@@ -1,10 +1,12 @@
 mod markdown;
+mod overlay_commands;
 mod popup;
 mod render;
 #[path = "onboarding/mod.rs"]
 mod onboarding;
 #[path = "state.rs"]
 mod state;
+mod usage;
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
@@ -186,6 +188,7 @@ fn handle_key(
             auth_store,
             auth_path,
             session_store,
+            commands,
             tui,
             no_alt_screen,
         );
@@ -275,9 +278,44 @@ fn handle_overlay_key(
     auth_store: &mut AuthStore,
     auth_path: &Path,
     session_store: &SessionStore,
+    commands: &[CommandSpec],
     tui: &mut TuiState,
     no_alt_screen: bool,
 ) -> Result<bool> {
+    if let Some(OverlayState::Usage(usage)) = tui.overlay.as_mut() {
+        match key.code {
+            KeyCode::Esc => tui.overlay = None,
+            KeyCode::Up => usage.scroll_up(),
+            KeyCode::Down => usage.scroll_down(),
+            KeyCode::PageUp => usage.page_up(),
+            KeyCode::PageDown => usage.page_down(),
+            KeyCode::Char('r') if !key.modifiers.contains(KeyModifiers::CONTROL) => usage.retry(),
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                state.should_exit = true;
+                return Ok(true);
+            }
+            _ => {}
+        }
+        return Ok(false);
+    }
+
+    if tui.overlay.as_ref().is_some_and(OverlayState::is_onboarding)
+        && overlay_commands::handle_onboarding_command_key(
+            key,
+            state,
+            resources,
+            providers,
+            auth_store,
+            auth_path,
+            session_store,
+            commands,
+            tui,
+            no_alt_screen,
+        )?
+    {
+        return Ok(false);
+    }
+
     let Some(overlay) = tui.overlay.as_mut() else {
         return Ok(false);
     };

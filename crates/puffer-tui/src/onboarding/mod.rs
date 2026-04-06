@@ -1,6 +1,7 @@
 use crate::state::{
     load_agent_picker_entries, AuthPickerAction, AuthPickerEntry, ModelPickerEntry, OverlayState,
 };
+use crate::usage::UsageOverlay;
 use anyhow::Result;
 use puffer_config::ConfigPaths;
 use puffer_core::AppState;
@@ -100,6 +101,7 @@ pub(crate) fn overlay_from_command(
         "login" if !args.is_empty() => auth_picker(providers, auth_store, args, false)?,
         "logout" if args.is_empty() => logout_picker(providers, auth_store),
         "theme" if args.is_empty() => Some(theme_picker()),
+        "usage" if args.is_empty() => Some(UsageOverlay::open(state, providers, auth_store)),
         _ => None,
     };
     Ok(overlay)
@@ -148,7 +150,8 @@ pub(crate) fn back_overlay(
         | OverlayState::ProviderPicker { .. }
         | OverlayState::LoginPicker { .. }
         | OverlayState::LogoutPicker { .. }
-        | OverlayState::ThemePicker { .. } => None,
+        | OverlayState::ThemePicker { .. }
+        | OverlayState::Usage(..) => None,
     };
     Ok(next)
 }

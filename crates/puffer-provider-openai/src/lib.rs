@@ -7,6 +7,7 @@
 mod auth;
 mod request;
 mod response;
+mod usage;
 
 pub use auth::OpenAIAuth;
 pub use auth::OpenAIOAuthConfig;
@@ -39,6 +40,9 @@ pub use response::OpenAIResponseToolCall;
 pub use response::OpenAIResponsesContentItem;
 pub use response::OpenAIResponsesOutputItem;
 pub use response::OpenAIResponsesResponse;
+pub use usage::fetch_usage_summary;
+pub use usage::OpenAIUsageError;
+pub use usage::OpenAIUsageSummary;
 
 /// Generates a PKCE verifier, challenge, and state for the OpenAI OAuth flow.
 pub fn generate_pkce() -> OpenAIPkce {

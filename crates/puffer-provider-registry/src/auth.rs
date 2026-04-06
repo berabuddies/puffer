@@ -40,6 +40,7 @@ pub struct OAuthCredential {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StoredCredential {
     ApiKey { key: String },
+    #[serde(rename = "oauth")]
     OAuth(OAuthCredential),
 }
 

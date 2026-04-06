@@ -2,15 +2,18 @@ use super::*;
 use insta::assert_snapshot;
 use puffer_config::PufferConfig;
 use puffer_core::CommandKind;
+use puffer_provider_openai::OpenAIUsageSummary;
 use puffer_provider_registry::{
     AuthMode, ModelDescriptor, OAuthCredential, ProviderDescriptor, ProviderRegistry,
 };
+use puffer_transport_anthropic::{AnthropicExtraUsage, AnthropicRateLimit, AnthropicUtilization};
 use puffer_resources::{LoadedItem, SourceInfo, SourceKind, ToolSpec};
 use puffer_session_store::SessionMetadata;
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 use std::path::PathBuf;
 use uuid::Uuid;
+use crate::usage::UsageOverlay;
 
 #[test]
 fn session_lines_include_lineage_tags_and_note() {
@@ -150,6 +153,193 @@ fn render_empty_state_shows_welcome_card() {
     assert!(rendered.contains("Welcome to Puffer Code"));
     assert!(rendered.contains("Clawd on duty"));
     assert!(rendered.contains("? for shortcuts"));
+}
+
+#[test]
+fn render_usage_overlay_shows_loading_state() {
+    let backend = TestBackend::new(100, 28);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let state = sample_state();
+    let resources = sample_resources();
+    let providers = sample_providers();
+    let auth_store = sample_auth_store();
+    let overlay = OverlayState::Usage(UsageOverlay::loading_for_test());
+
+    terminal
+        .draw(|frame| {
+            set_active_overlay(Some(overlay.clone()));
+            render(
+                frame,
+                &state,
+                &resources,
+                &providers,
+                &auth_store,
+                "",
+                0,
+                0,
+                0,
+                &sample_commands(),
+            );
+            set_active_overlay(None);
+        })
+        .unwrap();
+
+    let rendered = terminal_view(&terminal);
+    assert!(rendered.contains("Usage"));
+    assert!(rendered.contains("Loading usage data..."));
+    assert!(rendered.contains("Esc cancel"));
+}
+
+#[test]
+fn render_usage_overlay_shows_claude_style_sections() {
+    let backend = TestBackend::new(100, 32);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let state = sample_state();
+    let resources = sample_resources();
+    let providers = sample_providers();
+    let auth_store = sample_auth_store();
+    let overlay = OverlayState::Usage(UsageOverlay::ready_anthropic_for_test(
+        Some("max"),
+        AnthropicUtilization {
+            five_hour: Some(AnthropicRateLimit {
+                utilization: Some(42.0),
+                resets_at: Some("2030-04-06T12:00:00Z".to_string()),
+            }),
+            seven_day: Some(AnthropicRateLimit {
+                utilization: Some(64.0),
+                resets_at: Some("2030-04-08T12:00:00Z".to_string()),
+            }),
+            seven_day_oauth_apps: None,
+            seven_day_opus: None,
+            seven_day_sonnet: Some(AnthropicRateLimit {
+                utilization: Some(17.0),
+                resets_at: Some("2030-04-08T12:00:00Z".to_string()),
+            }),
+            extra_usage: Some(AnthropicExtraUsage {
+                is_enabled: true,
+                monthly_limit: Some(5_000.0),
+                used_credits: Some(1_234.0),
+                utilization: Some(24.0),
+            }),
+        },
+    ));
+
+    terminal
+        .draw(|frame| {
+            set_active_overlay(Some(overlay.clone()));
+            render(
+                frame,
+                &state,
+                &resources,
+                &providers,
+                &auth_store,
+                "",
+                0,
+                0,
+                0,
+                &sample_commands(),
+            );
+            set_active_overlay(None);
+        })
+        .unwrap();
+
+    let rendered = terminal_view(&terminal);
+    assert!(rendered.contains("Current session"));
+    assert!(rendered.contains("Current week (all models)"));
+    assert!(rendered.contains("Current week (Sonnet only)"));
+    assert!(rendered.contains("Extra usage"));
+    assert!(rendered.contains("$12.34 / $50.00 spent"));
+    assert!(rendered.contains("Claude subscription usage"));
+}
+
+#[test]
+fn render_usage_overlay_shows_error_retry_hint() {
+    let backend = TestBackend::new(100, 28);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let state = sample_state();
+    let resources = sample_resources();
+    let providers = sample_providers();
+    let auth_store = sample_auth_store();
+    let overlay = OverlayState::Usage(UsageOverlay::error_for_test("Failed to load usage data"));
+
+    terminal
+        .draw(|frame| {
+            set_active_overlay(Some(overlay.clone()));
+            render(
+                frame,
+                &state,
+                &resources,
+                &providers,
+                &auth_store,
+                "",
+                0,
+                0,
+                0,
+                &sample_commands(),
+            );
+            set_active_overlay(None);
+        })
+        .unwrap();
+
+    let rendered = terminal_view(&terminal);
+    assert!(rendered.contains("Error:"));
+    assert!(rendered.contains("r retry"));
+}
+
+#[test]
+fn render_usage_overlay_shows_openai_summary() {
+    let backend = TestBackend::new(100, 28);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut state = sample_state();
+    state.current_provider = Some("openai".to_string());
+    state.current_model = Some("openai/gpt-5".to_string());
+    let resources = sample_resources();
+    let providers = sample_providers();
+    let auth_store = sample_auth_store();
+    let overlay = OverlayState::Usage(UsageOverlay::ready_openai_for_test(
+        vec![
+            "Provider: OpenAI".to_string(),
+            "Authentication: OAuth".to_string(),
+            "Logged in as: dev@example.com".to_string(),
+            "Account ID: acct-1".to_string(),
+            "Plan: Pro".to_string(),
+        ],
+        OpenAIUsageSummary {
+            window_start_s: 0,
+            window_end_s: 1,
+            input_tokens: 1234,
+            output_tokens: 567,
+            input_cached_tokens: 89,
+            num_model_requests: 7,
+            total_cost_usd: Some(4.25),
+        },
+    ));
+
+    terminal
+        .draw(|frame| {
+            set_active_overlay(Some(overlay.clone()));
+            render(
+                frame,
+                &state,
+                &resources,
+                &providers,
+                &auth_store,
+                "",
+                0,
+                0,
+                0,
+                &sample_commands(),
+            );
+            set_active_overlay(None);
+        })
+        .unwrap();
+
+    let rendered = terminal_view(&terminal);
+    assert!(rendered.contains("OpenAI/Codex account usage"));
+    assert!(rendered.contains("Authentication: OAuth"));
+    assert!(rendered.contains("Input tokens: 1,234"));
+    assert!(rendered.contains("Output tokens: 567"));
+    assert!(rendered.contains("Cost: $4.25"));
 }
 
 fn sample_state() -> AppState {

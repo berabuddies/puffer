@@ -1,4 +1,5 @@
 use crate::popup::popup_rows;
+use crate::usage::UsageOverlay;
 use anyhow::Result;
 use puffer_config::{ensure_workspace_dirs, ConfigPaths};
 use puffer_core::CommandSpec;
@@ -246,6 +247,7 @@ pub(crate) enum OverlayState {
         entries: Vec<ModelPickerEntry>,
         selection: usize,
     },
+    Usage(UsageOverlay),
 }
 
 impl OverlayState {
@@ -262,7 +264,7 @@ impl OverlayState {
             | Self::ThemePicker { selection, .. } => {
                 *selection = selection.saturating_sub(1);
             }
-            Self::ApiKeyPrompt { .. } => {}
+            Self::ApiKeyPrompt { .. } | Self::Usage(..) => {}
         }
     }
 
@@ -290,7 +292,7 @@ impl OverlayState {
             } => {
                 *selection = (*selection + 1).min(entries.len().saturating_sub(1));
             }
-            Self::ApiKeyPrompt { .. } => {}
+            Self::ApiKeyPrompt { .. } | Self::Usage(..) => {}
         }
     }
 
@@ -342,7 +344,8 @@ impl OverlayState {
                 .map(|entry| format!("/theme {}", entry.selector)),
             Self::ProviderPicker { .. }
             | Self::AuthPicker { .. }
-            | Self::ApiKeyPrompt { .. } => None,
+            | Self::ApiKeyPrompt { .. }
+            | Self::Usage(..) => None,
         }
     }
 
@@ -359,7 +362,8 @@ impl OverlayState {
             Self::SessionPicker { .. }
             | Self::AgentPicker { .. }
             | Self::LogoutPicker { .. }
-            | Self::ThemePicker { .. } => None,
+            | Self::ThemePicker { .. }
+            | Self::Usage(..) => None,
         }
     }
 

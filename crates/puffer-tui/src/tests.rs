@@ -404,6 +404,30 @@ fn try_open_overlay_builds_theme_picker() {
 }
 
 #[test]
+fn try_open_overlay_builds_usage_overlay() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+
+    let state = sample_state();
+    let mut providers = sample_providers();
+    let auth_store = sample_auth_store();
+    let mut tui = TuiState::default();
+    let opened = try_open_overlay(
+        &state,
+        &mut providers,
+        &auth_store,
+        &session_store,
+        &mut tui,
+        "/usage",
+    )
+    .unwrap();
+    assert!(opened);
+    assert!(matches!(tui.overlay, Some(OverlayState::Usage(..))));
+}
+
+#[test]
 fn model_overlay_selected_command_uses_selector() {
     let overlay = OverlayState::ModelPicker {
         provider_id: "anthropic".to_string(),

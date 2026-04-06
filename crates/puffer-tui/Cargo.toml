@@ -11,12 +11,15 @@ ratatui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
+time.workspace = true
 puffer-config = { path = "../puffer-config" }
 puffer-core = { path = "../puffer-core" }
+puffer-provider-openai = { path = "../puffer-provider-openai" }
 puffer-provider-registry = { path = "../puffer-provider-registry" }
 puffer-resources = { path = "../puffer-resources" }
 puffer-session-store = { path = "../puffer-session-store" }
 puffer-tools = { path = "../puffer-tools" }
+puffer-transport-anthropic = { path = "../puffer-transport-anthropic" }
 
 [dev-dependencies]
 insta.workspace = true
