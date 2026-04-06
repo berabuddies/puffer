@@ -698,11 +698,6 @@ fn overlay_title(overlay: &OverlayState) -> &'static str {
         OverlayState::LoginPicker { .. } => "Select Provider",
         OverlayState::LogoutPicker { .. } => "Logout Provider",
         OverlayState::ThemePicker { .. } => "Select Theme",
-        OverlayState::OnboardingTheme { .. } => "Choose Theme",
-        OverlayState::OnboardingProvider { .. } => "Choose Provider",
-        OverlayState::OnboardingAuth { .. } => "Choose Sign-In",
-        OverlayState::OnboardingModel { .. } => "Choose Model",
-        OverlayState::OnboardingApiKey { .. } => "Enter API Key",
     }
 }
 
@@ -732,10 +727,7 @@ fn overlay_rows(overlay: &OverlayState) -> Vec<OverlayRow> {
         }
         | OverlayState::LoginPicker { entries, selection }
         | OverlayState::LogoutPicker { entries, selection }
-        | OverlayState::ThemePicker { entries, selection }
-        | OverlayState::OnboardingTheme { entries, selection }
-        | OverlayState::OnboardingProvider { entries, selection }
-        | OverlayState::OnboardingModel { entries, selection, .. } => entries
+        | OverlayState::ThemePicker { entries, selection } => entries
             .iter()
             .enumerate()
             .map(|(index, entry)| OverlayRow {
@@ -751,16 +743,7 @@ fn overlay_rows(overlay: &OverlayState) -> Vec<OverlayRow> {
                 text: render_auth_entry(entry),
             })
             .collect(),
-        OverlayState::OnboardingAuth { entries, selection, .. } => entries
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| OverlayRow {
-                selected: index == *selection,
-                text: render_model_entry(entry),
-            })
-            .collect(),
-        OverlayState::ApiKeyPrompt { value, .. }
-        | OverlayState::OnboardingApiKey { input: value, .. } => vec![
+        OverlayState::ApiKeyPrompt { value, .. } => vec![
             OverlayRow {
                 selected: false,
                 text: "Paste an API key and press Enter.".to_string(),
@@ -889,9 +872,7 @@ fn onboarding_body_lines(overlay: &OverlayState) -> Vec<Line<'static>> {
             overlay_rows(overlay),
             "Enter to confirm · Esc to go back",
         ),
-        OverlayState::ApiKeyPrompt {
-            provider_id, value, ..
-        } => {
+        OverlayState::ApiKeyPrompt { provider_id, value, .. } => {
             let key_line = format!("> {}", masked_secret(value));
             return vec![
                 Line::from(Span::styled(
