@@ -1,7 +1,7 @@
 use indexmap::IndexMap;
 use puffer_transport_anthropic::{
-    build_messages_request, AnthropicAuth, AnthropicMessage, AnthropicModelRequest,
-    AnthropicRequestConfig,
+    build_messages_request, finalize_cch_payload, AnthropicAuth, AnthropicMessage,
+    AnthropicModelRequest, AnthropicRequestConfig,
 };
 use serde_json::json;
 use xxhash_rust::xxh64::xxh64;
@@ -64,21 +64,25 @@ fn temp_cch_parity_covers_current_puffer_request_body_shape() {
     )
     .expect("build request");
 
-    let body = json!({
+    let payload = json!({
         "model": "claude-sonnet-4-5",
         "max_tokens": 1024,
         "messages": [{
             "role": "user",
-            "content": "hello world from puffer"
+            "content": "hello world from puffer and literal cch=00000"
         }],
         "system": [{
             "type": "text",
             "text": request.attribution_prefix_block
         }]
-    })
-    .to_string();
+    });
 
-    let cch = compute_free_code_cch(&body);
-    assert_eq!(cch.len(), 5);
-    assert!(body.contains("cch=00000"));
+    let unsigned = payload.to_string();
+    let expected_cch = compute_free_code_cch(&unsigned);
+    let signed = finalize_cch_payload(&payload).expect("signed payload");
+
+    assert!(unsigned.contains("cch=00000;"));
+    assert!(unsigned.contains("literal cch=00000"));
+    assert!(signed.contains(&format!("cch={expected_cch};")));
+    assert!(signed.contains("literal cch=00000"));
 }
