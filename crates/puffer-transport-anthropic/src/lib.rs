@@ -5,6 +5,7 @@
 //! fingerprint generation, and request shaping.
 
 mod auth;
+mod cch;
 mod fingerprint;
 mod request;
 mod response;
@@ -18,6 +19,7 @@ pub use auth::{
     ANTHROPIC_CLAUDE_AI_INFERENCE_SCOPE, ANTHROPIC_CLAUDE_AI_SCOPES, ANTHROPIC_MANUAL_REDIRECT_URL,
     ANTHROPIC_TOKEN_URL, CLAUDE_AI_AUTHORIZE_URL, CONSOLE_AUTHORIZE_URL, OAUTH_BETA_HEADER,
 };
+pub use cch::finalize_cch_body;
 pub use fingerprint::compute_fingerprint;
 pub use request::{
     anthropic_user_agent, attribution_header, build_messages_request,

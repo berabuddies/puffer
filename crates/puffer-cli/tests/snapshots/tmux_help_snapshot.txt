@@ -1,4 +1,4 @@
-Puffer Code · session-<id>... · anthropic/claude-sonnet-4-5 · auth api-key · tools 8/8
+Puffer Code · session-<id>... · anthropic/claude-sonnet-4-5 · auth api-key ·
 · Supported commands:
 /add-dir Add a new working directory
 /agents Manage agent configurations
@@ -13,41 +13,7 @@ Puffer Code · session-<id>... · anthropic/claude-sonnet-4-5 · auth api-key ·
 /copy Copy the latest assistant output
 /cost Show the total cost and duration of the current session
 /diff View uncommitted changes and per-turn diffs
-/doctor Diagnose and verify your Puffer Code installation and settings
+/doctor Diagnose and verify your Puffer Code installation and
 /effort Set effort level for model usage
-/exit Exit the REPL
-/export Export the current conversation to a file or clipboard
-/fast Toggle fast mode
-/help Show help and available commands
-/hooks View hook configurations for tool events
-/ide Manage IDE integrations and show status
-/init Initialize project guidance and defaults
-/keybindings Open or create your keybindings configuration file
-/login Sign in to a provider
-/logout Sign out from a provider
-/mcp Manage MCP servers
-/memory Edit memory files
-/model Select the active model
-/permissions Manage allow & deny tool permission rules
-/plan Enable plan mode or view the current session plan
-/plugin Manage Puffer plugins
-/pr-comments Get comments from a GitHub pull request
-/reload-plugins Activate pending plugin changes in the current session
-/remote-control Connect this terminal for remote-control sessions
-/remote-env Configure the default remote environment for remote sessions
-/rename Rename the current conversation
-/resume Resume a previous conversation
-/rewind Restore the code and/or conversation to a previous point
-/review Review the current worktree or pull request
-/sandbox Manage sandbox policies
-/security-review Complete a security review of the pending changes on the current branch
-/session Show remote session URL and QR code
-/skills List available skills
-/status Show current session configuration and status
-/statusline Set up the status line UI
-/tasks List and manage background tasks
-/terminal-setup Show terminal setup guidance
-/theme Change the theme
-/usage Show plan usage limits
-/vim Toggle between Vim and Normal editing modes
-Resource counts: prompts=7 tools=8 skills=2 plugins=4 mcp_servers=2 ides=1
+/claude-sonnet-4-5 auth api-key tools 8/8
+/help /review !pwd

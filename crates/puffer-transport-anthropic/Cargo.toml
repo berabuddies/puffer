@@ -14,3 +14,6 @@ serde_json.workspace = true
 sha2.workspace = true
 uuid.workspace = true
 url = "2.5.7"
+xxhash-rust = { version = "0.8.15", features = ["xxh64"] }
+
+[dev-dependencies]

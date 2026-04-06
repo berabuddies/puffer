@@ -1,5 +1,4 @@
-anthropic · anthropic/claude-sonnet-4-5 · auth api-key · tools 8/8
-anthropic /claude-sonnet-4-5
 Select Provider
 anthropic Anthropic
 openai OpenAI
+anthropic · anthropic/claude-sonnet-4-5 · auth api-key · tools 8/8

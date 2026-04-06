@@ -17,8 +17,8 @@ use puffer_provider_registry::{
 use puffer_resources::LoadedResources;
 use puffer_tools::ToolRegistry;
 use puffer_transport_anthropic::{
-    build_messages_request, get_session_ingress_auth, AnthropicAuth, AnthropicMessage,
-    AnthropicModelRequest, AnthropicRequestConfig,
+    build_messages_request, finalize_cch_body, get_session_ingress_auth, AnthropicAuth,
+    AnthropicMessage, AnthropicModelRequest, AnthropicRequestConfig,
 };
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
@@ -186,7 +186,7 @@ fn execute_anthropic(
             body["tools"] = Value::Array(tools);
         }
 
-        let body_text = body.to_string();
+        let body_text = finalize_cch_body(&body.to_string())?;
         let response = match send_http_request(&request.url, &request.headers, &body_text, true) {
             Ok(response) => response,
             Err(error) => {
