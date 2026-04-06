@@ -37,21 +37,51 @@ pub fn fetch_oauth_usage(base_url: &str, access_token: &str) -> Result<Anthropic
         .get(format!("{}/api/oauth/usage", base_url.trim_end_matches('/')))
         .header("Authorization", format!("Bearer {access_token}"))
         .header("anthropic-beta", OAUTH_BETA_HEADER)
-        .header(
-            "User-Agent",
-            format!("claude-code/{}", env!("CARGO_PKG_VERSION")),
-        )
+        .header("User-Agent", format!("claude-cli/{}", env!("CARGO_PKG_VERSION")))
         .header("Content-Type", "application/json")
         .send()
         .context("failed to fetch Anthropic OAuth usage")?;
     let status = response.status();
-    let usage: AnthropicUtilization = response
-        .json()
-        .context("failed to parse Anthropic OAuth usage response")?;
     if !status.is_success() {
-        anyhow::bail!("Anthropic OAuth usage request failed with status {status}");
+        let body = response
+            .text()
+            .context("failed to read Anthropic OAuth usage error response")?;
+        let detail = serde_json::from_str::<AnthropicUsageErrorEnvelope>(&body)
+            .ok()
+            .map(format_usage_error)
+            .unwrap_or_else(|| body.trim().to_string());
+        anyhow::bail!("Anthropic OAuth usage request failed with status {status}: {detail}");
     }
+    let body = response
+        .text()
+        .context("failed to read Anthropic OAuth usage response body")?;
+    let usage: AnthropicUtilization = serde_json::from_str(&body)
+        .context("failed to parse Anthropic OAuth usage response")?;
     Ok(usage)
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicUsageErrorEnvelope {
+    error: AnthropicUsageError,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicUsageError {
+    #[serde(default)]
+    r#type: String,
+    #[serde(default)]
+    message: String,
+}
+
+fn format_usage_error(error: AnthropicUsageErrorEnvelope) -> String {
+    let kind = error.error.r#type.trim();
+    let message = error.error.message.trim();
+    match (kind.is_empty(), message.is_empty()) {
+        (false, false) => format!("{kind}: {message}"),
+        (false, true) => kind.to_string(),
+        (true, false) => message.to_string(),
+        (true, true) => "unknown error".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -96,6 +126,40 @@ mod tests {
         let request = request.to_ascii_lowercase();
         assert!(request.contains("authorization: bearer subscriber-token"));
         assert!(request.contains("anthropic-beta: oauth-2025-04-20"));
-        assert!(request.contains("user-agent: claude-code/"));
+        assert!(request.contains("user-agent: claude-cli/"));
+    }
+
+    #[test]
+    fn fetch_oauth_usage_includes_error_body_details() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("connection");
+            let mut buffer = [0_u8; 4096];
+            let _ = stream.read(&mut buffer).expect("request");
+            let body = serde_json::json!({
+                "error": {
+                    "type": "rate_limit_error",
+                    "message": "Rate limited. Please try again later."
+                }
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 429 Too Many Requests\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("response write");
+        });
+
+        let error = fetch_oauth_usage(&format!("http://{address}"), "subscriber-token")
+            .expect_err("request should fail");
+        let message = error.to_string();
+        assert!(message.contains("429 Too Many Requests"));
+        assert!(message.contains("rate_limit_error"));
+        assert!(message.contains("Rate limited. Please try again later."));
+        server.join().expect("join");
     }
 }
