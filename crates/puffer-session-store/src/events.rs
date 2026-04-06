@@ -1,5 +1,33 @@
 use serde::{Deserialize, Serialize};
 
+/// Represents plan-mode metadata captured in runtime state snapshots.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimePlanState {
+    pub mode_open: bool,
+    pub summary: Option<String>,
+    pub updated_at_ms: u64,
+}
+
+/// Describes the persisted status of one runtime task entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeTaskStatus {
+    Completed,
+    Failed,
+}
+
+/// Stores one runtime task snapshot entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeTask {
+    pub id: u64,
+    pub label: String,
+    pub detail: String,
+    pub status: RuntimeTaskStatus,
+    pub plan_summary: Option<String>,
+    pub agent_id: Option<String>,
+    pub worktree: String,
+}
+
 /// Stores a transcript event in append-only session history.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -32,5 +60,12 @@ pub enum TranscriptEvent {
         remote_environment: Option<String>,
         statusline_enabled: bool,
         working_dirs: Vec<String>,
+    },
+    RuntimeState {
+        plan: RuntimePlanState,
+        tasks: Vec<RuntimeTask>,
+        next_task_id: u64,
+        active_agent_id: Option<String>,
+        active_worktree: Option<String>,
     },
 }

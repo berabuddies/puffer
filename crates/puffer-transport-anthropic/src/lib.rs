@@ -26,6 +26,4 @@ pub use response::{
     AnthropicContentBlock, AnthropicMessageResponse, AnthropicTextBlock, AnthropicToolUseBlock,
     AnthropicUnknownBlock,
 };
-pub use usage::{
-    fetch_oauth_usage, AnthropicExtraUsage, AnthropicRateLimit, AnthropicUtilization,
-};
+pub use usage::{fetch_oauth_usage, AnthropicExtraUsage, AnthropicRateLimit, AnthropicUtilization};

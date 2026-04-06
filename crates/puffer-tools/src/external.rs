@@ -129,8 +129,15 @@ impl SharedLibraryHandler {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) enum ProviderBuiltinHandler {
+    WebSearch,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) enum ToolRuntime {
     Builtin(crate::ToolKind),
+    ProviderBuiltin(ProviderBuiltinHandler),
+    RuntimeLocal,
     External(ExternalCommandHandler),
     SharedLibrary(SharedLibraryHandler),
 }
@@ -138,6 +145,14 @@ pub(crate) enum ToolRuntime {
 pub(crate) fn runtime_from_definition(definition: &ToolDefinition) -> Result<ToolRuntime> {
     if let Some(kind) = crate::builtin_tool_kind(&builtin_handler_name(&definition.handler)) {
         return Ok(ToolRuntime::Builtin(kind));
+    }
+    if definition.handler == "provider:web_search" {
+        return Ok(ToolRuntime::ProviderBuiltin(
+            ProviderBuiltinHandler::WebSearch,
+        ));
+    }
+    if is_runtime_local_handler(&definition.handler) {
+        return Ok(ToolRuntime::RuntimeLocal);
     }
     if let Some(handler) = ExternalCommandHandler::from_definition(definition) {
         return Ok(ToolRuntime::External(handler));
@@ -162,6 +177,14 @@ pub(crate) fn execute_runtime(
             let typed = crate::parse_builtin_input(*kind, input)?;
             crate::execute_builtin_tool(&definition.id, *kind, cwd, typed)
         }
+        ToolRuntime::ProviderBuiltin(ProviderBuiltinHandler::WebSearch) => Err(anyhow!(
+            "tool {} is provider-backed and must be executed by the runtime",
+            definition.id
+        )),
+        ToolRuntime::RuntimeLocal => Err(anyhow!(
+            "tool {} is runtime-backed and must be executed by the conversation runtime",
+            definition.id
+        )),
         ToolRuntime::External(handler) => handler.execute(definition, cwd, input),
         ToolRuntime::SharedLibrary(handler) => handler.execute(definition, cwd, input),
     }
@@ -172,6 +195,18 @@ pub(crate) fn builtin_handler_name(handler: &str) -> String {
         .strip_prefix("builtin:")
         .unwrap_or(handler)
         .to_string()
+}
+
+fn is_runtime_local_handler(handler: &str) -> bool {
+    matches!(
+        handler,
+        "runtime:skill"
+            | "runtime:tool_search"
+            | "runtime:glob"
+            | "runtime:notebook_edit"
+            | "runtime:list_mcp_resources"
+            | "runtime:read_mcp_resource"
+    )
 }
 
 fn resolve_library_path(cwd: &Path, path: &str) -> PathBuf {

@@ -1,0 +1,27 @@
+id: NotebookEdit
+name: NotebookEdit
+description: Edit cells in a Jupyter notebook with insert, replace, and delete operations.
+handler: runtime:notebook_edit
+approval_policy: on-request
+sandbox_policy: workspace-write
+input_schema:
+  type: object
+  properties:
+    notebook_path:
+      type: string
+      description: Path to the Jupyter notebook file.
+    cell_number:
+      type: integer
+      description: 0-indexed cell number to edit.
+    new_source:
+      type: string
+      description: New cell content for replace or insert operations.
+    cell_type:
+      type: string
+      description: Cell type for insert operations, usually code or markdown.
+    edit_mode:
+      type: string
+      description: One of replace, insert, or delete.
+  required:
+    - notebook_path
+    - cell_number

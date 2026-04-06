@@ -1,0 +1,12 @@
+id: ListMcpResourcesTool
+name: ListMcpResourcesTool
+description: List configured MCP server manifests available to this session.
+handler: runtime:list_mcp_resources
+approval_policy: auto
+sandbox_policy: read-only
+input_schema:
+  type: object
+  properties:
+    server:
+      type: string
+      description: Optional server id to filter by.

@@ -182,6 +182,9 @@ fn parse_input_schema(input_schema: &serde_json::Value) -> Result<ToolInputSchem
         let value_type = match property.get("type").and_then(serde_json::Value::as_str) {
             Some("string") | None => ToolSchemaType::String,
             Some("object") => ToolSchemaType::Object,
+            Some("boolean") => ToolSchemaType::Boolean,
+            Some("integer") => ToolSchemaType::Integer,
+            Some("array") => ToolSchemaType::Array,
             Some(other) => return Err(anyhow!("unsupported input schema type {other}")),
         };
         let description = property
@@ -371,6 +374,53 @@ mod tests {
         assert_eq!(
             definition.input_schema.properties["command"].description,
             "Command override"
+        );
+    }
+
+    #[test]
+    fn registry_schema_override_supports_boolean_integer_and_array_types() {
+        let resources = LoadedResources {
+            tools: vec![LoadedItem {
+                value: ToolSpec {
+                    handler: "builtin:bash".to_string(),
+                    input_schema: Some(serde_json::json!({
+                        "properties": {
+                            "flag": {
+                                "type": "boolean",
+                                "description": "Boolean flag"
+                            },
+                            "count": {
+                                "type": "integer",
+                                "description": "Integer count"
+                            },
+                            "paths": {
+                                "type": "array",
+                                "description": "Path list"
+                            }
+                        }
+                    })),
+                    ..bash_tool_spec()
+                },
+                source_info: SourceInfo {
+                    path: PathBuf::from("bash.yaml"),
+                    kind: SourceKind::Builtin,
+                },
+            }],
+            ..LoadedResources::default()
+        };
+        let registry = ToolRegistry::from_resources(&resources);
+        let definition = registry.definition("bash").expect("tool definition");
+        assert_eq!(
+            definition.input_schema.properties["flag"].value_type,
+            crate::ToolSchemaType::Boolean
+        );
+        assert_eq!(
+            definition.input_schema.properties["count"].value_type,
+            crate::ToolSchemaType::Integer
+        );
+        assert_eq!(
+            definition.input_schema.properties["paths"].value_type,
+            crate::ToolSchemaType::Array
         );
     }
 

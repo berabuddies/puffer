@@ -1,8 +1,8 @@
 mod markdown;
-mod popup;
-mod render;
 #[path = "onboarding/mod.rs"]
 mod onboarding;
+mod popup;
+mod render;
 #[path = "state.rs"]
 mod state;
 
@@ -23,16 +23,16 @@ use puffer_resources::LoadedResources;
 use puffer_session_store::{SessionStore, TranscriptEvent};
 use puffer_tools::{ToolInput, ToolRegistry};
 use ratatui::backend::CrosstermBackend;
-use ratatui::{TerminalOptions, Viewport};
 use ratatui::Terminal;
+use ratatui::{TerminalOptions, Viewport};
 use std::io;
 use std::io::IsTerminal;
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-pub(crate) use state::{AuthPickerAction, ModelPickerEntry, OverlayState};
 use state::TuiState;
+pub(crate) use state::{AuthPickerAction, ModelPickerEntry, OverlayState};
 
 /// Runs the interactive Puffer TUI until the user exits.
 pub fn run_app(
@@ -335,8 +335,7 @@ fn handle_overlay_key(
         KeyCode::PageDown => overlay.page_down(),
         KeyCode::Enter => {
             if matches!(overlay, OverlayState::ThemePicker { .. })
-                && onboarding::initial_overlay(state, providers, auth_store)?
-                    .is_some()
+                && onboarding::initial_overlay(state, providers, auth_store)?.is_some()
             {
                 let Some(command) = overlay.selected_command() else {
                     tui.overlay = None;
@@ -369,8 +368,11 @@ fn handle_overlay_key(
                 match overlay {
                     OverlayState::ProviderPicker { .. } | OverlayState::LoginPicker { .. } => {
                         apply_selected_provider(state, &provider_id)?;
-                        tui.overlay =
-                            onboarding::provider_setup_overlay(providers, auth_store, &provider_id)?;
+                        tui.overlay = onboarding::provider_setup_overlay(
+                            providers,
+                            auth_store,
+                            &provider_id,
+                        )?;
                     }
                     OverlayState::AuthPicker { .. } => {
                         let Some(action) = overlay.selected_auth_action().cloned() else {
@@ -395,9 +397,7 @@ fn handle_overlay_key(
                                     }
                                     Err(error) => {
                                         tui.overlay = onboarding::back_overlay(
-                                            overlay,
-                                            providers,
-                                            auth_store,
+                                            overlay, providers, auth_store,
                                         )?;
                                         emit_system_message(
                                             state,
@@ -823,6 +823,9 @@ fn execute_shell_shortcut(
         &state.cwd,
         ToolInput::Bash {
             command: shell_command.to_string(),
+            timeout: None,
+            run_in_background: false,
+            dangerously_disable_sandbox: false,
         },
     )?;
     state.record_task("bash", shell_command.to_string(), result.success);

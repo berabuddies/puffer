@@ -1,0 +1,6 @@
+id: Grep
+name: Grep
+description: Claude-compatible alias for searching text in workspace files.
+handler: builtin:search_text
+approval_policy: auto
+sandbox_policy: read-only

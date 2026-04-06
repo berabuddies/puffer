@@ -11,10 +11,7 @@ use puffer_provider_registry::{
 use puffer_session_store::SessionStore;
 
 /// Returns whether the current session still needs a selected provider/model pair.
-pub(crate) fn needs_initial_provider_setup(
-    state: &AppState,
-    providers: &ProviderRegistry,
-) -> bool {
+pub(crate) fn needs_initial_provider_setup(state: &AppState, providers: &ProviderRegistry) -> bool {
     let Some(provider_id) = state.current_provider.as_deref() else {
         return true;
     };
@@ -31,7 +28,10 @@ pub(crate) fn needs_initial_provider_setup(
         return false;
     };
     selected_provider != provider_id
-        || !provider.models.iter().any(|model| model.id == selected_model)
+        || !provider
+            .models
+            .iter()
+            .any(|model| model.id == selected_model)
 }
 
 /// Builds the initial onboarding overlay when provider/model setup is incomplete.
@@ -119,9 +119,7 @@ pub(crate) fn provider_setup_overlay(
 }
 
 /// Returns the first provider step used after the initial theme selection.
-pub(crate) fn initial_provider_overlay(
-    providers: &ProviderRegistry,
-) -> Option<OverlayState> {
+pub(crate) fn initial_provider_overlay(providers: &ProviderRegistry) -> Option<OverlayState> {
     provider_picker(providers, true)
 }
 
@@ -139,7 +137,9 @@ pub(crate) fn back_overlay(
         } => auth_picker(providers, auth_store, provider_id, *onboarding)?,
         OverlayState::AuthPicker { onboarding, .. } => provider_picker(providers, *onboarding),
         OverlayState::ProviderPicker { onboarding, .. } if *onboarding => Some(theme_picker()),
-        OverlayState::ModelPicker { onboarding, .. } if *onboarding => provider_picker(providers, true),
+        OverlayState::ModelPicker { onboarding, .. } if *onboarding => {
+            provider_picker(providers, true)
+        }
         OverlayState::SessionPicker { .. }
         | OverlayState::AgentPicker { .. }
         | OverlayState::ModelPicker { .. }
@@ -170,7 +170,10 @@ fn provider_picker(providers: &ProviderRegistry, onboarding: bool) -> Option<Ove
         })
         .collect::<Vec<_>>();
     providers.sort_by_key(|provider| provider_rank(provider.id.as_str()));
-    let entries = providers.into_iter().map(provider_entry).collect::<Vec<_>>();
+    let entries = providers
+        .into_iter()
+        .map(provider_entry)
+        .collect::<Vec<_>>();
     if entries.is_empty() {
         return None;
     }
@@ -324,10 +327,7 @@ fn model_picker(
     }
 }
 
-fn logout_picker(
-    providers: &ProviderRegistry,
-    auth_store: &AuthStore,
-) -> Option<OverlayState> {
+fn logout_picker(providers: &ProviderRegistry, auth_store: &AuthStore) -> Option<OverlayState> {
     let entries = auth_store
         .provider_ids()
         .map(|provider_id| ModelPickerEntry {

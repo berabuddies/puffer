@@ -1,0 +1,6 @@
+id: Write
+name: Write
+description: Claude-compatible alias for writing one file in the workspace.
+handler: builtin:write_file
+approval_policy: on-request
+sandbox_policy: workspace-write

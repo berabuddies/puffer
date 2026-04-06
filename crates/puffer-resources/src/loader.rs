@@ -6,6 +6,8 @@ use anyhow::{Context, Result};
 use indexmap::IndexMap;
 use puffer_config::ConfigPaths;
 use serde::de::DeserializeOwned;
+use serde::Deserialize;
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -65,7 +67,7 @@ pub fn load_resources(paths: &ConfigPaths) -> Result<LoadedResources> {
         );
         merge_by_id(
             &mut loaded.mcp_servers,
-            load_yaml_dir::<McpServerSpec>(&root.join("mcp_servers"), kind)?,
+            load_mcp_server_manifests(&root, kind)?,
             |item| item.value.id.clone(),
             "mcp_server",
             &mut loaded.diagnostics,
@@ -146,6 +148,52 @@ fn resource_roots(paths: &ConfigPaths) -> Vec<(PathBuf, SourceKind)> {
             SourceKind::Workspace,
         ),
     ]
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct McpManifestFile {
+    #[serde(flatten)]
+    server: McpServerSpec,
+    #[serde(default = "default_mcp_enabled")]
+    enabled: bool,
+    #[serde(default, flatten)]
+    _extra: BTreeMap<String, Value>,
+}
+
+fn default_mcp_enabled() -> bool {
+    true
+}
+
+fn load_mcp_server_manifests(
+    root: &Path,
+    kind: SourceKind,
+) -> Result<Vec<LoadedItem<McpServerSpec>>> {
+    let canonical = load_mcp_manifest_dir(&root.join("mcp_servers"), kind)?;
+    let canonical_ids = canonical
+        .iter()
+        .map(|item| item.value.id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    let legacy = load_mcp_manifest_dir(&root.join("mcp"), kind)?
+        .into_iter()
+        .filter(|item| !canonical_ids.contains(&item.value.id))
+        .collect::<Vec<_>>();
+
+    let mut merged = legacy;
+    merged.extend(canonical);
+    Ok(merged)
+}
+
+fn load_mcp_manifest_dir(dir: &Path, kind: SourceKind) -> Result<Vec<LoadedItem<McpServerSpec>>> {
+    Ok(load_yaml_dir::<McpManifestFile>(dir, kind)?
+        .into_iter()
+        .filter_map(|item| {
+            item.value.enabled.then_some(LoadedItem {
+                value: item.value.server,
+                source_info: item.source_info,
+            })
+        })
+        .collect())
 }
 
 fn load_yaml_dir<T>(dir: &Path, kind: SourceKind) -> Result<Vec<LoadedItem<T>>>
@@ -507,5 +555,101 @@ mod tests {
             .diagnostics
             .iter()
             .any(|item| item.contains("workspace hook `tool-end`")));
+    }
+
+    #[test]
+    fn load_resources_reads_legacy_mcp_dir_when_mcp_servers_absent() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        let legacy_mcp = root.join("resources/mcp");
+        fs::create_dir_all(&legacy_mcp).unwrap();
+        fs::write(
+            legacy_mcp.join("legacy.yaml"),
+            "id: legacy\ndisplay_name: Legacy MCP\ntransport: stdio\ntarget: legacy-server\n",
+        )
+        .unwrap();
+
+        let paths = ConfigPaths {
+            workspace_root: root.clone(),
+            workspace_config_dir: root.join(".puffer"),
+            user_config_dir: root.join(".home/.puffer"),
+            builtin_resources_dir: root.join("resources"),
+        };
+        let loaded = load_resources(&paths).unwrap();
+        assert_eq!(loaded.mcp_servers.len(), 1);
+        assert_eq!(loaded.mcp_servers[0].value.id, "legacy");
+        assert!(loaded.mcp_servers[0]
+            .source_info
+            .path
+            .to_string_lossy()
+            .contains("resources/mcp/legacy.yaml"));
+    }
+
+    #[test]
+    fn mcp_servers_dir_takes_precedence_over_legacy_dir_for_same_id() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        let legacy_mcp = root.join("resources/mcp");
+        let canonical_mcp = root.join("resources/mcp_servers");
+        fs::create_dir_all(&legacy_mcp).unwrap();
+        fs::create_dir_all(&canonical_mcp).unwrap();
+        fs::write(
+            legacy_mcp.join("docs.yaml"),
+            "id: docs\ndisplay_name: Legacy Docs\ntransport: stdio\ntarget: legacy-docs\n",
+        )
+        .unwrap();
+        fs::write(
+            canonical_mcp.join("docs.yaml"),
+            "id: docs\ndisplay_name: Canonical Docs\ntransport: stdio\ntarget: canonical-docs\n",
+        )
+        .unwrap();
+
+        let paths = ConfigPaths {
+            workspace_root: root.clone(),
+            workspace_config_dir: root.join(".puffer"),
+            user_config_dir: root.join(".home/.puffer"),
+            builtin_resources_dir: root.join("resources"),
+        };
+        let loaded = load_resources(&paths).unwrap();
+        assert_eq!(loaded.mcp_servers.len(), 1);
+        assert_eq!(loaded.mcp_servers[0].value.id, "docs");
+        assert_eq!(loaded.mcp_servers[0].value.display_name, "Canonical Docs");
+        assert!(loaded.mcp_servers[0]
+            .source_info
+            .path
+            .to_string_lossy()
+            .contains("resources/mcp_servers/docs.yaml"));
+        assert!(!loaded
+            .diagnostics
+            .iter()
+            .any(|item| item.contains("mcp_server `docs`")));
+    }
+
+    #[test]
+    fn disabled_mcp_manifests_are_filtered_out() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        let canonical_mcp = root.join("resources/mcp_servers");
+        fs::create_dir_all(&canonical_mcp).unwrap();
+        fs::write(
+            canonical_mcp.join("enabled.yaml"),
+            "id: enabled\ndisplay_name: Enabled MCP\ntransport: stdio\ntarget: enabled-server\nenabled: true\n",
+        )
+        .unwrap();
+        fs::write(
+            canonical_mcp.join("disabled.yaml"),
+            "id: disabled\ndisplay_name: Disabled MCP\ntransport: stdio\ntarget: disabled-server\nenabled: false\n",
+        )
+        .unwrap();
+
+        let paths = ConfigPaths {
+            workspace_root: root.clone(),
+            workspace_config_dir: root.join(".puffer"),
+            user_config_dir: root.join(".home/.puffer"),
+            builtin_resources_dir: root.join("resources"),
+        };
+        let loaded = load_resources(&paths).unwrap();
+        assert_eq!(loaded.mcp_servers.len(), 1);
+        assert_eq!(loaded.mcp_servers[0].value.id, "enabled");
     }
 }

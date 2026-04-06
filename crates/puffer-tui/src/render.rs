@@ -7,8 +7,8 @@ use puffer_provider_registry::{AuthStore, StoredCredential};
 use puffer_resources::LoadedResources;
 use puffer_tools::ToolRegistry;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::symbols::border;
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::symbols::border;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
@@ -189,7 +189,14 @@ pub(crate) fn render(
     }
 
     if input.starts_with('/') && !onboarding_active {
-        render_command_popup(frame, layout[1], prompt_row, input, slash_selection, commands);
+        render_command_popup(
+            frame,
+            layout[1],
+            prompt_row,
+            input,
+            slash_selection,
+            commands,
+        );
     }
     if let Some(overlay) = active_overlay.as_ref() {
         render_overlay(frame, layout[1], overlay);
@@ -361,10 +368,7 @@ fn status_secondary_line(
         line.push_str(&format!(" · {}", truncate(&remote, 18)));
     }
     if state.statusline_enabled {
-        line.push_str(&format!(
-            " · sandbox {}",
-            truncate(&state.sandbox_mode, 18)
-        ));
+        line.push_str(&format!(" · sandbox {}", truncate(&state.sandbox_mode, 18)));
     }
     if tool_status(tool_registry).executable == 0 {
         line.push_str(" · no tools");
@@ -735,7 +739,9 @@ fn overlay_rows(overlay: &OverlayState) -> Vec<OverlayRow> {
         | OverlayState::ThemePicker { entries, selection }
         | OverlayState::OnboardingTheme { entries, selection }
         | OverlayState::OnboardingProvider { entries, selection }
-        | OverlayState::OnboardingModel { entries, selection, .. } => entries
+        | OverlayState::OnboardingModel {
+            entries, selection, ..
+        } => entries
             .iter()
             .enumerate()
             .map(|(index, entry)| OverlayRow {
@@ -743,7 +749,9 @@ fn overlay_rows(overlay: &OverlayState) -> Vec<OverlayRow> {
                 text: render_model_entry(entry),
             })
             .collect(),
-        OverlayState::AuthPicker { entries, selection, .. } => entries
+        OverlayState::AuthPicker {
+            entries, selection, ..
+        } => entries
             .iter()
             .enumerate()
             .map(|(index, entry)| OverlayRow {
@@ -751,7 +759,9 @@ fn overlay_rows(overlay: &OverlayState) -> Vec<OverlayRow> {
                 text: render_auth_entry(entry),
             })
             .collect(),
-        OverlayState::OnboardingAuth { entries, selection, .. } => entries
+        OverlayState::OnboardingAuth {
+            entries, selection, ..
+        } => entries
             .iter()
             .enumerate()
             .map(|(index, entry)| OverlayRow {

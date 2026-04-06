@@ -1,5 +1,8 @@
 use puffer_config::PufferConfig;
-use puffer_session_store::{SessionMetadata, SessionRecord, TranscriptEvent};
+use puffer_session_store::{
+    RuntimePlanState, RuntimeTask, RuntimeTaskStatus, SessionMetadata, SessionRecord,
+    TranscriptEvent,
+};
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -32,6 +35,17 @@ pub struct TaskRecord {
     pub label: String,
     pub detail: String,
     pub status: TaskStatus,
+    pub plan_summary: Option<String>,
+    pub agent_id: Option<String>,
+    pub worktree: String,
+}
+
+/// Captures the current per-session plan mode and summary text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PlanState {
+    pub mode_open: bool,
+    pub summary: Option<String>,
+    pub updated_at_ms: u64,
 }
 
 /// Stores the mutable session and UI state for one interactive Puffer run.
@@ -53,6 +67,9 @@ pub struct AppState {
     pub statusline_enabled: bool,
     pub vim_mode: bool,
     pub should_exit: bool,
+    plan: PlanState,
+    active_agent_id: Option<String>,
+    active_worktree: Option<PathBuf>,
     tasks: Vec<TaskRecord>,
     next_task_id: u64,
 }
@@ -60,6 +77,7 @@ pub struct AppState {
 impl AppState {
     /// Creates a new application state for the active session.
     pub fn new(config: PufferConfig, cwd: PathBuf, session: SessionMetadata) -> Self {
+        let session_cwd = session.cwd.clone();
         Self {
             current_model: config.default_model.clone(),
             current_provider: config.default_provider.clone(),
@@ -77,6 +95,13 @@ impl AppState {
             statusline_enabled: true,
             vim_mode: false,
             should_exit: false,
+            plan: PlanState {
+                mode_open: false,
+                summary: None,
+                updated_at_ms: 0,
+            },
+            active_agent_id: None,
+            active_worktree: Some(session_cwd),
             tasks: Vec::new(),
             next_task_id: 1,
         }
@@ -129,6 +154,44 @@ impl AppState {
                     state.statusline_enabled = statusline_enabled;
                     state.working_dirs = working_dirs.into_iter().map(Into::into).collect();
                 }
+                TranscriptEvent::RuntimeState {
+                    plan,
+                    tasks,
+                    next_task_id,
+                    active_agent_id,
+                    active_worktree,
+                } => {
+                    state.plan = PlanState {
+                        mode_open: plan.mode_open,
+                        summary: plan.summary,
+                        updated_at_ms: plan.updated_at_ms,
+                    };
+                    state.tasks = tasks
+                        .into_iter()
+                        .map(|task| TaskRecord {
+                            id: task.id,
+                            label: task.label,
+                            detail: task.detail,
+                            status: match task.status {
+                                RuntimeTaskStatus::Completed => TaskStatus::Completed,
+                                RuntimeTaskStatus::Failed => TaskStatus::Failed,
+                            },
+                            plan_summary: task.plan_summary,
+                            agent_id: task.agent_id,
+                            worktree: task.worktree,
+                        })
+                        .collect();
+                    let inferred_next = state
+                        .tasks
+                        .iter()
+                        .map(|task| task.id)
+                        .max()
+                        .unwrap_or(0)
+                        .saturating_add(1);
+                    state.next_task_id = next_task_id.max(inferred_next).max(1);
+                    state.active_agent_id = active_agent_id;
+                    state.active_worktree = active_worktree.map(Into::into);
+                }
             }
         }
         state
@@ -149,15 +212,35 @@ impl AppState {
         detail: impl Into<String>,
         success: bool,
     ) {
+        let worktree = self
+            .active_worktree
+            .as_deref()
+            .unwrap_or(&self.cwd)
+            .display()
+            .to_string();
+        let plan_summary = self.plan.summary.clone();
+        let agent_id = self.active_agent_id.clone();
+        let detail = format!(
+            "{}\ncontext: plan={} agent={} worktree={}",
+            detail.into().trim(),
+            plan_summary.as_deref().unwrap_or("<unset>"),
+            agent_id.as_deref().unwrap_or("<unset>"),
+            worktree
+        )
+        .trim()
+        .to_string();
         let task = TaskRecord {
             id: self.next_task_id,
             label: label.into(),
-            detail: detail.into(),
+            detail,
             status: if success {
                 TaskStatus::Completed
             } else {
                 TaskStatus::Failed
             },
+            plan_summary,
+            agent_id,
+            worktree,
         };
         self.next_task_id += 1;
         self.tasks.push(task);
@@ -184,7 +267,132 @@ impl AppState {
         }
     }
 
+    /// Builds a persisted runtime event for task, plan, agent, and worktree state.
+    pub fn runtime_event(&self) -> TranscriptEvent {
+        TranscriptEvent::RuntimeState {
+            plan: RuntimePlanState {
+                mode_open: self.plan.mode_open,
+                summary: self.plan.summary.clone(),
+                updated_at_ms: self.plan.updated_at_ms,
+            },
+            tasks: self
+                .tasks
+                .iter()
+                .map(|task| RuntimeTask {
+                    id: task.id,
+                    label: task.label.clone(),
+                    detail: task.detail.clone(),
+                    status: match task.status {
+                        TaskStatus::Completed => RuntimeTaskStatus::Completed,
+                        TaskStatus::Failed => RuntimeTaskStatus::Failed,
+                    },
+                    plan_summary: task.plan_summary.clone(),
+                    agent_id: task.agent_id.clone(),
+                    worktree: task.worktree.clone(),
+                })
+                .collect(),
+            next_task_id: self.next_task_id,
+            active_agent_id: self.active_agent_id.clone(),
+            active_worktree: self
+                .active_worktree
+                .as_ref()
+                .map(|path| path.display().to_string()),
+        }
+    }
+
+    pub(crate) fn clear_active_agent(&mut self) {
+        self.active_agent_id = None;
+    }
+
+    pub(crate) fn open_plan(&mut self) {
+        self.plan.mode_open = true;
+        self.plan.updated_at_ms = now_ms();
+    }
+
+    pub(crate) fn close_plan(&mut self) {
+        self.plan.mode_open = false;
+        self.plan.updated_at_ms = now_ms();
+    }
+
+    pub(crate) fn set_active_agent(&mut self, agent_id: Option<String>) {
+        self.active_agent_id = agent_id;
+    }
+
+    pub(crate) fn set_active_worktree(&mut self, worktree: PathBuf) {
+        self.active_worktree = Some(worktree);
+    }
+
+    pub(crate) fn set_plan_summary(&mut self, summary: Option<String>) {
+        self.plan.summary = summary;
+        self.plan.updated_at_ms = now_ms();
+    }
+
+    pub(crate) fn render_plan_summary(&self) -> String {
+        format!(
+            "Plan:\nmode={}\nsummary={}\nupdated_at_ms={}",
+            if self.plan.mode_open {
+                "open"
+            } else {
+                "closed"
+            },
+            self.plan.summary.as_deref().unwrap_or("<unset>"),
+            self.plan.updated_at_ms
+        )
+    }
+
     pub(crate) fn tasks(&self) -> &[TaskRecord] {
         &self.tasks
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_event_roundtrip_restores_runtime_state() {
+        let metadata = SessionMetadata {
+            id: uuid::Uuid::nil(),
+            display_name: None,
+            cwd: PathBuf::from("/tmp/puffer"),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        };
+        let mut state = AppState::new(
+            PufferConfig::default(),
+            PathBuf::from("/tmp/puffer"),
+            metadata.clone(),
+        );
+        state.open_plan();
+        state.set_plan_summary(Some("ship runtime parity".to_string()));
+        state.set_active_agent(Some("reviewer".to_string()));
+        state.set_active_worktree(PathBuf::from("/tmp/puffer/.worktree/tool-review"));
+        state.record_task("bash", "cargo test -p puffer-core", true);
+        let record = SessionRecord {
+            metadata,
+            events: vec![state.runtime_event()],
+        };
+
+        let restored = AppState::from_session_record(PufferConfig::default(), record);
+        assert_eq!(restored.tasks().len(), 1);
+        assert!(restored.tasks()[0].detail.contains("agent=reviewer"));
+        assert!(restored.tasks()[0]
+            .detail
+            .contains("plan=ship runtime parity"));
+        assert_eq!(restored.render_plan_summary().contains("mode=open"), true);
+        assert!(restored
+            .render_plan_summary()
+            .contains("ship runtime parity"));
     }
 }

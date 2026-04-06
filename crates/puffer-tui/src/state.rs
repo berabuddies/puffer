@@ -307,21 +307,27 @@ impl OverlayState {
                 *selection = (*selection + 1).min(sessions.len().saturating_sub(1));
             }
             Self::AgentPicker { entries, selection }
-            | Self::ModelPicker { entries, selection, .. }
+            | Self::ModelPicker {
+                entries, selection, ..
+            }
             | Self::LoginPicker { entries, selection }
-            | Self::ProviderPicker { entries, selection, .. }
+            | Self::ProviderPicker {
+                entries, selection, ..
+            }
             | Self::LogoutPicker { entries, selection }
             | Self::ThemePicker { entries, selection }
             | Self::OnboardingTheme { entries, selection }
             | Self::OnboardingProvider { entries, selection }
-            | Self::OnboardingAuth { entries, selection, .. }
-            | Self::OnboardingModel { entries, selection, .. } => {
+            | Self::OnboardingAuth {
+                entries, selection, ..
+            }
+            | Self::OnboardingModel {
+                entries, selection, ..
+            } => {
                 *selection = (*selection + 1).min(entries.len().saturating_sub(1));
             }
             Self::AuthPicker {
-                entries,
-                selection,
-                ..
+                entries, selection, ..
             } => {
                 *selection = (*selection + 1).min(entries.len().saturating_sub(1));
             }
@@ -390,9 +396,9 @@ impl OverlayState {
     pub(crate) fn selected_provider(&self) -> Option<&str> {
         match self {
             Self::LoginPicker { entries, selection }
-            | Self::ProviderPicker { entries, selection, .. } => {
-                entries.get(*selection).map(|entry| entry.selector.as_str())
-            }
+            | Self::ProviderPicker {
+                entries, selection, ..
+            } => entries.get(*selection).map(|entry| entry.selector.as_str()),
             Self::ModelPicker { provider_id, .. }
             | Self::AuthPicker { provider_id, .. }
             | Self::ApiKeyPrompt { provider_id, .. }
@@ -471,7 +477,10 @@ impl OverlayState {
 
     /// Returns true when the overlay accepts inline text input.
     pub(crate) fn accepts_text_input(&self) -> bool {
-        matches!(self, Self::ApiKeyPrompt { .. } | Self::OnboardingApiKey { .. })
+        matches!(
+            self,
+            Self::ApiKeyPrompt { .. } | Self::OnboardingApiKey { .. }
+        )
     }
 
     /// Moves the text cursor left for inline API-key input.

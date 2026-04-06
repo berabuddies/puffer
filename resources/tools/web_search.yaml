@@ -1,0 +1,26 @@
+id: WebSearch
+name: WebSearch
+description: Search the web for current information and return a cited summary.
+handler: provider:web_search
+approval_policy: auto
+sandbox_policy: read-only
+input_schema:
+  type: object
+  properties:
+    query:
+      type: string
+      description: Search query to execute.
+    allowed_domains:
+      type: array
+      description: Optional allowlist of domains to search.
+    blocked_domains:
+      type: array
+      description: Optional denylist of domains to exclude.
+    user_location:
+      type: object
+      description: Optional provider-specific user location object.
+    external_web_access:
+      type: boolean
+      description: Optional provider-specific external web access toggle.
+  required:
+    - query

@@ -192,7 +192,10 @@ fn anthropic_usage_lines(
         if let Some(provider) = provider {
             match fetch_oauth_usage(&provider.base_url, &credential.access_token) {
                 Ok(usage) => {
-                    lines.push(format_rate_limit_line("Current session", usage.five_hour.as_ref()));
+                    lines.push(format_rate_limit_line(
+                        "Current session",
+                        usage.five_hour.as_ref(),
+                    ));
                     lines.push(format_rate_limit_line(
                         "Current week (all models)",
                         usage.seven_day.as_ref(),
@@ -209,9 +212,7 @@ fn anthropic_usage_lines(
                     return lines;
                 }
                 Err(error) => {
-                    lines.push(format!(
-                        "Live Claude usage fetch failed: {error}"
-                    ));
+                    lines.push(format!("Live Claude usage fetch failed: {error}"));
                 }
             }
         }

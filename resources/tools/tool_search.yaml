@@ -1,0 +1,17 @@
+id: ToolSearch
+name: ToolSearch
+description: Search available tools by name or keyword and return matching schemas.
+handler: runtime:tool_search
+approval_policy: auto
+sandbox_policy: read-only
+input_schema:
+  type: object
+  properties:
+    query:
+      type: string
+      description: Search query or select:<tool names> expression.
+    max_results:
+      type: integer
+      description: Maximum number of matches to return.
+  required:
+    - query

@@ -1,0 +1,10 @@
+id: Read
+name: Read
+description: Claude-compatible alias for reading one file from the workspace.
+handler: builtin:read_file
+approval_policy: auto
+sandbox_policy: read-only
+display:
+  group: files
+  title: Read
+  show_in_status: true

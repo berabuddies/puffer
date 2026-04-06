@@ -1,0 +1,17 @@
+id: Skill
+name: Skill
+description: Load a named skill into the current conversation when specialized instructions are needed.
+handler: runtime:skill
+approval_policy: auto
+sandbox_policy: read-only
+input_schema:
+  type: object
+  properties:
+    skill:
+      type: string
+      description: The skill name to load.
+    args:
+      type: string
+      description: Optional arguments to pass through for skill context.
+  required:
+    - skill

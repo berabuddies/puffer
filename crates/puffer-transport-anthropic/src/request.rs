@@ -461,18 +461,60 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(
-            !request
-                .headers
-                .iter()
-                .any(|(key, _)| key.eq_ignore_ascii_case("authorization"))
+        assert!(!request
+            .headers
+            .iter()
+            .any(|(key, _)| key.eq_ignore_ascii_case("authorization")));
+        assert!(!request
+            .headers
+            .iter()
+            .any(|(key, _)| key.eq_ignore_ascii_case("x-api-key")));
+    }
+
+    #[test]
+    fn request_with_tools_preserves_rich_schema_and_expanded_name() {
+        let request = build_messages_request_with_tools(
+            &base_config(AnthropicAuth::ApiKey("key-1".to_string())),
+            &AnthropicModelRequest {
+                model: "claude-sonnet-4-5".to_string(),
+                max_tokens: 256,
+                messages: vec![AnthropicMessage {
+                    role: "user".to_string(),
+                    content: "inspect the repo".to_string(),
+                }],
+            },
+            &[AnthropicToolDefinition {
+                name: "workspace/search:text.v2".to_string(),
+                description: "Searches workspace text".to_string(),
+                input_schema: json!({
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string"},
+                                "path": {"type": ["string", "null"]}
+                            },
+                            "required": ["query"]
+                        },
+                        {"type": "boolean"}
+                    ]
+                }),
+            }],
+            Some(&AnthropicToolChoice::Auto),
+        )
+        .unwrap();
+
+        let body: Value = serde_json::from_str(&request.body).unwrap();
+        assert_eq!(body["tools"][0]["name"], "workspace/search:text.v2");
+        assert_eq!(
+            body["tools"][0]["input_schema"]["oneOf"][0]["properties"]["path"]["type"],
+            json!(["string", "null"])
         );
-        assert!(
-            !request
-                .headers
-                .iter()
-                .any(|(key, _)| key.eq_ignore_ascii_case("x-api-key"))
+        assert_eq!(
+            body["tools"][0]["input_schema"]["oneOf"][1]["type"],
+            "boolean"
         );
+        assert_eq!(body["tool_choice"]["type"], "auto");
     }
 
     #[test]

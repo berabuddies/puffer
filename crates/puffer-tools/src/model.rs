@@ -2,13 +2,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-
 /// Describes the primitive type for a tool schema node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolSchemaType {
     Object,
     String,
+    Boolean,
+    Integer,
+    Array,
 }
 
 impl ToolSchemaType {
@@ -16,6 +18,9 @@ impl ToolSchemaType {
         match self {
             Self::Object => "object",
             Self::String => "string",
+            Self::Boolean => "boolean",
+            Self::Integer => "integer",
+            Self::Array => "array",
         }
     }
 }
@@ -171,12 +176,22 @@ impl ToolDefinition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BashToolInput {
     pub command: String,
+    #[serde(default)]
+    pub timeout: Option<u64>,
+    #[serde(default)]
+    pub run_in_background: bool,
+    #[serde(default, rename = "dangerouslyDisableSandbox")]
+    pub dangerously_disable_sandbox: bool,
 }
 
 /// Typed input for the built-in read-file tool.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadFileToolInput {
     pub path: PathBuf,
+    #[serde(default)]
+    pub offset: Option<usize>,
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 /// Typed input for the built-in write-file tool.
@@ -232,9 +247,19 @@ pub struct SearchTextToolInput {
 pub enum ToolInput {
     Bash {
         command: String,
+        #[serde(default)]
+        timeout: Option<u64>,
+        #[serde(default)]
+        run_in_background: bool,
+        #[serde(default, rename = "dangerouslyDisableSandbox")]
+        dangerously_disable_sandbox: bool,
     },
     ReadFile {
         path: PathBuf,
+        #[serde(default)]
+        offset: Option<usize>,
+        #[serde(default)]
+        limit: Option<usize>,
     },
     WriteFile {
         path: PathBuf,
@@ -281,13 +306,31 @@ impl ToolInput {
     /// Converts the enum into the matching kind plus strongly typed payload.
     pub fn into_kind_payload(self) -> (ToolKind, TypedToolInput) {
         match self {
-            Self::Bash { command } => (
+            Self::Bash {
+                command,
+                timeout,
+                run_in_background,
+                dangerously_disable_sandbox,
+            } => (
                 ToolKind::Bash,
-                TypedToolInput::Bash(BashToolInput { command }),
+                TypedToolInput::Bash(BashToolInput {
+                    command,
+                    timeout,
+                    run_in_background,
+                    dangerously_disable_sandbox,
+                }),
             ),
-            Self::ReadFile { path } => (
+            Self::ReadFile {
+                path,
+                offset,
+                limit,
+            } => (
                 ToolKind::ReadFile,
-                TypedToolInput::ReadFile(ReadFileToolInput { path }),
+                TypedToolInput::ReadFile(ReadFileToolInput {
+                    path,
+                    offset,
+                    limit,
+                }),
             ),
             Self::WriteFile { path, contents } => (
                 ToolKind::WriteFile,
@@ -395,14 +438,40 @@ pub fn builtin_tool_definition(kind: ToolKind) -> ToolDefinition {
             handler_args: Vec::new(),
             kind,
             input_schema: ToolInputSchema {
-                properties: BTreeMap::from([(
-                    "command".to_string(),
-                    ToolPropertySchema {
-                        value_type: ToolSchemaType::String,
-                        description: "Shell command to execute.".to_string(),
-                        required: true,
-                    },
-                )]),
+                properties: BTreeMap::from([
+                    (
+                        "command".to_string(),
+                        ToolPropertySchema {
+                            value_type: ToolSchemaType::String,
+                            description: "Shell command to execute.".to_string(),
+                            required: true,
+                        },
+                    ),
+                    (
+                        "timeout".to_string(),
+                        ToolPropertySchema {
+                            value_type: ToolSchemaType::Integer,
+                            description: "Optional timeout in milliseconds.".to_string(),
+                            required: false,
+                        },
+                    ),
+                    (
+                        "run_in_background".to_string(),
+                        ToolPropertySchema {
+                            value_type: ToolSchemaType::Boolean,
+                            description: "When true, request background execution.".to_string(),
+                            required: false,
+                        },
+                    ),
+                    (
+                        "dangerouslyDisableSandbox".to_string(),
+                        ToolPropertySchema {
+                            value_type: ToolSchemaType::Boolean,
+                            description: "When true, request unsandboxed execution.".to_string(),
+                            required: false,
+                        },
+                    ),
+                ]),
             },
             metadata: ToolMetadata {
                 may_spawn_processes: true,
@@ -422,14 +491,32 @@ pub fn builtin_tool_definition(kind: ToolKind) -> ToolDefinition {
             handler_args: Vec::new(),
             kind,
             input_schema: ToolInputSchema {
-                properties: BTreeMap::from([(
-                    "path".to_string(),
-                    ToolPropertySchema {
-                        value_type: ToolSchemaType::String,
-                        description: "Path to the file to read.".to_string(),
-                        required: true,
-                    },
-                )]),
+                properties: BTreeMap::from([
+                    (
+                        "path".to_string(),
+                        ToolPropertySchema {
+                            value_type: ToolSchemaType::String,
+                            description: "Path to the file to read.".to_string(),
+                            required: true,
+                        },
+                    ),
+                    (
+                        "offset".to_string(),
+                        ToolPropertySchema {
+                            value_type: ToolSchemaType::Integer,
+                            description: "Optional 0-indexed line offset.".to_string(),
+                            required: false,
+                        },
+                    ),
+                    (
+                        "limit".to_string(),
+                        ToolPropertySchema {
+                            value_type: ToolSchemaType::Integer,
+                            description: "Optional maximum number of lines to return.".to_string(),
+                            required: false,
+                        },
+                    ),
+                ]),
             },
             metadata: ToolMetadata {
                 may_spawn_processes: false,
@@ -514,7 +601,7 @@ pub fn builtin_tool_definition(kind: ToolKind) -> ToolDefinition {
                     (
                         "replace_all".to_string(),
                         ToolPropertySchema {
-                            value_type: ToolSchemaType::String,
+                            value_type: ToolSchemaType::Boolean,
                             description: "When true, replace every occurrence.".to_string(),
                             required: false,
                         },
@@ -588,7 +675,7 @@ pub fn builtin_tool_definition(kind: ToolKind) -> ToolDefinition {
                     (
                         "recursive".to_string(),
                         ToolPropertySchema {
-                            value_type: ToolSchemaType::String,
+                            value_type: ToolSchemaType::Boolean,
                             description: "Set to true when removing directories recursively."
                                 .to_string(),
                             required: false,
@@ -732,6 +819,78 @@ mod tests {
     }
 
     #[test]
+    fn schema_export_supports_boolean_integer_and_array_types() {
+        let schema = ToolInputSchema {
+            properties: BTreeMap::from([
+                (
+                    "flag".to_string(),
+                    ToolPropertySchema {
+                        value_type: ToolSchemaType::Boolean,
+                        description: "Boolean flag".to_string(),
+                        required: false,
+                    },
+                ),
+                (
+                    "count".to_string(),
+                    ToolPropertySchema {
+                        value_type: ToolSchemaType::Integer,
+                        description: "Count".to_string(),
+                        required: false,
+                    },
+                ),
+                (
+                    "paths".to_string(),
+                    ToolPropertySchema {
+                        value_type: ToolSchemaType::Array,
+                        description: "Paths".to_string(),
+                        required: false,
+                    },
+                ),
+            ]),
+        }
+        .as_json_schema();
+        assert_eq!(
+            schema["properties"]["flag"]["type"].as_str(),
+            Some("boolean")
+        );
+        assert_eq!(
+            schema["properties"]["count"]["type"].as_str(),
+            Some("integer")
+        );
+        assert_eq!(
+            schema["properties"]["paths"]["type"].as_str(),
+            Some("array")
+        );
+    }
+
+    #[test]
+    fn boolean_fields_in_builtin_schemas_use_boolean_type() {
+        let replace_schema = builtin_tool_definition(ToolKind::ReplaceInFile).input_schema;
+        let remove_schema = builtin_tool_definition(ToolKind::RemovePath).input_schema;
+        let bash_schema = builtin_tool_definition(ToolKind::Bash).input_schema;
+        assert_eq!(
+            replace_schema.properties["replace_all"].value_type,
+            ToolSchemaType::Boolean
+        );
+        assert_eq!(
+            remove_schema.properties["recursive"].value_type,
+            ToolSchemaType::Boolean
+        );
+        assert_eq!(
+            bash_schema.properties["run_in_background"].value_type,
+            ToolSchemaType::Boolean
+        );
+        assert_eq!(
+            bash_schema.properties["dangerouslyDisableSandbox"].value_type,
+            ToolSchemaType::Boolean
+        );
+        assert_eq!(
+            bash_schema.properties["timeout"].value_type,
+            ToolSchemaType::Integer
+        );
+    }
+
+    #[test]
     fn anthropic_tool_payload_uses_definition_schema() {
         let definition = builtin_tool_definition(ToolKind::Bash);
         let payload = definition.as_anthropic_tool();
@@ -760,10 +919,53 @@ mod tests {
     }
 
     #[test]
+    fn serde_read_input_accepts_offset_and_limit() {
+        let input: ToolInput = serde_json::from_value(serde_json::json!({
+            "tool": "read_file",
+            "path": "notes/todo.txt",
+            "offset": 10,
+            "limit": 25,
+        }))
+        .unwrap();
+        assert_eq!(
+            input,
+            ToolInput::ReadFile {
+                path: "notes/todo.txt".into(),
+                offset: Some(10),
+                limit: Some(25),
+            }
+        );
+    }
+
+    #[test]
+    fn serde_bash_input_accepts_timeout_and_sandbox_fields() {
+        let input: ToolInput = serde_json::from_value(serde_json::json!({
+            "tool": "bash",
+            "command": "printf hi",
+            "timeout": 2500,
+            "run_in_background": false,
+            "dangerouslyDisableSandbox": false,
+        }))
+        .unwrap();
+        assert_eq!(
+            input,
+            ToolInput::Bash {
+                command: "printf hi".to_string(),
+                timeout: Some(2500),
+                run_in_background: false,
+                dangerously_disable_sandbox: false,
+            }
+        );
+    }
+
+    #[test]
     fn tool_input_reports_kind() {
         assert_eq!(
             ToolInput::Bash {
-                command: "printf hi".to_string()
+                command: "printf hi".to_string(),
+                timeout: None,
+                run_in_background: false,
+                dangerously_disable_sandbox: false,
             }
             .kind(),
             ToolKind::Bash

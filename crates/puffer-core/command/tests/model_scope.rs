@@ -7,10 +7,7 @@ fn puffer_home_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-fn provider(
-    id: &str,
-    models: &[&str],
-) -> puffer_provider_registry::ProviderDescriptor {
+fn provider(id: &str, models: &[&str]) -> puffer_provider_registry::ProviderDescriptor {
     puffer_provider_registry::ProviderDescriptor {
         id: id.to_string(),
         display_name: id.to_string(),

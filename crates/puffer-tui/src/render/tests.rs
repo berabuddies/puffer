@@ -34,11 +34,11 @@ fn header_snapshot_reports_compact_status() {
         .collect::<Vec<_>>()
         .join("\n");
     assert_snapshot!(
-        snapshot,
-        @r"
+            snapshot,
+            @r"
 Puffer Code · Shipyard · anthropic/claude-sonnet-4-5 · auth api-key · tools 3/4 · dockyard@staging
 "
-    );
+        );
 }
 
 #[test]
@@ -47,19 +47,26 @@ fn footer_snapshot_reports_compact_prompt_rail() {
     let resources = sample_resources();
     let auth_store = sample_auth_store();
     let registry = ToolRegistry::from_resources(&resources);
-    let snapshot = footer_lines(&state, &resources, &auth_store, &registry, "/re", &sample_commands())
-        .into_iter()
-        .map(|line| line.to_string())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let snapshot = footer_lines(
+        &state,
+        &resources,
+        &auth_store,
+        &registry,
+        "/re",
+        &sample_commands(),
+    )
+    .into_iter()
+    .map(|line| line.to_string())
+    .collect::<Vec<_>>()
+    .join("\n");
     assert_snapshot!(
-        snapshot,
-        @r"
+            snapshot,
+            @r"
 anthropic · anthropic/claude-sonnet-4-5 · auth api-key · tools 3/4
 puffer · shell 1 · prompts 2 · 2 workdirs · dockyard@staging · sandbox workspace-write
 slash /re · 2 matches · best /review · Enter submits · Esc clears
 "
-    );
+        );
 }
 
 #[test]
@@ -76,12 +83,12 @@ fn header_snapshot_includes_oauth_identity_when_available() {
         .collect::<Vec<_>>()
         .join("\n");
     assert_snapshot!(
-        snapshot,
-        @r"
+            snapshot,
+            @r"
 Puffer Code · Shipyard · openai/gpt-5 · auth oauth · tools 3/4 · dockyard@staging
 dev@example.com · plan Pro · acct acct-1
 "
-    );
+        );
 }
 
 #[test]

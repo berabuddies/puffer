@@ -115,7 +115,10 @@ fn parse_discovered_models(
 ) -> Result<Vec<ModelDescriptor>> {
     let items = match discovery.response {
         ModelDiscoveryFormat::MistralModels => payload.as_array().ok_or_else(|| {
-            anyhow!("discovery response for {} was not a top-level array", provider.id)
+            anyhow!(
+                "discovery response for {} was not a top-level array",
+                provider.id
+            )
         })?,
         _ => payload
             .get(&discovery.items_field)

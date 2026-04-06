@@ -1,0 +1,17 @@
+id: Glob
+name: Glob
+description: Claude-compatible tool for finding files by glob pattern in the workspace.
+handler: runtime:glob
+approval_policy: auto
+sandbox_policy: read-only
+input_schema:
+  type: object
+  properties:
+    pattern:
+      type: string
+      description: Glob pattern to match against workspace-relative paths.
+    path:
+      type: string
+      description: Optional workspace-relative directory to scope the search.
+  required:
+    - pattern

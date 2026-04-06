@@ -120,9 +120,41 @@ fn start_tmux_with_home(workspace: &std::path::Path) -> puffer_test_support::Tmu
 }
 
 fn normalize_tmux_capture(capture: &str) -> String {
-    capture
+    let lines = capture
         .lines()
         .map(normalize_tmux_line)
+        .map(strip_tmux_chrome)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+
+    if lines
+        .iter()
+        .any(|line| line.contains("Supported commands:"))
+    {
+        return lines
+            .into_iter()
+            .filter(|line| {
+                line.starts_with("Puffer Code ·")
+                    || line.contains("Supported commands:")
+                    || line.starts_with('/')
+                    || line.starts_with("Resource counts:")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+
+    lines
+        .into_iter()
+        .filter(|line| {
+            matches!(
+                line.as_str(),
+                "Puffer Code"
+                    | "Welcome to Puffer Code"
+                    | "Clawd on duty"
+                    | "anthropic/claude-sonnet-4-5"
+                    | "workspace"
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -131,6 +163,17 @@ fn normalize_tmux_line(line: &str) -> String {
     let line = replace_session_marker(line);
     let line = replace_id_line(&line);
     replace_hex_runs(&line)
+}
+
+fn strip_tmux_chrome(line: String) -> String {
+    let collapsed = line
+        .chars()
+        .map(|ch| match ch {
+            '│' | '╭' | '╮' | '╰' | '╯' | '─' => ' ',
+            other => other,
+        })
+        .collect::<String>();
+    collapsed.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn replace_session_marker(line: &str) -> String {

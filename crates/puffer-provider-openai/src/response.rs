@@ -33,7 +33,7 @@ pub struct OpenAIResponsesOutputItem {
     #[serde(default)]
     pub call_id: Option<String>,
     #[serde(default)]
-    pub arguments: Option<String>,
+    pub arguments: Option<Value>,
     #[serde(default)]
     pub content: Vec<OpenAIResponsesContentItem>,
 }
@@ -92,7 +92,7 @@ pub struct OpenAIChatToolCall {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OpenAIChatFunctionCall {
     pub name: String,
-    pub arguments: String,
+    pub arguments: Value,
 }
 
 /// A parsed tool call emitted by the OpenAI Responses API.
@@ -168,8 +168,8 @@ pub(crate) fn extract_chat_completions_tool_calls(
         .into_iter()
         .flat_map(|choice| choice.message.tool_calls.iter())
         .map(|tool_call| {
-            let arguments =
-                serde_json::from_str(&tool_call.function.arguments).with_context(|| {
+            let arguments = parse_tool_arguments(&tool_call.function.arguments, &tool_call.id)
+                .with_context(|| {
                     format!(
                         "failed to parse OpenAI Chat Completions tool arguments for call {}",
                         tool_call.id
@@ -219,10 +219,8 @@ fn parse_tool_call(item: &OpenAIResponsesOutputItem) -> Result<OpenAIResponseToo
     let raw_arguments = item
         .arguments
         .as_ref()
-        .filter(|value| !value.is_empty())
-        .cloned()
         .ok_or_else(|| anyhow!("OpenAI tool call item is missing arguments"))?;
-    let arguments = serde_json::from_str(&raw_arguments)
+    let arguments = parse_tool_arguments(raw_arguments, &call_id)
         .with_context(|| format!("failed to parse OpenAI tool arguments for call {call_id}"))?;
 
     Ok(OpenAIResponseToolCall {
@@ -232,6 +230,19 @@ fn parse_tool_call(item: &OpenAIResponsesOutputItem) -> Result<OpenAIResponseToo
         name,
         arguments,
     })
+}
+
+fn parse_tool_arguments(raw_arguments: &Value, call_id: &str) -> Result<Value> {
+    match raw_arguments {
+        Value::String(encoded) => {
+            if encoded.is_empty() {
+                return Err(anyhow!("OpenAI tool call item is missing arguments"));
+            }
+            serde_json::from_str(encoded)
+                .with_context(|| format!("invalid JSON string arguments for call {call_id}"))
+        }
+        other => Ok(other.clone()),
+    }
 }
 
 #[cfg(test)]
@@ -341,6 +352,28 @@ mod tests {
     }
 
     #[test]
+    fn accepts_structured_responses_tool_arguments() {
+        let response = parse_responses_response(
+            r#"{
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_456",
+                        "name": "read_file",
+                        "arguments": {"path":"Cargo.toml","line":3}
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let calls = extract_responses_tool_calls(&response).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].arguments["path"], "Cargo.toml");
+        assert_eq!(calls[0].arguments["line"], 3);
+    }
+
+    #[test]
     fn extracts_text_and_tool_calls_from_chat_completions() {
         let response = parse_chat_completions_response(
             r#"{
@@ -375,5 +408,39 @@ mod tests {
         assert_eq!(calls[0].call_id, "call_123");
         assert_eq!(calls[0].name, "read_file");
         assert_eq!(calls[0].arguments, json!({ "path": "Cargo.toml" }));
+    }
+
+    #[test]
+    fn accepts_structured_chat_completions_tool_arguments() {
+        let response = parse_chat_completions_response(
+            r#"{
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": "call_obj",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "search_text",
+                                        "arguments": {
+                                            "query": "tool schema",
+                                            "path": "."
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let calls = extract_chat_completions_tool_calls(&response).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "search_text");
+        assert_eq!(calls[0].arguments["query"], "tool schema");
     }
 }

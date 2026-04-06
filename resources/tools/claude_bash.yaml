@@ -1,0 +1,10 @@
+id: Bash
+name: Bash
+description: Claude-compatible alias for running a shell command in the workspace.
+handler: builtin:bash
+approval_policy: on-request
+sandbox_policy: workspace-write
+display:
+  group: shell
+  title: Bash
+  show_in_status: true

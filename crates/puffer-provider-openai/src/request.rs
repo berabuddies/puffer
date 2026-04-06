@@ -71,6 +71,8 @@ pub struct OpenAIResponsesToolRequest {
     pub input: Value,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<OpenAIResponsesTool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<OpenAIResponsesToolChoice>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -82,9 +84,18 @@ pub struct OpenAIResponsesToolRequest {
 pub struct OpenAIResponsesTool {
     #[serde(rename = "type")]
     pub kind: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
     pub parameters: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filters: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_location: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_web_access: Option<bool>,
 }
 
 /// A tool selection directive for the OpenAI Responses API.
@@ -277,7 +288,11 @@ mod tests {
                         },
                         "required": ["path"]
                     }),
+                    filters: None,
+                    user_location: None,
+                    external_web_access: None,
                 }],
+                include: Vec::new(),
                 tool_choice: Some(OpenAIResponsesToolChoice::Mode(
                     OpenAIResponsesToolChoiceMode::Auto,
                 )),
@@ -335,5 +350,100 @@ mod tests {
         assert_eq!(body["messages"][0]["role"], json!("user"));
         assert_eq!(body["tools"][0]["function"]["name"], json!("read_file"));
         assert_eq!(body["tool_choice"], json!("auto"));
+    }
+
+    #[test]
+    fn tool_request_preserves_rich_schema_and_name() {
+        let request = build_tool_responses_request(
+            &OpenAIRequestConfig {
+                base_url: "https://api.openai.com".to_string(),
+                version: "0.1.0".to_string(),
+                auth: OpenAIAuth::ApiKey("sk-test".to_string()),
+            },
+            &OpenAIResponsesToolRequest {
+                model: "gpt-5".to_string(),
+                input: json!("inspect"),
+                tools: vec![OpenAIResponsesTool {
+                    kind: "function".to_string(),
+                    name: "workspace/search:text.v2".to_string(),
+                    description: "Searches workspace text.".to_string(),
+                    parameters: json!({
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "query": {"type": "string"},
+                                    "path": {"type": ["string", "null"]}
+                                },
+                                "required": ["query"],
+                                "additionalProperties": false
+                            },
+                            {"type": "boolean"}
+                        ]
+                    }),
+                    filters: None,
+                    user_location: None,
+                    external_web_access: None,
+                }],
+                include: Vec::new(),
+                tool_choice: Some(OpenAIResponsesToolChoice::Mode(
+                    OpenAIResponsesToolChoiceMode::Auto,
+                )),
+                previous_response_id: None,
+            },
+        )
+        .unwrap();
+
+        let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+        assert_eq!(body["tools"][0]["name"], json!("workspace/search:text.v2"));
+        assert_eq!(
+            body["tools"][0]["parameters"]["oneOf"][0]["properties"]["path"]["type"],
+            json!(["string", "null"])
+        );
+        assert_eq!(
+            body["tools"][0]["parameters"]["oneOf"][1]["type"],
+            json!("boolean")
+        );
+    }
+
+    #[test]
+    fn tool_request_allows_non_function_style_tool_payload() {
+        let request = build_tool_responses_request(
+            &OpenAIRequestConfig {
+                base_url: "https://api.openai.com".to_string(),
+                version: "0.1.0".to_string(),
+                auth: OpenAIAuth::ApiKey("sk-test".to_string()),
+            },
+            &OpenAIResponsesToolRequest {
+                model: "gpt-5".to_string(),
+                input: json!("search"),
+                tools: vec![OpenAIResponsesTool {
+                    kind: "web_search".to_string(),
+                    name: String::new(),
+                    description: String::new(),
+                    parameters: Value::Null,
+                    filters: Some(json!({
+                        "allowed_domains": ["openai.com"]
+                    })),
+                    user_location: Some(json!({
+                        "type": "approximate",
+                        "country": "US",
+                    })),
+                    external_web_access: Some(true),
+                }],
+                include: vec!["web_search_call.action.sources".to_string()],
+                tool_choice: None,
+                previous_response_id: None,
+            },
+        )
+        .unwrap();
+
+        let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+        assert_eq!(body["tools"][0]["type"], json!("web_search"));
+        assert_eq!(
+            body["tools"][0]["filters"]["allowed_domains"],
+            json!(["openai.com"])
+        );
+        assert_eq!(body["include"], json!(["web_search_call.action.sources"]));
     }
 }

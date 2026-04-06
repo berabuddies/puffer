@@ -1,0 +1,6 @@
+id: Edit
+name: Edit
+description: Claude-compatible alias for replacing text inside one workspace file.
+handler: builtin:replace_in_file
+approval_policy: on-request
+sandbox_policy: workspace-write

@@ -1,0 +1,18 @@
+id: ReadMcpResourceTool
+name: ReadMcpResourceTool
+description: Read one configured MCP server manifest by server id and URI.
+handler: runtime:read_mcp_resource
+approval_policy: auto
+sandbox_policy: read-only
+input_schema:
+  type: object
+  properties:
+    server:
+      type: string
+      description: MCP server id.
+    uri:
+      type: string
+      description: Resource URI returned by ListMcpResourcesTool.
+  required:
+    - server
+    - uri

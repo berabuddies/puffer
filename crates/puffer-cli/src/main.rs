@@ -470,8 +470,16 @@ fn run_tool_command(
         }
         ToolCommand::Bash { command } => {
             let registry = ToolRegistry::from_resources(resources);
-            let result =
-                registry.execute("bash", cwd, puffer_tools::ToolInput::Bash { command })?;
+            let result = registry.execute(
+                "bash",
+                cwd,
+                puffer_tools::ToolInput::Bash {
+                    command,
+                    timeout: None,
+                    run_in_background: false,
+                    dangerously_disable_sandbox: false,
+                },
+            )?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         ToolCommand::Read { path } => {
@@ -479,7 +487,11 @@ fn run_tool_command(
             let result = registry.execute(
                 "read_file",
                 cwd,
-                puffer_tools::ToolInput::ReadFile { path: path.into() },
+                puffer_tools::ToolInput::ReadFile {
+                    path: path.into(),
+                    offset: None,
+                    limit: None,
+                },
             )?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }

@@ -381,7 +381,10 @@ struct SandboxSettings {
     excluded_commands: Vec<String>,
 }
 
-fn load_or_initialize_sandbox_settings(path: &PathBuf, state: &AppState) -> Result<SandboxSettings> {
+fn load_or_initialize_sandbox_settings(
+    path: &PathBuf,
+    state: &AppState,
+) -> Result<SandboxSettings> {
     if path.exists() {
         return Ok(toml::from_str(&fs::read_to_string(path)?)?);
     }

@@ -34,7 +34,10 @@ pub struct AnthropicUtilization {
 pub fn fetch_oauth_usage(base_url: &str, access_token: &str) -> Result<AnthropicUtilization> {
     let client = Client::new();
     let response = client
-        .get(format!("{}/api/oauth/usage", base_url.trim_end_matches('/')))
+        .get(format!(
+            "{}/api/oauth/usage",
+            base_url.trim_end_matches('/')
+        ))
         .header("Authorization", format!("Bearer {access_token}"))
         .header("anthropic-beta", OAUTH_BETA_HEADER)
         .header(
@@ -88,10 +91,7 @@ mod tests {
         let usage = fetch_oauth_usage(&format!("http://{address}"), "subscriber-token")
             .expect("usage fetch");
         let request = server.join().expect("join");
-        assert_eq!(
-            usage.five_hour.expect("bucket").utilization,
-            Some(42.0)
-        );
+        assert_eq!(usage.five_hour.expect("bucket").utilization, Some(42.0));
         assert!(request.contains("GET /api/oauth/usage HTTP/1.1"));
         let request = request.to_ascii_lowercase();
         assert!(request.contains("authorization: bearer subscriber-token"));

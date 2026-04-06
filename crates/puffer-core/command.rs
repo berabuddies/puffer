@@ -4,8 +4,7 @@ use crate::command_helpers::{
     handle_ide_command, handle_keybindings_command, handle_mcp_command, handle_memory_command,
     handle_permissions_command, handle_plugin_command, handle_sandbox_command,
     handle_session_command, list_skills, persist_user_model_selection, reload_plugins_summary,
-    render_login_guidance, rewind_transcript, run_doctor,
-    terminal_setup_advice,
+    render_login_guidance, rewind_transcript, run_doctor, terminal_setup_advice,
 };
 use crate::{
     render_buddy_summary, render_cost_summary, render_task_summary, render_usage_summary, AppState,
@@ -416,15 +415,18 @@ pub fn dispatch_command(
     )?;
 
     match command.kind {
-        CommandKind::Prompt => execute_prompt_command(
-            state,
-            resources,
-            providers,
-            auth_store,
-            session_store,
-            command,
-            args,
-        ),
+        CommandKind::Prompt => {
+            execute_prompt_command(
+                state,
+                resources,
+                providers,
+                auth_store,
+                session_store,
+                command,
+                args,
+            )?;
+            session_store.append_event(state.session.id, state.runtime_event())
+        }
         CommandKind::Local | CommandKind::Ui => {
             execute_local_command(
                 state,
@@ -436,6 +438,7 @@ pub fn dispatch_command(
                 command,
                 args,
             )?;
+            session_store.append_event(state.session.id, state.runtime_event())?;
             session_store.append_event(state.session.id, state.snapshot_event())
         }
     }
@@ -450,6 +453,28 @@ fn execute_prompt_command(
     command: &CommandSpec,
     args: &str,
 ) -> Result<()> {
+    if command.name == "plan" {
+        let trimmed = args.trim();
+        if trimmed.is_empty() || trimmed == "show" {
+            return emit_system(state, session_store, state.render_plan_summary());
+        }
+        if trimmed == "open" {
+            state.open_plan();
+            return emit_system(state, session_store, state.render_plan_summary());
+        }
+        if trimmed == "close" {
+            state.close_plan();
+            return emit_system(state, session_store, state.render_plan_summary());
+        }
+        if trimmed == "clear" {
+            state.set_plan_summary(None);
+            state.close_plan();
+            return emit_system(state, session_store, state.render_plan_summary());
+        }
+        state.open_plan();
+        state.set_plan_summary(Some(trimmed.to_string()));
+    }
+
     let prompt = prompt_by_id(resources, command.name);
     if let Some(prompt) = prompt {
         if let Some(model_override) = prompt
@@ -573,6 +598,7 @@ fn execute_local_command(
             if !state.working_dirs.iter().any(|existing| existing == &dir) {
                 state.working_dirs.push(dir.clone());
             }
+            state.set_active_worktree(dir.clone());
             emit_system(state, session_store, format!("Added working directory {}.", dir.display()))
         }
         "exit" => {
@@ -724,6 +750,7 @@ fn execute_local_command(
                     state.current_model = Some(format!("{}/{}", provider.id, model.id));
                     state.config.default_provider = Some(provider.id.clone());
                     state.config.default_model = Some(format!("{}/{}", provider.id, model.id));
+                    state.clear_active_agent();
                     persist_user_model_selection(state)?;
                     emit_system(
                         state,
@@ -770,7 +797,24 @@ fn execute_local_command(
         ),
         "config" => handle_config_command(state, session_store, args),
         "context" => describe_context(state, resources, session_store),
-        "agents" => handle_agents_command(state, session_store, args),
+        "agents" => {
+            let result = handle_agents_command(state, session_store, args);
+            if result.is_ok() {
+                let trimmed = args.trim();
+                if let Some(agent_id) = trimmed.strip_prefix("use ").map(str::trim) {
+                    if !agent_id.is_empty()
+                        && matches!(
+                            state.transcript.last(),
+                            Some(message) if message.role == MessageRole::System
+                                && message.text.starts_with("Selected agent")
+                        )
+                    {
+                        state.set_active_agent(Some(agent_id.to_string()));
+                    }
+                }
+            }
+            result
+        }
         "memory" => handle_memory_command(state, session_store, args),
         "keybindings" => handle_keybindings_command(state, session_store),
         "remote-control" => {

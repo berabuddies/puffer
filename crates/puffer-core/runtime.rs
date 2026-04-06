@@ -1,14 +1,12 @@
-use crate::hooks::run_resource_hooks;
 use crate::AppState;
 use anyhow::{anyhow, bail, Context, Result};
 use puffer_provider_openai::{
     build_chat_completions_request, build_responses_request, build_tool_responses_request,
     extract_chat_completions_text, extract_chat_completions_tool_calls, extract_responses_text,
     extract_responses_tool_calls, parse_chat_completions_response, parse_responses_response,
-    OpenAIAuth, OpenAIChatCompletionTool, OpenAIChatCompletionToolFunction,
-    OpenAIChatCompletionsRequest, OpenAIChatFunctionCall, OpenAIChatMessage, OpenAIChatToolCall,
-    OpenAIRequestConfig, OpenAIResponsesFunctionCallOutput, OpenAIResponsesRequest,
-    OpenAIResponsesTool, OpenAIResponsesToolChoice, OpenAIResponsesToolChoiceMode,
+    OpenAIAuth, OpenAIChatCompletionsRequest, OpenAIChatFunctionCall, OpenAIChatMessage,
+    OpenAIChatToolCall, OpenAIRequestConfig, OpenAIResponsesFunctionCallOutput,
+    OpenAIResponsesRequest, OpenAIResponsesToolChoice, OpenAIResponsesToolChoiceMode,
     OpenAIResponsesToolRequest,
 };
 use puffer_provider_registry::{
@@ -23,7 +21,19 @@ use puffer_transport_anthropic::{
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
 
+mod hook_support;
+mod local_tools;
 mod mistral;
+mod tool_support;
+mod web_search;
+
+use hook_support::{run_tool_hooks, run_turn_hooks};
+use local_tools::{execute_runtime_local_tool, is_runtime_local_tool};
+use tool_support::{
+    anthropic_tool_definitions, enforce_tool_permission, is_provider_web_search_tool,
+    merge_tool_output, openai_chat_completion_tools, openai_tool_definitions,
+};
+use web_search::{execute_anthropic_web_search, execute_openai_web_search};
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Describes one tool call executed during a model turn.
@@ -137,27 +147,28 @@ fn execute_anthropic(
     input: &str,
 ) -> Result<TurnExecution> {
     let auth = anthropic_auth_for_provider(auth_store, provider)?;
+    let request_config = AnthropicRequestConfig {
+        base_url: provider.base_url.clone(),
+        session_id: state.session.id.to_string(),
+        custom_headers: provider.headers.clone(),
+        remote_container_id: None,
+        remote_session_id: None,
+        client_app: None,
+        entrypoint: "cli".to_string(),
+        user_type: "external".to_string(),
+        version: APP_VERSION.to_string(),
+        workload: None,
+        additional_protection: false,
+        cch_enabled: true,
+        auth: auth.clone(),
+        beta_header: None,
+        client_request_id: None,
+    };
     let registry = ToolRegistry::from_resources(resources);
     let mut messages = transcript_to_anthropic_messages(state, input);
     let mut invocations = Vec::new();
     let request = build_messages_request(
-        &AnthropicRequestConfig {
-            base_url: provider.base_url.clone(),
-            session_id: state.session.id.to_string(),
-            custom_headers: provider.headers.clone(),
-            remote_container_id: None,
-            remote_session_id: None,
-            client_app: None,
-            entrypoint: "cli".to_string(),
-            user_type: "external".to_string(),
-            version: APP_VERSION.to_string(),
-            workload: None,
-            additional_protection: false,
-            cch_enabled: true,
-            auth: auth.clone(),
-            beta_header: None,
-            client_request_id: None,
-        },
+        &request_config,
         &AnthropicModelRequest {
             model: model_id.clone(),
             max_tokens: 1024,
@@ -178,15 +189,20 @@ fn execute_anthropic(
             ]
         });
 
-        let tools = anthropic_tool_definitions(&registry);
+        let tools = anthropic_tool_definitions(&registry, provider, &model_id);
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools);
         }
 
         let response = send_http_request(&request.url, &request.headers, &body.to_string(), true)?;
-        if let Some(tool_results) =
-            execute_anthropic_tool_calls(resources, &response, &registry, &state.cwd)?
-        {
+        if let Some(tool_results) = execute_anthropic_tool_calls(
+            resources,
+            &response,
+            &registry,
+            &state.cwd,
+            &request_config,
+            &model_id,
+        )? {
             invocations.extend(tool_results.invocations);
             messages.push(json!({
                 "role": "assistant",
@@ -227,7 +243,7 @@ fn execute_openai(
         auth,
     };
     let registry = ToolRegistry::from_resources(resources);
-    let tools = openai_tool_definitions(&registry);
+    let tools = openai_tool_definitions(&registry, provider, &model_id);
     let mut previous_response_id = None;
     let mut next_input = transcript_to_openai_input(state, input);
     let mut invocations = Vec::new();
@@ -252,6 +268,7 @@ fn execute_openai(
                     model: model_id.clone(),
                     input: next_input.clone(),
                     tools: tools.clone(),
+                    include: Vec::new(),
                     tool_choice: if tools.is_empty() {
                         None
                     } else {
@@ -280,8 +297,14 @@ fn execute_openai(
             .id
             .clone()
             .ok_or_else(|| anyhow!("OpenAI response missing id for tool continuation"))?;
-        let tool_results =
-            execute_openai_tool_calls(resources, &tool_calls, &registry, &state.cwd)?;
+        let tool_results = execute_openai_tool_calls(
+            resources,
+            &tool_calls,
+            &registry,
+            &state.cwd,
+            &request_config,
+            &model_id,
+        )?;
         invocations.extend(tool_results.invocations);
         previous_response_id = Some(response_id);
         next_input = json!(tool_results.outputs);
@@ -305,7 +328,7 @@ fn execute_openai_completions(
         auth,
     };
     let registry = ToolRegistry::from_resources(resources);
-    let tools = openai_chat_completion_tools(&registry);
+    let tools = openai_chat_completion_tools(&registry, provider, &model_id);
     let mut messages = transcript_to_openai_chat_messages(state, input);
     let mut invocations = Vec::new();
 
@@ -345,8 +368,14 @@ fn execute_openai_completions(
             });
         }
 
-        let tool_results =
-            execute_openai_tool_calls(resources, &tool_calls, &registry, &state.cwd)?;
+        let tool_results = execute_openai_tool_calls(
+            resources,
+            &tool_calls,
+            &registry,
+            &state.cwd,
+            &request_config,
+            &model_id,
+        )?;
         invocations.extend(tool_results.invocations);
         messages.push(OpenAIChatMessage {
             role: choice
@@ -474,79 +503,13 @@ fn parse_anthropic_text(response: &Value) -> Result<String> {
     }
     Ok(parts.join("\n"))
 }
-fn anthropic_tool_definitions(registry: &ToolRegistry) -> Vec<Value> {
-    registry
-        .tools()
-        .map(|tool| {
-            json!({
-                "name": tool.spec.id,
-                "description": tool.spec.description,
-                "input_schema": tool.spec.input_schema.as_json_schema(),
-            })
-        })
-        .collect()
-}
-#[cfg(test)]
-fn anthropic_tool_schema(handler: &str) -> Value {
-    match handler {
-        "bash" => json!({
-            "type": "object",
-            "properties": {
-                "command": { "type": "string" }
-            },
-            "required": ["command"],
-        }),
-        "read_file" => json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string" }
-            },
-            "required": ["path"],
-        }),
-        "write_file" => json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string" },
-                "contents": { "type": "string" }
-            },
-            "required": ["path", "contents"],
-        }),
-        "replace_in_file" => json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string" },
-                "old": { "type": "string" },
-                "new": { "type": "string" },
-                "replace_all": { "type": "boolean" }
-            },
-            "required": ["path", "old", "new"],
-        }),
-        "list_dir" => json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string" }
-            },
-            "required": [],
-        }),
-        "search_text" => json!({
-            "type": "object",
-            "properties": {
-                "query": { "type": "string" },
-                "path": { "type": "string" }
-            },
-            "required": ["query"],
-        }),
-        _ => json!({
-            "type": "object",
-            "properties": {},
-        }),
-    }
-}
 fn execute_anthropic_tool_calls(
     resources: &LoadedResources,
     response: &Value,
     registry: &ToolRegistry,
     cwd: &std::path::Path,
+    request_config: &AnthropicRequestConfig,
+    model_id: &str,
 ) -> Result<Option<AnthropicToolResults>> {
     let Some(content) = response.get("content").and_then(Value::as_array) else {
         return Ok(None);
@@ -569,6 +532,92 @@ fn execute_anthropic_tool_calls(
         let input = item
             .get("input")
             .ok_or_else(|| anyhow!("anthropic tool_use block missing input"))?;
+        if let Err(error) = enforce_tool_permission(registry, tool_id) {
+            let output_text = error.to_string();
+            run_tool_hooks(
+                resources,
+                cwd,
+                "tool_end",
+                tool_id,
+                input,
+                false,
+                "",
+                &output_text,
+            );
+            results.push(json!({
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": output_text,
+                "is_error": true,
+            }));
+            invocations.push(ToolInvocation {
+                tool_id: tool_id.to_string(),
+                input: serde_json::to_string(input)?,
+                output: output_text,
+                success: false,
+            });
+            continue;
+        }
+        let definition = registry
+            .definition(tool_id)
+            .ok_or_else(|| anyhow!("unknown tool {tool_id}"))?;
+        if is_runtime_local_tool(definition) {
+            let output_text =
+                execute_runtime_local_tool(resources, registry, definition, cwd, input.clone())?;
+            run_tool_hooks(
+                resources,
+                cwd,
+                "tool_end",
+                tool_id,
+                input,
+                true,
+                &output_text,
+                "",
+            );
+            results.push(json!({
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": output_text,
+                "is_error": false,
+            }));
+            invocations.push(ToolInvocation {
+                tool_id: tool_id.to_string(),
+                input: serde_json::to_string(input)?,
+                output: output_text,
+                success: true,
+            });
+            continue;
+        }
+        if registry
+            .definition(tool_id)
+            .is_some_and(is_provider_web_search_tool)
+        {
+            let output_text =
+                execute_anthropic_web_search(request_config, model_id, input.clone())?;
+            run_tool_hooks(
+                resources,
+                cwd,
+                "tool_end",
+                tool_id,
+                input,
+                true,
+                &output_text,
+                "",
+            );
+            results.push(json!({
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": output_text,
+                "is_error": false,
+            }));
+            invocations.push(ToolInvocation {
+                tool_id: tool_id.to_string(),
+                input: serde_json::to_string(input)?,
+                output: output_text,
+                success: true,
+            });
+            continue;
+        }
         let execution = registry.execute_json(tool_id, cwd, input.clone())?;
         run_tool_hooks(
             resources,
@@ -580,13 +629,7 @@ fn execute_anthropic_tool_calls(
             &execution.output.stdout,
             &execution.output.stderr,
         );
-        let output_text = if execution.output.stderr.is_empty() {
-            execution.output.stdout
-        } else if execution.output.stdout.is_empty() {
-            execution.output.stderr
-        } else {
-            format!("{}\n{}", execution.output.stdout, execution.output.stderr)
-        };
+        let output_text = merge_tool_output(execution.output.stdout, execution.output.stderr);
         results.push(json!({
             "type": "tool_result",
             "tool_use_id": tool_use_id,
@@ -620,41 +663,106 @@ struct OpenAIToolResults {
     outputs: Vec<OpenAIResponsesFunctionCallOutput>,
     invocations: Vec<ToolInvocation>,
 }
-fn openai_tool_definitions(registry: &ToolRegistry) -> Vec<OpenAIResponsesTool> {
-    registry
-        .definitions()
-        .map(|definition| OpenAIResponsesTool {
-            kind: "function".to_string(),
-            name: definition.id.clone(),
-            description: definition.description.clone(),
-            parameters: definition.input_schema.as_json_schema(),
-        })
-        .collect()
-}
-
-fn openai_chat_completion_tools(registry: &ToolRegistry) -> Vec<OpenAIChatCompletionTool> {
-    registry
-        .definitions()
-        .map(|definition| OpenAIChatCompletionTool {
-            kind: "function".to_string(),
-            function: OpenAIChatCompletionToolFunction {
-                name: definition.id.clone(),
-                description: definition.description.clone(),
-                parameters: definition.input_schema.as_json_schema(),
-            },
-        })
-        .collect()
-}
 
 fn execute_openai_tool_calls(
     resources: &LoadedResources,
     tool_calls: &[puffer_provider_openai::OpenAIResponseToolCall],
     registry: &ToolRegistry,
     cwd: &std::path::Path,
+    request_config: &OpenAIRequestConfig,
+    model_id: &str,
 ) -> Result<OpenAIToolResults> {
     let mut outputs = Vec::new();
     let mut invocations = Vec::new();
     for tool_call in tool_calls {
+        if let Err(error) = enforce_tool_permission(registry, &tool_call.name) {
+            let output = error.to_string();
+            run_tool_hooks(
+                resources,
+                cwd,
+                "tool_end",
+                &tool_call.name,
+                &tool_call.arguments,
+                false,
+                "",
+                &output,
+            );
+            outputs.push(OpenAIResponsesFunctionCallOutput {
+                kind: "function_call_output".to_string(),
+                call_id: tool_call.call_id.clone(),
+                output: output.clone(),
+            });
+            invocations.push(ToolInvocation {
+                tool_id: tool_call.name.clone(),
+                input: serde_json::to_string(&tool_call.arguments)?,
+                output,
+                success: false,
+            });
+            continue;
+        }
+        let definition = registry
+            .definition(&tool_call.name)
+            .ok_or_else(|| anyhow!("unknown tool {}", tool_call.name))?;
+        if is_runtime_local_tool(definition) {
+            let output = execute_runtime_local_tool(
+                resources,
+                registry,
+                definition,
+                cwd,
+                tool_call.arguments.clone(),
+            )?;
+            run_tool_hooks(
+                resources,
+                cwd,
+                "tool_end",
+                &tool_call.name,
+                &tool_call.arguments,
+                true,
+                &output,
+                "",
+            );
+            outputs.push(OpenAIResponsesFunctionCallOutput {
+                kind: "function_call_output".to_string(),
+                call_id: tool_call.call_id.clone(),
+                output: output.clone(),
+            });
+            invocations.push(ToolInvocation {
+                tool_id: tool_call.name.clone(),
+                input: serde_json::to_string(&tool_call.arguments)?,
+                output,
+                success: true,
+            });
+            continue;
+        }
+        if registry
+            .definition(&tool_call.name)
+            .is_some_and(is_provider_web_search_tool)
+        {
+            let output =
+                execute_openai_web_search(request_config, model_id, tool_call.arguments.clone())?;
+            run_tool_hooks(
+                resources,
+                cwd,
+                "tool_end",
+                &tool_call.name,
+                &tool_call.arguments,
+                true,
+                &output,
+                "",
+            );
+            outputs.push(OpenAIResponsesFunctionCallOutput {
+                kind: "function_call_output".to_string(),
+                call_id: tool_call.call_id.clone(),
+                output: output.clone(),
+            });
+            invocations.push(ToolInvocation {
+                tool_id: tool_call.name.clone(),
+                input: serde_json::to_string(&tool_call.arguments)?,
+                output,
+                success: true,
+            });
+            continue;
+        }
         let execution = registry.execute_json(&tool_call.name, cwd, tool_call.arguments.clone())?;
         run_tool_hooks(
             resources,
@@ -666,13 +774,7 @@ fn execute_openai_tool_calls(
             &execution.output.stdout,
             &execution.output.stderr,
         );
-        let output = if execution.output.stderr.is_empty() {
-            execution.output.stdout
-        } else if execution.output.stdout.is_empty() {
-            execution.output.stderr
-        } else {
-            format!("{}\n{}", execution.output.stdout, execution.output.stderr)
-        };
+        let output = merge_tool_output(execution.output.stdout, execution.output.stderr);
         outputs.push(OpenAIResponsesFunctionCallOutput {
             kind: "function_call_output".to_string(),
             call_id: tool_call.call_id.clone(),
@@ -689,48 +791,6 @@ fn execute_openai_tool_calls(
         outputs,
         invocations,
     })
-}
-fn run_tool_hooks(
-    resources: &LoadedResources,
-    cwd: &std::path::Path,
-    event: &str,
-    tool_id: &str,
-    input: &Value,
-    success: bool,
-    stdout: &str,
-    stderr: &str,
-) {
-    run_resource_hooks(
-        resources,
-        cwd,
-        event,
-        &[
-            ("PUFFER_TOOL_ID", tool_id.to_string()),
-            ("PUFFER_TOOL_INPUT", input.to_string()),
-            (
-                "PUFFER_TOOL_SUCCESS",
-                if success { "true" } else { "false" }.to_string(),
-            ),
-            ("PUFFER_TOOL_STDOUT", stdout.to_string()),
-            ("PUFFER_TOOL_STDERR", stderr.to_string()),
-        ],
-    );
-}
-fn run_turn_hooks(
-    resources: &LoadedResources,
-    cwd: &std::path::Path,
-    text: &str,
-    tool_count: usize,
-) {
-    run_resource_hooks(
-        resources,
-        cwd,
-        "turn_end",
-        &[
-            ("PUFFER_TURN_TEXT", text.to_string()),
-            ("PUFFER_TURN_TOOL_COUNT", tool_count.to_string()),
-        ],
-    );
 }
 fn parse_openai_text(response: &Value) -> Result<String> {
     if let Some(text) = response.get("output_text").and_then(Value::as_str) {
