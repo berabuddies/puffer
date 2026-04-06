@@ -11,9 +11,11 @@ mod response;
 mod usage;
 
 pub use auth::{
-    build_authorization_url, exchange_authorization_code, generate_pkce, get_session_ingress_auth,
-    parse_authorization_input, refresh_oauth_token, AnthropicAuth, AnthropicOAuthConfig,
-    AnthropicOAuthCredentials, AnthropicPkce, ANTHROPIC_ALL_SCOPES, ANTHROPIC_MANUAL_REDIRECT_URL,
+    build_authorization_url, create_api_key, exchange_authorization_code, fetch_user_roles,
+    generate_pkce, get_session_ingress_auth, parse_authorization_input, refresh_oauth_token,
+    should_use_claude_ai_auth, AnthropicAuth, AnthropicOAuthConfig, AnthropicOAuthCredentials,
+    AnthropicPkce, AnthropicUserRoles, ANTHROPIC_ALL_SCOPES, ANTHROPIC_API_BASE_URL,
+    ANTHROPIC_CLAUDE_AI_INFERENCE_SCOPE, ANTHROPIC_CLAUDE_AI_SCOPES, ANTHROPIC_MANUAL_REDIRECT_URL,
     ANTHROPIC_TOKEN_URL, CLAUDE_AI_AUTHORIZE_URL, CONSOLE_AUTHORIZE_URL, OAUTH_BETA_HEADER,
 };
 pub use fingerprint::compute_fingerprint;
@@ -26,6 +28,4 @@ pub use response::{
     AnthropicContentBlock, AnthropicMessageResponse, AnthropicTextBlock, AnthropicToolUseBlock,
     AnthropicUnknownBlock,
 };
-pub use usage::{
-    fetch_oauth_usage, AnthropicExtraUsage, AnthropicRateLimit, AnthropicUtilization,
-};
+pub use usage::{fetch_oauth_usage, AnthropicExtraUsage, AnthropicRateLimit, AnthropicUtilization};

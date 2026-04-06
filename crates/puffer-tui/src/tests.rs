@@ -521,6 +521,9 @@ fn sample_auth_store() -> AuthStore {
             plan_type: None,
             rate_limit_tier: None,
             scopes: vec!["org:create_api_key".to_string()],
+            organization_name: None,
+            organization_role: None,
+            workspace_role: None,
         },
     );
     auth_store

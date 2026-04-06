@@ -1,3 +1,4 @@
+mod auth_credentials;
 mod auth_provider;
 mod authflow;
 
@@ -10,7 +11,7 @@ use puffer_provider_openai::{
     parse_authorization_input as parse_openai_authorization_input,
     refresh_oauth_token as refresh_openai_oauth_token,
 };
-use puffer_provider_registry::{AuthStore, OAuthCredential, ProviderRegistry, StoredCredential};
+use puffer_provider_registry::{AuthStore, ProviderRegistry, StoredCredential};
 use puffer_resources::load_resources;
 use puffer_session_store::SessionStore;
 use puffer_tools::ToolRegistry;
@@ -18,15 +19,22 @@ use puffer_transport_anthropic::{
     build_messages_request, exchange_authorization_code as exchange_anthropic_code,
     parse_authorization_input as parse_anthropic_authorization_input,
     refresh_oauth_token as refresh_anthropic_oauth_token, AnthropicAuth, AnthropicMessage,
-    AnthropicModelRequest, AnthropicRequestConfig,
+    AnthropicModelRequest, AnthropicRequestConfig, ANTHROPIC_API_BASE_URL,
+    ANTHROPIC_MANUAL_REDIRECT_URL,
 };
 use std::io::Read as _;
 use std::io::Write as _;
 use std::time::Duration;
 use uuid::Uuid;
 
+use crate::auth_credentials::{
+    anthropic_refresh_scopes, inferred_anthropic_redirect_uri,
+    registry_to_anthropic_oauth_credential, set_stored_credential, store_anthropic_credential,
+    store_ready_credential_from_anthropic, to_registry_oauth_credential_openai,
+};
 use crate::auth_provider::{
-    oauth_family_for_provider, oauth_start_bundle_for_provider, OauthFamily,
+    oauth_family_for_provider, oauth_login_bundle_for_provider, oauth_start_bundle_for_provider,
+    OauthFamily,
 };
 
 #[derive(Debug, Parser)]
@@ -677,6 +685,8 @@ fn run_auth_command(
                     "code_verifier": bundle.verifier,
                     "state": bundle.state,
                     "redirect_uri": bundle.redirect_uri,
+                    "manual_redirect_uri": bundle.manual_redirect_uri,
+                    "automatic_authorization_url": bundle.automatic_authorization_url,
                 }))?
             );
         }
@@ -718,16 +728,22 @@ fn run_auth_command(
                     let code = code.ok_or_else(|| {
                         anyhow::anyhow!("could not extract an Anthropic authorization code")
                     })?;
-                    let expected_state = state.clone().unwrap_or_else(|| verifier.clone());
+                    let expected_state = state.ok_or_else(|| {
+                        anyhow::anyhow!("--state is required for anthropic oauth-exchange")
+                    })?;
                     if parsed_state.as_deref().unwrap_or_default() != expected_state {
                         anyhow::bail!("oauth state mismatch for anthropic");
                     }
-                    let credential =
-                        exchange_anthropic_code(&code, &verifier, &expected_state, None)?;
-                    auth_store.set_oauth(
-                        provider.clone(),
-                        to_registry_oauth_credential_anthropic(credential),
-                    );
+                    let redirect_uri = inferred_anthropic_redirect_uri(&input)
+                        .unwrap_or_else(|| ANTHROPIC_MANUAL_REDIRECT_URL.to_string());
+                    let credential = exchange_anthropic_code(
+                        &code,
+                        &verifier,
+                        &expected_state,
+                        Some(&redirect_uri),
+                        Some(ANTHROPIC_API_BASE_URL),
+                    )?;
+                    store_anthropic_credential(auth_store, &provider, credential)?;
                 }
                 None => anyhow::bail!("oauth exchange is not implemented for {provider}"),
             }
@@ -742,15 +758,22 @@ fn run_auth_command(
                 anyhow::bail!("stored credential for {provider} is not oauth");
             };
             let refreshed = match oauth_family_for_provider(providers, &provider) {
-                Some(OauthFamily::OpenAi) => to_registry_oauth_credential_openai(
-                    refresh_openai_oauth_token(&existing.refresh_token)?,
-                ),
-                Some(OauthFamily::Anthropic) => to_registry_oauth_credential_anthropic(
-                    refresh_anthropic_oauth_token(&existing.refresh_token)?,
-                ),
+                Some(OauthFamily::OpenAi) => {
+                    StoredCredential::OAuth(to_registry_oauth_credential_openai(
+                        refresh_openai_oauth_token(&existing.refresh_token)?,
+                    ))
+                }
+                Some(OauthFamily::Anthropic) => {
+                    store_ready_credential_from_anthropic(refresh_anthropic_oauth_token(
+                        &existing.refresh_token,
+                        anthropic_refresh_scopes(existing).as_deref(),
+                        Some(ANTHROPIC_API_BASE_URL),
+                        Some(&registry_to_anthropic_oauth_credential(existing)),
+                    )?)?
+                }
                 None => anyhow::bail!("oauth refresh is not implemented for {provider}"),
             };
-            auth_store.set_oauth(provider.clone(), refreshed);
+            set_stored_credential(auth_store, provider.clone(), refreshed);
             auth_store.save(auth_path)?;
             println!("refreshed oauth credentials for {provider}");
         }
@@ -766,20 +789,37 @@ fn run_login_flow(
     auth_path: &std::path::Path,
     providers: &ProviderRegistry,
 ) -> Result<()> {
-    let bundle = oauth_start_bundle_for_provider(providers, provider)?;
+    let callback_listener = if stdin || value.is_some() {
+        None
+    } else {
+        Some(authflow::CallbackListener::bind_localhost("/callback")?)
+    };
+    let bundle = if let Some(listener) = callback_listener.as_ref() {
+        oauth_login_bundle_for_provider(providers, provider, listener.redirect_uri())?
+    } else {
+        oauth_start_bundle_for_provider(providers, provider)?
+    };
 
     println!(
         "Open this URL in your browser:\n\n{}\n",
         bundle.authorization_url
     );
+    if let Some(automatic_url) = bundle.automatic_authorization_url.as_deref() {
+        if authflow::open_browser(automatic_url) {
+            println!("Opened the automatic localhost callback flow in your browser.");
+            println!("If it did not open correctly, use the URL above instead.\n");
+        }
+    }
     let input = if stdin {
         read_secret_from_stdin()?
     } else if let Some(value) = value {
         value
-    } else if let Some(callback) =
-        authflow::wait_for_callback_url(&bundle.redirect_uri, Duration::from_secs(120))?
-    {
-        callback
+    } else if let Some(listener) = callback_listener.as_ref() {
+        if let Some(callback) = listener.wait_for_callback_url(Duration::from_secs(120))? {
+            callback
+        } else {
+            read_line_with_prompt("Paste the callback URL or authorization code: ")?
+        }
     } else {
         read_line_with_prompt("Paste the callback URL or authorization code: ")?
     };
@@ -809,11 +849,17 @@ fn run_login_flow(
             if parsed_state != bundle.state {
                 anyhow::bail!("oauth state mismatch for anthropic");
             }
-            let credential = exchange_anthropic_code(&code, &bundle.verifier, &bundle.state, None)?;
-            auth_store.set_oauth(
-                provider.to_string(),
-                to_registry_oauth_credential_anthropic(credential),
-            );
+            let redirect_uri = inferred_anthropic_redirect_uri(&input)
+                .or_else(|| bundle.manual_redirect_uri.clone())
+                .unwrap_or_else(|| ANTHROPIC_MANUAL_REDIRECT_URL.to_string());
+            let credential = exchange_anthropic_code(
+                &code,
+                &bundle.verifier,
+                &bundle.state,
+                Some(&redirect_uri),
+                Some(ANTHROPIC_API_BASE_URL),
+            )?;
+            store_anthropic_credential(auth_store, provider, credential)?;
         }
         None => anyhow::bail!("oauth login is not implemented for {provider}"),
     }
@@ -843,38 +889,6 @@ fn read_line_with_prompt(prompt: &str) -> Result<String> {
         anyhow::bail!("no input received");
     }
     Ok(trimmed)
-}
-
-fn to_registry_oauth_credential_openai(
-    credential: puffer_provider_openai::OpenAIOAuthCredentials,
-) -> OAuthCredential {
-    OAuthCredential {
-        access_token: credential.access_token,
-        refresh_token: credential.refresh_token,
-        expires_at_ms: credential.expires_at_ms,
-        account_id: credential.account_id,
-        organization_id: None,
-        email: credential.email,
-        plan_type: credential.plan_type,
-        rate_limit_tier: None,
-        scopes: Vec::new(),
-    }
-}
-
-fn to_registry_oauth_credential_anthropic(
-    credential: puffer_transport_anthropic::AnthropicOAuthCredentials,
-) -> OAuthCredential {
-    OAuthCredential {
-        access_token: credential.access_token,
-        refresh_token: credential.refresh_token,
-        expires_at_ms: credential.expires_at_ms,
-        account_id: credential.account_uuid,
-        organization_id: credential.organization_uuid,
-        email: credential.email_address,
-        plan_type: None,
-        rate_limit_tier: None,
-        scopes: credential.scopes,
-    }
 }
 
 fn resolve_session_query(session_store: &SessionStore, query: &str) -> Result<Uuid> {

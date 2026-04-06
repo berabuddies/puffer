@@ -24,6 +24,7 @@ use reqwest::blocking::Client;
 use serde_json::{json, Value};
 
 mod mistral;
+mod oauth;
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Describes one tool call executed during a model turn.
@@ -136,36 +137,38 @@ fn execute_anthropic(
     auth_store: &AuthStore,
     input: &str,
 ) -> Result<TurnExecution> {
-    let auth = anthropic_auth_for_provider(auth_store, provider)?;
+    let mut request_auth_store = oauth::load_request_auth_store(state, provider, auth_store)?;
+    let mut auth = anthropic_auth_for_provider(&request_auth_store, provider)?;
     let registry = ToolRegistry::from_resources(resources);
     let mut messages = transcript_to_anthropic_messages(state, input);
     let mut invocations = Vec::new();
-    let request = build_messages_request(
-        &AnthropicRequestConfig {
-            base_url: provider.base_url.clone(),
-            session_id: state.session.id.to_string(),
-            custom_headers: provider.headers.clone(),
-            remote_container_id: None,
-            remote_session_id: None,
-            client_app: None,
-            entrypoint: "cli".to_string(),
-            user_type: "external".to_string(),
-            version: APP_VERSION.to_string(),
-            workload: None,
-            additional_protection: false,
-            cch_enabled: true,
-            auth: auth.clone(),
-            beta_header: None,
-            client_request_id: None,
-        },
-        &AnthropicModelRequest {
-            model: model_id.clone(),
-            max_tokens: 1024,
-            messages: transcript_to_anthropic_request_messages(state, input),
-        },
-    )?;
+    let request_messages = transcript_to_anthropic_request_messages(state, input);
 
     for _ in 0..8 {
+        let request = build_messages_request(
+            &AnthropicRequestConfig {
+                base_url: provider.base_url.clone(),
+                session_id: state.session.id.to_string(),
+                custom_headers: provider.headers.clone(),
+                remote_container_id: None,
+                remote_session_id: None,
+                client_app: None,
+                entrypoint: "cli".to_string(),
+                user_type: "external".to_string(),
+                version: APP_VERSION.to_string(),
+                workload: None,
+                additional_protection: false,
+                cch_enabled: true,
+                auth: auth.clone(),
+                beta_header: None,
+                client_request_id: None,
+            },
+            &AnthropicModelRequest {
+                model: model_id.clone(),
+                max_tokens: 1024,
+                messages: request_messages.clone(),
+            },
+        )?;
         let mut body = json!({
             "model": model_id,
             "max_tokens": 1024,
@@ -183,7 +186,63 @@ fn execute_anthropic(
             body["tools"] = Value::Array(tools);
         }
 
-        let response = send_http_request(&request.url, &request.headers, &body.to_string(), true)?;
+        let body_text = body.to_string();
+        let response = match send_http_request(&request.url, &request.headers, &body_text, true) {
+            Ok(response) => response,
+            Err(error) => {
+                if oauth_retryable_anthropic_error(&error, &auth) {
+                    let failed_access_token = match &auth {
+                        AnthropicAuth::OAuthBearer(token) => token.as_str(),
+                        _ => unreachable!("retryable errors require OAuth bearer auth"),
+                    };
+                    let recovered_store = oauth::recover_from_oauth_failure(
+                        state,
+                        provider,
+                        &request_auth_store,
+                        failed_access_token,
+                    )?;
+                    let recovered_auth = anthropic_auth_for_provider(&recovered_store, provider)?;
+                    if recovered_auth != auth {
+                        request_auth_store = recovered_store;
+                        auth = recovered_auth;
+                        let retry_request = build_messages_request(
+                            &AnthropicRequestConfig {
+                                base_url: provider.base_url.clone(),
+                                session_id: state.session.id.to_string(),
+                                custom_headers: provider.headers.clone(),
+                                remote_container_id: None,
+                                remote_session_id: None,
+                                client_app: None,
+                                entrypoint: "cli".to_string(),
+                                user_type: "external".to_string(),
+                                version: APP_VERSION.to_string(),
+                                workload: None,
+                                additional_protection: false,
+                                cch_enabled: true,
+                                auth: auth.clone(),
+                                beta_header: None,
+                                client_request_id: None,
+                            },
+                            &AnthropicModelRequest {
+                                model: model_id.clone(),
+                                max_tokens: 1024,
+                                messages: request_messages.clone(),
+                            },
+                        )?;
+                        send_http_request(
+                            &retry_request.url,
+                            &retry_request.headers,
+                            &body_text,
+                            true,
+                        )?
+                    } else {
+                        return Err(error);
+                    }
+                } else {
+                    return Err(error);
+                }
+            }
+        };
         if let Some(tool_results) =
             execute_anthropic_tool_calls(resources, &response, &registry, &state.cwd)?
         {
@@ -212,6 +271,16 @@ fn execute_anthropic(
 
     bail!("anthropic tool loop exceeded iteration limit")
 }
+
+fn oauth_retryable_anthropic_error(error: &anyhow::Error, auth: &AnthropicAuth) -> bool {
+    if !matches!(auth, AnthropicAuth::OAuthBearer(_)) {
+        return false;
+    }
+    let message = error.to_string();
+    message.contains("request failed with status 401:")
+        || (message.contains("request failed with status 403:")
+            && message.contains("OAuth token has been revoked"))
+}
 fn execute_openai(
     state: &AppState,
     resources: &LoadedResources,
@@ -220,7 +289,8 @@ fn execute_openai(
     auth_store: &AuthStore,
     input: &str,
 ) -> Result<TurnExecution> {
-    let auth = openai_auth_for_provider(auth_store, provider)?;
+    let request_auth_store = oauth::load_request_auth_store(state, provider, auth_store)?;
+    let auth = openai_auth_for_provider(&request_auth_store, provider)?;
     let request_config = OpenAIRequestConfig {
         base_url: provider.base_url.clone(),
         version: APP_VERSION.to_string(),
@@ -298,7 +368,8 @@ fn execute_openai_completions(
     auth_store: &AuthStore,
     input: &str,
 ) -> Result<TurnExecution> {
-    let auth = openai_auth_for_provider(auth_store, provider)?;
+    let request_auth_store = oauth::load_request_auth_store(state, provider, auth_store)?;
+    let auth = openai_auth_for_provider(&request_auth_store, provider)?;
     let request_config = OpenAIRequestConfig {
         base_url: provider.base_url.clone(),
         version: APP_VERSION.to_string(),

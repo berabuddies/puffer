@@ -187,6 +187,9 @@ fn usage_command_prefers_claude_style_anthropic_oauth_sections() {
             plan_type: Some("max".to_string()),
             rate_limit_tier: Some("team_tier".to_string()),
             scopes: vec!["openid".to_string()],
+            organization_name: None,
+            organization_role: None,
+            workspace_role: None,
         },
     );
 
@@ -251,6 +254,9 @@ fn usage_command_shows_best_effort_openai_identity() {
             plan_type: Some("pro".to_string()),
             rate_limit_tier: None,
             scopes: vec!["openid".to_string()],
+            organization_name: None,
+            organization_role: None,
+            workspace_role: None,
         },
     );
 

@@ -1,7 +1,9 @@
-use crate::OAUTH_BETA_HEADER;
+use crate::{anthropic_user_agent, AnthropicAuth, AnthropicRequestConfig, OAUTH_BETA_HEADER};
 use anyhow::{Context, Result};
+use indexmap::IndexMap;
 use reqwest::blocking::Client;
 use serde::Deserialize;
+use std::time::Duration;
 
 /// One Anthropic OAuth usage limit bucket.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -33,15 +35,33 @@ pub struct AnthropicUtilization {
 /// Fetches Anthropic OAuth usage data using the subscriber usage endpoint.
 pub fn fetch_oauth_usage(base_url: &str, access_token: &str) -> Result<AnthropicUtilization> {
     let client = Client::new();
+    let user_agent = anthropic_user_agent(&AnthropicRequestConfig {
+        base_url: base_url.to_string(),
+        session_id: "usage-summary".to_string(),
+        custom_headers: IndexMap::new(),
+        remote_container_id: None,
+        remote_session_id: None,
+        client_app: None,
+        entrypoint: "cli".to_string(),
+        user_type: "external".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        workload: None,
+        additional_protection: false,
+        cch_enabled: false,
+        auth: AnthropicAuth::OAuthBearer(access_token.to_string()),
+        beta_header: None,
+        client_request_id: None,
+    });
     let response = client
-        .get(format!("{}/api/oauth/usage", base_url.trim_end_matches('/')))
+        .get(format!(
+            "{}/api/oauth/usage",
+            base_url.trim_end_matches('/')
+        ))
         .header("Authorization", format!("Bearer {access_token}"))
         .header("anthropic-beta", OAUTH_BETA_HEADER)
-        .header(
-            "User-Agent",
-            format!("claude-code/{}", env!("CARGO_PKG_VERSION")),
-        )
+        .header("User-Agent", user_agent)
         .header("Content-Type", "application/json")
+        .timeout(Duration::from_secs(5))
         .send()
         .context("failed to fetch Anthropic OAuth usage")?;
     let status = response.status();
@@ -88,14 +108,11 @@ mod tests {
         let usage = fetch_oauth_usage(&format!("http://{address}"), "subscriber-token")
             .expect("usage fetch");
         let request = server.join().expect("join");
-        assert_eq!(
-            usage.five_hour.expect("bucket").utilization,
-            Some(42.0)
-        );
+        assert_eq!(usage.five_hour.expect("bucket").utilization, Some(42.0));
         assert!(request.contains("GET /api/oauth/usage HTTP/1.1"));
         let request = request.to_ascii_lowercase();
         assert!(request.contains("authorization: bearer subscriber-token"));
         assert!(request.contains("anthropic-beta: oauth-2025-04-20"));
-        assert!(request.contains("user-agent: claude-code/"));
+        assert!(request.contains("user-agent: claude-cli/"));
     }
 }

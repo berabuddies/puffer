@@ -1,47 +1,85 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::process::Command;
 use std::time::{Duration, Instant};
 
-/// Waits for a single OAuth callback request on the host/port implied by the redirect URI.
-pub fn wait_for_callback_url(redirect_uri: &str, timeout: Duration) -> Result<Option<String>> {
-    let url = url::Url::parse(redirect_uri)
-        .with_context(|| format!("invalid redirect uri {redirect_uri}"))?;
-    let host = url
-        .host_str()
-        .ok_or_else(|| anyhow!("redirect uri is missing a host"))?;
-    let port = url
-        .port_or_known_default()
-        .ok_or_else(|| anyhow!("redirect uri is missing a port"))?;
-    let expected_path = url.path().to_string();
+/// Owns one ephemeral localhost OAuth callback listener.
+pub(crate) struct CallbackListener {
+    listener: TcpListener,
+    host: String,
+    port: u16,
+    expected_path: String,
+    redirect_uri: String,
+}
 
-    let listener = TcpListener::bind((host, port))
-        .with_context(|| format!("failed to bind callback listener on {host}:{port}"))?;
-    listener.set_nonblocking(true)?;
-
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        match listener.accept() {
-            Ok((mut stream, _)) => {
-                let mut buffer = [0_u8; 4096];
-                let bytes_read = stream.read(&mut buffer)?;
-                let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
-                if let Some(callback_url) =
-                    parse_callback_request(&request, host, port, &expected_path)
-                {
-                    let _ = stream.write_all(success_response().as_bytes());
-                    return Ok(Some(callback_url));
-                }
-                let _ = stream.write_all(error_response().as_bytes());
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(error) => return Err(error.into()),
-        }
+impl CallbackListener {
+    /// Binds an OS-assigned localhost callback port for the provided path.
+    pub(crate) fn bind_localhost(path: &str) -> Result<Self> {
+        let listener = TcpListener::bind(("localhost", 0))
+            .with_context(|| format!("failed to bind callback listener for {path}"))?;
+        listener.set_nonblocking(true)?;
+        let port = listener
+            .local_addr()
+            .context("failed to read callback listener address")?
+            .port();
+        Ok(Self {
+            listener,
+            host: "localhost".to_string(),
+            port,
+            expected_path: path.to_string(),
+            redirect_uri: format!("http://localhost:{port}{path}"),
+        })
     }
 
-    Ok(None)
+    /// Returns the automatic redirect URI associated with this listener.
+    pub(crate) fn redirect_uri(&self) -> &str {
+        &self.redirect_uri
+    }
+
+    /// Waits for a single callback request and returns the captured callback URL.
+    pub(crate) fn wait_for_callback_url(&self, timeout: Duration) -> Result<Option<String>> {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            match self.listener.accept() {
+                Ok((mut stream, _)) => {
+                    let mut buffer = [0_u8; 4096];
+                    let bytes_read = stream.read(&mut buffer)?;
+                    let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
+                    if let Some(callback_url) =
+                        parse_callback_request(&request, &self.host, self.port, &self.expected_path)
+                    {
+                        let _ = stream.write_all(success_response().as_bytes());
+                        return Ok(Some(callback_url));
+                    }
+                    let _ = stream.write_all(error_response().as_bytes());
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Tries to open a URL in the user's default browser.
+pub(crate) fn open_browser(url: &str) -> bool {
+    let mut command = if cfg!(target_os = "macos") {
+        let mut command = Command::new("open");
+        command.arg(url);
+        command
+    } else if cfg!(target_os = "windows") {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", "", url]);
+        command
+    } else {
+        let mut command = Command::new("xdg-open");
+        command.arg(url);
+        command
+    };
+    command.spawn().is_ok()
 }
 
 fn parse_callback_request(
@@ -80,7 +118,7 @@ fn error_response() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::parse_callback_request;
-    use super::wait_for_callback_url;
+    use super::CallbackListener;
     use std::io::{Read, Write};
     use std::net::{Shutdown, TcpListener, TcpStream};
     use std::thread;
@@ -105,17 +143,22 @@ mod tests {
     #[test]
     fn callback_listener_captures_matching_request() {
         let temp_listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let port = temp_listener.local_addr().unwrap().port();
         drop(temp_listener);
 
-        let redirect_uri = format!("http://127.0.0.1:{port}/callback");
-        let thread_redirect = redirect_uri.clone();
+        let listener = CallbackListener::bind_localhost("/callback").unwrap();
+        let redirect_uri = listener.redirect_uri().to_string();
         let handle = thread::spawn(move || {
-            wait_for_callback_url(&thread_redirect, Duration::from_secs(2)).unwrap()
+            listener
+                .wait_for_callback_url(Duration::from_secs(2))
+                .unwrap()
         });
 
         thread::sleep(Duration::from_millis(150));
-        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let callback_port = url::Url::parse(&redirect_uri)
+            .unwrap()
+            .port_or_known_default()
+            .unwrap();
+        let mut stream = TcpStream::connect(("127.0.0.1", callback_port)).unwrap();
         stream
             .write_all(
                 b"GET /callback?code=test-code&state=test-state HTTP/1.1\r\nHost: localhost\r\n\r\n",
@@ -127,7 +170,8 @@ mod tests {
         assert!(response.contains("Authentication completed"));
 
         let callback = handle.join().unwrap();
-        let expected = format!("http://127.0.0.1:{port}/callback?code=test-code&state=test-state");
+        let expected =
+            format!("http://localhost:{callback_port}/callback?code=test-code&state=test-state");
         assert_eq!(callback.as_deref(), Some(expected.as_str()));
     }
 }

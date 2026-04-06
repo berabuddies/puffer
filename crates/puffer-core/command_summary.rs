@@ -3,7 +3,9 @@ use puffer_provider_registry::{
     AuthStore, OAuthCredential, ProviderDescriptor, ProviderRegistry, StoredCredential,
 };
 use puffer_resources::{mascot_by_id, LoadedResources};
-use puffer_transport_anthropic::{fetch_oauth_usage, AnthropicExtraUsage, AnthropicRateLimit};
+use puffer_transport_anthropic::{
+    fetch_oauth_usage, AnthropicExtraUsage, AnthropicRateLimit, ANTHROPIC_API_BASE_URL,
+};
 use std::fmt::Write as _;
 
 /// Renders the most recent recorded tool and shell tasks.
@@ -124,8 +126,25 @@ fn account_summary_lines(
                 if let Some(email) = credential.email.as_deref() {
                     lines.push(format!("Logged in as: {email}"));
                 }
-                if let Some(organization_id) = credential.organization_id.as_deref() {
+                if let Some(organization_name) = credential.organization_name.as_deref() {
+                    lines.push(format!(
+                        "Organization: {}",
+                        format_metadata_value(organization_name)
+                    ));
+                } else if let Some(organization_id) = credential.organization_id.as_deref() {
                     lines.push(format!("Organization: {organization_id}"));
+                }
+                if let Some(organization_role) = credential.organization_role.as_deref() {
+                    lines.push(format!(
+                        "Organization role: {}",
+                        format_metadata_value(organization_role)
+                    ));
+                }
+                if let Some(workspace_role) = credential.workspace_role.as_deref() {
+                    lines.push(format!(
+                        "Workspace role: {}",
+                        format_metadata_value(workspace_role)
+                    ));
                 }
                 if let Some(plan_type) = credential.plan_type.as_deref() {
                     lines.push(format!("Plan: {}", format_metadata_value(plan_type)));
@@ -190,9 +209,17 @@ fn anthropic_usage_lines(
 
     if should_attempt_live_anthropic_usage(credential) {
         if let Some(provider) = provider {
-            match fetch_oauth_usage(&provider.base_url, &credential.access_token) {
+            let usage_base_url = if provider.id == "anthropic" {
+                ANTHROPIC_API_BASE_URL
+            } else {
+                &provider.base_url
+            };
+            match fetch_oauth_usage(usage_base_url, &credential.access_token) {
                 Ok(usage) => {
-                    lines.push(format_rate_limit_line("Current session", usage.five_hour.as_ref()));
+                    lines.push(format_rate_limit_line(
+                        "Current session",
+                        usage.five_hour.as_ref(),
+                    ));
                     lines.push(format_rate_limit_line(
                         "Current week (all models)",
                         usage.seven_day.as_ref(),
@@ -209,9 +236,7 @@ fn anthropic_usage_lines(
                     return lines;
                 }
                 Err(error) => {
-                    lines.push(format!(
-                        "Live Claude usage fetch failed: {error}"
-                    ));
+                    lines.push(format!("Live Claude usage fetch failed: {error}"));
                 }
             }
         }

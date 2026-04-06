@@ -3,6 +3,7 @@ mod discovery;
 mod import;
 mod model;
 mod registry;
+mod secure_oauth;
 
 pub use auth::{AuthMode, AuthStore, OAuthCredential, StoredCredential};
 pub use discovery::{merge_discovered_models, ModelDiscoveryClient};

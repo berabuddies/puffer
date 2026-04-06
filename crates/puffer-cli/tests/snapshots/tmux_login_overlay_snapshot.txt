@@ -1,49 +1,5 @@
-
-
-
-
-
-
-
-
-
-
-
-                                                                            ╭ Puffer Code ───────────────────────────────────────────╮
-                                                                            │                                                        │
-                                                                            │                 Welcome to Puffer Code                 │
-                                                                            │                                                        │
-                                                                            │                      Clawd on duty                     │
-                                                                            │               anthropic/claude-sonnet-4-5              │
-                                                                            │                        workspace                       │
-                                                                            │                                                        │
-                                                                            ╰────────────────────────────────────────────────────────╯
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│anthropic · anthropic/claude-sonnet-4-5 · auth api-key · tools 8/8                                                                                                                                              │
-│workspace · shell 0 · prompts 7 · 0 workdirs · sandbox workspace-write                                                                                                                                          │
-│❯ Review changes, ask a question, or type /                                                                                                                                                                     │
-│? for shortcuts · /help · /review · !pwd                                                                                                                                                                        │
-╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+anthropic · anthropic/claude-sonnet-4-5 · auth api-key · tools 8/8
+anthropic /claude-sonnet-4-5
+Select Provider
+anthropic Anthropic
+openai OpenAI

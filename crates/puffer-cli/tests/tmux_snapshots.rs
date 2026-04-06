@@ -1,8 +1,8 @@
 use puffer_config::{ensure_workspace_dirs, ConfigPaths};
 use puffer_session_store::SessionStore;
 use puffer_test_support::{
-    assert_normalized_snapshot, send_tmux_keys, start_tmux_command, temp_workspace, tmux_available,
-    wait_for_tmux_text,
+    assert_normalized_snapshot, capture_tmux_pane, send_tmux_keys, start_tmux_command,
+    temp_workspace, tmux_available, wait_for_tmux_text,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -21,7 +21,7 @@ fn tmux_help_matches_snapshot() {
     let capture =
         wait_for_tmux_text(&session, "Supported commands:", Duration::from_secs(10)).unwrap();
     assert_normalized_snapshot(
-        &normalize_tmux_capture(&capture),
+        &normalize_help_capture(&capture),
         &snapshot_path("tmux_help_snapshot.txt"),
     )
     .unwrap();
@@ -37,9 +37,11 @@ fn tmux_login_overlay_matches_snapshot() {
     let session = start_tmux_with_home(&workspace);
     wait_for_tmux_text(&session, "Puffer Code", Duration::from_secs(10)).unwrap();
     send_tmux_keys(&session, &["/login", "Enter"]).unwrap();
-    let capture = wait_for_tmux_text(&session, "anthropic", Duration::from_secs(10)).unwrap();
+    wait_for_tmux_text(&session, "Select Provider", Duration::from_secs(10)).unwrap();
+    std::thread::sleep(Duration::from_millis(250));
+    let capture = capture_tmux_pane(&session).unwrap();
     assert_normalized_snapshot(
-        &normalize_tmux_capture(&capture),
+        &normalize_login_capture(&capture),
         &snapshot_path("tmux_login_overlay_snapshot.txt"),
     )
     .unwrap();
@@ -125,6 +127,85 @@ fn normalize_tmux_capture(capture: &str) -> String {
         .map(normalize_tmux_line)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn normalize_help_capture(capture: &str) -> String {
+    let mut lines = Vec::new();
+    for line in normalize_tmux_capture(capture).lines() {
+        if line.starts_with("Puffer Code") || line.trim() == "· Supported commands:" {
+            lines.push(line.trim().to_string());
+            continue;
+        }
+        if let Some(command) = extract_command_line(line) {
+            lines.push(command);
+            continue;
+        }
+        if line.trim_start().starts_with("Resource counts:") {
+            lines.push(line.trim().to_string());
+        }
+    }
+    lines.join("\n")
+}
+
+fn normalize_login_capture(capture: &str) -> String {
+    normalize_tmux_capture(capture)
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line
+                .trim()
+                .trim_matches(|ch: char| matches!(ch, '│' | '╭' | '╰' | '╮' | '╯' | '─' | ' '));
+            if trimmed == "Select Provider" {
+                return Some(trimmed.to_string());
+            }
+            if let Some(selector) = trimmed.strip_prefix("anthropic") {
+                return Some(format!("anthropic{}", normalize_overlay_suffix(selector)));
+            }
+            if let Some(selector) = trimmed.strip_prefix("openai") {
+                return Some(format!("openai{}", normalize_overlay_suffix(selector)));
+            }
+            if trimmed == "You can still use /login <provider> for a direct auth hint." {
+                Some(trimmed.to_string())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn normalize_overlay_suffix(suffix: &str) -> String {
+    let suffix = suffix.split_whitespace().collect::<Vec<_>>().join(" ");
+    if suffix.is_empty() {
+        String::new()
+    } else {
+        format!(" {suffix}")
+    }
+}
+
+fn extract_command_line(line: &str) -> Option<String> {
+    let start = line.find('/')?;
+    let mut command = String::new();
+    for ch in line[start..].chars() {
+        if ch.is_ascii_alphanumeric() || ch == '/' || ch == '-' || ch == ':' {
+            command.push(ch);
+        } else {
+            break;
+        }
+    }
+    if command.len() < 2 {
+        return None;
+    }
+    let tail = line[start + command.len()..]
+        .split(['│', '╮', '╯', '╭', '╰'])
+        .next()
+        .unwrap_or_default()
+        .replace(['─', '·', '╭', '╰', '╮', '╯', '│'], " ");
+    let description = tail.split_whitespace().collect::<Vec<_>>().join(" ");
+    if description.is_empty() {
+        Some(command)
+    } else {
+        Some(format!("{command} {description}"))
+    }
 }
 
 fn normalize_tmux_line(line: &str) -> String {

@@ -86,6 +86,9 @@ fn read_claude_candidates(home: &Path) -> Result<Vec<ExternalImportCandidate>> {
                     plan_type: oauth.subscription_type,
                     rate_limit_tier: oauth.rate_limit_tier,
                     scopes: oauth.scopes,
+                    organization_name: None,
+                    organization_role: None,
+                    workspace_role: None,
                 }),
             });
         }
@@ -97,7 +100,10 @@ fn read_claude_candidates(home: &Path) -> Result<Vec<ExternalImportCandidate>> {
             .with_context(|| format!("failed to read {}", config_path.display()))?;
         let config: ClaudeGlobalConfig = serde_json::from_str(&raw)
             .with_context(|| format!("failed to parse {}", config_path.display()))?;
-        if let Some(api_key) = config.primary_api_key.filter(|value| !value.trim().is_empty()) {
+        if let Some(api_key) = config
+            .primary_api_key
+            .filter(|value| !value.trim().is_empty())
+        {
             candidates.push(ExternalImportCandidate {
                 source: ExternalImportSource::Claude,
                 family: ExternalImportFamily::Anthropic,
@@ -135,7 +141,9 @@ fn read_codex_candidates(home: &Path) -> Result<Vec<ExternalImportCandidate>> {
         let claims = parse_codex_id_token(tokens.id_token.as_deref());
         let plan = claims.as_ref().and_then(|claim| claim.plan_type.clone());
         let email = claims.as_ref().and_then(|claim| claim.email.clone());
-        let account_id = tokens.account_id.or_else(|| claims.and_then(|claim| claim.account_id));
+        let account_id = tokens
+            .account_id
+            .or_else(|| claims.and_then(|claim| claim.account_id));
         let mut description = String::from("Import Codex OAuth");
         if let Some(email) = email.as_deref() {
             description.push_str(&format!(" ({email})"));
@@ -155,6 +163,9 @@ fn read_codex_candidates(home: &Path) -> Result<Vec<ExternalImportCandidate>> {
                 plan_type: plan,
                 rate_limit_tier: None,
                 scopes: Vec::new(),
+                organization_name: None,
+                organization_role: None,
+                workspace_role: None,
             }),
         });
     }
