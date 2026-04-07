@@ -1,25 +1,6 @@
 id: AskUserQuestion
 name: AskUserQuestion
-description: |-
-  Ask the user multiple-choice questions to gather information, clarify
-  ambiguity, understand preferences, make decisions, or offer choices.
-
-  Usage notes:
-  - Users will always be able to select "Other" and provide custom text input.
-  - Use `multiSelect: true` to allow multiple selections.
-  - If you recommend a specific option, make it the first option and append
-    "(Recommended)" to the label.
-  - Use the optional `preview` field only when users need to compare concrete
-    artifacts such as mockups, code snippets, diagrams, or configuration
-    examples.
-  - Do not use previews for simple preference questions.
-  - Previews are only supported for single-select questions, not `multiSelect`.
-  - In plan mode, use this to clarify requirements or choose between approaches
-    before finalizing the plan.
-  - Do not use this tool to ask whether the user approves the finished plan;
-    use ExitPlanMode for plan approval instead.
-  - In plan mode, do not ask about "the plan" directly because the user cannot
-    see it until ExitPlanMode is called.
+description: "Use this tool when you need to ask the user questions during execution. This allows you to:\n1. Gather user preferences or requirements\n2. Clarify ambiguous instructions\n3. Get decisions on implementation choices as you work\n4. Offer choices to the user about what direction to take.\n\nUsage notes:\n- Users will always be able to select \"Other\" to provide custom text input\n- Use multiSelect: true to allow multiple answers to be selected for a question\n- If you recommend a specific option, make that the first option in the list and add \"(Recommended)\" at the end of the label\n\nPlan mode note: In plan mode, use this tool to clarify requirements or choose between approaches BEFORE finalizing your plan. Do NOT use this tool to ask \"Is my plan ready?\" or \"Should I proceed?\" - use ExitPlanMode for plan approval. IMPORTANT: Do not reference \"the plan\" in your questions (e.g., \"Do you have feedback about the plan?\", \"Does the plan look good?\") because the user cannot see the plan in the UI until you call ExitPlanMode. If you need plan approval, use ExitPlanMode instead.\nPreview feature:\nUse the optional `preview` field on options when presenting concrete artifacts that users need to visually compare:\n- ASCII mockups of UI layouts or components\n- Code snippets showing different implementations\n- Diagram variations\n- Configuration examples\n\nPreview content is rendered as markdown in a monospace box. Multi-line text with newlines is supported. When any option has a preview, the UI switches to a side-by-side layout with a vertical option list on the left and preview on the right. Do not use previews for simple preference questions where labels and descriptions suffice. Note: previews are only supported for single-select questions (not multiSelect)."
 handler: runtime:workflow:ask_user_question
 approval_policy: auto
 sandbox_policy: read-only
@@ -91,7 +72,7 @@ input_schema:
       properties:
         source:
           type: string
-      description: Optional metadata for tracking and analytics purposes.
+      description: Optional metadata for tracking purposes.
       additionalProperties: false
   required:
     - questions

@@ -2,7 +2,8 @@ use super::*;
 use puffer_config::PufferConfig;
 use puffer_session_store::SessionMetadata;
 use std::fs;
-use std::time::Duration;
+use std::path::Path;
+use std::time::{Duration, UNIX_EPOCH};
 use uuid::Uuid;
 
 fn temp_state() -> AppState {
@@ -21,6 +22,48 @@ fn temp_state() -> AppState {
         note: None,
     };
     AppState::new(PufferConfig::default(), cwd, session)
+}
+
+fn write_sample_notebook(path: &Path) {
+    fs::write(
+        path,
+        serde_json::to_string_pretty(&json!({
+            "nbformat": 4,
+            "nbformat_minor": 5,
+            "metadata": {
+                "language_info": { "name": "python" }
+            },
+            "cells": [
+                {
+                    "id": "alpha",
+                    "cell_type": "code",
+                    "source": "print('old')",
+                    "metadata": {},
+                    "execution_count": 1,
+                    "outputs": [{"output_type": "stream", "text": "old"}]
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+fn mark_file_fully_read(state: &mut AppState, path: &Path) {
+    let timestamp_ms = fs::metadata(path)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    state.claude_read_state.insert(
+        path.to_path_buf(),
+        crate::state::ClaudeReadState {
+            timestamp_ms,
+            is_partial_view: false,
+        },
+    );
 }
 
 #[test]
@@ -108,6 +151,49 @@ fn execute_openai_tool_calls_return_permission_denials_as_tool_results() {
 
     assert!(!result.invocations[0].success);
     assert!(result.outputs[0].output.contains("Permission denied"));
+}
+
+#[test]
+fn execute_openai_tool_calls_enforce_working_directory_access_for_claude_file_tools() {
+    let mut state = temp_state();
+    let outside = tempfile::tempdir().unwrap();
+    let outside_file = outside.path().join("secret.txt");
+    fs::write(&outside_file, "secret\n").unwrap();
+    let resources = LoadedResources {
+        tools: vec![loaded_tool("Read", "Read file", "runtime:claude_read")],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let mut providers = ProviderRegistry::new();
+    providers.register(openai_provider("http://127.0.0.1".to_string()));
+    let tool_calls = vec![OpenAIResponseToolCall {
+        item_id: Some("fc_read".to_string()),
+        status: Some("completed".to_string()),
+        call_id: "call_read".to_string(),
+        name: "Read".to_string(),
+        arguments: json!({ "file_path": outside_file.display().to_string() }),
+    }];
+    let request_config = test_openai_request_config();
+    let cwd = state.cwd.clone();
+
+    let error = execute_openai_tool_calls(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &tool_calls,
+        &registry,
+        &cwd,
+        &request_config,
+        "gpt-5",
+        None,
+        None,
+    )
+    .err()
+    .unwrap()
+    .to_string();
+
+    assert!(error.contains("working director"));
 }
 
 #[test]
@@ -255,6 +341,182 @@ fn execute_anthropic_tool_calls_support_runtime_sleep() {
     assert!(result.invocations[0]
         .output
         .contains("\"reason\": \"wait briefly\""));
+}
+
+#[test]
+fn execute_openai_tool_calls_support_runtime_notebook_edit() {
+    let mut tool = loaded_tool(
+        "NotebookEdit",
+        "Edit notebook cells",
+        "runtime:notebook_edit",
+    );
+    tool.value.approval_policy = Some("auto".to_string());
+    tool.value.sandbox_policy = Some("workspace-write".to_string());
+    let resources = LoadedResources {
+        tools: vec![tool],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let mut providers = ProviderRegistry::new();
+    providers.register(openai_provider("http://127.0.0.1".to_string()));
+    let request_config = test_openai_request_config();
+    let mut state = temp_state();
+    let notebook = state.cwd.join("demo.ipynb");
+    write_sample_notebook(&notebook);
+    mark_file_fully_read(&mut state, &notebook);
+
+    let tool_calls = vec![OpenAIResponseToolCall {
+        item_id: Some("fc_nb".to_string()),
+        status: Some("completed".to_string()),
+        call_id: "call_nb".to_string(),
+        name: "NotebookEdit".to_string(),
+        arguments: json!({
+            "notebook_path": notebook.display().to_string(),
+            "cell_id": "alpha",
+            "new_source": "print('updated')",
+            "edit_mode": "replace"
+        }),
+    }];
+    let cwd = state.cwd.clone();
+
+    let result = execute_openai_tool_calls(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &tool_calls,
+        &registry,
+        &cwd,
+        &request_config,
+        "gpt-5",
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert!(result.invocations[0].success);
+    assert_eq!(result.invocations[0].tool_id, "NotebookEdit");
+    assert!(result.outputs[0]
+        .output
+        .contains("\"edit_mode\": \"replace\""));
+    let updated = fs::read_to_string(&notebook).unwrap();
+    assert!(updated.contains("print('updated')"));
+}
+
+#[test]
+fn execute_anthropic_tool_calls_support_runtime_notebook_edit() {
+    let mut tool = loaded_tool(
+        "NotebookEdit",
+        "Edit notebook cells",
+        "runtime:notebook_edit",
+    );
+    tool.value.approval_policy = Some("auto".to_string());
+    tool.value.sandbox_policy = Some("workspace-write".to_string());
+    let resources = LoadedResources {
+        tools: vec![tool],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let mut providers = ProviderRegistry::new();
+    providers.register(provider());
+    let request_config = test_anthropic_request_config();
+    let mut state = temp_state();
+    let notebook = state.cwd.join("demo.ipynb");
+    write_sample_notebook(&notebook);
+    mark_file_fully_read(&mut state, &notebook);
+
+    let response = json!({
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "toolu_nb",
+                "name": "NotebookEdit",
+                "input": {
+                    "notebook_path": notebook.display().to_string(),
+                    "cell_id": "alpha",
+                    "new_source": "print('updated')",
+                    "edit_mode": "replace"
+                }
+            }
+        ]
+    });
+    let cwd = state.cwd.clone();
+
+    let result = execute_anthropic_tool_calls(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &response,
+        &registry,
+        &cwd,
+        &request_config,
+        "claude-sonnet-4-5",
+        None,
+        None,
+    )
+    .unwrap()
+    .expect("anthropic notebook edit tool result");
+
+    assert!(result.invocations[0].success);
+    assert_eq!(result.invocations[0].tool_id, "NotebookEdit");
+    assert!(result.invocations[0]
+        .output
+        .contains("\"edit_mode\": \"replace\""));
+    let updated = fs::read_to_string(&notebook).unwrap();
+    assert!(updated.contains("print('updated')"));
+}
+
+#[test]
+fn execute_tool_call_requires_prior_read_for_notebook_edit() {
+    let mut tool = loaded_tool(
+        "NotebookEdit",
+        "Edit notebook cells",
+        "runtime:notebook_edit",
+    );
+    tool.value.approval_policy = Some("auto".to_string());
+    tool.value.sandbox_policy = Some("workspace-write".to_string());
+    let resources = LoadedResources {
+        tools: vec![tool],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let mut providers = ProviderRegistry::new();
+    providers.register(openai_provider("http://127.0.0.1".to_string()));
+    let request_config = test_openai_request_config();
+    let mut state = temp_state();
+    let notebook = state.cwd.join("demo.ipynb");
+    write_sample_notebook(&notebook);
+    let cwd = state.cwd.clone();
+
+    let result = execute_tool_call(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &registry,
+        "gpt-5",
+        &cwd,
+        ToolExecutionBackend::OpenAi {
+            request_config: &request_config,
+            structured_output: None,
+        },
+        None,
+        "NotebookEdit",
+        json!({
+            "notebook_path": notebook.display().to_string(),
+            "cell_id": "alpha",
+            "new_source": "print('updated')",
+            "edit_mode": "replace"
+        }),
+    )
+    .unwrap();
+
+    assert!(!result.success);
+    assert!(result
+        .output
+        .stdout
+        .contains("File has not been read yet. Read it first before writing to it."));
 }
 
 #[test]
@@ -739,7 +1001,7 @@ fn config_tool_allows_null_to_clear_model_override() {
 }
 
 #[test]
-fn ask_user_question_rejects_duplicate_headers() {
+fn ask_user_question_rejects_duplicate_question_text() {
     let mut state = temp_state();
     let cwd = state.cwd.clone();
     let error = super::super::claude_tools::workflow::ask_user_question::execute_ask_user_question(
@@ -756,8 +1018,8 @@ fn ask_user_question_rejects_duplicate_headers() {
                     ]
                 },
                 {
-                    "question": "Pick two",
-                    "header": "choice",
+                    "question": "Pick one",
+                    "header": "second",
                     "options": [
                         {"label": "C", "description": "C"},
                         {"label": "D", "description": "D"}
@@ -767,7 +1029,7 @@ fn ask_user_question_rejects_duplicate_headers() {
         }),
     )
     .unwrap_err();
-    assert!(error.to_string().contains("headers must be unique"));
+    assert!(error.to_string().contains("question texts must be unique"));
 }
 
 #[test]

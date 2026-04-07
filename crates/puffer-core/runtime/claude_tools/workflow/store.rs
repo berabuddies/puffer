@@ -383,7 +383,7 @@ pub(super) fn get_config_value(state: &AppState, setting: &str) -> Result<Value>
     match normalize_setting_key(setting) {
         "theme" => Ok(json!(state.config.theme)),
         "model" => Ok(json!(state.current_model)),
-        "editorMode" => Ok(json!(if state.vim_mode { "vim" } else { "default" })),
+        "editorMode" => Ok(json!(state.config.editor_mode)),
         "default_provider" => Ok(json!(state.config.default_provider)),
         "default_model" => Ok(json!(state.config.default_model)),
         "openai_base_url" => Ok(json!(state.config.openai_base_url)),
@@ -403,8 +403,12 @@ pub(super) fn get_config_value(state: &AppState, setting: &str) -> Result<Value>
             .status_line
             .as_ref()
             .map(|status_line| status_line.padding))),
-        "fastMode" => Ok(json!(state.fast_mode)),
-        "effortLevel" => Ok(json!(state.effort_level)),
+        "fastMode" => Ok(json!(state.config.fast_mode)),
+        "effortLevel" => Ok(json!(state
+            .config
+            .effort_level
+            .as_deref()
+            .unwrap_or("auto"))),
         "promptColor" => Ok(json!(state.prompt_color)),
         "statuslineEnabled" => Ok(json!(state.statusline_enabled)),
         other => bail!("Unsupported config setting `{other}`"),
@@ -440,8 +444,14 @@ pub(super) fn set_config_value(state: &mut AppState, setting: &str, value: Value
                 .as_str()
                 .ok_or_else(|| anyhow!("editorMode must be a string"))?;
             match mode {
-                "vim" => state.vim_mode = true,
-                "default" | "normal" => state.vim_mode = false,
+                "vim" => {
+                    state.vim_mode = true;
+                    state.config.editor_mode = "vim".to_string();
+                }
+                "default" | "normal" => {
+                    state.vim_mode = false;
+                    state.config.editor_mode = "normal".to_string();
+                }
                 other => bail!("unsupported editorMode `{other}`"),
             }
         }
@@ -521,15 +531,26 @@ pub(super) fn set_config_value(state: &mut AppState, setting: &str, value: Value
             status_line.padding = padding;
         }
         "fastMode" => {
-            state.fast_mode = value
+            let parsed = value
                 .as_bool()
-                .ok_or_else(|| anyhow!("fastMode must be a boolean"))?
+                .ok_or_else(|| anyhow!("fastMode must be a boolean"))?;
+            state.fast_mode = parsed;
+            state.config.fast_mode = parsed;
         }
         "effortLevel" => {
-            state.effort_level = value
+            let parsed = value
                 .as_str()
-                .ok_or_else(|| anyhow!("effortLevel must be a string"))?
-                .to_string()
+                .ok_or_else(|| anyhow!("effortLevel must be a string"))?;
+            match parsed {
+                "auto" | "unset" | "default" => {
+                    state.effort_level = "auto".to_string();
+                    state.config.effort_level = None;
+                }
+                other => {
+                    state.effort_level = other.to_string();
+                    state.config.effort_level = Some(other.to_string());
+                }
+            }
         }
         "promptColor" => {
             state.prompt_color = value
@@ -884,16 +905,16 @@ pub(super) fn validate_ask_user_questions(items: &[AskUserQuestionItem]) -> Resu
     if items.is_empty() || items.len() > 4 {
         bail!("AskUserQuestion requires between 1 and 4 questions");
     }
-    let mut seen_headers = std::collections::BTreeSet::new();
+    let mut seen_questions = std::collections::BTreeSet::new();
     for item in items {
         if item.question.trim().is_empty() {
             bail!("AskUserQuestion questions must not be empty");
         }
+        if !seen_questions.insert(item.question.trim().to_ascii_lowercase()) {
+            bail!("AskUserQuestion question texts must be unique");
+        }
         if item.header.trim().is_empty() {
             bail!("AskUserQuestion headers must not be empty");
-        }
-        if !seen_headers.insert(item.header.to_ascii_lowercase()) {
-            bail!("AskUserQuestion headers must be unique");
         }
         if item.options.len() < 2 || item.options.len() > 4 {
             bail!(

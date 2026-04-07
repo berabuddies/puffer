@@ -1,5 +1,17 @@
+mod manage;
+mod support;
+
+use self::manage::{
+    disable_workspace_plugin, enable_workspace_plugin, install_workspace_plugin,
+    uninstall_workspace_plugin, update_workspace_plugin,
+};
+use self::support::{
+    default_plugin_contents, format_plugin_counts, is_disabled_placeholder,
+    marketplace_management_request, plugin_description, plugin_help_text, plugin_status,
+    render_plugin_marketplace, source_kind_label,
+};
 use super::common::open_text_file_in_editor;
-use super::emit_system;
+use super::{emit_system, CommandActionEntry};
 use crate::AppState;
 use anyhow::Result;
 use puffer_config::{ensure_workspace_dirs, ConfigPaths};
@@ -10,19 +22,10 @@ use puffer_resources::{
 use puffer_session_store::SessionStore;
 use std::fmt::Write as _;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-const DISABLED_PLUGIN_PLACEHOLDER_PREFIX: &str =
-    "Disabled plugin placeholder created by `puffer plugin disable`.";
-
-/// Describes one interactive `/plugin` action exposed in the TUI.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PluginActionEntry {
-    /// The slash command executed when the action is selected.
-    pub command: String,
-    /// The row description shown in the interactive picker.
-    pub description: String,
-}
+/// Backward-compatible alias for plugin action picker rows.
+pub type PluginActionEntry = CommandActionEntry;
 
 /// Shows or materializes the workspace plugin directory.
 pub(crate) fn handle_plugin_command(
@@ -43,8 +46,14 @@ pub(crate) fn handle_plugin_command(
     let inventory = plugin_inventory(&paths, resources)?;
 
     match trimmed {
-        "" | "show" | "manage" => {
-            emit_system(state, session_store, render_plugin_summary(state, resources)?)
+        "help" | "-h" | "--help" => emit_system(state, session_store, plugin_help_text()),
+        "" | "show" | "manage" => emit_system(
+            state,
+            session_store,
+            render_plugin_summary(state, resources)?,
+        ),
+        "marketplace" | "market" | "marketplace list" | "market list" => {
+            emit_system(state, session_store, render_plugin_marketplace(resources))
         }
         "errors" => emit_system(
             state,
@@ -66,6 +75,16 @@ pub(crate) fn handle_plugin_command(
             session_store,
             render_plugin_validation(&inventory, None),
         ),
+        "install" | "i" => emit_system(
+            state,
+            session_store,
+            format!(
+                "{}\n\n{}",
+                plugin_help_text(),
+                render_plugin_marketplace(resources)
+            ),
+        ),
+        "uninstall" | "remove" | "update" => emit_system(state, session_store, plugin_help_text()),
         "reload" => {
             state.reload_resources_requested = true;
             emit_system(
@@ -78,6 +97,25 @@ pub(crate) fn handle_plugin_command(
         _ if trimmed.starts_with("show ") => {
             let plugin_id = trimmed.trim_start_matches("show ").trim();
             describe_plugin(state, session_store, &inventory, plugin_id)
+        }
+        _ if trimmed.starts_with("install ") => {
+            let plugin_ref = trimmed.trim_start_matches("install ").trim();
+            install_workspace_plugin(state, resources, session_store, &paths, plugin_ref)
+        }
+        _ if trimmed.starts_with("i ") => {
+            let plugin_ref = trimmed.trim_start_matches("i ").trim();
+            install_workspace_plugin(state, resources, session_store, &paths, plugin_ref)
+        }
+        _ if trimmed.starts_with("uninstall ") || trimmed.starts_with("remove ") => {
+            let plugin_id = trimmed
+                .split_once(' ')
+                .map(|(_, value)| value.trim())
+                .unwrap_or_default();
+            uninstall_workspace_plugin(state, resources, session_store, &paths, plugin_id)
+        }
+        _ if trimmed.starts_with("update ") => {
+            let plugin_id = trimmed.trim_start_matches("update ").trim();
+            update_workspace_plugin(state, resources, session_store, &paths, plugin_id)
         }
         _ if trimmed.starts_with("validate ") => {
             let plugin_id = trimmed.trim_start_matches("validate ").trim();
@@ -102,14 +140,18 @@ pub(crate) fn handle_plugin_command(
             let plugin_id = trimmed.trim_start_matches("disable ").trim();
             disable_workspace_plugin(state, resources, session_store, &paths, plugin_id)
         }
+        _ if marketplace_management_request(trimmed) => emit_system(
+            state,
+            session_store,
+            format!(
+                "Custom plugin marketplaces are not implemented yet.\n\n{}",
+                render_plugin_marketplace(resources)
+            ),
+        ),
         _ if inventory.iter().any(|plugin| plugin.value.id == trimmed) => {
             describe_plugin(state, session_store, &inventory, trimmed)
         }
-        _ => emit_system(
-            state,
-            session_store,
-            "Usage: /plugin [show|manage|list|errors|validate [id]|path|open [id]|edit [id]|enable <id>|disable <id>|reload]".to_string(),
-        ),
+        _ => emit_system(state, session_store, plugin_help_text()),
     }
 }
 
@@ -145,7 +187,7 @@ pub(crate) fn render_plugin_summary(
     }
     let inventory = plugin_inventory(&paths, resources)?;
     Ok(format!(
-        "Plugins directory: {}\nworkspace_plugin_manifest={}\nloaded_plugins={}\n{}\nUse `/plugin enable <id>`, `/plugin disable <id>`, `/plugin open <id>`, `/plugin validate [id]`, `/plugin errors`, or `/reload-plugins`.\n\n{}",
+        "Plugins directory: {}\nworkspace_plugin_manifest={}\nloaded_plugins={}\n{}\nUse `/plugin marketplace`, `/plugin install <id|path>`, `/plugin update <id>`, `/plugin uninstall <id>`, `/plugin enable <id>`, `/plugin disable <id>`, `/plugin open <id>`, `/plugin validate [id]`, `/plugin errors`, or `/reload-plugins`.\n\n{}",
         plugins_dir.display(),
         plugin_path.display(),
         inventory.iter().filter(|plugin| !is_disabled_placeholder(&plugin.value)).count(),
@@ -162,6 +204,10 @@ pub(crate) fn render_plugin_actions(
     let paths = ConfigPaths::discover(&state.cwd);
     let inventory = plugin_inventory(&paths, resources)?;
     let mut actions = vec![
+        PluginActionEntry {
+            command: "/plugin marketplace".to_string(),
+            description: "Browse builtin plugins that can be installed here".to_string(),
+        },
         PluginActionEntry {
             command: "/plugin open".to_string(),
             description: format!(
@@ -186,6 +232,17 @@ pub(crate) fn render_plugin_actions(
         },
     ];
     for plugin in &inventory {
+        if plugin.value.id == "workspace" {
+            actions.push(PluginActionEntry {
+                command: format!("/plugin open {}", plugin.value.id),
+                description: format!("Open manifest {}", plugin.source_info.path.display()),
+            });
+            actions.push(PluginActionEntry {
+                command: format!("/plugin validate {}", plugin.value.id),
+                description: format!("Validate plugin {}", plugin.value.id),
+            });
+            continue;
+        }
         let status = plugin_status(&plugin.value);
         let counts = format_plugin_counts(&plugin.value);
         let label = if plugin.value.display_name == plugin.value.id {
@@ -219,6 +276,21 @@ pub(crate) fn render_plugin_actions(
             command: format!("/plugin validate {}", plugin.value.id),
             description: format!("Validate plugin {}", plugin.value.id),
         });
+        if plugin.source_info.kind == SourceKind::Workspace {
+            actions.push(PluginActionEntry {
+                command: format!("/plugin uninstall {}", plugin.value.id),
+                description: format!("Remove workspace override for {}", plugin.value.id),
+            });
+            actions.push(PluginActionEntry {
+                command: format!("/plugin update {}", plugin.value.id),
+                description: format!("Refresh {} from builtin/user source", plugin.value.id),
+            });
+        } else if !is_disabled_placeholder(&plugin.value) {
+            actions.push(PluginActionEntry {
+                command: format!("/plugin install {}", plugin.value.id),
+                description: format!("Install an editable workspace copy of {}", plugin.value.id),
+            });
+        }
     }
     Ok(actions)
 }
@@ -529,222 +601,5 @@ fn open_plugin_file(state: &mut AppState, session_store: &SessionStore, path: &P
                 path.display()
             ),
         ),
-    }
-}
-
-fn disable_workspace_plugin(
-    state: &mut AppState,
-    resources: &LoadedResources,
-    session_store: &SessionStore,
-    paths: &ConfigPaths,
-    plugin_id: &str,
-) -> Result<()> {
-    if plugin_id.trim().is_empty() {
-        return emit_system(
-            state,
-            session_store,
-            "Usage: /plugin disable <id>".to_string(),
-        );
-    }
-    let plugins_dir = paths.workspace_config_dir.join("resources/plugins");
-    fs::create_dir_all(&plugins_dir)?;
-    let enabled_path = plugin_manifest_path(&plugins_dir, plugin_id);
-    let disabled_path = disabled_variant(&enabled_path);
-    if enabled_path.exists() {
-        let plugin: PluginSpec = serde_yaml::from_str(&fs::read_to_string(&enabled_path)?)?;
-        if is_disabled_placeholder(&plugin) {
-            return emit_system(
-                state,
-                session_store,
-                format!("Plugin `{plugin_id}` is already disabled."),
-            );
-        }
-        remove_if_exists(&disabled_path)?;
-        fs::rename(&enabled_path, &disabled_path)?;
-        write_plugin_manifest(&enabled_path, &disabled_placeholder_for(&plugin))?;
-        state.reload_resources_requested = true;
-        return emit_system(
-            state,
-            session_store,
-            format!(
-                "Disabled plugin `{plugin_id}` in {}.",
-                enabled_path.display()
-            ),
-        );
-    }
-    let Some(plugin) = resources
-        .plugins
-        .iter()
-        .find(|plugin| plugin.value.id == plugin_id)
-    else {
-        return emit_system(
-            state,
-            session_store,
-            format!("Unknown plugin `{plugin_id}`."),
-        );
-    };
-    write_plugin_manifest(&enabled_path, &disabled_placeholder_for(&plugin.value))?;
-    state.reload_resources_requested = true;
-    emit_system(
-        state,
-        session_store,
-        format!(
-            "Disabled plugin `{plugin_id}` in {}.",
-            enabled_path.display()
-        ),
-    )
-}
-
-fn enable_workspace_plugin(
-    state: &mut AppState,
-    resources: &LoadedResources,
-    session_store: &SessionStore,
-    paths: &ConfigPaths,
-    plugin_id: &str,
-) -> Result<()> {
-    if plugin_id.trim().is_empty() {
-        return emit_system(
-            state,
-            session_store,
-            "Usage: /plugin enable <id>".to_string(),
-        );
-    }
-    let plugins_dir = paths.workspace_config_dir.join("resources/plugins");
-    let enabled_path = plugin_manifest_path(&plugins_dir, plugin_id);
-    let disabled_path = disabled_variant(&enabled_path);
-    if enabled_path.exists() {
-        let plugin: PluginSpec = serde_yaml::from_str(&fs::read_to_string(&enabled_path)?)?;
-        if is_disabled_placeholder(&plugin) {
-            if disabled_path.exists() {
-                fs::remove_file(&enabled_path)?;
-                fs::rename(&disabled_path, &enabled_path)?;
-            } else {
-                fs::remove_file(&enabled_path)?;
-            }
-            state.reload_resources_requested = true;
-            return emit_system(
-                state,
-                session_store,
-                format!("Enabled plugin `{plugin_id}`."),
-            );
-        }
-        return emit_system(
-            state,
-            session_store,
-            format!("Plugin `{plugin_id}` is already enabled."),
-        );
-    }
-    if disabled_path.exists() {
-        fs::rename(&disabled_path, &enabled_path)?;
-        state.reload_resources_requested = true;
-        return emit_system(
-            state,
-            session_store,
-            format!(
-                "Enabled plugin `{plugin_id}` in {}.",
-                enabled_path.display()
-            ),
-        );
-    }
-    if resources
-        .plugins
-        .iter()
-        .any(|plugin| plugin.value.id == plugin_id && !is_disabled_placeholder(&plugin.value))
-    {
-        return emit_system(
-            state,
-            session_store,
-            format!("Plugin `{plugin_id}` is already enabled."),
-        );
-    }
-    emit_system(
-        state,
-        session_store,
-        format!("Unknown plugin `{plugin_id}`."),
-    )
-}
-
-fn plugin_status(plugin: &PluginSpec) -> &'static str {
-    if is_disabled_placeholder(plugin) {
-        "disabled"
-    } else {
-        "enabled"
-    }
-}
-
-fn plugin_description(plugin: &PluginSpec) -> String {
-    plugin
-        .description
-        .strip_prefix(DISABLED_PLUGIN_PLACEHOLDER_PREFIX)
-        .map(str::trim)
-        .and_then(|value| value.strip_prefix("Original description:").map(str::trim))
-        .unwrap_or(plugin.description.as_str())
-        .to_string()
-}
-
-fn format_plugin_counts(plugin: &PluginSpec) -> String {
-    format!(
-        "commands={} skills={} agents={} mcp_servers={} lsp_servers={}",
-        plugin.commands.len(),
-        plugin.skills.len(),
-        plugin.agents.len(),
-        plugin.mcp_servers.len(),
-        plugin.lsp_servers.len()
-    )
-}
-
-fn is_disabled_placeholder(plugin: &PluginSpec) -> bool {
-    plugin
-        .description
-        .starts_with(DISABLED_PLUGIN_PLACEHOLDER_PREFIX)
-}
-
-fn disabled_placeholder_for(plugin: &PluginSpec) -> PluginSpec {
-    PluginSpec {
-        id: plugin.id.clone(),
-        display_name: plugin.display_name.clone(),
-        description: format!(
-            "{DISABLED_PLUGIN_PLACEHOLDER_PREFIX} Original description: {}",
-            plugin_description(plugin)
-        ),
-        commands: Vec::new(),
-        skills: Vec::new(),
-        agents: Vec::new(),
-        mcp_servers: Vec::new(),
-        lsp_servers: Vec::new(),
-    }
-}
-
-fn plugin_manifest_path(dir: &Path, plugin_id: &str) -> PathBuf {
-    dir.join(format!("{plugin_id}.yaml"))
-}
-
-fn disabled_variant(path: &Path) -> PathBuf {
-    PathBuf::from(format!("{}.disabled", path.display()))
-}
-
-fn remove_if_exists(path: &Path) -> Result<()> {
-    if path.exists() {
-        fs::remove_file(path)?;
-    }
-    Ok(())
-}
-
-fn write_plugin_manifest(path: &Path, plugin: &PluginSpec) -> Result<()> {
-    fs::write(path, serde_yaml::to_string(plugin)?)?;
-    Ok(())
-}
-
-fn default_plugin_contents() -> &'static str {
-    "id: workspace\n\
-display_name: Workspace Plugin\n\
-description: Customize plugin commands for this workspace.\n"
-}
-
-fn source_kind_label(kind: SourceKind) -> &'static str {
-    match kind {
-        SourceKind::Builtin => "builtin",
-        SourceKind::User => "user",
-        SourceKind::Workspace => "workspace",
     }
 }
