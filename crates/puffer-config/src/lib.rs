@@ -5,8 +5,11 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+const BUILTIN_RESOURCES_DIR_ENV: &str = "PUFFER_BUILTIN_RESOURCES_DIR";
 
 pub use settings_catalog::{
     config_setting_persists_to_workspace_file, config_setting_scope, config_setting_spec,
@@ -110,7 +113,9 @@ impl ConfigPaths {
             .or_else(dirs::home_dir)
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".puffer");
-        let builtin_resources_dir = workspace_root.join("resources");
+        let builtin_resources_dir = env::var_os(BUILTIN_RESOURCES_DIR_ENV)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| workspace_root.join("resources"));
         Self {
             workspace_root,
             workspace_config_dir,
@@ -305,6 +310,28 @@ mod tests {
                 std::env::set_var("PUFFER_HOME", value);
             } else {
                 std::env::remove_var("PUFFER_HOME");
+            }
+        }
+    }
+
+    struct ScopedBuiltinResourcesDir {
+        old_value: Option<OsString>,
+    }
+
+    impl ScopedBuiltinResourcesDir {
+        fn set(path: &Path) -> Self {
+            let old_value = std::env::var_os(BUILTIN_RESOURCES_DIR_ENV);
+            std::env::set_var(BUILTIN_RESOURCES_DIR_ENV, path);
+            Self { old_value }
+        }
+    }
+
+    impl Drop for ScopedBuiltinResourcesDir {
+        fn drop(&mut self) {
+            if let Some(value) = self.old_value.take() {
+                std::env::set_var(BUILTIN_RESOURCES_DIR_ENV, value);
+            } else {
+                std::env::remove_var(BUILTIN_RESOURCES_DIR_ENV);
             }
         }
     }
@@ -550,5 +577,19 @@ tmux_golden_mode = false
                 .map(|status_line| status_line.padding),
             Some(2)
         );
+    }
+
+    #[test]
+    fn discover_honors_builtin_resources_override() {
+        let _guard = lock_puffer_home();
+        let tempdir = tempdir().expect("tempdir");
+        let workspace = tempdir.path().join("workspace");
+        let override_dir = tempdir.path().join("bundled-resources");
+        fs::create_dir_all(&workspace).expect("workspace");
+        fs::create_dir_all(&override_dir).expect("override");
+        let _override = ScopedBuiltinResourcesDir::set(&override_dir);
+
+        let paths = ConfigPaths::discover(&workspace);
+        assert_eq!(paths.builtin_resources_dir, override_dir);
     }
 }

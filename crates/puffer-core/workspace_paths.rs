@@ -133,24 +133,26 @@ pub(crate) fn resolve_path_in_workspaces(
 ) -> Result<PathBuf> {
     let candidate = normalize_user_path(cwd, path.to_string_lossy().as_ref());
     let roots = workspace_roots(cwd, additional_roots);
-    let Some(root) = matching_workspace_root(&candidate, &roots) else {
+    if !roots.iter().any(|root| candidate.starts_with(root)) {
         anyhow::bail!(
             "Path {} is outside the current working directories. Use `/add-dir <directory>` to add access first.",
             candidate.display()
         );
-    };
+    }
 
-    let canonical_root = canonicalize_or_normalize(root)?;
+    let canonical_roots = roots
+        .iter()
+        .map(|root| canonicalize_or_normalize(root))
+        .collect::<Result<Vec<_>>>()?;
     let ancestor = nearest_existing_ancestor(&candidate).ok_or_else(|| {
         anyhow!(
-            "failed to resolve path {} inside working directory {}",
-            path.display(),
-            root.display()
+            "failed to resolve path {} inside the current working directories",
+            path.display()
         )
     })?;
     let canonical_ancestor = fs::canonicalize(&ancestor)
         .with_context(|| format!("failed to canonicalize {}", ancestor.display()))?;
-    if !canonical_ancestor.starts_with(&canonical_root) {
+    if !starts_with_any_root(&canonical_ancestor, &canonical_roots) {
         anyhow::bail!(
             "Path {} resolves outside the current working directories. Use `/add-dir <directory>` to add access first.",
             candidate.display()
@@ -160,7 +162,7 @@ pub(crate) fn resolve_path_in_workspaces(
     if candidate.exists() {
         let canonical_candidate = fs::canonicalize(&candidate)
             .with_context(|| format!("failed to canonicalize {}", candidate.display()))?;
-        if !canonical_candidate.starts_with(&canonical_root) {
+        if !starts_with_any_root(&canonical_candidate, &canonical_roots) {
             anyhow::bail!(
                 "Path {} resolves outside the current working directories. Use `/add-dir <directory>` to add access first.",
                 candidate.display()
@@ -223,11 +225,8 @@ fn canonicalize_or_normalize(path: &Path) -> Result<PathBuf> {
     }
 }
 
-fn matching_workspace_root<'a>(candidate: &Path, roots: &'a [PathBuf]) -> Option<&'a PathBuf> {
-    roots
-        .iter()
-        .filter(|root| candidate.starts_with(root))
-        .max_by_key(|root| root.components().count())
+fn starts_with_any_root(candidate: &Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| candidate.starts_with(root))
 }
 
 fn is_missing_like_error(error: &std::io::Error) -> bool {
@@ -273,5 +272,37 @@ fn nearest_existing_ancestor(path: &Path) -> Option<PathBuf> {
         if !current.pop() {
             return None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_path_in_workspaces;
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_path_in_workspaces_allows_symlink_target_within_another_root() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().unwrap();
+        let cwd = temp.path().join("workspace");
+        let etc = temp.path().join("etc");
+        let usr_lib = temp.path().join("usr/lib");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&etc).unwrap();
+        std::fs::create_dir_all(&usr_lib).unwrap();
+        std::fs::write(usr_lib.join("os-release"), "NAME=test\n").unwrap();
+        symlink("../usr/lib/os-release", etc.join("os-release")).unwrap();
+
+        let resolved = resolve_path_in_workspaces(
+            &cwd,
+            &[etc.clone(), temp.path().join("usr")],
+            Path::new(&etc.join("os-release")),
+        )
+        .unwrap();
+
+        assert_eq!(resolved, etc.join("os-release"));
     }
 }

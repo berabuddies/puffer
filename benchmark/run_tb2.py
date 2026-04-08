@@ -275,6 +275,16 @@ def load_trial_result(trial_dir: Path) -> tuple[dict[str, Any] | None, dict[str,
     return result, rewards
 
 
+def harbor_attempt_failed(result: dict[str, Any] | None) -> bool:
+    """Treat Harbor trial exceptions and explicit agent failures as retryable failures."""
+    if not result:
+        return False
+    if result.get("exception_info"):
+        return True
+    metadata = ((result.get("agent_result") or {}).get("metadata")) or {}
+    return metadata.get("success") is False
+
+
 def solved_from_rewards(rewards: dict[str, float | int] | None) -> bool:
     """Treat a task as solved when every reported reward is positive."""
     if not rewards:
@@ -287,8 +297,9 @@ def backup_trial_dir(trial_dir: Path, attempt_index: int) -> None:
     if not trial_dir.exists():
         return
     backup_dir = trial_dir.with_name(f"{trial_dir.name}--retry-{attempt_index:02d}")
-    if backup_dir.exists():
-        shutil.rmtree(backup_dir)
+    while backup_dir.exists():
+        attempt_index += 1
+        backup_dir = trial_dir.with_name(f"{trial_dir.name}--retry-{attempt_index:02d}")
     shutil.move(str(trial_dir), str(backup_dir))
 
 
@@ -364,7 +375,7 @@ def run_single_task(
         (trial_dir / "harbor-output.txt").write_text(completed.stdout)
 
         result, rewards = load_trial_result(trial_dir)
-        if completed.returncode == 0:
+        if completed.returncode == 0 and not harbor_attempt_failed(result):
             exception_info = (result or {}).get("exception_info") or {}
             return TrialSummary(
                 slug=task.slug,
@@ -379,6 +390,9 @@ def run_single_task(
                 retry_exhausted=False,
             )
 
+        if completed.returncode == 0 and harbor_attempt_failed(result) and attempt <= args.max_agent_retries:
+            continue
+
         if attempt > args.max_agent_retries:
             result, rewards = load_trial_result(trial_dir)
             exception_info = (result or {}).get("exception_info") or {}
@@ -387,7 +401,7 @@ def run_single_task(
                 task_dir=str(task.task_dir),
                 trial_dir=str(trial_dir),
                 attempts=attempt,
-                return_code=completed.returncode,
+                return_code=completed.returncode or 1,
                 solved=False,
                 rewards=rewards,
                 exception_type=exception_info.get("exception_type"),

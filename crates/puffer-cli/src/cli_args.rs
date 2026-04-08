@@ -126,6 +126,40 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: DesktopApiCommand,
     },
+    /// Execute one unattended benchmark turn and emit machine-readable artifacts.
+    #[command(hide = true)]
+    BenchmarkRun {
+        /// Inline prompt text.
+        #[arg(long = "prompt", conflicts_with_all = ["prompt_file", "stdin"])]
+        prompt: Option<String>,
+        /// Load the prompt text from a file.
+        #[arg(long = "prompt-file", conflicts_with_all = ["prompt", "stdin"])]
+        prompt_file: Option<String>,
+        /// Read the prompt text from stdin.
+        #[arg(long = "stdin", default_value_t = false, conflicts_with_all = ["prompt", "prompt_file"])]
+        stdin: bool,
+        /// Provider id to execute against.
+        #[arg(long = "provider", default_value = "openai")]
+        provider: String,
+        /// Model id or selector.
+        #[arg(long = "model", default_value = "gpt-5.4")]
+        model: String,
+        /// Reasoning effort to use.
+        #[arg(long = "effort", default_value = "xhigh")]
+        effort: String,
+        /// Enable fast mode.
+        #[arg(long = "fast", default_value_t = true)]
+        fast: bool,
+        /// Path for a JSON summary artifact.
+        #[arg(long = "result-json")]
+        result_json: Option<String>,
+        /// Path for an ATIF trajectory artifact.
+        #[arg(long = "trajectory-json")]
+        trajectory_json: Option<String>,
+        /// Disable one tool for unattended execution.
+        #[arg(long = "deny-tool")]
+        deny_tools: Vec<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
