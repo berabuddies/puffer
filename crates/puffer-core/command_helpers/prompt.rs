@@ -258,10 +258,21 @@ pub(crate) fn finalize_compact_prompt_command(
 ) -> Result<()> {
     session_store.append_transcript_clear(state.session.id)?;
     state.apply_transcript_rewrite(&puffer_session_store::TranscriptRewrite::Clear);
+    // Re-inject the summary as a user message so the model retains context
+    // in subsequent turns (CC uses a "boundary marker" + summary message).
+    let boundary = format!(
+        "[Conversation compacted — prior context summarized below]\n\n{}",
+        summary.trim_end()
+    );
+    state.push_message(MessageRole::User, boundary.clone());
+    session_store.append_event(
+        state.session.id,
+        puffer_session_store::TranscriptEvent::UserMessage { text: boundary },
+    )?;
     emit_system(
         state,
         session_store,
-        format!("Compacted conversation summary:\n{}", summary.trim_end()),
+        "Conversation compacted. Summary preserved in context.".to_string(),
     )
 }
 
@@ -294,48 +305,43 @@ fn build_compact_prompt_override(state: &AppState, args: &str) -> String {
     let mut user_messages = 0usize;
     let mut assistant_messages = 0usize;
     let mut system_messages = 0usize;
-    let mut highlights = Vec::new();
 
-    for message in state.transcript.iter().rev() {
+    for message in &state.transcript {
         match message.role {
             MessageRole::User => user_messages += 1,
             MessageRole::Assistant => assistant_messages += 1,
             MessageRole::System => system_messages += 1,
         }
-        if highlights.len() >= 8 {
-            continue;
-        }
-        let compact_line = single_line_excerpt(&message.text);
-        if compact_line.is_empty() {
-            continue;
-        }
-        let role = match message.role {
-            MessageRole::User => "user",
-            MessageRole::Assistant => "assistant",
-            MessageRole::System => "system",
-        };
-        highlights.push(format!("- {role}: {compact_line}"));
     }
-    highlights.reverse();
 
-    let mut text = String::from(
-        "Summarize the current conversation so work can continue with a compact preserved context.\n",
+    let mut text = String::new();
+    text.push_str(
+        "Summarize the conversation into a compact context block that preserves all information \
+         needed to continue work seamlessly. Use NO tools — return only the summary text.\n\n",
     );
+    text.push_str("Structure your summary with these sections:\n");
+    text.push_str("1. **User Intent** — what the user is trying to accomplish\n");
+    text.push_str(
+        "2. **Key Concepts** — important terms, patterns, or architectural decisions discussed\n",
+    );
+    text.push_str(
+        "3. **Files & Code** — files read, edited, or created, with paths and brief descriptions\n",
+    );
+    text.push_str("4. **Errors & Fixes** — errors encountered and how they were resolved\n");
+    text.push_str(
+        "5. **Pending Tasks** — any incomplete work, open questions, or next steps\n",
+    );
+    text.push_str("6. **Current State** — what was just completed before this compaction\n\n");
+
     let _ = writeln!(
         &mut text,
-        "messages: user={} assistant={} system={}",
+        "Conversation stats: {} user, {} assistant, {} system messages.",
         user_messages, assistant_messages, system_messages
     );
     if !trimmed_instruction.is_empty() {
-        let _ = writeln!(&mut text, "custom_instruction: {trimmed_instruction}");
+        let _ = writeln!(&mut text, "Additional instruction: {trimmed_instruction}");
     }
-    text.push_str("Return only the compact summary that should remain in context.\n");
-    if highlights.is_empty() {
-        text.push_str("highlights:\n- <no non-empty messages>");
-    } else {
-        text.push_str("highlights:\n");
-        text.push_str(&highlights.join("\n"));
-    }
+    text.push_str("\nBe thorough but concise. Preserve file paths, function names, and error messages verbatim.\n");
     text
 }
 

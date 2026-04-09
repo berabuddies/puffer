@@ -353,7 +353,12 @@ pub(super) fn extract_metric_value(text: &str, metric_name: &str) -> Option<f64>
     let re = Regex::new(&pattern).ok()?;
     let caps = re.captures(text)?;
     let m = caps.get(1)?;
-    m.as_str().trim().parse::<f64>().ok()
+    let value = m.as_str().trim().parse::<f64>().ok()?;
+    // Reject NaN/Infinity which would corrupt convergence detection.
+    if value.is_nan() || value.is_infinite() {
+        return None;
+    }
+    Some(value)
 }
 
 pub(super) fn has_converged(history: &[f64]) -> bool {

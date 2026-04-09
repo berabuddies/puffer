@@ -3,7 +3,7 @@ use anyhow::Result;
 use puffer_resources::{render_prompt_by_id, LoadedResources};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SYSTEM_PROMPT_ID: &str = "system-base";
@@ -64,7 +64,12 @@ Focus text output on:
 
 If you can say it in one sentence, don't use three. Prefer short, direct sentences over long explanations. This does not apply to code or tool calls.
 
+When sending user-facing text, you're writing for a person, not logging to a console. Assume users can't see most tool calls or thinking - only your text output. Before your first tool call, briefly state what you're about to do. While working, give short updates at key moments: when you find something load-bearing (a bug, a root cause), when changing direction, when you've made progress without an update.
+
 $SESSION_GUIDANCE
+
+# Important context behavior
+When working with tool results, write down any important information you might need later in your response, as the original tool result may be cleared later to free context space.
 
 $ENVIRONMENT"#;
 
@@ -91,7 +96,19 @@ pub(super) fn render_runtime_system_prompt(
     ]);
     let rendered = render_prompt_by_id(resources, SYSTEM_PROMPT_ID, &variables)
         .unwrap_or_else(|| render_fallback_prompt(&variables));
-    Ok(normalize_prompt_whitespace(&rendered))
+    let mut prompt = normalize_prompt_whitespace(&rendered);
+    // Inject CLAUDE.md / memory contents if present (matches CC's memory section).
+    if let Some(mut memory) = load_memory_prompt(&state.cwd) {
+        // CC limits memory to 40K characters to avoid bloating the system prompt.
+        const MAX_MEMORY_CHARS: usize = 40_000;
+        if memory.chars().count() > MAX_MEMORY_CHARS {
+            memory = memory.chars().take(MAX_MEMORY_CHARS).collect();
+            memory.push_str("\n\n[CLAUDE.md truncated — 40K char limit reached]");
+        }
+        prompt.push_str("\n\n# Project Context (CLAUDE.md)\n");
+        prompt.push_str(&memory);
+    }
+    Ok(prompt)
 }
 
 fn render_fallback_prompt(variables: &BTreeMap<String, String>) -> String {
@@ -243,6 +260,26 @@ fn build_environment_section(state: &AppState, model_id: &str) -> Result<String>
         "You have been invoked in the following environment:".to_string(),
     ];
     lines.extend(prepend_bullets(items));
+
+    // Scratchpad directory: session-isolated temp space for intermediate files.
+    if let Some(scratchpad) = scratchpad_dir(state) {
+        lines.push(String::new());
+        lines.push("# Scratchpad Directory".to_string());
+        lines.push(format!(
+            "IMPORTANT: Always use this scratchpad directory for temporary files instead of `/tmp` or other system temp directories:\n\
+             `{}`\n\n\
+             Use this directory for ALL temporary file needs:\n\
+             - Storing intermediate results or data during multi-step tasks\n\
+             - Writing temporary scripts or configuration files\n\
+             - Saving outputs that don't belong in the user's project\n\
+             - Creating working files during analysis or processing\n\
+             - Any file that would otherwise go to `/tmp`\n\n\
+             Only use `/tmp` if the user explicitly requests it.\n\
+             The scratchpad directory is session-specific, isolated from the user's project, and can be used freely without permission prompts.",
+            scratchpad.display()
+        ));
+    }
+
     Ok(lines.join("\n"))
 }
 
@@ -269,6 +306,47 @@ fn prepend_bullets(items: Vec<String>) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// Loads CLAUDE.md from the working directory and user home, concatenating both if present.
+fn load_memory_prompt(cwd: &Path) -> Option<String> {
+    let mut parts = Vec::new();
+    // Project-level CLAUDE.md
+    let project_path = cwd.join("CLAUDE.md");
+    if let Ok(content) = std::fs::read_to_string(&project_path) {
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            parts.push(trimmed.to_string());
+        }
+    }
+    // User-level CLAUDE.md (in ~/.claude/ or ~/.puffer/)
+    if let Some(home) = env::var_os("HOME") {
+        for dir in &[".claude", ".puffer"] {
+            let user_path = Path::new(&home).join(dir).join("CLAUDE.md");
+            if let Ok(content) = std::fs::read_to_string(&user_path) {
+                let trimmed = content.trim();
+                if !trimmed.is_empty() {
+                    parts.push(trimmed.to_string());
+                }
+            }
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
+}
+
+/// Returns the session-specific scratchpad directory, creating it if needed.
+fn scratchpad_dir(state: &AppState) -> Option<PathBuf> {
+    let dir = state
+        .cwd
+        .join(".puffer")
+        .join("scratchpad")
+        .join(state.session.id.to_string());
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
 }
 
 fn is_git_repository(cwd: &Path) -> bool {

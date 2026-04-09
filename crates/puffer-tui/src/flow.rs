@@ -238,7 +238,8 @@ pub(crate) fn handle_prompt_submit(
         return Ok(());
     }
     if !is_provider_prompt_input(&submitted) {
-        return handle_submit(
+        let had_transcript = !state.transcript.is_empty();
+        handle_submit(
             state,
             resources,
             providers,
@@ -247,7 +248,13 @@ pub(crate) fn handle_prompt_submit(
             session_store,
             submitted,
             no_alt_screen,
-        );
+        )?;
+        // Clear active loop if transcript was wiped (/compact, /clear).
+        if had_transcript && state.transcript.is_empty() && tui.active_loop.is_some() {
+            tui.active_loop = None;
+            tui.queued_prompts.clear();
+        }
+        return Ok(());
     }
     if tui.has_pending_submit() {
         return Ok(());

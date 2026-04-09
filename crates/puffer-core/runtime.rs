@@ -437,7 +437,7 @@ fn execute_anthropic(
         &request_config,
         &AnthropicModelRequest {
             model: model_id.clone(),
-            max_tokens: 1024,
+            max_tokens: resolve_max_output_tokens(provider, &model_id),
             messages: transcript_to_anthropic_request_messages(state, input),
         },
     )?;
@@ -461,10 +461,38 @@ fn execute_anthropic(
             .collect::<std::collections::BTreeSet<_>>(),
     )?;
 
+    // Prepend system-reminder context (CC's prependUserContext).
+    // Injected as the first user message so the model sees current date/context.
+    prepend_system_reminder(&mut messages);
+
+    // History snipping: truncate old tool outputs in messages to save context.
+    // CC does this via applyToolResultBudget / applyHistorySnip.
+    snip_old_tool_outputs(&mut messages);
+
+    // Auto-compact: if estimated token usage exceeds 80% of context window,
+    // truncate older messages to stay within budget (matching CC's threshold).
+    let context_window = provider
+        .models
+        .iter()
+        .find(|m| m.id == model_id)
+        .map(|m| m.context_window as u32)
+        .unwrap_or(200_000);
+    let auto_compact_threshold = context_window.saturating_mul(80) / 100;
+    auto_compact_messages(&mut messages, auto_compact_threshold);
+
+    // Resolve thinking/reasoning support from model capabilities + effort level.
+    let model_supports_thinking = provider
+        .models
+        .iter()
+        .find(|m| m.id == model_id)
+        .map(|m| m.supports_reasoning)
+        .unwrap_or(false);
+    let max_output = resolve_max_output_tokens(provider, &model_id);
+
     for _ in 0..8 {
         let mut body = json!({
             "model": model_id,
-            "max_tokens": 1024,
+            "max_tokens": max_output,
             "messages": messages,
             "system": anthropic_system_blocks(
                 &request.attribution_prefix_block,
@@ -474,9 +502,85 @@ fn execute_anthropic(
         });
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools.clone());
+            body["tool_choice"] = json!({"type": "auto"});
         }
+        // Add thinking/reasoning when the model supports it, effort is not "low",
+        // and the provider actually supports the Anthropic thinking API format.
+        let provider_supports_thinking_api = provider.id == "anthropic"
+            || provider.base_url.contains("anthropic.com");
+        if model_supports_thinking && provider_supports_thinking_api && state.effort_level != "low" {
+            let thinking_budget = match state.effort_level.as_str() {
+                "high" | "max" => max_output.saturating_sub(1).min(16_384),
+                _ => max_output.saturating_sub(1).min(8_192), // medium default
+            };
+            body["thinking"] = json!({
+                "type": "enabled",
+                "budget_tokens": thinking_budget
+            });
+        } else {
+            // Temperature is only sent when thinking is disabled (CC behavior).
+            body["temperature"] = json!(1);
+        }
+        // Context management: clear old thinking blocks server-side (CC parity).
+        if model_supports_thinking && provider_supports_thinking_api {
+            body["context_management"] = json!({
+                "edits": [{
+                    "type": "clear_thinking_20251015",
+                    "keep": "all"
+                }]
+            });
+        }
+        // Fast mode: send speed='fast' when the user has toggled /fast on.
+        if state.fast_mode {
+            body["speed"] = json!("fast");
+        }
+        // Metadata for request attribution (matches CC's metadata.user_id).
+        body["metadata"] = json!({
+            "user_id": format!(
+                "{{\"session_id\":\"{}\",\"device_id\":\"puffer-cli\"}}",
+                state.session.id
+            )
+        });
 
-        let response = send_http_request(&request.url, &request.headers, &body.to_string(), true)?;
+        let response = match send_http_request(&request.url, &request.headers, &body.to_string(), true) {
+            Ok(response) => response,
+            Err(error) => {
+                let err_msg = error.to_string();
+                // 413 / prompt_too_long recovery: drop oldest messages and retry.
+                if err_msg.contains("413")
+                    || err_msg.contains("prompt_too_long")
+                    || err_msg.contains("too long")
+                {
+                    if messages.len() > 3 {
+                        let drop_count = (messages.len() / 3).max(1);
+                        messages.drain(..drop_count);
+                        // Ensure first message is user role for valid alternation.
+                        if messages
+                            .first()
+                            .and_then(|m| m["role"].as_str())
+                            == Some("user")
+                        {
+                            if let Some(first) = messages.first_mut() {
+                                let existing = first["content"].as_str().unwrap_or("").to_string();
+                                first["content"] = json!(format!(
+                                    "[Context truncated]\n\n{existing}"
+                                ));
+                            }
+                        } else {
+                            messages.insert(
+                                0,
+                                json!({
+                                    "role": "user",
+                                    "content": "[Context truncated to fit within model limits]"
+                                }),
+                            );
+                        }
+                        continue;
+                    }
+                }
+                return Err(error);
+            }
+        };
         let cwd = state.cwd.clone();
         if let Some(tool_results) = execute_anthropic_tool_calls(
             state,
@@ -539,6 +643,17 @@ fn send_http_request_raw(
         match send_http_request_raw_once(url, headers, body, anthropic) {
             Ok(response) => {
                 trace_http_response(url, response.status.as_u16(), &response.text);
+                // Retry on 429 (rate limit) and 5xx (server errors).
+                let status = response.status.as_u16();
+                if attempt < total_attempts
+                    && (status == 429 || (500..=599).contains(&status))
+                {
+                    let delay = retry_delay(retry_config, attempt);
+                    if !delay.is_zero() {
+                        std::thread::sleep(delay);
+                    }
+                    continue;
+                }
                 return Ok(response);
             }
             Err(error) if attempt < total_attempts && is_retryable_http_error(&error) => {
@@ -560,7 +675,10 @@ fn send_http_request_raw_once(
     body: &str,
     anthropic: bool,
 ) -> Result<RawHttpResponse> {
-    let client = Client::new();
+    let client = Client::builder()
+        .timeout(Duration::from_secs(300))
+        .build()
+        .unwrap_or_else(|_| Client::new());
     let mut request = client.post(url);
     for (key, value) in headers {
         request = request.header(key, value);
@@ -601,7 +719,7 @@ fn send_http_request_raw_once(
 fn http_retry_config() -> HttpRetryConfig {
     HttpRetryConfig {
         retries: parsed_env_usize(HTTP_RETRY_ATTEMPTS_ENV)
-            .unwrap_or(0)
+            .unwrap_or(3)
             .min(10),
         delay_ms: parsed_env_u64(HTTP_RETRY_DELAY_MS_ENV)
             .unwrap_or(1_000)
@@ -874,13 +992,16 @@ fn execute_anthropic_tool_calls(
             tool_id,
             input.clone(),
         )?;
-        let output_text = if execution.output.stderr.is_empty() {
+        let raw_output = if execution.output.stderr.is_empty() {
             execution.output.stdout
         } else if execution.output.stdout.is_empty() {
             execution.output.stderr
         } else {
             format!("{}\n{}", execution.output.stdout, execution.output.stderr)
         };
+        // Truncate oversized tool results to prevent context overflow
+        // (CC limits: 50K chars per tool, 200K chars per message).
+        let output_text = truncate_tool_result(&raw_output, MAX_TOOL_RESULT_CHARS);
         results.push(json!({
             "type": "tool_result",
             "tool_use_id": tool_use_id,
@@ -890,7 +1011,7 @@ fn execute_anthropic_tool_calls(
         invocations.push(ToolInvocation {
             tool_id: tool_id.to_string(),
             input: serde_json::to_string(input)?,
-            output: output_text,
+            output: output_text.clone(),
             success: execution.success,
         });
     }
@@ -909,6 +1030,171 @@ struct AnthropicToolResults {
     results: Value,
     invocations: Vec<ToolInvocation>,
 }
+/// Trims older messages from the front when the estimated token count exceeds
+/// the threshold, keeping the most recent messages to stay within budget.
+/// This matches CC's auto-compact behavior (triggered at ~80% context usage).
+/// Maximum characters per individual tool result (matches CC's DEFAULT_MAX_RESULT_SIZE_CHARS).
+const MAX_TOOL_RESULT_CHARS: usize = 50_000;
+
+/// Prepends a system-reminder user message with current date and context.
+/// Matches CC's `prependUserContext()` which injects `<system-reminder>` tags.
+fn prepend_system_reminder(messages: &mut Vec<Value>) {
+    let now = time::OffsetDateTime::now_utc();
+    let date_str = format!("{}-{:02}-{:02}", now.year(), now.month() as u8, now.day());
+    let git_status = git_status_context();
+    let mut sections = format!(
+        "# currentDate\nToday's date is {date_str}."
+    );
+    if !git_status.is_empty() {
+        sections.push_str(&format!("\n# gitStatus\n{git_status}"));
+    }
+    let reminder = format!(
+        "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n\
+         {sections}\n\n\
+         IMPORTANT: this context may or may not be relevant to your tasks. \
+         You should not respond to this context unless it is highly relevant to your task.\n\
+         </system-reminder>"
+    );
+    // Merge into first user message if possible to avoid breaking alternation.
+    if let Some(first) = messages.first_mut() {
+        if first["role"].as_str() == Some("user") {
+            let existing = first["content"].as_str().unwrap_or("").to_string();
+            first["content"] = json!(format!("{reminder}\n{existing}"));
+            return;
+        }
+    }
+    messages.insert(0, json!({"role": "user", "content": reminder}));
+}
+
+/// Returns a short git status summary for system-reminder injection (CC parity).
+fn git_status_context() -> String {
+    let branch = std::process::Command::new("git")
+        .args(["branch", "--show-current"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    if branch.is_empty() {
+        return String::new();
+    }
+    let status = std::process::Command::new("git")
+        .args(["status", "--short", "--no-ahead-behind"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    let log = std::process::Command::new("git")
+        .args(["log", "--oneline", "-3", "--no-decorate"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    let mut result = format!("Current branch: {branch}");
+    if !status.is_empty() {
+        result.push_str(&format!("\nStatus:\n{status}"));
+    }
+    if !log.is_empty() {
+        result.push_str(&format!("\nRecent commits:\n{log}"));
+    }
+    result
+}
+
+/// Number of recent messages whose tool outputs are preserved in full.
+const SNIP_KEEP_RECENT: usize = 6;
+/// Maximum chars for a snipped tool output (older messages).
+const SNIP_MAX_CHARS: usize = 500;
+
+/// Truncates tool outputs in older messages to free context space.
+/// Keeps the most recent SNIP_KEEP_RECENT messages intact.
+/// This matches CC's history snipping / tool result budget.
+fn snip_old_tool_outputs(messages: &mut [Value]) {
+    let total = messages.len();
+    if total <= SNIP_KEEP_RECENT {
+        return;
+    }
+    let cutoff = total - SNIP_KEEP_RECENT;
+    for msg in &mut messages[..cutoff] {
+        let role = msg["role"].as_str().unwrap_or("");
+        if role != "user" {
+            continue;
+        }
+        // Check if this is a system-tagged tool output message.
+        let content = msg["content"].as_str().unwrap_or("");
+        if !content.starts_with("[system]\nTool ") {
+            continue;
+        }
+        if content.chars().count() <= SNIP_MAX_CHARS {
+            continue;
+        }
+        let snipped: String = content.chars().take(SNIP_MAX_CHARS).collect();
+        msg["content"] = json!(format!("{snipped}\n[...output snipped...]"));
+    }
+}
+
+fn truncate_tool_result(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let truncated: String = text.chars().take(max_chars).collect();
+    format!("{truncated}\n\n[Output truncated — {max_chars} char limit reached]")
+}
+
+fn auto_compact_messages(messages: &mut Vec<Value>, threshold_tokens: u32) {
+    let estimate = |msgs: &[Value]| -> u32 {
+        msgs.iter()
+            .map(|m| {
+                let text = m["content"].as_str().unwrap_or("");
+                (text.chars().count() as u32 + 3) / 4
+            })
+            .sum()
+    };
+    let total = estimate(messages);
+    if total <= threshold_tokens || messages.len() <= 2 {
+        return;
+    }
+    // Drop oldest messages (keeping at least the last 2) until under budget.
+    while messages.len() > 2 && estimate(messages) > threshold_tokens {
+        messages.remove(0);
+    }
+    // Ensure the first message is "user" for valid API alternation.
+    let first_is_user = messages
+        .first()
+        .and_then(|m| m["role"].as_str())
+        == Some("user");
+    if first_is_user {
+        // Merge compaction note into existing first user message.
+        if let Some(first) = messages.first_mut() {
+            let existing = first["content"].as_str().unwrap_or("").to_string();
+            first["content"] =
+                json!(format!("[Earlier messages compacted]\n\n{existing}"));
+        }
+    } else {
+        // Insert a user message before the assistant message.
+        messages.insert(
+            0,
+            json!({
+                "role": "user",
+                "content": "[Earlier conversation messages were automatically compacted to fit context window]"
+            }),
+        );
+    }
+}
+
+/// Resolves the max output tokens for the given model, falling back to a
+/// sensible default when the provider catalog doesn't specify one.
+fn resolve_max_output_tokens(provider: &ProviderDescriptor, model_id: &str) -> u32 {
+    provider
+        .models
+        .iter()
+        .find(|m| m.id == model_id)
+        .map(|m| m.max_output_tokens)
+        .filter(|&v| v > 0)
+        .unwrap_or(16_384)
+}
+
 fn transcript_to_anthropic_messages(state: &AppState, input: &str) -> Vec<Value> {
     let mut messages = state
         .transcript
@@ -975,6 +1261,7 @@ fn anthropic_system_blocks(
         blocks.push(json!({
             "type": "text",
             "text": system_prompt,
+            "cache_control": { "type": "ephemeral" }
         }));
     }
     if let Some(plan_mode_context) = plan_mode_context {

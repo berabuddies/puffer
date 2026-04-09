@@ -676,8 +676,9 @@ fn write_agent_completion_notification(
     let Ok(mut store) = load_store::<MessageStore>(&messages_path(cwd)) else {
         return;
     };
-    let preview = if result_summary.len() > 200 {
-        format!("{}...", &result_summary[..200])
+    let preview = if result_summary.chars().count() > 200 {
+        let truncated: String = result_summary.chars().take(200).collect();
+        format!("{truncated}...")
     } else {
         result_summary.to_string()
     };

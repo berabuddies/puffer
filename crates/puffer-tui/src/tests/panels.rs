@@ -395,7 +395,7 @@ fn render_shows_loop_status_box_when_active() {
     terminal
         .draw(|frame| {
             render::set_active_overlay(None);
-            render::set_pending_submit_state(None, vec![]);
+            render::set_pending_submit_state(None, vec![], vec![]);
             render::set_tool_details_expanded(false);
             render::set_follow_output(true);
             render::render(
