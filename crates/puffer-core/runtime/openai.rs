@@ -7,10 +7,13 @@ mod support;
 
 pub(super) use self::support::build_codex_openai_request_body;
 use self::support::{
-    append_default_openai_headers, extend_input_with_continuation, is_codex_openai_provider,
-    is_openai_structured_output_error, openai_base_url_for_auth, openai_model_supports_reasoning,
-    openai_registry_credential, openai_responses_path, prefer_native_structured_output,
-    retry_openai_transport, structured_output_endpoint_id, OPENAI_STRUCTURED_OUTPUT_FAMILY,
+    append_default_openai_headers, apply_previous_response_id, is_codex_openai_provider,
+    is_openai_structured_output_error, next_openai_input, openai_base_url_for_auth,
+    openai_model_supports_reasoning, openai_registry_credential, openai_responses_path,
+    openai_stream_read_timeout, prefer_native_structured_output, retry_openai_transport,
+    structured_output_endpoint_id, trace_openai_http_request,
+    trace_openai_http_response_headers,
+    OPENAI_STRUCTURED_OUTPUT_FAMILY,
 };
 use super::structured_output_support::{
     openai_chat_completion_tools_for_request, openai_chat_response_format,
@@ -130,22 +133,26 @@ fn execute_openai_once(
             .map(|tool| tool.name.clone())
             .collect::<std::collections::BTreeSet<_>>(),
     )?;
-    let mut next_input = transcript_to_openai_input(state, input, Some(&system_prompt))?;
+    let instructions = openai_request_instructions(state, Some(&system_prompt))?;
+    let mut next_input = transcript_to_openai_input(state, input)?;
     let mut invocations = Vec::new();
     let supports_reasoning = openai_model_supports_reasoning(provider, &model_id);
+    let mut previous_response_id = None;
 
-    for _ in 0..8 {
+    loop {
         let response =
             send_openai_request_with_refresh(auth_store, &mut execution, |request_config| {
-                let body = build_codex_openai_request_body(
+                let mut body = build_codex_openai_request_body(
                     state,
                     &model_id,
+                    &instructions,
                     next_input.clone(),
                     &tools,
                     supports_reasoning,
                     text.clone(),
                     false,
                 );
+                apply_previous_response_id(&mut body, previous_response_id.as_deref());
                 build_json_post_request(
                     request_config,
                     openai_responses_path(&request_config.base_url),
@@ -154,6 +161,7 @@ fn execute_openai_once(
             })?;
 
         let parsed = parse_responses_response(&serde_json::to_string(&response)?)?;
+        previous_response_id = parsed.id.clone();
         let tool_calls = extract_responses_tool_calls(&parsed)?;
         if tool_calls.is_empty() {
             let assistant_text = parse_openai_assistant_text(&parsed, &response, state)?;
@@ -179,13 +187,9 @@ fn execute_openai_once(
             options.tool_filter,
         )?;
         invocations.extend(tool_results.invocations);
-        next_input = extend_input_with_continuation(
-            next_input,
-            continuation_input(&tool_calls, &tool_results.outputs),
-        );
+        next_input =
+            next_openai_input(previous_response_id.as_deref(), next_input, continuation_input(&tool_calls, &tool_results.outputs));
     }
-
-    bail!("openai tool loop exceeded iteration limit")
 }
 
 pub(super) fn execute_openai_streaming<F>(
@@ -250,11 +254,6 @@ where
 {
     let structured_output = options.structured_output;
     let mut execution = resolve_openai_execution_config(state, auth_store, provider)?;
-    if !execution.codex_style {
-        return execute_openai_once(
-            state, resources, providers, provider, model_id, auth_store, input, options, use_native,
-        );
-    }
 
     let registry = ToolRegistry::from_resources(resources);
     let permission_context = load_runtime_permission_context(&state.cwd, resources, state)?;
@@ -275,34 +274,41 @@ where
             .map(|tool| tool.name.clone())
             .collect::<std::collections::BTreeSet<_>>(),
     )?;
-    let mut next_input = transcript_to_openai_input(state, input, Some(&system_prompt))?;
+    let instructions = openai_request_instructions(state, Some(&system_prompt))?;
+    let mut next_input = transcript_to_openai_input(state, input)?;
     let mut invocations = Vec::new();
     let supports_reasoning = openai_model_supports_reasoning(provider, &model_id);
+    let mut previous_response_id = None;
 
-    for _ in 0..8 {
-        let response = send_openai_request_with_refresh_streaming(
-            auth_store,
-            &mut execution,
-            |request_config| {
-                let body = build_codex_openai_request_body(
-                    state,
-                    &model_id,
-                    next_input.clone(),
-                    &tools,
-                    supports_reasoning,
-                    text.clone(),
-                    true,
-                );
-                build_json_post_request(
-                    request_config,
-                    openai_responses_path(&request_config.base_url),
-                    &body,
-                )
-            },
-            on_event,
-        )?;
+    loop {
+        let response = retry_openai_transport(|| {
+            send_openai_request_with_refresh_streaming(
+                auth_store,
+                &mut execution,
+                |request_config| {
+                    let mut body = build_codex_openai_request_body(
+                        state,
+                        &model_id,
+                        &instructions,
+                        next_input.clone(),
+                        &tools,
+                        supports_reasoning,
+                        text.clone(),
+                        true,
+                    );
+                    apply_previous_response_id(&mut body, previous_response_id.as_deref());
+                    build_json_post_request(
+                        request_config,
+                        openai_responses_path(&request_config.base_url),
+                        &body,
+                    )
+                },
+                on_event,
+            )
+        })?;
 
         let parsed = parse_responses_response(&serde_json::to_string(&response)?)?;
+        previous_response_id = parsed.id.clone();
         let tool_calls = extract_responses_tool_calls(&parsed)?;
         if tool_calls.is_empty() {
             let assistant_text = parse_openai_assistant_text(&parsed, &response, state)?;
@@ -337,18 +343,12 @@ where
             options.tool_filter,
         )?;
         if !tool_results.invocations.is_empty() {
-            on_event(TurnStreamEvent::ToolInvocations(
-                tool_results.invocations.clone(),
-            ));
+            on_event(TurnStreamEvent::ToolInvocations(tool_results.invocations.clone()));
         }
         invocations.extend(tool_results.invocations);
-        next_input = extend_input_with_continuation(
-            next_input,
-            continuation_input(&tool_calls, &tool_results.outputs),
-        );
+        next_input =
+            next_openai_input(previous_response_id.as_deref(), next_input, continuation_input(&tool_calls, &tool_results.outputs));
     }
-
-    bail!("openai tool loop exceeded iteration limit")
 }
 
 pub(super) fn execute_openai_completions(
@@ -425,7 +425,7 @@ fn execute_openai_completions_once(
     let mut messages = transcript_to_openai_chat_messages(state, input, Some(&system_prompt))?;
     let mut invocations = Vec::new();
 
-    for _ in 0..8 {
+    loop {
         let response =
             send_openai_request_with_refresh(auth_store, &mut execution, |request_config| {
                 build_chat_completions_request(
@@ -509,8 +509,6 @@ fn execute_openai_completions_once(
             });
         }
     }
-
-    bail!("openai chat completions tool loop exceeded iteration limit")
 }
 
 fn continuation_input(
@@ -621,42 +619,12 @@ fn parse_openai_text(response: &Value) -> Result<String> {
     Ok(parts.join("\n"))
 }
 
-pub(super) fn transcript_to_openai_input(
-    state: &AppState,
-    input: &str,
-    system_prompt: Option<&str>,
-) -> Result<Value> {
-    let plan_mode_context = crate::command_helpers::prompt::plan_mode_context_message(state)?;
-    if state.transcript.is_empty() && plan_mode_context.is_none() && system_prompt.is_none() {
+pub(super) fn transcript_to_openai_input(state: &AppState, input: &str) -> Result<Value> {
+    if state.transcript.is_empty() {
         return Ok(Value::String(input.to_string()));
     }
 
     let mut items = Vec::new();
-    if let Some(system_prompt) = system_prompt.filter(|prompt| !prompt.trim().is_empty()) {
-        items.push(json!({
-            "role": "system",
-            "content": system_prompt,
-        }));
-    }
-    if let Some(plan_mode_context) = plan_mode_context {
-        items.push(json!({
-            "role": "system",
-            "content": plan_mode_context,
-        }));
-    }
-    if state.transcript.is_empty() {
-        items.push(json!({
-            "role": "user",
-            "content": [
-                {
-                    "type": "input_text",
-                    "text": input,
-                }
-            ],
-        }));
-        return Ok(Value::Array(items));
-    }
-
     items.extend(
         state
             .transcript
@@ -692,6 +660,24 @@ pub(super) fn transcript_to_openai_input(
             }),
     );
     Ok(Value::Array(items))
+}
+
+fn openai_request_instructions(state: &AppState, system_prompt: Option<&str>) -> Result<String> {
+    let mut sections = Vec::new();
+    if let Some(system_prompt) = system_prompt
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+    {
+        sections.push(system_prompt.to_string());
+    }
+    if let Some(plan_mode_context) =
+        crate::command_helpers::prompt::plan_mode_context_message(state)?
+            .map(|message| message.trim().to_string())
+            .filter(|message| !message.is_empty())
+    {
+        sections.push(plan_mode_context);
+    }
+    Ok(sections.join("\n\n"))
 }
 
 pub(super) fn transcript_to_openai_chat_messages(
@@ -765,10 +751,26 @@ pub(super) fn parse_openai_text_fallback(response: &Value, state: &AppState) -> 
     {
         return Ok(text);
     }
+    let output_kinds = response
+        .get("output")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("type").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default();
     bail!(
-        "provider {} returned an unsupported response shape for session {}",
+        "provider {} returned an unsupported response shape for session {} (output types: {})",
         state.current_provider.as_deref().unwrap_or("unknown"),
-        state.session.id
+        state.session.id,
+        if output_kinds.is_empty() {
+            "<none>"
+        } else {
+            output_kinds.as_str()
+        }
     )
 }
 
@@ -919,7 +921,9 @@ where
     G: FnMut(TurnStreamEvent),
 {
     let request = build_request(&execution.request_config)?;
-    let response = send_openai_request_stream_raw(&request.url, &request.headers, &request.body)?;
+    let response = retry_openai_transport(|| {
+        send_openai_request_stream_raw(&request.url, &request.headers, &request.body)
+    })?;
     if response.status() != StatusCode::UNAUTHORIZED || execution.refresh_token.is_none() {
         return parse_openai_stream_response(&request.url, response, on_event);
     }
@@ -937,16 +941,16 @@ where
     auth_store.set_oauth(execution.provider_id.clone(), stored);
 
     let retry = build_request(&execution.request_config)?;
-    let retry_response = send_openai_request_stream_raw(&retry.url, &retry.headers, &retry.body)?;
+    let retry_response =
+        retry_openai_transport(|| send_openai_request_stream_raw(&retry.url, &retry.headers, &retry.body))?;
     parse_openai_stream_response(&retry.url, retry_response, on_event)
 }
 
-fn send_openai_request_stream_raw(
-    url: &str,
-    headers: &[(String, String)],
-    body: &str,
-) -> Result<Response> {
-    let client = Client::new();
+fn send_openai_request_stream_raw(url: &str, headers: &[(String, String)], body: &str) -> Result<Response> {
+    trace_openai_http_request(url, headers, body);
+    let client = Client::builder()
+        .timeout(openai_stream_read_timeout())
+        .build()?;
     let mut request = client.post(url);
     for (key, value) in headers {
         request = request.header(key, value);
@@ -957,10 +961,19 @@ fn send_openai_request_stream_raw(
     {
         request = request.header("content-type", "application/json");
     }
-    request
+    let response = request
         .body(body.to_string())
         .send()
-        .with_context(|| format!("request to {url} failed"))
+        .with_context(|| format!("request to {url} failed"))?;
+    trace_openai_http_response_headers(
+        url,
+        response.status().as_u16(),
+        response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value: &reqwest::header::HeaderValue| value.to_str().ok()),
+    );
+    Ok(response)
 }
 
 fn parse_openai_stream_response<G>(url: &str, response: Response, on_event: &mut G) -> Result<Value>

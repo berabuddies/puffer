@@ -86,9 +86,9 @@ where
                 *response_id = Some(id.to_string());
             }
         }
-        "response.output_item.done" => {
+        "response.output_item.added" | "response.output_item.done" => {
             if let Some(item) = event.get("item") {
-                output.push(item.clone());
+                upsert_output_item(output, item.clone());
             }
         }
         "response.output_text.delta" => {
@@ -99,4 +99,17 @@ where
         _ => {}
     }
     Ok(())
+}
+
+fn upsert_output_item(output: &mut Vec<Value>, item: Value) {
+    if let Some(item_id) = item.get("id").and_then(Value::as_str) {
+        if let Some(existing) = output
+            .iter_mut()
+            .find(|existing| existing.get("id").and_then(Value::as_str) == Some(item_id))
+        {
+            *existing = item;
+            return;
+        }
+    }
+    output.push(item);
 }

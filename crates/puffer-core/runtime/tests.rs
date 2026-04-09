@@ -4,7 +4,7 @@ use base64::Engine as _;
 use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
 use puffer_provider_openai::{
     OpenAIAuth, OpenAIRequestConfig, OpenAIResponseToolCall, OpenAIResponsesTextConfig,
-    OpenAIResponsesTextFormat,
+    OpenAIResponsesTextFormat, OpenAIResponsesTool,
 };
 use puffer_provider_registry::{AuthMode, OAuthCredential, ProviderDescriptor, StoredCredential};
 use puffer_resources::{AgentSpec, LoadedItem, LoadedResources, SourceInfo, SourceKind, ToolSpec};
@@ -539,6 +539,7 @@ fn build_codex_openai_request_body_matches_codex_shape() {
     let body = build_codex_openai_request_body(
         &state,
         "gpt-5",
+        "system instructions",
         Value::String("hello".to_string()),
         &Vec::new(),
         true,
@@ -550,11 +551,14 @@ fn build_codex_openai_request_body_matches_codex_shape() {
     assert_eq!(body["stream"], json!(true));
     assert_eq!(body["include"][0], json!("reasoning.encrypted_content"));
     assert_eq!(body["prompt_cache_key"], json!(Uuid::nil().to_string()));
+    assert_eq!(body["instructions"], json!("system instructions"));
     assert_eq!(body["input"][0]["type"], json!("message"));
     assert_eq!(body["input"][0]["content"][0]["text"], json!("hello"));
     assert_eq!(body["reasoning"]["summary"], json!("auto"));
     assert_eq!(body["reasoning"]["effort"], json!("medium"));
+    assert_eq!(body["parallel_tool_calls"], json!(false));
     assert!(body.get("previous_response_id").is_none());
+    assert!(body.get("service_tier").is_none());
 }
 
 #[test]
@@ -564,6 +568,7 @@ fn build_codex_openai_request_body_supports_xhigh_effort() {
     let body = build_codex_openai_request_body(
         &state,
         "gpt-5",
+        "",
         Value::String("hello".to_string()),
         &Vec::new(),
         true,
@@ -575,11 +580,46 @@ fn build_codex_openai_request_body_supports_xhigh_effort() {
 }
 
 #[test]
+fn build_codex_openai_request_body_uses_priority_tier_for_fast_mode() {
+    let mut state = state();
+    state.fast_mode = true;
+    let tools = vec![OpenAIResponsesTool {
+        kind: "function".to_string(),
+        name: "read_file".to_string(),
+        description: "Reads a file.".to_string(),
+        strict: false,
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string" }
+            }
+        }),
+        filters: None,
+        user_location: None,
+        external_web_access: None,
+    }];
+    let body = build_codex_openai_request_body(
+        &state,
+        "gpt-5",
+        "",
+        Value::String("hello".to_string()),
+        &tools,
+        true,
+        None,
+        true,
+    );
+
+    assert_eq!(body["service_tier"], json!("priority"));
+    assert_eq!(body["parallel_tool_calls"], json!(false));
+}
+
+#[test]
 fn build_codex_openai_request_body_includes_native_structured_output_config() {
     let state = state();
     let body = build_codex_openai_request_body(
         &state,
         "gpt-5",
+        "",
         Value::String("hello".to_string()),
         &Vec::new(),
         true,

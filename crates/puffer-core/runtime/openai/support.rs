@@ -13,6 +13,7 @@ pub(super) const OPENAI_STRUCTURED_OUTPUT_FAMILY: &str = "openai";
 pub(crate) fn build_codex_openai_request_body(
     state: &AppState,
     model_id: &str,
+    instructions: &str,
     input: Value,
     tools: &[OpenAIResponsesTool],
     supports_reasoning: bool,
@@ -30,11 +31,11 @@ pub(crate) fn build_codex_openai_request_body(
         .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
     let mut body = json!({
         "model": model_id,
-        "instructions": "",
+        "instructions": instructions,
         "input": codex_input_items(input),
         "tools": tools,
         "tool_choice": "auto",
-        "parallel_tool_calls": !tools.is_empty(),
+        "parallel_tool_calls": false,
         "store": store,
         "stream": stream,
         "include": include,
@@ -45,6 +46,9 @@ pub(crate) fn build_codex_openai_request_body(
     }
     if let Some(text) = text {
         body["text"] = serde_json::to_value(text).unwrap_or(Value::Null);
+    }
+    if state.fast_mode {
+        body["service_tier"] = json!("priority");
     }
     body
 }
@@ -121,6 +125,15 @@ fn openai_transport_retry_delay() -> Duration {
     Duration::from_millis(delay_ms)
 }
 
+pub(super) fn openai_stream_read_timeout() -> Duration {
+    let timeout_ms = std::env::var("PUFFER_OPENAI_STREAM_READ_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(30_000)
+        .clamp(1_000, 300_000);
+    Duration::from_millis(timeout_ms)
+}
+
 fn is_retryable_openai_transport_error(error: &Error) -> bool {
     if error.chain().any(|cause| {
         cause
@@ -164,6 +177,33 @@ pub(super) fn openai_registry_credential(
 
 pub(super) fn extend_input_with_continuation(input: Value, continuation: Value) -> Value {
     let mut items = openai_input_items(input);
+    items.extend(openai_input_items(continuation));
+    Value::Array(items)
+}
+
+pub(super) fn apply_previous_response_id(body: &mut Value, previous_response_id: Option<&str>) {
+    if let Some(previous_response_id) = previous_response_id {
+        body["previous_response_id"] = json!(previous_response_id);
+    }
+}
+
+pub(super) fn next_openai_input(
+    previous_response_id: Option<&str>,
+    input: Value,
+    continuation: Value,
+) -> Value {
+    if previous_response_id.is_none() {
+        return extend_input_with_continuation(input, continuation);
+    }
+    let mut items = openai_input_items(input)
+        .into_iter()
+        .filter(|item| {
+            !matches!(
+                item.get("type").and_then(Value::as_str),
+                Some("function_call" | "function_call_output")
+            )
+        })
+        .collect::<Vec<_>>();
     items.extend(openai_input_items(continuation));
     Value::Array(items)
 }
@@ -240,6 +280,58 @@ fn has_header(headers: &[(String, String)], name: &str) -> bool {
     headers
         .iter()
         .any(|(header, _)| header.eq_ignore_ascii_case(name))
+}
+
+pub(super) fn trace_openai_http_request(url: &str, headers: &[(String, String)], body: &str) {
+    let Ok(path) = std::env::var("PUFFER_HTTP_TRACE_PATH") else {
+        return;
+    };
+    let rendered_headers = headers
+        .iter()
+        .map(|(key, value)| {
+            if key.eq_ignore_ascii_case("authorization") {
+                format!("{key}: <redacted>")
+            } else {
+                format!("{key}: {value}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| {
+            use std::io::Write as _;
+            writeln!(
+                file,
+                "--- REQUEST {} ---\n{}\n\n{}\n",
+                url, rendered_headers, body
+            )
+        });
+}
+
+pub(super) fn trace_openai_http_response_headers(
+    url: &str,
+    status: u16,
+    content_type: Option<&str>,
+) {
+    let Ok(path) = std::env::var("PUFFER_HTTP_TRACE_PATH") else {
+        return;
+    };
+    let content_type = content_type.unwrap_or("<missing>");
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| {
+            use std::io::Write as _;
+            writeln!(
+                file,
+                "--- RESPONSE_HEADERS {} {} ---\ncontent-type: {}\n",
+                status, url, content_type
+            )
+        });
 }
 
 fn codex_input_items(input: Value) -> Value {
