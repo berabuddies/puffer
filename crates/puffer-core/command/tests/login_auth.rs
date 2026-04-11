@@ -82,7 +82,7 @@ fn login_command_runs_oauth_flow_for_oauth_capable_provider() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text == "Completed login flow for custom-openai."
     ));
 }
@@ -129,7 +129,7 @@ fn login_command_reports_guidance_when_oauth_flow_fails() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("Login failed for custom-openai: browser launch blocked")
             && text.contains("Supported auth modes: api_key, oauth")
             && text.contains("API key: `puffer auth set-api-key custom-openai --stdin`")
@@ -173,7 +173,7 @@ fn login_command_reports_session_ingress_support() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("session_ingress")
             && text.contains("Session ingress: exported session-ingress credentials are supported.")
     ));
@@ -211,7 +211,7 @@ fn login_command_reports_when_provider_has_no_auth_modes() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text == "ollama does not require stored credentials."
     ));
 }
@@ -272,7 +272,7 @@ fn logout_command_removes_anthropic_credentials_and_clears_active_selection() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text == "Removed stored credentials for anthropic and cleared the active selection."
     ));
 }
@@ -333,7 +333,7 @@ fn logout_command_clears_selection_when_model_provider_matches_openai() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text == "Removed stored credentials for openai and cleared the active selection."
     ));
 }
@@ -387,7 +387,7 @@ fn logout_command_defaults_to_current_provider_when_args_are_omitted() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text == "Removed stored credentials for openai and cleared the active selection."
     ));
 }

@@ -172,10 +172,15 @@ fn provider_message_payload(message: &RenderedMessage, api: &str, index: usize) 
         "anthropic-messages" => serde_json::to_string(&json!({
             "role": match message.role {
                 MessageRole::Assistant => "assistant",
-                MessageRole::User | MessageRole::System => "user",
+                MessageRole::User
+                | MessageRole::System
+                | MessageRole::ToolCall
+                | MessageRole::ToolResult => "user",
             },
             "content": match message.role {
-                MessageRole::System => format!("[system]\n{}", message.text),
+                MessageRole::System
+                | MessageRole::ToolCall
+                | MessageRole::ToolResult => format!("[system]\n{}", message.text),
                 _ => message.text.clone(),
             },
         }))
@@ -184,7 +189,9 @@ fn provider_message_payload(message: &RenderedMessage, api: &str, index: usize) 
             "role": match message.role {
                 MessageRole::User => "user",
                 MessageRole::Assistant => "assistant",
-                MessageRole::System => "system",
+                MessageRole::System
+                | MessageRole::ToolCall
+                | MessageRole::ToolResult => "system",
             },
             "content": message.text,
         }))
@@ -212,7 +219,9 @@ fn provider_message_payload(message: &RenderedMessage, api: &str, index: usize) 
                 "status": "completed",
                 "id": format!("msg_{index}"),
             }),
-            MessageRole::System => json!({
+            MessageRole::System
+            | MessageRole::ToolCall
+            | MessageRole::ToolResult => json!({
                 "role": "system",
                 "content": message.text,
             }),

@@ -533,6 +533,8 @@ fn role_label(role: &MessageRole) -> &'static str {
         MessageRole::User => "User",
         MessageRole::Assistant => "Assistant",
         MessageRole::System => "System",
+        MessageRole::ToolCall => "ToolCall",
+        MessageRole::ToolResult => "ToolResult",
     }
 }
 

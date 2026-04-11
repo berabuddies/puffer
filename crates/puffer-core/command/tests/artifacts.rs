@@ -57,7 +57,7 @@ fn copy_command_reports_invalid_history_index() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("Usage: /copy [N]")
     ));
 }
@@ -135,7 +135,7 @@ fn copy_internal_commands_copy_code_blocks_and_persist_preference() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("copy.rs")
     ));
 
@@ -197,7 +197,7 @@ fn export_command_writes_plain_text_transcript_to_txt_file() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("Conversation exported to")
             && text.contains("ship-notes.txt")
     ));

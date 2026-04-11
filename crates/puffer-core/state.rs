@@ -12,6 +12,10 @@ pub enum MessageRole {
     User,
     Assistant,
     System,
+    /// Structured tool call — preserves call_id and tool name for API reconstruction.
+    ToolCall,
+    /// Structured tool result — preserves call_id for API reconstruction.
+    ToolResult,
 }
 
 /// Represents one rendered transcript message in the interactive UI.
@@ -19,6 +23,18 @@ pub enum MessageRole {
 pub struct RenderedMessage {
     pub role: MessageRole,
     pub text: String,
+    /// Tool call ID for ToolCall/ToolResult roles.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+    /// Tool name for ToolCall role.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_id: Option<String>,
+    /// Tool input JSON for ToolCall role.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_input: Option<String>,
+    /// Whether the tool call succeeded (ToolResult role).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub success: Option<bool>,
 }
 
 /// Describes the completion state of one recorded task.
@@ -156,6 +172,15 @@ impl AppState {
                 TranscriptEvent::SystemMessage { text } => {
                     state.push_message(MessageRole::System, text)
                 }
+                TranscriptEvent::ToolInvocation {
+                    call_id,
+                    tool_id,
+                    input,
+                    output,
+                    success,
+                } => {
+                    state.push_tool_invocation(&call_id, &tool_id, &input, &output, success);
+                }
                 TranscriptEvent::CommandInvoked { .. } => {}
                 TranscriptEvent::SessionRenamed { name } => {
                     state.session.display_name = Some(name);
@@ -232,6 +257,37 @@ impl AppState {
         self.transcript.push(RenderedMessage {
             role,
             text: text.into(),
+            call_id: None,
+            tool_id: None,
+            tool_input: None,
+            success: None,
+        });
+    }
+
+    /// Appends a structured tool invocation (call + result) to the transcript.
+    pub fn push_tool_invocation(
+        &mut self,
+        call_id: &str,
+        tool_id: &str,
+        input: &str,
+        output: &str,
+        success: bool,
+    ) {
+        self.transcript.push(RenderedMessage {
+            role: MessageRole::ToolCall,
+            text: input.to_string(),
+            call_id: Some(call_id.to_string()),
+            tool_id: Some(tool_id.to_string()),
+            tool_input: Some(input.to_string()),
+            success: None,
+        });
+        self.transcript.push(RenderedMessage {
+            role: MessageRole::ToolResult,
+            text: output.to_string(),
+            call_id: Some(call_id.to_string()),
+            tool_id: Some(tool_id.to_string()),
+            tool_input: None,
+            success: Some(success),
         });
     }
 

@@ -54,6 +54,7 @@ pub(crate) struct BenchmarkRunArgs {
 
 #[derive(Debug, Clone, Serialize)]
 struct BenchmarkToolInvocation {
+    call_id: String,
     tool_id: String,
     input: String,
     output: String,
@@ -227,6 +228,7 @@ pub(crate) fn run_benchmark_command(
                 .tool_invocations
                 .into_iter()
                 .map(|tool| BenchmarkToolInvocation {
+                    call_id: tool.call_id,
                     tool_id: tool.tool_id,
                     input: tool.input,
                     output: tool.output,

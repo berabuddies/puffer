@@ -58,7 +58,7 @@ fn status_command_reports_richer_session_and_resource_status() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("Status")
             && text.contains("Provider: OpenAI")
             && text.contains("Authentication: API key")

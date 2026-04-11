@@ -31,7 +31,7 @@ fn tag_command_toggles_session_tag() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text == "Tagged session with #dockyard"
     ));
 
@@ -51,7 +51,7 @@ fn tag_command_toggles_session_tag() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text == "Removed tag #dockyard"
     ));
 }
@@ -86,7 +86,7 @@ fn tag_command_without_argument_shows_help() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("Usage: /tag <tag-name>")
     ));
 }

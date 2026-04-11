@@ -813,31 +813,27 @@ pub(crate) fn append_tool_messages(
             invocation.input.clone(),
             invocation.success,
         );
-        let rendered = render_tool_invocation(invocation);
-        state.push_message(MessageRole::System, rendered.clone());
+        state.push_tool_invocation(
+            &invocation.call_id,
+            &invocation.tool_id,
+            &invocation.input,
+            &invocation.output,
+            invocation.success,
+        );
         session_store.append_event(
             state.session.id,
-            TranscriptEvent::SystemMessage { text: rendered },
+            TranscriptEvent::ToolInvocation {
+                call_id: invocation.call_id.clone(),
+                tool_id: invocation.tool_id.clone(),
+                input: invocation.input.clone(),
+                output: invocation.output.clone(),
+                success: invocation.success,
+            },
         )?;
     }
     Ok(())
 }
 
-fn render_tool_invocation(invocation: &ToolInvocation) -> String {
-    let status = if invocation.success { "ok" } else { "error" };
-    let output = invocation.output.trim();
-    if output.is_empty() {
-        format!(
-            "Tool {} [{}]\ninput: {}",
-            invocation.tool_id, status, invocation.input
-        )
-    } else {
-        format!(
-            "Tool {} [{}]\ninput: {}\n{}",
-            invocation.tool_id, status, invocation.input, output
-        )
-    }
-}
 
 /// Executes a `!cmd` shell shortcut and records the result into the transcript.
 pub(crate) fn execute_shell_shortcut(

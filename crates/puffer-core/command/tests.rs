@@ -280,7 +280,7 @@ fn hooks_command_creates_workspace_file() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("loaded_hooks=1") && text.contains("tool-end")
     ));
 }
@@ -345,7 +345,7 @@ fn doctor_reports_discovery_and_diagnostics() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("Puffer doctor")
             && text.contains("auth=api-key")
             && text.contains("discovery=configured")
@@ -492,7 +492,7 @@ fn agents_command_lists_builtin_resource_agents() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("explore [builtin]")
     ));
 }
@@ -534,7 +534,7 @@ fn prompt_commands_append_user_message_and_surface_runtime_failures() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("Prompt command /review failed")
     ));
 }
@@ -622,7 +622,7 @@ fn pr_comments_command_uses_reference_prompt_text_from_resources() {
         state.transcript.first(),
         Some(RenderedMessage {
             role: MessageRole::User,
-            text,
+            text, ..
         }) if text.contains("gh pr view --json number,headRepository")
             && text.contains("gh api /repos/{owner}/{repo}/issues/{number}/comments")
             && text.contains("Return ONLY the formatted comments")
@@ -677,7 +677,7 @@ fn skill_command_executes_rendered_skill_prompt_instead_of_dumping_skill_body() 
         state.transcript.first(),
         Some(RenderedMessage {
             role: MessageRole::User,
-            text,
+            text, ..
         }) if text.contains("Base directory for this skill:")
             && text.contains("Check cargo test")
     ));
@@ -685,7 +685,7 @@ fn skill_command_executes_rendered_skill_prompt_instead_of_dumping_skill_body() 
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("Skill command /skill:verify failed")
     ));
 }
@@ -736,7 +736,7 @@ fn direct_skill_command_executes_rendered_skill_prompt_via_builtin_surface_fallb
         state.transcript.first(),
         Some(RenderedMessage {
             role: MessageRole::User,
-            text,
+            text, ..
         }) if text.contains("Base directory for this skill:")
             && text.contains("Check cargo test")
     ));
@@ -744,7 +744,7 @@ fn direct_skill_command_executes_rendered_skill_prompt_via_builtin_surface_fallb
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("Skill command /skill:verify failed")
     ));
 }
@@ -795,7 +795,7 @@ fn skill_command_rejects_model_only_skills_for_direct_invocation() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("can only be invoked by Claude")
     ));
 }
@@ -847,7 +847,7 @@ fn session_command_can_list_and_update_note() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("dockyard")
     ));
 }
@@ -931,7 +931,7 @@ fn session_command_lists_saved_sessions() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("dockyard")
     ));
 }

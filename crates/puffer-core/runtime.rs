@@ -89,6 +89,7 @@ struct HttpRetryConfig {
 /// Describes one tool call executed during a model turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolInvocation {
+    pub call_id: String,
     pub tool_id: String,
     pub input: String,
     pub output: String,
@@ -1241,6 +1242,7 @@ fn execute_anthropic_tool_calls(
             "is_error": !execution.success,
         }));
         invocations.push(ToolInvocation {
+            call_id: tool_use_id.to_string(),
             tool_id: tool_id.to_string(),
             input: serde_json::to_string(input)?,
             output: output_text.clone(),
@@ -1623,7 +1625,9 @@ fn transcript_to_anthropic_messages(state: &AppState, input: &str) -> Vec<Value>
                 "role": "assistant",
                 "content": message.text,
             }),
-            crate::MessageRole::System => json!({
+            crate::MessageRole::System
+            | crate::MessageRole::ToolCall
+            | crate::MessageRole::ToolResult => json!({
                 "role": "user",
                 "content": format!("[system]\n{}", message.text),
             }),
@@ -1647,10 +1651,15 @@ fn transcript_to_anthropic_request_messages(
         .map(|message| AnthropicMessage {
             role: match message.role {
                 crate::MessageRole::Assistant => "assistant".to_string(),
-                crate::MessageRole::User | crate::MessageRole::System => "user".to_string(),
+                crate::MessageRole::User
+                | crate::MessageRole::System
+                | crate::MessageRole::ToolCall
+                | crate::MessageRole::ToolResult => "user".to_string(),
             },
             content: match message.role {
-                crate::MessageRole::System => format!("[system]\n{}", message.text),
+                crate::MessageRole::System
+                | crate::MessageRole::ToolCall
+                | crate::MessageRole::ToolResult => format!("[system]\n{}", message.text),
                 _ => message.text.clone(),
             },
         })

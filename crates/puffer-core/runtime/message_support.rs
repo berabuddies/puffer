@@ -19,7 +19,9 @@ pub(super) fn transcript_to_anthropic_messages(state: &AppState, input: &str) ->
                 "role": "assistant",
                 "content": message.text,
             }),
-            crate::MessageRole::System => json!({
+            crate::MessageRole::System
+            | crate::MessageRole::ToolCall
+            | crate::MessageRole::ToolResult => json!({
                 "role": "user",
                 "content": format!("[system]\n{}", message.text),
             }),
@@ -45,10 +47,15 @@ pub(super) fn transcript_to_anthropic_request_messages(
         .map(|message| AnthropicMessage {
             role: match message.role {
                 crate::MessageRole::Assistant => "assistant".to_string(),
-                crate::MessageRole::User | crate::MessageRole::System => "user".to_string(),
+                crate::MessageRole::User
+                | crate::MessageRole::System
+                | crate::MessageRole::ToolCall
+                | crate::MessageRole::ToolResult => "user".to_string(),
             },
             content: match message.role {
-                crate::MessageRole::System => format!("[system]\n{}", message.text),
+                crate::MessageRole::System
+                | crate::MessageRole::ToolCall
+                | crate::MessageRole::ToolResult => format!("[system]\n{}", message.text),
                 _ => message.text.clone(),
             },
         })
@@ -73,8 +80,8 @@ pub(super) fn transcript_to_openai_input(state: &AppState, input: &str) -> Value
             .transcript
             .iter()
             .enumerate()
-            .map(|(index, message)| match message.role {
-                crate::MessageRole::User => json!({
+            .flat_map(|(index, message)| match message.role {
+                crate::MessageRole::User => vec![json!({
                     "role": "user",
                     "content": [
                         {
@@ -82,8 +89,8 @@ pub(super) fn transcript_to_openai_input(state: &AppState, input: &str) -> Value
                             "text": message.text,
                         }
                     ],
-                }),
-                crate::MessageRole::Assistant => json!({
+                })],
+                crate::MessageRole::Assistant => vec![json!({
                     "type": "message",
                     "role": "assistant",
                     "content": [
@@ -95,11 +102,30 @@ pub(super) fn transcript_to_openai_input(state: &AppState, input: &str) -> Value
                     ],
                     "status": "completed",
                     "id": format!("msg_{index}"),
-                }),
-                crate::MessageRole::System => json!({
+                })],
+                crate::MessageRole::System => vec![json!({
                     "role": "system",
                     "content": message.text,
-                }),
+                })],
+                crate::MessageRole::ToolCall => {
+                    let call_id = message.call_id.clone().unwrap_or_default();
+                    let name = message.tool_id.clone().unwrap_or_default();
+                    let arguments = message.tool_input.clone().unwrap_or_else(|| "{}".into());
+                    vec![json!({
+                        "type": "function_call",
+                        "call_id": call_id,
+                        "name": name,
+                        "arguments": arguments,
+                    })]
+                }
+                crate::MessageRole::ToolResult => {
+                    let call_id = message.call_id.clone().unwrap_or_default();
+                    vec![json!({
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": message.text,
+                    })]
+                }
             })
             .collect(),
     )
@@ -117,7 +143,9 @@ pub(super) fn transcript_to_openai_chat_messages(
             role: match message.role {
                 crate::MessageRole::User => "user".to_string(),
                 crate::MessageRole::Assistant => "assistant".to_string(),
-                crate::MessageRole::System => "system".to_string(),
+                crate::MessageRole::System
+                | crate::MessageRole::ToolCall
+                | crate::MessageRole::ToolResult => "system".to_string(),
             },
             content: Some(json!(message.text)),
             tool_call_id: None,

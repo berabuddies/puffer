@@ -48,7 +48,23 @@ pub(crate) fn append_tool_invocations(
             invocation.input.clone(),
             invocation.success,
         );
-        emit_system(state, session_store, format_tool_invocation(invocation))?;
+        state.push_tool_invocation(
+            &invocation.call_id,
+            &invocation.tool_id,
+            &invocation.input,
+            &invocation.output,
+            invocation.success,
+        );
+        session_store.append_event(
+            state.session.id,
+            puffer_session_store::TranscriptEvent::ToolInvocation {
+                call_id: invocation.call_id.clone(),
+                tool_id: invocation.tool_id.clone(),
+                input: invocation.input.clone(),
+                output: invocation.output.clone(),
+                success: invocation.success,
+            },
+        )?;
     }
     Ok(())
 }
@@ -461,21 +477,6 @@ pub(crate) fn handle_remote_env_command(
     )
 }
 
-fn format_tool_invocation(invocation: &ToolInvocation) -> String {
-    let status = if invocation.success { "ok" } else { "error" };
-    let output = invocation.output.trim();
-    if output.is_empty() {
-        format!(
-            "Tool {} [{}]\ninput: {}",
-            invocation.tool_id, status, invocation.input
-        )
-    } else {
-        format!(
-            "Tool {} [{}]\ninput: {}\n{}",
-            invocation.tool_id, status, invocation.input, output
-        )
-    }
-}
 
 fn render_memory_summary(state: &AppState) -> String {
     let files = memory_file_entries(state);

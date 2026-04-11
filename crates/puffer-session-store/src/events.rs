@@ -48,6 +48,16 @@ pub enum TranscriptEvent {
     SystemMessage {
         text: String,
     },
+    /// Structured tool invocation — preserves call_id, tool name, input/output
+    /// so the Responses API can reconstruct FunctionCall/FunctionCallOutput
+    /// items instead of degrading to system messages.
+    ToolInvocation {
+        call_id: String,
+        tool_id: String,
+        input: String,
+        output: String,
+        success: bool,
+    },
     CommandInvoked {
         name: String,
         args: String,

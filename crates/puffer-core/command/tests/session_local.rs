@@ -274,7 +274,7 @@ fn config_command_lists_supported_keys() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("status_line_command")
     ));
 }

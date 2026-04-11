@@ -506,7 +506,7 @@ fn render_transcript_message(message: &RenderedMessage, pulse_tool: bool) -> Vec
     let (first_prefix, continuation_prefix) = match message.role {
         MessageRole::User => ("› ", "  "),
         MessageRole::Assistant => ("", "  "),
-        MessageRole::System => ("· ", "  "),
+        MessageRole::System | MessageRole::ToolCall | MessageRole::ToolResult => ("· ", "  "),
     };
     render_markdown(&message.text)
         .lines

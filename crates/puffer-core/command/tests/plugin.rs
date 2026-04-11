@@ -159,7 +159,7 @@ fn plugin_validate_reports_duplicate_entries() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("duplicate command `search`") && text.contains("duplicate skill `reviewer`")
     ));
 }
@@ -201,7 +201,7 @@ fn plugin_errors_filters_resource_diagnostics() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("errors=1") && text.contains("plugin `docs`") && !text.contains("prompt `review`")
     ));
 }
@@ -260,7 +260,7 @@ fn plugin_marketplace_lists_builtin_plugins() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("Plugin marketplace") && text.contains("docs") && text.contains("Builtin docs helpers")
     ));
 }
@@ -301,7 +301,7 @@ fn plugin_validate_accepts_manifest_file_path() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("validated_manifests=1")
             && text.contains("- docs [ok]")
             && text.contains("resources/plugins/docs.yaml")
@@ -345,7 +345,7 @@ fn plugin_validate_accepts_directory_path() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("validated_manifests=1")
             && text.contains("target=")
             && text.contains("bundle/resources/plugins/docs.yaml")
@@ -385,7 +385,7 @@ fn plugin_validate_reports_manifest_parse_errors_for_paths() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("- bad [issues]")
             && text.contains("failed to parse manifest")
     ));
@@ -526,7 +526,7 @@ fn plugin_marketplace_add_install_update_and_remove_custom_marketplace() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("Added plugin marketplace `extras`")
     ));
 
@@ -545,7 +545,7 @@ fn plugin_marketplace_add_install_update_and_remove_custom_marketplace() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("custom_marketplaces=1")
             && text.contains("docs-helper@extras")
             && text.contains("Shared team plugins")
@@ -617,7 +617,7 @@ fn plugin_marketplace_add_install_update_and_remove_custom_marketplace() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("Removed plugin marketplace `extras`")
     ));
 }

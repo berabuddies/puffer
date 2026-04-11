@@ -503,6 +503,17 @@ fn timeline_items(record: &SessionRecord) -> Vec<TimelineItemDto> {
                     text: format!("Session renamed to {name}."),
                 })
             }
+            TranscriptEvent::ToolInvocation {
+                call_id: _,
+                tool_id,
+                input,
+                output,
+                success,
+            } => {
+                let status = if *success { "ok" } else { "error" };
+                let text = format!("Tool {tool_id} [{status}]\ninput: {input}\n{output}");
+                items.extend(parse_system_message(index, &text))
+            }
             TranscriptEvent::TranscriptRewritten { .. } | TranscriptEvent::StateSnapshot { .. } => {
             }
         }

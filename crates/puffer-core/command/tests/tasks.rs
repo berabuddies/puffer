@@ -31,7 +31,7 @@ fn tasks_command_reports_recorded_runtime_tasks() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("bash") && text.contains("completed")
     ));
 }
@@ -91,7 +91,7 @@ fn tasks_command_reports_workflow_tasks_and_todos() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("Task list:")
             && text.contains("Audit slash command parity")
             && text.contains("Todos:")
@@ -152,7 +152,7 @@ fn tasks_command_reports_background_agents_and_teams() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("Background agents:") && text.contains("reviewer")
     ));
 
@@ -170,7 +170,7 @@ fn tasks_command_reports_background_agents_and_teams() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("Teams:") && text.contains("alpha")
     ));
 }
@@ -248,7 +248,7 @@ fn tasks_command_can_show_task_details_after_claude_style_tool_refactor() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("Task task-1")
             && text.contains("subject=Audit slash command parity")
             && text.contains("description=Check the task detail view")

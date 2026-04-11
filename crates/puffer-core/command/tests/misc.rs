@@ -34,7 +34,7 @@ fn cost_command_reports_runtime_summary() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("assistant_messages=1")
             && text.contains("tool_invocations=1")
             && text.contains("recorded_tasks=1")
@@ -118,7 +118,7 @@ fn reload_plugins_reports_resource_counts() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("Reloading plugin changes from disk")
     ));
 }

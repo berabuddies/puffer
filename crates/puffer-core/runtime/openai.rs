@@ -825,6 +825,7 @@ pub(super) fn execute_openai_tool_calls(
             output: output.clone(),
         });
         invocations.push(ToolInvocation {
+            call_id: tc.call_id.clone(),
             tool_id: tc.name.clone(),
             input: serde_json::to_string(&tc.arguments)?,
             output,
@@ -901,6 +902,7 @@ fn execute_openai_tool_calls_serial(
             output: output.clone(),
         });
         invocations.push(ToolInvocation {
+            call_id: tool_call.call_id.clone(),
             tool_id: tool_call.name.clone(),
             input: serde_json::to_string(&tool_call.arguments)?,
             output,

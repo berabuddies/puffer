@@ -100,7 +100,7 @@ fn context_command_renders_anthropic_context_breakdown() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("## Context Usage")
             && text.contains("**Model:** anthropic/claude-sonnet-4-5")
             && text.contains("| Conversation |")
@@ -175,7 +175,7 @@ fn context_command_renders_openai_context_breakdown() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("**Model:** openai/gpt-5")
             && text.contains("272,000")
             && text.contains("| Tools |")

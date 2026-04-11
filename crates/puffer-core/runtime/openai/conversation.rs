@@ -111,15 +111,32 @@ pub(crate) fn transcript_to_items(state: &AppState, input: &str) -> Vec<Conversa
         .transcript
         .iter()
         .enumerate()
-        .map(|(index, message)| match message.role {
-            crate::MessageRole::User => ConversationItem::user_message(&message.text),
-            crate::MessageRole::Assistant => ConversationItem::Message {
+        .flat_map(|(index, message)| match message.role {
+            crate::MessageRole::User => vec![ConversationItem::user_message(&message.text)],
+            crate::MessageRole::Assistant => vec![ConversationItem::Message {
                 role: "assistant".to_string(),
                 content: message.text.clone(),
                 id: Some(format!("msg_{index}")),
                 status: Some("completed".to_string()),
-            },
-            crate::MessageRole::System => ConversationItem::system_message(&message.text),
+            }],
+            crate::MessageRole::System => vec![ConversationItem::system_message(&message.text)],
+            crate::MessageRole::ToolCall => {
+                let call_id = message.call_id.clone().unwrap_or_default();
+                let name = message.tool_id.clone().unwrap_or_default();
+                let arguments = message.tool_input.clone().unwrap_or_else(|| "{}".into());
+                vec![ConversationItem::FunctionCall {
+                    call_id,
+                    name,
+                    arguments,
+                }]
+            }
+            crate::MessageRole::ToolResult => {
+                let call_id = message.call_id.clone().unwrap_or_default();
+                vec![ConversationItem::FunctionCallOutput {
+                    call_id,
+                    output: message.text.clone(),
+                }]
+            }
         })
         .collect();
 

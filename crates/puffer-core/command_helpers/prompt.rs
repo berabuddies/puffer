@@ -266,7 +266,9 @@ fn build_compact_prompt_override(state: &AppState, args: &str) -> String {
         match message.role {
             MessageRole::User => user_messages += 1,
             MessageRole::Assistant => assistant_messages += 1,
-            MessageRole::System => system_messages += 1,
+            MessageRole::System | MessageRole::ToolCall | MessageRole::ToolResult => {
+                system_messages += 1
+            }
         }
     }
 

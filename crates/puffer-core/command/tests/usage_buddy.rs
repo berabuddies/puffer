@@ -147,7 +147,7 @@ fn usage_command_reports_runtime_and_resource_counts() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("Usage")
             && text.contains("Provider: Anthropic")
             && text.contains("Authentication: API key")
@@ -214,7 +214,7 @@ fn usage_command_prefers_claude_style_anthropic_oauth_sections() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("Provider: Anthropic")
             && text.contains("Authentication: OAuth")
             && text.contains("Logged in as: dev@example.com")
@@ -281,7 +281,7 @@ fn usage_command_shows_best_effort_openai_identity() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("Provider: OpenAI")
             && text.contains("Authentication: OAuth")
             && text.contains("Logged in as: dev@example.com")
@@ -335,7 +335,7 @@ fn buddy_command_uses_loaded_mascot_intro() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("Clawd is on duty.")
             && text.contains("mascot_id=clawd")
             && text.contains("A sharp-eyed dockside reviewer.")

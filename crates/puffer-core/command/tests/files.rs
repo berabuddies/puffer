@@ -30,7 +30,7 @@ fn files_command_reports_empty_context() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text == "No files in context"
     ));
 }
@@ -79,7 +79,7 @@ fn files_command_lists_context_files_relative_to_cwd() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text == "Files in context:\nREADME.md\nsrc/main.rs"
     ));
 }

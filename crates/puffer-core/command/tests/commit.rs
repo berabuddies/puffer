@@ -78,7 +78,7 @@ fn commit_command_uses_reference_prompt_text_from_resources() {
         state.transcript.first(),
         Some(RenderedMessage {
             role: MessageRole::User,
-            text,
+            text, ..
         }) if text.contains("## Context")
             && text.contains("Current git status:")
             && text.contains("Current git diff (staged and unstaged changes):")
@@ -90,7 +90,7 @@ fn commit_command_uses_reference_prompt_text_from_resources() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("Prompt command /commit failed")
     ));
 }

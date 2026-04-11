@@ -51,7 +51,7 @@ fn diff_command_includes_recent_command_snapshots() {
         state.transcript.last(),
         Some(RenderedMessage {
             role: MessageRole::System,
-            text,
+            text, ..
         }) if text.contains("Recent turn-by-turn diff snapshots:")
             && text.contains("/theme harbor")
     ));
