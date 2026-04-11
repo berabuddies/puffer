@@ -37,11 +37,13 @@ pub struct NotebookEditOutput {
 pub fn execute_notebook_edit_tool(
     cwd: &Path,
     working_dirs: &[PathBuf],
+    allow_all_paths: bool,
     input: Value,
 ) -> Result<String> {
     let parsed: NotebookEditInput =
         serde_json::from_value(input).context("invalid NotebookEdit input payload")?;
-    let notebook_path = resolve_notebook_path(cwd, working_dirs, &parsed.notebook_path)?;
+    let notebook_path =
+        resolve_notebook_path(cwd, working_dirs, allow_all_paths, &parsed.notebook_path)?;
     let output = match execute_notebook_edit_inner(&parsed, &notebook_path) {
         Ok(output) => output,
         Err(error) => NotebookEditOutput {
@@ -180,6 +182,7 @@ fn execute_notebook_edit_inner(
 fn resolve_notebook_path(
     cwd: &Path,
     working_dirs: &[PathBuf],
+    allow_all_paths: bool,
     notebook_path: &str,
 ) -> Result<PathBuf> {
     let candidate = PathBuf::from(notebook_path);
@@ -192,7 +195,17 @@ fn resolve_notebook_path(
             candidate.display()
         );
     }
-    workspace_paths::resolve_path_in_workspaces(cwd, working_dirs, Path::new(notebook_path))
+    let sandbox_mode = if allow_all_paths {
+        "danger-full-access"
+    } else {
+        "workspace-write"
+    };
+    workspace_paths::resolve_path_for_session(
+        cwd,
+        working_dirs,
+        sandbox_mode,
+        Path::new(notebook_path),
+    )
 }
 
 fn ensure_notebook_path(path: &Path) -> Result<()> {
@@ -392,6 +405,7 @@ mod tests {
         let output = execute_notebook_edit_tool(
             temp.path(),
             &[],
+            false,
             json!({
                 "notebook_path": notebook_path.display().to_string(),
                 "cell_id": "alpha",
@@ -421,6 +435,7 @@ mod tests {
         let output = execute_notebook_edit_tool(
             temp.path(),
             &[],
+            false,
             json!({
                 "notebook_path": notebook_path.display().to_string(),
                 "new_source": "first",
@@ -448,6 +463,7 @@ mod tests {
         let output = execute_notebook_edit_tool(
             temp.path(),
             &[],
+            false,
             json!({
                 "notebook_path": notebook_path.display().to_string(),
                 "new_source": "x",
@@ -471,6 +487,7 @@ mod tests {
         let output = execute_notebook_edit_tool(
             temp.path(),
             &[],
+            false,
             json!({
                 "notebook_path": notebook_path.display().to_string(),
                 "cell_id": "cell-1",
@@ -496,6 +513,7 @@ mod tests {
         let output = execute_notebook_edit_tool(
             temp.path(),
             &[],
+            false,
             json!({
                 "notebook_path": notebook_path.display().to_string(),
                 "new_source": "x",
@@ -520,6 +538,7 @@ mod tests {
         let error = execute_notebook_edit_tool(
             temp.path(),
             &[],
+            false,
             json!({
                 "notebook_path": notebook_path.display().to_string(),
                 "cell_id": "alpha",

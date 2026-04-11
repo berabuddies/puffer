@@ -80,6 +80,7 @@ struct UnchangedFilePayload {
 pub fn execute_claude_read_tool(
     cwd: &Path,
     working_dirs: &[PathBuf],
+    allow_all_paths: bool,
     input: Value,
 ) -> Result<String> {
     let input: ClaudeReadInput =
@@ -88,7 +89,7 @@ pub fn execute_claude_read_tool(
         pages: normalize_optional_string(input.pages),
         ..input
     };
-    let output = execute_claude_read(cwd, working_dirs, input)?;
+    let output = execute_claude_read(cwd, working_dirs, allow_all_paths, input)?;
     Ok(serde_json::to_string_pretty(&output)?)
 }
 
@@ -107,6 +108,7 @@ pub fn execute_claude_file_unchanged(file_path: &str) -> Result<String> {
 fn execute_claude_read(
     cwd: &Path,
     working_dirs: &[PathBuf],
+    allow_all_paths: bool,
     input: ClaudeReadInput,
 ) -> Result<ClaudeReadOutput> {
     if let Some(limit) = input.limit {
@@ -119,7 +121,7 @@ fn execute_claude_read(
         validate_pdf_pages(pages)?;
     }
 
-    let path = resolve_absolute_read_path(cwd, working_dirs, &input.file_path)?;
+    let path = resolve_absolute_read_path(cwd, working_dirs, allow_all_paths, &input.file_path)?;
     let ext = path
         .extension()
         .and_then(|value| value.to_str())
@@ -144,7 +146,8 @@ fn read_text(
     offset: Option<usize>,
     limit: Option<usize>,
 ) -> Result<ClaudeReadOutput> {
-    let bytes = fs::read(path).with_context(|| format!("failed to read text file {}", path.display()))?;
+    let bytes =
+        fs::read(path).with_context(|| format!("failed to read text file {}", path.display()))?;
     let contents = match std::str::from_utf8(&bytes) {
         Ok(text) => text.to_string(),
         Err(_) => {
@@ -398,6 +401,7 @@ fn parse_pdf_range(value: &str) -> Result<(u32, u32)> {
 fn resolve_absolute_read_path(
     cwd: &Path,
     working_dirs: &[PathBuf],
+    allow_all_paths: bool,
     raw_path: &str,
 ) -> Result<PathBuf> {
     let provided = PathBuf::from(raw_path);
@@ -407,8 +411,17 @@ fn resolve_absolute_read_path(
             provided.display()
         );
     }
-    let resolved =
-        workspace_paths::resolve_path_in_workspaces(cwd, working_dirs, Path::new(raw_path))?;
+    let sandbox_mode = if allow_all_paths {
+        "danger-full-access"
+    } else {
+        "workspace-write"
+    };
+    let resolved = workspace_paths::resolve_path_for_session(
+        cwd,
+        working_dirs,
+        sandbox_mode,
+        Path::new(raw_path),
+    )?;
     if resolved.is_dir() {
         bail!(
             "Read can only read files, not directories (`{}`)",
@@ -488,7 +501,7 @@ mod tests {
             "offset": 2,
             "limit": 2,
         });
-        let output = execute_claude_read_tool(temp.path(), &[], payload).unwrap();
+        let output = execute_claude_read_tool(temp.path(), &[], false, payload).unwrap();
         let parsed: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(parsed["type"], "text");
         assert_eq!(parsed["file"]["content"], "     2\ttwo\n     3\tthree\n");
@@ -509,7 +522,7 @@ mod tests {
         let payload = serde_json::json!({
             "file_path": path.display().to_string(),
         });
-        let output = execute_claude_read_tool(temp.path(), &[], payload).unwrap();
+        let output = execute_claude_read_tool(temp.path(), &[], false, payload).unwrap();
         let parsed: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(parsed["type"], "text");
         assert_eq!(parsed["file"]["startLine"], 1);
@@ -526,7 +539,7 @@ mod tests {
         let payload = serde_json::json!({
             "file_path": "relative.txt",
         });
-        let error = execute_claude_read_tool(temp.path(), &[], payload).unwrap_err();
+        let error = execute_claude_read_tool(temp.path(), &[], false, payload).unwrap_err();
         assert!(error
             .to_string()
             .contains("Read requires an absolute file_path"));
@@ -550,7 +563,7 @@ mod tests {
         let payload = serde_json::json!({
             "file_path": path.display().to_string(),
         });
-        let output = execute_claude_read_tool(temp.path(), &[], payload).unwrap();
+        let output = execute_claude_read_tool(temp.path(), &[], false, payload).unwrap();
         let parsed: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(parsed["type"], "notebook");
         assert_eq!(parsed["file"]["cells"].as_array().unwrap().len(), 2);
@@ -564,7 +577,7 @@ mod tests {
         let payload = serde_json::json!({
             "file_path": path.display().to_string(),
         });
-        let output = execute_claude_read_tool(temp.path(), &[], payload).unwrap();
+        let output = execute_claude_read_tool(temp.path(), &[], false, payload).unwrap();
         let parsed: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(parsed["type"], "image");
         assert_eq!(parsed["file"]["type"], "image/png");
@@ -580,7 +593,7 @@ mod tests {
             "file_path": path.display().to_string(),
         });
 
-        let output = execute_claude_read_tool(temp.path(), &[], payload).unwrap();
+        let output = execute_claude_read_tool(temp.path(), &[], false, payload).unwrap();
         let parsed: Value = serde_json::from_str(&output).unwrap();
 
         assert_eq!(parsed["type"], "text");
@@ -601,7 +614,7 @@ mod tests {
             "file_path": path.display().to_string(),
             "pages": "1-30",
         });
-        let error = execute_claude_read_tool(temp.path(), &[], payload).unwrap_err();
+        let error = execute_claude_read_tool(temp.path(), &[], false, payload).unwrap_err();
         assert!(error.to_string().contains("exceeds maximum of 20 pages"));
     }
 
@@ -615,7 +628,7 @@ mod tests {
             "pages": "   ",
         });
 
-        let output = execute_claude_read_tool(temp.path(), &[], payload).unwrap();
+        let output = execute_claude_read_tool(temp.path(), &[], false, payload).unwrap();
         let parsed: Value = serde_json::from_str(&output).unwrap();
 
         assert_eq!(parsed["type"], "text");
@@ -632,6 +645,7 @@ mod tests {
         let output = execute_claude_read_tool(
             temp.path(),
             &[],
+            false,
             serde_json::json!({ "file_path": path.display().to_string() }),
         )
         .unwrap();
@@ -649,6 +663,7 @@ mod tests {
         let output = execute_claude_read_tool(
             temp.path(),
             &[],
+            false,
             serde_json::json!({
                 "file_path": path.display().to_string(),
                 "offset": 5,
@@ -693,6 +708,7 @@ mod tests {
         let output = execute_claude_read_tool(
             temp.path(),
             &[],
+            false,
             serde_json::json!({
                 "file_path": pdf_path.display().to_string(),
                 "pages": "1-2",
@@ -725,6 +741,7 @@ mod tests {
         let output = execute_claude_read_tool(
             temp.path(),
             &[extra],
+            false,
             serde_json::json!({ "file_path": path.display().to_string() }),
         )
         .unwrap();
@@ -746,6 +763,7 @@ mod tests {
         let error = execute_claude_read_tool(
             temp.path(),
             &[],
+            false,
             serde_json::json!({ "file_path": path.display().to_string() }),
         )
         .unwrap_err()

@@ -34,7 +34,12 @@ struct ClaudeGlobOutput {
 ///
 /// Output matches Claude Code's shape:
 /// - `durationMs`, `numFiles`, `filenames`, `truncated`
-pub fn execute_claude_glob(cwd: &Path, working_dirs: &[PathBuf], input: Value) -> Result<String> {
+pub fn execute_claude_glob(
+    cwd: &Path,
+    working_dirs: &[PathBuf],
+    allow_all_paths: bool,
+    input: Value,
+) -> Result<String> {
     let started = Instant::now();
     let input: ClaudeGlobInput = serde_json::from_value(input).context("invalid Glob input")?;
     if input.pattern.trim().is_empty() {
@@ -43,10 +48,22 @@ pub fn execute_claude_glob(cwd: &Path, working_dirs: &[PathBuf], input: Value) -
 
     let pattern = Pattern::new(&input.pattern)
         .map_err(|error| anyhow!("invalid glob pattern `{}`: {error}", input.pattern))?;
+    let sandbox_mode = if allow_all_paths {
+        "danger-full-access"
+    } else {
+        "workspace-write"
+    };
     let root = input
         .path
         .as_deref()
-        .map(|path| workspace_paths::resolve_path_in_workspaces(cwd, working_dirs, Path::new(path)))
+        .map(|path| {
+            workspace_paths::resolve_path_for_session(
+                cwd,
+                working_dirs,
+                sandbox_mode,
+                Path::new(path),
+            )
+        })
         .transpose()?
         .unwrap_or_else(|| cwd.to_path_buf());
     if !root.exists() {
@@ -137,6 +154,7 @@ mod tests {
         let output = execute_claude_glob(
             temp.path(),
             &[],
+            false,
             json!({
                 "pattern": "src/*.rs"
             }),
@@ -159,6 +177,7 @@ mod tests {
         let output = execute_claude_glob(
             temp.path(),
             &[],
+            false,
             json!({
                 "pattern": "*.txt"
             }),
@@ -175,6 +194,7 @@ mod tests {
         let error = execute_claude_glob(
             temp.path(),
             &[],
+            false,
             json!({
                 "pattern": "*.rs",
                 "path": "../"
@@ -197,6 +217,7 @@ mod tests {
         let output = execute_claude_glob(
             &cwd,
             &[extra.clone()],
+            false,
             json!({
                 "pattern": "src/*.rs",
                 "path": extra.display().to_string()

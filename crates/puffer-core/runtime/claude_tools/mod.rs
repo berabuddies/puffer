@@ -1,5 +1,6 @@
 use crate::runtime::structured_output_support::StructuredOutputConfig;
 use crate::state::ClaudeReadState;
+use crate::workspace_paths;
 use crate::AppState;
 use anyhow::{bail, Context, Result};
 use puffer_provider_openai::OpenAIRequestConfig;
@@ -56,6 +57,7 @@ pub(crate) fn execute_tool(
     input: Value,
     provider_context: ProviderToolContext<'_>,
 ) -> Result<ToolExecutionResult> {
+    let allow_all_paths = workspace_paths::sandbox_allows_all_paths(&state.sandbox_mode);
     match definition.id.as_str() {
         "Bash" => {
             let execution = bash::execute_from_value(cwd, input)?;
@@ -77,7 +79,12 @@ pub(crate) fn execute_tool(
                     }
                 }
             }
-            let output = read::execute_claude_read_tool(cwd, &state.working_dirs, input.clone())?;
+            let output = read::execute_claude_read_tool(
+                cwd,
+                &state.working_dirs,
+                allow_all_paths,
+                input.clone(),
+            )?;
             record_read_from_input(state, &input)?;
             Ok(tool_result(definition, true, output))
         }
@@ -86,6 +93,7 @@ pub(crate) fn execute_tool(
             let output = write::execute_claude_write_tool(
                 cwd,
                 &state.working_dirs,
+                allow_all_paths,
                 input.clone(),
                 &mut read_state,
             )?;
@@ -99,7 +107,12 @@ pub(crate) fn execute_tool(
             if edit::requires_prior_read(&input) {
                 enforce_read_precondition(state, input_file_path(&input, "file_path")?.as_deref())?;
             }
-            let output = edit::execute_claude_edit(cwd, &state.working_dirs, input.clone())?;
+            let output = edit::execute_claude_edit(
+                cwd,
+                &state.working_dirs,
+                allow_all_paths,
+                input.clone(),
+            )?;
             if let Some(path) = input_file_path(&input, "file_path")? {
                 mark_fully_read(state, &path)?;
             }
@@ -108,12 +121,12 @@ pub(crate) fn execute_tool(
         "Glob" => Ok(tool_result(
             definition,
             true,
-            glob::execute_claude_glob(cwd, &state.working_dirs, input)?,
+            glob::execute_claude_glob(cwd, &state.working_dirs, allow_all_paths, input)?,
         )),
         "Grep" => Ok(tool_result(
             definition,
             true,
-            grep::execute_claude_grep(cwd, &state.working_dirs, input)?,
+            grep::execute_claude_grep(cwd, &state.working_dirs, allow_all_paths, input)?,
         )),
         "NotebookEdit" => {
             if let Err(error) = enforce_read_precondition(
@@ -122,8 +135,12 @@ pub(crate) fn execute_tool(
             ) {
                 return Ok(tool_result(definition, false, error.to_string()));
             }
-            let output =
-                notebook_edit::execute_notebook_edit_tool(cwd, &state.working_dirs, input.clone())?;
+            let output = notebook_edit::execute_notebook_edit_tool(
+                cwd,
+                &state.working_dirs,
+                allow_all_paths,
+                input.clone(),
+            )?;
             if let Some(path) = input_file_path(&input, "notebook_path")? {
                 mark_fully_read(state, &path)?;
             }
