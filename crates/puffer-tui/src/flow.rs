@@ -35,8 +35,8 @@ use crate::{OverlayState, TuiState};
 pub(crate) use flow_auth::{handle_auth_command, run_embedded_auth_login};
 #[path = "flow_loop.rs"]
 mod flow_loop;
-pub(crate) use flow_loop::{advance_loop_after_turn, check_loop_interval};
 use flow_loop::try_handle_loop_command;
+pub(crate) use flow_loop::{advance_loop_after_turn, check_loop_interval};
 
 /// Opens a TUI overlay for slash commands that map to picker UI.
 pub(crate) fn try_open_overlay(
@@ -203,6 +203,7 @@ pub(crate) fn set_overlay_state(tui: &mut TuiState, overlay: Option<OverlayState
     tui.input.clear();
     tui.cursor = 0;
     tui.slash_selection = 0;
+    tui.reset_prompt_history_navigation();
 }
 
 /// Returns true when the submitted text should run through the async provider path.

@@ -8,6 +8,7 @@ license.workspace = true
 anyhow.workspace = true
 crossterm.workspace = true
 dirs.workspace = true
+fslock.workspace = true
 indexmap.workspace = true
 image = { version = "0.25.8", default-features = false, features = ["png"] }
 pulldown-cmark = "0.13.0"
