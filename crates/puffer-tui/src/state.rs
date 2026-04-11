@@ -1,3 +1,10 @@
+#[path = "state/input_history.rs"]
+mod input_history;
+#[path = "state/navigation.rs"]
+mod navigation;
+
+use self::input_history::PromptHistory;
+use self::navigation::{max_scroll_offset, next_boundary, previous_boundary};
 use crate::approval_overlay::ApprovalOverlay;
 use crate::btw_overlay::BtwOverlay;
 use crate::popup::popup_rows;
@@ -65,6 +72,8 @@ pub(crate) struct TuiState {
     pub(crate) deferred_prompt: Option<String>,
     pub(crate) pending_submit: Option<PendingSubmit>,
     pub(crate) queued_prompts: VecDeque<String>,
+    pub(crate) prompt_history: PromptHistory,
+    pub(crate) overlay_draft_input: Option<String>,
     pub(crate) active_loop: Option<LoopState>,
     /// Timestamp of last Ctrl+C press. Second press within 2s exits.
     pub(crate) last_ctrl_c: Option<std::time::Instant>,
@@ -114,6 +123,8 @@ impl Default for TuiState {
             deferred_prompt: None,
             pending_submit: None,
             queued_prompts: VecDeque::new(),
+            prompt_history: PromptHistory::default(),
+            overlay_draft_input: None,
             active_loop: None,
             last_ctrl_c: None,
             status_hint: None,
@@ -157,6 +168,7 @@ impl TuiState {
         self.input.clear();
         self.cursor = 0;
         self.slash_selection = 0;
+        self.reset_prompt_history_navigation();
         self.sync(commands);
     }
 
@@ -264,6 +276,7 @@ impl TuiState {
     pub(crate) fn take_input(&mut self) -> String {
         self.cursor = 0;
         self.slash_selection = 0;
+        self.reset_prompt_history_navigation();
         std::mem::take(&mut self.input)
     }
 
@@ -765,6 +778,11 @@ impl OverlayState {
                 if let Some(index) = entries.iter().position(|entry| {
                     entry.selector.to_ascii_lowercase().contains(&query)
                         || entry.description.to_ascii_lowercase().contains(&query)
+                        || entry
+                            .command
+                            .as_deref()
+                            .map(|command| command.to_ascii_lowercase().contains(&query))
+                            .unwrap_or(false)
                 }) {
                     *selection = index;
                 }
@@ -975,54 +993,5 @@ impl OverlayState {
             Self::OnboardingApiKey { input, .. } => Some(input.as_str()),
             _ => None,
         }
-    }
-}
-
-fn previous_boundary(input: &str, cursor: usize) -> usize {
-    if cursor == 0 {
-        return 0;
-    }
-    let mut index = cursor - 1;
-    while index > 0 && !input.is_char_boundary(index) {
-        index -= 1;
-    }
-    index
-}
-
-fn next_boundary(input: &str, cursor: usize) -> usize {
-    if cursor >= input.len() {
-        return input.len();
-    }
-    let mut index = cursor + 1;
-    while index < input.len() && !input.is_char_boundary(index) {
-        index += 1;
-    }
-    index.min(input.len())
-}
-
-fn max_scroll_offset(line_count: u16, viewport_height: u16) -> u16 {
-    line_count.saturating_sub(viewport_height.max(1))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::TuiState;
-
-    #[test]
-    fn scroll_up_detaches_from_follow_output() {
-        let mut tui = TuiState::default();
-        tui.scroll_up(1, 20, 5);
-        assert!(!tui.follow_output);
-        assert_eq!(tui.scroll_offset, 14);
-    }
-
-    #[test]
-    fn scroll_down_reattaches_when_reaching_bottom() {
-        let mut tui = TuiState::default();
-        tui.follow_output = false;
-        tui.scroll_offset = 14;
-        tui.scroll_down(1, 20, 5);
-        assert!(tui.follow_output);
-        assert_eq!(tui.scroll_offset, 15);
     }
 }

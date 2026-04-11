@@ -1,8 +1,11 @@
 use super::*;
 use crate::flow::{handle_auth_command, parse_shell_shortcut};
+use crate::key_handler::handle_overlay_key;
+use crate::prompt_history_store::PromptHistorySource;
 use crate::state::AuthPickerEntry;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use puffer_config::{ensure_workspace_dirs, save_user_config, ConfigPaths, PufferConfig};
-use puffer_core::{supported_commands, MessageRole};
+use puffer_core::{supported_commands, CommandSpec, MessageRole};
 use puffer_provider_registry::{
     AuthMode, ExternalImportCandidate, ExternalImportFamily, ExternalImportSource, ModelDescriptor,
     OAuthCredential, ProviderDescriptor, StoredCredential,
@@ -92,6 +95,403 @@ fn enter_completion_prefers_selected_slash_command() {
     tui.insert_char('v', &commands);
     assert!(tui.complete_on_enter(&commands));
     assert_eq!(tui.input, "/review");
+}
+
+#[test]
+fn up_key_recalls_previous_prompt_history() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let auth_path = paths.user_config_dir.join("auth.json");
+
+    let mut state = sample_state();
+    let mut resources = sample_resources();
+    let mut providers = sample_providers();
+    let mut auth_store = sample_auth_store();
+    let commands = supported_commands();
+    let mut tui = TuiState::default();
+    tui.remember_prompt_history("first prompt", PromptHistorySource::Sent, tempdir.path())
+        .unwrap();
+    tui.remember_prompt_history("/help", PromptHistorySource::Sent, tempdir.path())
+        .unwrap();
+
+    handle_key(
+        KeyEvent::from(KeyCode::Up),
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &commands,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(tui.input, "/help");
+    assert_eq!(tui.cursor, tui.input.len());
+    assert!(tui.is_prompt_history_active());
+}
+
+#[test]
+fn down_key_restores_unsent_draft_after_history_recall() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let auth_path = paths.user_config_dir.join("auth.json");
+
+    let mut state = sample_state();
+    let mut resources = sample_resources();
+    let mut providers = sample_providers();
+    let mut auth_store = sample_auth_store();
+    let commands = supported_commands();
+    let mut tui = TuiState::default();
+    tui.remember_prompt_history("first prompt", PromptHistorySource::Sent, tempdir.path())
+        .unwrap();
+    tui.input = "draft".to_string();
+    tui.cursor = tui.input.len();
+
+    handle_key(
+        KeyEvent::from(KeyCode::Up),
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &commands,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+    handle_key(
+        KeyEvent::from(KeyCode::Down),
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &commands,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(tui.input, "draft");
+    assert_eq!(tui.cursor, tui.input.len());
+    assert!(!tui.is_prompt_history_active());
+}
+
+#[test]
+fn ctrl_c_clears_prompt_and_adds_it_to_history() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let auth_path = paths.user_config_dir.join("auth.json");
+
+    let mut state = sample_state();
+    let mut resources = sample_resources();
+    let mut providers = sample_providers();
+    let mut auth_store = sample_auth_store();
+    let commands = supported_commands();
+    let mut tui = TuiState::default();
+    tui.input = "draft prompt".to_string();
+    tui.cursor = tui.input.len();
+
+    handle_key(
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &commands,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+
+    assert!(tui.input.is_empty());
+    assert_eq!(tui.cursor, 0);
+    assert!(tui.has_prompt_history());
+    assert_eq!(
+        tui.status_hint
+            .as_ref()
+            .map(|(message, _)| message.as_str()),
+        Some("Prompt cleared.")
+    );
+
+    handle_key(
+        KeyEvent::from(KeyCode::Up),
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &commands,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(tui.input, "draft prompt");
+}
+
+#[test]
+fn ctrl_r_opens_prompt_history_search_overlay() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let auth_path = paths.user_config_dir.join("auth.json");
+
+    let mut state = sample_state();
+    let mut resources = sample_resources();
+    let mut providers = sample_providers();
+    let mut auth_store = sample_auth_store();
+    let commands = supported_commands();
+    let mut tui = TuiState::default();
+    tui.remember_prompt_history("first prompt", PromptHistorySource::Sent, tempdir.path())
+        .unwrap();
+    tui.input = "draft".to_string();
+    tui.cursor = tui.input.len();
+
+    handle_key(
+        KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &commands,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        tui.overlay,
+        Some(OverlayState::CommandPicker { ref title, .. }) if title == "Search Prompt History"
+    ));
+    assert!(tui.input.is_empty());
+}
+
+#[test]
+fn history_search_escape_restores_draft() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let auth_path = paths.user_config_dir.join("auth.json");
+
+    let mut state = sample_state();
+    let mut resources = sample_resources();
+    let mut providers = sample_providers();
+    let mut auth_store = sample_auth_store();
+    let commands = supported_commands();
+    let mut tui = TuiState::default();
+    tui.remember_prompt_history("history entry", PromptHistorySource::Sent, tempdir.path())
+        .unwrap();
+    tui.input = "draft".to_string();
+    tui.cursor = tui.input.len();
+
+    handle_key(
+        KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &commands,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+    handle_overlay_key(
+        KeyEvent::from(KeyCode::Esc),
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+
+    assert!(tui.overlay.is_none());
+    assert_eq!(tui.input, "draft");
+}
+
+#[test]
+fn history_search_enter_loads_matching_prompt_into_composer() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let auth_path = paths.user_config_dir.join("auth.json");
+
+    let mut state = sample_state();
+    let mut resources = sample_resources();
+    let mut providers = sample_providers();
+    let mut auth_store = sample_auth_store();
+    let commands = supported_commands();
+    let mut tui = TuiState::default();
+    tui.remember_prompt_history(
+        "headline\nsecond line needle",
+        PromptHistorySource::Sent,
+        tempdir.path(),
+    )
+    .unwrap();
+    tui.remember_prompt_history("other prompt", PromptHistorySource::Sent, tempdir.path())
+        .unwrap();
+
+    handle_key(
+        KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &commands,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+
+    for ch in "needle".chars() {
+        handle_overlay_key(
+            KeyEvent::from(KeyCode::Char(ch)),
+            &mut state,
+            &mut resources,
+            &mut providers,
+            &mut auth_store,
+            &auth_path,
+            &session_store,
+            &mut tui,
+            true,
+        )
+        .unwrap();
+    }
+    handle_overlay_key(
+        KeyEvent::from(KeyCode::Enter),
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+
+    assert!(tui.overlay.is_none());
+    assert_eq!(tui.input, "headline\nsecond line needle");
+}
+
+#[test]
+fn page_up_and_page_down_can_navigate_prompt_history() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let auth_path = paths.user_config_dir.join("auth.json");
+
+    let mut state = sample_state();
+    let mut resources = sample_resources();
+    let mut providers = sample_providers();
+    let mut auth_store = sample_auth_store();
+    let commands = supported_commands();
+    let mut tui = TuiState::default();
+    tui.remember_prompt_history("first prompt", PromptHistorySource::Sent, tempdir.path())
+        .unwrap();
+    tui.remember_prompt_history("second prompt", PromptHistorySource::Sent, tempdir.path())
+        .unwrap();
+
+    handle_key(
+        KeyEvent::from(KeyCode::PageUp),
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &commands,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(tui.input, "second prompt");
+    assert!(tui.is_prompt_history_active());
+
+    handle_key(
+        KeyEvent::from(KeyCode::PageDown),
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &commands,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+
+    assert!(tui.input.is_empty());
+    assert!(!tui.is_prompt_history_active());
+}
+
+#[test]
+fn slash_popup_navigation_still_wins_over_prompt_history() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let auth_path = paths.user_config_dir.join("auth.json");
+
+    let mut state = sample_state();
+    let mut resources = sample_resources();
+    let mut providers = sample_providers();
+    let mut auth_store = sample_auth_store();
+    let commands = supported_commands();
+    let mut tui = TuiState::default();
+    tui.remember_prompt_history("older prompt", PromptHistorySource::Sent, tempdir.path())
+        .unwrap();
+    tui.insert_char('/', &commands);
+    tui.insert_char('m', &commands);
+    tui.slash_selection = 1;
+
+    handle_key(
+        KeyEvent::from(KeyCode::Up),
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &commands,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(tui.input, "/m");
+    assert_eq!(tui.slash_selection, 0);
+    assert!(!tui.is_prompt_history_active());
 }
 
 #[test]
