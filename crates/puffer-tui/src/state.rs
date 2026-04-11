@@ -66,6 +66,10 @@ pub(crate) struct TuiState {
     pub(crate) pending_submit: Option<PendingSubmit>,
     pub(crate) queued_prompts: VecDeque<String>,
     pub(crate) active_loop: Option<LoopState>,
+    /// Timestamp of last Ctrl+C press. Second press within 2s exits.
+    pub(crate) last_ctrl_c: Option<std::time::Instant>,
+    /// Transient hint shown in the status bar (auto-clears after 2s).
+    pub(crate) status_hint: Option<(String, std::time::Instant)>,
 }
 
 /// Carries one completed background provider turn back to the UI thread.
@@ -111,11 +115,26 @@ impl Default for TuiState {
             pending_submit: None,
             queued_prompts: VecDeque::new(),
             active_loop: None,
+            last_ctrl_c: None,
+            status_hint: None,
         }
     }
 }
 
 impl TuiState {
+    /// Returns true if this Ctrl+C should exit (second press within 2s).
+    /// On first press, records the timestamp and returns false.
+    pub(crate) fn should_exit_on_ctrl_c(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        if let Some(last) = self.last_ctrl_c {
+            if now.duration_since(last).as_secs() < 2 {
+                return true; // Second press within 2s → exit
+            }
+        }
+        self.last_ctrl_c = Some(now);
+        false
+    }
+
     /// Returns true when a provider-backed prompt is still running.
     pub(crate) fn has_pending_submit(&self) -> bool {
         self.pending_submit.is_some()

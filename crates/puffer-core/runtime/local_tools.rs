@@ -68,7 +68,12 @@ pub(super) fn execute_runtime_local_tool(
     match definition.handler.as_str() {
         "runtime:skill" => execute_skill_tool(resources, input),
         "runtime:tool_search" => execute_tool_search(registry, input),
-        "runtime:glob" => execute_glob_tool(cwd, &state.working_dirs, input),
+        "runtime:glob" => execute_glob_tool(
+            cwd,
+            &state.working_dirs,
+            workspace_paths::sandbox_allows_all_paths(&state.sandbox_mode),
+            input,
+        ),
         "runtime:sleep" => sleep::execute_sleep(input),
         "runtime:list_mcp_resources" => execute_list_mcp_resources(resources, cwd, input),
         "runtime:read_mcp_resource" => execute_read_mcp_resource(resources, cwd, input),
@@ -84,14 +89,31 @@ fn execute_tool_search(registry: &ToolRegistry, input: Value) -> Result<String> 
     super::claude_tools::tool_search::execute_claude_tool_search_tool(registry, input)
 }
 
-fn execute_glob_tool(cwd: &Path, working_dirs: &[PathBuf], input: Value) -> Result<String> {
+fn execute_glob_tool(
+    cwd: &Path,
+    working_dirs: &[PathBuf],
+    allow_all_paths: bool,
+    input: Value,
+) -> Result<String> {
     let input: GlobInput = serde_json::from_value(input)?;
     let pattern = Pattern::new(&input.pattern)
         .map_err(|error| anyhow!("invalid glob pattern `{}`: {error}", input.pattern))?;
+    let sandbox_mode = if allow_all_paths {
+        "danger-full-access"
+    } else {
+        "workspace-write"
+    };
     let root = input
         .path
         .as_deref()
-        .map(|path| workspace_paths::resolve_path_in_workspaces(cwd, working_dirs, Path::new(path)))
+        .map(|path| {
+            workspace_paths::resolve_path_for_session(
+                cwd,
+                working_dirs,
+                sandbox_mode,
+                Path::new(path),
+            )
+        })
         .transpose()?
         .unwrap_or_else(|| cwd.to_path_buf());
     let mut matches = Vec::new();
@@ -625,7 +647,8 @@ mod tests {
         std::fs::create_dir_all(temp.path().join("src")).unwrap();
         std::fs::write(temp.path().join("src/lib.rs"), "pub fn hi() {}").unwrap();
         std::fs::write(temp.path().join("src/main.rs"), "fn main() {}").unwrap();
-        let output = execute_glob_tool(temp.path(), &[], json!({"pattern": "src/*.rs"})).unwrap();
+        let output =
+            execute_glob_tool(temp.path(), &[], false, json!({"pattern": "src/*.rs"})).unwrap();
         assert!(output.contains("src/lib.rs"));
         assert!(output.contains("src/main.rs"));
     }
@@ -642,6 +665,7 @@ mod tests {
         let output = execute_glob_tool(
             &cwd,
             std::slice::from_ref(&extra),
+            false,
             json!({
                 "pattern": "guides/*.md",
                 "path": extra.display().to_string()

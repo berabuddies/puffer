@@ -106,7 +106,7 @@ pub fn supported_commands() -> Vec<CommandSpec> {
             &[],
             "Summarize the conversation to preserve context budget",
             Some("<optional custom summarization instructions>"),
-            CommandKind::Local,
+            CommandKind::Prompt,
         ),
         cmd(
             "config",

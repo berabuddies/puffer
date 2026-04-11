@@ -24,6 +24,7 @@ mod context_usage;
 mod hook_support;
 mod local_mcp_resources;
 mod local_tools;
+mod anthropic_sse;
 mod openai;
 mod openai_sse;
 mod permission_prompt;
@@ -331,6 +332,9 @@ where
                 on_event,
             )
         }
+        "anthropic-messages" => execute_anthropic_streaming(
+            state, resources, providers, auth_store, input, options, on_event,
+        ),
         _ => execute_user_prompt_with_options(
             state, resources, providers, auth_store, input, options,
         ),
@@ -469,8 +473,7 @@ fn execute_anthropic(
     // CC does this via applyToolResultBudget / applyHistorySnip.
     snip_old_tool_outputs(&mut messages);
 
-    // Auto-compact: if estimated token usage exceeds 80% of context window,
-    // truncate older messages to stay within budget (matching CC's threshold).
+    // Auto-compact before turn: generate summary if over threshold.
     let context_window = provider
         .models
         .iter()
@@ -478,7 +481,14 @@ fn execute_anthropic(
         .map(|m| m.context_window as u32)
         .unwrap_or(200_000);
     let auto_compact_threshold = context_window.saturating_mul(80) / 100;
-    auto_compact_messages(&mut messages, auto_compact_threshold);
+    auto_compact_messages(
+        &mut messages,
+        auto_compact_threshold,
+        &request.url,
+        &request.headers,
+        &model_id,
+        resolve_max_output_tokens(provider, &model_id),
+    );
 
     // Resolve thinking/reasoning support from model capabilities + effort level.
     let model_supports_thinking = provider
@@ -607,6 +617,16 @@ fn execute_anthropic(
                 "role": "user",
                 "content": tool_results.results,
             }));
+            // Context management between tool iterations (CC parity).
+            snip_old_tool_outputs(&mut messages);
+            auto_compact_messages(
+                &mut messages,
+                auto_compact_threshold,
+                &request.url,
+                &request.headers,
+                &model_id,
+                max_output,
+            );
             continue;
         }
 
@@ -620,6 +640,213 @@ fn execute_anthropic(
 
     bail!("anthropic tool loop exceeded iteration limit")
 }
+
+/// Streaming variant of execute_anthropic — sends `stream: true` and parses
+/// SSE events, emitting TextDelta in real-time.
+fn execute_anthropic_streaming<F>(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    providers: &ProviderRegistry,
+    auth_store: &mut AuthStore,
+    input: &str,
+    options: TurnRequestOptions<'_>,
+    on_event: &mut F,
+) -> Result<TurnExecution>
+where
+    F: FnMut(TurnStreamEvent),
+{
+    let (provider, model_id) = resolve_provider_and_model(state, providers)?;
+    let structured_output = options.structured_output;
+    let auth = anthropic_auth_for_provider(auth_store, provider)?;
+    let registry = ToolRegistry::from_resources(resources);
+    let permission_context = load_runtime_permission_context(&state.cwd, resources, state)?;
+    let mut messages = transcript_to_anthropic_messages(state, input);
+    let mut invocations = Vec::new();
+    let plan_mode_context = crate::command_helpers::prompt::plan_mode_context_message(state)?;
+
+    let request_config = build_anthropic_request_config(state, provider, &auth);
+    let request = build_messages_request(
+        &request_config,
+        &AnthropicModelRequest {
+            model: model_id.clone(),
+            max_tokens: resolve_max_output_tokens(provider, &model_id),
+            messages: transcript_to_anthropic_request_messages(state, input),
+        },
+    )?;
+    let tools = anthropic_tool_definitions_for_request(
+        &registry,
+        structured_output,
+        Some(&permission_context),
+        options.tool_filter,
+    )?;
+    let system_prompt = render_runtime_system_prompt(
+        state,
+        resources,
+        &model_id,
+        &tools
+            .iter()
+            .filter_map(|tool| {
+                tool.get("name")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+            .collect::<std::collections::BTreeSet<_>>(),
+    )?;
+
+    prepend_system_reminder(&mut messages);
+    snip_old_tool_outputs(&mut messages);
+
+    let model_supports_thinking = provider
+        .models
+        .iter()
+        .find(|m| m.id == model_id)
+        .map(|m| m.supports_reasoning)
+        .unwrap_or(false);
+    let provider_supports_thinking_api =
+        provider.id == "anthropic" || provider.base_url.contains("anthropic.com");
+    let max_output = resolve_max_output_tokens(provider, &model_id);
+
+    for _ in 0..8 {
+        let mut body = json!({
+            "model": model_id,
+            "max_tokens": max_output,
+            "messages": messages,
+            "stream": true,
+            "system": anthropic_system_blocks(
+                &request.attribution_prefix_block,
+                Some(system_prompt.as_str()),
+                plan_mode_context.as_deref(),
+            )
+        });
+        if !tools.is_empty() {
+            body["tools"] = Value::Array(tools.clone());
+            body["tool_choice"] = json!({"type": "auto"});
+        }
+        if model_supports_thinking && provider_supports_thinking_api && state.effort_level != "low"
+        {
+            let thinking_budget = match state.effort_level.as_str() {
+                "high" | "max" => max_output.saturating_sub(1).min(16_384),
+                _ => max_output.saturating_sub(1).min(8_192),
+            };
+            body["thinking"] = json!({
+                "type": "enabled",
+                "budget_tokens": thinking_budget
+            });
+        } else {
+            body["temperature"] = json!(1);
+        }
+
+        // Send streaming request — use raw reqwest response for true SSE streaming.
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .unwrap_or_else(|_| Client::new());
+        let mut http_request = client.post(&request.url);
+        for (key, value) in &request.headers {
+            http_request = http_request.header(key, value);
+        }
+        http_request = http_request
+            .header("content-type", "application/json")
+            .header("accept", "text/event-stream");
+        let http_response = http_request
+            .body(body.to_string())
+            .send()
+            .with_context(|| format!("failed to send streaming request to {}", request.url))?;
+
+        if !http_response.status().is_success() {
+            let status = http_response.status();
+            let text = http_response.text().unwrap_or_default();
+            bail!("request failed with status {status}: {text}");
+        }
+
+        // Parse SSE stream — reqwest::blocking::Response implements Read,
+        // so the parser reads events as they arrive from the network.
+        let response =
+            anthropic_sse::parse_anthropic_sse(http_response, on_event)?;
+
+        let cwd = state.cwd.clone();
+        if let Some(tool_results) = execute_anthropic_tool_calls(
+            state,
+            resources,
+            providers,
+            auth_store,
+            &response,
+            &registry,
+            &cwd,
+            &request_config,
+            &model_id,
+            structured_output,
+            options.tool_filter,
+        )? {
+            if !tool_results.invocations.is_empty() {
+                on_event(TurnStreamEvent::ToolInvocations(
+                    tool_results.invocations.clone(),
+                ));
+            }
+            invocations.extend(tool_results.invocations);
+            messages.push(json!({
+                "role": "assistant",
+                "content": response
+                    .get("content")
+                    .cloned()
+                    .unwrap_or_else(|| Value::Array(Vec::new())),
+            }));
+            messages.push(json!({
+                "role": "user",
+                "content": tool_results.results,
+            }));
+            // Context management between tool iterations (CC parity).
+            snip_old_tool_outputs(&mut messages);
+            let ctx_threshold = provider
+                .models.iter().find(|m| m.id == model_id)
+                .map(|m| m.context_window as u32).unwrap_or(200_000)
+                .saturating_mul(80) / 100;
+            auto_compact_messages(
+                &mut messages,
+                ctx_threshold,
+                &request.url,
+                &request.headers,
+                &model_id,
+                max_output,
+            );
+            continue;
+        }
+
+        let assistant_text = parse_anthropic_text(&response)?;
+        run_turn_hooks(resources, &state.cwd, &assistant_text, invocations.len());
+        return Ok(TurnExecution {
+            assistant_text,
+            tool_invocations: invocations,
+        });
+    }
+
+    bail!("anthropic streaming tool loop exceeded iteration limit")
+}
+
+fn build_anthropic_request_config(
+    state: &AppState,
+    provider: &ProviderDescriptor,
+    auth: &AnthropicAuth,
+) -> AnthropicRequestConfig {
+    AnthropicRequestConfig {
+        base_url: provider.base_url.clone(),
+        session_id: state.session.id.to_string(),
+        custom_headers: provider.headers.clone(),
+        remote_container_id: None,
+        remote_session_id: None,
+        client_app: None,
+        entrypoint: "cli".to_string(),
+        user_type: "external".to_string(),
+        version: APP_VERSION.to_string(),
+        workload: None,
+        additional_protection: false,
+        cch_enabled: true,
+        auth: auth.clone(),
+        beta_header: None,
+        client_request_id: None,
+    }
+}
+
 fn send_http_request(
     url: &str,
     headers: &[(String, String)],
@@ -1142,45 +1369,111 @@ fn truncate_tool_result(text: &str, max_chars: usize) -> String {
     format!("{truncated}\n\n[Output truncated — {max_chars} char limit reached]")
 }
 
-fn auto_compact_messages(messages: &mut Vec<Value>, threshold_tokens: u32) {
-    let estimate = |msgs: &[Value]| -> u32 {
-        msgs.iter()
-            .map(|m| {
-                let text = m["content"].as_str().unwrap_or("");
-                (text.chars().count() as u32 + 3) / 4
-            })
-            .sum()
-    };
-    let total = estimate(messages);
-    if total <= threshold_tokens || messages.len() <= 2 {
+/// Estimates token count for a message array (~4 chars per token).
+fn estimate_message_tokens(messages: &[Value]) -> u32 {
+    messages
+        .iter()
+        .map(|m| {
+            let text = m["content"].as_str().unwrap_or("");
+            (text.chars().count() as u32 + 3) / 4
+        })
+        .sum()
+}
+
+/// Auto-compact: if token estimate exceeds threshold, generate an AI summary
+/// of old messages and replace them. Falls back to simple drop on API failure.
+///
+/// CC calls this before every API request in the query loop. Codex does the
+/// same at pre-sampling and post-sampling points.
+/// Maximum auto-compact cycles per turn to prevent infinite loops.
+const MAX_AUTO_COMPACT_CYCLES: u32 = 10;
+
+fn auto_compact_messages(
+    messages: &mut Vec<Value>,
+    threshold_tokens: u32,
+    url: &str,
+    headers: &[(String, String)],
+    model_id: &str,
+    max_output: u32,
+) {
+    // Circuit breaker: track consecutive compactions.
+    // Resets when messages are under threshold (no compact needed).
+    thread_local! {
+        static COMPACT_COUNT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+
+    if estimate_message_tokens(messages) <= threshold_tokens || messages.len() <= 2 {
+        COMPACT_COUNT.with(|c| c.set(0)); // Under threshold → reset counter.
         return;
     }
-    // Drop oldest messages (keeping at least the last 2) until under budget.
-    while messages.len() > 2 && estimate(messages) > threshold_tokens {
-        messages.remove(0);
+
+    let count = COMPACT_COUNT.with(|c| {
+        let v = c.get();
+        c.set(v + 1);
+        v
+    });
+    if count >= MAX_AUTO_COMPACT_CYCLES {
+        return; // Exhausted — stop to prevent infinite loops.
     }
-    // Ensure the first message is "user" for valid API alternation.
-    let first_is_user = messages
-        .first()
-        .and_then(|m| m["role"].as_str())
-        == Some("user");
-    if first_is_user {
-        // Merge compaction note into existing first user message.
-        if let Some(first) = messages.first_mut() {
-            let existing = first["content"].as_str().unwrap_or("").to_string();
-            first["content"] =
-                json!(format!("[Earlier messages compacted]\n\n{existing}"));
-        }
-    } else {
-        // Insert a user message before the assistant message.
-        messages.insert(
-            0,
-            json!({
-                "role": "user",
-                "content": "[Earlier conversation messages were automatically compacted to fit context window]"
-            }),
-        );
+
+    // Build a compact prompt from the messages we're about to drop.
+    // Keep the most recent 4 messages intact, summarize the rest.
+    let keep_count = 4.min(messages.len());
+    let to_summarize = &messages[..messages.len() - keep_count];
+    if to_summarize.is_empty() {
+        return;
     }
+
+    // Build summary request: ask the model to summarize the old messages.
+    let mut summary_content = String::new();
+    for msg in to_summarize {
+        let role = msg["role"].as_str().unwrap_or("?");
+        let text = msg["content"].as_str().unwrap_or("");
+        let preview: String = text.chars().take(500).collect();
+        summary_content.push_str(&format!("[{role}]: {preview}\n\n"));
+    }
+
+    let compact_prompt = format!(
+        "Summarize this conversation fragment into a compact context block. \
+         Preserve file paths, function names, errors, and key decisions verbatim. \
+         Structure: 1) Intent 2) Key Concepts 3) Files & Code 4) Errors & Fixes \
+         5) Pending Tasks 6) Current State. Be thorough but concise.\n\n---\n\n{summary_content}"
+    );
+
+    let body = json!({
+        "model": model_id,
+        "max_tokens": max_output.min(4096),
+        "messages": [
+            {"role": "user", "content": compact_prompt}
+        ],
+    });
+
+    // Try to generate summary via API. On failure, fall back to simple drop.
+    let summary = match send_http_request(url, headers, &body.to_string(), true) {
+        Ok(response) => parse_anthropic_text(&response).ok(),
+        Err(_) => None,
+    };
+
+    // Replace old messages with summary.
+    let kept: Vec<Value> = messages.split_off(messages.len() - keep_count);
+    messages.clear();
+
+    let summary_text = summary.unwrap_or_else(|| {
+        "[Earlier conversation automatically compacted to fit context window]".to_string()
+    });
+
+    messages.push(json!({
+        "role": "user",
+        "content": format!(
+            "[Conversation compacted — prior context summarized below]\n\n{summary_text}"
+        )
+    }));
+    // Need an assistant ack to maintain alternation before the kept messages.
+    messages.push(json!({
+        "role": "assistant",
+        "content": "Understood. I have the summarized context and will continue from here."
+    }));
+    messages.extend(kept);
 }
 
 /// Resolves the max output tokens for the given model, falling back to a

@@ -1,6 +1,7 @@
 mod auth_credentials;
 mod auth_provider;
 mod authflow;
+mod benchmark_run;
 mod cli_args;
 mod command_surface;
 mod desktop_api;
@@ -8,6 +9,7 @@ mod desktop_api_types;
 mod resource_fs;
 
 use anyhow::Result;
+use benchmark_run::run_benchmark_command;
 use clap::Parser;
 use cli_args::{AuthCommand, Cli, Command, SessionCommand, ToolCommand};
 use command_surface::{
@@ -180,6 +182,36 @@ fn main() -> Result<()> {
             &resources,
             &providers,
             &mut auth_store,
+        ),
+        Some(Command::BenchmarkRun {
+            prompt,
+            prompt_file,
+            stdin,
+            provider,
+            model,
+            effort,
+            fast,
+            result_json,
+            trajectory_json,
+            deny_tools,
+        }) => run_benchmark_command(
+            &cwd,
+            &config,
+            &resources,
+            &mut providers,
+            &mut auth_store,
+            benchmark_run::BenchmarkRunArgs {
+                prompt,
+                prompt_file,
+                stdin,
+                provider,
+                model,
+                effort,
+                fast,
+                result_json,
+                trajectory_json,
+                deny_tools,
+            },
         ),
         Some(Command::AnthropicRequestFixture) => {
             let request = build_messages_request(

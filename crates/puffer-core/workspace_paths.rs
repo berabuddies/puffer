@@ -173,6 +173,20 @@ pub(crate) fn resolve_path_in_workspaces(
     Ok(candidate)
 }
 
+/// Resolves one tool path, skipping workspace-root restrictions when the
+/// session runs in `danger-full-access` mode.
+pub(crate) fn resolve_path_for_session(
+    cwd: &Path,
+    additional_roots: &[PathBuf],
+    sandbox_mode: &str,
+    path: &Path,
+) -> Result<PathBuf> {
+    if sandbox_allows_all_paths(sandbox_mode) {
+        return Ok(normalize_user_path(cwd, path.to_string_lossy().as_ref()));
+    }
+    resolve_path_in_workspaces(cwd, additional_roots, path)
+}
+
 /// Resolves one tool path against the primary working directory plus `/add-dir` roots.
 pub(crate) fn resolve_path_in_working_dirs(
     cwd: &Path,
@@ -180,6 +194,12 @@ pub(crate) fn resolve_path_in_working_dirs(
     path: &Path,
 ) -> Result<PathBuf> {
     resolve_path_in_workspaces(cwd, additional_roots, path)
+}
+
+/// Returns true when tool path guards should be bypassed for the current
+/// session sandbox mode.
+pub(crate) fn sandbox_allows_all_paths(sandbox_mode: &str) -> bool {
+    sandbox_mode.trim() == "danger-full-access"
 }
 
 /// Returns the normalized primary workspace root plus any distinct additional roots.
@@ -277,7 +297,7 @@ fn nearest_existing_ancestor(path: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_path_in_workspaces;
+    use super::{resolve_path_for_session, resolve_path_in_workspaces};
     use std::path::Path;
     use tempfile::tempdir;
 
@@ -304,5 +324,18 @@ mod tests {
         .unwrap();
 
         assert_eq!(resolved, etc.join("os-release"));
+    }
+
+    #[test]
+    fn resolve_path_for_session_allows_outside_workspace_in_danger_full_access() {
+        let temp = tempdir().unwrap();
+        let cwd = temp.path().join("workspace");
+        let outside = temp.path().join("outside").join("notes.txt");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let resolved =
+            resolve_path_for_session(&cwd, &[], "danger-full-access", Path::new(&outside)).unwrap();
+
+        assert_eq!(resolved, outside);
     }
 }

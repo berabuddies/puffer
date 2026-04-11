@@ -339,9 +339,11 @@ fn load_memory_prompt(cwd: &Path) -> Option<String> {
 }
 
 /// Returns the session-specific scratchpad directory, creating it if needed.
+/// Returns the session-specific scratchpad directory under $HOME/.puffer/
+/// (not in the project directory, to avoid polluting workspace listings).
 fn scratchpad_dir(state: &AppState) -> Option<PathBuf> {
-    let dir = state
-        .cwd
+    let home = env::var_os("HOME")?;
+    let dir = Path::new(&home)
         .join(".puffer")
         .join("scratchpad")
         .join(state.session.id.to_string());

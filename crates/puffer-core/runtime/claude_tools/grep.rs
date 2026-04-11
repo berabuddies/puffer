@@ -57,17 +57,34 @@ enum GrepMode {
 /// The output is returned as JSON with Claude-like fields:
 /// `mode`, `numFiles`, `filenames`, and optional `content`, `numLines`,
 /// `numMatches`, `appliedLimit`, and `appliedOffset`.
-pub fn execute_claude_grep(cwd: &Path, working_dirs: &[PathBuf], input: Value) -> Result<String> {
+pub fn execute_claude_grep(
+    cwd: &Path,
+    working_dirs: &[PathBuf],
+    allow_all_paths: bool,
+    input: Value,
+) -> Result<String> {
     let input: ClaudeGrepInput = serde_json::from_value(input).context("invalid Grep input")?;
     if input.pattern.trim().is_empty() {
         bail!("Grep pattern cannot be empty");
     }
 
     let mode = parse_mode(input.output_mode.as_deref())?;
+    let sandbox_mode = if allow_all_paths {
+        "danger-full-access"
+    } else {
+        "workspace-write"
+    };
     let absolute_target = input
         .path
         .as_deref()
-        .map(|path| workspace_paths::resolve_path_in_workspaces(cwd, working_dirs, Path::new(path)))
+        .map(|path| {
+            workspace_paths::resolve_path_for_session(
+                cwd,
+                working_dirs,
+                sandbox_mode,
+                Path::new(path),
+            )
+        })
         .transpose()?
         .unwrap_or_else(|| cwd.to_path_buf());
     if !absolute_target.exists() {
@@ -560,6 +577,7 @@ mod tests {
         let output = execute_claude_grep(
             temp.path(),
             &[],
+            false,
             json!({
                 "pattern": "fn",
                 "path": "src",
@@ -585,6 +603,7 @@ mod tests {
         let output = execute_claude_grep(
             temp.path(),
             &[],
+            false,
             json!({
                 "pattern": "abc",
                 "output_mode": "count"
@@ -602,6 +621,7 @@ mod tests {
         let error = execute_claude_grep(
             temp.path(),
             &[],
+            false,
             json!({
                 "pattern": "abc",
                 "path": "../"
@@ -628,6 +648,7 @@ mod tests {
         let output = execute_claude_grep(
             &cwd,
             &[extra.clone()],
+            false,
             json!({
                 "pattern": "abc",
                 "path": extra.display().to_string(),

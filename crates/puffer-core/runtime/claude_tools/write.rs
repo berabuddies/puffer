@@ -56,6 +56,7 @@ struct ClaudeWriteOutput {
 pub fn execute_claude_write_tool(
     cwd: &Path,
     working_dirs: &[PathBuf],
+    allow_all_paths: bool,
     input: Value,
     read_file_state: &mut HashMap<PathBuf, ClaudeReadSnapshot>,
 ) -> Result<String> {
@@ -68,9 +69,15 @@ pub fn execute_claude_write_tool(
     {
         bail!("file_path must be an absolute path");
     }
-    let path = workspace_paths::resolve_path_in_workspaces(
+    let sandbox_mode = if allow_all_paths {
+        "danger-full-access"
+    } else {
+        "workspace-write"
+    };
+    let path = workspace_paths::resolve_path_for_session(
         cwd,
         working_dirs,
+        sandbox_mode,
         Path::new(&input.file_path),
     )?;
     if path.is_dir() {
@@ -237,6 +244,7 @@ mod tests {
         let output = execute_claude_write_tool(
             temp.path(),
             &[],
+            false,
             write_input(&path, "hello"),
             &mut read_state,
         )
@@ -257,10 +265,15 @@ mod tests {
         fs::write(&path, "old").unwrap();
         let mut read_state = HashMap::new();
 
-        let error =
-            execute_claude_write_tool(temp.path(), &[], write_input(&path, "new"), &mut read_state)
-                .unwrap_err()
-                .to_string();
+        let error = execute_claude_write_tool(
+            temp.path(),
+            &[],
+            false,
+            write_input(&path, "new"),
+            &mut read_state,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains(NOT_READ_ERROR));
     }
 
@@ -278,10 +291,15 @@ mod tests {
             },
         );
 
-        let error =
-            execute_claude_write_tool(temp.path(), &[], write_input(&path, "new"), &mut read_state)
-                .unwrap_err()
-                .to_string();
+        let error = execute_claude_write_tool(
+            temp.path(),
+            &[],
+            false,
+            write_input(&path, "new"),
+            &mut read_state,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains(NOT_READ_ERROR));
     }
 
@@ -299,10 +317,15 @@ mod tests {
             },
         );
 
-        let error =
-            execute_claude_write_tool(temp.path(), &[], write_input(&path, "new"), &mut read_state)
-                .unwrap_err()
-                .to_string();
+        let error = execute_claude_write_tool(
+            temp.path(),
+            &[],
+            false,
+            write_input(&path, "new"),
+            &mut read_state,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains(STALE_READ_ERROR));
     }
 
@@ -320,9 +343,14 @@ mod tests {
             },
         );
 
-        let output =
-            execute_claude_write_tool(temp.path(), &[], write_input(&path, "new"), &mut read_state)
-                .unwrap();
+        let output = execute_claude_write_tool(
+            temp.path(),
+            &[],
+            false,
+            write_input(&path, "new"),
+            &mut read_state,
+        )
+        .unwrap();
         let parsed: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(parsed["type"], "update");
         assert_eq!(parsed["originalFile"], "old");
@@ -345,6 +373,7 @@ mod tests {
         let output = execute_claude_write_tool(
             temp.path(),
             &[],
+            false,
             write_input(&path, "hello"),
             &mut read_state,
         )
@@ -365,6 +394,7 @@ mod tests {
         let error = execute_claude_write_tool(
             temp.path(),
             &[],
+            false,
             write_input(&path, "hello"),
             &mut read_state,
         )
@@ -372,5 +402,26 @@ mod tests {
         .to_string();
 
         assert!(error.contains("outside the current working directories"));
+    }
+
+    #[test]
+    fn write_allows_paths_outside_working_directories_in_danger_full_access() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let path = outside.path().join("fresh.txt");
+        let mut read_state = HashMap::new();
+
+        let output = execute_claude_write_tool(
+            temp.path(),
+            &[],
+            true,
+            write_input(&path, "hello"),
+            &mut read_state,
+        )
+        .unwrap();
+
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["type"], "create");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "hello");
     }
 }

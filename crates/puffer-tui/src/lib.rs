@@ -290,6 +290,7 @@ fn sync_render_state(tui: &TuiState) {
     render::set_tool_details_expanded(tui.tool_details_expanded);
     render::set_follow_output(tui.follow_output);
     render::set_active_loop_state(tui.active_loop.clone());
+    render::set_status_hint(tui.status_hint.clone());
 }
 
 fn handle_key(
@@ -323,8 +324,28 @@ fn handle_key(
             tui.tool_details_expanded = !tui.tool_details_expanded;
         }
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            state.should_exit = true;
-            return Ok(true);
+            if tui.active_loop.is_some() {
+                cancel_pending_submit(state, session_store, tui)?;
+                tui.active_loop = None;
+                tui.queued_prompts.clear();
+                tui.status_hint = Some(("Loop stopped.".into(), std::time::Instant::now()));
+            } else if tui.has_pending_submit() {
+                cancel_pending_submit(state, session_store, tui)?;
+                tui.status_hint = Some((
+                    "Interrupted. Press Ctrl+C again to exit.".into(),
+                    std::time::Instant::now(),
+                ));
+                tui.last_ctrl_c = Some(std::time::Instant::now());
+            } else if tui.should_exit_on_ctrl_c() {
+                state.should_exit = true;
+                return Ok(true);
+            } else {
+                tui.status_hint = Some((
+                    "Press Ctrl+C again to exit.".into(),
+                    std::time::Instant::now(),
+                ));
+            }
+            return Ok(false);
         }
         KeyCode::Esc => {
             if cancel_pending_submit(state, session_store, tui)? {
@@ -617,8 +638,15 @@ fn handle_overlay_key(
                 )?;
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                state.should_exit = true;
-                return Ok(true);
+                if tui.should_exit_on_ctrl_c() {
+                    state.should_exit = true;
+                    return Ok(true);
+                }
+                emit_system_message(
+                    state,
+                    session_store,
+                    "Press Ctrl+C again to exit.".to_string(),
+                )?;
             }
             KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(overlay) = tui.overlay.as_mut() {
@@ -987,9 +1015,24 @@ fn handle_overlay_key(
                 tui.active_loop = None;
                 tui.queued_prompts.clear();
                 emit_system_message(state, session_store, "Loop stopped.".to_string())?;
-            } else {
+            } else if tui.has_pending_submit() {
+                // First Ctrl+C during a running turn → cancel the turn
+                cancel_pending_submit(state, session_store, tui)?;
+                emit_system_message(
+                    state,
+                    session_store,
+                    "Interrupted. Press Ctrl+C again to exit.".to_string(),
+                )?;
+                tui.last_ctrl_c = Some(std::time::Instant::now());
+            } else if tui.should_exit_on_ctrl_c() {
                 state.should_exit = true;
                 return Ok(true);
+            } else {
+                emit_system_message(
+                    state,
+                    session_store,
+                    "Press Ctrl+C again to exit.".to_string(),
+                )?;
             }
         }
         KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
