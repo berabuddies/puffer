@@ -1,3 +1,4 @@
+mod composer;
 mod helpers;
 pub(crate) mod loop_status;
 mod overlay_content;
@@ -7,6 +8,10 @@ mod summary;
 mod tool_messages;
 mod top_panel;
 use self::helpers::{help_pane_active, separator_line};
+use self::composer::{
+    composer_area_height, inline_dropdown_height, overlay_prompt_cursor, overlay_prompt_input,
+    overlay_prompt_placeholder, overlay_renders_inline_dropdown, render_inline_dropdown,
+};
 #[cfg(test)]
 use self::overlay_content::render_model_entry;
 use self::overlay_content::{masked_secret, overlay_rows, overlay_title, OverlayRow};
@@ -21,7 +26,6 @@ pub(crate) use self::top_panel::initialize_top_panel_image_state;
 use crate::approval_overlay::render_permission_overlay;
 use crate::btw_overlay::render_btw_overlay;
 use crate::markdown::render_markdown;
-use crate::popup::popup_rows;
 use crate::session_overlay::render_session_overlay;
 use crate::status_overlay::render_status_overlay;
 use crate::task_overlay::{is_task_overlay, render_task_overlay};
@@ -95,6 +99,70 @@ pub(crate) fn set_active_loop_state(loop_state: Option<crate::state::LoopState>)
 pub(crate) fn current_transcript_viewport() -> Rect {
     ACTIVE_TRANSCRIPT_VIEWPORT.with(|value| value.borrow().unwrap_or_default())
 }
+
+/// Returns the viewport height needed for the current frame.
+pub(crate) fn desired_height(
+    width: u16,
+    height: u16,
+    state: &AppState,
+    resources: &LoadedResources,
+    providers: &puffer_provider_registry::ProviderRegistry,
+    auth_store: &AuthStore,
+    input: &str,
+    commands: &[CommandSpec],
+) -> u16 {
+    let _ = providers;
+    let tool_registry = ToolRegistry::from_resources(resources);
+    let active_overlay = ACTIVE_OVERLAY.with(|value| value.borrow().clone());
+    let onboarding_active = active_overlay
+        .as_ref()
+        .map(OverlayState::is_onboarding)
+        .unwrap_or(false);
+    let help_active = help_pane_active(state, &active_overlay);
+    let full_panel_overlay = active_overlay
+        .as_ref()
+        .is_some_and(|overlay| !overlay_renders_inline_dropdown(overlay));
+    let dropdown_height = inline_dropdown_height(active_overlay.as_ref(), input, 0, commands, width);
+    let footer_height = composer_area_height(help_active, dropdown_height);
+    let loop_box_height =
+        ACTIVE_LOOP_STATE.with(|value| loop_status::loop_status_height(&value.borrow()));
+    let fixed_top_panel =
+        !help_active && !onboarding_active && ACTIVE_FOLLOW_OUTPUT.with(|value| *value.borrow());
+    let header_height = if fixed_top_panel {
+        top_panel_height(state, resources, auth_store, &tool_registry, width).min(
+            height
+                .saturating_sub(loop_box_height)
+                .saturating_sub(footer_height)
+                .saturating_sub(1),
+        )
+    } else {
+        0
+    };
+    let pending_submit = pending_submit_state();
+    let transcript_height = transcript_line_count_with_width(
+        width.max(1),
+        state,
+        resources,
+        auth_store,
+        pending_submit.loading_prompt.is_some() || !pending_submit.queued_prompts.is_empty(),
+    )
+    .max(1);
+    let body_height = if help_active || full_panel_overlay {
+        height
+            .saturating_sub(header_height)
+            .saturating_sub(loop_box_height)
+            .saturating_sub(footer_height)
+            .max(1)
+    } else {
+        transcript_height
+    };
+
+    header_height
+        .saturating_add(body_height)
+        .saturating_add(loop_box_height)
+        .saturating_add(footer_height)
+        .min(height.max(1))
+}
 /// Renders the current application frame.
 pub(crate) fn render(
     frame: &mut Frame<'_>,
@@ -117,22 +185,20 @@ pub(crate) fn render(
         .unwrap_or(false);
     let help_active = help_pane_active(state, &active_overlay);
     let overlay_active = active_overlay.is_some();
+    let dropdown_height =
+        inline_dropdown_height(active_overlay.as_ref(), input, slash_selection, commands, frame.area().width);
     let simplified_surface = help_active;
-    let fixed_top_panel = !simplified_surface && !onboarding_active;
+    let fixed_top_panel = !simplified_surface
+        && !onboarding_active
+        && ACTIVE_FOLLOW_OUTPUT.with(|value| *value.borrow());
     let custom_status_line = state.config.ui.status_line.as_ref().and_then(|config| {
         state.status_line_text.as_ref().map(|text| {
             let padding = " ".repeat(config.padding as usize);
             format!("{padding}{text}{padding}")
         })
     });
-    let footer_height = if onboarding_active {
-        4
-    } else if help_active {
-        2
-    } else {
-        3
-    };
-    let body_min_height = if fixed_top_panel { 4 } else { 8 };
+    let footer_height = composer_area_height(help_active, dropdown_height);
+    let body_min_height = 1;
     let header_height = if fixed_top_panel {
         top_panel_height(
             state,
@@ -203,22 +269,12 @@ pub(crate) fn render(
         );
     }
 
-    let footer_constraints = if help_active {
-        vec![Constraint::Length(1), Constraint::Length(1)]
-    } else if onboarding_active {
-        vec![
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ]
-    } else {
-        vec![
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ]
-    };
+    let mut footer_constraints = vec![Constraint::Length(1), Constraint::Length(1)];
+    if dropdown_height > 0 {
+        footer_constraints.push(Constraint::Length(dropdown_height));
+    } else if !help_active {
+        footer_constraints.push(Constraint::Length(1));
+    }
     let footer = Layout::default()
         .direction(Direction::Vertical)
         .constraints(footer_constraints)
@@ -241,28 +297,41 @@ pub(crate) fn render(
         footer[0],
     );
 
-    let prompt_row = if onboarding_active {
-        footer[2]
-    } else if help_active {
-        footer[1]
+    let prompt_row = footer[1];
+    let dropdown_row = if dropdown_height > 0 {
+        Some(footer[2])
     } else {
-        footer[1]
+        None
     };
-    let hint_row = if onboarding_active {
-        Some(footer[3])
-    } else if help_active {
+    let hint_row = if dropdown_height > 0 || help_active {
         None
     } else {
         Some(footer[2])
     };
     if overlay_active {
-        frame.render_widget(Paragraph::new(overlay_prompt_line(input)), prompt_row);
+        let overlay_input = overlay_prompt_input(input, active_overlay.as_ref());
+        frame.render_widget(
+            Paragraph::new(overlay_prompt_line(
+                &overlay_input,
+                overlay_prompt_placeholder(active_overlay.as_ref()),
+            )),
+            prompt_row,
+        );
         let max_cursor = usize::from(prompt_row.width.saturating_sub(3));
         frame.set_cursor_position((
-            prompt_row.x + 2 + cursor.min(max_cursor) as u16,
+            prompt_row.x + 2 + overlay_prompt_cursor(cursor, active_overlay.as_ref()).min(max_cursor) as u16,
             prompt_row.y,
         ));
-        if let Some(hint_row) = hint_row {
+        if let Some(dropdown_row) = dropdown_row {
+            render_inline_dropdown(
+                frame,
+                dropdown_row,
+                active_overlay.as_ref(),
+                input,
+                slash_selection,
+                commands,
+            );
+        } else if let Some(hint_row) = hint_row {
             frame.render_widget(
                 Paragraph::new(overlay_hint_line(input, onboarding_active))
                     .style(Style::default().add_modifier(Modifier::DIM)),
@@ -282,7 +351,9 @@ pub(crate) fn render(
             prompt_row.y,
         ));
 
-        if let Some(hint_row) = hint_row {
+        if let Some(dropdown_row) = dropdown_row {
+            render_inline_dropdown(frame, dropdown_row, None, input, slash_selection, commands);
+        } else if let Some(hint_row) = hint_row {
             let footer_line = custom_status_line
                 .clone()
                 .unwrap_or_else(|| footer_status_line(state, providers));
@@ -293,16 +364,6 @@ pub(crate) fn render(
         }
     }
 
-    if input.starts_with('/') && !onboarding_active {
-        render_command_popup(
-            frame,
-            layout[1],
-            prompt_row,
-            input,
-            slash_selection,
-            commands,
-        );
-    }
     if let Some(overlay) = active_overlay.as_ref() {
         match overlay {
             OverlayState::Help => {}
@@ -314,17 +375,18 @@ pub(crate) fn render(
             _ if is_task_overlay(overlay) => {
                 render_task_overlay(frame, frame.area(), state, overlay)
             }
+            _ if overlay_renders_inline_dropdown(overlay) => {}
             _ => render_overlay(frame, layout[1], overlay),
         }
     }
 }
 
 fn transcript_text(
-    width: u16,
+    _width: u16,
     state: &AppState,
-    resources: &LoadedResources,
-    auth_store: &AuthStore,
-    tool_registry: &ToolRegistry,
+    _resources: &LoadedResources,
+    _auth_store: &AuthStore,
+    _tool_registry: &ToolRegistry,
     pending_submit: PendingSubmitRenderState,
 ) -> Text<'static> {
     let mut lines = Vec::new();
@@ -343,12 +405,27 @@ pub(crate) fn transcript_line_count(
     auth_store: &AuthStore,
     pending_submit: bool,
 ) -> u16 {
+    transcript_line_count_with_width(
+        current_transcript_viewport().width.max(1),
+        state,
+        resources,
+        auth_store,
+        pending_submit,
+    )
+}
+
+fn transcript_line_count_with_width(
+    width: u16,
+    state: &AppState,
+    resources: &LoadedResources,
+    auth_store: &AuthStore,
+    pending_submit: bool,
+) -> u16 {
     let pending = if pending_submit {
         pending_submit_state()
     } else {
         PendingSubmitRenderState::default()
     };
-    let width = current_transcript_viewport().width.max(1);
     let tool_registry = ToolRegistry::from_resources(resources);
     Paragraph::new(transcript_text(
         width,
@@ -451,11 +528,14 @@ fn prompt_line(input: &str) -> Line<'static> {
     }
 }
 
-fn overlay_prompt_line(input: &str) -> Line<'static> {
+fn overlay_prompt_line(input: &str, placeholder: &str) -> Line<'static> {
     if input.is_empty() {
         Line::from(vec![
             Span::raw("❯ "),
-            Span::styled("Type to jump", Style::default().add_modifier(Modifier::DIM)),
+            Span::styled(
+                placeholder.to_string(),
+                Style::default().add_modifier(Modifier::DIM),
+            ),
         ])
     } else {
         Line::from(format!("❯ {input}"))
@@ -473,59 +553,6 @@ fn overlay_hint_line(input: &str, onboarding_active: bool) -> String {
     } else {
         format!("{prefix} · Enter to select · Esc to close")
     }
-}
-
-fn render_command_popup(
-    frame: &mut Frame<'_>,
-    transcript_area: Rect,
-    prompt_row: Rect,
-    input: &str,
-    slash_selection: usize,
-    commands: &[CommandSpec],
-) {
-    let matching = popup_rows(input, commands)
-        .into_iter()
-        .enumerate()
-        .map(|(index, command)| {
-            let argument_hint = command
-                .argument_hint
-                .as_deref()
-                .map(|value| format!("  {value}"))
-                .unwrap_or_default();
-            ListItem::new(format!(
-                "/{:<16} {}{}",
-                command.name, command.description, argument_hint
-            ))
-            .style(if index == slash_selection {
-                Style::default()
-                    .add_modifier(Modifier::BOLD)
-                    .add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            })
-        })
-        .collect::<Vec<_>>();
-
-    let height = matching.len() as u16 + 2;
-    let popup_area = Rect {
-        x: transcript_area.x + 2,
-        y: prompt_row
-            .y
-            .saturating_sub(height.saturating_add(1))
-            .max(transcript_area.y + 1),
-        width: transcript_area.width.saturating_sub(4).min(72),
-        height,
-    };
-    frame.render_widget(Clear, popup_area);
-    frame.render_widget(
-        List::new(matching).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_set(border::ROUNDED)
-                .border_style(accent_border_style()),
-        ),
-        popup_area,
-    );
 }
 
 fn render_overlay(frame: &mut Frame<'_>, viewport: Rect, overlay: &OverlayState) {

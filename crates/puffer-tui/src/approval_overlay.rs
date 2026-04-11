@@ -85,6 +85,27 @@ impl ApprovalOverlay {
             .unwrap_or(PermissionPromptAction::Deny)
     }
 
+    /// Builds the line-based representation used by the inline composer dropdown.
+    pub(crate) fn dropdown_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = self.body_lines();
+        lines.push(Line::default());
+        for (selected, item) in self.list.rows() {
+            let mut spans = vec![Span::raw(if selected { "› " } else { "  " })];
+            spans.push(Span::raw(item.label.clone()));
+            if let Some(description) = &item.description {
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(
+                    description.clone(),
+                    Style::default().add_modifier(Modifier::DIM),
+                ));
+            }
+            lines.push(Line::from(spans));
+        }
+        lines.push(Line::default());
+        lines.push(self.footer_hint());
+        lines
+    }
+
     /// Renders the overlay into the given viewport.
     pub(crate) fn render(&self, frame: &mut Frame<'_>, viewport: Rect) {
         let width = viewport.width.saturating_sub(8).min(92);

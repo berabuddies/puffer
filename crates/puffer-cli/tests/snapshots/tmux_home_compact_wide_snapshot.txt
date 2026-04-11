@@ -1,22 +1,17 @@
-╭ Puffer Code ─────────────────────────────────────────────────────────────────────╮
-│Mascot    Clawd on duty            │Session    session-<id> · <id>  │
-│User      anthropic via API key    │Model      anthropic/claude-sonn... · tools   │
-│Provider  anthropic · auth api-key │0/0                                           │
-│Mode      effort auto              │Directory  dockyard                           │
-╰──────────────────────────────────────────────────────────────────────────────────╯
-   Welcome to Puffer Code                      │Tips to get started
-                                               │
-   Clawd on duty                               │/help   Browse common commands
-   anthropic/claude-sonnet-4-5                 │/review Review the current
-   dockyard                                    │worktree
-                                               │/login  Switch provider auth
-                                               │
-                                               │Recent activity
-                                               │No recent activity yet.
-                                               │
-                                               │
-                                               │
-anthropic · anthropic/claude-so... · auth api-key · tools 0/0 · dockyard────────────
+                ██
+            ██████████    ██
+          ████████████████████
+      ████████████████████████    ╭ Puffer Code ───────────────────────────────────╮
+      ██████████████████████      │Account   anthropic via API key                 │
+    ████████████████████████████  │Model     anthropic/claude-sonnet-4-5 · tools...│
+██████████████████████████████    │Session   session-<id><id>│
+  ████████████████████████████    │Mode      effort auto                           │
+      ████████████████████████    │Context   dockyard · 0 msgs · 0 wds · sandbox...│
+    ████████████████████████      ╰────────────────────────────────────────────────╯
+        ████████████████████
+        ████████████████
+            ████████
 
+────────────────────────────────────────────────────────────────────────────────────
 ❯ Review changes, ask a question, or type /
-? for shortcuts · /help · /review · !pwd
+anthropic/claude-sonnet-4-5 · 0% left · ~/dockyard

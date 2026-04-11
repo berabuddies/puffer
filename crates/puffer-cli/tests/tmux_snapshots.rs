@@ -87,7 +87,7 @@ fn assert_tmux_home_snapshot(size: TerminalSize, snapshot_name: &str) {
 
     let (_tempdir, workspace) = configured_workspace();
     let session = start_tmux_with_home(&workspace, size);
-    wait_for_tmux_text(&session, "Welcome to Puffer Code", Duration::from_secs(10)).unwrap();
+    wait_for_tmux_text(&session, "Puffer Code", Duration::from_secs(10)).unwrap();
     let capture = capture_tmux_visible_pane(&session).unwrap();
     assert_normalized_snapshot(
         &normalize_tmux_capture(&trim_blank_rows(&capture)),
@@ -103,7 +103,7 @@ fn assert_tmux_help_snapshot(size: TerminalSize, snapshot_name: &str) {
 
     let (_tempdir, workspace) = configured_workspace();
     let session = start_tmux_with_home_args(&workspace, size, &["/help"]);
-    wait_for_tmux_text(&session, "Supported commands", Duration::from_secs(10)).unwrap();
+    wait_for_tmux_text(&session, "Puffer Code", Duration::from_secs(10)).unwrap();
     let capture = capture_tmux_visible_pane(&session).unwrap();
     assert_normalized_snapshot(
         &normalize_tmux_capture(&focused_help_capture(&capture, size)),
@@ -165,11 +165,7 @@ fn capture_tmux_turn(size: TerminalSize) -> String {
         .unwrap();
     let session_id = session.id.to_string();
     let session = start_tmux_with_home_args(&workspace, size, &["resume", &session_id]);
-    wait_for_tmux_text(
-        &session,
-        "The working tree is clean.",
-        Duration::from_secs(10),
-    )
+    wait_for_tmux_text(&session, "anthropic/claude-sonnet-4-5", Duration::from_secs(10))
     .unwrap_or_else(|error| {
         let capture =
             capture_tmux_pane(&session).unwrap_or_else(|_| "<capture failed>".to_string());
@@ -387,9 +383,31 @@ fn trim_blank_rows(capture: &str) -> String {
 }
 
 fn normalize_tmux_line(line: &str) -> String {
-    let line = replace_session_marker(line);
+    let line = replace_session_summary(&line);
+    let line = replace_session_marker(&line);
     let line = replace_id_line(&line);
+    let line = replace_uuid_like_runs(&line);
+    let line = replace_temp_workspace_paths(&line);
     replace_hex_runs(&line)
+}
+
+fn replace_session_summary(line: &str) -> String {
+    let Some(start) = line.find("Session") else {
+        return line.to_string();
+    };
+    let after_label = start + "Session".len();
+    let value_end = line[after_label..]
+        .find('│')
+        .map(|index| after_label + index)
+        .unwrap_or(line.len());
+    let replacement = if line.contains("dockyard") {
+        "   dockyard · <id>"
+    } else {
+        "   session-<id>"
+    };
+    let mut normalized = line.to_string();
+    normalized.replace_range(after_label..value_end, replacement);
+    normalized
 }
 
 fn replace_session_marker(line: &str) -> String {
@@ -458,4 +476,51 @@ fn flush_hex_run(output: &mut String, hex_run: &mut String) {
         output.push_str(hex_run);
     }
     hex_run.clear();
+}
+
+fn replace_uuid_like_runs(line: &str) -> String {
+    let mut output = String::with_capacity(line.len());
+    let chars = line.chars().collect::<Vec<_>>();
+    let mut index = 0usize;
+    while index < chars.len() {
+        let remaining = chars.len() - index;
+        let matches_uuid = remaining >= 36
+            && chars[index..index + 8].iter().all(|ch| ch.is_ascii_hexdigit())
+            && chars[index + 8] == '-'
+            && chars[index + 9..index + 13]
+                .iter()
+                .all(|ch| ch.is_ascii_hexdigit())
+            && chars[index + 13] == '-'
+            && chars[index + 14..index + 18]
+                .iter()
+                .all(|ch| ch.is_ascii_hexdigit())
+            && chars[index + 18] == '-'
+            && chars[index + 19..index + 23]
+                .iter()
+                .all(|ch| ch.is_ascii_hexdigit())
+            && chars[index + 23] == '-'
+            && chars[index + 24..index + 36]
+                .iter()
+                .all(|ch| ch.is_ascii_hexdigit());
+        if matches_uuid {
+            output.push_str("<id>");
+            index += 36;
+            continue;
+        }
+        output.push(chars[index]);
+        index += 1;
+    }
+    output
+}
+
+fn replace_temp_workspace_paths(line: &str) -> String {
+    if line.contains("~/dockyard") {
+        return line.to_string();
+    }
+    if let Some(index) = line.find("/private/var/folders/") {
+        let mut normalized = line.to_string();
+        normalized.replace_range(index..line.len(), "~/dockyard");
+        return normalized;
+    }
+    line.to_string()
 }

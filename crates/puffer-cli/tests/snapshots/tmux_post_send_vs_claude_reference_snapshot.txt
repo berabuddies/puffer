@@ -21,34 +21,31 @@ Review the current worktree and call out any risks.
 ❯
 
 Puffer captured pane:
-╭ Puffer Code ─────────────────────────────────────────────────────────────────────────────────────╮
-│Mascot    Clawd on duty                   │Session    dockyard · <id>                         │
-│User      anthropic via API key           │Model      anthropic/claude-sonn... · tools 0/0        │
-│Provider  anthropic · auth api-key        │Directory  dockyard                                    │
-│Mode      effort auto                     │Activity   2 messages · 0 workdirs · sandbox           │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-
+                 ██
+             ██████████    ██
+           ████████████████████
+       ████████████████████████    ╭ Puffer Code ────────────────────────────────────────────────╮
+       ██████████████████████      │Account   anthropic via API key                              │
+     ████████████████████████████  │Model     anthropic/claude-sonnet-4-5 · tools 0/0            │
+ ██████████████████████████████    │Session   dockyard · <id>│
+   ████████████████████████████    │Mode      effort auto                                        │
+       ████████████████████████    │Context   dockyard · 2 msgs · 0 wds · sandbox workspace-write│
+     ████████████████████████      ╰─────────────────────────────────────────────────────────────╯
+         ████████████████████
+         ████████████████
+             ████████
 › Review the current worktree and call out any risks.
-
 The working tree is clean.
 
 
   No pending changes are waiting for review.
-
-
-
-
-
-
-
-anthropic · anthropic/claude-so... · auth api-key · tools 0/0 · dockyard────────────────────────────
-
+────────────────────────────────────────────────────────────────────────────────────────────────────
 ❯ Review changes, ask a question, or type /
-? for shortcuts · /help · /review · !pwd
+anthropic/claude-sonnet-4-5 · 0% left · ~/dockyard · sandbox workspace-write
 
 Feature comparison:
 top_panel: claude=false puffer=true
 boxed_footer: claude=false puffer=false
 user_prefix: claude=false puffer=true
 response_connector: claude=true puffer=false
-shortcut_rail: claude=false puffer=true
+shortcut_rail: claude=false puffer=false

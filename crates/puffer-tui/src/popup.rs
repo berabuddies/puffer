@@ -1,6 +1,6 @@
 use puffer_core::CommandSpec;
 
-const MAX_POPUP_ROWS: usize = 24;
+const MAX_POPUP_ROWS: usize = 8;
 
 /// Returns slash-command popup rows for the current slash-input prefix.
 pub(crate) fn popup_rows<'a>(input: &str, commands: &'a [CommandSpec]) -> Vec<&'a CommandSpec> {
@@ -61,10 +61,10 @@ mod tests {
     }
 
     #[test]
-    fn popup_shows_more_than_eight_rows_for_broad_queries() {
+    fn popup_limits_broad_queries_to_eight_rows() {
         let commands = supported_commands();
         let rows = popup_rows("/", &commands);
-        assert!(rows.len() > 8);
+        assert_eq!(rows.len(), 8);
     }
 
     #[test]

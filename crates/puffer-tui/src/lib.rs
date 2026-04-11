@@ -1,4 +1,5 @@
 mod approval_overlay;
+mod app_helpers;
 mod btw_overlay;
 mod flow;
 mod list_selection_view;
@@ -28,6 +29,10 @@ use crate::flow::{
 use crate::permission_prompt_flow::handle_permission_prompt_key;
 use crate::render::initialize_top_panel_image_state;
 use crate::statusline::refresh_status_line;
+use app_helpers::{
+    apply_model_selection_preferences, apply_selected_model, help_pane_active_without_overlay,
+    should_use_inline_viewport,
+};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
@@ -35,10 +40,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, size as terminal_size, EnterAlternateScreen,
     LeaveAlternateScreen,
 };
-use puffer_core::{
-    apply_model_preferences, command_surface, shutdown_runtime_services, AppState, CommandSpec,
-    MessageRole,
-};
+use puffer_core::{command_surface, shutdown_runtime_services, AppState, CommandSpec};
 use puffer_provider_registry::{AuthStore, ProviderRegistry, StoredCredential};
 use puffer_resources::LoadedResources;
 use puffer_session_store::SessionStore;
@@ -81,22 +83,12 @@ pub fn run_app(
         .as_deref()
         .map(allow_prompt_before_onboarding)
         .unwrap_or(false);
+    let use_content_viewport = should_use_inline_viewport(no_alt_screen);
+    let no_alt_screen = use_content_viewport;
     enable_raw_mode()?;
     if !no_alt_screen {
         execute!(io::stdout(), EnterAlternateScreen)?;
     }
-
-    let mut terminal = if should_use_inline_viewport(no_alt_screen) {
-        let (_, height) = terminal_size()?;
-        Terminal::with_options(
-            CrosstermBackend::new(io::stdout()),
-            TerminalOptions {
-                viewport: Viewport::Inline(height.max(1)),
-            },
-        )?
-    } else {
-        Terminal::new(CrosstermBackend::new(io::stdout()))?
-    };
     let mut tui = TuiState::default();
     initialize_top_panel_image_state();
     tui.defer_prompt(
@@ -141,6 +133,34 @@ pub fn run_app(
         )?;
     }
 
+    sync_render_state(&tui);
+    let mut viewport_height = if use_content_viewport {
+        let (width, height) = terminal_size()?;
+        render::desired_height(
+            width,
+            height,
+            state,
+            resources,
+            providers,
+            auth_store,
+            &tui.input,
+            &commands,
+        )
+        .max(1)
+    } else {
+        0
+    };
+    let mut terminal = if use_content_viewport {
+        Terminal::with_options(
+            CrosstermBackend::new(io::stdout()),
+            TerminalOptions {
+                viewport: Viewport::Inline(viewport_height),
+            },
+        )?
+    } else {
+        Terminal::new(CrosstermBackend::new(io::stdout()))?
+    };
+
     loop {
         if poll_pending_submit(state, auth_store, auth_path, session_store, &mut tui)? {
             advance_loop_after_turn(state, session_store, &mut tui)?;
@@ -179,21 +199,34 @@ pub fn run_app(
             )?;
         }
         refresh_status_line(state)?;
+        sync_render_state(&tui);
+        if use_content_viewport {
+            let size = terminal.size()?;
+            let next_height = render::desired_height(
+                size.width,
+                size.height,
+                state,
+                resources,
+                providers,
+                auth_store,
+                &tui.input,
+                &commands,
+            )
+            .max(1);
+            if next_height != viewport_height {
+                terminal.clear()?;
+                terminal = Terminal::with_options(
+                    CrosstermBackend::new(io::stdout()),
+                    TerminalOptions {
+                        viewport: Viewport::Inline(next_height),
+                    },
+                )?;
+                viewport_height = next_height;
+            } else {
+                terminal.autoresize()?;
+            }
+        }
         terminal.draw(|frame| {
-            render::set_active_overlay(tui.overlay.clone());
-            render::set_pending_submit_state(
-                tui.pending_submit
-                    .as_ref()
-                    .map(|pending| pending.prompt.clone()),
-                tui.pending_submit
-                    .as_ref()
-                    .map(|pending| pending.pending_tool_calls.clone())
-                    .unwrap_or_default(),
-                tui.queued_prompts.iter().cloned().collect(),
-            );
-            render::set_tool_details_expanded(tui.tool_details_expanded);
-            render::set_follow_output(tui.follow_output);
-            render::set_active_loop_state(tui.active_loop.clone());
             render::render(
                 frame,
                 state,
@@ -242,10 +275,21 @@ pub fn run_app(
     Ok(())
 }
 
-fn should_use_inline_viewport(no_alt_screen: bool) -> bool {
-    no_alt_screen
-        && std::env::var_os("SSH_CONNECTION").is_none()
-        && std::env::var_os("SSH_TTY").is_none()
+fn sync_render_state(tui: &TuiState) {
+    render::set_active_overlay(tui.overlay.clone());
+    render::set_pending_submit_state(
+        tui.pending_submit
+            .as_ref()
+            .map(|pending| pending.prompt.clone()),
+        tui.pending_submit
+            .as_ref()
+            .map(|pending| pending.pending_tool_calls.clone())
+            .unwrap_or_default(),
+        tui.queued_prompts.iter().cloned().collect(),
+    );
+    render::set_tool_details_expanded(tui.tool_details_expanded);
+    render::set_follow_output(tui.follow_output);
+    render::set_active_loop_state(tui.active_loop.clone());
 }
 
 fn handle_key(
@@ -430,64 +474,6 @@ fn handle_key(
         _ => {}
     }
     Ok(false)
-}
-
-fn help_pane_active_without_overlay(state: &AppState, tui: &TuiState) -> bool {
-    tui.overlay.is_none()
-        && state.transcript.last().is_some_and(|message| {
-            message.role == MessageRole::System && message.text.starts_with("Supported commands:")
-        })
-}
-
-fn apply_model_selection_preferences(
-    state: &mut AppState,
-    auth_store: &AuthStore,
-    auth_path: &Path,
-    session_store: &SessionStore,
-    provider_id: &str,
-    model_id: &str,
-    effort: &str,
-    fast_mode: bool,
-) -> Result<()> {
-    let _ = auth_store;
-    let _ = auth_path;
-    apply_model_preferences(state, provider_id, model_id, effort, fast_mode)?;
-    session_store.append_event(state.session.id, state.snapshot_event())?;
-    emit_system_message(
-        state,
-        session_store,
-        format!(
-            "Active model set to {provider_id}/{model_id}.\nEffort level set to {effort}.\nFast mode is now {}.",
-            if fast_mode { "on" } else { "off" }
-        ),
-    )
-}
-
-fn apply_selected_model(
-    state: &mut AppState,
-    session_store: &SessionStore,
-    provider_id: &str,
-    model_id: &str,
-) -> Result<()> {
-    let current_effort = state.effort_level.clone();
-    let current_fast_mode = state.fast_mode;
-    apply_model_preferences(
-        state,
-        provider_id,
-        model_id,
-        &current_effort,
-        current_fast_mode,
-    )?;
-    session_store.append_event(state.session.id, state.snapshot_event())?;
-    emit_system_message(
-        state,
-        session_store,
-        format!(
-            "Active model set to {provider_id}/{model_id}.\nEffort level set to {}.\nFast mode is now {}.",
-            state.effort_level,
-            if state.fast_mode { "on" } else { "off" }
-        ),
-    )
 }
 
 fn handle_overlay_key(
