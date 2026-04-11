@@ -573,21 +573,9 @@ fn plan_command_enters_plan_mode_and_submits_raw_arguments() {
         "{:?}",
         state.transcript
     );
-    assert!(matches!(
-        state.transcript.get(1),
-        Some(RenderedMessage {
-            role: MessageRole::User,
-            text,
-        }) if text == "stabilize slash-command parity"
-    ));
-    assert!(!state.transcript[1].text.contains("Requested focus:"));
-    assert!(
-        state.transcript.iter().any(|message| {
-            message.role == MessageRole::System
-                && message.text.starts_with("Plan mode query failed:")
-        }),
-        "{:?}",
-        state.transcript
+    assert_eq!(
+        state.take_pending_query_prompt().as_deref(),
+        Some("stabilize slash-command parity")
     );
 }
 

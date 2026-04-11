@@ -1,3 +1,4 @@
+use crate::plan_mode::enter_plan_mode;
 use crate::AppState;
 use anyhow::bail;
 use anyhow::Result;
@@ -16,7 +17,7 @@ pub fn execute_enter_plan_mode(state: &mut AppState, cwd: &Path, input: Value) -
             "message": "Already in plan mode. Continue exploring the codebase and refining your implementation plan."
         }))?);
     }
-    state.plan_mode = true;
+    enter_plan_mode(state)?;
     Ok(serde_json::to_string_pretty(&json!({
         "message": "Entered plan mode. You should now focus on exploring the codebase and designing an implementation approach."
     }))?)

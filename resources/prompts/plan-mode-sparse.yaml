@@ -1,0 +1,15 @@
+id: plan-mode-sparse
+description: Claude Code parity sparse reminder while plan mode remains active
+variables:
+  - name: PLAN_FILE_PATH
+    description: Absolute plan file path.
+  - name: WORKFLOW_DESCRIPTION
+    description: Interview or phase-based workflow reminder sentence.
+  - name: ASK_USER_QUESTION_TOOL_NAME
+    description: Ask-user-question tool name.
+    default: AskUserQuestion
+  - name: EXIT_PLAN_MODE_TOOL_NAME
+    description: Exit-plan-mode tool name.
+    default: ExitPlanMode
+template: |
+  Plan mode still active (see full instructions earlier in conversation). Read-only except plan file ($PLAN_FILE_PATH). $WORKFLOW_DESCRIPTION End turns with $ASK_USER_QUESTION_TOOL_NAME (for clarifications) or $EXIT_PLAN_MODE_TOOL_NAME (for plan approval). Never ask about plan approval via text or AskUserQuestion.

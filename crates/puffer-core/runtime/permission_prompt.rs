@@ -88,6 +88,7 @@ fn permission_request_summary(definition: &ToolDefinition, input: &Value) -> Str
             .map(|to| format!("Send a message to {to}"))
             .unwrap_or_else(|| definition.id.clone()),
         "AskUserQuestion" => "Answer questions?".to_string(),
+        "ExitPlanMode" => "Exit plan mode?".to_string(),
         _ => definition.id.clone(),
     }
 }

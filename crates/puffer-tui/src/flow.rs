@@ -35,8 +35,8 @@ use crate::{OverlayState, TuiState};
 pub(crate) use flow_auth::{handle_auth_command, run_embedded_auth_login};
 #[path = "flow_loop.rs"]
 mod flow_loop;
-pub(crate) use flow_loop::{advance_loop_after_turn, check_loop_interval};
 use flow_loop::try_handle_loop_command;
+pub(crate) use flow_loop::{advance_loop_after_turn, check_loop_interval};
 
 /// Opens a TUI overlay for slash commands that map to picker UI.
 pub(crate) fn try_open_overlay(
@@ -431,6 +431,7 @@ pub(crate) fn poll_pending_submit(
                 if *auth_store != previous_auth_store {
                     auth_store.save(auth_path)?;
                 }
+                session_store.append_event(state.session.id, state.snapshot_event())?;
                 break;
             }
         }
@@ -692,6 +693,20 @@ pub(crate) fn submit_queued_prompt_if_ready(
     }
     if let Some(overlay) = onboarding::initial_overlay(state, providers, auth_store)? {
         tui.overlay = Some(overlay);
+        return Ok(());
+    }
+    if let Some(prompt) = state.take_pending_query_prompt() {
+        handle_prompt_submit(
+            state,
+            resources,
+            providers,
+            auth_store,
+            auth_path,
+            session_store,
+            tui,
+            prompt,
+            no_alt_screen,
+        )?;
         return Ok(());
     }
     if let Some(prompt) = tui.take_deferred_prompt() {

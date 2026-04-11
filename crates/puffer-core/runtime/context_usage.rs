@@ -4,8 +4,8 @@ use super::structured_output_support::{
     anthropic_tool_definitions_for_request, openai_tool_definitions_for_request,
 };
 use super::system_prompt::render_runtime_system_prompt;
-use crate::command_helpers::prompt::plan_mode_context_message;
 use crate::permissions::load_runtime_permission_context;
+use crate::plan_mode::preview_plan_mode_context_message;
 use crate::{AppState, MessageRole, RenderedMessage};
 use anyhow::Result;
 use puffer_provider_registry::ProviderRegistry;
@@ -35,7 +35,7 @@ pub(crate) fn render_context_usage_summary(
     let registry = ToolRegistry::from_resources(resources);
     let (tool_rows, enabled_tools) = tool_rows_for_summary(&api, &registry, &permission_context)?;
     let system_prompt = render_runtime_system_prompt(state, resources, &model_id, &enabled_tools)?;
-    let plan_mode_context = plan_mode_context_message(state)?;
+    let plan_mode_context = preview_plan_mode_context_message(state, resources)?;
     let system_tokens = estimate_tokens(&system_prompt)
         + plan_mode_context
             .as_deref()

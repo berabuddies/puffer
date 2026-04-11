@@ -1,0 +1,10 @@
+id: plan-mode-exited
+description: Claude Code parity reminder after exiting plan mode
+variables:
+  - name: PLAN_REFERENCE
+    description: Optional trailing sentence referencing the saved plan file.
+    default: ""
+template: |
+  ## Exited Plan Mode
+
+  You have exited plan mode. You can now make edits, run tools, and take actions.$PLAN_REFERENCE

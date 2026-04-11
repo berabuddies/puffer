@@ -9,8 +9,9 @@ use crate::plans::{ensure_plan_file, persist_plan_output, plan_file_path};
 use crate::{AppState, MessageRole};
 use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
-use puffer_resources::LoadedResources;
+use puffer_resources::{LoadedItem, LoadedResources, PromptTemplate, SourceInfo, SourceKind};
 use puffer_session_store::SessionStore;
+use std::path::PathBuf;
 use std::process::Command;
 use tempfile::tempdir;
 use tempfile::TempDir;
@@ -162,25 +163,19 @@ fn plan_specialization_with_description_submits_raw_prompt_after_enabling_mode()
         prepare_plan_prompt_command(&mut state, &session_store, "stabilize slash-command parity")
             .unwrap();
 
-    match outcome {
-        PromptCommandPreparation::DirectPrompt(prompt) => {
-            assert_eq!(prompt, "stabilize slash-command parity");
-            assert!(state.plan_mode);
-            assert!(!plan_path.exists());
-            assert!(state
-                .transcript
-                .last()
-                .unwrap()
-                .text
-                .contains("Enabled plan mode"));
-        }
-        PromptCommandPreparation::PromptOverride(_)
-        | PromptCommandPreparation::HandledLocally
-        | PromptCommandPreparation::SideQuestion(_)
-        | PromptCommandPreparation::VariableOverrides(_) => {
-            panic!("expected direct prompt for non-empty plan arguments")
-        }
-    }
+    assert_eq!(outcome, PromptCommandPreparation::HandledLocally);
+    assert_eq!(
+        state.take_pending_query_prompt().as_deref(),
+        Some("stabilize slash-command parity")
+    );
+    assert!(state.plan_mode);
+    assert!(!plan_path.exists());
+    assert!(state
+        .transcript
+        .last()
+        .unwrap()
+        .text
+        .contains("Enabled plan mode"));
 }
 
 #[test]
@@ -266,7 +261,7 @@ fn plan_specialization_treats_default_scaffold_as_missing_plan() {
 }
 
 #[test]
-fn handle_plan_command_executes_direct_prompt_after_entering_plan_mode() {
+fn handle_plan_command_queues_prompt_after_entering_plan_mode() {
     let fixture = sample_state();
     let mut state = fixture.state;
     let session_store = fixture.session_store;
@@ -286,16 +281,9 @@ fn handle_plan_command_executes_direct_prompt_after_entering_plan_mode() {
         .transcript
         .iter()
         .any(|message| message.text == "Enabled plan mode"));
-    assert!(state.transcript.iter().any(|message| {
-        message.role == MessageRole::User && message.text == "stabilize slash-command parity"
-    }));
-    assert!(
-        state
-            .transcript
-            .iter()
-            .any(|message| message.text.starts_with("Plan mode query failed:")),
-        "{:?}",
-        state.transcript
+    assert_eq!(
+        state.take_pending_query_prompt().as_deref(),
+        Some("stabilize slash-command parity")
     );
 }
 
@@ -492,12 +480,47 @@ fn plan_mode_context_does_not_create_a_default_plan_file() {
     let mut state = fixture.state;
     state.plan_mode = true;
 
-    let context = plan_mode_context_message(&state)
+    let context = plan_mode_context_message(&state, &plan_mode_resources())
         .unwrap()
         .expect("plan mode context");
 
-    assert!(context.contains("Current plan contents:\n<empty>"));
+    assert!(context.contains("Plan mode is active."));
+    assert!(context.contains("No plan file exists yet."));
     assert!(!plan_file_path(&state).unwrap().exists());
+}
+
+fn plan_mode_resources() -> LoadedResources {
+    LoadedResources {
+        prompts: vec![
+            loaded_prompt(
+                "resources/prompts/plan-mode-interview.yaml",
+                include_str!("../../../resources/prompts/plan-mode-interview.yaml"),
+            ),
+            loaded_prompt(
+                "resources/prompts/plan-mode-sparse.yaml",
+                include_str!("../../../resources/prompts/plan-mode-sparse.yaml"),
+            ),
+            loaded_prompt(
+                "resources/prompts/plan-mode-reentry.yaml",
+                include_str!("../../../resources/prompts/plan-mode-reentry.yaml"),
+            ),
+            loaded_prompt(
+                "resources/prompts/plan-mode-exited.yaml",
+                include_str!("../../../resources/prompts/plan-mode-exited.yaml"),
+            ),
+        ],
+        ..LoadedResources::default()
+    }
+}
+
+fn loaded_prompt(path: &str, contents: &str) -> LoadedItem<PromptTemplate> {
+    LoadedItem {
+        value: serde_yaml::from_str::<PromptTemplate>(contents).unwrap(),
+        source_info: SourceInfo {
+            path: PathBuf::from(path),
+            kind: SourceKind::Builtin,
+        },
+    }
 }
 
 struct TestFixture {

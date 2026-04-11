@@ -1,6 +1,7 @@
 use super::append_tool_invocations;
 use super::common::open_text_file_in_editor;
 use super::emit_system;
+use crate::plan_mode::{enter_plan_mode, preview_plan_mode_context_message};
 use crate::plans::{plan_file_path, plan_has_user_content, read_plan_text};
 use crate::runtime::RequestToolFilter;
 use crate::{AppState, MessageRole};
@@ -108,12 +109,12 @@ pub(crate) fn prepare_plan_prompt_command(
     let trimmed = args.trim();
 
     if !state.plan_mode {
-        state.plan_mode = true;
+        enter_plan_mode(state)?;
         emit_system(state, session_store, "Enabled plan mode".to_string())?;
-        if trimmed.is_empty() || trimmed == "open" {
-            return Ok(PromptCommandPreparation::HandledLocally);
+        if !trimmed.is_empty() && trimmed != "open" {
+            state.queue_pending_query_prompt(trimmed.to_string());
         }
-        return Ok(PromptCommandPreparation::DirectPrompt(trimmed.to_string()));
+        return Ok(PromptCommandPreparation::HandledLocally);
     }
 
     let Some(plan_body) = read_plan_text(state)?.filter(|text| plan_has_user_content(text)) else {
@@ -141,46 +142,17 @@ pub(crate) fn prepare_plan_prompt_command(
     Ok(PromptCommandPreparation::HandledLocally)
 }
 
-/// Handles `/plan` from the local command path while preserving its direct-prompt behavior.
+/// Handles `/plan` from the local command path.
 pub(crate) fn handle_plan_command(
     state: &mut AppState,
-    resources: &LoadedResources,
-    providers: &ProviderRegistry,
-    auth_store: &mut AuthStore,
+    _resources: &LoadedResources,
+    _providers: &ProviderRegistry,
+    _auth_store: &mut AuthStore,
     session_store: &SessionStore,
     args: &str,
 ) -> Result<()> {
-    match prepare_plan_prompt_command(state, session_store, args)? {
-        PromptCommandPreparation::HandledLocally => Ok(()),
-        PromptCommandPreparation::DirectPrompt(prompt) => {
-            record_specialized_prompt_request(state, session_store, &prompt)?;
-            match crate::runtime::execute_user_prompt(
-                state, resources, providers, auth_store, &prompt,
-            ) {
-                Ok(turn) => {
-                    append_tool_invocations(state, session_store, &turn.tool_invocations)?;
-                    state.push_message(MessageRole::Assistant, turn.assistant_text.clone());
-                    session_store.append_event(
-                        state.session.id,
-                        TranscriptEvent::AssistantMessage {
-                            text: turn.assistant_text,
-                        },
-                    )?;
-                    Ok(())
-                }
-                Err(error) => emit_system(
-                    state,
-                    session_store,
-                    format!("Plan mode query failed: {error}"),
-                ),
-            }
-        }
-        PromptCommandPreparation::PromptOverride(_)
-        | PromptCommandPreparation::SideQuestion(_)
-        | PromptCommandPreparation::VariableOverrides(_) => {
-            unreachable!("/plan only uses local and direct-prompt branches")
-        }
-    }
+    let _ = prepare_plan_prompt_command(state, session_store, args)?;
+    Ok(())
 }
 
 /// Supplies the optional user-input block used by the declarative `/pr-comments` prompt.
@@ -276,28 +248,12 @@ pub(crate) fn finalize_compact_prompt_command(
     )
 }
 
-/// Renders the active plan-mode context block for provider requests.
-pub(crate) fn plan_mode_context_message(state: &AppState) -> Result<Option<String>> {
-    if !state.plan_mode {
-        return Ok(None);
-    }
-    let plan_path = plan_file_path(state)?;
-    let plan_text = read_plan_text(state)?.unwrap_or_default();
-    let plan_body = if plan_text.trim().is_empty() {
-        "<empty>"
-    } else {
-        plan_text.trim_end()
-    };
-    Ok(Some(format!(
-        "Plan mode is active. The user wants planning only right now.\n\
-Do not edit files other than the plan file, and do not implement code until plan mode is exited.\n\
-Update the plan file as you learn more, use AskUserQuestion for clarifications, and use ExitPlanMode when the plan is ready for approval.\n\
-The active plan file is: {}\n\
-\n\
-Current plan contents:\n{}",
-        plan_path.display(),
-        plan_body
-    )))
+/// Renders the next active plan-mode reminder for previews and context estimates.
+pub(crate) fn plan_mode_context_message(
+    state: &AppState,
+    resources: &LoadedResources,
+) -> Result<Option<String>> {
+    preview_plan_mode_context_message(state, resources)
 }
 
 fn build_compact_prompt_override(state: &AppState, args: &str) -> String {
@@ -328,9 +284,7 @@ fn build_compact_prompt_override(state: &AppState, args: &str) -> String {
         "3. **Files & Code** — files read, edited, or created, with paths and brief descriptions\n",
     );
     text.push_str("4. **Errors & Fixes** — errors encountered and how they were resolved\n");
-    text.push_str(
-        "5. **Pending Tasks** — any incomplete work, open questions, or next steps\n",
-    );
+    text.push_str("5. **Pending Tasks** — any incomplete work, open questions, or next steps\n");
     text.push_str("6. **Current State** — what was just completed before this compaction\n\n");
 
     let _ = writeln!(

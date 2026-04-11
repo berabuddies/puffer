@@ -1,5 +1,6 @@
 use super::*;
-use crate::permissions::load_runtime_permission_context;
+use crate::permissions::{load_runtime_permission_context, ToolPermissionBehavior};
+use crate::plans::plan_file_path;
 use serde_json::json;
 
 #[test]
@@ -148,6 +149,64 @@ fn plan_mode_requires_approval_for_mutating_on_request_tools() {
     assert!(error
         .to_string()
         .contains("plan mode requires approval for mutating tools"));
+}
+
+#[test]
+fn plan_mode_allows_writing_the_active_plan_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = ConfigPaths::discover(temp.path());
+    ensure_workspace_dirs(&paths).unwrap();
+
+    let mut state = state();
+    state.cwd = temp.path().to_path_buf();
+    state.plan_mode = true;
+    let mut write_tool = loaded_tool("Write", "Write file", "runtime:claude_write");
+    write_tool.value.approval_policy = Some("on-request".to_string());
+    write_tool.value.sandbox_policy = Some("workspace-write".to_string());
+    let resources = LoadedResources {
+        tools: vec![write_tool],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let definition = registry.definition("Write").unwrap();
+    let permission_context =
+        load_runtime_permission_context(&state.cwd, &resources, &state).unwrap();
+
+    permission_context
+        .enforce_tool_call(
+            definition,
+            &json!({"file_path": plan_file_path(&state).unwrap(), "content": "# Plan\n"}),
+        )
+        .unwrap();
+}
+
+#[test]
+fn plan_mode_allows_ask_user_question() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = ConfigPaths::discover(temp.path());
+    ensure_workspace_dirs(&paths).unwrap();
+
+    let mut state = state();
+    state.cwd = temp.path().to_path_buf();
+    state.plan_mode = true;
+    let resources = LoadedResources {
+        tools: vec![loaded_tool(
+            "AskUserQuestion",
+            "Ask a question",
+            "runtime:workflow:ask_user_question",
+        )],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let definition = registry.definition("AskUserQuestion").unwrap();
+    let permission_context =
+        load_runtime_permission_context(&state.cwd, &resources, &state).unwrap();
+
+    let decision = permission_context.decision_for_tool_call(
+        definition,
+        &json!({"questions":[{"question":"Pick one","header":"Choice","options":[{"label":"A","description":"A"},{"label":"B","description":"B"}]}]}),
+    );
+    assert_eq!(decision.behavior, ToolPermissionBehavior::Allow);
 }
 
 #[test]

@@ -1,4 +1,5 @@
 use super::emit_system;
+use crate::plans::copy_plan_for_fork;
 use crate::{AppState, MessageRole};
 use anyhow::Result;
 use puffer_session_store::{SessionStore, SessionSummary};
@@ -32,7 +33,9 @@ pub(crate) fn handle_branch_command(
     session_store.rename_session(fork.id, branch_name.clone())?;
     let record = session_store.load_session(fork.id)?;
     let config = state.config.clone();
+    let original_state = state.clone();
     *state = AppState::from_session_record(config, record);
+    let _ = copy_plan_for_fork(&original_state, state)?;
     state.remote_name = None;
     state.remote_session_id = None;
     state.remote_session_url = None;

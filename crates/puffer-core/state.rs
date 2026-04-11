@@ -58,6 +58,11 @@ pub struct AppState {
     pub effort_level: String,
     pub fast_mode: bool,
     pub plan_mode: bool,
+    pub(crate) plan_mode_attachment_turns: usize,
+    pub(crate) plan_mode_attachment_count: usize,
+    pub(crate) plan_mode_has_exited: bool,
+    pub(crate) plan_mode_needs_reentry_attachment: bool,
+    pub(crate) plan_mode_needs_exit_attachment: bool,
     pub sandbox_mode: String,
     pub remote_name: Option<String>,
     pub remote_environment: Option<String>,
@@ -74,6 +79,7 @@ pub struct AppState {
     pub(crate) session_tool_permissions: HashMap<String, String>,
     pub(crate) native_structured_output_unsupported: HashSet<String>,
     pub(crate) status_line_signature: Option<String>,
+    pending_query_prompt: Option<String>,
     tasks: Vec<TaskRecord>,
     next_task_id: u64,
 }
@@ -101,6 +107,11 @@ impl AppState {
             transcript: Vec::new(),
             prompt_color: "default".to_string(),
             plan_mode: false,
+            plan_mode_attachment_turns: 0,
+            plan_mode_attachment_count: 0,
+            plan_mode_has_exited: false,
+            plan_mode_needs_reentry_attachment: false,
+            plan_mode_needs_exit_attachment: false,
             sandbox_mode: "workspace-write".to_string(),
             remote_name: None,
             remote_environment: None,
@@ -117,6 +128,7 @@ impl AppState {
             session_tool_permissions: HashMap::new(),
             native_structured_output_unsupported: HashSet::new(),
             status_line_signature: None,
+            pending_query_prompt: None,
             tasks: Vec::new(),
             next_task_id: 1,
         }
@@ -153,6 +165,11 @@ impl AppState {
                     effort_level,
                     fast_mode,
                     plan_mode,
+                    plan_mode_attachment_turns,
+                    plan_mode_attachment_count,
+                    plan_mode_has_exited,
+                    plan_mode_needs_reentry_attachment,
+                    plan_mode_needs_exit_attachment,
                     sandbox_mode,
                     remote_name,
                     remote_environment,
@@ -171,6 +188,11 @@ impl AppState {
                     state.effort_level = effort_level;
                     state.fast_mode = fast_mode;
                     state.plan_mode = plan_mode;
+                    state.plan_mode_attachment_turns = plan_mode_attachment_turns;
+                    state.plan_mode_attachment_count = plan_mode_attachment_count;
+                    state.plan_mode_has_exited = plan_mode_has_exited;
+                    state.plan_mode_needs_reentry_attachment = plan_mode_needs_reentry_attachment;
+                    state.plan_mode_needs_exit_attachment = plan_mode_needs_exit_attachment;
                     state.sandbox_mode = sandbox_mode;
                     state.remote_name = remote_name;
                     state.remote_environment = remote_environment;
@@ -251,6 +273,27 @@ impl AppState {
         self.status_line_signature = signature;
     }
 
+    /// Queues a follow-up provider prompt requested by a local command.
+    pub fn queue_pending_query_prompt(&mut self, prompt: impl Into<String>) {
+        let prompt = prompt.into();
+        let trimmed = prompt.trim();
+        if trimmed.is_empty() {
+            self.pending_query_prompt = None;
+            return;
+        }
+        self.pending_query_prompt = Some(trimmed.to_string());
+    }
+
+    /// Returns true when a local command queued a follow-up provider prompt.
+    pub fn has_pending_query_prompt(&self) -> bool {
+        self.pending_query_prompt.is_some()
+    }
+
+    /// Drains the queued follow-up provider prompt, if one exists.
+    pub fn take_pending_query_prompt(&mut self) -> Option<String> {
+        self.pending_query_prompt.take()
+    }
+
     /// Builds a persisted snapshot event for the current mutable session state.
     pub fn snapshot_event(&self) -> TranscriptEvent {
         TranscriptEvent::StateSnapshot {
@@ -261,6 +304,11 @@ impl AppState {
             effort_level: self.effort_level.clone(),
             fast_mode: self.fast_mode,
             plan_mode: self.plan_mode,
+            plan_mode_attachment_turns: self.plan_mode_attachment_turns,
+            plan_mode_attachment_count: self.plan_mode_attachment_count,
+            plan_mode_has_exited: self.plan_mode_has_exited,
+            plan_mode_needs_reentry_attachment: self.plan_mode_needs_reentry_attachment,
+            plan_mode_needs_exit_attachment: self.plan_mode_needs_exit_attachment,
             sandbox_mode: self.sandbox_mode.clone(),
             remote_name: self.remote_name.clone(),
             remote_environment: self.remote_environment.clone(),

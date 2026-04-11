@@ -1,3 +1,4 @@
+use crate::plans::plan_file_path;
 use crate::tool_names::canonical_tool_name;
 use crate::AppState;
 use anyhow::{bail, Result};
@@ -9,7 +10,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 /// Stores persisted workspace permission overrides for tool ids.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -63,6 +64,7 @@ pub(crate) struct RuntimePermissionContext {
     permissions: PermissionsSettings,
     sandbox: SandboxSettings,
     plan_mode: bool,
+    active_plan_path: Option<PathBuf>,
 }
 
 impl RuntimePermissionContext {
@@ -177,9 +179,16 @@ impl RuntimePermissionContext {
                     reason: None,
                 }
             }),
-            "AskUserQuestion" => Some(ToolPermissionDecision {
-                behavior: ToolPermissionBehavior::Ask,
-                reason: Some("answer questions?".to_string()),
+            "AskUserQuestion" => Some(if self.plan_mode {
+                ToolPermissionDecision {
+                    behavior: ToolPermissionBehavior::Allow,
+                    reason: None,
+                }
+            } else {
+                ToolPermissionDecision {
+                    behavior: ToolPermissionBehavior::Ask,
+                    reason: Some("answer questions?".to_string()),
+                }
             }),
             "WebSearch" => Some(ToolPermissionDecision {
                 behavior: ToolPermissionBehavior::Ask,
@@ -259,6 +268,9 @@ impl RuntimePermissionContext {
         if let Some(reason) = shell_command_reason(definition, input) {
             return Some(reason);
         }
+        if self.plan_mode_allows_mutation(definition, input) {
+            return None;
+        }
         if self.plan_mode && tool_mutates_workspace(definition) {
             return Some(format!(
                 "plan mode requires approval for mutating tools. Use `ExitPlanMode` before retrying `{}`.",
@@ -266,6 +278,16 @@ impl RuntimePermissionContext {
             ));
         }
         None
+    }
+
+    fn plan_mode_allows_mutation(&self, definition: &ToolDefinition, input: &Value) -> bool {
+        if !self.plan_mode {
+            return false;
+        }
+        matches!(
+            canonical_tool_name(&definition.id).as_str(),
+            "write" | "edit"
+        ) && tool_targets_active_plan_file(input, self.active_plan_path.as_deref())
     }
 }
 
@@ -439,7 +461,44 @@ pub(crate) fn load_runtime_permission_context(
         permissions,
         sandbox: load_runtime_sandbox_settings(cwd, state)?,
         plan_mode: state.plan_mode,
+        active_plan_path: state.plan_mode.then(|| plan_file_path(state)).transpose()?,
     })
+}
+fn tool_targets_active_plan_file(input: &Value, active_plan_path: Option<&Path>) -> bool {
+    let Some(active_plan_path) = active_plan_path else {
+        return false;
+    };
+    let Some(raw_path) = input.get("file_path").and_then(Value::as_str) else {
+        return false;
+    };
+    normalize_permission_path(raw_path)
+        .is_some_and(|tool_path| tool_path == normalize_filesystem_path(active_plan_path))
+}
+fn normalize_permission_path(raw_path: &str) -> Option<PathBuf> {
+    let expanded = if raw_path == "~" {
+        std::env::var_os("HOME").map(PathBuf::from)?
+    } else if let Some(suffix) = raw_path
+        .strip_prefix("~/")
+        .or_else(|| raw_path.strip_prefix("~\\"))
+    {
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(suffix))?
+    } else {
+        PathBuf::from(raw_path)
+    };
+    Some(normalize_filesystem_path(&expanded))
+}
+fn normalize_filesystem_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let _ = normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
 }
 
 /// Writes the permissions file to disk.
@@ -651,6 +710,7 @@ mod tests {
             permissions: PermissionsSettings::default(),
             sandbox: SandboxSettings::from_mode("workspace-write"),
             plan_mode: true,
+            active_plan_path: None,
         };
         let decision =
             context.decision_for_tool_call(&tool_definition("Write", "on-request"), &Value::Null);
@@ -659,11 +719,34 @@ mod tests {
     }
 
     #[test]
+    fn plan_mode_allows_writes_and_edits_for_the_active_plan_file() {
+        let active_plan_path = PathBuf::from("/tmp/.puffer/plans/session.md");
+        let context = RuntimePermissionContext {
+            permissions: PermissionsSettings::default(),
+            sandbox: SandboxSettings::from_mode("workspace-write"),
+            plan_mode: true,
+            active_plan_path: Some(active_plan_path.clone()),
+        };
+        let write = context.decision_for_tool_call(
+            &tool_definition("Write", "on-request"),
+            &serde_json::json!({"file_path": active_plan_path, "content": "# Plan"}),
+        );
+        let edit = context.decision_for_tool_call(
+            &tool_definition("Edit", "on-request"),
+            &serde_json::json!({"file_path": "/tmp/.puffer/plans/./session.md", "old_string": "#", "new_string": "##"}),
+        );
+
+        assert_eq!(write.behavior, ToolPermissionBehavior::Allow);
+        assert_eq!(edit.behavior, ToolPermissionBehavior::Allow);
+    }
+
+    #[test]
     fn config_reads_allow_but_writes_ask() {
         let context = RuntimePermissionContext {
             permissions: PermissionsSettings::default(),
             sandbox: SandboxSettings::from_mode("workspace-write"),
             plan_mode: false,
+            active_plan_path: None,
         };
         let config = tool_definition("Config", "auto");
         let read = context.decision_for_tool_call(&config, &serde_json::json!({"setting":"theme"}));
@@ -681,6 +764,7 @@ mod tests {
             permissions: PermissionsSettings::default(),
             sandbox: SandboxSettings::from_mode("workspace-write"),
             plan_mode: false,
+            active_plan_path: None,
         };
         let question = tool_definition("AskUserQuestion", "auto");
         let decision = context.decision_for_tool_call(
@@ -696,6 +780,7 @@ mod tests {
             permissions: PermissionsSettings::default(),
             sandbox: SandboxSettings::from_mode("workspace-write"),
             plan_mode: false,
+            active_plan_path: None,
         };
         let search = tool_definition("WebSearch", "auto");
         let decision =
@@ -709,6 +794,7 @@ mod tests {
             permissions: PermissionsSettings::default(),
             sandbox: SandboxSettings::from_mode("workspace-write"),
             plan_mode: false,
+            active_plan_path: None,
         };
         let send = tool_definition("SendMessage", "auto");
         let local = context
@@ -727,6 +813,7 @@ mod tests {
             permissions: PermissionsSettings::default(),
             sandbox: SandboxSettings::from_mode("workspace-write"),
             plan_mode: true,
+            active_plan_path: None,
         };
         let todo = tool_definition("TodoWrite", "auto");
         let agent = tool_definition("Agent", "auto");
@@ -750,6 +837,7 @@ mod tests {
             permissions: PermissionsSettings::default(),
             sandbox: SandboxSettings::from_mode("workspace-write"),
             plan_mode: false,
+            active_plan_path: None,
         };
         assert!(!context.tool_visible_to_model(&definition));
     }
@@ -765,6 +853,7 @@ mod tests {
             },
             sandbox: SandboxSettings::from_mode("workspace-write"),
             plan_mode: true,
+            active_plan_path: None,
         };
         let send_user_message = ToolDefinition {
             id: "SendUserMessage".to_string(),
@@ -813,6 +902,7 @@ mod tests {
             },
             sandbox: SandboxSettings::from_mode("workspace-write"),
             plan_mode: false,
+            active_plan_path: None,
         };
         let read = tool_definition("Read", "auto");
         let edit = tool_definition("Edit", "auto");
@@ -857,6 +947,7 @@ mod tests {
             permissions: PermissionsSettings::default(),
             sandbox: SandboxSettings::from_mode("workspace-write"),
             plan_mode: false,
+            active_plan_path: None,
         };
         let bash = tool_definition("Bash", "on-request");
         let decision = context.decision_for_tool_call(
@@ -877,6 +968,7 @@ mod tests {
             permissions: PermissionsSettings::default(),
             sandbox: SandboxSettings::from_mode("workspace-write"),
             plan_mode: false,
+            active_plan_path: None,
         };
         let bash = tool_definition("Bash", "on-request");
         let decision = context.decision_for_tool_call(

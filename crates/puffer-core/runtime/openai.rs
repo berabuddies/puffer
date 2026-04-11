@@ -8,12 +8,11 @@ mod support;
 pub(super) use self::support::build_codex_openai_request_body;
 use self::support::{
     append_default_openai_headers, apply_previous_response_id, compact_openai_input,
-    extend_input_with_response_items, is_codex_openai_provider,
-    is_openai_structured_output_error, next_openai_input,
-    openai_base_url_for_auth, openai_model_supports_reasoning, openai_registry_credential,
-    openai_responses_path, openai_stream_read_timeout, prefer_native_structured_output,
-    retry_openai_transport, structured_output_endpoint_id, trace_openai_http_request,
-    trace_openai_http_response_headers, OPENAI_STRUCTURED_OUTPUT_FAMILY,
+    extend_input_with_response_items, is_codex_openai_provider, is_openai_structured_output_error,
+    next_openai_input, openai_base_url_for_auth, openai_model_supports_reasoning,
+    openai_registry_credential, openai_responses_path, openai_stream_read_timeout,
+    prefer_native_structured_output, retry_openai_transport, structured_output_endpoint_id,
+    trace_openai_http_request, trace_openai_http_response_headers, OPENAI_STRUCTURED_OUTPUT_FAMILY,
 };
 use super::structured_output_support::{
     openai_chat_completion_tools_for_request, openai_chat_response_format,
@@ -133,7 +132,9 @@ fn execute_openai_once(
             .map(|tool| tool.name.clone())
             .collect::<std::collections::BTreeSet<_>>(),
     )?;
-    let instructions = openai_request_instructions(state, Some(&system_prompt))?;
+    let plan_mode_context = crate::plan_mode::take_plan_mode_context_message(state, resources)?;
+    let instructions =
+        openai_request_instructions(Some(&system_prompt), plan_mode_context.as_deref());
     let mut next_input = transcript_to_openai_input(state, input)?;
     let mut invocations = Vec::new();
     let supports_reasoning = openai_model_supports_reasoning(provider, &model_id);
@@ -278,7 +279,9 @@ where
             .map(|tool| tool.name.clone())
             .collect::<std::collections::BTreeSet<_>>(),
     )?;
-    let instructions = openai_request_instructions(state, Some(&system_prompt))?;
+    let plan_mode_context = crate::plan_mode::take_plan_mode_context_message(state, resources)?;
+    let instructions =
+        openai_request_instructions(Some(&system_prompt), plan_mode_context.as_deref());
     let mut next_input = transcript_to_openai_input(state, input)?;
     let mut invocations = Vec::new();
     let supports_reasoning = openai_model_supports_reasoning(provider, &model_id);
@@ -431,7 +434,13 @@ fn execute_openai_completions_once(
             .map(|tool| tool.function.name.clone())
             .collect::<std::collections::BTreeSet<_>>(),
     )?;
-    let mut messages = transcript_to_openai_chat_messages(state, input, Some(&system_prompt))?;
+    let plan_mode_context = crate::plan_mode::take_plan_mode_context_message(state, resources)?;
+    let mut messages = transcript_to_openai_chat_messages(
+        state,
+        input,
+        Some(&system_prompt),
+        plan_mode_context.as_deref(),
+    )?;
     let mut invocations = Vec::new();
 
     loop {
@@ -671,7 +680,10 @@ pub(super) fn transcript_to_openai_input(state: &AppState, input: &str) -> Resul
     Ok(Value::Array(items))
 }
 
-fn openai_request_instructions(state: &AppState, system_prompt: Option<&str>) -> Result<String> {
+fn openai_request_instructions(
+    system_prompt: Option<&str>,
+    plan_mode_context: Option<&str>,
+) -> String {
     let mut sections = Vec::new();
     if let Some(system_prompt) = system_prompt
         .map(str::trim)
@@ -679,22 +691,21 @@ fn openai_request_instructions(state: &AppState, system_prompt: Option<&str>) ->
     {
         sections.push(system_prompt.to_string());
     }
-    if let Some(plan_mode_context) =
-        crate::command_helpers::prompt::plan_mode_context_message(state)?
-            .map(|message| message.trim().to_string())
-            .filter(|message| !message.is_empty())
+    if let Some(plan_mode_context) = plan_mode_context
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
     {
-        sections.push(plan_mode_context);
+        sections.push(plan_mode_context.to_string());
     }
-    Ok(sections.join("\n\n"))
+    sections.join("\n\n")
 }
 
 pub(super) fn transcript_to_openai_chat_messages(
     state: &AppState,
     input: &str,
     system_prompt: Option<&str>,
+    plan_mode_context: Option<&str>,
 ) -> Result<Vec<OpenAIChatMessage>> {
-    let plan_mode_context = crate::command_helpers::prompt::plan_mode_context_message(state)?;
     let mut messages = Vec::new();
     if let Some(system_prompt) = system_prompt.filter(|prompt| !prompt.trim().is_empty()) {
         messages.push(OpenAIChatMessage {
@@ -704,7 +715,8 @@ pub(super) fn transcript_to_openai_chat_messages(
             tool_calls: Vec::new(),
         });
     }
-    if let Some(plan_mode_context) = plan_mode_context {
+    if let Some(plan_mode_context) = plan_mode_context.filter(|message| !message.trim().is_empty())
+    {
         messages.push(OpenAIChatMessage {
             role: "system".to_string(),
             content: Some(json!(plan_mode_context)),

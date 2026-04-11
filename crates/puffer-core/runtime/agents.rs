@@ -1,4 +1,5 @@
 use crate::agent_catalog::load_agent_resources;
+use crate::plan_mode::enter_plan_mode;
 use crate::runtime::claude_tools::workflow::store::{register_team_member, ClaudeTeamMember};
 use crate::tool_names::tool_spec_matches_selector;
 use crate::{AppState, MessageRole};
@@ -326,7 +327,7 @@ fn prepare_agent_execution(
         .or(input.permission_mode.as_deref())
         .or(agent.value.permission_mode.as_deref());
     if effective_mode == Some("plan") {
-        nested_state.plan_mode = true;
+        enter_plan_mode(&mut nested_state)?;
     }
     nested_state.active_team_name = input
         .team_name

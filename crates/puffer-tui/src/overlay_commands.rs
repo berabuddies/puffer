@@ -80,7 +80,6 @@ pub(crate) fn handle_onboarding_command_key(
                 session_store,
                 tui,
                 no_alt_screen,
-                super::handle_submit,
             )?;
             Ok(true)
         }

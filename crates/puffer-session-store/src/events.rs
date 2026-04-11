@@ -71,6 +71,16 @@ pub enum TranscriptEvent {
         fast_mode: bool,
         #[serde(default)]
         plan_mode: bool,
+        #[serde(default)]
+        plan_mode_attachment_turns: usize,
+        #[serde(default)]
+        plan_mode_attachment_count: usize,
+        #[serde(default)]
+        plan_mode_has_exited: bool,
+        #[serde(default)]
+        plan_mode_needs_reentry_attachment: bool,
+        #[serde(default)]
+        plan_mode_needs_exit_attachment: bool,
         sandbox_mode: String,
         remote_name: Option<String>,
         remote_environment: Option<String>,

@@ -1,3 +1,4 @@
+use crate::plan_mode::exit_plan_mode;
 use crate::plans::{plan_file_path, read_plan_text};
 use crate::AppState;
 use anyhow::bail;
@@ -16,7 +17,7 @@ pub fn execute_exit_plan_mode(state: &mut AppState, cwd: &Path, input: Value) ->
     }
     let plan_path = plan_file_path(state)?;
     let plan = read_plan_text(state)?;
-    state.plan_mode = false;
+    exit_plan_mode(state);
     Ok(serde_json::to_string_pretty(&serde_json::json!({
         "isAgent": false,
         "filePath": plan_path.display().to_string(),

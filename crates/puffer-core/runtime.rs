@@ -18,13 +18,12 @@ use std::time::Duration;
 #[cfg(test)]
 mod agent_runtime_tests;
 mod agents;
+mod anthropic_sse;
 pub mod claude_tools;
-pub mod teammate_loop;
 mod context_usage;
 mod hook_support;
 mod local_mcp_resources;
 mod local_tools;
-mod anthropic_sse;
 mod openai;
 mod openai_sse;
 mod permission_prompt;
@@ -32,6 +31,7 @@ mod request_tool_filter;
 mod side_question;
 mod structured_output_support;
 mod system_prompt;
+pub mod teammate_loop;
 mod tool_executor;
 
 pub(crate) use self::context_usage::render_context_usage_summary;
@@ -419,7 +419,7 @@ fn execute_anthropic(
     let permission_context = load_runtime_permission_context(&state.cwd, resources, state)?;
     let mut messages = transcript_to_anthropic_messages(state, input);
     let mut invocations = Vec::new();
-    let plan_mode_context = crate::command_helpers::prompt::plan_mode_context_message(state)?;
+    let plan_mode_context = crate::plan_mode::take_plan_mode_context_message(state, resources)?;
     let request_config = AnthropicRequestConfig {
         base_url: provider.base_url.clone(),
         session_id: state.session.id.to_string(),
@@ -516,9 +516,10 @@ fn execute_anthropic(
         }
         // Add thinking/reasoning when the model supports it, effort is not "low",
         // and the provider actually supports the Anthropic thinking API format.
-        let provider_supports_thinking_api = provider.id == "anthropic"
-            || provider.base_url.contains("anthropic.com");
-        if model_supports_thinking && provider_supports_thinking_api && state.effort_level != "low" {
+        let provider_supports_thinking_api =
+            provider.id == "anthropic" || provider.base_url.contains("anthropic.com");
+        if model_supports_thinking && provider_supports_thinking_api && state.effort_level != "low"
+        {
             let thinking_budget = match state.effort_level.as_str() {
                 "high" | "max" => max_output.saturating_sub(1).min(16_384),
                 _ => max_output.saturating_sub(1).min(8_192), // medium default
@@ -552,45 +553,42 @@ fn execute_anthropic(
             )
         });
 
-        let response = match send_http_request(&request.url, &request.headers, &body.to_string(), true) {
-            Ok(response) => response,
-            Err(error) => {
-                let err_msg = error.to_string();
-                // 413 / prompt_too_long recovery: drop oldest messages and retry.
-                if err_msg.contains("413")
-                    || err_msg.contains("prompt_too_long")
-                    || err_msg.contains("too long")
-                {
-                    if messages.len() > 3 {
-                        let drop_count = (messages.len() / 3).max(1);
-                        messages.drain(..drop_count);
-                        // Ensure first message is user role for valid alternation.
-                        if messages
-                            .first()
-                            .and_then(|m| m["role"].as_str())
-                            == Some("user")
-                        {
-                            if let Some(first) = messages.first_mut() {
-                                let existing = first["content"].as_str().unwrap_or("").to_string();
-                                first["content"] = json!(format!(
-                                    "[Context truncated]\n\n{existing}"
-                                ));
+        let response =
+            match send_http_request(&request.url, &request.headers, &body.to_string(), true) {
+                Ok(response) => response,
+                Err(error) => {
+                    let err_msg = error.to_string();
+                    // 413 / prompt_too_long recovery: drop oldest messages and retry.
+                    if err_msg.contains("413")
+                        || err_msg.contains("prompt_too_long")
+                        || err_msg.contains("too long")
+                    {
+                        if messages.len() > 3 {
+                            let drop_count = (messages.len() / 3).max(1);
+                            messages.drain(..drop_count);
+                            // Ensure first message is user role for valid alternation.
+                            if messages.first().and_then(|m| m["role"].as_str()) == Some("user") {
+                                if let Some(first) = messages.first_mut() {
+                                    let existing =
+                                        first["content"].as_str().unwrap_or("").to_string();
+                                    first["content"] =
+                                        json!(format!("[Context truncated]\n\n{existing}"));
+                                }
+                            } else {
+                                messages.insert(
+                                    0,
+                                    json!({
+                                        "role": "user",
+                                        "content": "[Context truncated to fit within model limits]"
+                                    }),
+                                );
                             }
-                        } else {
-                            messages.insert(
-                                0,
-                                json!({
-                                    "role": "user",
-                                    "content": "[Context truncated to fit within model limits]"
-                                }),
-                            );
+                            continue;
                         }
-                        continue;
                     }
+                    return Err(error);
                 }
-                return Err(error);
-            }
-        };
+            };
         let cwd = state.cwd.clone();
         if let Some(tool_results) = execute_anthropic_tool_calls(
             state,
@@ -662,7 +660,7 @@ where
     let permission_context = load_runtime_permission_context(&state.cwd, resources, state)?;
     let mut messages = transcript_to_anthropic_messages(state, input);
     let mut invocations = Vec::new();
-    let plan_mode_context = crate::command_helpers::prompt::plan_mode_context_message(state)?;
+    let plan_mode_context = crate::plan_mode::take_plan_mode_context_message(state, resources)?;
 
     let request_config = build_anthropic_request_config(state, provider, &auth);
     let request = build_messages_request(
@@ -761,8 +759,7 @@ where
 
         // Parse SSE stream — reqwest::blocking::Response implements Read,
         // so the parser reads events as they arrive from the network.
-        let response =
-            anthropic_sse::parse_anthropic_sse(http_response, on_event)?;
+        let response = anthropic_sse::parse_anthropic_sse(http_response, on_event)?;
 
         let cwd = state.cwd.clone();
         if let Some(tool_results) = execute_anthropic_tool_calls(
@@ -798,9 +795,13 @@ where
             // Context management between tool iterations (CC parity).
             snip_old_tool_outputs(&mut messages);
             let ctx_threshold = provider
-                .models.iter().find(|m| m.id == model_id)
-                .map(|m| m.context_window as u32).unwrap_or(200_000)
-                .saturating_mul(80) / 100;
+                .models
+                .iter()
+                .find(|m| m.id == model_id)
+                .map(|m| m.context_window as u32)
+                .unwrap_or(200_000)
+                .saturating_mul(80)
+                / 100;
             auto_compact_messages(
                 &mut messages,
                 ctx_threshold,
@@ -872,9 +873,7 @@ fn send_http_request_raw(
                 trace_http_response(url, response.status.as_u16(), &response.text);
                 // Retry on 429 (rate limit) and 5xx (server errors).
                 let status = response.status.as_u16();
-                if attempt < total_attempts
-                    && (status == 429 || (500..=599).contains(&status))
-                {
+                if attempt < total_attempts && (status == 429 || (500..=599).contains(&status)) {
                     let delay = retry_delay(retry_config, attempt);
                     if !delay.is_zero() {
                         std::thread::sleep(delay);
@@ -1269,9 +1268,7 @@ fn prepend_system_reminder(messages: &mut Vec<Value>) {
     let now = time::OffsetDateTime::now_utc();
     let date_str = format!("{}-{:02}-{:02}", now.year(), now.month() as u8, now.day());
     let git_status = git_status_context();
-    let mut sections = format!(
-        "# currentDate\nToday's date is {date_str}."
-    );
+    let mut sections = format!("# currentDate\nToday's date is {date_str}.");
     if !git_status.is_empty() {
         sections.push_str(&format!("\n# gitStatus\n{git_status}"));
     }

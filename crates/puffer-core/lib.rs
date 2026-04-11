@@ -6,6 +6,7 @@ mod config_settings;
 mod hooks;
 mod model_preferences;
 mod permissions;
+mod plan_mode;
 mod plans;
 mod runtime;
 mod skill_support;
@@ -31,7 +32,9 @@ pub use model_preferences::{
     default_effort_level, effort_level_is_supported, normalized_effort_level,
     provider_preference_family, supported_effort_levels, ModelPreferenceFamily,
 };
+pub use runtime::claude_tools::execute_workflow_tool;
 pub use runtime::execute_user_prompt as execute_user_turn;
+pub use runtime::teammate_loop;
 pub use runtime::{
     execute_side_question, execute_user_prompt_streaming as execute_user_turn_streaming,
     execute_user_prompt_streaming_with_permissions as execute_user_turn_streaming_with_permissions,
@@ -41,8 +44,6 @@ pub use runtime::{
     PermissionPromptRequest, StructuredOutputConfig, ToolCallRequest, ToolInvocation,
     TurnExecution, TurnStreamEvent,
 };
-pub use runtime::claude_tools::execute_workflow_tool;
-pub use runtime::teammate_loop;
 pub use state::{AppState, MessageRole, RenderedMessage, TaskRecord, TaskStatus};
 
 use anyhow::Result;

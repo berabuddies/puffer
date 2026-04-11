@@ -1,6 +1,6 @@
 use super::flow_loop::*;
 use super::*;
-use crate::state::{LoopKind, LoopState};
+use crate::state::LoopKind;
 use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
 use puffer_session_store::SessionMetadata;
 use tempfile::tempdir;
@@ -127,6 +127,57 @@ fn handle_prompt_submit_queues_prompt_while_turn_is_running() {
 }
 
 #[test]
+fn slash_plan_with_arguments_starts_async_turn_after_local_handling() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = sample_state(session, tempdir.path());
+    let mut resources = LoadedResources::default();
+    let mut providers = ProviderRegistry::new();
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let mut auth_store = AuthStore::default();
+    let mut tui = TuiState::default();
+
+    handle_prompt_submit(
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        "/plan stabilize slash-command parity".to_string(),
+        true,
+    )
+    .unwrap();
+    submit_queued_prompt_if_ready(
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+
+    assert!(state.plan_mode);
+    assert!(tui.has_pending_submit());
+    assert!(state
+        .transcript
+        .iter()
+        .any(|message| message.text == "Enabled plan mode"));
+    assert!(state.transcript.iter().any(|message| {
+        message.role == MessageRole::User && message.text == "stabilize slash-command parity"
+    }));
+}
+
+#[test]
 fn cancel_pending_submit_records_interrupt_and_starts_next_queued_prompt() {
     let tempdir = tempdir().unwrap();
     let paths = ConfigPaths::discover(tempdir.path());
@@ -218,10 +269,22 @@ fn parse_loop_args_extracts_interval_and_prompt() {
 
 #[test]
 fn parse_duration_handles_all_suffixes() {
-    assert_eq!(parse_duration("10s"), Some(std::time::Duration::from_secs(10)));
-    assert_eq!(parse_duration("5m"), Some(std::time::Duration::from_secs(300)));
-    assert_eq!(parse_duration("1h"), Some(std::time::Duration::from_secs(3600)));
-    assert_eq!(parse_duration("2d"), Some(std::time::Duration::from_secs(172800)));
+    assert_eq!(
+        parse_duration("10s"),
+        Some(std::time::Duration::from_secs(10))
+    );
+    assert_eq!(
+        parse_duration("5m"),
+        Some(std::time::Duration::from_secs(300))
+    );
+    assert_eq!(
+        parse_duration("1h"),
+        Some(std::time::Duration::from_secs(3600))
+    );
+    assert_eq!(
+        parse_duration("2d"),
+        Some(std::time::Duration::from_secs(172800))
+    );
     assert_eq!(parse_duration("abc"), None);
     assert_eq!(parse_duration(""), None);
 }
@@ -260,7 +323,10 @@ fn build_optimization_prompt_includes_context() {
     // User prompt should come before optimization context
     let user_pos = prompt.find("fix tests").unwrap();
     let ctx_pos = prompt.find("Optimization context").unwrap();
-    assert!(user_pos < ctx_pos, "user prompt should precede optimization context");
+    assert!(
+        user_pos < ctx_pos,
+        "user prompt should precede optimization context"
+    );
 }
 
 #[test]
@@ -302,10 +368,13 @@ fn try_handle_loop_command_creates_maximize_state() {
     let mut state = sample_state(session, tempdir.path());
     let mut tui = TuiState::default();
 
-    assert!(
-        try_handle_loop_command(&mut state, &session_store, &mut tui, "/maximize accuracy run bench")
-            .unwrap()
-    );
+    assert!(try_handle_loop_command(
+        &mut state,
+        &session_store,
+        &mut tui,
+        "/maximize accuracy run bench"
+    )
+    .unwrap());
     assert!(tui.active_loop.is_some());
     let ls = tui.active_loop.as_ref().unwrap();
     assert!(matches!(ls.kind, LoopKind::Maximize(ref m) if m == "accuracy"));

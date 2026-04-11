@@ -74,6 +74,11 @@ fn extract_template_literal(contents: &str, marker: &str) -> String {
     contents[start..end.unwrap()].to_string()
 }
 
+fn extract_template_literal_after(contents: &str, anchor: &str, marker: &str) -> String {
+    let start = contents.find(anchor).unwrap();
+    extract_template_literal(&contents[start..], marker)
+}
+
 fn normalize_reference_template(raw: &str) -> String {
     let unescaped = raw.replace("\\`", "`");
     let trimmed = unescaped.strip_prefix('\n').unwrap_or(&unescaped);
@@ -271,6 +276,183 @@ fn exit_plan_mode_tool_prompt_matches_claude_reference() {
     .replace("${ASK_USER_QUESTION_TOOL_NAME}", "AskUserQuestion");
 
     assert_eq!(tool.description.trim_end(), expected.trim_end());
+}
+
+#[test]
+fn plan_mode_interview_prompt_matches_claude_reference_when_rendered() {
+    let rendered = render_prompt(
+        "resources/prompts/plan-mode-interview.yaml",
+        &[
+            (
+                "PLAN_FILE_INFO",
+                "A plan file already exists at /tmp/plan.md. You can read it and make incremental edits using the Edit tool.",
+            ),
+            ("READ_ONLY_TOOL_NAMES", "Read, Glob, Grep"),
+            (
+                "EXPLORE_AGENT_HINT",
+                " You can use the explore agent type to parallelize complex searches without filling your context, though for straightforward queries direct tools are simpler.",
+            ),
+            ("ASK_USER_QUESTION_TOOL_NAME", "AskUserQuestion"),
+            ("EXIT_PLAN_MODE_TOOL_NAME", "ExitPlanMode"),
+        ],
+    );
+    let reference = read_repo_file("references/claude-code/src/utils/messages.ts");
+    let expected = normalize_reference_template(&extract_template_literal_after(
+        &reference,
+        "function getPlanModeInterviewInstructions(",
+        "const content = `",
+    ))
+    .replace("${planFileInfo}", "A plan file already exists at /tmp/plan.md. You can read it and make incremental edits using the Edit tool.")
+    .replace("${getReadOnlyToolNames()}", "Read, Glob, Grep")
+    .replace(
+        r#"${areExplorePlanAgentsEnabled() ? ` You can use the ${EXPLORE_AGENT.agentType} agent type to parallelize complex searches without filling your context, though for straightforward queries direct tools are simpler.` : ''}"#,
+        " You can use the explore agent type to parallelize complex searches without filling your context, though for straightforward queries direct tools are simpler.",
+    )
+    .replace("${ASK_USER_QUESTION_TOOL_NAME}", "AskUserQuestion")
+    .replace("${ExitPlanModeV2Tool.name}", "ExitPlanMode");
+
+    assert_eq!(rendered.trim_end(), expected.trim_end());
+}
+
+#[test]
+fn plan_mode_full_prompt_matches_claude_reference_when_rendered() {
+    let phase4_section = "### Phase 4: Final Plan\nGoal: Write your final plan to the plan file (the only file you can edit).\n- Begin with a **Context** section: explain why this change is being made — the problem or need it addresses, what prompted it, and the intended outcome\n- Include only your recommended approach, not all alternatives\n- Ensure that the plan file is concise enough to scan quickly, but detailed enough to execute effectively\n- Include the paths of critical files to be modified\n- Reference existing functions and utilities you found that should be reused, with their file paths\n- Include a verification section describing how to test the changes end-to-end (run the code, use MCP tools, run tests)";
+    let rendered = render_prompt(
+        "resources/prompts/plan-mode-full.yaml",
+        &[
+            (
+                "PLAN_FILE_INFO",
+                "A plan file already exists at /tmp/plan.md. You can read it and make incremental edits using the Edit tool.",
+            ),
+            ("EXPLORE_AGENT_TYPE", "explore"),
+            ("EXPLORE_AGENT_COUNT", "1"),
+            ("PLAN_AGENT_TYPE", "plan"),
+            ("PLAN_AGENT_COUNT", "1"),
+            ("MULTI_AGENT_GUIDANCE", ""),
+            ("PHASE4_SECTION", phase4_section),
+            ("ASK_USER_QUESTION_TOOL_NAME", "AskUserQuestion"),
+            ("EXIT_PLAN_MODE_TOOL_NAME", "ExitPlanMode"),
+        ],
+    );
+    let reference = read_repo_file("references/claude-code/src/utils/messages.ts");
+    let expected = normalize_reference_template(&extract_template_literal_after(
+        &reference,
+        "function getPlanModeV2Instructions(",
+        "const content = `",
+    ))
+    .replace("${planFileInfo}", "A plan file already exists at /tmp/plan.md. You can read it and make incremental edits using the Edit tool.")
+    .replace("${EXPLORE_AGENT.agentType}", "explore")
+    .replace("${exploreAgentCount}", "1")
+    .replace("${PLAN_AGENT.agentType}", "plan")
+    .replace("${agentCount}", "1")
+    .replace(
+        "${\n  agentCount > 1\n    ? `- **Multiple agents**: Use up to 1 agents for complex tasks that benefit from different perspectives\n\nExamples of when to use multiple agents:\n- The task touches multiple parts of the codebase\n- It's a large refactor or architectural change\n- There are many edge cases to consider\n- You'd benefit from exploring different approaches\n\nExample perspectives by task type:\n- New feature: simplicity vs performance vs maintainability\n- Bug fix: root cause vs workaround vs prevention\n- Refactoring: minimal change vs clean architecture\n`\n    : ''\n}",
+        "",
+    )
+    .replace("${ASK_USER_QUESTION_TOOL_NAME}", "AskUserQuestion")
+    .replace("${ExitPlanModeV2Tool.name}", "ExitPlanMode")
+    .replace("${getPlanPhase4Section()}", phase4_section);
+
+    assert_eq!(rendered.trim_end(), expected.trim_end());
+}
+
+#[test]
+fn plan_mode_sparse_prompt_matches_claude_reference_when_rendered() {
+    let rendered = render_prompt(
+        "resources/prompts/plan-mode-sparse.yaml",
+        &[
+            ("PLAN_FILE_PATH", "/tmp/plan.md"),
+            (
+                "WORKFLOW_DESCRIPTION",
+                "Follow iterative workflow: explore codebase, interview user, write to plan incrementally.",
+            ),
+            ("ASK_USER_QUESTION_TOOL_NAME", "AskUserQuestion"),
+            ("EXIT_PLAN_MODE_TOOL_NAME", "ExitPlanMode"),
+        ],
+    );
+    let reference = read_repo_file("references/claude-code/src/utils/messages.ts");
+    let expected = normalize_reference_template(&extract_template_literal_after(
+        &reference,
+        "function getPlanModeV2SparseInstructions(",
+        "const content = `",
+    ))
+    .replace("${attachment.planFilePath}", "/tmp/plan.md")
+    .replace(
+        "${workflowDescription}",
+        "Follow iterative workflow: explore codebase, interview user, write to plan incrementally.",
+    )
+    .replace("${ASK_USER_QUESTION_TOOL_NAME}", "AskUserQuestion")
+    .replace("${ExitPlanModeV2Tool.name}", "ExitPlanMode");
+
+    assert_eq!(rendered.trim_end(), expected.trim_end());
+}
+
+#[test]
+fn plan_mode_subagent_prompt_matches_claude_reference_when_rendered() {
+    let rendered = render_prompt(
+        "resources/prompts/plan-mode-subagent.yaml",
+        &[
+            (
+                "PLAN_FILE_INFO",
+                "A plan file already exists at /tmp/plan.md. You can read it and make incremental edits using the Edit tool if you need to.",
+            ),
+            ("ASK_USER_QUESTION_TOOL_NAME", "AskUserQuestion"),
+        ],
+    );
+    let reference = read_repo_file("references/claude-code/src/utils/messages.ts");
+    let expected = normalize_reference_template(&extract_template_literal_after(
+        &reference,
+        "function getPlanModeV2SubAgentInstructions(",
+        "const content = `",
+    ))
+    .replace("${planFileInfo}", "A plan file already exists at /tmp/plan.md. You can read it and make incremental edits using the Edit tool if you need to.")
+    .replace("${ASK_USER_QUESTION_TOOL_NAME}", "AskUserQuestion");
+
+    assert_eq!(rendered.trim_end(), expected.trim_end());
+}
+
+#[test]
+fn plan_mode_reentry_prompt_matches_claude_reference_when_rendered() {
+    let rendered = render_prompt(
+        "resources/prompts/plan-mode-reentry.yaml",
+        &[
+            ("PLAN_FILE_PATH", "/tmp/plan.md"),
+            ("EXIT_PLAN_MODE_TOOL_NAME", "ExitPlanMode"),
+        ],
+    );
+    let reference = read_repo_file("references/claude-code/src/utils/messages.ts");
+    let expected = normalize_reference_template(&extract_template_literal_after(
+        &reference,
+        "case 'plan_mode_reentry': {",
+        "const content = `",
+    ))
+    .replace("${attachment.planFilePath}", "/tmp/plan.md")
+    .replace("${ExitPlanModeV2Tool.name}", "ExitPlanMode");
+
+    assert_eq!(rendered.trim_end(), expected.trim_end());
+}
+
+#[test]
+fn plan_mode_exited_prompt_matches_claude_reference_when_rendered() {
+    let rendered = render_prompt(
+        "resources/prompts/plan-mode-exited.yaml",
+        &[(
+            "PLAN_REFERENCE",
+            " The plan file is located at /tmp/plan.md if you need to reference it.",
+        )],
+    );
+    let reference = read_repo_file("references/claude-code/src/utils/messages.ts");
+    let expected = normalize_reference_template(&extract_template_literal_after(
+        &reference,
+        "case 'plan_mode_exit': {",
+        "const content = `",
+    ))
+    .replace(
+        "${planReference}",
+        " The plan file is located at /tmp/plan.md if you need to reference it.",
+    );
+
+    assert_eq!(rendered.trim_end(), expected.trim_end());
 }
 
 #[test]
