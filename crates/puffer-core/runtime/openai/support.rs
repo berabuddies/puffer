@@ -1,14 +1,22 @@
 use super::super::{APP_VERSION, OPENAI_CHATGPT_BASE_URL};
 use super::StructuredOutputConfig;
+use crate::runtime::ToolInvocation;
 use crate::AppState;
 use anyhow::{Error, Result};
 use puffer_provider_openai::{OpenAIResponsesTextConfig, OpenAIResponsesTool};
 use puffer_provider_registry::{OAuthCredential, ProviderDescriptor};
 use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::time::Duration;
 
 pub(super) const OPENAI_STRUCTURED_OUTPUT_FAMILY: &str = "openai";
+
+#[derive(Debug, Default)]
+pub(super) struct RepeatedToolFailureGuard {
+    repeated_missing_commands: HashMap<String, usize>,
+    reminded_missing_commands: HashSet<String>,
+}
 
 pub(crate) fn build_codex_openai_request_body(
     state: &AppState,
@@ -219,6 +227,44 @@ pub(super) fn openai_supports_response_threading(
         || trimmed.contains("/api/codex")
 }
 
+impl RepeatedToolFailureGuard {
+    pub(super) fn blocked_output(&self, tool_id: &str, arguments: &Value) -> Option<String> {
+        let command = missing_bash_command_from_arguments(tool_id, arguments)?;
+        let attempts = self
+            .repeated_missing_commands
+            .get(&command)
+            .copied()
+            .unwrap_or(0);
+        if attempts < 2 {
+            return None;
+        }
+        Some(format!(
+            "Blocked repeated Bash command `{command}` because it already failed with `command not found` twice in this turn. Use a different available command or strategy instead of retrying it."
+        ))
+    }
+
+    pub(super) fn observe_invocations(&mut self, invocations: &[ToolInvocation]) -> Option<String> {
+        let mut newly_repeated = Vec::new();
+        for invocation in invocations {
+            let Some(command) = missing_bash_command_from_invocation(invocation) else {
+                continue;
+            };
+            let attempts = self
+                .repeated_missing_commands
+                .entry(command.clone())
+                .and_modify(|count| *count += 1)
+                .or_insert(1);
+            if *attempts >= 2 && self.reminded_missing_commands.insert(command.clone()) {
+                newly_repeated.push(command);
+            }
+        }
+        if newly_repeated.is_empty() {
+            return None;
+        }
+        Some(render_repeated_failure_reminder(&newly_repeated))
+    }
+}
+
 pub(super) fn openai_responses_path(base_url: &str) -> &'static str {
     let trimmed = base_url.trim_end_matches('/');
     if trimmed.contains("/backend-api") || trimmed.contains("/api/codex") {
@@ -291,6 +337,48 @@ fn has_header(headers: &[(String, String)], name: &str) -> bool {
     headers
         .iter()
         .any(|(header, _)| header.eq_ignore_ascii_case(name))
+}
+
+fn render_repeated_failure_reminder(commands: &[String]) -> String {
+    let command_lines = commands
+        .iter()
+        .map(|command| {
+            format!(
+                "- Bash command `{command}` already failed with `command not found` twice in this turn. Do not run it again unless you first change the environment; choose a different command or strategy."
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "<system-reminder>\nRepeated missing-command failures detected.\n{command_lines}\n</system-reminder>"
+    )
+}
+
+fn missing_bash_command_from_invocation(invocation: &ToolInvocation) -> Option<String> {
+    if invocation.success
+        || !invocation
+            .output
+            .to_ascii_lowercase()
+            .contains("command not found")
+    {
+        return None;
+    }
+    let arguments = serde_json::from_str::<Value>(&invocation.input).ok()?;
+    missing_bash_command_from_arguments(&invocation.tool_id, &arguments)
+}
+
+fn missing_bash_command_from_arguments(tool_id: &str, arguments: &Value) -> Option<String> {
+    if tool_id != "Bash" {
+        return None;
+    }
+    let command = arguments.get("command")?.as_str()?.trim();
+    if command.is_empty() {
+        return None;
+    }
+    shell_words::split(command)
+        .ok()
+        .and_then(|parts| parts.into_iter().next())
+        .or_else(|| command.split_whitespace().next().map(ToOwned::to_owned))
 }
 
 fn env_flag(name: &str) -> bool {
@@ -414,6 +502,7 @@ mod tests {
     use super::is_retryable_openai_transport_error;
     use super::openai_max_turns;
     use super::openai_supports_response_threading;
+    use super::RepeatedToolFailureGuard;
     use crate::runtime::tests::state;
     use anyhow::anyhow;
     use puffer_provider_registry::ProviderDescriptor;
@@ -564,5 +653,34 @@ mod tests {
         drop(_small);
         let _large = ScopedEnvVar::set("PUFFER_OPENAI_MAX_TURNS", "128");
         assert_eq!(openai_max_turns(), 64);
+    }
+
+    #[test]
+    fn repeated_missing_bash_commands_trigger_reminder_and_block() {
+        let mut guard = RepeatedToolFailureGuard::default();
+        let first = crate::runtime::ToolInvocation {
+            call_id: "call-1".to_string(),
+            tool_id: "Bash".to_string(),
+            input: r#"{"command":"7z l archive.7z"}"#.to_string(),
+            output: "bash: line 1: 7z: command not found".to_string(),
+            success: false,
+        };
+        let second = crate::runtime::ToolInvocation {
+            call_id: "call-2".to_string(),
+            tool_id: "Bash".to_string(),
+            input: r#"{"command":"7z x archive.7z"}"#.to_string(),
+            output: "bash: line 1: 7z: command not found".to_string(),
+            success: false,
+        };
+
+        assert!(guard.observe_invocations(&[first]).is_none());
+        let reminder = guard
+            .observe_invocations(&[second])
+            .expect("second failure should trigger reminder");
+        assert!(reminder.contains("Repeated missing-command failures detected"));
+        assert!(reminder.contains("`7z`"));
+        assert!(guard
+            .blocked_output("Bash", &json!({ "command": "7z t archive.7z" }))
+            .is_some());
     }
 }

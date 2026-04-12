@@ -15,7 +15,8 @@ use self::support::{
     openai_model_supports_reasoning, openai_registry_credential, openai_responses_path,
     openai_stream_read_timeout, openai_supports_response_threading,
     prefer_native_structured_output, retry_openai_transport, structured_output_endpoint_id,
-    trace_openai_http_request, trace_openai_http_response_headers, OPENAI_STRUCTURED_OUTPUT_FAMILY,
+    trace_openai_http_request, trace_openai_http_response_headers, RepeatedToolFailureGuard,
+    OPENAI_STRUCTURED_OUTPUT_FAMILY,
 };
 use super::structured_output_support::{
     openai_chat_completion_tools_for_request, openai_chat_response_format,
@@ -154,6 +155,7 @@ fn execute_openai_once(
     let supports_response_threading =
         openai_supports_response_threading(provider, &execution.request_config.base_url);
     let max_turns = openai_max_turns();
+    let mut repeated_tool_failure_guard = RepeatedToolFailureGuard::default();
     let mut previous_response_id = None;
     // Index where "continuation" items start — used for previous_response_id optimization.
     // When previous_response_id is set, only items[start..] are sent as wire input.
@@ -236,7 +238,7 @@ fn execute_openai_once(
         continuation_start = Some(items.len());
 
         let cwd = state.cwd.clone();
-        let tool_results = execute_openai_tool_calls(
+        let tool_results = execute_openai_tool_calls_with_guard(
             state,
             resources,
             providers,
@@ -248,10 +250,16 @@ fn execute_openai_once(
             &model_id,
             structured_output,
             options.tool_filter,
+            &mut repeated_tool_failure_guard,
         )?;
 
         // Shared: append tool calls + outputs to canonical items.
         append_tool_results(&mut items, &tool_results.invocations);
+        if let Some(reminder) =
+            repeated_tool_failure_guard.observe_invocations(&tool_results.invocations)
+        {
+            items.push(ConversationItem::user_message(&reminder));
+        }
         invocations.extend(tool_results.invocations);
 
         // Shared: unified compaction.
@@ -372,6 +380,7 @@ where
     let supports_response_threading =
         openai_supports_response_threading(provider, &execution.request_config.base_url);
     let max_turns = openai_max_turns();
+    let mut repeated_tool_failure_guard = RepeatedToolFailureGuard::default();
     let mut previous_response_id: Option<String> = None;
     // Index where "continuation" items start — used for previous_response_id optimization.
     // When previous_response_id is set, only items[start..] are sent as wire input.
@@ -507,7 +516,7 @@ where
         continuation_start = Some(items.len());
 
         let cwd = state.cwd.clone();
-        let tool_results = execute_openai_tool_calls(
+        let tool_results = execute_openai_tool_calls_with_guard(
             state,
             resources,
             providers,
@@ -519,6 +528,7 @@ where
             &model_id,
             structured_output,
             options.tool_filter,
+            &mut repeated_tool_failure_guard,
         )?;
         if !tool_results.invocations.is_empty() {
             on_event(TurnStreamEvent::ToolInvocations(
@@ -528,6 +538,11 @@ where
 
         // Shared: append tool calls + outputs to canonical items.
         append_tool_results(&mut items, &tool_results.invocations);
+        if let Some(reminder) =
+            repeated_tool_failure_guard.observe_invocations(&tool_results.invocations)
+        {
+            items.push(ConversationItem::user_message(&reminder));
+        }
         invocations.extend(tool_results.invocations);
 
         // Shared: unified compaction.
@@ -631,6 +646,7 @@ fn execute_openai_completions_once(
     let mut items = transcript_to_items(state, input);
     let mut invocations = Vec::new();
     let max_turns = openai_max_turns();
+    let mut repeated_tool_failure_guard = RepeatedToolFailureGuard::default();
 
     for _ in 0..max_turns {
         // Check for background tasks that completed since the last turn.
@@ -695,7 +711,7 @@ fn execute_openai_completions_once(
         }
 
         let cwd = state.cwd.clone();
-        let tool_results = execute_openai_tool_calls(
+        let tool_results = execute_openai_tool_calls_with_guard(
             state,
             resources,
             providers,
@@ -707,10 +723,16 @@ fn execute_openai_completions_once(
             &model_id,
             structured_output,
             options.tool_filter,
+            &mut repeated_tool_failure_guard,
         )?;
 
         // Shared: append tool calls + outputs to canonical items.
         append_tool_results(&mut items, &tool_results.invocations);
+        if let Some(reminder) =
+            repeated_tool_failure_guard.observe_invocations(&tool_results.invocations)
+        {
+            items.push(ConversationItem::user_message(&reminder));
+        }
         invocations.extend(tool_results.invocations);
 
         // Shared: unified compaction (previously missing post-compact context).
@@ -742,6 +764,37 @@ pub(super) fn execute_openai_tool_calls(
     structured_output: Option<&StructuredOutputConfig>,
     tool_filter: Option<&super::RequestToolFilter>,
 ) -> Result<OpenAIToolResults> {
+    let mut repeated_tool_failure_guard = RepeatedToolFailureGuard::default();
+    execute_openai_tool_calls_with_guard(
+        state,
+        resources,
+        providers,
+        auth_store,
+        tool_calls,
+        registry,
+        cwd,
+        request_config,
+        model_id,
+        structured_output,
+        tool_filter,
+        &mut repeated_tool_failure_guard,
+    )
+}
+
+fn execute_openai_tool_calls_with_guard(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    providers: &ProviderRegistry,
+    auth_store: &mut AuthStore,
+    tool_calls: &[OpenAIResponseToolCall],
+    registry: &ToolRegistry,
+    cwd: &std::path::Path,
+    request_config: &OpenAIRequestConfig,
+    model_id: &str,
+    structured_output: Option<&StructuredOutputConfig>,
+    tool_filter: Option<&super::RequestToolFilter>,
+    repeated_tool_failure_guard: &mut RepeatedToolFailureGuard,
+) -> Result<OpenAIToolResults> {
     // Count how many parallel-safe tools we have.
     let parallel_count = tool_calls
         .iter()
@@ -762,6 +815,7 @@ pub(super) fn execute_openai_tool_calls(
             model_id,
             structured_output,
             tool_filter,
+            repeated_tool_failure_guard,
         );
     }
 
@@ -793,12 +847,20 @@ pub(super) fn execute_openai_tool_calls(
 
     // Pre-allocate results array; each slot filled by either parallel or serial exec.
     let mut results: Vec<Option<(String, bool)>> = vec![None; tool_calls.len()];
+    for (i, tc) in tool_calls.iter().enumerate() {
+        if let Some(output) = repeated_tool_failure_guard.blocked_output(&tc.name, &tc.arguments) {
+            results[i] = Some((output, false));
+        }
+    }
 
     // Execute parallel-safe permitted tools concurrently.
     std::thread::scope(|s| {
         let mut handles: Vec<(usize, std::thread::ScopedJoinHandle<'_, (String, bool)>)> =
             Vec::new();
         for (i, tc) in tool_calls.iter().enumerate() {
+            if results[i].is_some() {
+                continue;
+            }
             // Skip denied tools and non-parallel tools.
             if !is_parallel_safe_tool(&tc.name) {
                 continue;
@@ -950,10 +1012,28 @@ fn execute_openai_tool_calls_serial(
     model_id: &str,
     structured_output: Option<&StructuredOutputConfig>,
     tool_filter: Option<&super::RequestToolFilter>,
+    repeated_tool_failure_guard: &mut RepeatedToolFailureGuard,
 ) -> Result<OpenAIToolResults> {
     let mut outputs = Vec::new();
     let mut invocations = Vec::new();
     for tool_call in tool_calls {
+        if let Some(output) =
+            repeated_tool_failure_guard.blocked_output(&tool_call.name, &tool_call.arguments)
+        {
+            outputs.push(OpenAIResponsesFunctionCallOutput {
+                kind: "function_call_output".to_string(),
+                call_id: tool_call.call_id.clone(),
+                output: output.clone(),
+            });
+            invocations.push(ToolInvocation {
+                call_id: tool_call.call_id.clone(),
+                tool_id: tool_call.name.clone(),
+                input: serde_json::to_string(&tool_call.arguments)?,
+                output,
+                success: false,
+            });
+            continue;
+        }
         let (output, success) = match execute_tool_call(
             state,
             resources,
