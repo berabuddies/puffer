@@ -1,14 +1,16 @@
 use crate::agent_catalog::load_agent_resources;
 use crate::plan_mode::enter_plan_mode;
+use crate::runtime::agent_support::{
+    build_agent_system_prompt, combine_agent_prompt, ensure_required_mcp_servers,
+    filter_resources_for_agent, is_in_process_teammate_context, resolve_effective_team_name,
+    resolve_model_case_insensitive,
+};
 use crate::runtime::claude_tools::workflow::store::{register_team_member, ClaudeTeamMember};
-use crate::tool_names::tool_spec_matches_selector;
 use crate::{AppState, MessageRole};
 use anyhow::{anyhow, bail, Context, Result};
 use puffer_config::{ensure_workspace_dirs, ConfigPaths};
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
-use puffer_resources::{
-    agent_by_id, plugin_mcp_servers, skill_by_name, AgentSpec, LoadedResources, ToolSpec,
-};
+use puffer_resources::{agent_by_id, LoadedResources};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::fs;
@@ -158,33 +160,6 @@ struct PreparedAgentExecution {
     worktree: Option<AgentWorktree>,
 }
 
-const IMPLICIT_AGENT_DISALLOWED_TOOLS: &[&str] = &[
-    "Agent",
-    "TaskOutput",
-    "EnterPlanMode",
-    "ExitPlanMode",
-    "AskUserQuestion",
-    "TaskStop",
-];
-
-const ASYNC_AGENT_ALLOWED_TOOLS: &[&str] = &[
-    "Bash",
-    "PowerShell",
-    "Read",
-    "Edit",
-    "Write",
-    "NotebookEdit",
-    "Glob",
-    "Grep",
-    "WebFetch",
-    "WebSearch",
-    "TodoWrite",
-    "Skill",
-    "ToolSearch",
-    "EnterWorktree",
-    "ExitWorktree",
-];
-
 /// Executes the runtime-backed `Agent` tool by running a nested model turn.
 pub(super) fn execute_agent_tool(
     state: &AppState,
@@ -194,7 +169,7 @@ pub(super) fn execute_agent_tool(
     cwd: &Path,
     input: Value,
 ) -> Result<String> {
-    let input: AgentToolInput = serde_json::from_value(input).context("invalid Agent input")?;
+    let mut input: AgentToolInput = serde_json::from_value(input).context("invalid Agent input")?;
     if input.prompt.trim().is_empty() {
         bail!("Agent prompt cannot be empty");
     }
@@ -213,6 +188,28 @@ pub(super) fn execute_agent_tool(
     if input.max_turns == Some(0) {
         bail!("agent max_turns must be greater than zero");
     }
+    let guard_team_name = input
+        .team_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| state.active_team_name.clone());
+    let effective_team_name =
+        resolve_effective_team_name(state, input.team_name.as_deref(), input.name.as_deref());
+    if is_in_process_teammate_context(state)
+        && guard_team_name.is_some()
+        && input
+            .name
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+    {
+        bail!(
+            "Teammates cannot spawn other teammates — the team roster is flat. To spawn a subagent instead, omit the `name` parameter."
+        );
+    }
+    input.team_name = effective_team_name;
 
     let prepared = prepare_agent_execution(state, resources, providers, cwd, input)?;
     if prepared.prompt.trim().is_empty() {
@@ -237,6 +234,14 @@ pub(super) fn execute_agent_tool(
                 cwd: prepared.nested_cwd.display().to_string(),
             },
         )?;
+    }
+    if is_in_process_teammate_context(state)
+        && guard_team_name.is_some()
+        && prepared.run_in_background
+    {
+        bail!(
+            "In-process teammates cannot spawn background agents. Use run_in_background=false for synchronous subagents."
+        );
     }
 
     if prepared.run_in_background {
@@ -865,202 +870,7 @@ fn agent_output_path(session_cwd: &Path, agent_id: &str) -> Result<PathBuf> {
     Ok(dir.join(format!("{agent_id}.json")))
 }
 
-fn filter_resources_for_agent(
-    resources: &LoadedResources,
-    tools: &[String],
-    disallowed_tools: &[String],
-) -> LoadedResources {
-    let mut filtered = resources.clone();
-    let wildcard = tools.is_empty() || tools.iter().any(|tool| tool == "*");
-    filtered.tools.retain(|tool| {
-        if IMPLICIT_AGENT_DISALLOWED_TOOLS
-            .iter()
-            .any(|blocked| tool_matches_selector(&tool.value, blocked))
-        {
-            return false;
-        }
-        if disallowed_tools
-            .iter()
-            .any(|blocked| tool_matches_selector(&tool.value, blocked))
-        {
-            return false;
-        }
-        if !ASYNC_AGENT_ALLOWED_TOOLS
-            .iter()
-            .any(|allowed| tool_matches_selector(&tool.value, allowed))
-        {
-            return false;
-        }
-        wildcard
-            || tools
-                .iter()
-                .any(|allowed| tool_matches_selector(&tool.value, allowed))
-    });
-    filtered
-}
-
-fn tool_matches_selector(tool: &ToolSpec, selector: &str) -> bool {
-    tool_spec_matches_selector(tool, selector)
-}
-
-fn build_agent_system_prompt(resources: &LoadedResources, agent: &AgentSpec) -> Result<String> {
-    let mut sections = vec![agent.prompt.trim().to_string()];
-    for skill_name in &agent.skills {
-        let Some(skill) = skill_by_name(resources, skill_name) else {
-            bail!(
-                "agent `{}` references unknown skill `{skill_name}`",
-                agent.id
-            );
-        };
-        sections.push(format!(
-            "<skill name=\"{}\">\n{}\n</skill>",
-            skill.value.name,
-            skill.value.content.trim()
-        ));
-    }
-    Ok(sections.join("\n\n"))
-}
-
-fn combine_agent_prompt(initial_prompt: Option<&str>, prompt: &str) -> String {
-    if let Some(initial_prompt) = initial_prompt
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        format!("{initial_prompt}\n\n{}", prompt.trim())
-    } else {
-        prompt.to_string()
-    }
-}
-
-fn ensure_required_mcp_servers(resources: &LoadedResources, required: &[String]) -> Result<()> {
-    if required.is_empty() {
-        return Ok(());
-    }
-    let available = resources
-        .mcp_servers
-        .iter()
-        .map(|server| server.value.id.to_ascii_lowercase())
-        .chain(
-            plugin_mcp_servers(resources)
-                .into_iter()
-                .map(|(_, server)| server.id.to_ascii_lowercase()),
-        )
-        .collect::<Vec<_>>();
-    let missing = required
-        .iter()
-        .filter(|pattern| {
-            let normalized = pattern.trim().to_ascii_lowercase();
-            !normalized.is_empty()
-                && !available
-                    .iter()
-                    .any(|candidate| candidate.contains(normalized.as_str()))
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        bail!(
-            "required MCP servers are unavailable for this agent: {}",
-            missing.join(", ")
-        )
-    }
-}
-
-fn resolve_model_case_insensitive<'a>(
-    providers: &'a ProviderRegistry,
-    selector: &str,
-) -> Option<&'a puffer_provider_registry::ModelDescriptor> {
-    providers.providers().find_map(|provider| {
-        provider.models.iter().find(|model| {
-            format!("{}/{}", model.provider, model.id).eq_ignore_ascii_case(selector)
-                || model.id.eq_ignore_ascii_case(selector)
-        })
-    })
-}
-
 #[cfg(test)]
 mod tests {
-    use super::filter_resources_for_agent;
-    use puffer_resources::{LoadedItem, LoadedResources, SourceInfo, SourceKind, ToolSpec};
-    use std::path::PathBuf;
-
-    fn tool(id: &str, handler: &str) -> LoadedItem<ToolSpec> {
-        LoadedItem {
-            value: ToolSpec {
-                id: id.to_string(),
-                name: id.to_string(),
-                description: id.to_string(),
-                handler: handler.to_string(),
-                aliases: Vec::new(),
-                handler_args: Vec::new(),
-                approval_policy: None,
-                sandbox_policy: None,
-                shared_lib: None,
-                enabled_if: None,
-                input_schema: None,
-                metadata: Default::default(),
-                display: Default::default(),
-            },
-            source_info: SourceInfo {
-                path: PathBuf::from(format!("{id}.yaml")),
-                kind: SourceKind::Builtin,
-            },
-        }
-    }
-
-    #[test]
-    fn wildcard_agents_only_receive_async_safe_tool_pool() {
-        let resources = LoadedResources {
-            tools: vec![
-                tool("Agent", "runtime:agent"),
-                tool("Bash", "runtime:claude_bash"),
-                tool("Read", "runtime:claude_read"),
-                tool("Edit", "runtime:claude_edit"),
-                tool("Config", "runtime:workflow:config"),
-                tool("TaskCreate", "runtime:workflow:task_create"),
-                tool("TaskStop", "runtime:workflow:task_stop"),
-            ],
-            ..LoadedResources::default()
-        };
-
-        let filtered = filter_resources_for_agent(&resources, &[], &[]);
-        let ids = filtered
-            .tools
-            .iter()
-            .map(|tool| tool.value.id.as_str())
-            .collect::<Vec<_>>();
-
-        assert_eq!(ids, vec!["Bash", "Read", "Edit"]);
-    }
-
-    #[test]
-    fn agent_tool_filters_accept_legacy_lowercase_aliases() {
-        let resources = LoadedResources {
-            tools: vec![
-                tool("Read", "runtime:claude_read"),
-                tool("Glob", "runtime:claude_glob"),
-                tool("Grep", "runtime:claude_grep"),
-                tool("Write", "runtime:claude_write"),
-            ],
-            ..LoadedResources::default()
-        };
-
-        let filtered = filter_resources_for_agent(
-            &resources,
-            &[
-                "read_file".to_string(),
-                "list_dir".to_string(),
-                "search_text".to_string(),
-            ],
-            &[],
-        );
-        let ids = filtered
-            .tools
-            .iter()
-            .map(|tool| tool.value.id.as_str())
-            .collect::<Vec<_>>();
-
-        assert_eq!(ids, vec!["Read", "Glob", "Grep"]);
-    }
+    // Agent helper tests live in runtime/agent_support.rs.
 }

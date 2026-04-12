@@ -17,6 +17,7 @@ use std::time::Duration;
 
 #[cfg(test)]
 mod agent_runtime_tests;
+mod agent_support;
 mod agents;
 mod anthropic_sse;
 pub mod background_tasks;
