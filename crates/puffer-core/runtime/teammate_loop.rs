@@ -3,12 +3,12 @@
 //! Each teammate runs as a long-lived thread that polls for messages,
 //! executes agent turns, and idles until new work arrives.
 
-use crate::AppState;
+use crate::{AppState, MessageRole};
 use anyhow::Result;
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use puffer_resources::LoadedResources;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -110,6 +110,7 @@ fn teammate_loop(mut config: TeammateLoopConfig, rx: mpsc::Receiver<TeammateMess
         &mut config.auth_store,
         &config.prompt,
     );
+    persist_turn_to_transcript(&mut config.state, &config.prompt, &first_result);
     append_turn_result(&config.output_file, turn_count, &first_result);
 
     if reached_max(config.max_turns, turn_count) {
@@ -181,6 +182,7 @@ fn teammate_loop(mut config: TeammateLoopConfig, rx: mpsc::Receiver<TeammateMess
                         &mut config.auth_store,
                         &prompt,
                     );
+                    persist_turn_to_transcript(&mut config.state, &prompt, &result);
                     append_turn_result(&config.output_file, turn_count, &result);
                     if reached_max(config.max_turns, turn_count) {
                         write_status(
@@ -209,6 +211,7 @@ fn teammate_loop(mut config: TeammateLoopConfig, rx: mpsc::Receiver<TeammateMess
             &mut config.auth_store,
             &combined,
         );
+        persist_turn_to_transcript(&mut config.state, &combined, &result);
         append_turn_result(&config.output_file, turn_count, &result);
 
         if reached_max(config.max_turns, turn_count) {
@@ -221,6 +224,29 @@ fn teammate_loop(mut config: TeammateLoopConfig, rx: mpsc::Receiver<TeammateMess
             );
             return;
         }
+    }
+}
+
+/// Persists a completed turn's context to `state.transcript` so the next turn's
+/// `transcript_to_items()` has full conversation history (user prompt + tool
+/// invocations + assistant reply).
+fn persist_turn_to_transcript(
+    state: &mut AppState,
+    prompt: &str,
+    result: &Result<crate::TurnExecution>,
+) {
+    if let Ok(turn) = result {
+        state.push_message(MessageRole::User, prompt);
+        for inv in &turn.tool_invocations {
+            state.push_tool_invocation(
+                &inv.call_id,
+                &inv.tool_id,
+                &inv.input,
+                &inv.output,
+                inv.success,
+            );
+        }
+        state.push_message(MessageRole::Assistant, &turn.assistant_text);
     }
 }
 
