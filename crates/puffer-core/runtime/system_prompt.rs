@@ -324,16 +324,16 @@ fn load_memory_prompt(cwd: &Path) -> Option<String> {
         "## User Memory",
         &paths.user_config_dir.join("memory.md"),
     );
+    push_memory_section(
+        &mut parts,
+        "## User CLAUDE.md",
+        &paths.user_config_dir.join("CLAUDE.md"),
+    );
     if let Some(home) = env::var_os("HOME") {
         push_memory_section(
             &mut parts,
             "## User CLAUDE.md (~/.claude)",
             &Path::new(&home).join(".claude").join("CLAUDE.md"),
-        );
-        push_memory_section(
-            &mut parts,
-            "## User CLAUDE.md (~/.puffer)",
-            &Path::new(&home).join(".puffer").join("CLAUDE.md"),
         );
     }
     if parts.is_empty() {
@@ -420,22 +420,25 @@ mod tests {
     use std::collections::BTreeSet;
     use tempfile::tempdir;
 
-    struct HomeGuard(Option<std::ffi::OsString>);
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
 
-    impl HomeGuard {
-        fn set(path: &std::path::Path) -> Self {
-            let old_home = std::env::var_os("HOME");
-            std::env::set_var("HOME", path);
-            Self(old_home)
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &std::path::Path) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
         }
     }
 
-    impl Drop for HomeGuard {
+    impl Drop for EnvVarGuard {
         fn drop(&mut self) {
-            if let Some(previous_home) = self.0.take() {
-                std::env::set_var("HOME", previous_home);
+            if let Some(previous) = self.previous.take() {
+                std::env::set_var(self.key, previous);
             } else {
-                std::env::remove_var("HOME");
+                std::env::remove_var(self.key);
             }
         }
     }
@@ -476,7 +479,7 @@ mod tests {
         let cwd = tempdir.path().join("workspace");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(&cwd).unwrap();
-        let _home = HomeGuard::set(&home);
+        let _home = EnvVarGuard::set("HOME", &home);
 
         let paths = ConfigPaths::discover(&cwd);
         ensure_workspace_dirs(&paths).unwrap();
@@ -502,5 +505,36 @@ mod tests {
         assert!(prompt.contains("workspace memory"));
         assert!(prompt.contains("## User Memory"));
         assert!(prompt.contains("user memory"));
+    }
+
+    #[test]
+    fn runtime_system_prompt_uses_puffer_home_for_user_claude_md() {
+        let _guard = refresh_env_lock().lock().unwrap();
+        let tempdir = tempdir().unwrap();
+        let home = tempdir.path().join("home");
+        let puffer_home = tempdir.path().join("custom-puffer-home");
+        let cwd = tempdir.path().join("workspace");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let _home = EnvVarGuard::set("HOME", &home);
+        let _puffer_home = EnvVarGuard::set("PUFFER_HOME", &puffer_home);
+
+        let paths = ConfigPaths::discover(&cwd);
+        ensure_workspace_dirs(&paths).unwrap();
+        std::fs::write(paths.user_config_dir.join("CLAUDE.md"), "custom user claude").unwrap();
+
+        let mut state = state();
+        state.cwd = cwd;
+
+        let prompt = render_runtime_system_prompt(
+            &state,
+            &LoadedResources::default(),
+            "gpt-5",
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert!(prompt.contains("## User CLAUDE.md"));
+        assert!(prompt.contains("custom user claude"));
     }
 }
