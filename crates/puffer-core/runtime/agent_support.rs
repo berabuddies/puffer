@@ -52,10 +52,11 @@ pub(crate) fn resolve_effective_team_name(
 /// Returns true when the invocation is happening inside a nested in-process teammate/subagent.
 pub(crate) fn is_in_process_teammate_context(state: &AppState) -> bool {
     state.active_team_name.is_some()
-        && state
-            .transcript
-            .first()
-            .is_some_and(|message| message.role == MessageRole::System)
+        && state.transcript.first().is_some_and(|message| {
+            message.role == MessageRole::System
+                && (message.text.contains("You are a coding subagent")
+                    || message.text.contains("You are a verification specialist"))
+        })
 }
 
 /// Filters the loaded resource pool down to the tools available to one agent.
@@ -186,7 +187,9 @@ pub(crate) fn resolve_model_case_insensitive<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{filter_resources_for_agent, resolve_effective_team_name};
+    use super::{
+        filter_resources_for_agent, is_in_process_teammate_context, resolve_effective_team_name,
+    };
     use crate::state::{AppState, MessageRole};
     use puffer_config::PufferConfig;
     use puffer_resources::{LoadedItem, LoadedResources, SourceInfo, SourceKind, ToolSpec};
@@ -319,5 +322,17 @@ mod tests {
             resolve_effective_team_name(&state, Some("beta"), Some("researcher")),
             Some("beta".to_string())
         );
+    }
+
+    #[test]
+    fn teammate_context_detection_ignores_generic_main_thread_system_messages() {
+        let mut state = state();
+        state.active_team_name = Some("alpha".to_string());
+        state.push_message(MessageRole::System, "Team created.");
+        assert!(!is_in_process_teammate_context(&state));
+
+        state.transcript.clear();
+        state.push_message(MessageRole::System, "You are a coding subagent.");
+        assert!(is_in_process_teammate_context(&state));
     }
 }
