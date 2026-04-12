@@ -106,7 +106,7 @@ pub fn supported_commands() -> Vec<CommandSpec> {
             &[],
             "Summarize the conversation to preserve context budget",
             Some("<optional custom summarization instructions>"),
-            CommandKind::Prompt,
+            CommandKind::Local,
         ),
         cmd(
             "config",
@@ -767,6 +767,15 @@ fn execute_local_command(
             );
             emit_system(state, session_store, text)
         }
+        "btw" | "compact" => execute_prompt_command(
+            state,
+            resources,
+            providers,
+            auth_store,
+            session_store,
+            command,
+            args,
+        ),
         "status" => emit_system(
             state,
             session_store,

@@ -274,7 +274,7 @@ fn build_compact_prompt_override(state: &AppState, args: &str) -> String {
 
     let mut text = String::new();
     text.push_str(
-        "Summarize the conversation into a compact context block that preserves all information \
+        "Summarize the current conversation into a compact context block that preserves all information \
          needed to continue work seamlessly. Use NO tools — return only the summary text.\n\n",
     );
     text.push_str("Structure your summary with these sections:\n");
@@ -295,7 +295,7 @@ fn build_compact_prompt_override(state: &AppState, args: &str) -> String {
         user_messages, assistant_messages, system_messages
     );
     if !trimmed_instruction.is_empty() {
-        let _ = writeln!(&mut text, "Additional instruction: {trimmed_instruction}");
+        let _ = writeln!(&mut text, "custom_instruction: {trimmed_instruction}");
     }
     text.push_str("\nBe thorough but concise. Preserve file paths, function names, and error messages verbatim.\n");
     text
