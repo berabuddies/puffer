@@ -26,7 +26,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use puffer_provider_openai::{
     build_chat_completions_request, build_json_post_request, extract_chat_completions_text,
     extract_chat_completions_tool_calls, extract_responses_text, extract_responses_tool_calls,
-    parse_chat_completions_response, parse_responses_response, refresh_oauth_token, OpenAIAuth,
+    parse_chat_completions_response, refresh_oauth_token, OpenAIAuth,
     OpenAIChatCompletionsRequest, OpenAIRequestConfig, OpenAIResponseToolCall,
     OpenAIResponsesFunctionCallOutput, OpenAIResponsesResponse, OpenAIResponsesToolChoiceMode,
 };
@@ -38,9 +38,8 @@ use reqwest::StatusCode;
 use serde_json::Value;
 use std::collections::HashSet;
 
-pub(super) use super::openai_sse::{
-    is_event_stream, parse_openai_sse_reader_with_metadata, parse_openai_sse_response,
-};
+pub(super) use super::openai_sse::{is_event_stream, parse_openai_sse_response};
+use super::openai_sse::{parse_openai_sse_reader_typed, OpenAISseResult};
 
 #[cfg(test)]
 pub(super) use super::openai_sse::parse_openai_sse_response_streaming;
@@ -61,12 +60,6 @@ pub(super) struct OpenAIExecutionConfig {
 pub(super) struct OpenAIToolResults {
     pub(super) outputs: Vec<OpenAIResponsesFunctionCallOutput>,
     pub(super) invocations: Vec<ToolInvocation>,
-}
-
-#[derive(Debug)]
-struct OpenAIStreamResponse {
-    body: Value,
-    emitted_tool_call_ids: HashSet<String>,
 }
 
 pub(super) fn execute_openai(
@@ -182,9 +175,7 @@ fn execute_openai_once(
                 )
             })?;
 
-        let parsed = parse_responses_response(&serde_json::to_string(&response)?)?;
-        previous_response_id = parsed.id.clone();
-        // Extract server-reported input token count for precise compaction & context display.
+        // Parse typed struct directly from Value — no String roundtrip.
         let input_tokens = response
             .pointer("/usage/input_tokens")
             .and_then(Value::as_u64)
@@ -192,6 +183,9 @@ fn execute_openai_once(
         if let Some(tokens) = input_tokens {
             state.last_input_tokens = Some(tokens as u32);
         }
+        let parsed: OpenAIResponsesResponse = serde_json::from_value(response.clone())
+            .context("failed to parse OpenAI Responses payload")?;
+        previous_response_id = parsed.id.clone();
         let tool_calls = extract_responses_tool_calls(&parsed)?;
         if tool_calls.is_empty() {
             let assistant_text = parse_openai_assistant_text(&parsed, &response, state)?;
@@ -387,20 +381,20 @@ where
             )
         })?;
 
-        let parsed = parse_responses_response(&serde_json::to_string(&response.body)?)?;
-        previous_response_id = parsed.id.clone();
-        // Extract server-reported input token count for context display & compaction.
-        let input_tokens = response
-            .body
-            .pointer("/usage/input_tokens")
-            .and_then(Value::as_u64)
-            .map(|v| v as usize);
+        // Typed fields extracted during SSE — no Value→String→typed roundtrip.
+        previous_response_id = response.response_id;
+        let input_tokens = response.input_tokens;
         if let Some(tokens) = input_tokens {
             state.last_input_tokens = Some(tokens as u32);
         }
-        let tool_calls = extract_responses_tool_calls(&parsed)?;
-        if tool_calls.is_empty() {
-            let assistant_text = parse_openai_assistant_text(&parsed, &response.body, state)?;
+        if response.tool_calls.is_empty() {
+            // Final turn — extract assistant text (typed, with raw fallback).
+            let assistant_text = if response.assistant_text.trim().is_empty() {
+                parse_openai_text(&response.raw_response)
+                    .or_else(|_| parse_openai_text_fallback(&response.raw_response, state))?
+            } else {
+                response.assistant_text
+            };
             run_turn_hooks(resources, &state.cwd, &assistant_text, invocations.len());
             return Ok(super::TurnExecution {
                 assistant_text,
@@ -408,6 +402,7 @@ where
             });
         }
 
+        let tool_calls = response.tool_calls;
         let pending_tool_calls = tool_calls
             .iter()
             .filter(|tool_call| !response.emitted_tool_call_ids.contains(&tool_call.call_id))
@@ -421,9 +416,8 @@ where
         }
 
         // Add assistant text from this round to maintain full history.
-        let assistant_text = extract_responses_text(&parsed);
-        if !assistant_text.trim().is_empty() {
-            items.push(ConversationItem::assistant_message(&assistant_text));
+        if !response.assistant_text.trim().is_empty() {
+            items.push(ConversationItem::assistant_message(&response.assistant_text));
         }
         // Record where continuation starts (tool calls + outputs for next request).
         continuation_start = Some(items.len());
@@ -1170,7 +1164,7 @@ fn send_openai_request_with_refresh_streaming<F, G>(
     execution: &mut OpenAIExecutionConfig,
     build_request: F,
     on_event: &mut G,
-) -> Result<OpenAIStreamResponse>
+) -> Result<OpenAISseResult>
 where
     F: Fn(&OpenAIRequestConfig) -> Result<puffer_provider_openai::BuiltOpenAIRequest>,
     G: FnMut(TurnStreamEvent),
@@ -1240,7 +1234,7 @@ fn parse_openai_stream_response<G>(
     url: &str,
     response: Response,
     on_event: &mut G,
-) -> Result<OpenAIStreamResponse>
+) -> Result<OpenAISseResult>
 where
     G: FnMut(TurnStreamEvent),
 {
@@ -1255,18 +1249,28 @@ where
         bail!("request failed with status {}: {}", status, text);
     }
     if is_event_stream(content_type.as_deref(), "") {
-        return parse_openai_sse_reader_with_metadata(std::io::BufReader::new(response), on_event)
-            .map(|parsed| OpenAIStreamResponse {
-                body: parsed.response,
-                emitted_tool_call_ids: parsed.emitted_tool_call_ids,
-            })
+        return parse_openai_sse_reader_typed(std::io::BufReader::new(response), on_event)
             .with_context(|| format!("failed to parse SSE response from {url}"));
     }
+    // Non-SSE fallback: parse JSON directly into typed struct — one parse, no roundtrip.
     let text = response.text()?;
-    serde_json::from_str::<Value>(&text)
-        .map(|body| OpenAIStreamResponse {
-            body,
-            emitted_tool_call_ids: HashSet::new(),
-        })
-        .with_context(|| format!("response from {url} was not valid JSON"))
+    let raw: Value = serde_json::from_str(&text)
+        .with_context(|| format!("response from {url} was not valid JSON"))?;
+    let response_id = raw.get("id").and_then(Value::as_str).map(str::to_string);
+    let input_tokens = raw
+        .pointer("/usage/input_tokens")
+        .and_then(Value::as_u64)
+        .map(|v| v as usize);
+    let parsed: OpenAIResponsesResponse = serde_json::from_value(raw.clone())
+        .with_context(|| format!("response from {url} was not a valid Responses payload"))?;
+    let assistant_text = extract_responses_text(&parsed);
+    let tool_calls = extract_responses_tool_calls(&parsed)?;
+    Ok(OpenAISseResult {
+        response_id,
+        input_tokens,
+        assistant_text,
+        tool_calls,
+        emitted_tool_call_ids: HashSet::new(),
+        raw_response: raw,
+    })
 }
