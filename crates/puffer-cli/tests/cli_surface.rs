@@ -26,6 +26,10 @@ fn top_level_help_shows_claude_style_public_surface() {
             "missing `{command}` in help:\n{stdout}"
         );
     }
+    assert!(
+        stdout.contains("--resume"),
+        "missing `--resume` in help:\n{stdout}"
+    );
     for hidden in [
         "anthropic-request-fixture",
         "providers",

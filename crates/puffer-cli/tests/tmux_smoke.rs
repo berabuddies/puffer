@@ -116,7 +116,7 @@ tmux_golden_mode = true
         },
     )
     .unwrap();
-    wait_for_tmux_text(&session, "Clawd on duty", Duration::from_secs(15)).unwrap();
+    wait_for_tmux_text(&session, "Puffer Code", Duration::from_secs(15)).unwrap();
     let capture = capture_tmux_visible_pane(&session).unwrap();
     assert!(!capture.contains("PREV1"));
     assert!(!capture.contains("PREV2"));

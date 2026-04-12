@@ -24,6 +24,7 @@ pub use command_helpers::CommandActionEntry;
 pub use command_helpers::CopyActionEntry;
 pub use command_helpers::McpActionEntry;
 pub use command_helpers::PluginActionEntry;
+pub use command_helpers::ResumeLaunchResolution;
 pub use command_helpers::SessionOverlayView;
 pub use command_helpers::TaskActionEntry;
 pub(crate) use command_summary::{render_buddy_summary, render_cost_summary, render_usage_summary};
@@ -269,6 +270,15 @@ pub fn resumable_sessions_for_picker(
     current_cwd: &Path,
 ) -> Result<Vec<SessionSummary>> {
     command_helpers::resumable_sessions_for_picker(session_store, current_session_id, current_cwd)
+}
+
+/// Resolves a startup `--resume` request into a direct session or picker state.
+pub fn resolve_resume_launch(
+    session_store: &SessionStore,
+    current_cwd: &Path,
+    query: Option<&str>,
+) -> Result<ResumeLaunchResolution> {
+    command_helpers::resolve_resume_launch(session_store, current_cwd, query)
 }
 
 /// Reloads declarative resources and rebuilds the provider registry for the active session.

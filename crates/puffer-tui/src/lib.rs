@@ -34,11 +34,12 @@ use app_helpers::{
     apply_model_selection_preferences, apply_selected_model, help_pane_active_without_overlay,
     should_use_inline_viewport,
 };
+use crossterm::cursor::MoveTo;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, size as terminal_size, EnterAlternateScreen,
-    LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, size as terminal_size, Clear, ClearType,
+    EnterAlternateScreen, LeaveAlternateScreen,
 };
 use puffer_core::{command_surface, shutdown_runtime_services, AppState, CommandSpec};
 use puffer_provider_registry::{AuthStore, ProviderRegistry, StoredCredential};
@@ -51,6 +52,17 @@ pub(crate) use state::{AuthPickerAction, ModelPickerEntry, OverlayState};
 use std::io::{self, IsTerminal};
 use std::path::Path;
 use std::time::Duration;
+
+/// Configures launch-time TUI behavior before the first render.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum StartupAction {
+    /// Start a fresh TUI session with no extra overlay.
+    #[default]
+    None,
+    /// Open the `/resume` picker on launch and optionally seed its search query.
+    ResumePicker { query: Option<String> },
+}
+
 /// Runs the interactive Puffer TUI until the user exits.
 pub fn run_app(
     state: &mut AppState,
@@ -59,6 +71,7 @@ pub fn run_app(
     auth_store: &mut AuthStore,
     auth_path: &Path,
     session_store: &SessionStore,
+    startup_action: StartupAction,
     initial_prompt: Option<String>,
     no_alt_screen: bool,
 ) -> Result<()> {
@@ -86,7 +99,9 @@ pub fn run_app(
     let use_content_viewport = should_use_inline_viewport(no_alt_screen);
     let no_alt_screen = use_content_viewport;
     enable_raw_mode()?;
-    if !no_alt_screen {
+    if use_content_viewport {
+        execute!(io::stdout(), MoveTo(0, 0), Clear(ClearType::All))?;
+    } else {
         execute!(io::stdout(), EnterAlternateScreen)?;
     }
     let mut tui = TuiState::default();
@@ -97,6 +112,15 @@ pub fn run_app(
             .filter(|prompt| !prompt.trim().is_empty())
             .filter(|_| !bypass_onboarding),
     );
+    apply_startup_action(
+        state,
+        resources,
+        providers,
+        auth_store,
+        session_store,
+        &startup_action,
+        &mut tui,
+    )?;
     let commands = command_surface(resources);
     if let Some(prompt) = initial_prompt.filter(|prompt| allow_prompt_before_onboarding(prompt)) {
         if !try_open_overlay(
@@ -276,6 +300,36 @@ pub fn run_app(
     disable_raw_mode()?;
     if !no_alt_screen {
         execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    }
+    Ok(())
+}
+
+fn apply_startup_action(
+    state: &AppState,
+    resources: &LoadedResources,
+    providers: &mut ProviderRegistry,
+    auth_store: &AuthStore,
+    session_store: &SessionStore,
+    startup_action: &StartupAction,
+    tui: &mut TuiState,
+) -> Result<()> {
+    let StartupAction::ResumePicker { query } = startup_action else {
+        return Ok(());
+    };
+    if try_open_overlay(
+        state,
+        resources,
+        providers,
+        auth_store,
+        session_store,
+        tui,
+        "/resume",
+    )? {
+        tui.input = query.clone().unwrap_or_default();
+        tui.cursor = tui.input.len();
+        if let Some(overlay) = tui.overlay.as_mut() {
+            overlay.select_matching_query(&tui.input);
+        }
     }
     Ok(())
 }

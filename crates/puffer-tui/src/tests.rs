@@ -132,6 +132,69 @@ fn try_open_overlay_builds_skills_panel() {
 }
 
 #[test]
+fn startup_resume_action_seeds_picker_query() {
+    let tempdir = tempdir().unwrap();
+    let repo_root = tempdir.path().join("repo");
+    let current_cwd = repo_root.join("current");
+    let sibling_cwd = repo_root.join("dockyard");
+    std::fs::create_dir_all(&current_cwd).unwrap();
+    std::fs::create_dir_all(&sibling_cwd).unwrap();
+    let output = std::process::Command::new("git")
+        .arg("init")
+        .arg(&repo_root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git init failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let current = session_store.create_session(current_cwd.clone()).unwrap();
+    let other = session_store.create_session(sibling_cwd).unwrap();
+    session_store
+        .rename_session(other.id, "dockyard".to_string())
+        .unwrap();
+
+    let mut state = sample_state();
+    state.session.id = current.id;
+    state.cwd = current_cwd;
+    state.session.cwd = state.cwd.clone();
+    let resources = sample_resources();
+    let mut providers = sample_providers();
+    let auth_store = sample_auth_store();
+    let mut tui = TuiState::default();
+
+    apply_startup_action(
+        &state,
+        &resources,
+        &mut providers,
+        &auth_store,
+        &session_store,
+        &StartupAction::ResumePicker {
+            query: Some("dock".to_string()),
+        },
+        &mut tui,
+    )
+    .unwrap();
+
+    assert_eq!(tui.input, "dock");
+    assert_eq!(tui.cursor, 4);
+    match tui.overlay {
+        Some(OverlayState::SessionPicker {
+            sessions,
+            selection,
+        }) => {
+            assert_eq!(sessions.len(), 1);
+            assert_eq!(sessions[selection].id, other.id);
+        }
+        _ => panic!("resume picker"),
+    }
+}
+
+#[test]
 fn task_picker_enter_opens_dashboard_overlay() {
     let tempdir = tempdir().unwrap();
     let paths = ConfigPaths::discover(tempdir.path());

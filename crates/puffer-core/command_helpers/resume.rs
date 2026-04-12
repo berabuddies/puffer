@@ -5,6 +5,7 @@ use puffer_session_store::{SessionStore, SessionSummary};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use uuid::Uuid;
 
 /// Handles `/resume` by listing resumable sessions or switching to a unique match.
 pub(crate) fn handle_resume_command(
@@ -46,6 +47,68 @@ pub(crate) fn handle_resume_command(
         session_store,
         render_resume_ambiguity(query, &matches),
     )
+}
+
+/// Describes how CLI startup should handle a `--resume` request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResumeLaunchResolution {
+    /// Resume directly into the matched session.
+    Exact(SessionSummary),
+    /// Open the interactive picker, optionally seeded with a search term.
+    Picker {
+        sessions: Vec<SessionSummary>,
+        query: Option<String>,
+    },
+    /// No resumable sessions were available for the requested query.
+    NotFound { query: Option<String> },
+}
+
+/// Resolves a Claude-style startup resume request into a direct session or picker state.
+pub fn resolve_resume_launch(
+    session_store: &SessionStore,
+    current_cwd: &Path,
+    query: Option<&str>,
+) -> Result<ResumeLaunchResolution> {
+    let sessions = resumable_sessions_for_picker(session_store, Uuid::nil(), current_cwd)?;
+    let normalized_query = query.map(str::trim).filter(|value| !value.is_empty());
+    let Some(query) = normalized_query else {
+        return if sessions.is_empty() {
+            Ok(ResumeLaunchResolution::NotFound { query: None })
+        } else {
+            Ok(ResumeLaunchResolution::Picker {
+                sessions,
+                query: None,
+            })
+        };
+    };
+
+    let all_sessions = all_resumable_sessions(session_store, Uuid::nil())?;
+    let matches = if looks_like_session_id(query) {
+        search_sessions(&all_sessions, query)
+    } else {
+        search_sessions(&sessions, query)
+    };
+    if let Some(best_match) = matches.first() {
+        let best_rank = best_match.rank;
+        let best_rank_count = matches
+            .iter()
+            .take_while(|candidate| candidate.rank == best_rank)
+            .count();
+        if matches.len() == 1 || (best_rank_count == 1 && best_rank.is_precise()) {
+            return Ok(ResumeLaunchResolution::Exact(best_match.session.clone()));
+        }
+    }
+
+    if sessions.is_empty() {
+        Ok(ResumeLaunchResolution::NotFound {
+            query: Some(query.to_string()),
+        })
+    } else {
+        Ok(ResumeLaunchResolution::Picker {
+            sessions,
+            query: Some(query.to_string()),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -339,9 +402,16 @@ fn resume_into_session(
 
 #[cfg(test)]
 mod tests {
-    use super::{resume_scope, search_sessions, session_scope_matches};
+    use super::{
+        resolve_resume_launch, resume_scope, search_sessions, session_scope_matches,
+        ResumeLaunchResolution,
+    };
+    use puffer_config::{ensure_workspace_dirs, ConfigPaths};
+    use puffer_session_store::SessionStore;
     use puffer_session_store::SessionSummary;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use tempfile::tempdir;
     use uuid::Uuid;
 
     fn session(
@@ -437,5 +507,97 @@ mod tests {
         ));
         assert!(session_scope_matches(&scope, Path::new("/tmp/workspace")));
         assert!(!session_scope_matches(&scope, Path::new("/tmp/elsewhere")));
+    }
+
+    #[test]
+    fn resolve_resume_launch_uses_picker_for_empty_query() {
+        let tempdir = tempdir().unwrap();
+        let repo_root = tempdir.path().join("repo");
+        let current_cwd = repo_root.join("current");
+        let sibling_cwd = repo_root.join("dockyard");
+        std::fs::create_dir_all(&current_cwd).unwrap();
+        std::fs::create_dir_all(&sibling_cwd).unwrap();
+        init_git_repo(&repo_root);
+        let paths = ConfigPaths::discover(tempdir.path());
+        ensure_workspace_dirs(&paths).unwrap();
+        let session_store = SessionStore::from_paths(&paths).unwrap();
+        session_store.create_session(current_cwd.clone()).unwrap();
+        let other = session_store.create_session(sibling_cwd).unwrap();
+
+        let resolution = resolve_resume_launch(&session_store, &current_cwd, None).unwrap();
+        match resolution {
+            ResumeLaunchResolution::Picker { sessions, query } => {
+                assert_eq!(query, None);
+                assert_eq!(sessions.len(), 2);
+                assert!(sessions.iter().any(|session| session.id == other.id));
+            }
+            other => panic!("expected picker resolution, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_resume_launch_returns_exact_for_precise_match() {
+        let tempdir = tempdir().unwrap();
+        let repo_root = tempdir.path().join("repo");
+        let current_cwd = repo_root.join("current");
+        let sibling_cwd = repo_root.join("dockyard");
+        std::fs::create_dir_all(&current_cwd).unwrap();
+        std::fs::create_dir_all(&sibling_cwd).unwrap();
+        init_git_repo(&repo_root);
+        let paths = ConfigPaths::discover(tempdir.path());
+        ensure_workspace_dirs(&paths).unwrap();
+        let session_store = SessionStore::from_paths(&paths).unwrap();
+        session_store.create_session(current_cwd.clone()).unwrap();
+        let other = session_store.create_session(sibling_cwd).unwrap();
+        session_store
+            .rename_session(other.id, "dockyard".to_string())
+            .unwrap();
+
+        let resolution =
+            resolve_resume_launch(&session_store, &current_cwd, Some("dockyard")).unwrap();
+        match resolution {
+            ResumeLaunchResolution::Exact(session) => assert_eq!(session.id, other.id),
+            other => panic!("expected exact resolution, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_resume_launch_falls_back_to_picker_for_search_terms() {
+        let tempdir = tempdir().unwrap();
+        let repo_root = tempdir.path().join("repo");
+        let current_cwd = repo_root.join("current");
+        let sibling_a = repo_root.join("dockyard-a");
+        let sibling_b = repo_root.join("dockyard-b");
+        std::fs::create_dir_all(&current_cwd).unwrap();
+        std::fs::create_dir_all(&sibling_a).unwrap();
+        std::fs::create_dir_all(&sibling_b).unwrap();
+        init_git_repo(&repo_root);
+        let paths = ConfigPaths::discover(tempdir.path());
+        ensure_workspace_dirs(&paths).unwrap();
+        let session_store = SessionStore::from_paths(&paths).unwrap();
+        session_store.create_session(current_cwd.clone()).unwrap();
+        let first = session_store.create_session(sibling_a).unwrap();
+        let second = session_store.create_session(sibling_b).unwrap();
+
+        let resolution =
+            resolve_resume_launch(&session_store, &current_cwd, Some("dockyard")).unwrap();
+        match resolution {
+            ResumeLaunchResolution::Picker { sessions, query } => {
+                assert_eq!(query.as_deref(), Some("dockyard"));
+                assert_eq!(sessions.len(), 3);
+                assert!(sessions.iter().any(|session| session.id == first.id));
+                assert!(sessions.iter().any(|session| session.id == second.id));
+            }
+            other => panic!("expected picker resolution, got {other:?}"),
+        }
+    }
+
+    fn init_git_repo(path: &Path) {
+        let output = Command::new("git").arg("init").arg(path).output().unwrap();
+        assert!(
+            output.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

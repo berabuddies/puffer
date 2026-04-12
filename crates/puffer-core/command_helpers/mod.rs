@@ -50,7 +50,9 @@ pub(crate) use plugins::{
     handle_plugin_command, reload_plugins_summary, render_plugin_actions, render_plugin_summary,
 };
 pub(crate) use prompt::handle_plan_command;
-pub(crate) use resume::{handle_resume_command, resumable_sessions_for_picker};
+pub(crate) use resume::handle_resume_command;
+pub(crate) use resume::resumable_sessions_for_picker;
+pub use resume::{resolve_resume_launch, ResumeLaunchResolution};
 pub use session::SessionOverlayView;
 pub(crate) use session::{
     append_tool_invocations, handle_memory_command, handle_remote_control_command,

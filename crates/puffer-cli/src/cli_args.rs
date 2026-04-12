@@ -10,6 +10,16 @@ pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) subcommand: Option<Command>,
 
+    /// Resume a conversation by session ID or search term, or open the picker when omitted.
+    #[arg(
+        short = 'r',
+        long = "resume",
+        num_args = 0..=1,
+        default_missing_value = "",
+        value_name = "SESSION"
+    )]
+    pub(crate) resume: Option<String>,
+
     /// Optional prompt to submit immediately when launching the TUI.
     pub(crate) prompt: Option<String>,
 
@@ -518,6 +528,20 @@ pub(crate) enum McpTransport {
 mod tests {
     use super::{Cli, Command};
     use clap::Parser;
+
+    #[test]
+    fn resume_flag_without_value_uses_empty_sentinel() {
+        let cli = Cli::parse_from(["puffer", "--resume"]);
+        assert_eq!(cli.resume.as_deref(), Some(""));
+        assert!(cli.prompt.is_none());
+    }
+
+    #[test]
+    fn resume_flag_with_value_keeps_positional_prompt() {
+        let cli = Cli::parse_from(["puffer", "--resume", "dockyard", "follow up"]);
+        assert_eq!(cli.resume.as_deref(), Some("dockyard"));
+        assert_eq!(cli.prompt.as_deref(), Some("follow up"));
+    }
 
     #[test]
     fn remote_prompt_collects_trailing_words() {

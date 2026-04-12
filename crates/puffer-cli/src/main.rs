@@ -18,7 +18,7 @@ use command_surface::{
     run_update_command,
 };
 use puffer_config::{ensure_workspace_dirs, load_config, ConfigPaths};
-use puffer_core::{supported_commands, AppState};
+use puffer_core::{resolve_resume_launch, supported_commands, AppState, ResumeLaunchResolution};
 use puffer_provider_openai::{
     exchange_authorization_code as exchange_openai_code,
     parse_authorization_input as parse_openai_authorization_input,
@@ -35,6 +35,7 @@ use puffer_transport_anthropic::{
     AnthropicModelRequest, AnthropicRequestConfig, ANTHROPIC_API_BASE_URL,
     ANTHROPIC_MANUAL_REDIRECT_URL,
 };
+use puffer_tui::StartupAction;
 use std::io::Read as _;
 use std::io::Write as _;
 use std::time::Duration;
@@ -271,22 +272,18 @@ fn main() -> Result<()> {
             (!prompt.is_empty()).then(|| prompt.join(" ")),
             cli.no_alt_screen || no_alt_screen || config.ui.no_alt_screen,
         ),
-        Some(Command::Resume { session_id }) => {
-            let session_store = SessionStore::from_paths(&paths)?;
-            let session =
-                session_store.load_session(resolve_session_query(&session_store, &session_id)?)?;
-            let mut state = AppState::from_session_record(config.clone(), session);
-            puffer_tui::run_app(
-                &mut state,
-                &mut resources,
-                &mut providers,
-                &mut auth_store,
-                &auth_path,
-                &session_store,
-                None,
-                cli.no_alt_screen || config.ui.no_alt_screen,
-            )
-        }
+        Some(Command::Resume { session_id }) => run_existing_session_tui(
+            resolve_session_query(&SessionStore::from_paths(&paths)?, &session_id)?,
+            cli.prompt,
+            &cwd,
+            &config,
+            &mut resources,
+            &mut providers,
+            &mut auth_store,
+            &auth_path,
+            &paths,
+            cli.no_alt_screen || config.ui.no_alt_screen,
+        ),
         Some(Command::Fork { session_id }) => {
             let session_store = SessionStore::from_paths(&paths)?;
             let source = resolve_session_query(&session_store, &session_id)?;
@@ -300,26 +297,102 @@ fn main() -> Result<()> {
                 &mut auth_store,
                 &auth_path,
                 &session_store,
+                StartupAction::None,
                 None,
                 cli.no_alt_screen || config.ui.no_alt_screen,
             )
         }
         None => {
             let session_store = SessionStore::from_paths(&paths)?;
-            let session = session_store.create_session(cwd.clone())?;
-            let mut state = AppState::new(config.clone(), cwd, session);
-            puffer_tui::run_app(
-                &mut state,
-                &mut resources,
-                &mut providers,
-                &mut auth_store,
-                &auth_path,
-                &session_store,
-                cli.prompt,
-                cli.no_alt_screen || config.ui.no_alt_screen,
-            )
+            match resolve_resume_launch(&session_store, &cwd, cli.resume.as_deref())? {
+                ResumeLaunchResolution::Exact(session) => run_existing_session_tui(
+                    session.id,
+                    cli.prompt,
+                    &cwd,
+                    &config,
+                    &mut resources,
+                    &mut providers,
+                    &mut auth_store,
+                    &auth_path,
+                    &paths,
+                    cli.no_alt_screen || config.ui.no_alt_screen,
+                ),
+                ResumeLaunchResolution::Picker { query, .. } if cli.resume.is_some() => {
+                    let session = session_store.create_session(cwd.clone())?;
+                    let mut state = AppState::new(config.clone(), cwd, session);
+                    if let Some(prompt) = cli.prompt {
+                        state.queue_pending_query_prompt(prompt);
+                    }
+                    puffer_tui::run_app(
+                        &mut state,
+                        &mut resources,
+                        &mut providers,
+                        &mut auth_store,
+                        &auth_path,
+                        &session_store,
+                        StartupAction::ResumePicker { query },
+                        None,
+                        cli.no_alt_screen || config.ui.no_alt_screen,
+                    )
+                }
+                ResumeLaunchResolution::NotFound { query } if cli.resume.is_some() => {
+                    if let Some(query) = query {
+                        anyhow::bail!(
+                            "No conversations matched `{query}`.\nRun `puffer --resume` to pick from recent sessions."
+                        );
+                    }
+                    anyhow::bail!("No conversations found to resume.");
+                }
+                _ => {
+                    let session = session_store.create_session(cwd.clone())?;
+                    let mut state = AppState::new(config.clone(), cwd, session);
+                    puffer_tui::run_app(
+                        &mut state,
+                        &mut resources,
+                        &mut providers,
+                        &mut auth_store,
+                        &auth_path,
+                        &session_store,
+                        StartupAction::None,
+                        cli.prompt,
+                        cli.no_alt_screen || config.ui.no_alt_screen,
+                    )
+                }
+            }
         }
     }
+}
+
+fn run_existing_session_tui(
+    session_id: Uuid,
+    initial_prompt: Option<String>,
+    cwd: &std::path::Path,
+    config: &puffer_config::PufferConfig,
+    resources: &mut puffer_resources::LoadedResources,
+    providers: &mut ProviderRegistry,
+    auth_store: &mut AuthStore,
+    auth_path: &std::path::Path,
+    paths: &ConfigPaths,
+    no_alt_screen: bool,
+) -> Result<()> {
+    let session_store = SessionStore::from_paths(paths)?;
+    let session = session_store.load_session(session_id)?;
+    let mut state = AppState::from_session_record(config.clone(), session);
+    if state.cwd.as_os_str().is_empty() {
+        state.cwd = cwd.to_path_buf();
+        state.session.cwd = cwd.to_path_buf();
+    }
+    puffer_tui::run_app(
+        &mut state,
+        resources,
+        providers,
+        auth_store,
+        auth_path,
+        &session_store,
+        StartupAction::None,
+        initial_prompt,
+        no_alt_screen,
+    )
 }
 
 fn run_tool_command(
