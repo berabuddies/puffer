@@ -36,9 +36,10 @@ use puffer_tools::ToolRegistry;
 use reqwest::blocking::{Client, Response};
 use reqwest::StatusCode;
 use serde_json::Value;
+use std::collections::HashSet;
 
 pub(super) use super::openai_sse::{
-    is_event_stream, parse_openai_sse_reader, parse_openai_sse_response,
+    is_event_stream, parse_openai_sse_reader_with_metadata, parse_openai_sse_response,
 };
 
 #[cfg(test)]
@@ -60,6 +61,12 @@ pub(super) struct OpenAIExecutionConfig {
 pub(super) struct OpenAIToolResults {
     pub(super) outputs: Vec<OpenAIResponsesFunctionCallOutput>,
     pub(super) invocations: Vec<ToolInvocation>,
+}
+
+#[derive(Debug)]
+struct OpenAIStreamResponse {
+    body: Value,
+    emitted_tool_call_ids: HashSet<String>,
 }
 
 pub(super) fn execute_openai(
@@ -380,10 +387,11 @@ where
             )
         })?;
 
-        let parsed = parse_responses_response(&serde_json::to_string(&response)?)?;
+        let parsed = parse_responses_response(&serde_json::to_string(&response.body)?)?;
         previous_response_id = parsed.id.clone();
         // Extract server-reported input token count for context display & compaction.
         let input_tokens = response
+            .body
             .pointer("/usage/input_tokens")
             .and_then(Value::as_u64)
             .map(|v| v as usize);
@@ -392,7 +400,7 @@ where
         }
         let tool_calls = extract_responses_tool_calls(&parsed)?;
         if tool_calls.is_empty() {
-            let assistant_text = parse_openai_assistant_text(&parsed, &response, state)?;
+            let assistant_text = parse_openai_assistant_text(&parsed, &response.body, state)?;
             run_turn_hooks(resources, &state.cwd, &assistant_text, invocations.len());
             return Ok(super::TurnExecution {
                 assistant_text,
@@ -400,15 +408,17 @@ where
             });
         }
 
-        on_event(TurnStreamEvent::ToolCallsRequested(
-            tool_calls
-                .iter()
-                .map(|tool_call| super::ToolCallRequest {
-                    tool_id: tool_call.name.clone(),
-                    input: serde_json::to_string(&tool_call.arguments).unwrap_or_default(),
-                })
-                .collect(),
-        ));
+        let pending_tool_calls = tool_calls
+            .iter()
+            .filter(|tool_call| !response.emitted_tool_call_ids.contains(&tool_call.call_id))
+            .map(|tool_call| super::ToolCallRequest {
+                tool_id: tool_call.name.clone(),
+                input: serde_json::to_string(&tool_call.arguments).unwrap_or_default(),
+            })
+            .collect::<Vec<_>>();
+        if !pending_tool_calls.is_empty() {
+            on_event(TurnStreamEvent::ToolCallsRequested(pending_tool_calls));
+        }
 
         // Add assistant text from this round to maintain full history.
         let assistant_text = extract_responses_text(&parsed);
@@ -1158,7 +1168,7 @@ fn send_openai_request_with_refresh_streaming<F, G>(
     execution: &mut OpenAIExecutionConfig,
     build_request: F,
     on_event: &mut G,
-) -> Result<Value>
+) -> Result<OpenAIStreamResponse>
 where
     F: Fn(&OpenAIRequestConfig) -> Result<puffer_provider_openai::BuiltOpenAIRequest>,
     G: FnMut(TurnStreamEvent),
@@ -1224,7 +1234,11 @@ fn send_openai_request_stream_raw(
     Ok(response)
 }
 
-fn parse_openai_stream_response<G>(url: &str, response: Response, on_event: &mut G) -> Result<Value>
+fn parse_openai_stream_response<G>(
+    url: &str,
+    response: Response,
+    on_event: &mut G,
+) -> Result<OpenAIStreamResponse>
 where
     G: FnMut(TurnStreamEvent),
 {
@@ -1239,10 +1253,18 @@ where
         bail!("request failed with status {}: {}", status, text);
     }
     if is_event_stream(content_type.as_deref(), "") {
-        return parse_openai_sse_reader(std::io::BufReader::new(response), on_event)
+        return parse_openai_sse_reader_with_metadata(std::io::BufReader::new(response), on_event)
+            .map(|parsed| OpenAIStreamResponse {
+                body: parsed.response,
+                emitted_tool_call_ids: parsed.emitted_tool_call_ids,
+            })
             .with_context(|| format!("failed to parse SSE response from {url}"));
     }
     let text = response.text()?;
     serde_json::from_str::<Value>(&text)
+        .map(|body| OpenAIStreamResponse {
+            body,
+            emitted_tool_call_ids: HashSet::new(),
+        })
         .with_context(|| format!("response from {url} was not valid JSON"))
 }

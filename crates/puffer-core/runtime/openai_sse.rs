@@ -1,9 +1,16 @@
 use super::TurnStreamEvent;
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
 use std::io::{BufRead, BufReader};
+
+/// Stores one parsed OpenAI SSE response plus streamed tool-call metadata.
+pub(super) struct OpenAISseParseResult {
+    pub(super) response: Value,
+    pub(super) emitted_tool_call_ids: HashSet<String>,
+}
 
 /// Returns true when an OpenAI response payload is encoded as SSE.
 pub(super) fn is_event_stream(content_type: Option<&str>, text: &str) -> bool {
@@ -13,7 +20,8 @@ pub(super) fn is_event_stream(content_type: Option<&str>, text: &str) -> bool {
 
 /// Parses a complete OpenAI SSE response body into a reconstructed JSON payload.
 pub(super) fn parse_openai_sse_response(stream: &str) -> Result<Value> {
-    parse_openai_sse_response_streaming(stream, &mut |_| {})
+    let mut on_event = |_| {};
+    Ok(parse_openai_sse_response_with_metadata(stream, &mut on_event)?.response)
 }
 
 /// Parses an OpenAI SSE response body and emits incremental text delta events.
@@ -24,11 +32,34 @@ pub(super) fn parse_openai_sse_response_streaming<F>(
 where
     F: FnMut(TurnStreamEvent),
 {
-    parse_openai_sse_reader(BufReader::new(stream.as_bytes()), on_event)
+    Ok(parse_openai_sse_response_with_metadata(stream, on_event)?.response)
+}
+
+/// Parses an OpenAI SSE response body and returns streamed tool-call metadata.
+pub(super) fn parse_openai_sse_response_with_metadata<F>(
+    stream: &str,
+    on_event: &mut F,
+) -> Result<OpenAISseParseResult>
+where
+    F: FnMut(TurnStreamEvent),
+{
+    parse_openai_sse_reader_with_metadata(BufReader::new(stream.as_bytes()), on_event)
 }
 
 /// Parses an OpenAI SSE stream from any buffered reader.
 pub(super) fn parse_openai_sse_reader<R, F>(reader: BufReader<R>, on_event: &mut F) -> Result<Value>
+where
+    R: std::io::Read,
+    F: FnMut(TurnStreamEvent),
+{
+    Ok(parse_openai_sse_reader_with_metadata(reader, on_event)?.response)
+}
+
+/// Parses an OpenAI SSE stream and returns streamed tool-call metadata.
+pub(super) fn parse_openai_sse_reader_with_metadata<R, F>(
+    reader: BufReader<R>,
+    on_event: &mut F,
+) -> Result<OpenAISseParseResult>
 where
     R: std::io::Read,
     F: FnMut(TurnStreamEvent),
@@ -67,7 +98,7 @@ where
         }
     }
 
-    Ok(state.into_response())
+    Ok(state.into_parse_result())
 }
 
 fn openai_sse_trace_file() -> Option<File> {
@@ -125,12 +156,20 @@ where
                         item.get("name").and_then(Value::as_str),
                         item.get("arguments").and_then(Value::as_str),
                     ) {
-                        on_event(TurnStreamEvent::ToolCallsRequested(vec![
-                            super::ToolCallRequest {
-                                tool_id: name.to_string(),
-                                input: arguments.to_string(),
-                            },
-                        ]));
+                        let already_emitted = item
+                            .get("call_id")
+                            .and_then(Value::as_str)
+                            .is_some_and(|call_id| {
+                                !state.emitted_tool_call_ids.insert(call_id.to_string())
+                            });
+                        if !already_emitted {
+                            on_event(TurnStreamEvent::ToolCallsRequested(vec![
+                                super::ToolCallRequest {
+                                    tool_id: name.to_string(),
+                                    input: arguments.to_string(),
+                                },
+                            ]));
+                        }
                     }
                 }
             }
@@ -171,6 +210,7 @@ struct OpenAISseState {
     response: Option<Value>,
     output: Vec<Value>,
     terminal: bool,
+    emitted_tool_call_ids: HashSet<String>,
 }
 
 impl OpenAISseState {
@@ -180,14 +220,17 @@ impl OpenAISseState {
         }
     }
 
-    fn into_response(self) -> Value {
+    fn into_parse_result(self) -> OpenAISseParseResult {
         let mut response = self
             .response
             .unwrap_or_else(|| json!({ "id": Value::Null, "output": Value::Array(Vec::new()) }));
         if response.get("output").is_none() || !self.output.is_empty() {
             response["output"] = Value::Array(self.output);
         }
-        response
+        OpenAISseParseResult {
+            response,
+            emitted_tool_call_ids: self.emitted_tool_call_ids,
+        }
     }
 }
 
@@ -217,8 +260,12 @@ fn format_openai_sse_error(event: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_openai_sse_response, parse_openai_sse_response_streaming};
+    use super::{
+        parse_openai_sse_reader_with_metadata, parse_openai_sse_response,
+        parse_openai_sse_response_streaming,
+    };
     use serde_json::json;
+    use std::io::BufReader;
 
     #[test]
     fn parse_openai_sse_response_stops_at_terminal_event() {
@@ -289,5 +336,31 @@ mod tests {
         assert_eq!(deltas, vec!["partial".to_string()]);
         assert_eq!(parsed["id"], json!("resp_123"));
         assert_eq!(parsed["status"], json!("incomplete"));
+    }
+
+    #[test]
+    fn parse_openai_sse_reader_tracks_emitted_tool_call_ids() {
+        let stream = concat!(
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_123\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"Cargo.toml\\\"}\"}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_123\",\"status\":\"completed\"}}\n\n"
+        );
+        let mut requests = Vec::new();
+
+        let parsed = parse_openai_sse_reader_with_metadata(
+            BufReader::new(stream.as_bytes()),
+            &mut |event| {
+                if let super::TurnStreamEvent::ToolCallsRequested(tool_calls) = event {
+                    requests.extend(tool_calls);
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].tool_id, "read_file");
+        assert!(parsed.emitted_tool_call_ids.contains("call_123"));
+        assert_eq!(parsed.response["output"][0]["call_id"], json!("call_123"));
     }
 }
