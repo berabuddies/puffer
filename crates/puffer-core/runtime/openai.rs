@@ -13,8 +13,9 @@ use self::support::{
     append_default_openai_headers, apply_previous_response_id, is_codex_openai_provider,
     is_openai_structured_output_error, openai_base_url_for_auth, openai_model_supports_reasoning,
     openai_registry_credential, openai_responses_path, openai_stream_read_timeout,
-    prefer_native_structured_output, retry_openai_transport, structured_output_endpoint_id,
-    trace_openai_http_request, trace_openai_http_response_headers, OPENAI_STRUCTURED_OUTPUT_FAMILY,
+    openai_supports_response_threading, prefer_native_structured_output, retry_openai_transport,
+    structured_output_endpoint_id, trace_openai_http_request, trace_openai_http_response_headers,
+    OPENAI_STRUCTURED_OUTPUT_FAMILY,
 };
 use super::structured_output_support::{
     openai_chat_completion_tools_for_request, openai_chat_response_format,
@@ -26,9 +27,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use puffer_provider_openai::{
     build_chat_completions_request, build_json_post_request, extract_chat_completions_text,
     extract_chat_completions_tool_calls, extract_responses_text, extract_responses_tool_calls,
-    parse_chat_completions_response, refresh_oauth_token, OpenAIAuth,
-    OpenAIChatCompletionsRequest, OpenAIRequestConfig, OpenAIResponseToolCall,
-    OpenAIResponsesFunctionCallOutput, OpenAIResponsesResponse, OpenAIResponsesToolChoiceMode,
+    parse_chat_completions_response, refresh_oauth_token, OpenAIAuth, OpenAIChatCompletionsRequest,
+    OpenAIRequestConfig, OpenAIResponseToolCall, OpenAIResponsesFunctionCallOutput,
+    OpenAIResponsesResponse, OpenAIResponsesToolChoiceMode,
 };
 use puffer_provider_registry::{AuthStore, ProviderDescriptor, ProviderRegistry, StoredCredential};
 use puffer_resources::LoadedResources;
@@ -150,6 +151,8 @@ fn execute_openai_once(
 
     let mut invocations = Vec::new();
     let supports_reasoning = openai_model_supports_reasoning(provider, &model_id);
+    let supports_response_threading =
+        openai_supports_response_threading(provider, &execution.request_config.base_url);
     let mut previous_response_id = None;
     // Index where "continuation" items start — used for previous_response_id optimization.
     // When previous_response_id is set, only items[start..] are sent as wire input.
@@ -157,8 +160,12 @@ fn execute_openai_once(
 
     loop {
         // Wire boundary: ConversationItem → Responses API input.
-        let wire_input = match (previous_response_id.as_ref(), continuation_start) {
-            (Some(_), Some(start)) => items_to_responses_input(&items[start..]),
+        let wire_input = match (
+            supports_response_threading,
+            previous_response_id.as_ref(),
+            continuation_start,
+        ) {
+            (true, Some(_), Some(start)) => items_to_responses_input(&items[start..]),
             _ => items_to_responses_input(&items),
         };
 
@@ -174,7 +181,12 @@ fn execute_openai_once(
                     text.clone(),
                     false,
                 );
-                apply_previous_response_id(&mut body, previous_response_id.as_deref());
+                let previous_response_id = if supports_response_threading {
+                    previous_response_id.as_deref()
+                } else {
+                    None
+                };
+                apply_previous_response_id(&mut body, previous_response_id);
                 build_json_post_request(
                     request_config,
                     openai_responses_path(&request_config.base_url),
@@ -199,7 +211,11 @@ fn execute_openai_once(
         }
         let parsed: OpenAIResponsesResponse = serde_json::from_value(response.clone())
             .context("failed to parse OpenAI Responses payload")?;
-        previous_response_id = parsed.id.clone();
+        previous_response_id = if supports_response_threading {
+            parsed.id.clone()
+        } else {
+            None
+        };
         let tool_calls = extract_responses_tool_calls(&parsed)?;
         if tool_calls.is_empty() {
             let assistant_text = parse_openai_assistant_text(&parsed, &response, state)?;
@@ -350,6 +366,8 @@ where
 
     let mut invocations = Vec::new();
     let supports_reasoning = openai_model_supports_reasoning(provider, &model_id);
+    let supports_response_threading =
+        openai_supports_response_threading(provider, &execution.request_config.base_url);
     let mut previous_response_id: Option<String> = None;
     // Index where "continuation" items start — used for previous_response_id optimization.
     // When previous_response_id is set, only items[start..] are sent as wire input.
@@ -358,7 +376,10 @@ where
     loop {
         // Check for background tasks that completed since the last turn and inject
         // a system reminder so the model learns about them without needing to poll.
-        let completed = super::claude_tools::workflow::drain_completed_shell_tasks(&state.cwd, &state.session.id);
+        let completed = super::claude_tools::workflow::drain_completed_shell_tasks(
+            &state.cwd,
+            &state.session.id,
+        );
         if !completed.is_empty() {
             let notice = format!(
                 "<system-reminder>\n{}\nUse TaskOutput to retrieve the full output if needed.\n</system-reminder>",
@@ -369,12 +390,20 @@ where
 
         // Wire boundary: ConversationItem → Responses API input.
         // When previous_response_id is set, only send continuation items.
-        let wire_input = match (previous_response_id.as_ref(), continuation_start) {
-            (Some(_), Some(start)) => items_to_responses_input(&items[start..]),
+        let wire_input = match (
+            supports_response_threading,
+            previous_response_id.as_ref(),
+            continuation_start,
+        ) {
+            (true, Some(_), Some(start)) => items_to_responses_input(&items[start..]),
             _ => items_to_responses_input(&items),
         };
 
-        let prev_resp_id = previous_response_id.clone();
+        let prev_resp_id = if supports_response_threading {
+            previous_response_id.clone()
+        } else {
+            None
+        };
         let mut retry_events: Vec<TurnStreamEvent> = Vec::new();
         let response = retry_openai_transport(
             || {
@@ -415,7 +444,11 @@ where
         }
 
         // Typed fields extracted during SSE — no Value→String→typed roundtrip.
-        previous_response_id = response.response_id;
+        previous_response_id = if supports_response_threading {
+            response.response_id
+        } else {
+            None
+        };
         let input_tokens = response.input_tokens;
         if let Some(tokens) = input_tokens {
             state.last_input_tokens = Some(tokens as u32);
@@ -462,7 +495,9 @@ where
 
         // Add assistant text from this round to maintain full history.
         if !response.assistant_text.trim().is_empty() {
-            items.push(ConversationItem::assistant_message(&response.assistant_text));
+            items.push(ConversationItem::assistant_message(
+                &response.assistant_text,
+            ));
         }
         // Record where continuation starts (tool calls + outputs for next request).
         continuation_start = Some(items.len());
@@ -592,7 +627,10 @@ fn execute_openai_completions_once(
 
     loop {
         // Check for background tasks that completed since the last turn.
-        let completed = super::claude_tools::workflow::drain_completed_shell_tasks(&state.cwd, &state.session.id);
+        let completed = super::claude_tools::workflow::drain_completed_shell_tasks(
+            &state.cwd,
+            &state.session.id,
+        );
         if !completed.is_empty() {
             let notice = format!(
                 "<system-reminder>\n{}\nUse TaskOutput to retrieve the full output if needed.\n</system-reminder>",

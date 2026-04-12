@@ -192,6 +192,25 @@ pub(super) fn apply_previous_response_id(body: &mut Value, previous_response_id:
     }
 }
 
+pub(super) fn openai_supports_response_threading(
+    provider: &ProviderDescriptor,
+    base_url: &str,
+) -> bool {
+    if env_flag("PUFFER_OPENAI_DISABLE_RESPONSE_THREADING")
+        || env_flag("PUFFER_OPENAI_DISABLE_PREVIOUS_RESPONSE_ID")
+    {
+        return false;
+    }
+    if env_flag("PUFFER_OPENAI_ENABLE_CUSTOM_RESPONSE_THREADING") {
+        return true;
+    }
+
+    let trimmed = base_url.trim_end_matches('/');
+    (provider.id == "openai" && trimmed.contains("api.openai.com"))
+        || trimmed.contains("chatgpt.com/backend-api")
+        || trimmed.contains("/api/codex")
+}
+
 pub(super) fn openai_responses_path(base_url: &str) -> &'static str {
     let trimmed = base_url.trim_end_matches('/');
     if trimmed.contains("/backend-api") || trimmed.contains("/api/codex") {
@@ -264,6 +283,12 @@ fn has_header(headers: &[(String, String)], name: &str) -> bool {
     headers
         .iter()
         .any(|(header, _)| header.eq_ignore_ascii_case(name))
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
 }
 
 pub(super) fn trace_openai_http_request(url: &str, headers: &[(String, String)], body: &str) {
@@ -379,9 +404,55 @@ fn codex_reasoning_config(state: &AppState, supports_reasoning: bool) -> Option<
 mod tests {
     use super::build_codex_openai_request_body;
     use super::is_retryable_openai_transport_error;
+    use super::openai_supports_response_threading;
     use crate::runtime::tests::state;
     use anyhow::anyhow;
+    use puffer_provider_registry::ProviderDescriptor;
     use serde_json::{json, Value};
+    use std::ffi::OsString;
+
+    struct ScopedEnvVar {
+        name: &'static str,
+        old_value: Option<OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(name: &'static str, value: &str) -> Self {
+            let old_value = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, old_value }
+        }
+
+        fn unset(name: &'static str) -> Self {
+            let old_value = std::env::var_os(name);
+            std::env::remove_var(name);
+            Self { name, old_value }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            if let Some(value) = self.old_value.take() {
+                std::env::set_var(self.name, value);
+            } else {
+                std::env::remove_var(self.name);
+            }
+        }
+    }
+
+    fn provider(id: &str, base_url: &str) -> ProviderDescriptor {
+        ProviderDescriptor {
+            id: id.to_string(),
+            display_name: id.to_string(),
+            base_url: base_url.to_string(),
+            default_api: "openai-responses".to_string(),
+            auth_modes: Vec::new(),
+            headers: Default::default(),
+            query_params: Default::default(),
+            discovery: None,
+            models: Vec::new(),
+        }
+    }
 
     #[test]
     fn retries_stream_closed_before_completed_errors() {
@@ -419,5 +490,54 @@ mod tests {
         );
 
         assert_eq!(body["prompt_cache_key"], json!("benchmark-cache-key"));
+    }
+
+    #[test]
+    fn official_openai_endpoints_keep_response_threading_enabled() {
+        let _guard = crate::test_locks::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _disable = ScopedEnvVar::unset("PUFFER_OPENAI_DISABLE_RESPONSE_THREADING");
+        let _legacy_disable = ScopedEnvVar::unset("PUFFER_OPENAI_DISABLE_PREVIOUS_RESPONSE_ID");
+        let _force_enable = ScopedEnvVar::unset("PUFFER_OPENAI_ENABLE_CUSTOM_RESPONSE_THREADING");
+        let provider = provider("openai", "https://api.openai.com");
+
+        assert!(openai_supports_response_threading(
+            &provider,
+            "https://api.openai.com"
+        ));
+    }
+
+    #[test]
+    fn custom_openai_proxy_disables_response_threading_by_default() {
+        let _guard = crate::test_locks::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _disable = ScopedEnvVar::unset("PUFFER_OPENAI_DISABLE_RESPONSE_THREADING");
+        let _legacy_disable = ScopedEnvVar::unset("PUFFER_OPENAI_DISABLE_PREVIOUS_RESPONSE_ID");
+        let _force_enable = ScopedEnvVar::unset("PUFFER_OPENAI_ENABLE_CUSTOM_RESPONSE_THREADING");
+        let provider = provider("openai", "http://84.32.32.146:8317/v1");
+
+        assert!(!openai_supports_response_threading(
+            &provider,
+            "http://84.32.32.146:8317/v1"
+        ));
+    }
+
+    #[test]
+    fn custom_openai_proxy_can_opt_back_into_response_threading() {
+        let _guard = crate::test_locks::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _disable = ScopedEnvVar::unset("PUFFER_OPENAI_DISABLE_RESPONSE_THREADING");
+        let _legacy_disable = ScopedEnvVar::unset("PUFFER_OPENAI_DISABLE_PREVIOUS_RESPONSE_ID");
+        let _force_enable =
+            ScopedEnvVar::set("PUFFER_OPENAI_ENABLE_CUSTOM_RESPONSE_THREADING", "true");
+        let provider = provider("openai", "http://84.32.32.146:8317/v1");
+
+        assert!(openai_supports_response_threading(
+            &provider,
+            "http://84.32.32.146:8317/v1"
+        ));
     }
 }
