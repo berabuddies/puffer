@@ -11,11 +11,11 @@ mod support;
 pub(super) use self::support::build_codex_openai_request_body;
 use self::support::{
     append_default_openai_headers, apply_previous_response_id, is_codex_openai_provider,
-    is_openai_structured_output_error, openai_base_url_for_auth, openai_model_supports_reasoning,
-    openai_registry_credential, openai_responses_path, openai_stream_read_timeout,
-    openai_supports_response_threading, prefer_native_structured_output, retry_openai_transport,
-    structured_output_endpoint_id, trace_openai_http_request, trace_openai_http_response_headers,
-    OPENAI_STRUCTURED_OUTPUT_FAMILY,
+    is_openai_structured_output_error, openai_base_url_for_auth, openai_max_turns,
+    openai_model_supports_reasoning, openai_registry_credential, openai_responses_path,
+    openai_stream_read_timeout, openai_supports_response_threading,
+    prefer_native_structured_output, retry_openai_transport, structured_output_endpoint_id,
+    trace_openai_http_request, trace_openai_http_response_headers, OPENAI_STRUCTURED_OUTPUT_FAMILY,
 };
 use super::structured_output_support::{
     openai_chat_completion_tools_for_request, openai_chat_response_format,
@@ -153,12 +153,13 @@ fn execute_openai_once(
     let supports_reasoning = openai_model_supports_reasoning(provider, &model_id);
     let supports_response_threading =
         openai_supports_response_threading(provider, &execution.request_config.base_url);
+    let max_turns = openai_max_turns();
     let mut previous_response_id = None;
     // Index where "continuation" items start — used for previous_response_id optimization.
     // When previous_response_id is set, only items[start..] are sent as wire input.
     let mut continuation_start: Option<usize> = None;
 
-    loop {
+    for _ in 0..max_turns {
         // Wire boundary: ConversationItem → Responses API input.
         let wire_input = match (
             supports_response_threading,
@@ -267,6 +268,8 @@ fn execute_openai_once(
             inject_post_compact_context(&mut items, &cwd);
         }
     }
+
+    bail!("OpenAI Responses turn exceeded {max_turns} model iterations")
 }
 
 pub(super) fn execute_openai_streaming<F>(
@@ -368,12 +371,13 @@ where
     let supports_reasoning = openai_model_supports_reasoning(provider, &model_id);
     let supports_response_threading =
         openai_supports_response_threading(provider, &execution.request_config.base_url);
+    let max_turns = openai_max_turns();
     let mut previous_response_id: Option<String> = None;
     // Index where "continuation" items start — used for previous_response_id optimization.
     // When previous_response_id is set, only items[start..] are sent as wire input.
     let mut continuation_start: Option<usize> = None;
 
-    loop {
+    for _ in 0..max_turns {
         // Check for background tasks that completed since the last turn and inject
         // a system reminder so the model learns about them without needing to poll.
         let completed = super::claude_tools::workflow::drain_completed_shell_tasks(
@@ -540,6 +544,8 @@ where
             inject_post_compact_context(&mut items, &cwd);
         }
     }
+
+    bail!("OpenAI Responses turn exceeded {max_turns} model iterations")
 }
 
 pub(super) fn execute_openai_completions(
@@ -624,8 +630,9 @@ fn execute_openai_completions_once(
     // Unified: all internal logic on Vec<ConversationItem>.
     let mut items = transcript_to_items(state, input);
     let mut invocations = Vec::new();
+    let max_turns = openai_max_turns();
 
-    loop {
+    for _ in 0..max_turns {
         // Check for background tasks that completed since the last turn.
         let completed = super::claude_tools::workflow::drain_completed_shell_tasks(
             &state.cwd,
@@ -718,6 +725,8 @@ fn execute_openai_completions_once(
             inject_post_compact_context(&mut items, &cwd);
         }
     }
+
+    bail!("OpenAI chat completion turn exceeded {max_turns} model iterations")
 }
 
 pub(super) fn execute_openai_tool_calls(

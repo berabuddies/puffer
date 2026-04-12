@@ -141,6 +141,14 @@ pub(super) fn openai_stream_read_timeout() -> Duration {
     Duration::from_millis(timeout_ms)
 }
 
+pub(super) fn openai_max_turns() -> usize {
+    std::env::var("PUFFER_OPENAI_MAX_TURNS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(16)
+        .clamp(1, 64)
+}
+
 fn is_retryable_openai_transport_error(error: &Error) -> bool {
     if error.chain().any(|cause| {
         cause
@@ -404,6 +412,7 @@ fn codex_reasoning_config(state: &AppState, supports_reasoning: bool) -> Option<
 mod tests {
     use super::build_codex_openai_request_body;
     use super::is_retryable_openai_transport_error;
+    use super::openai_max_turns;
     use super::openai_supports_response_threading;
     use crate::runtime::tests::state;
     use anyhow::anyhow;
@@ -539,5 +548,21 @@ mod tests {
             &provider,
             "http://84.32.32.146:8317/v1"
         ));
+    }
+
+    #[test]
+    fn openai_max_turns_uses_default_and_clamps_env_override() {
+        let _guard = crate::test_locks::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _unset = ScopedEnvVar::unset("PUFFER_OPENAI_MAX_TURNS");
+        assert_eq!(openai_max_turns(), 16);
+
+        let _small = ScopedEnvVar::set("PUFFER_OPENAI_MAX_TURNS", "0");
+        assert_eq!(openai_max_turns(), 1);
+
+        drop(_small);
+        let _large = ScopedEnvVar::set("PUFFER_OPENAI_MAX_TURNS", "128");
+        assert_eq!(openai_max_turns(), 64);
     }
 }
