@@ -299,9 +299,20 @@ pub(crate) fn transcript_to_items(state: &AppState, input: &str) -> Vec<Conversa
         })
         .collect();
 
-    // Always append the current user input.
-    if items.is_empty() || !input.trim().is_empty() {
-        items.push(ConversationItem::user_message(input));
+    // Append the current user input unless the transcript already ends with it
+    // (callers like command.rs and flow.rs push the user message to the
+    // transcript *before* calling execute, so it would be double-counted).
+    if !input.trim().is_empty() {
+        let already_present = matches!(
+            items.last(),
+            Some(ConversationItem::Message { role, content })
+                if role == "user"
+                    && content.len() == 1
+                    && matches!(&content[0], ContentPart::Text { text } if text == input)
+        );
+        if !already_present {
+            items.push(ConversationItem::user_message(input));
+        }
     }
     items
 }
@@ -1014,6 +1025,29 @@ mod tests {
         assert!(matches!(&items[0], ConversationItem::Message { role, .. } if role == "user"));
         assert!(matches!(&items[1], ConversationItem::Message { role, .. } if role == "assistant"));
         assert!(matches!(&items[2], ConversationItem::Message { role, .. } if role == "user"));
+        assert_eq!(items[2].text_content().unwrap(), "second");
+    }
+
+    #[test]
+    fn transcript_to_items_deduplicates_when_already_in_transcript() {
+        let mut state = test_state();
+        // Simulate what command.rs / flow.rs does: push the user message
+        // to the transcript *before* calling execute with the same text.
+        state.push_message(crate::MessageRole::User, "hello world");
+        let items = transcript_to_items(&state, "hello world");
+        // Should appear only once, not twice.
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].text_content().unwrap(), "hello world");
+    }
+
+    #[test]
+    fn transcript_to_items_appends_new_input_after_assistant() {
+        let mut state = test_state();
+        state.push_message(crate::MessageRole::User, "first");
+        state.push_message(crate::MessageRole::Assistant, "reply");
+        // Different input than last transcript entry — should be appended.
+        let items = transcript_to_items(&state, "second");
+        assert_eq!(items.len(), 3);
         assert_eq!(items[2].text_content().unwrap(), "second");
     }
 

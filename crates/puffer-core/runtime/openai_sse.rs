@@ -177,8 +177,11 @@ where
                             ]));
                         }
                         // Accumulate typed tool call — avoids later re-parse.
+                        // On invalid JSON, preserve the raw string so downstream
+                        // can report a proper error instead of silently running
+                        // the tool with empty arguments (Codex parity).
                         let arguments = serde_json::from_str::<Value>(arguments_str)
-                            .unwrap_or(Value::Object(Default::default()));
+                            .unwrap_or_else(|_| Value::String(arguments_str.to_string()));
                         state.tool_calls.push(OpenAIResponseToolCall {
                             item_id: item.get("id").and_then(Value::as_str).map(str::to_string),
                             status: item
@@ -503,5 +506,29 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.assistant_text, "fallback text");
+    }
+
+    #[test]
+    fn typed_result_preserves_invalid_json_arguments() {
+        // When arguments contain invalid JSON, the raw string should be
+        // preserved as Value::String so downstream can report a proper error
+        // instead of silently executing with empty arguments.
+        let stream = concat!(
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"status\":\"completed\",\"call_id\":\"call_X\",\"name\":\"Bash\",\"arguments\":\"not valid json\"}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_bad\",\"status\":\"completed\"}}\n\n"
+        );
+
+        let result = super::parse_openai_sse_reader_typed(
+            BufReader::new(stream.as_bytes()),
+            &mut |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "Bash");
+        // Invalid JSON preserved as string, not silently replaced with {}.
+        assert_eq!(result.tool_calls[0].arguments, json!("not valid json"));
     }
 }

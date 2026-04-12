@@ -141,6 +141,13 @@ fn execute_openai_once(
     let instructions = openai_request_instructions(state, resources, Some(&system_prompt))?;
     // Unified: all internal logic on Vec<ConversationItem>.
     let mut items = transcript_to_items(state, input);
+
+    // Inject dynamic context as a user message at the start of the input
+    // array (matching Codex/CC pattern: dynamic context lives in `input`,
+    // not `instructions`, so `instructions` stays static and cacheable).
+    let context_reminder = build_context_reminder_message();
+    items.insert(0, ConversationItem::user_message(&context_reminder));
+
     let mut invocations = Vec::new();
     let supports_reasoning = openai_model_supports_reasoning(provider, &model_id);
     let mut previous_response_id = None;
@@ -328,6 +335,12 @@ where
     let instructions = openai_request_instructions(state, resources, Some(&system_prompt))?;
     // Unified: all internal logic on Vec<ConversationItem>.
     let mut items = transcript_to_items(state, input);
+
+    // Inject dynamic context as a user message at the start of the input
+    // array (matching Codex/CC pattern).
+    let context_reminder = build_context_reminder_message();
+    items.insert(0, ConversationItem::user_message(&context_reminder));
+
     let mut invocations = Vec::new();
     let supports_reasoning = openai_model_supports_reasoning(provider, &model_id);
     let mut previous_response_id: Option<String> = None;
@@ -968,17 +981,37 @@ fn openai_request_instructions(
     {
         sections.push(plan_mode_context);
     }
-    // Inject system reminder (current date + git status) matching Anthropic path.
+    // Dynamic context (date, git status, CLAUDE.md) is now injected as a
+    // context user message in the `input` array, not here.  This keeps
+    // `instructions` static and cacheable (matching Codex's design where
+    // `instructions` = pure developer instructions, and contextual data
+    // lives in `input` items).
+    Ok(sections.join("\n\n"))
+}
+
+/// Builds the dynamic context message injected into the `input` array.
+///
+/// This follows CC/Codex's pattern of separating static instructions
+/// (in `instructions`) from dynamic context (in `input` messages).
+/// The `<system-reminder>` XML tag helps the model distinguish
+/// system-injected context from user-authored messages.
+fn build_context_reminder_message() -> String {
     let now = time::OffsetDateTime::now_utc();
     let date_str = format!("{}-{:02}-{:02}", now.year(), now.month() as u8, now.day());
     let git_status = super::git_status_context();
-    let mut reminder = format!("# currentDate\nToday's date is {date_str}.");
+
+    let mut parts = Vec::new();
+    parts.push(format!("# currentDate\nToday's date is {date_str}."));
     if !git_status.is_empty() {
-        reminder.push_str(&format!("\n\n# gitStatus\n{git_status}"));
+        parts.push(format!("# gitStatus\n{git_status}"));
     }
-    sections.push(reminder);
-    Ok(sections.join("\n\n"))
+
+    format!(
+        "<system-reminder>\n{}\n\n      IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.\n</system-reminder>",
+        parts.join("\n\n")
+    )
 }
+
 pub(super) fn parse_openai_assistant_text(
     parsed: &OpenAIResponsesResponse,
     response: &Value,
