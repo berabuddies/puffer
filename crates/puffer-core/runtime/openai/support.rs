@@ -39,7 +39,10 @@ pub(crate) fn build_codex_openai_request_body(
         "store": store,
         "stream": stream,
         "include": include,
-        "prompt_cache_key": state.session.id.to_string(),
+        "prompt_cache_key": state
+            .prompt_cache_key_override
+            .clone()
+            .unwrap_or_else(|| state.session.id.to_string()),
     });
     if let Some(reasoning) = reasoning {
         body["reasoning"] = reasoning;
@@ -374,8 +377,11 @@ fn codex_reasoning_config(state: &AppState, supports_reasoning: bool) -> Option<
 
 #[cfg(test)]
 mod tests {
+    use super::build_codex_openai_request_body;
     use super::is_retryable_openai_transport_error;
+    use crate::runtime::tests::state;
     use anyhow::anyhow;
+    use serde_json::{json, Value};
 
     #[test]
     fn retries_stream_closed_before_completed_errors() {
@@ -394,5 +400,24 @@ mod tests {
         let error = anyhow!("stream closed before response.completed")
             .context("failed to parse SSE response from http://example.test/v1/responses");
         assert!(is_retryable_openai_transport_error(&error));
+    }
+
+    #[test]
+    fn request_body_uses_prompt_cache_key_override_when_present() {
+        let mut state = state();
+        state.prompt_cache_key_override = Some("benchmark-cache-key".to_string());
+
+        let body = build_codex_openai_request_body(
+            &state,
+            "gpt-5",
+            "instructions",
+            Value::String("hello".to_string()),
+            &Vec::new(),
+            true,
+            None,
+            true,
+        );
+
+        assert_eq!(body["prompt_cache_key"], json!("benchmark-cache-key"));
     }
 }

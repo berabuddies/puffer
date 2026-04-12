@@ -64,6 +64,8 @@ struct BenchmarkToolInvocation {
 #[derive(Debug, Clone, Serialize)]
 struct BenchmarkResult {
     success: bool,
+    session_id: String,
+    prompt_cache_key: String,
     provider: String,
     model: String,
     effort: String,
@@ -112,8 +114,16 @@ pub(crate) fn run_benchmark_command(
     prepare_unattended_workspace(&paths, &benchmark_resources, &args.deny_tools)?;
 
     let now_ms = unix_time_ms();
-    let session_id =
-        benchmark_session_id(&selected_provider, &model_selector, &args.effort, args.fast);
+    let session_id = Uuid::new_v4();
+    let prompt_cache_key = benchmark_prompt_cache_key(
+        cwd,
+        &selected_provider,
+        &model_selector,
+        &args.effort,
+        args.fast,
+        &prompt,
+        &args.deny_tools,
+    );
     let mut state = AppState::new(
         config.clone(),
         cwd.to_path_buf(),
@@ -129,6 +139,7 @@ pub(crate) fn run_benchmark_command(
             note: None,
         },
     );
+    state.prompt_cache_key_override = Some(prompt_cache_key.clone());
     state.current_provider = Some(selected_provider.clone());
     state.current_model = Some(model_selector.clone());
     state.effort_level = args.effort.clone();
@@ -166,6 +177,7 @@ pub(crate) fn run_benchmark_command(
         .and_then(|p| fs::File::create(p).ok())
         .map(std::sync::Mutex::new);
     let incremental_ref = &incremental_file;
+    let emitted_text_delta = std::cell::Cell::new(false);
 
     match execute_user_turn_streaming(
         &mut state,
@@ -177,6 +189,7 @@ pub(crate) fn run_benchmark_command(
             use std::io::Write;
             match &event {
                 puffer_core::TurnStreamEvent::TextDelta(delta) => {
+                    emitted_text_delta.set(true);
                     print!("{delta}");
                     let _ = std::io::stdout().flush();
                 }
@@ -237,6 +250,8 @@ pub(crate) fn run_benchmark_command(
                 .collect::<Vec<_>>();
             let result = BenchmarkResult {
                 success: true,
+                session_id: session_id.to_string(),
+                prompt_cache_key: prompt_cache_key.clone(),
                 provider: selected_provider,
                 model: model_selector.clone(),
                 effort: args.effort,
@@ -257,12 +272,20 @@ pub(crate) fn run_benchmark_command(
                 args.result_json.as_deref(),
                 args.trajectory_json.as_deref(),
             )?;
-            println!("\n{}", turn.assistant_text);
+            if emitted_text_delta.get() {
+                if !turn.assistant_text.is_empty() && !turn.assistant_text.ends_with('\n') {
+                    println!();
+                }
+            } else if !turn.assistant_text.is_empty() {
+                println!("{}", turn.assistant_text);
+            }
             Ok(())
         }
         Err(error) => {
             let result = BenchmarkResult {
                 success: false,
+                session_id: session_id.to_string(),
+                prompt_cache_key,
                 provider: selected_provider,
                 model: model_selector,
                 effort: args.effort,
@@ -557,7 +580,7 @@ fn build_trajectory_json(result: &BenchmarkResult) -> Value {
 
     json!({
         "schema_version": "ATIF-v1.6",
-        "session_id": Uuid::new_v4().to_string(),
+        "session_id": result.session_id,
         "agent": {
             "name": APP_NAME,
             "version": APP_VERSION,
@@ -566,6 +589,7 @@ fn build_trajectory_json(result: &BenchmarkResult) -> Value {
                 "provider": result.provider,
                 "effort": result.effort,
                 "fast_mode": result.fast_mode,
+                "prompt_cache_key": result.prompt_cache_key,
             }
         },
         "steps": steps,
@@ -585,12 +609,50 @@ fn parse_tool_arguments(raw: &str) -> Value {
     json!({ "value": raw })
 }
 
-fn benchmark_session_id(provider: &str, model: &str, effort: &str, fast_mode: bool) -> Uuid {
+fn benchmark_prompt_cache_key(
+    cwd: &Path,
+    provider: &str,
+    model: &str,
+    effort: &str,
+    fast_mode: bool,
+    prompt: &str,
+    deny_tools: &[String],
+) -> String {
     let tool_fingerprint = BENCHMARK_ALLOWED_TOOL_IDS.join(",");
-    let key = format!("benchmark-run:{provider}:{model}:{effort}:{fast_mode}:{tool_fingerprint}");
+    let deny_tool_fingerprint = deny_tools
+        .iter()
+        .map(|tool| tool.trim())
+        .filter(|tool| !tool.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(",");
+    let key = (
+        "benchmark-run",
+        provider,
+        model,
+        effort,
+        fast_mode,
+        tool_fingerprint,
+        deny_tool_fingerprint,
+        cwd,
+        prompt.trim(),
+    );
+    let secondary_key = (
+        "benchmark-run",
+        provider,
+        model,
+        effort,
+        fast_mode,
+        BENCHMARK_ALLOWED_TOOL_IDS,
+        deny_tools,
+        cwd,
+        prompt.trim(),
+        "prompt-cache",
+    );
     let primary = stable_hash64(&key) as u128;
-    let secondary = stable_hash64(&(key.as_str(), "prompt-cache")) as u128;
-    Uuid::from_u128((primary << 64) | secondary)
+    let secondary = stable_hash64(&secondary_key) as u128;
+    Uuid::from_u128((primary << 64) | secondary).to_string()
 }
 
 fn stable_hash64<T: Hash>(value: &T) -> u64 {
@@ -696,6 +758,8 @@ mod tests {
     fn build_trajectory_json_records_failure_message() {
         let value = build_trajectory_json(&BenchmarkResult {
             success: false,
+            session_id: "session-123".to_string(),
+            prompt_cache_key: "cache-123".to_string(),
             provider: "openai".to_string(),
             model: "openai/gpt-5.4".to_string(),
             effort: "high".to_string(),
@@ -706,6 +770,8 @@ mod tests {
             error: Some("boom".to_string()),
         });
         assert_eq!(value["steps"][1]["message"], "Benchmark run failed: boom");
+        assert_eq!(value["session_id"], "session-123");
+        assert_eq!(value["agent"]["extra"]["prompt_cache_key"], "cache-123");
     }
 
     #[test]
@@ -731,13 +797,48 @@ mod tests {
     }
 
     #[test]
-    fn benchmark_session_id_is_stable_for_identical_inputs() {
-        let first = benchmark_session_id("openai", "openai/gpt-5.4", "xhigh", true);
-        let second = benchmark_session_id("openai", "openai/gpt-5.4", "xhigh", true);
-        let changed = benchmark_session_id("openai", "openai/gpt-5.4", "high", true);
+    fn benchmark_prompt_cache_key_is_stable_for_identical_inputs() {
+        let cwd = Path::new("/tmp/bench");
+        let first = benchmark_prompt_cache_key(
+            cwd,
+            "openai",
+            "openai/gpt-5.4",
+            "xhigh",
+            true,
+            "solve task a",
+            &[],
+        );
+        let second = benchmark_prompt_cache_key(
+            cwd,
+            "openai",
+            "openai/gpt-5.4",
+            "xhigh",
+            true,
+            "solve task a",
+            &[],
+        );
+        let changed_prompt = benchmark_prompt_cache_key(
+            cwd,
+            "openai",
+            "openai/gpt-5.4",
+            "xhigh",
+            true,
+            "solve task b",
+            &[],
+        );
+        let changed_cwd = benchmark_prompt_cache_key(
+            Path::new("/tmp/other"),
+            "openai",
+            "openai/gpt-5.4",
+            "xhigh",
+            true,
+            "solve task a",
+            &[],
+        );
 
         assert_eq!(first, second);
-        assert_ne!(first, changed);
+        assert_ne!(first, changed_prompt);
+        assert_ne!(first, changed_cwd);
     }
 
     #[test]
