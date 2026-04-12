@@ -1,5 +1,6 @@
 use crate::AppState;
 use anyhow::Result;
+use puffer_config::ConfigPaths;
 use puffer_resources::{render_prompt_by_id, LoadedResources};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -97,15 +98,15 @@ pub(super) fn render_runtime_system_prompt(
     let rendered = render_prompt_by_id(resources, SYSTEM_PROMPT_ID, &variables)
         .unwrap_or_else(|| render_fallback_prompt(&variables));
     let mut prompt = normalize_prompt_whitespace(&rendered);
-    // Inject CLAUDE.md / memory contents if present (matches CC's memory section).
+    // Inject CLAUDE.md and memory contents if present.
     if let Some(mut memory) = load_memory_prompt(&state.cwd) {
         // CC limits memory to 40K characters to avoid bloating the system prompt.
         const MAX_MEMORY_CHARS: usize = 40_000;
         if memory.chars().count() > MAX_MEMORY_CHARS {
             memory = memory.chars().take(MAX_MEMORY_CHARS).collect();
-            memory.push_str("\n\n[CLAUDE.md truncated — 40K char limit reached]");
+            memory.push_str("\n\n[Project context and memory truncated — 40K char limit reached]");
         }
-        prompt.push_str("\n\n# Project Context (CLAUDE.md)\n");
+        prompt.push_str("\n\n# Project Context and Memory\n");
         prompt.push_str(&memory);
     }
     Ok(prompt)
@@ -308,33 +309,46 @@ fn prepend_bullets(items: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-/// Loads CLAUDE.md from the working directory and user home, concatenating both if present.
+/// Loads project and user memory sources that should be injected into the runtime system prompt.
 fn load_memory_prompt(cwd: &Path) -> Option<String> {
+    let paths = ConfigPaths::discover(cwd);
     let mut parts = Vec::new();
-    // Project-level CLAUDE.md
-    let project_path = cwd.join("CLAUDE.md");
-    if let Ok(content) = std::fs::read_to_string(&project_path) {
-        let trimmed = content.trim();
-        if !trimmed.is_empty() {
-            parts.push(trimmed.to_string());
-        }
-    }
-    // User-level CLAUDE.md (in ~/.claude/ or ~/.puffer/)
+    push_memory_section(&mut parts, "## Project CLAUDE.md", &cwd.join("CLAUDE.md"));
+    push_memory_section(
+        &mut parts,
+        "## Workspace Memory",
+        &paths.workspace_config_dir.join("memory.md"),
+    );
+    push_memory_section(
+        &mut parts,
+        "## User Memory",
+        &paths.user_config_dir.join("memory.md"),
+    );
     if let Some(home) = env::var_os("HOME") {
-        for dir in &[".claude", ".puffer"] {
-            let user_path = Path::new(&home).join(dir).join("CLAUDE.md");
-            if let Ok(content) = std::fs::read_to_string(&user_path) {
-                let trimmed = content.trim();
-                if !trimmed.is_empty() {
-                    parts.push(trimmed.to_string());
-                }
-            }
-        }
+        push_memory_section(
+            &mut parts,
+            "## User CLAUDE.md (~/.claude)",
+            &Path::new(&home).join(".claude").join("CLAUDE.md"),
+        );
+        push_memory_section(
+            &mut parts,
+            "## User CLAUDE.md (~/.puffer)",
+            &Path::new(&home).join(".puffer").join("CLAUDE.md"),
+        );
     }
     if parts.is_empty() {
         None
     } else {
         Some(parts.join("\n\n"))
+    }
+}
+
+fn push_memory_section(parts: &mut Vec<String>, heading: &str, path: &Path) {
+    if let Ok(content) = std::fs::read_to_string(path) {
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            parts.push(format!("{heading}\n{trimmed}"));
+        }
     }
 }
 
@@ -400,8 +414,31 @@ fn os_version() -> String {
 mod tests {
     use super::render_runtime_system_prompt;
     use crate::runtime::tests::state;
+    use crate::runtime::tests::refresh_env_lock;
+    use puffer_config::{ensure_workspace_dirs, ConfigPaths};
     use puffer_resources::LoadedResources;
     use std::collections::BTreeSet;
+    use tempfile::tempdir;
+
+    struct HomeGuard(Option<std::ffi::OsString>);
+
+    impl HomeGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let old_home = std::env::var_os("HOME");
+            std::env::set_var("HOME", path);
+            Self(old_home)
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            if let Some(previous_home) = self.0.take() {
+                std::env::set_var("HOME", previous_home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
 
     #[test]
     fn runtime_system_prompt_mentions_tools_and_environment() {
@@ -429,5 +466,41 @@ mod tests {
         assert!(prompt.contains("AskUserQuestion"));
         assert!(prompt.contains("# Environment"));
         assert!(prompt.contains("Primary working directory:"));
+    }
+
+    #[test]
+    fn runtime_system_prompt_includes_workspace_and_user_memory_files() {
+        let _guard = refresh_env_lock().lock().unwrap();
+        let tempdir = tempdir().unwrap();
+        let home = tempdir.path().join("home");
+        let cwd = tempdir.path().join("workspace");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let _home = HomeGuard::set(&home);
+
+        let paths = ConfigPaths::discover(&cwd);
+        ensure_workspace_dirs(&paths).unwrap();
+        std::fs::write(cwd.join("CLAUDE.md"), "project instructions").unwrap();
+        std::fs::write(paths.workspace_config_dir.join("memory.md"), "workspace memory").unwrap();
+        std::fs::write(paths.user_config_dir.join("memory.md"), "user memory").unwrap();
+
+        let mut state = state();
+        state.cwd = cwd;
+
+        let prompt = render_runtime_system_prompt(
+            &state,
+            &LoadedResources::default(),
+            "gpt-5",
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert!(prompt.contains("# Project Context and Memory"));
+        assert!(prompt.contains("## Project CLAUDE.md"));
+        assert!(prompt.contains("project instructions"));
+        assert!(prompt.contains("## Workspace Memory"));
+        assert!(prompt.contains("workspace memory"));
+        assert!(prompt.contains("## User Memory"));
+        assert!(prompt.contains("user memory"));
     }
 }
