@@ -2,6 +2,50 @@ id: Config
 name: Config
 description: |-
   Get or set Claude Code configuration settings.
+
+  View or change Claude Code settings. Use when the user requests configuration changes, asks about current settings, or when adjusting a setting would benefit them.
+
+  ## Usage
+  - **Get current value:** Omit the "value" parameter
+  - **Set new value:** Include the "value" parameter
+
+  ## Configurable settings list
+  The following settings are available for you to change:
+
+  ### Global Settings (stored in ~/.puffer/config.toml)
+  - theme: "puffer", "harbor", "sunrise" - Color theme for the UI.
+  - model - Default provider/model selection for new turns. Use null to clear.
+  - editorMode: "normal", "vim" - Editor mode (`normal` or `vim`).
+  - fastMode: true/false - Fast mode preference.
+  - copy_full_response: true/false - Copy the full assistant response when using /copy.
+  - effortLevel: "auto", "minimal", "low", "medium", "high", "xhigh", "max" - Reasoning effort preference.
+  - default_provider - Default provider ID. Use null to clear.
+  - default_model - Default model selector. Use null to clear.
+
+  ### Project Settings (stored in .puffer/config.toml)
+  - openai_base_url - Workspace OpenAI-compatible base URL override. Use null to clear.
+  - openai_headers: {"key":"value"} - Workspace OpenAI-compatible custom headers as a JSON object. Use null to clear.
+  - openai_query_params: {"key":"value"} - Workspace OpenAI-compatible query params as a JSON object. Use null to clear.
+  - no_alt_screen: true/false - Disable alternate screen mode in this workspace.
+  - tmux_golden_mode: true/false - Enable tmux golden snapshot mode in this workspace.
+  - status_line_command - Workspace status line command. Use null to clear.
+  - status_line_padding: integer - Workspace status line padding. Use null to clear.
+
+  ### Session Settings (apply to the current session only)
+  - promptColor - Prompt bar color for the current session.
+  - statuslineEnabled: true/false - Status line visibility for the current session.
+
+  ## Model
+  - model - Override the default model. Accepts provider/model selectors and `null` or "default" to clear the override.
+
+  ## Examples
+  - Get theme: { "setting": "theme" }
+  - Set theme: { "setting": "theme", "value": "harbor" }
+  - Enable vim mode: { "setting": "editorMode", "value": "vim" }
+  - Set copy behavior: { "setting": "copy_full_response", "value": true }
+  - Change model: { "setting": "model", "value": "openai/gpt-5" }
+  - Set OpenAI headers: { "setting": "openaiHeaders", "value": { "x-test": "one" } }
+  - Set status line padding: { "setting": "statusLinePadding", "value": 2 }
 handler: runtime:workflow:config
 approval_policy: auto
 sandbox_policy: workspace-write
