@@ -14,8 +14,8 @@ pub(super) const OPENAI_STRUCTURED_OUTPUT_FAMILY: &str = "openai";
 
 #[derive(Debug, Default)]
 pub(super) struct RepeatedToolFailureGuard {
-    repeated_failed_signatures: HashMap<String, usize>,
-    reminded_failed_signatures: HashSet<String>,
+    repeated_missing_commands: HashMap<String, usize>,
+    reminded_missing_commands: HashSet<String>,
 }
 
 pub(crate) fn build_codex_openai_request_body(
@@ -229,34 +229,33 @@ pub(super) fn openai_supports_response_threading(
 
 impl RepeatedToolFailureGuard {
     pub(super) fn blocked_output(&self, tool_id: &str, arguments: &Value) -> Option<String> {
-        let signature = tool_call_signature_from_arguments(tool_id, arguments)?;
+        let command = missing_bash_command_from_arguments(tool_id, arguments)?;
         let attempts = self
-            .repeated_failed_signatures
-            .get(&signature)
+            .repeated_missing_commands
+            .get(&command)
             .copied()
             .unwrap_or(0);
         if attempts < 2 {
             return None;
         }
-        let label = tool_call_label(tool_id, &serde_json::to_string(arguments).ok()?);
         Some(format!(
-            "Blocked repeated tool call `{label}` because this exact call already failed twice in this turn. Use a different strategy instead of retrying the identical call."
+            "Blocked repeated Bash command `{command}` because it already failed with `command not found` twice in this turn. Use a different available command or strategy instead of retrying it."
         ))
     }
 
     pub(super) fn observe_invocations(&mut self, invocations: &[ToolInvocation]) -> Option<String> {
         let mut newly_repeated = Vec::new();
         for invocation in invocations {
-            let Some(signature) = failed_tool_signature_from_invocation(invocation) else {
+            let Some(command) = missing_bash_command_from_invocation(invocation) else {
                 continue;
             };
             let attempts = self
-                .repeated_failed_signatures
-                .entry(signature.clone())
+                .repeated_missing_commands
+                .entry(command.clone())
                 .and_modify(|count| *count += 1)
                 .or_insert(1);
-            if *attempts >= 2 && self.reminded_failed_signatures.insert(signature) {
-                newly_repeated.push(tool_call_label(&invocation.tool_id, &invocation.input));
+            if *attempts >= 2 && self.reminded_missing_commands.insert(command.clone()) {
+                newly_repeated.push(command);
             }
         }
         if newly_repeated.is_empty() {
@@ -340,57 +339,46 @@ fn has_header(headers: &[(String, String)], name: &str) -> bool {
         .any(|(header, _)| header.eq_ignore_ascii_case(name))
 }
 
-fn render_repeated_failure_reminder(labels: &[String]) -> String {
-    let repeated_lines = labels
+fn render_repeated_failure_reminder(commands: &[String]) -> String {
+    let command_lines = commands
         .iter()
-        .map(|label| {
+        .map(|command| {
             format!(
-                "- Tool call `{label}` already failed twice in this turn. Do not run the exact same call again unless something changed; choose a different strategy."
+                "- Bash command `{command}` already failed with `command not found` twice in this turn. Do not run it again unless you first change the environment; choose a different command or strategy."
             )
         })
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "<system-reminder>\nRepeated identical tool failures detected.\n{repeated_lines}\n</system-reminder>"
+        "<system-reminder>\nRepeated missing-command failures detected.\n{command_lines}\n</system-reminder>"
     )
 }
 
-fn failed_tool_signature_from_invocation(invocation: &ToolInvocation) -> Option<String> {
-    if invocation.success {
+fn missing_bash_command_from_invocation(invocation: &ToolInvocation) -> Option<String> {
+    if invocation.success
+        || !invocation
+            .output
+            .to_ascii_lowercase()
+            .contains("command not found")
+    {
         return None;
     }
-    tool_call_signature_from_input(&invocation.tool_id, &invocation.input)
+    let arguments = serde_json::from_str::<Value>(&invocation.input).ok()?;
+    missing_bash_command_from_arguments(&invocation.tool_id, &arguments)
 }
 
-fn tool_call_signature_from_arguments(tool_id: &str, arguments: &Value) -> Option<String> {
-    let serialized = serde_json::to_string(arguments).ok()?;
-    tool_call_signature_from_input(tool_id, &serialized)
-}
-
-fn tool_call_signature_from_input(tool_id: &str, input: &str) -> Option<String> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
+fn missing_bash_command_from_arguments(tool_id: &str, arguments: &Value) -> Option<String> {
+    if tool_id != "Bash" {
         return None;
     }
-    Some(format!("{tool_id}\n{trimmed}"))
-}
-
-fn tool_call_label(tool_id: &str, input: &str) -> String {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return tool_id.to_string();
+    let command = arguments.get("command")?.as_str()?.trim();
+    if command.is_empty() {
+        return None;
     }
-    format!("{} {}", tool_id, truncate_tool_input(trimmed, 120))
-}
-
-fn truncate_tool_input(input: &str, max_chars: usize) -> String {
-    let mut chars = input.chars();
-    let truncated: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() {
-        format!("{truncated}...")
-    } else {
-        truncated
-    }
+    shell_words::split(command)
+        .ok()
+        .and_then(|parts| parts.into_iter().next())
+        .or_else(|| command.split_whitespace().next().map(ToOwned::to_owned))
 }
 
 fn env_flag(name: &str) -> bool {
@@ -668,7 +656,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_identical_failed_tool_calls_trigger_reminder_and_block() {
+    fn repeated_missing_bash_commands_trigger_reminder_and_block() {
         let mut guard = RepeatedToolFailureGuard::default();
         let first = crate::runtime::ToolInvocation {
             call_id: "call-1".to_string(),
@@ -680,8 +668,8 @@ mod tests {
         let second = crate::runtime::ToolInvocation {
             call_id: "call-2".to_string(),
             tool_id: "Bash".to_string(),
-            input: r#"{"command":"7z l archive.7z"}"#.to_string(),
-            output: "Tool execution failed: synthetic failure".to_string(),
+            input: r#"{"command":"7z x archive.7z"}"#.to_string(),
+            output: "bash: line 1: 7z: command not found".to_string(),
             success: false,
         };
 
@@ -689,13 +677,10 @@ mod tests {
         let reminder = guard
             .observe_invocations(&[second])
             .expect("second failure should trigger reminder");
-        assert!(reminder.contains("Repeated identical tool failures detected"));
-        assert!(reminder.contains(r#"Bash {"command":"7z l archive.7z"}"#));
+        assert!(reminder.contains("Repeated missing-command failures detected"));
+        assert!(reminder.contains("`7z`"));
         assert!(guard
-            .blocked_output("Bash", &json!({ "command": "7z l archive.7z" }))
+            .blocked_output("Bash", &json!({ "command": "7z t archive.7z" }))
             .is_some());
-        assert!(guard
-            .blocked_output("Bash", &json!({ "command": "7z x archive.7z" }))
-            .is_none());
     }
 }
