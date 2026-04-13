@@ -34,6 +34,7 @@ mod structured_output_support;
 mod system_prompt;
 pub mod teammate_loop;
 mod tool_executor;
+mod tool_loop;
 
 mod debug_context;
 pub(crate) use self::context_usage::render_context_usage_summary;
@@ -63,6 +64,7 @@ use self::tool_executor::{
     execute_tool_call, is_parallel_safe_tool, resolve_tool_permission, PermissionOutcome,
     ToolExecutionBackend,
 };
+use self::tool_loop::{tool_loop_iterations, tool_loop_limit_error, ToolLoopProvider};
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const OPENAI_CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
@@ -516,13 +518,8 @@ fn execute_anthropic(
 
     // Pre-turn compaction using shared logic.
     let cwd = state.cwd.clone();
-    let compacted = compact_conversation_with(
-        &mut items,
-        provider,
-        &model_id,
-        None,
-        &anthropic_summary_fn,
-    );
+    let compacted =
+        compact_conversation_with(&mut items, provider, &model_id, None, &anthropic_summary_fn);
     if compacted {
         inject_post_compact_context(&mut items, &cwd);
     }
@@ -536,7 +533,7 @@ fn execute_anthropic(
         .unwrap_or(false);
     let max_output = resolve_max_output_tokens(provider, &model_id);
 
-    for _ in 0..8 {
+    for _ in tool_loop_iterations() {
         // Convert items to Anthropic wire format at each iteration.
         let wire_messages = items_to_anthropic_messages(&items);
 
@@ -654,7 +651,7 @@ fn execute_anthropic(
         });
     }
 
-    bail!("anthropic tool loop exceeded iteration limit")
+    Err(tool_loop_limit_error(ToolLoopProvider::Anthropic, false))
 }
 
 /// Streaming variant of execute_anthropic — sends `stream: true` and parses
@@ -732,13 +729,8 @@ where
 
     // Pre-turn compaction.
     let cwd = state.cwd.clone();
-    let compacted = compact_conversation_with(
-        &mut items,
-        provider,
-        &model_id,
-        None,
-        &anthropic_summary_fn,
-    );
+    let compacted =
+        compact_conversation_with(&mut items, provider, &model_id, None, &anthropic_summary_fn);
     if compacted {
         inject_post_compact_context(&mut items, &cwd);
     }
@@ -753,9 +745,10 @@ where
         provider.id == "anthropic" || provider.base_url.contains("anthropic.com");
     let max_output = resolve_max_output_tokens(provider, &model_id);
 
-    for _ in 0..8 {
+    for _ in tool_loop_iterations() {
         // Drain completed background tasks and inject as user messages.
-        let completed = claude_tools::workflow::drain_completed_shell_tasks(&state.cwd, &state.session.id);
+        let completed =
+            claude_tools::workflow::drain_completed_shell_tasks(&state.cwd, &state.session.id);
         if !completed.is_empty() {
             let notice = format!(
                 "<system-reminder>\n{}\nUse TaskOutput to retrieve the full output if needed.\n</system-reminder>",
@@ -865,7 +858,7 @@ where
         });
     }
 
-    bail!("anthropic streaming tool loop exceeded iteration limit")
+    Err(tool_loop_limit_error(ToolLoopProvider::Anthropic, true))
 }
 
 fn build_anthropic_request_config(
