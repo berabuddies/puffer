@@ -38,6 +38,7 @@ use reqwest::blocking::{Client, Response};
 use reqwest::StatusCode;
 use serde_json::Value;
 use std::collections::HashSet;
+use std::io::{BufRead, Read};
 
 pub(super) use super::openai_sse::{is_event_stream, parse_openai_sse_response};
 use super::openai_sse::{parse_openai_sse_reader_typed, OpenAISseResult};
@@ -1391,12 +1392,21 @@ where
         let text = response.text()?;
         bail!("request failed with status {}: {}", status, text);
     }
-    if is_event_stream(content_type.as_deref(), "") {
-        return parse_openai_sse_reader_typed(std::io::BufReader::new(response), on_event)
+    let mut reader = std::io::BufReader::new(response);
+    let looks_like_sse = if is_event_stream(content_type.as_deref(), "") {
+        true
+    } else {
+        let prefix = reader.fill_buf()?;
+        let prefix = std::str::from_utf8(prefix).unwrap_or_default();
+        is_event_stream(content_type.as_deref(), prefix)
+    };
+    if looks_like_sse {
+        return parse_openai_sse_reader_typed(reader, on_event)
             .with_context(|| format!("failed to parse SSE response from {url}"));
     }
     // Non-SSE fallback: parse JSON directly into typed struct — one parse, no roundtrip.
-    let text = response.text()?;
+    let mut text = String::new();
+    reader.read_to_string(&mut text)?;
     let raw: Value = serde_json::from_str(&text)
         .with_context(|| format!("response from {url} was not valid JSON"))?;
     let response_id = raw.get("id").and_then(Value::as_str).map(str::to_string);

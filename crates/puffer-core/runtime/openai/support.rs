@@ -207,8 +207,7 @@ pub(super) fn openai_supports_response_threading(
 
     let trimmed = base_url.trim_end_matches('/');
     (provider.id == "openai" && trimmed.contains("api.openai.com"))
-        || trimmed.contains("chatgpt.com/backend-api")
-        || trimmed.contains("/api/codex")
+        || (trimmed.contains("/api/codex") && !trimmed.contains("chatgpt.com/backend-api"))
 }
 
 pub(super) fn openai_responses_path(base_url: &str) -> &'static str {
@@ -538,6 +537,22 @@ mod tests {
         assert!(openai_supports_response_threading(
             &provider,
             "http://84.32.32.146:8317/v1"
+        ));
+    }
+
+    #[test]
+    fn chatgpt_codex_backend_disables_response_threading_by_default() {
+        let _guard = crate::test_locks::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _disable = ScopedEnvVar::unset("PUFFER_OPENAI_DISABLE_RESPONSE_THREADING");
+        let _legacy_disable = ScopedEnvVar::unset("PUFFER_OPENAI_DISABLE_PREVIOUS_RESPONSE_ID");
+        let _force_enable = ScopedEnvVar::unset("PUFFER_OPENAI_ENABLE_CUSTOM_RESPONSE_THREADING");
+        let provider = provider("openai", "https://api.openai.com");
+
+        assert!(!openai_supports_response_threading(
+            &provider,
+            "https://chatgpt.com/backend-api/codex"
         ));
     }
 }
