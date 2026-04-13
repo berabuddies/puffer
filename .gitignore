@@ -2,3 +2,9 @@ references/
 target/
 .worktree/
 .puffer/
+# Generated Terminal Bench harness artifacts.
+benchmark/.venv-harbor/
+benchmark/harbor-cache/
+benchmark/tb2-trajectory/
+benchmark/__pycache__/
+benchmark/*.pyc
