@@ -34,7 +34,6 @@ mod structured_output_support;
 mod system_prompt;
 pub mod teammate_loop;
 mod tool_executor;
-mod tool_loop;
 
 mod debug_context;
 pub(crate) use self::context_usage::render_context_usage_summary;
@@ -64,7 +63,6 @@ use self::tool_executor::{
     execute_tool_call, is_parallel_safe_tool, resolve_tool_permission, PermissionOutcome,
     ToolExecutionBackend,
 };
-use self::tool_loop::{tool_loop_iterations, tool_loop_limit_error, ToolLoopProvider};
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const OPENAI_CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
@@ -533,7 +531,7 @@ fn execute_anthropic(
         .unwrap_or(false);
     let max_output = resolve_max_output_tokens(provider, &model_id);
 
-    for _ in tool_loop_iterations() {
+    loop {
         // Convert items to Anthropic wire format at each iteration.
         let wire_messages = items_to_anthropic_messages(&items);
 
@@ -650,8 +648,6 @@ fn execute_anthropic(
             tool_invocations: invocations,
         });
     }
-
-    Err(tool_loop_limit_error(ToolLoopProvider::Anthropic, false))
 }
 
 /// Streaming variant of execute_anthropic — sends `stream: true` and parses
@@ -745,7 +741,7 @@ where
         provider.id == "anthropic" || provider.base_url.contains("anthropic.com");
     let max_output = resolve_max_output_tokens(provider, &model_id);
 
-    for _ in tool_loop_iterations() {
+    loop {
         // Drain completed background tasks and inject as user messages.
         let completed =
             claude_tools::workflow::drain_completed_shell_tasks(&state.cwd, &state.session.id);
@@ -857,8 +853,6 @@ where
             tool_invocations: invocations,
         });
     }
-
-    Err(tool_loop_limit_error(ToolLoopProvider::Anthropic, true))
 }
 
 fn build_anthropic_request_config(

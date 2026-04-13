@@ -1026,8 +1026,8 @@ fn tool_definitions_keep_never_approval_tools_enabled() {
 
 #[path = "tests/http_retries.rs"]
 mod http_retries;
-#[path = "tests/iteration_limits.rs"]
-mod iteration_limits;
+#[path = "tests/iteration_behavior.rs"]
+mod iteration_behavior;
 #[path = "tests/openai_tool_errors.rs"]
 mod openai_tool_errors;
 #[path = "tests/permissions.rs"]

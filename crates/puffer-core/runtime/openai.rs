@@ -22,7 +22,6 @@ use super::structured_output_support::{
     openai_responses_text_config, openai_tool_definitions_for_request, StructuredOutputConfig,
 };
 use super::system_prompt::render_runtime_system_prompt;
-use super::tool_loop::{tool_loop_iterations, tool_loop_limit_error, ToolLoopProvider};
 use crate::AppState;
 use anyhow::{anyhow, bail, Context, Result};
 use puffer_provider_openai::{
@@ -159,7 +158,7 @@ fn execute_openai_once(
     // When previous_response_id is set, only items[start..] are sent as wire input.
     let mut continuation_start: Option<usize> = None;
 
-    for _ in tool_loop_iterations() {
+    loop {
         // Wire boundary: ConversationItem → Responses API input.
         let wire_input = match (
             supports_response_threading,
@@ -268,8 +267,6 @@ fn execute_openai_once(
             inject_post_compact_context(&mut items, &cwd);
         }
     }
-
-    Err(tool_loop_limit_error(ToolLoopProvider::OpenAi, false))
 }
 
 pub(super) fn execute_openai_streaming<F>(
@@ -376,7 +373,7 @@ where
     // When previous_response_id is set, only items[start..] are sent as wire input.
     let mut continuation_start: Option<usize> = None;
 
-    for _ in tool_loop_iterations() {
+    loop {
         // Check for background tasks that completed since the last turn and inject
         // a system reminder so the model learns about them without needing to poll.
         let completed = super::claude_tools::workflow::drain_completed_shell_tasks(
@@ -543,8 +540,6 @@ where
             inject_post_compact_context(&mut items, &cwd);
         }
     }
-
-    Err(tool_loop_limit_error(ToolLoopProvider::OpenAi, true))
 }
 
 pub(super) fn execute_openai_completions(
@@ -630,7 +625,7 @@ fn execute_openai_completions_once(
     let mut items = transcript_to_items(state, input);
     let mut invocations = Vec::new();
 
-    for _ in tool_loop_iterations() {
+    loop {
         // Check for background tasks that completed since the last turn.
         let completed = super::claude_tools::workflow::drain_completed_shell_tasks(
             &state.cwd,
@@ -723,8 +718,6 @@ fn execute_openai_completions_once(
             inject_post_compact_context(&mut items, &cwd);
         }
     }
-
-    Err(tool_loop_limit_error(ToolLoopProvider::OpenAi, false))
 }
 
 pub(super) fn execute_openai_tool_calls(
