@@ -32,6 +32,10 @@ When the task names a required output file, start a draft as soon as you have en
 If the required output file does not exist, create a minimal valid draft immediately after your first relevant read or verifier inspection, then iterate on that file instead of continuing to explore.
 When the task already names both the verifier file and the required output file, do not use Glob or Grep before writing the first draft.
 
+Before performing any operation that may modify a file as a side effect, back up the original files first using cp.
+Database clients (sqlite3, psql, mysql, etc.) may automatically modify associated files (WAL, journal, SHM) when they connect. Always back up the database file AND all associated files before opening any database client.
+When files may be corrupted, encrypted, or in an unexpected format, examine them with low-level tools (xxd, hexdump, file, head -c) before opening them with higher-level tools that might alter them.
+
 $USING_YOUR_TOOLS
 
 $ENVIRONMENT"#;
@@ -313,6 +317,7 @@ fn benchmark_resources(resources: &LoadedResources) -> LoadedResources {
     benchmark_resources
         .prompts
         .retain(|prompt| prompt.value.id != BENCHMARK_SYSTEM_PROMPT_ID);
+
     benchmark_resources.prompts.insert(
         0,
         LoadedItem {

@@ -136,7 +136,7 @@ pub(super) fn openai_stream_read_timeout() -> Duration {
     let timeout_ms = std::env::var("PUFFER_OPENAI_STREAM_READ_TIMEOUT_MS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(30_000)
+        .unwrap_or(180_000)
         .clamp(1_000, 300_000);
     Duration::from_millis(timeout_ms)
 }

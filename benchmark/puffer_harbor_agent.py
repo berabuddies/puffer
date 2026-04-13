@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 from pathlib import Path
 from typing import Any
@@ -100,6 +101,16 @@ class PufferBenchAgent(BaseInstalledAgent):
         if not self.model_name:
             raise ValueError("Model name is required")
 
+        env: dict[str, str] = {}
+        for key in (
+            "OPENAI_API_KEY",
+            "OPENAI_BASE_URL",
+            "PUFFER_OPENAI_STREAM_READ_TIMEOUT_MS",
+        ):
+            value = os.environ.get(key, "")
+            if value:
+                env[key] = value
+
         prompt_path = "/tmp/puffer-benchmark-prompt.txt"
         quoted_instruction = shlex.quote(instruction)
         quoted_bin = shlex.quote(self._puffer_bin_path)
@@ -125,4 +136,5 @@ class PufferBenchAgent(BaseInstalledAgent):
                 "--trajectory-json /logs/agent/trajectory.json "
                 "2>&1 | tee /logs/agent/puffer.txt"
             ),
+            env=env,
         )
