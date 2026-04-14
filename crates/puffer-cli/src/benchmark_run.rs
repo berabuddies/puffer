@@ -29,8 +29,7 @@ Do not repeat the same search or reread the same unchanged file unless the earli
 When the task names a file, read or write that exact path directly instead of searching for it.
 Ignore benchmark harness files under /app/.puffer unless the task explicitly mentions them.
 When the task names a required output file, start a draft as soon as you have enough information to make progress and iterate from there.
-If the required output file does not exist, create a minimal valid draft immediately after your first relevant read or verifier inspection, then iterate on that file instead of continuing to explore.
-When the task already names both the verifier file and the required output file, do not use Glob or Grep before writing the first draft.
+If the required output file does not exist, create it early with your best current attempt. After every few analysis steps, update the output file with your latest interpretation — even a rough answer is better than no answer if you run out of time.
 
 Before opening or running a tool on a file, consider whether it may modify that file or its neighbors as a side effect. When in doubt, back up first.
 When a file's contents look unexpected, inspect it with a low-level tool before passing it to a higher-level one that might alter it.
