@@ -1,7 +1,9 @@
 use anyhow::{anyhow, Context, Result};
 use indexmap::IndexMap;
 use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
-use puffer_core::{execute_user_turn_streaming, AppState};
+use puffer_core::{
+    execute_user_turn_streaming_with_reflection, AppState, ReflectionConfig, ReflectionLanguage,
+};
 use puffer_provider_registry::{
     detect_import_candidates, AuthStore, ExternalImportFamily, ModelDescriptor, ProviderRegistry,
     StoredCredential,
@@ -182,12 +184,15 @@ pub(crate) fn run_benchmark_command(
     let incremental_ref = &incremental_file;
     let emitted_text_delta = std::cell::Cell::new(false);
 
-    match execute_user_turn_streaming(
+    match execute_user_turn_streaming_with_reflection(
         &mut state,
         &benchmark_resources,
         providers,
         auth_store,
         &prompt,
+        ReflectionConfig {
+            language: ReflectionLanguage::Chinese,
+        },
         |event| {
             use std::io::Write;
             match &event {
@@ -231,6 +236,24 @@ pub(crate) fn run_benchmark_command(
                                 });
                                 let _ = writeln!(f, "{}", line);
                             }
+                            let _ = f.flush();
+                        }
+                    }
+                }
+                puffer_core::TurnStreamEvent::ReflectionCheckpoint(summary) => {
+                    let rendered = format!("Reflection checkpoint\n{summary}");
+                    let _ = session_store.append_event(
+                        session_id,
+                        TranscriptEvent::SystemMessage { text: rendered },
+                    );
+                    if let Some(lock) = incremental_ref {
+                        if let Ok(mut f) = lock.lock() {
+                            let line = serde_json::json!({
+                                "type": "reflection_checkpoint",
+                                "summary": summary,
+                                "timestamp": unix_time_ms(),
+                            });
+                            let _ = writeln!(f, "{}", line);
                             let _ = f.flush();
                         }
                     }

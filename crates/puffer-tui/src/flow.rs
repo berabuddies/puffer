@@ -304,6 +304,9 @@ pub(crate) fn handle_prompt_submit(
                 TurnStreamEvent::ToolInvocations(invocations) => {
                     let _ = event_sender.send(PendingSubmitEvent::ToolInvocations(invocations));
                 }
+                TurnStreamEvent::ReflectionCheckpoint(summary) => {
+                    let _ = event_sender.send(PendingSubmitEvent::ReflectionCheckpoint(summary));
+                }
                 TurnStreamEvent::RetryAttempt {
                     attempt,
                     max_attempts,
@@ -433,6 +436,9 @@ pub(crate) fn poll_pending_submit(
                 pending.pending_tool_calls.drain(0..completed);
                 pending.rendered_tool_invocations += invocations.len();
                 append_tool_messages(state, session_store, &invocations)?;
+            }
+            PendingSubmitEvent::ReflectionCheckpoint(summary) => {
+                pending.status_hint = Some(summary);
             }
             PendingSubmitEvent::RetryAttempt {
                 attempt,
@@ -623,7 +629,9 @@ fn append_thinking_delta(state: &mut AppState, delta: &str) {
     }
     if let Some(last) = state.transcript.last_mut() {
         if last.role == MessageRole::Assistant {
-            last.thinking.get_or_insert_with(String::new).push_str(delta);
+            last.thinking
+                .get_or_insert_with(String::new)
+                .push_str(delta);
             return;
         }
     }
@@ -895,7 +903,6 @@ pub(crate) fn append_tool_messages(
     }
     Ok(())
 }
-
 
 /// Executes a `!cmd` shell shortcut and records the result into the transcript.
 pub(crate) fn execute_shell_shortcut(

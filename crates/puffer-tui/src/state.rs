@@ -88,6 +88,7 @@ pub(crate) enum PendingSubmitEvent {
     TextDelta(String),
     ToolCallsRequested(Vec<ToolCallRequest>),
     ToolInvocations(Vec<ToolInvocation>),
+    ReflectionCheckpoint(String),
     RetryAttempt {
         attempt: usize,
         max_attempts: usize,

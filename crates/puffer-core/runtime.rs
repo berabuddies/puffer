@@ -28,6 +28,7 @@ mod local_tools;
 mod openai;
 mod openai_sse;
 mod permission_prompt;
+mod reflection;
 mod request_tool_filter;
 mod side_question;
 mod structured_output_support;
@@ -50,6 +51,7 @@ use self::openai::{
 pub use self::permission_prompt::{
     with_permission_prompt_handler, PermissionPromptAction, PermissionPromptRequest,
 };
+pub use self::reflection::{ReflectionConfig, ReflectionLanguage};
 pub(crate) use self::request_tool_filter::{build_request_tool_filter, RequestToolFilter};
 pub use self::structured_output_support::StructuredOutputConfig;
 use self::structured_output_support::{
@@ -73,6 +75,7 @@ const HTTP_RETRY_DELAY_MS_ENV: &str = "PUFFER_HTTP_RETRY_DELAY_MS";
 struct TurnRequestOptions<'a> {
     structured_output: Option<&'a StructuredOutputConfig>,
     tool_filter: Option<&'a RequestToolFilter>,
+    reflection: Option<ReflectionConfig>,
 }
 
 #[derive(Debug)]
@@ -128,6 +131,7 @@ pub enum TurnStreamEvent {
     TextDelta(String),
     ToolCallsRequested(Vec<ToolCallRequest>),
     ToolInvocations(Vec<ToolInvocation>),
+    ReflectionCheckpoint(String),
     /// A transport-level retry is about to be attempted.
     RetryAttempt {
         attempt: usize,
@@ -174,6 +178,7 @@ pub(crate) fn execute_user_prompt_with_tool_filter(
         TurnRequestOptions {
             structured_output: None,
             tool_filter,
+            reflection: None,
         },
     )
 }
@@ -226,6 +231,7 @@ pub fn execute_user_prompt_with_structured_output(
         TurnRequestOptions {
             structured_output: Some(structured_output),
             tool_filter: None,
+            reflection: None,
         },
     )
 }
@@ -304,6 +310,7 @@ where
             TurnRequestOptions {
                 structured_output,
                 tool_filter: None,
+                reflection: None,
             },
             &mut on_event,
         )
@@ -333,6 +340,35 @@ where
         TurnRequestOptions {
             structured_output: Some(structured_output),
             tool_filter: None,
+            reflection: None,
+        },
+        &mut on_event,
+    )
+}
+
+/// Executes one user prompt with streaming events and a reflection policy.
+pub fn execute_user_prompt_streaming_with_reflection<F>(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    providers: &ProviderRegistry,
+    auth_store: &mut AuthStore,
+    input: &str,
+    reflection: ReflectionConfig,
+    mut on_event: F,
+) -> Result<TurnExecution>
+where
+    F: FnMut(TurnStreamEvent),
+{
+    execute_user_prompt_streaming_with_options(
+        state,
+        resources,
+        providers,
+        auth_store,
+        input,
+        TurnRequestOptions {
+            structured_output: None,
+            tool_filter: None,
+            reflection: Some(reflection),
         },
         &mut on_event,
     )
@@ -453,6 +489,9 @@ fn execute_anthropic(
     // Build canonical conversation items (shared with OpenAI path).
     let mut items = transcript_to_items(state, input);
     let mut invocations = Vec::new();
+    let mut reflection = options
+        .reflection
+        .map(|config| reflection::ReflectionTracker::new(input, config));
 
     let request_config = AnthropicRequestConfig {
         base_url: provider.base_url.clone(),
@@ -627,6 +666,12 @@ fn execute_anthropic(
             invocations.extend(tool_results.invocations.clone());
             // Append response content as ConversationItems.
             append_anthropic_response_to_items(&mut items, &response, &tool_results);
+            if let Some(checkpoint) = reflection
+                .as_mut()
+                .and_then(|tracker| tracker.observe_batch(&tool_results.invocations))
+            {
+                items.push(ConversationItem::user_message(checkpoint.prompt));
+            }
             // Compact between tool iterations using shared logic.
             let compacted = compact_conversation_with(
                 &mut items,
@@ -679,6 +724,9 @@ where
     // Build canonical conversation items (shared with OpenAI path).
     let mut items = transcript_to_items(state, input);
     let mut invocations = Vec::new();
+    let mut reflection = options
+        .reflection
+        .map(|config| reflection::ReflectionTracker::new(input, config));
 
     let request_config = build_anthropic_request_config(state, provider, &auth);
     let request = build_messages_request(
@@ -832,6 +880,15 @@ where
             invocations.extend(tool_results.invocations.clone());
             // Append response content as ConversationItems.
             append_anthropic_response_to_items(&mut items, &response, &tool_results);
+            if let Some(checkpoint) = reflection
+                .as_mut()
+                .and_then(|tracker| tracker.observe_batch(&tool_results.invocations))
+            {
+                on_event(TurnStreamEvent::ReflectionCheckpoint(
+                    checkpoint.summary.clone(),
+                ));
+                items.push(ConversationItem::user_message(checkpoint.prompt));
+            }
             // Compact between tool iterations.
             let compacted = compact_conversation_with(
                 &mut items,

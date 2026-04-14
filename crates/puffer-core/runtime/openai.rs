@@ -144,6 +144,9 @@ fn execute_openai_once(
     let instructions = openai_request_instructions(state, resources, Some(&system_prompt))?;
     // Unified: all internal logic on Vec<ConversationItem>.
     let mut items = transcript_to_items(state, input);
+    let mut reflection = options
+        .reflection
+        .map(|config| super::reflection::ReflectionTracker::new(input, config));
 
     // Inject dynamic context as a user message at the start of the input
     // array (matching Codex/CC pattern: dynamic context lives in `input`,
@@ -241,9 +244,7 @@ fn execute_openai_once(
             .and_then(Value::as_array)
             .map(|arr| {
                 arr.iter()
-                    .filter(|item| {
-                        item.get("type").and_then(Value::as_str) == Some("reasoning")
-                    })
+                    .filter(|item| item.get("type").and_then(Value::as_str) == Some("reasoning"))
                     .cloned()
                     .collect()
             })
@@ -269,6 +270,12 @@ fn execute_openai_once(
 
         // Shared: append tool calls + outputs to canonical items.
         append_tool_results(&mut items, &tool_results.invocations);
+        if let Some(checkpoint) = reflection
+            .as_mut()
+            .and_then(|tracker| tracker.observe_batch(&tool_results.invocations))
+        {
+            items.push(ConversationItem::user_message(checkpoint.prompt));
+        }
         invocations.extend(tool_results.invocations);
 
         // Shared: unified compaction.
@@ -377,6 +384,9 @@ where
     let instructions = openai_request_instructions(state, resources, Some(&system_prompt))?;
     // Unified: all internal logic on Vec<ConversationItem>.
     let mut items = transcript_to_items(state, input);
+    let mut reflection = options
+        .reflection
+        .map(|config| super::reflection::ReflectionTracker::new(input, config));
 
     // Inject dynamic context as a user message at the start of the input
     // array (matching Codex/CC pattern).
@@ -548,6 +558,15 @@ where
 
         // Shared: append tool calls + outputs to canonical items.
         append_tool_results(&mut items, &tool_results.invocations);
+        if let Some(checkpoint) = reflection
+            .as_mut()
+            .and_then(|tracker| tracker.observe_batch(&tool_results.invocations))
+        {
+            on_event(TurnStreamEvent::ReflectionCheckpoint(
+                checkpoint.summary.clone(),
+            ));
+            items.push(ConversationItem::user_message(checkpoint.prompt));
+        }
         invocations.extend(tool_results.invocations);
 
         // Shared: unified compaction.
@@ -647,6 +666,9 @@ fn execute_openai_completions_once(
 
     // Unified: all internal logic on Vec<ConversationItem>.
     let mut items = transcript_to_items(state, input);
+    let mut reflection = options
+        .reflection
+        .map(|config| super::reflection::ReflectionTracker::new(input, config));
     let mut invocations = Vec::new();
 
     loop {
@@ -728,6 +750,12 @@ fn execute_openai_completions_once(
 
         // Shared: append tool calls + outputs to canonical items.
         append_tool_results(&mut items, &tool_results.invocations);
+        if let Some(checkpoint) = reflection
+            .as_mut()
+            .and_then(|tracker| tracker.observe_batch(&tool_results.invocations))
+        {
+            items.push(ConversationItem::user_message(checkpoint.prompt));
+        }
         invocations.extend(tool_results.invocations);
 
         // Shared: unified compaction (previously missing post-compact context).
