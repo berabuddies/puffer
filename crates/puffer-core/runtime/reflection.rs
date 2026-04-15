@@ -1,16 +1,36 @@
-use super::ToolInvocation;
+use super::openai::conversation::ConversationItem;
+use super::{execute_user_prompt_with_options, ToolInvocation, TurnRequestOptions};
+use crate::AppState;
+mod llm;
+mod support;
+
+use self::llm::{
+    build_llm_judge_prompt, parse_llm_judge_decision, parse_llm_judge_response, render_judge_lines,
+    render_llm_judge_context, render_relevant_paths, select_final_signal, LlmJudgeDecision,
+    LlmJudgeResponse,
+};
+use self::support::{
+    content_is_meaningful, count_case_insensitive, extract_artifact_candidates, extract_count,
+    extract_path_candidates, first_non_empty_line, is_runtime_path, looks_like_validation_command,
+    normalize_text, path_matches_targets, summarize_goal,
+};
+use puffer_provider_registry::{AuthStore, ProviderRegistry};
+use puffer_resources::LoadedResources;
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const MIN_TOOL_CALLS_BEFORE_CHECKPOINT: usize = 4;
-const MIN_BATCHES_BETWEEN_CHECKPOINTS: usize = 2;
-const SOFT_STALL_MS: u128 = 5 * 60 * 1000;
-const HARD_STALL_MS: u128 = 10 * 60 * 1000;
+#[cfg(test)]
+mod tests;
+
+const MIN_TOOL_CALLS_BEFORE_EVALUATION: usize = 4;
+const MIN_BATCHES_BETWEEN_EVALUATIONS: usize = 2;
 const RECENT_ACTION_WINDOW: usize = 10;
 const RECENT_ACTION_PREVIEW: usize = 4;
+const DEFAULT_LLM_JUDGE_MODEL_SELECTOR: &str = "openai/gpt-5.4";
+const DEFAULT_LLM_JUDGE_EFFORT_LEVEL: &str = "low";
 
-/// Selects the natural language used for reflection checkpoints.
+/// Selects the natural language used for reflection checkpoints and LLM judging.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReflectionLanguage {
     English,
@@ -23,16 +43,99 @@ impl Default for ReflectionLanguage {
     }
 }
 
-/// Configures the lightweight runtime reflection stage.
+/// Configures the heuristic code judge that detects unproductive loops.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeJudgeConfig {
+    pub soft_stall_ms: u128,
+    pub hard_stall_ms: u128,
+    pub min_score: u8,
+    pub repeated_fingerprint_threshold: usize,
+    pub repeated_error_threshold: usize,
+    pub repeated_read_threshold: usize,
+    pub repeated_write_threshold: usize,
+}
+
+impl Default for CodeJudgeConfig {
+    fn default() -> Self {
+        Self {
+            soft_stall_ms: 5 * 60 * 1000,
+            hard_stall_ms: 10 * 60 * 1000,
+            min_score: 4,
+            repeated_fingerprint_threshold: 3,
+            repeated_error_threshold: 2,
+            repeated_read_threshold: 3,
+            repeated_write_threshold: 4,
+        }
+    }
+}
+
+/// Controls how the LLM judge collaborates with the code judge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmJudgeMode {
+    Independent,
+    ConfirmCodeJudge,
+}
+
+impl Default for LlmJudgeMode {
+    fn default() -> Self {
+        Self::ConfirmCodeJudge
+    }
+}
+
+/// Selects how much conversation context is passed to the LLM judge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmJudgeContextScope {
+    CurrentWindow,
+    RecentWindow,
+    SummaryAndRecent,
+}
+
+impl Default for LlmJudgeContextScope {
+    fn default() -> Self {
+        Self::CurrentWindow
+    }
+}
+
+/// Configures the optional LLM-based reflection judge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmJudgeConfig {
+    pub mode: LlmJudgeMode,
+    pub model_selector: Option<String>,
+    pub effort_level: Option<String>,
+    pub context_scope: LlmJudgeContextScope,
+    pub recent_item_count: usize,
+    pub max_context_chars: usize,
+    pub max_tool_output_chars: usize,
+}
+
+impl Default for LlmJudgeConfig {
+    fn default() -> Self {
+        Self {
+            mode: LlmJudgeMode::default(),
+            model_selector: Some(DEFAULT_LLM_JUDGE_MODEL_SELECTOR.to_string()),
+            effort_level: Some(DEFAULT_LLM_JUDGE_EFFORT_LEVEL.to_string()),
+            context_scope: LlmJudgeContextScope::default(),
+            recent_item_count: 12,
+            max_context_chars: 12_000,
+            max_tool_output_chars: 1_200,
+        }
+    }
+}
+
+/// Configures the runtime reflection stage.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReflectionConfig {
     pub language: ReflectionLanguage,
+    pub code_judge: Option<CodeJudgeConfig>,
+    pub llm_judge: Option<LlmJudgeConfig>,
 }
 
 impl Default for ReflectionConfig {
     fn default() -> Self {
         Self {
             language: ReflectionLanguage::default(),
+            code_judge: Some(CodeJudgeConfig::default()),
+            llm_judge: Some(LlmJudgeConfig::default()),
         }
     }
 }
@@ -68,15 +171,24 @@ struct ValidationSnapshot {
     error_count: Option<u32>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct BatchAssessment {
     validation_progress: bool,
     artifact_progress: bool,
     edit_progress: bool,
     loopiness_score: u8,
     focus_bad: bool,
+    time_since_progress_ms: u128,
     signal_notes: Vec<String>,
     recent_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct JudgeSignal {
+    source: &'static str,
+    summary: String,
+    reason: String,
+    next_action: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -90,7 +202,7 @@ pub(super) struct ReflectionTracker {
     total_tool_calls: usize,
     batch_count: usize,
     last_progress_at_ms: u128,
-    last_checkpoint_batch: usize,
+    last_evaluation_batch: usize,
     last_validation: Option<ValidationSnapshot>,
 }
 
@@ -109,7 +221,7 @@ impl ReflectionTracker {
             total_tool_calls: 0,
             batch_count: 0,
             last_progress_at_ms: now_ms,
-            last_checkpoint_batch: 0,
+            last_evaluation_batch: 0,
             last_validation: None,
         }
     }
@@ -126,6 +238,46 @@ impl ReflectionTracker {
         invocations: &[ToolInvocation],
         now_ms: u128,
     ) -> Option<ReflectionCheckpoint> {
+        let assessment = self.observe_batch_internal(invocations, now_ms)?;
+        let signal = self.code_judge_signal(&assessment)?;
+        self.last_evaluation_batch = self.batch_count;
+        Some(self.build_checkpoint(&assessment, &signal))
+    }
+
+    pub(super) fn observe_openai_batch(
+        &mut self,
+        invocations: &[ToolInvocation],
+        items: &[ConversationItem],
+        state: &AppState,
+        resources: &LoadedResources,
+        providers: &ProviderRegistry,
+        auth_store: &mut AuthStore,
+    ) -> Option<ReflectionCheckpoint> {
+        let assessment = self.observe_batch_internal(invocations, unix_time_ms())?;
+        let code_signal = self.code_judge_signal(&assessment);
+        let llm_signal = self.llm_judge_signal(
+            &assessment,
+            code_signal.as_ref(),
+            items,
+            state,
+            resources,
+            providers,
+            auth_store,
+        );
+        let final_signal = select_final_signal(
+            self.config.llm_judge.as_ref().map(|config| config.mode),
+            code_signal,
+            llm_signal,
+        )?;
+        self.last_evaluation_batch = self.batch_count;
+        Some(self.build_checkpoint(&assessment, &final_signal))
+    }
+
+    fn observe_batch_internal(
+        &mut self,
+        invocations: &[ToolInvocation],
+        now_ms: u128,
+    ) -> Option<BatchAssessment> {
         if invocations.is_empty() {
             return None;
         }
@@ -133,7 +285,16 @@ impl ReflectionTracker {
         self.batch_count += 1;
         self.total_tool_calls += invocations.len();
 
-        let mut assessment = BatchAssessment::default();
+        let mut assessment = BatchAssessment {
+            validation_progress: false,
+            artifact_progress: false,
+            edit_progress: false,
+            loopiness_score: 0,
+            focus_bad: false,
+            time_since_progress_ms: 0,
+            signal_notes: Vec::new(),
+            recent_actions: Vec::new(),
+        };
         let mut saw_progress = false;
 
         for invocation in invocations {
@@ -191,16 +352,14 @@ impl ReflectionTracker {
         if saw_progress {
             self.last_progress_at_ms = now_ms;
         }
+        assessment.time_since_progress_ms = now_ms.saturating_sub(self.last_progress_at_ms);
+        assessment.signal_notes = self.signal_notes(&assessment);
 
-        let time_since_progress_ms = now_ms.saturating_sub(self.last_progress_at_ms);
-        assessment.signal_notes = self.signal_notes(&assessment, time_since_progress_ms);
-
-        if !self.should_trigger(&assessment, time_since_progress_ms) {
+        if !self.should_evaluate(&assessment) {
             return None;
         }
 
-        self.last_checkpoint_batch = self.batch_count;
-        Some(self.build_checkpoint(&assessment, time_since_progress_ms))
+        Some(assessment)
     }
 
     fn push_recent_action(&mut self, action: ActionObservation) {
@@ -211,6 +370,7 @@ impl ReflectionTracker {
     }
 
     fn loopiness_score(&self) -> u8 {
+        let thresholds = self.config.code_judge.as_ref().cloned().unwrap_or_default();
         let mut score = 0u8;
         let mut fingerprints: HashMap<&str, usize> = HashMap::new();
         let mut errors: HashMap<&str, usize> = HashMap::new();
@@ -226,23 +386,35 @@ impl ReflectionTracker {
                 match action.kind {
                     ActionKind::Read => *read_paths.entry(path.as_str()).or_default() += 1,
                     ActionKind::Write | ActionKind::Edit => {
-                        *write_paths.entry(path.as_str()).or_default() += 1
+                        *write_paths.entry(path.as_str()).or_default() += 1;
                     }
                     _ => {}
                 }
             }
         }
 
-        if fingerprints.values().any(|count| *count >= 3) {
+        if fingerprints
+            .values()
+            .any(|count| *count >= thresholds.repeated_fingerprint_threshold)
+        {
             score += 2;
         }
-        if errors.values().any(|count| *count >= 2) {
+        if errors
+            .values()
+            .any(|count| *count >= thresholds.repeated_error_threshold)
+        {
             score += 2;
         }
-        if read_paths.values().any(|count| *count >= 3) {
+        if read_paths
+            .values()
+            .any(|count| *count >= thresholds.repeated_read_threshold)
+        {
             score += 1;
         }
-        if write_paths.values().any(|count| *count >= 4) {
+        if write_paths
+            .values()
+            .any(|count| *count >= thresholds.repeated_write_threshold)
+        {
             score += 1;
         }
         score
@@ -267,15 +439,10 @@ impl ReflectionTracker {
             return on_target * 2 < touched_paths.len();
         }
 
-        let unique_paths = touched_paths.into_iter().collect::<BTreeSet<_>>();
-        unique_paths.len() > 6
+        touched_paths.into_iter().collect::<BTreeSet<_>>().len() > 6
     }
 
-    fn signal_notes(
-        &self,
-        assessment: &BatchAssessment,
-        time_since_progress_ms: u128,
-    ) -> Vec<String> {
+    fn signal_notes(&self, assessment: &BatchAssessment) -> Vec<String> {
         let mut notes = Vec::new();
         notes.push(if assessment.validation_progress {
             "validation_progress: positive".to_string()
@@ -300,17 +467,17 @@ impl ReflectionTracker {
         });
         notes.push(format!(
             "time_since_last_progress: {}s",
-            (time_since_progress_ms / 1000) as u64
+            (assessment.time_since_progress_ms / 1000) as u64
         ));
         notes
     }
 
-    fn should_trigger(&self, assessment: &BatchAssessment, time_since_progress_ms: u128) -> bool {
-        if self.total_tool_calls < MIN_TOOL_CALLS_BEFORE_CHECKPOINT {
+    fn should_evaluate(&self, assessment: &BatchAssessment) -> bool {
+        if self.total_tool_calls < MIN_TOOL_CALLS_BEFORE_EVALUATION {
             return false;
         }
-        if self.batch_count.saturating_sub(self.last_checkpoint_batch)
-            < MIN_BATCHES_BETWEEN_CHECKPOINTS
+        if self.batch_count.saturating_sub(self.last_evaluation_batch)
+            < MIN_BATCHES_BETWEEN_EVALUATIONS
         {
             return false;
         }
@@ -321,24 +488,168 @@ impl ReflectionTracker {
             return false;
         }
 
+        let config = self.config.code_judge.as_ref().cloned().unwrap_or_default();
         let mut score = 0u8;
-        if time_since_progress_ms >= SOFT_STALL_MS {
+        if assessment.time_since_progress_ms >= config.soft_stall_ms {
             score += 2;
         }
-        if time_since_progress_ms >= HARD_STALL_MS {
+        if assessment.time_since_progress_ms >= config.hard_stall_ms {
             score += 2;
         }
         score += assessment.loopiness_score.min(3);
         if assessment.focus_bad {
             score += 1;
         }
-        score >= 4
+        score >= 3
+    }
+
+    fn code_judge_signal(&self, assessment: &BatchAssessment) -> Option<JudgeSignal> {
+        let config = self.config.code_judge.as_ref()?;
+        let mut score = 0u8;
+        if assessment.time_since_progress_ms >= config.soft_stall_ms {
+            score += 2;
+        }
+        if assessment.time_since_progress_ms >= config.hard_stall_ms {
+            score += 2;
+        }
+        score += assessment.loopiness_score.min(3);
+        if assessment.focus_bad {
+            score += 1;
+        }
+        if score < config.min_score {
+            return None;
+        }
+
+        Some(JudgeSignal {
+            source: "code_judge",
+            summary: format!(
+                "code judge triggered after {}s without real progress; loopiness={}, focus={}",
+                (assessment.time_since_progress_ms / 1000) as u64,
+                assessment.loopiness_score,
+                if assessment.focus_bad {
+                    "wandering"
+                } else {
+                    "focused"
+                }
+            ),
+            reason: format!(
+                "heuristic stall score {} reached the configured threshold {}",
+                score, config.min_score
+            ),
+            next_action: None,
+        })
+    }
+
+    fn llm_judge_signal(
+        &self,
+        assessment: &BatchAssessment,
+        code_signal: Option<&JudgeSignal>,
+        items: &[ConversationItem],
+        state: &AppState,
+        resources: &LoadedResources,
+        providers: &ProviderRegistry,
+        auth_store: &mut AuthStore,
+    ) -> Option<Option<JudgeSignal>> {
+        let config = self.config.llm_judge.as_ref()?;
+        if matches!(config.mode, LlmJudgeMode::ConfirmCodeJudge) && code_signal.is_none() {
+            return None;
+        }
+
+        let response = self.run_llm_judge(
+            config,
+            assessment,
+            code_signal,
+            items,
+            state,
+            resources,
+            providers,
+            auth_store,
+        )?;
+        let decision = parse_llm_judge_decision(&response.decision)?;
+        if matches!(decision, LlmJudgeDecision::Continue) {
+            return Some(None);
+        }
+
+        let confidence = response
+            .confidence
+            .map(|value| format!("{value:.2}"))
+            .unwrap_or_else(|| "n/a".to_string());
+        Some(Some(JudgeSignal {
+            source: "llm_judge",
+            summary: format!(
+                "llm judge {} with confidence {} using {:?}",
+                response.decision.to_ascii_lowercase(),
+                confidence,
+                config.context_scope
+            ),
+            reason: response.reason,
+            next_action: Some(response.next_action),
+        }))
+    }
+
+    fn run_llm_judge(
+        &self,
+        config: &LlmJudgeConfig,
+        assessment: &BatchAssessment,
+        code_signal: Option<&JudgeSignal>,
+        items: &[ConversationItem],
+        state: &AppState,
+        resources: &LoadedResources,
+        providers: &ProviderRegistry,
+        auth_store: &mut AuthStore,
+    ) -> Option<LlmJudgeResponse> {
+        let prompt = build_llm_judge_prompt(
+            self.config.language,
+            &self.goal,
+            assessment,
+            code_signal,
+            &render_llm_judge_context(
+                items,
+                config.context_scope,
+                config.recent_item_count,
+                config.max_context_chars,
+                config.max_tool_output_chars,
+            ),
+            &render_relevant_paths(&self.relevant_paths),
+        );
+
+        // The main agent keeps using its configured execution model. Reflection
+        // judging is a side request that can be routed to a separate
+        // provider/model pair so the decision policy stays configurable and
+        // inexpensive by default.
+        let mut side_state = state.clone();
+        if let Some(selector) = &config.model_selector {
+            side_state.current_model = Some(selector.clone());
+            if let Some((provider, _)) = selector.split_once('/') {
+                side_state.current_provider = Some(provider.to_string());
+            }
+        }
+        if let Some(effort) = &config.effort_level {
+            side_state.effort_level = effort.clone();
+        }
+
+        let mut side_resources = resources.clone();
+        side_resources.tools.clear();
+        let execution = execute_user_prompt_with_options(
+            &mut side_state,
+            &side_resources,
+            providers,
+            auth_store,
+            &prompt,
+            TurnRequestOptions {
+                structured_output: None,
+                tool_filter: None,
+                reflection: None,
+            },
+        )
+        .ok()?;
+        parse_llm_judge_response(&execution.assistant_text)
     }
 
     fn build_checkpoint(
         &self,
         assessment: &BatchAssessment,
-        time_since_progress_ms: u128,
+        signal: &JudgeSignal,
     ) -> ReflectionCheckpoint {
         let signal_lines = assessment
             .signal_notes
@@ -358,30 +669,22 @@ impl ReflectionTracker {
             .map(|line| format!("- {line}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let relevant_paths = self
-            .relevant_paths
-            .iter()
-            .filter(|path| !is_runtime_path(path))
-            .take(6)
-            .map(|path| format!("- {path}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let time_since_progress_s = (time_since_progress_ms / 1000) as u64;
+        let relevant_paths = render_relevant_paths(&self.relevant_paths);
+        let judge_lines = render_judge_lines(signal);
         let summary = format!(
-            "reflection checkpoint ({}) after {}s without real progress; loopiness={}, focus={}, recent_actions={}",
+            "reflection checkpoint ({}) via {} after {}s without real progress",
             language_label(self.config.language),
-            time_since_progress_s,
-            assessment.loopiness_score,
-            if assessment.focus_bad { "wandering" } else { "focused" },
-            assessment.recent_actions.len()
+            signal.source,
+            (assessment.time_since_progress_ms / 1000) as u64
         );
         let prompt = build_prompt(
             self.config.language,
             &self.goal,
+            &summary,
             &signal_lines,
             &recent_actions,
             &relevant_paths,
-            &summary,
+            &judge_lines,
         );
         ReflectionCheckpoint { prompt, summary }
     }
@@ -569,182 +872,20 @@ fn normalized_fingerprint(invocation: &ToolInvocation, primary_path: Option<&str
 fn build_prompt(
     language: ReflectionLanguage,
     goal: &str,
+    summary: &str,
     signal_lines: &str,
     recent_actions: &str,
     relevant_paths: &str,
-    summary: &str,
+    judge_lines: &str,
 ) -> String {
     match language {
         ReflectionLanguage::Chinese => format!(
-            "<system-reminder>\n反思检查点已触发。\n{summary}\n\n当前目标摘要：\n- {goal}\n\n最近信号：\n{signal_lines}\n\n最近动作：\n{recent_actions}\n\n相关文件：\n{relevant_paths}\n\n先在内部用中文回答下面 5 个问题，再继续执行任务。除非你决定升级处理，否则不要把这段反思原样告诉用户。\n1. 当前目标是什么？\n2. 有哪些证据说明当前方法有效或无效？\n3. 自上次 checkpoint 以来有什么变化？\n4. 现在最好的下一步动作是什么？\n5. 继续、重规划，还是升级处理？\n\n输出约束：\n- 先在内部得出一个决定：CONTINUE、REPLAN 或 ESCALATE。\n- 如果决定是 REPLAN，立刻换方法，不要重复刚才那条路径。\n- 如果决定是 ESCALATE，但当前没有用户可问，就简短说明阻塞点并采取成本最低的 fallback，而不是继续死循环。\n- 不要只停在反思；反思后要继续做事。\n</system-reminder>"
+            "<system-reminder>\n反思检查点已触发。\n{summary}\n\n当前目标摘要：\n- {goal}\n\nJudge 结论：\n{judge_lines}\n\n最近信号：\n{signal_lines}\n\n最近动作：\n{recent_actions}\n\n相关文件：\n{relevant_paths}\n\n先在内部用中文回答下面 5 个问题，再继续执行任务。除非你决定升级处理，否则不要把这段反思原样告诉用户。\n1. 当前目标是什么？\n2. 有哪些证据说明当前方法有效或无效？\n3. 自上次 checkpoint 以来有什么变化？\n4. 现在最好的下一步动作是什么？\n5. 继续、重规划，还是升级处理？\n\n输出约束：\n- 先在内部得出一个决定：CONTINUE、REPLAN 或 ESCALATE。\n- 如果决定是 REPLAN，立刻换方法，不要重复刚才那条路径。\n- 如果决定是 ESCALATE，但当前没有用户可问，就简短说明阻塞点并采取成本最低的 fallback，而不是继续死循环。\n- 不要只停在反思；反思后要继续做事。\n</system-reminder>"
         ),
         ReflectionLanguage::English => format!(
-            "<system-reminder>\nReflection checkpoint triggered.\n{summary}\n\nCurrent goal summary:\n- {goal}\n\nRecent signals:\n{signal_lines}\n\nRecent actions:\n{recent_actions}\n\nRelevant files:\n{relevant_paths}\n\nAnswer the following 5 questions internally in English before you continue. Do not echo the full reflection to the user unless you decide to escalate.\n1. What is the current goal?\n2. What evidence says the current approach is or is not working?\n3. What changed since the last checkpoint?\n4. What is the next best action?\n5. Continue, replan, or escalate?\n\nOutput constraints:\n- Decide internally: CONTINUE, REPLAN, or ESCALATE.\n- If the decision is REPLAN, switch methods immediately instead of repeating the current path.\n- If the decision is ESCALATE and no user interaction is available, state the blocker briefly and take the cheapest viable fallback instead of looping.\n- Do not stop at reflection; continue the task.\n</system-reminder>"
+            "<system-reminder>\nReflection checkpoint triggered.\n{summary}\n\nCurrent goal summary:\n- {goal}\n\nJudge verdict:\n{judge_lines}\n\nRecent signals:\n{signal_lines}\n\nRecent actions:\n{recent_actions}\n\nRelevant files:\n{relevant_paths}\n\nAnswer the following 5 questions internally in English before you continue. Do not echo the full reflection to the user unless you decide to escalate.\n1. What is the current goal?\n2. What evidence says the current approach is or is not working?\n3. What changed since the last checkpoint?\n4. What is the next best action?\n5. Continue, replan, or escalate?\n\nOutput constraints:\n- Decide internally: CONTINUE, REPLAN, or ESCALATE.\n- If the decision is REPLAN, switch methods immediately instead of repeating the current path.\n- If the decision is ESCALATE and no user interaction is available, state the blocker briefly and take the cheapest viable fallback instead of looping.\n- Do not stop at reflection; continue the task.\n</system-reminder>"
         ),
     }
-}
-
-fn content_is_meaningful(content: &str) -> bool {
-    let trimmed = content.trim();
-    if trimmed.len() < 8 {
-        return false;
-    }
-    let normalized = trimmed.to_ascii_lowercase();
-    !matches!(
-        normalized.as_str(),
-        "[]" | "{}" | "null" | "todo" | "placeholder"
-    ) && !normalized.contains("not been run yet")
-        && !normalized.contains("placeholder")
-}
-
-fn looks_like_validation_command(command: &str, description: &str) -> bool {
-    let normalized = format!("{command}\n{description}").to_ascii_lowercase();
-    [
-        "test",
-        "pytest",
-        "verify",
-        "verification",
-        "check",
-        "cargo check",
-        "cargo test",
-        "ctest",
-        "unittest",
-        "compile",
-        "build",
-        "py_compile",
-        "/tests/",
-        "verifier",
-    ]
-    .iter()
-    .any(|needle| normalized.contains(needle))
-}
-
-fn extract_path_candidates(text: &str) -> BTreeSet<String> {
-    text.split_whitespace()
-        .filter_map(clean_path_token)
-        .collect()
-}
-
-fn extract_artifact_candidates(text: &str) -> BTreeSet<String> {
-    let mut paths = BTreeSet::new();
-    for line in text.lines() {
-        let normalized = line.to_ascii_lowercase();
-        if ["output", "result", "write", "save", "answer", "create"]
-            .iter()
-            .any(|needle| normalized.contains(needle))
-        {
-            paths.extend(extract_path_candidates(line));
-        }
-    }
-    paths
-}
-
-fn clean_path_token(token: &str) -> Option<String> {
-    let trimmed = token.trim_matches(|ch: char| {
-        ch.is_whitespace()
-            || matches!(
-                ch,
-                '"' | '\'' | ',' | ';' | ':' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>'
-            )
-    });
-    if trimmed.is_empty() {
-        return None;
-    }
-    let looks_absolute = trimmed.starts_with('/');
-    let looks_relative_file =
-        trimmed.contains('.') && (trimmed.contains('/') || has_file_extension(trimmed));
-    if !(looks_absolute || looks_relative_file) {
-        return None;
-    }
-    Some(trimmed.to_string())
-}
-
-fn has_file_extension(token: &str) -> bool {
-    token
-        .rsplit_once('.')
-        .map(|(_, ext)| ext.chars().all(|ch| ch.is_ascii_alphanumeric()) && ext.len() <= 8)
-        .unwrap_or(false)
-}
-
-fn summarize_goal(goal: &str) -> String {
-    let trimmed = goal.trim();
-    if trimmed.chars().count() <= 240 {
-        return trimmed.to_string();
-    }
-    trimmed.chars().take(240).collect::<String>() + "..."
-}
-
-fn path_matches_targets(path: &str, targets: &BTreeSet<String>) -> bool {
-    if targets.is_empty() {
-        return false;
-    }
-    targets
-        .iter()
-        .any(|target| path == target || path.ends_with(target))
-}
-
-fn is_runtime_path(path: &str) -> bool {
-    path.contains("/.puffer/")
-        || path.contains("/.codex/")
-        || path.contains("/scratchpad/")
-        || path.contains("/shell_outputs/")
-        || path.starts_with("/tmp/")
-        || path.starts_with("/logs/agent/")
-}
-
-fn extract_count(text: &str, keyword: &str) -> Option<u32> {
-    let lower = text.to_ascii_lowercase();
-    let tokens = lower
-        .split(|ch: char| !ch.is_ascii_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .collect::<Vec<_>>();
-    for window in tokens.windows(2) {
-        if let [lhs, rhs] = window {
-            if *rhs == keyword {
-                if let Ok(value) = lhs.parse::<u32>() {
-                    return Some(value);
-                }
-            }
-        }
-    }
-    None
-}
-
-fn count_case_insensitive(text: &str, needle: &str) -> usize {
-    let lower = text.to_ascii_lowercase();
-    let needle = needle.to_ascii_lowercase();
-    lower.matches(&needle).count()
-}
-
-fn first_non_empty_line(text: &str) -> Option<String> {
-    text.lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn normalize_text(text: impl AsRef<str>) -> String {
-    let mut normalized = String::with_capacity(text.as_ref().len());
-    let mut last_was_space = false;
-    for ch in text.as_ref().chars() {
-        let mapped = if ch.is_ascii_digit() {
-            '#'
-        } else if ch.is_whitespace() {
-            ' '
-        } else {
-            ch.to_ascii_lowercase()
-        };
-        if mapped == ' ' {
-            if !last_was_space {
-                normalized.push(mapped);
-            }
-            last_was_space = true;
-            continue;
-        }
-        last_was_space = false;
-        normalized.push(mapped);
-    }
-    normalized.trim().to_string()
 }
 
 fn language_label(language: ReflectionLanguage) -> &'static str {
@@ -759,77 +900,4 @@ fn unix_time_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn bash_invocation(command: &str, output: &str, success: bool) -> ToolInvocation {
-        ToolInvocation {
-            call_id: "call-bash".to_string(),
-            tool_id: "Bash".to_string(),
-            input: format!(r#"{{"command":"{command}","description":"run verifier"}}"#),
-            output: output.to_string(),
-            success,
-        }
-    }
-
-    fn write_invocation(path: &str, content: &str) -> ToolInvocation {
-        ToolInvocation {
-            call_id: "call-write".to_string(),
-            tool_id: "Write".to_string(),
-            input: format!(r#"{{"file_path":"{path}","content":{content:?}}}"#),
-            output: String::new(),
-            success: true,
-        }
-    }
-
-    #[test]
-    fn reflection_defaults_to_chinese() {
-        assert_eq!(
-            ReflectionConfig::default().language,
-            ReflectionLanguage::Chinese
-        );
-    }
-
-    #[test]
-    fn checkpoint_prompt_uses_chinese_questions() {
-        let start = unix_time_ms();
-        let mut tracker = ReflectionTracker::new(
-            "Write the answer to /app/out.txt and use /tests/check.sh to verify it.",
-            ReflectionConfig::default(),
-        );
-        let placeholder = write_invocation("/app/out.txt", "[]");
-        assert!(tracker
-            .observe_batch_at(&[placeholder], start + 1_000)
-            .is_none());
-
-        let failed = bash_invocation("bash /tests/check.sh", "2 failed, 0 passed", false);
-        let checkpoint = tracker
-            .observe_batch_at(
-                &[failed.clone(), failed.clone(), failed.clone()],
-                start + 1_000 + HARD_STALL_MS,
-            )
-            .expect("checkpoint should trigger");
-        assert!(checkpoint.prompt.contains("当前目标是什么？"));
-        assert!(checkpoint.prompt.contains("继续、重规划，还是升级处理？"));
-    }
-
-    #[test]
-    fn meaningful_artifact_write_resets_progress() {
-        let start = unix_time_ms();
-        let mut tracker = ReflectionTracker::new(
-            "Write the answer to /app/out.txt and verify it.",
-            ReflectionConfig::default(),
-        );
-        let meaningful = write_invocation("/app/out.txt", "final answer\\n");
-        assert!(tracker
-            .observe_batch_at(&[meaningful], start + 2_000)
-            .is_none());
-        let failed = bash_invocation("bash /tests/check.sh", "1 failed", false);
-        assert!(tracker
-            .observe_batch_at(&[failed.clone(), failed], start + 2_000 + 60_000)
-            .is_none());
-    }
 }

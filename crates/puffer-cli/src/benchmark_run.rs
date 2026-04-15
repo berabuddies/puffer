@@ -192,6 +192,7 @@ pub(crate) fn run_benchmark_command(
         &prompt,
         ReflectionConfig {
             language: ReflectionLanguage::Chinese,
+            ..ReflectionConfig::default()
         },
         |event| {
             use std::io::Write;

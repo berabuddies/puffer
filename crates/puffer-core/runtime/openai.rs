@@ -84,7 +84,7 @@ pub(super) fn execute_openai(
         model_id.clone(),
         auth_store,
         input,
-        options,
+        options.clone(),
         use_native,
     ) {
         Ok(turn) => Ok(turn),
@@ -270,10 +270,16 @@ fn execute_openai_once(
 
         // Shared: append tool calls + outputs to canonical items.
         append_tool_results(&mut items, &tool_results.invocations);
-        if let Some(checkpoint) = reflection
-            .as_mut()
-            .and_then(|tracker| tracker.observe_batch(&tool_results.invocations))
-        {
+        if let Some(checkpoint) = reflection.as_mut().and_then(|tracker| {
+            tracker.observe_openai_batch(
+                &tool_results.invocations,
+                &items,
+                state,
+                resources,
+                providers,
+                auth_store,
+            )
+        }) {
             items.push(ConversationItem::user_message(checkpoint.prompt));
         }
         invocations.extend(tool_results.invocations);
@@ -318,7 +324,7 @@ where
         model_id.clone(),
         auth_store,
         input,
-        options,
+        options.clone(),
         use_native,
         on_event,
     ) {
@@ -558,10 +564,16 @@ where
 
         // Shared: append tool calls + outputs to canonical items.
         append_tool_results(&mut items, &tool_results.invocations);
-        if let Some(checkpoint) = reflection
-            .as_mut()
-            .and_then(|tracker| tracker.observe_batch(&tool_results.invocations))
-        {
+        if let Some(checkpoint) = reflection.as_mut().and_then(|tracker| {
+            tracker.observe_openai_batch(
+                &tool_results.invocations,
+                &items,
+                state,
+                resources,
+                providers,
+                auth_store,
+            )
+        }) {
             on_event(TurnStreamEvent::ReflectionCheckpoint(
                 checkpoint.summary.clone(),
             ));
@@ -605,7 +617,7 @@ pub(super) fn execute_openai_completions(
         model_id.clone(),
         auth_store,
         input,
-        options,
+        options.clone(),
         use_native,
     ) {
         Ok(turn) => Ok(turn),
@@ -750,10 +762,16 @@ fn execute_openai_completions_once(
 
         // Shared: append tool calls + outputs to canonical items.
         append_tool_results(&mut items, &tool_results.invocations);
-        if let Some(checkpoint) = reflection
-            .as_mut()
-            .and_then(|tracker| tracker.observe_batch(&tool_results.invocations))
-        {
+        if let Some(checkpoint) = reflection.as_mut().and_then(|tracker| {
+            tracker.observe_openai_batch(
+                &tool_results.invocations,
+                &items,
+                state,
+                resources,
+                providers,
+                auth_store,
+            )
+        }) {
             items.push(ConversationItem::user_message(checkpoint.prompt));
         }
         invocations.extend(tool_results.invocations);

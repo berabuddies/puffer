@@ -51,7 +51,10 @@ use self::openai::{
 pub use self::permission_prompt::{
     with_permission_prompt_handler, PermissionPromptAction, PermissionPromptRequest,
 };
-pub use self::reflection::{ReflectionConfig, ReflectionLanguage};
+pub use self::reflection::{
+    CodeJudgeConfig, LlmJudgeConfig, LlmJudgeContextScope, LlmJudgeMode, ReflectionConfig,
+    ReflectionLanguage,
+};
 pub(crate) use self::request_tool_filter::{build_request_tool_filter, RequestToolFilter};
 pub use self::structured_output_support::StructuredOutputConfig;
 use self::structured_output_support::{
@@ -71,7 +74,7 @@ const OPENAI_CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const HTTP_RETRY_ATTEMPTS_ENV: &str = "PUFFER_HTTP_RETRY_ATTEMPTS";
 const HTTP_RETRY_DELAY_MS_ENV: &str = "PUFFER_HTTP_RETRY_DELAY_MS";
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct TurnRequestOptions<'a> {
     structured_output: Option<&'a StructuredOutputConfig>,
     tool_filter: Option<&'a RequestToolFilter>,
