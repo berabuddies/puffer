@@ -17,6 +17,17 @@ fn command_registry_contains_review_usage_and_resume_alias() {
 }
 
 #[test]
+fn reflect_command_is_registered_as_local() {
+    let commands = supported_commands();
+    let reflect = find_command(&commands, "reflect").expect("reflect command");
+    assert_eq!(reflect.kind, CommandKind::Local);
+    assert!(reflect
+        .argument_hint
+        .as_deref()
+        .is_some_and(|hint| hint.contains("lang")));
+}
+
+#[test]
 fn btw_and_compact_match_claude_local_command_classification() {
     let commands = supported_commands();
     assert_eq!(

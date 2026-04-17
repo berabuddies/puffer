@@ -245,8 +245,9 @@ fn execute_user_prompt_with_options(
     providers: &ProviderRegistry,
     auth_store: &mut AuthStore,
     input: &str,
-    options: TurnRequestOptions<'_>,
+    mut options: TurnRequestOptions<'_>,
 ) -> Result<TurnExecution> {
+    apply_session_reflection_default(state, &mut options);
     let (provider, model_id) = resolve_provider_and_model(state, providers)?;
     match resolve_model_api(state, providers, provider, &model_id).as_str() {
         "anthropic-messages" => execute_anthropic(
@@ -262,6 +263,16 @@ fn execute_user_prompt_with_options(
             "provider {} with api {other} is not executable yet",
             provider.id
         ),
+    }
+}
+
+/// If the caller did not pass an explicit reflection policy, inherit the
+/// session-scoped one configured via `/reflect`.
+fn apply_session_reflection_default(state: &AppState, options: &mut TurnRequestOptions<'_>) {
+    if options.reflection.is_none() {
+        if let Some(config) = state.reflection_config.as_ref() {
+            options.reflection = Some(config.clone());
+        }
     }
 }
 
@@ -383,12 +394,13 @@ fn execute_user_prompt_streaming_with_options<F>(
     providers: &ProviderRegistry,
     auth_store: &mut AuthStore,
     input: &str,
-    options: TurnRequestOptions<'_>,
+    mut options: TurnRequestOptions<'_>,
     on_event: &mut F,
 ) -> Result<TurnExecution>
 where
     F: FnMut(TurnStreamEvent),
 {
+    apply_session_reflection_default(state, &mut options);
     let (provider, model_id) = resolve_provider_and_model(state, providers)?;
     match resolve_model_api(state, providers, provider, &model_id).as_str() {
         "openai-responses" | "azure-openai-responses" | "openai-codex-responses" => {

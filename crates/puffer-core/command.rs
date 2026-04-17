@@ -4,9 +4,9 @@ use crate::command_helpers::{
     handle_config_command, handle_copy_command, handle_effort_command, handle_export_command,
     handle_fast_command, handle_hooks_command, handle_ide_command, handle_keybindings_command,
     handle_mcp_command, handle_memory_command, handle_model_command, handle_permissions_command,
-    handle_plan_command, handle_plugin_command, handle_remote_control_command,
-    handle_remote_env_command, handle_resume_command, handle_sandbox_command,
-    handle_session_command, handle_tag_command, handle_tasks_command,
+    handle_plan_command, handle_plugin_command, handle_reflect_command,
+    handle_remote_control_command, handle_remote_env_command, handle_resume_command,
+    handle_sandbox_command, handle_session_command, handle_tag_command, handle_tasks_command,
     handle_terminal_setup_command, list_skills, persist_user_settings, record_command_checkpoint,
     reload_config_from_disk, remove_provider_credentials, render_login_guidance, rewind_transcript,
     run_doctor, run_provider_login_flow, should_hide_terminal_setup_command, supports_auth_mode,
@@ -298,6 +298,13 @@ pub fn supported_commands() -> Vec<CommandSpec> {
             "Get comments from a GitHub pull request",
             None,
             CommandKind::Prompt,
+        ),
+        cmd(
+            "reflect",
+            &[],
+            "Toggle runtime reflection (stall/loop detection) for this session",
+            Some("[on|off|toggle|status|lang <zh|en>|mode <confirm|independent>|llm <on|off>]"),
+            CommandKind::Local,
         ),
         cmd(
             "reload-plugins",
@@ -887,6 +894,7 @@ fn execute_local_command(
             emit_system(state, session_store, text)
         }
         "plan" => handle_plan_command(state, resources, providers, auth_store, session_store, args),
+        "reflect" => handle_reflect_command(state, session_store, args),
         "agents" => handle_agents_command(state, session_store, args),
         "memory" => handle_memory_command(state, session_store, args),
         "keybindings" => handle_keybindings_command(state, session_store),

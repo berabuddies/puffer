@@ -1,3 +1,4 @@
+use crate::runtime::ReflectionConfig;
 use puffer_config::PufferConfig;
 use puffer_session_store::{
     ClaudeReadSnapshotEvent, SessionMetadata, SessionRecord, TranscriptEvent, TranscriptRewrite,
@@ -93,6 +94,8 @@ pub struct AppState {
     pub statusline_enabled: bool,
     pub status_line_text: Option<String>,
     pub vim_mode: bool,
+    /// Session-scoped reflection policy toggled via `/reflect`; `None` means off.
+    pub reflection_config: Option<ReflectionConfig>,
     pub should_exit: bool,
     pub reload_resources_requested: bool,
     pub(crate) claude_read_state: HashMap<PathBuf, ClaudeReadState>,
@@ -158,6 +161,7 @@ impl AppState {
             statusline_enabled: true,
             status_line_text: None,
             vim_mode,
+            reflection_config: None,
             should_exit: false,
             reload_resources_requested: false,
             claude_read_state: HashMap::new(),
