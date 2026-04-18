@@ -39,6 +39,13 @@ pub struct OpenAIChatMessage {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<OpenAIChatToolCall>,
+    /// Vendor extension used by reasoning-capable models reached via the
+    /// Chat Completions API (DeepSeek-R1, Kimi k2). Kimi rejects replayed
+    /// assistant tool-call messages with `400 "thinking is enabled but
+    /// reasoning_content is missing"` unless this field is populated with
+    /// the reasoning the model emitted on that turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 /// A tool-call item emitted or replayed through Chat Completions messages.
@@ -255,14 +262,23 @@ fn build_request_to_path<T: Serialize>(
     accept_event_stream: bool,
 ) -> anyhow::Result<BuiltOpenAIRequest> {
     let normalized_path = normalized_path(&config.base_url, path);
-    let mut headers = vec![
-        ("Content-Type".to_string(), "application/json".to_string()),
-        (
+    // Providers may override `User-Agent` via `custom_headers` (Kimi's
+    // whitelist requires `KimiCLI/<ver>`). reqwest's `.header()` appends when
+    // the same name is supplied twice, so silently stacking two User-Agent
+    // values would leave both on the wire and some servers match the first.
+    // Drop the default when a custom one is already present.
+    let has_custom_user_agent = config
+        .custom_headers
+        .iter()
+        .any(|(key, _)| key.eq_ignore_ascii_case("user-agent"));
+    let mut headers = vec![("Content-Type".to_string(), "application/json".to_string())];
+    if !has_custom_user_agent {
+        headers.push((
             "User-Agent".to_string(),
             codex_user_agent(&config.version, &config.originator),
-        ),
-        ("originator".to_string(), config.originator.clone()),
-    ];
+        ));
+    }
+    headers.push(("originator".to_string(), config.originator.clone()));
     if normalized_path.ends_with("/responses") && accept_event_stream {
         headers.push(("Accept".to_string(), "text/event-stream".to_string()));
     }

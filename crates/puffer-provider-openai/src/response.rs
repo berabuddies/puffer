@@ -87,6 +87,12 @@ pub struct OpenAIChatChoiceMessage {
     pub content: Option<Value>,
     #[serde(default, deserialize_with = "deserialize_tool_calls")]
     pub tool_calls: Vec<OpenAIChatToolCall>,
+    /// Reasoning trace emitted by models like Kimi and DeepSeek-R1 over the
+    /// Chat Completions API. Kept separate from `content` so the caller can
+    /// round-trip it on subsequent turns (required by Kimi when the turn
+    /// also produced tool calls).
+    #[serde(default)]
+    pub reasoning_content: Option<String>,
 }
 
 /// A tool-call item nested under a Chat Completions assistant message.
@@ -175,6 +181,19 @@ pub(crate) fn extract_chat_completions_text(response: &OpenAIChatCompletionsResp
         .and_then(|choice| choice.message.content.as_ref())
         .map(extract_chat_content_text)
         .unwrap_or_default()
+}
+
+/// Extracts the `reasoning_content` field from a parsed Chat Completions
+/// response, if the vendor (Kimi, DeepSeek-R1, …) produced one. Returns
+/// `None` for plain OpenAI Chat Completions responses.
+pub(crate) fn extract_chat_completions_reasoning(
+    response: &OpenAIChatCompletionsResponse,
+) -> Option<String> {
+    response
+        .choices
+        .first()
+        .and_then(|choice| choice.message.reasoning_content.clone())
+        .filter(|text| !text.is_empty())
 }
 
 /// Extracts tool calls from a parsed OpenAI Chat Completions payload.

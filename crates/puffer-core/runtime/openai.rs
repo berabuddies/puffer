@@ -27,11 +27,11 @@ use super::system_prompt::render_runtime_system_prompt;
 use crate::AppState;
 use anyhow::{anyhow, bail, Context, Result};
 use puffer_provider_openai::{
-    build_chat_completions_request, build_json_post_request, extract_chat_completions_text,
-    extract_chat_completions_tool_calls, extract_responses_text, extract_responses_tool_calls,
-    parse_chat_completions_response, refresh_oauth_token, OpenAIAuth, OpenAIChatCompletionsRequest,
-    OpenAIRequestConfig, OpenAIResponseToolCall, OpenAIResponsesFunctionCallOutput,
-    OpenAIResponsesResponse, OpenAIResponsesToolChoiceMode,
+    build_chat_completions_request, build_json_post_request, extract_chat_completions_reasoning,
+    extract_chat_completions_text, extract_chat_completions_tool_calls, extract_responses_text,
+    extract_responses_tool_calls, parse_chat_completions_response, refresh_oauth_token,
+    OpenAIAuth, OpenAIChatCompletionsRequest, OpenAIRequestConfig, OpenAIResponseToolCall,
+    OpenAIResponsesFunctionCallOutput, OpenAIResponsesResponse, OpenAIResponsesToolChoiceMode,
 };
 use puffer_provider_registry::{AuthStore, ProviderDescriptor, ProviderRegistry, StoredCredential};
 use puffer_resources::LoadedResources;
@@ -652,6 +652,7 @@ fn execute_openai_completions_once(
     use self::conversation::{
         append_tool_results, build_system_reminder, compact_conversation,
         inject_post_compact_context, items_to_chat_messages, transcript_to_items, ConversationItem,
+        ReasoningSummary,
     };
 
     let structured_output = options.structured_output;
@@ -724,6 +725,7 @@ fn execute_openai_completions_once(
                 )
             })?;
         let parsed = parse_chat_completions_response(&serde_json::to_string(&response)?)?;
+        let reasoning_text = extract_chat_completions_reasoning(&parsed);
         let tool_calls = extract_chat_completions_tool_calls(&parsed)?;
         if tool_calls.is_empty() {
             let text = extract_chat_completions_text(&parsed);
@@ -737,6 +739,18 @@ fn execute_openai_completions_once(
             return Ok(super::TurnExecution {
                 assistant_text,
                 tool_invocations: invocations,
+            });
+        }
+
+        // A Reasoning item goes BEFORE the assistant text/tool-call items
+        // so `items_to_chat_messages` on the next turn can hand Kimi (and
+        // any other reasoning model) back the `reasoning_content` it just
+        // emitted. Kimi rejects the next request with HTTP 400 if the
+        // replayed assistant tool-call message lacks this field.
+        if let Some(text) = reasoning_text {
+            items.push(ConversationItem::Reasoning {
+                summary: vec![ReasoningSummary::SummaryText { text }],
+                encrypted_content: None,
             });
         }
 

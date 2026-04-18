@@ -134,6 +134,14 @@ pub fn extract_chat_completions_text(response: &OpenAIChatCompletionsResponse) -
     response::extract_chat_completions_text(response)
 }
 
+/// Extracts the optional `reasoning_content` field from a Chat Completions
+/// payload (populated by reasoning models like Kimi and DeepSeek-R1).
+pub fn extract_chat_completions_reasoning(
+    response: &OpenAIChatCompletionsResponse,
+) -> Option<String> {
+    response::extract_chat_completions_reasoning(response)
+}
+
 /// Extracts tool calls from a parsed OpenAI Responses API payload.
 pub fn extract_responses_tool_calls(
     response: &OpenAIResponsesResponse,

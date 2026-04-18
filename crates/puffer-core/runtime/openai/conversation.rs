@@ -372,11 +372,11 @@ pub(crate) fn reasoning_item_from_value(item: &Value) -> Option<ConversationItem
             arr.iter()
                 .filter_map(|s| {
                     if s.get("type").and_then(Value::as_str) == Some("summary_text") {
-                        s.get("text")
-                            .and_then(Value::as_str)
-                            .map(|text| ReasoningSummary::SummaryText {
+                        s.get("text").and_then(Value::as_str).map(|text| {
+                            ReasoningSummary::SummaryText {
                                 text: text.to_string(),
-                            })
+                            }
+                        })
                     } else {
                         None
                     }
@@ -557,26 +557,34 @@ pub(crate) fn items_to_chat_messages(
     }
 
     let mut i = 0;
+    // `pending_reasoning` carries a `ConversationItem::Reasoning` payload
+    // forward one step so it lands on the assistant turn that immediately
+    // follows it. Reasoning-capable vendors over the Chat Completions API
+    // (Kimi, DeepSeek-R1) require it to be re-sent as a sibling field on
+    // the same assistant message, otherwise the next turn is rejected
+    // (Kimi: `400 "thinking is enabled but reasoning_content is missing in
+    // assistant tool call message"`).
+    let mut pending_reasoning: Option<String> = None;
     while i < items.len() {
         match &items[i] {
             ConversationItem::Message { role, content } => {
                 let text = content_parts_to_text(content);
-                messages.push(chat_message(role, &text));
+                let mut msg = chat_message(role, &text);
                 i += 1;
-            }
-            ConversationItem::FunctionCall { .. } => {
-                // Group consecutive FunctionCall items into one assistant message
-                // with tool_calls (Chat Completions requirement: tool_calls must
-                // be in a single assistant message).
-                let mut tool_calls = Vec::new();
-                while i < items.len() {
-                    if let ConversationItem::FunctionCall {
+                if role == "assistant" {
+                    // OpenAI spec: one assistant turn = one wire message
+                    // with optional `content` + optional `tool_calls` + Kimi/
+                    // DeepSeek's optional `reasoning_content`. Fold any
+                    // immediately following `FunctionCall` items from the
+                    // same turn into this one message instead of emitting
+                    // a second assistant message (the old behavior).
+                    while let Some(ConversationItem::FunctionCall {
                         call_id,
                         name,
                         arguments,
-                    } = &items[i]
+                    }) = items.get(i)
                     {
-                        tool_calls.push(OpenAIChatToolCall {
+                        msg.tool_calls.push(OpenAIChatToolCall {
                             id: call_id.clone(),
                             kind: "function".to_string(),
                             function: OpenAIChatFunctionCall {
@@ -585,15 +593,41 @@ pub(crate) fn items_to_chat_messages(
                             },
                         });
                         i += 1;
-                    } else {
-                        break;
                     }
+                    msg.reasoning_content = pending_reasoning.take();
+                } else {
+                    // Reasoning only attaches to assistant turns; a stray
+                    // Reasoning before a user/system message is dropped.
+                    pending_reasoning = None;
+                }
+                messages.push(msg);
+            }
+            ConversationItem::FunctionCall { .. } => {
+                // Tool calls without a preceding assistant text message —
+                // emit a standalone assistant message with tool_calls only.
+                let mut tool_calls = Vec::new();
+                while let Some(ConversationItem::FunctionCall {
+                    call_id,
+                    name,
+                    arguments,
+                }) = items.get(i)
+                {
+                    tool_calls.push(OpenAIChatToolCall {
+                        id: call_id.clone(),
+                        kind: "function".to_string(),
+                        function: OpenAIChatFunctionCall {
+                            name: name.clone(),
+                            arguments: arguments.clone(),
+                        },
+                    });
+                    i += 1;
                 }
                 messages.push(OpenAIChatMessage {
                     role: "assistant".to_string(),
                     content: None,
                     tool_call_id: None,
                     tool_calls,
+                    reasoning_content: pending_reasoning.take(),
                 });
             }
             ConversationItem::FunctionCallOutput { call_id, output } => {
@@ -602,19 +636,35 @@ pub(crate) fn items_to_chat_messages(
                     content: Some(json!(output.text)),
                     tool_call_id: Some(call_id.clone()),
                     tool_calls: Vec::new(),
+                    reasoning_content: None,
                 });
                 i += 1;
             }
-            ConversationItem::Reasoning { .. } => {
-                // Chat Completions has no concept of reasoning items on the
-                // wire — they exist only in the Responses API. Drop them here.
+            ConversationItem::Reasoning { summary, .. } => {
+                // Stash the reasoning text so the next assistant turn can
+                // carry it back over the wire. Multiple consecutive
+                // Reasoning items are concatenated. `encrypted_content` is
+                // Responses-API specific and is intentionally dropped here.
+                let text = summary
+                    .iter()
+                    .map(|s| match s {
+                        ReasoningSummary::SummaryText { text } => text.as_str(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                if !text.is_empty() {
+                    match pending_reasoning.as_mut() {
+                        Some(existing) => existing.push_str(&text),
+                        None => pending_reasoning = Some(text),
+                    }
+                }
                 i += 1;
             }
             ConversationItem::Compaction { summary } => {
-                let text = format!(
-                    "[Conversation compacted — prior context summarized]\n\n{summary}"
-                );
+                let text =
+                    format!("[Conversation compacted — prior context summarized]\n\n{summary}");
                 messages.push(chat_message("user", &text));
+                pending_reasoning = None;
                 i += 1;
             }
         }
@@ -634,6 +684,7 @@ fn chat_message(role: &str, content: &str) -> OpenAIChatMessage {
         content: Some(json!(content)),
         tool_call_id: None,
         tool_calls: Vec::new(),
+        reasoning_content: None,
     }
 }
 
@@ -680,8 +731,7 @@ pub(crate) fn items_to_anthropic_messages(items: &[ConversationItem]) -> Vec<Val
                         arguments,
                     } = &items[i]
                     {
-                        let input_val: Value =
-                            serde_json::from_str(arguments).unwrap_or(json!({}));
+                        let input_val: Value = serde_json::from_str(arguments).unwrap_or(json!({}));
                         tool_uses.push(json!({
                             "type": "tool_use",
                             "id": call_id,
@@ -723,9 +773,8 @@ pub(crate) fn items_to_anthropic_messages(items: &[ConversationItem]) -> Vec<Val
                 i += 1;
             }
             ConversationItem::Compaction { summary } => {
-                let text = format!(
-                    "[Conversation compacted — prior context summarized]\n\n{summary}"
-                );
+                let text =
+                    format!("[Conversation compacted — prior context summarized]\n\n{summary}");
                 push_or_merge(&mut messages, "user", json!(text));
                 i += 1;
             }
@@ -924,9 +973,8 @@ pub(crate) fn compact_conversation(
     request_config: &OpenAIRequestConfig,
     input_tokens_hint: Option<usize>,
 ) -> bool {
-    let summary_fn = |old_context: &str, mid: &str| {
-        generate_summary(old_context, mid, provider, request_config)
-    };
+    let summary_fn =
+        |old_context: &str, mid: &str| generate_summary(old_context, mid, provider, request_config);
     compact_conversation_with(items, provider, model_id, input_tokens_hint, &summary_fn)
 }
 
@@ -1467,7 +1515,10 @@ mod tests {
         let recovered: ConversationItem = serde_json::from_str(&json).unwrap();
         if let ConversationItem::FunctionCallOutput { output, .. } = &recovered {
             assert_eq!(output.text, "permission denied");
-            assert!(!output.is_error, "is_error should default to false after deserialization");
+            assert!(
+                !output.is_error,
+                "is_error should default to false after deserialization"
+            );
         } else {
             panic!("expected FunctionCallOutput");
         }
@@ -1581,7 +1632,11 @@ mod tests {
         ];
         let original_len = items.len();
         normalize_items(&mut items);
-        assert_eq!(items.len(), original_len, "paired items should not be modified");
+        assert_eq!(
+            items.len(),
+            original_len,
+            "paired items should not be modified"
+        );
     }
 
     #[test]
@@ -1644,7 +1699,7 @@ mod tests {
     fn token_estimation_function_call() {
         let item = ConversationItem::FunctionCall {
             call_id: "c1".into(),
-            name: "Bash".into(),             // 4 chars → 1 token
+            name: "Bash".into(),                 // 4 chars → 1 token
             arguments: r#"{"cmd":"ls"}"#.into(), // 12 chars → 3 tokens
         };
         // name(1) + arguments(3) = 4
@@ -1827,12 +1882,15 @@ mod tests {
         });
         let items = transcript_to_items(&state, "");
         // Find the FunctionCallOutput
-        let output_item = items.iter().find(|i| {
-            matches!(i, ConversationItem::FunctionCallOutput { .. })
-        });
+        let output_item = items
+            .iter()
+            .find(|i| matches!(i, ConversationItem::FunctionCallOutput { .. }));
         assert!(output_item.is_some(), "should have a FunctionCallOutput");
         if let ConversationItem::FunctionCallOutput { output, .. } = output_item.unwrap() {
-            assert!(output.is_error, "is_error should be true for failed tool result");
+            assert!(
+                output.is_error,
+                "is_error should be true for failed tool result"
+            );
             assert_eq!(output.text, "error output");
         }
     }
@@ -1885,7 +1943,11 @@ mod tests {
             },
         ];
         let msgs = items_to_anthropic_messages(&items);
-        assert_eq!(msgs.len(), 3, "user + assistant(tool_use) + user(tool_result)");
+        assert_eq!(
+            msgs.len(),
+            3,
+            "user + assistant(tool_use) + user(tool_result)"
+        );
 
         // Assistant message with tool_use
         assert_eq!(msgs[1]["role"], "assistant");
@@ -1901,7 +1963,10 @@ mod tests {
         assert_eq!(tool_result["type"], "tool_result");
         assert_eq!(tool_result["tool_use_id"], "c1");
         assert_eq!(tool_result["content"], "file.rs");
-        assert!(tool_result.get("is_error").is_none(), "is_error should be absent when false");
+        assert!(
+            tool_result.get("is_error").is_none(),
+            "is_error should be absent when false"
+        );
     }
 
     #[test]
@@ -2111,7 +2176,10 @@ mod tests {
         // === Chat Completions (OpenAI legacy pattern) ===
         let chat = items_to_chat_messages(&items, None, None, None);
         // user → assistant(tool_calls) → tool → assistant → user → assistant(tool_calls) → tool → assistant
-        assert!(chat.len() >= 4, "Chat Completions: should have role-based messages");
+        assert!(
+            chat.len() >= 4,
+            "Chat Completions: should have role-based messages"
+        );
         assert_eq!(chat[0].role, "user");
         // Function calls become assistant with tool_calls
         assert_eq!(chat[1].role, "assistant");
@@ -2127,7 +2195,8 @@ mod tests {
         // Verify alternation
         for i in 1..anthropic.len() {
             assert_ne!(
-                anthropic[i]["role"], anthropic[i - 1]["role"],
+                anthropic[i]["role"],
+                anthropic[i - 1]["role"],
                 "Anthropic: strict alternation violated at index {i}"
             );
         }
@@ -2141,7 +2210,10 @@ mod tests {
                     .map(|c| c.iter().any(|b| b["type"] == "tool_use"))
                     .unwrap_or(false)
         });
-        assert!(assistant_with_tool.is_some(), "Anthropic: should have assistant with tool_use");
+        assert!(
+            assistant_with_tool.is_some(),
+            "Anthropic: should have assistant with tool_use"
+        );
         let tool_use_block = assistant_with_tool.unwrap()["content"]
             .as_array()
             .unwrap()
@@ -2159,7 +2231,10 @@ mod tests {
                     .map(|c| c.iter().any(|b| b["type"] == "tool_result"))
                     .unwrap_or(false)
         });
-        assert!(user_with_result.is_some(), "Anthropic: should have user with tool_result");
+        assert!(
+            user_with_result.is_some(),
+            "Anthropic: should have user with tool_result"
+        );
         let tool_result_block = user_with_result.unwrap()["content"]
             .as_array()
             .unwrap()
@@ -2169,13 +2244,27 @@ mod tests {
         assert_eq!(tool_result_block["tool_use_id"], "call_1");
 
         // Find is_error propagation in Turn 2
-        let error_result = anthropic.iter().flat_map(|m| {
-            m["content"].as_array().unwrap_or(&vec![]).iter().filter(|b| {
-                b["type"] == "tool_result" && b["tool_use_id"] == "call_2"
-            }).cloned().collect::<Vec<_>>()
-        }).next();
-        assert!(error_result.is_some(), "Anthropic: should have tool_result for call_2");
-        assert_eq!(error_result.unwrap()["is_error"], true, "Anthropic: is_error should propagate");
+        let error_result = anthropic
+            .iter()
+            .flat_map(|m| {
+                m["content"]
+                    .as_array()
+                    .unwrap_or(&vec![])
+                    .iter()
+                    .filter(|b| b["type"] == "tool_result" && b["tool_use_id"] == "call_2")
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .next();
+        assert!(
+            error_result.is_some(),
+            "Anthropic: should have tool_result for call_2"
+        );
+        assert_eq!(
+            error_result.unwrap()["is_error"],
+            true,
+            "Anthropic: is_error should propagate"
+        );
     }
 
     /// Dumps the actual wire-format JSON for visual inspection.
@@ -2346,14 +2435,12 @@ mod tests {
         append_reasoning_items(&mut items, &raw);
 
         assert_eq!(items.len(), 3);
-        let ConversationItem::Reasoning {
-            summary: s1,
-            ..
-        } = &items[1] else { panic!("item[1] should be Reasoning"); };
-        let ConversationItem::Reasoning {
-            summary: s2,
-            ..
-        } = &items[2] else { panic!("item[2] should be Reasoning"); };
+        let ConversationItem::Reasoning { summary: s1, .. } = &items[1] else {
+            panic!("item[1] should be Reasoning");
+        };
+        let ConversationItem::Reasoning { summary: s2, .. } = &items[2] else {
+            panic!("item[2] should be Reasoning");
+        };
         assert!(matches!(&s1[0], ReasoningSummary::SummaryText { text } if text == "first"));
         assert!(matches!(&s2[0], ReasoningSummary::SummaryText { text } if text == "second"));
     }
