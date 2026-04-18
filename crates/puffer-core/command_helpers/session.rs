@@ -1,9 +1,10 @@
 use super::common::{open_text_file_in_editor, render_utf8_qr};
 use super::emit_system;
+use crate::runtime::ReflectionTraceEvent;
 use crate::{AppState, ToolInvocation};
 use anyhow::Result;
 use puffer_config::ConfigPaths;
-use puffer_session_store::SessionStore;
+use puffer_session_store::{SessionStore, TRACE_RUNTIME};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
@@ -34,6 +35,25 @@ pub struct SessionOverlayView {
     pub qr: Option<String>,
     /// Supplemental guidance or warnings shown below the primary session details.
     pub notice: Option<String>,
+}
+
+/// Persists one turn's reflection trace events into the per-session sidecar
+/// JSONL. Used by every `TurnExecution` consumer (both the non-streaming
+/// command/skill/compact paths in `puffer-core` and the streaming TUI
+/// receiver in `puffer-tui`) so reflection traces do not silently vanish on
+/// paths the runtime already observed them on. Failures are surfaced via
+/// `eprintln!` rather than swallowed so a mis-provisioned sidecar (disk
+/// full, permission drop) shows up somewhere the operator can see.
+pub fn append_trace_events(
+    session_store: &SessionStore,
+    session_id: uuid::Uuid,
+    traces: &[ReflectionTraceEvent],
+) {
+    for trace in traces {
+        if let Err(error) = session_store.append_trace_event(session_id, TRACE_RUNTIME, trace) {
+            eprintln!("reflection trace persist failed: {error}");
+        }
+    }
 }
 
 /// Records tool invocations into task history and the visible transcript.
@@ -768,6 +788,41 @@ mod tests {
                 note: None,
             },
         )
+    }
+
+    #[test]
+    fn append_trace_events_writes_each_event_to_sidecar() {
+        use puffer_config::{ensure_workspace_dirs, ConfigPaths};
+        use tempfile::tempdir;
+
+        let tmp = tempdir().unwrap();
+        let paths = ConfigPaths::discover(tmp.path());
+        ensure_workspace_dirs(&paths).unwrap();
+        let store = SessionStore::from_paths(&paths).unwrap();
+        let session = store.create_session(tmp.path().to_path_buf()).unwrap();
+
+        let traces = vec![
+            ReflectionTraceEvent::LlmJudgeSkipped {
+                mode: "disabled".to_string(),
+                reason: "llm judge disabled in reflection config".to_string(),
+            },
+            ReflectionTraceEvent::LlmJudgeSkipped {
+                mode: "confirm_code_judge".to_string(),
+                reason: "confirm_code_judge mode requires a code-judge trigger first"
+                    .to_string(),
+            },
+        ];
+
+        append_trace_events(&store, session.id, &traces);
+
+        let sidecar = store
+            .root()
+            .join(format!("{}.session.runtime_trace.jsonl", session.id));
+        let body = std::fs::read_to_string(&sidecar).expect("sidecar file exists");
+        // Two events, one JSON object per line.
+        assert_eq!(body.lines().count(), 2, "full body:\n{body}");
+        assert!(body.contains("llm judge disabled"));
+        assert!(body.contains("confirm_code_judge mode requires"));
     }
 
     #[test]

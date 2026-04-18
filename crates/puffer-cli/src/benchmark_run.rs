@@ -262,7 +262,13 @@ pub(crate) fn run_benchmark_command(
                         "event": trace,
                         "timestamp": unix_time_ms(),
                     });
-                    let _ = session_store.append_trace_event(session_id, "runtime_trace", &line);
+                    if let Err(error) = session_store.append_trace_event(
+                        session_id,
+                        puffer_session_store::TRACE_RUNTIME,
+                        &line,
+                    ) {
+                        eprintln!("reflection trace persist failed: {error}");
+                    }
                     if let Some(lock) = incremental_ref {
                         if let Ok(mut f) = lock.lock() {
                             let _ = writeln!(f, "{}", line);

@@ -20,6 +20,7 @@ pub use agent_catalog::{load_agent_catalog, AgentCatalogEntry};
 pub use command::{
     command_surface, dispatch_command, find_command, supported_commands, CommandKind, CommandSpec,
 };
+pub use command_helpers::append_trace_events;
 pub use command_helpers::CommandActionEntry;
 pub use command_helpers::CopyActionEntry;
 pub use command_helpers::McpActionEntry;

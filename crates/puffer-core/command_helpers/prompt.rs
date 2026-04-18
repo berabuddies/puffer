@@ -1,4 +1,4 @@
-use super::append_tool_invocations;
+use super::{append_tool_invocations, append_trace_events};
 use super::common::open_text_file_in_editor;
 use super::emit_system;
 use crate::plan_mode::{enter_plan_mode, preview_plan_mode_context_message};
@@ -197,6 +197,7 @@ pub(crate) fn execute_compact_prompt_command(
     ) {
         Ok(turn) => {
             append_tool_invocations(state, session_store, &turn.tool_invocations)?;
+            append_trace_events(session_store, state.session.id, &turn.reflection_traces);
             finalize_compact_prompt_command(state, session_store, &turn.assistant_text)
         }
         Err(error) => emit_system(

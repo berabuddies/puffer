@@ -56,6 +56,7 @@ pub(crate) use resume::handle_resume_command;
 pub(crate) use resume::resumable_sessions_for_picker;
 pub use resume::{resolve_resume_launch, ResumeLaunchResolution};
 pub use session::SessionOverlayView;
+pub use session::append_trace_events;
 pub(crate) use session::{
     append_tool_invocations, handle_memory_command, handle_remote_control_command,
     handle_remote_env_command, handle_session_command, handle_tag_command, render_memory_panel,

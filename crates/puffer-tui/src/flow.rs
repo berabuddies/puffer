@@ -307,6 +307,11 @@ pub(crate) fn handle_prompt_submit(
                 TurnStreamEvent::ReflectionCheckpoint(summary) => {
                     let _ = event_sender.send(PendingSubmitEvent::ReflectionCheckpoint(summary));
                 }
+                // Trace events ride the stream for incremental consumers
+                // but we drain them from `turn.reflection_traces` in the
+                // main thread below (persisting them requires `session_store`,
+                // which isn't moved into the worker thread). No persistence
+                // work on the stream side — avoids double-write.
                 TurnStreamEvent::ReflectionTrace(_) => {}
                 TurnStreamEvent::RetryAttempt {
                     attempt,
@@ -481,6 +486,17 @@ pub(crate) fn poll_pending_submit(
                                 &turn.tool_invocations[rendered_tool_invocations..],
                             )?;
                         }
+                        // TurnExecution carries every trace event produced
+                        // during the turn (both streaming and non-streaming
+                        // paths populate it). Persist them via the shared
+                        // sidecar helper so interactive sessions land trace
+                        // data in the same place as benchmark and slash
+                        // command runs.
+                        puffer_core::append_trace_events(
+                            session_store,
+                            state.session.id,
+                            &turn.reflection_traces,
+                        );
                         finalize_assistant_text(state, session_store, &turn.assistant_text)?;
                     }
                     Err(error) => {

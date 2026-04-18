@@ -1,6 +1,7 @@
 use crate::command_helpers::{
-    append_tool_invocations, describe_context, describe_files_in_context, describe_git_diff,
-    emit_system, execute_skill_command, handle_agents_command, handle_branch_command,
+    append_tool_invocations, append_trace_events, describe_context, describe_files_in_context,
+    describe_git_diff, emit_system, execute_skill_command, handle_agents_command,
+    handle_branch_command,
     handle_config_command, handle_copy_command, handle_effort_command, handle_export_command,
     handle_fast_command, handle_hooks_command, handle_ide_command, handle_keybindings_command,
     handle_mcp_command, handle_memory_command, handle_model_command, handle_permissions_command,
@@ -728,13 +729,7 @@ fn execute_prompt_command(
     ) {
         Ok(turn) => {
             append_tool_invocations(state, session_store, &turn.tool_invocations)?;
-            for trace in &turn.reflection_traces {
-                if let Err(error) =
-                    session_store.append_trace_event(state.session.id, "runtime_trace", trace)
-                {
-                    eprintln!("reflection trace persist failed: {error}");
-                }
-            }
+            append_trace_events(session_store, state.session.id, &turn.reflection_traces);
             state.push_message(MessageRole::Assistant, turn.assistant_text.clone());
             session_store.append_event(
                 state.session.id,

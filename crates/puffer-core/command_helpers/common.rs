@@ -1,4 +1,4 @@
-use super::append_tool_invocations;
+use super::{append_tool_invocations, append_trace_events};
 use crate::{AppState, MessageRole};
 use anyhow::{Context, Result};
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
@@ -224,6 +224,7 @@ pub(crate) fn execute_skill_command(
     match outcome {
         Ok(turn) => {
             append_tool_invocations(state, session_store, &turn.tool_invocations)?;
+            append_trace_events(session_store, state.session.id, &turn.reflection_traces);
             state.push_message(MessageRole::Assistant, turn.assistant_text.clone());
             session_store.append_event(
                 state.session.id,
