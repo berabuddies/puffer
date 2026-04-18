@@ -116,6 +116,13 @@ pub struct ToolCallRequest {
 pub struct TurnExecution {
     pub assistant_text: String,
     pub tool_invocations: Vec<ToolInvocation>,
+    /// Reflection trace events observed during the turn. Populated by every
+    /// execute path (streaming or not) so callers can round-trip them to
+    /// `SessionStore::append_trace_event` (or any other sidecar) without
+    /// branching on transport. Streaming consumers still receive the same
+    /// events incrementally via `TurnStreamEvent::ReflectionTrace` and may
+    /// treat this field as a replay-friendly fallback.
+    pub reflection_traces: Vec<ReflectionTraceEvent>,
 }
 
 /// Per-turn token usage report emitted after the provider response completes.
@@ -514,6 +521,7 @@ fn execute_anthropic(
     // Build canonical conversation items (shared with OpenAI path).
     let mut items = transcript_to_items(state, input);
     let mut invocations = Vec::new();
+    let mut reflection_traces: Vec<ReflectionTraceEvent> = Vec::new();
     let mut reflection = options
         .reflection
         .map(|config| reflection::ReflectionTracker::new(input, config));
@@ -695,10 +703,7 @@ fn execute_anthropic(
                 .as_mut()
                 .and_then(|tracker| tracker.observe_batch_with_trace(&tool_results.invocations))
             {
-                // Non-streaming: no on_event channel, so trace events are dropped.
-                // The checkpoint is still consumed via item injection so the next
-                // provider request sees it (same behavior as the streaming path
-                // below, minus the TurnStreamEvent emissions).
+                reflection_traces.extend(observation.trace_events);
                 if let Some(checkpoint) = observation.checkpoint {
                     items.push(ConversationItem::user_message(checkpoint.prompt));
                 }
@@ -722,6 +727,7 @@ fn execute_anthropic(
         return Ok(TurnExecution {
             assistant_text,
             tool_invocations: invocations,
+            reflection_traces,
         });
     }
 }
@@ -755,6 +761,7 @@ where
     // Build canonical conversation items (shared with OpenAI path).
     let mut items = transcript_to_items(state, input);
     let mut invocations = Vec::new();
+    let mut reflection_traces: Vec<ReflectionTraceEvent> = Vec::new();
     let mut reflection = options
         .reflection
         .map(|config| reflection::ReflectionTracker::new(input, config));
@@ -915,9 +922,10 @@ where
                 .as_mut()
                 .and_then(|tracker| tracker.observe_batch_with_trace(&tool_results.invocations))
             {
-                for trace_event in observation.trace_events {
-                    on_event(TurnStreamEvent::ReflectionTrace(trace_event));
+                for trace_event in &observation.trace_events {
+                    on_event(TurnStreamEvent::ReflectionTrace(trace_event.clone()));
                 }
+                reflection_traces.extend(observation.trace_events);
                 if let Some(checkpoint) = observation.checkpoint {
                     on_event(TurnStreamEvent::ReflectionCheckpoint(
                         checkpoint.summary.clone(),
@@ -944,6 +952,7 @@ where
         return Ok(TurnExecution {
             assistant_text,
             tool_invocations: invocations,
+            reflection_traces,
         });
     }
 }

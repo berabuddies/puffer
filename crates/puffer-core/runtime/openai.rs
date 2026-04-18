@@ -149,6 +149,7 @@ fn execute_openai_once(
     let mut reflection = options
         .reflection
         .map(|config| super::reflection::ReflectionTracker::new(input, config));
+    let mut reflection_traces: Vec<super::ReflectionTraceEvent> = Vec::new();
 
     // Inject dynamic context as a user message at the start of the input
     // array (matching Codex/CC pattern: dynamic context lives in `input`,
@@ -230,6 +231,7 @@ fn execute_openai_once(
             return Ok(super::TurnExecution {
                 assistant_text,
                 tool_invocations: invocations,
+                reflection_traces,
             });
         }
 
@@ -282,9 +284,7 @@ fn execute_openai_once(
                 auth_store,
             )
         }) {
-            // Non-streaming: no on_event channel, so `observation.trace_events`
-            // are intentionally dropped here. The checkpoint still round-trips
-            // via item injection so the next provider request sees it.
+            reflection_traces.extend(observation.trace_events);
             if let Some(checkpoint) = observation.checkpoint {
                 items.push(ConversationItem::user_message(checkpoint.prompt));
             }
@@ -400,6 +400,7 @@ where
     let mut reflection = options
         .reflection
         .map(|config| super::reflection::ReflectionTracker::new(input, config));
+    let mut reflection_traces: Vec<super::ReflectionTraceEvent> = Vec::new();
 
     // Inject dynamic context as a user message at the start of the input
     // array (matching Codex/CC pattern).
@@ -519,6 +520,7 @@ where
             return Ok(super::TurnExecution {
                 assistant_text,
                 tool_invocations: invocations,
+                reflection_traces,
             });
         }
 
@@ -581,9 +583,10 @@ where
                 auth_store,
             )
         }) {
-            for trace_event in observation.trace_events {
-                on_event(TurnStreamEvent::ReflectionTrace(trace_event));
+            for trace_event in &observation.trace_events {
+                on_event(TurnStreamEvent::ReflectionTrace(trace_event.clone()));
             }
+            reflection_traces.extend(observation.trace_events);
             if let Some(checkpoint) = observation.checkpoint {
                 on_event(TurnStreamEvent::ReflectionCheckpoint(
                     checkpoint.summary.clone(),
@@ -693,6 +696,7 @@ fn execute_openai_completions_once(
     let mut reflection = options
         .reflection
         .map(|config| super::reflection::ReflectionTracker::new(input, config));
+    let mut reflection_traces: Vec<super::ReflectionTraceEvent> = Vec::new();
     let mut invocations = Vec::new();
 
     loop {
@@ -747,6 +751,7 @@ fn execute_openai_completions_once(
             return Ok(super::TurnExecution {
                 assistant_text,
                 tool_invocations: invocations,
+                reflection_traces,
             });
         }
 
@@ -784,9 +789,7 @@ fn execute_openai_completions_once(
                 auth_store,
             )
         }) {
-            // Non-streaming: no on_event channel, so `observation.trace_events`
-            // are intentionally dropped here. The checkpoint still round-trips
-            // via item injection so the next provider request sees it.
+            reflection_traces.extend(observation.trace_events);
             if let Some(checkpoint) = observation.checkpoint {
                 items.push(ConversationItem::user_message(checkpoint.prompt));
             }

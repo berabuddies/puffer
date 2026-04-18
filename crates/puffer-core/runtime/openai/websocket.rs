@@ -237,6 +237,7 @@ where
         .reflection
         .clone()
         .map(|config| super::super::reflection::ReflectionTracker::new(input, config));
+    let mut reflection_traces: Vec<super::super::ReflectionTraceEvent> = Vec::new();
 
     loop {
         // Check for background tasks that completed since the last turn.
@@ -407,6 +408,7 @@ where
             return Ok(super::super::TurnExecution {
                 assistant_text,
                 tool_invocations: invocations,
+                reflection_traces,
             });
         }
 
@@ -462,9 +464,10 @@ where
                 auth_store,
             )
         }) {
-            for trace_event in observation.trace_events {
-                on_event(TurnStreamEvent::ReflectionTrace(trace_event));
+            for trace_event in &observation.trace_events {
+                on_event(TurnStreamEvent::ReflectionTrace(trace_event.clone()));
             }
+            reflection_traces.extend(observation.trace_events);
             if let Some(checkpoint) = observation.checkpoint {
                 on_event(TurnStreamEvent::ReflectionCheckpoint(
                     checkpoint.summary.clone(),

@@ -728,6 +728,13 @@ fn execute_prompt_command(
     ) {
         Ok(turn) => {
             append_tool_invocations(state, session_store, &turn.tool_invocations)?;
+            for trace in &turn.reflection_traces {
+                if let Err(error) =
+                    session_store.append_trace_event(state.session.id, "runtime_trace", trace)
+                {
+                    eprintln!("reflection trace persist failed: {error}");
+                }
+            }
             state.push_message(MessageRole::Assistant, turn.assistant_text.clone());
             session_store.append_event(
                 state.session.id,
