@@ -208,6 +208,86 @@ fn trace_events_capture_batch_and_code_judge_decision() {
 }
 
 #[test]
+fn llm_judge_skipped_event_fires_when_llm_judge_is_disabled() {
+    use puffer_provider_registry::{AuthStore, ProviderRegistry};
+    use puffer_resources::LoadedResources;
+
+    let mut config = ReflectionConfig::default();
+    config.llm_judge = None;
+    config.code_judge = Some(CodeJudgeConfig {
+        soft_stall_ms: 0,
+        hard_stall_ms: 0,
+        min_score: 1,
+        ..CodeJudgeConfig::default()
+    });
+    let mut tracker = ReflectionTracker::new("stall this task until reflection triggers", config);
+
+    let state = crate::AppState::new(
+        PufferConfig::default(),
+        std::env::temp_dir(),
+        SessionMetadata {
+            id: Uuid::nil(),
+            display_name: None,
+            cwd: std::env::temp_dir(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        },
+    );
+    let resources = LoadedResources::default();
+    let providers = ProviderRegistry::new();
+    let mut auth_store = AuthStore::default();
+
+    // Batch 1: ramps batch_count to 1 and total_tool_calls to 2. Still below
+    // MIN_BATCHES_BETWEEN_EVALUATIONS, so no evaluation runs.
+    let _ = tracker.observe_openai_batch(
+        &[
+            bash_invocation("echo ping", "pong", true),
+            bash_invocation("echo ping", "pong", true),
+        ],
+        &[],
+        &state,
+        &resources,
+        &providers,
+        &mut auth_store,
+    );
+
+    // Batch 2: batch_count=2, total_tool_calls=4, stall score >= 4. Evaluation
+    // fires and — because `llm_judge` is disabled — `llm_judge_signal` must
+    // push a `LlmJudgeSkipped { mode: "disabled", ... }` trace event before
+    // returning.
+    let observation = tracker
+        .observe_openai_batch(
+            &[
+                bash_invocation("echo ping", "pong", true),
+                bash_invocation("echo ping", "pong", true),
+            ],
+            &[],
+            &state,
+            &resources,
+            &providers,
+            &mut auth_store,
+        )
+        .expect("second batch should produce an observation");
+
+    let skipped = observation
+        .trace_events
+        .iter()
+        .find(|event| matches!(event, ReflectionTraceEvent::LlmJudgeSkipped { .. }))
+        .expect("LlmJudgeSkipped trace event should be emitted when llm_judge is disabled");
+    if let ReflectionTraceEvent::LlmJudgeSkipped { mode, reason } = skipped {
+        assert_eq!(mode, "disabled", "mode tag should flag the disabled path");
+        assert!(
+            reason.to_ascii_lowercase().contains("disabled"),
+            "reason should explain the disable: {reason}"
+        );
+    }
+}
+
+#[test]
 fn scp_style_remote_is_not_treated_as_filesystem_path() {
     let tracker = ReflectionTracker::new(
         "configure git server for git@localhost:/git/server and serve hello.html",

@@ -282,6 +282,9 @@ fn execute_openai_once(
                 auth_store,
             )
         }) {
+            // Non-streaming: no on_event channel, so `observation.trace_events`
+            // are intentionally dropped here. The checkpoint still round-trips
+            // via item injection so the next provider request sees it.
             if let Some(checkpoint) = observation.checkpoint {
                 items.push(ConversationItem::user_message(checkpoint.prompt));
             }
@@ -781,6 +784,9 @@ fn execute_openai_completions_once(
                 auth_store,
             )
         }) {
+            // Non-streaming: no on_event channel, so `observation.trace_events`
+            // are intentionally dropped here. The checkpoint still round-trips
+            // via item injection so the next provider request sees it.
             if let Some(checkpoint) = observation.checkpoint {
                 items.push(ConversationItem::user_message(checkpoint.prompt));
             }

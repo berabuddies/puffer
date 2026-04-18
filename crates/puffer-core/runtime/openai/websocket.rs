@@ -231,6 +231,13 @@ where
         }
     };
 
+    // Cloned out of `options` so the mid-loop fallback paths can still hand a
+    // fresh reflection policy to the SSE path if the websocket dies later.
+    let mut reflection = options
+        .reflection
+        .clone()
+        .map(|config| super::super::reflection::ReflectionTracker::new(input, config));
+
     loop {
         // Check for background tasks that completed since the last turn.
         let completed = super::super::claude_tools::workflow::drain_completed_shell_tasks(
@@ -445,6 +452,26 @@ where
         }
 
         append_tool_results(&mut items, &tool_results.invocations);
+        if let Some(observation) = reflection.as_mut().and_then(|tracker| {
+            tracker.observe_openai_batch(
+                &tool_results.invocations,
+                &items,
+                state,
+                resources,
+                providers,
+                auth_store,
+            )
+        }) {
+            for trace_event in observation.trace_events {
+                on_event(TurnStreamEvent::ReflectionTrace(trace_event));
+            }
+            if let Some(checkpoint) = observation.checkpoint {
+                on_event(TurnStreamEvent::ReflectionCheckpoint(
+                    checkpoint.summary.clone(),
+                ));
+                items.push(ConversationItem::user_message(checkpoint.prompt));
+            }
+        }
         invocations.extend(tool_results.invocations);
 
         let compacted = compact_conversation(

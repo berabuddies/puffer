@@ -691,11 +691,17 @@ fn execute_anthropic(
             invocations.extend(tool_results.invocations.clone());
             // Append response content as ConversationItems.
             append_anthropic_response_to_items(&mut items, &response, &tool_results);
-            if let Some(checkpoint) = reflection
+            if let Some(observation) = reflection
                 .as_mut()
-                .and_then(|tracker| tracker.observe_batch(&tool_results.invocations))
+                .and_then(|tracker| tracker.observe_batch_with_trace(&tool_results.invocations))
             {
-                items.push(ConversationItem::user_message(checkpoint.prompt));
+                // Non-streaming: no on_event channel, so trace events are dropped.
+                // The checkpoint is still consumed via item injection so the next
+                // provider request sees it (same behavior as the streaming path
+                // below, minus the TurnStreamEvent emissions).
+                if let Some(checkpoint) = observation.checkpoint {
+                    items.push(ConversationItem::user_message(checkpoint.prompt));
+                }
             }
             // Compact between tool iterations using shared logic.
             let compacted = compact_conversation_with(
