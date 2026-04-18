@@ -62,7 +62,7 @@ where
         model_id.clone(),
         auth_store,
         input,
-        options,
+        options.clone(),
         use_native,
         on_event,
     ) {
