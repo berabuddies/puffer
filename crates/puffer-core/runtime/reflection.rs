@@ -32,6 +32,13 @@ const MIN_TOOL_CALLS_BEFORE_EVALUATION: usize = 4;
 const MIN_BATCHES_BETWEEN_EVALUATIONS: usize = 2;
 const RECENT_ACTION_WINDOW: usize = 10;
 const RECENT_ACTION_PREVIEW: usize = 4;
+/// Loose gate for "run the judges at all" inside `evaluation_gate`. Note that
+/// this is **intentionally** lower than `CodeJudgeConfig::min_score` (default
+/// 4). The window between the two thresholds lets the LLM judge (when
+/// enabled) step in and flag a near-stall that the heuristic code judge would
+/// not yet raise on its own. `observe_*` only consumes an evaluation slot
+/// once a checkpoint actually fires, so running the judges at score `>=3`
+/// without firing is cheap in `ConfirmCodeJudge` mode (LLM early-skipped).
 const EVALUATION_TRIGGER_SCORE: u8 = 3;
 const DEFAULT_LLM_JUDGE_MODEL_SELECTOR: &str = "openai/gpt-5.4";
 const DEFAULT_LLM_JUDGE_EFFORT_LEVEL: &str = "low";
@@ -274,6 +281,16 @@ impl ReflectionTracker {
         &self.relevant_paths
     }
 
+    #[cfg(test)]
+    pub(super) fn batch_count_for_test(&self) -> usize {
+        self.batch_count
+    }
+
+    #[cfg(test)]
+    pub(super) fn last_evaluation_batch_for_test(&self) -> usize {
+        self.last_evaluation_batch
+    }
+
     pub(super) fn observe_batch(
         &mut self,
         invocations: &[ToolInvocation],
@@ -330,10 +347,19 @@ impl ReflectionTracker {
             .map(|config| config.min_score)
             .unwrap_or_default();
         trace_events.push(code_judge_decision_event(score, threshold, signal.as_ref()));
-        self.last_evaluation_batch = self.batch_count;
-        let checkpoint = signal
-            .as_ref()
-            .map(|value| self.build_checkpoint(&observation.assessment, value));
+        // Only consume an evaluation slot when a checkpoint actually fires.
+        // Otherwise a batch that cleared `EVALUATION_TRIGGER_SCORE` (the
+        // loose "enter evaluation" gate) but not `config.min_score` (the
+        // strict "code judge fires" threshold) would silence reflection for
+        // the next `MIN_BATCHES_BETWEEN_EVALUATIONS` batches despite never
+        // producing a signal. Matches pre-split `observe_batch_at` on
+        // master (b5cd6a2).
+        let checkpoint = if let Some(ref value) = signal {
+            self.last_evaluation_batch = self.batch_count;
+            Some(self.build_checkpoint(&observation.assessment, value))
+        } else {
+            None
+        };
         trace_events.push(final_decision_event(signal.as_ref(), checkpoint.as_ref()));
         Some(ReflectionObservation {
             trace_events,
@@ -396,10 +422,15 @@ impl ReflectionTracker {
             code_signal,
             llm_signal,
         );
-        self.last_evaluation_batch = self.batch_count;
-        let checkpoint = final_signal
-            .as_ref()
-            .map(|signal| self.build_checkpoint(&observation.assessment, signal));
+        // See the matching comment in `observe_batch_with_trace_at`: the
+        // evaluation slot is only consumed when a checkpoint actually
+        // fires, mirroring master's pre-split behavior.
+        let checkpoint = if let Some(ref signal) = final_signal {
+            self.last_evaluation_batch = self.batch_count;
+            Some(self.build_checkpoint(&observation.assessment, signal))
+        } else {
+            None
+        };
         trace_events.push(final_decision_event(
             final_signal.as_ref(),
             checkpoint.as_ref(),
