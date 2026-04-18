@@ -128,7 +128,14 @@ pub(super) fn select_final_signal(
             (Some(_), Some(None)) => None,
             (None, _) => None,
         },
-        _ => llm_signal.flatten().or(code_signal),
+        // Independent: the LLM decides authoritatively when it was reached.
+        // - Some(Some(sig)) — LLM said REFLECT/ESCALATE, use it.
+        // - Some(None)      — LLM said CONTINUE, suppress code signal.
+        // - None            — LLM was unavailable / errored, fall back to code signal.
+        _ => match llm_signal {
+            Some(value) => value,
+            None => code_signal,
+        },
     }
 }
 
@@ -367,6 +374,39 @@ mod tests {
             None,
         )
         .expect("code judge should survive transport failure");
+        assert_eq!(selected.source, code_signal.source);
+    }
+
+    #[test]
+    fn independent_mode_honours_llm_continue_over_code_signal() {
+        let code_signal = JudgeSignal {
+            source: "code_judge",
+            summary: "stalled".to_string(),
+            reason: "looping".to_string(),
+            next_action: None,
+        };
+        let selected = select_final_signal(
+            Some(LlmJudgeMode::Independent),
+            Some(code_signal),
+            Some(None),
+        );
+        assert!(
+            selected.is_none(),
+            "independent mode should respect an explicit LLM CONTINUE"
+        );
+    }
+
+    #[test]
+    fn independent_mode_falls_back_to_code_when_llm_unreached() {
+        let code_signal = JudgeSignal {
+            source: "code_judge",
+            summary: "stalled".to_string(),
+            reason: "looping".to_string(),
+            next_action: None,
+        };
+        let selected =
+            select_final_signal(Some(LlmJudgeMode::Independent), Some(code_signal.clone()), None)
+                .expect("independent mode should fall back to code judge on llm failure");
         assert_eq!(selected.source, code_signal.source);
     }
 }
