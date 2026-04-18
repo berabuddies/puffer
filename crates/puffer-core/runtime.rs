@@ -699,10 +699,16 @@ fn execute_anthropic(
             invocations.extend(tool_results.invocations.clone());
             // Append response content as ConversationItems.
             append_anthropic_response_to_items(&mut items, &response, &tool_results);
-            if let Some(observation) = reflection
-                .as_mut()
-                .and_then(|tracker| tracker.observe_batch_with_trace(&tool_results.invocations))
-            {
+            if let Some(observation) = reflection.as_mut().and_then(|tracker| {
+                tracker.observe_batch_with_judge(
+                    &tool_results.invocations,
+                    &items,
+                    state,
+                    resources,
+                    providers,
+                    auth_store,
+                )
+            }) {
                 reflection_traces.extend(observation.trace_events);
                 if let Some(checkpoint) = observation.checkpoint {
                     items.push(ConversationItem::user_message(checkpoint.prompt));
@@ -918,10 +924,16 @@ where
             invocations.extend(tool_results.invocations.clone());
             // Append response content as ConversationItems.
             append_anthropic_response_to_items(&mut items, &response, &tool_results);
-            if let Some(observation) = reflection
-                .as_mut()
-                .and_then(|tracker| tracker.observe_batch_with_trace(&tool_results.invocations))
-            {
+            if let Some(observation) = reflection.as_mut().and_then(|tracker| {
+                tracker.observe_batch_with_judge(
+                    &tool_results.invocations,
+                    &items,
+                    state,
+                    resources,
+                    providers,
+                    auth_store,
+                )
+            }) {
                 for trace_event in &observation.trace_events {
                     on_event(TurnStreamEvent::ReflectionTrace(trace_event.clone()));
                 }

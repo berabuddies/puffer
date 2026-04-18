@@ -367,7 +367,7 @@ impl ReflectionTracker {
         })
     }
 
-    pub(super) fn observe_openai_batch(
+    pub(super) fn observe_batch_with_judge(
         &mut self,
         invocations: &[ToolInvocation],
         items: &[ConversationItem],

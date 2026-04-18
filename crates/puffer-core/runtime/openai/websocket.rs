@@ -455,7 +455,7 @@ where
 
         append_tool_results(&mut items, &tool_results.invocations);
         if let Some(observation) = reflection.as_mut().and_then(|tracker| {
-            tracker.observe_openai_batch(
+            tracker.observe_batch_with_judge(
                 &tool_results.invocations,
                 &items,
                 state,

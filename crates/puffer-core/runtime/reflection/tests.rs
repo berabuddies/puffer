@@ -318,7 +318,7 @@ fn llm_judge_skipped_event_fires_when_llm_judge_is_disabled() {
 
     // Batch 1: ramps batch_count to 1 and total_tool_calls to 2. Still below
     // MIN_BATCHES_BETWEEN_EVALUATIONS, so no evaluation runs.
-    let _ = tracker.observe_openai_batch(
+    let _ = tracker.observe_batch_with_judge(
         &[
             bash_invocation("echo ping", "pong", true),
             bash_invocation("echo ping", "pong", true),
@@ -335,7 +335,7 @@ fn llm_judge_skipped_event_fires_when_llm_judge_is_disabled() {
     // push a `LlmJudgeSkipped { mode: "disabled", ... }` trace event before
     // returning.
     let observation = tracker
-        .observe_openai_batch(
+        .observe_batch_with_judge(
             &[
                 bash_invocation("echo ping", "pong", true),
                 bash_invocation("echo ping", "pong", true),
