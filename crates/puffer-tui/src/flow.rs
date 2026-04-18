@@ -307,6 +307,7 @@ pub(crate) fn handle_prompt_submit(
                 TurnStreamEvent::ReflectionCheckpoint(summary) => {
                     let _ = event_sender.send(PendingSubmitEvent::ReflectionCheckpoint(summary));
                 }
+                TurnStreamEvent::ReflectionTrace(_) => {}
                 TurnStreamEvent::RetryAttempt {
                     attempt,
                     max_attempts,

@@ -1,5 +1,6 @@
 mod auth_credentials;
 mod auth_provider;
+mod benchmark_reflection;
 mod authflow;
 mod benchmark_run;
 mod cli_args;

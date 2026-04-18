@@ -1,4 +1,7 @@
 use super::*;
+use puffer_config::PufferConfig;
+use puffer_session_store::SessionMetadata;
+use uuid::Uuid;
 
 fn bash_invocation(command: &str, output: &str, success: bool) -> ToolInvocation {
     ToolInvocation {
@@ -33,7 +36,81 @@ fn llm_judge_defaults_use_gpt_54_low_and_current_window() {
     let config = LlmJudgeConfig::default();
     assert_eq!(config.model_selector.as_deref(), Some("openai/gpt-5.4"));
     assert_eq!(config.effort_level.as_deref(), Some("low"));
+    assert_eq!(
+        config.prompt_cache_mode,
+        LlmJudgePromptCacheMode::InheritMainAgent
+    );
     assert_eq!(config.context_scope, LlmJudgeContextScope::CurrentWindow);
+}
+
+#[test]
+fn llm_judge_side_state_inherits_main_agent_cache_key_by_default() {
+    let mut state = crate::AppState::new(
+        PufferConfig::default(),
+        std::env::temp_dir(),
+        SessionMetadata {
+            id: Uuid::nil(),
+            display_name: None,
+            cwd: std::env::temp_dir(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        },
+    );
+    state.push_message(crate::state::MessageRole::User, "main transcript");
+    state.prompt_cache_key_override = Some("main-cache-key".to_string());
+    state.plan_mode = true;
+
+    let mut config = LlmJudgeConfig::default();
+    config.model_selector = Some("openai/gpt-5.3-codex-spark".to_string());
+    let side_state = judge::build_llm_judge_side_state(&state, &config, "judge prompt");
+
+    assert!(side_state.transcript.is_empty());
+    assert!(!side_state.plan_mode);
+    assert_eq!(
+        side_state.current_model.as_deref(),
+        Some("openai/gpt-5.3-codex-spark")
+    );
+    assert_eq!(side_state.current_provider.as_deref(), Some("openai"));
+    assert_eq!(
+        side_state.prompt_cache_key_override.as_deref(),
+        Some("main-cache-key")
+    );
+}
+
+#[test]
+fn llm_judge_side_state_can_use_dedicated_cache_key() {
+    let mut state = crate::AppState::new(
+        PufferConfig::default(),
+        std::env::temp_dir(),
+        SessionMetadata {
+            id: Uuid::nil(),
+            display_name: None,
+            cwd: std::env::temp_dir(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        },
+    );
+    state.push_message(crate::state::MessageRole::User, "main transcript");
+    state.prompt_cache_key_override = Some("main-cache-key".to_string());
+
+    let mut config = LlmJudgeConfig::default();
+    config.prompt_cache_mode = LlmJudgePromptCacheMode::Dedicated;
+    let side_state = judge::build_llm_judge_side_state(&state, &config, "judge prompt");
+
+    let cache_key = side_state
+        .prompt_cache_key_override
+        .as_deref()
+        .expect("llm judge cache key");
+    assert_ne!(cache_key, "main-cache-key");
+    assert!(cache_key.starts_with("reflection-judge-"));
 }
 
 #[test]
@@ -74,4 +151,75 @@ fn meaningful_artifact_write_resets_progress() {
     assert!(tracker
         .observe_batch_at(&[failed.clone(), failed], start + 62_000)
         .is_none());
+}
+
+#[test]
+fn trace_events_capture_batch_and_code_judge_decision() {
+    let start = unix_time_ms();
+    let mut config = ReflectionConfig::default();
+    config.llm_judge = None;
+    let mut tracker = ReflectionTracker::new(
+        "Write the answer to /app/out.txt and use /tests/check.sh to verify it.",
+        config,
+    );
+    let placeholder = write_invocation("/app/out.txt", "[]");
+    let initial = tracker
+        .observe_batch_with_trace_at(&[placeholder], start + 1_000)
+        .expect("initial observation should exist");
+    assert_eq!(initial.trace_events.len(), 1);
+    assert!(matches!(
+        &initial.trace_events[0],
+        ReflectionTraceEvent::BatchObserved {
+            should_evaluate: false,
+            ..
+        }
+    ));
+    assert!(initial.checkpoint.is_none());
+
+    let failed = bash_invocation("bash /tests/check.sh", "2 failed, 0 passed", false);
+    let triggered = tracker
+        .observe_batch_with_trace_at(
+            &[failed.clone(), failed.clone(), failed],
+            start + 1_000 + 10 * 60 * 1000,
+        )
+        .expect("triggered observation should exist");
+    assert!(triggered.checkpoint.is_some());
+    assert!(triggered.trace_events.iter().any(|event| matches!(
+        event,
+        ReflectionTraceEvent::BatchObserved {
+            should_evaluate: true,
+            ..
+        }
+    )));
+    assert!(triggered.trace_events.iter().any(|event| matches!(
+        event,
+        ReflectionTraceEvent::CodeJudgeDecision {
+            triggered: true,
+            ..
+        }
+    )));
+    assert!(triggered.trace_events.iter().any(|event| matches!(
+        event,
+        ReflectionTraceEvent::FinalDecision {
+            triggered_checkpoint: true,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn scp_style_remote_is_not_treated_as_filesystem_path() {
+    let tracker = ReflectionTracker::new(
+        "configure git server for git@localhost:/git/server and serve hello.html",
+        ReflectionConfig::default(),
+    );
+    let relevant: std::collections::BTreeSet<String> = tracker.relevant_paths_for_test().clone();
+    assert!(
+        !relevant.iter().any(|path| path.contains('@')),
+        "scp-style remotes should be filtered out; saw: {relevant:?}"
+    );
+    assert!(
+        relevant.iter().any(|path| path.contains("hello.html")),
+        "plain filesystem references should still be kept; saw: {relevant:?}"
+    );
 }

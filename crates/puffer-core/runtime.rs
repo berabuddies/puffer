@@ -53,8 +53,8 @@ pub use self::permission_prompt::{
     with_permission_prompt_handler, PermissionPromptAction, PermissionPromptRequest,
 };
 pub use self::reflection::{
-    CodeJudgeConfig, LlmJudgeConfig, LlmJudgeContextScope, LlmJudgeMode, ReflectionConfig,
-    ReflectionLanguage,
+    CodeJudgeConfig, LlmJudgeConfig, LlmJudgeContextScope, LlmJudgeMode, LlmJudgePromptCacheMode,
+    ReflectionConfig, ReflectionLanguage, ReflectionTraceEvent,
 };
 pub(crate) use self::request_tool_filter::{build_request_tool_filter, RequestToolFilter};
 pub use self::structured_output_support::StructuredOutputConfig;
@@ -135,6 +135,7 @@ pub enum TurnStreamEvent {
     TextDelta(String),
     ToolCallsRequested(Vec<ToolCallRequest>),
     ToolInvocations(Vec<ToolInvocation>),
+    ReflectionTrace(ReflectionTraceEvent),
     ReflectionCheckpoint(String),
     /// A transport-level retry is about to be attempted.
     RetryAttempt {
@@ -904,14 +905,19 @@ where
             invocations.extend(tool_results.invocations.clone());
             // Append response content as ConversationItems.
             append_anthropic_response_to_items(&mut items, &response, &tool_results);
-            if let Some(checkpoint) = reflection
+            if let Some(observation) = reflection
                 .as_mut()
-                .and_then(|tracker| tracker.observe_batch(&tool_results.invocations))
+                .and_then(|tracker| tracker.observe_batch_with_trace(&tool_results.invocations))
             {
-                on_event(TurnStreamEvent::ReflectionCheckpoint(
-                    checkpoint.summary.clone(),
-                ));
-                items.push(ConversationItem::user_message(checkpoint.prompt));
+                for trace_event in observation.trace_events {
+                    on_event(TurnStreamEvent::ReflectionTrace(trace_event));
+                }
+                if let Some(checkpoint) = observation.checkpoint {
+                    on_event(TurnStreamEvent::ReflectionCheckpoint(
+                        checkpoint.summary.clone(),
+                    ));
+                    items.push(ConversationItem::user_message(checkpoint.prompt));
+                }
             }
             // Compact between tool iterations.
             let compacted = compact_conversation_with(

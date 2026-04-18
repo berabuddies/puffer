@@ -70,6 +70,28 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Appends one structured trace event to a session sidecar JSONL file.
+    pub fn append_trace_event<T: Serialize>(
+        &self,
+        session_id: Uuid,
+        trace_name: &str,
+        event: &T,
+    ) -> Result<()> {
+        let sanitized = sanitize_trace_name(trace_name);
+        let path = self
+            .session_path(session_id)
+            .with_extension(format!("{sanitized}.jsonl"));
+        let mut file = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&path)
+            .with_context(|| format!("failed to open session trace {}", path.display()))?;
+        let line = serde_json::to_string(event)?;
+        writeln!(file, "{line}")?;
+        self.touch_session(session_id)?;
+        Ok(())
+    }
+
     /// Appends a transcript rewrite operation to the session log.
     pub fn append_transcript_rewrite(
         &self,
@@ -310,6 +332,24 @@ fn unix_timestamp_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn sanitize_trace_name(name: &str) -> String {
+    let filtered = name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if filtered.is_empty() {
+        "trace".to_string()
+    } else {
+        filtered
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,5 +508,28 @@ mod tests {
                 rewrite: TranscriptRewrite::PopLast { count: 2 },
             }
         );
+    }
+
+    #[test]
+    fn sidecar_trace_events_are_appended() {
+        let tempdir = tempdir().unwrap();
+        let paths = test_paths(tempdir.path());
+        fs::create_dir_all(&paths.workspace_config_dir).unwrap();
+        let store = SessionStore::from_paths(&paths).unwrap();
+        let session = store.create_session(tempdir.path().join("src")).unwrap();
+
+        store
+            .append_trace_event(
+                session.id,
+                "runtime_trace",
+                &serde_json::json!({"type":"judge_event","value":1}),
+            )
+            .unwrap();
+
+        let trace_path = store
+            .session_path(session.id)
+            .with_extension("runtime_trace.jsonl");
+        let content = fs::read_to_string(trace_path).unwrap();
+        assert!(content.contains("\"judge_event\""));
     }
 }
