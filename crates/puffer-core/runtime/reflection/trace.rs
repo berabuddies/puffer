@@ -39,7 +39,9 @@ pub enum ReflectionTraceEvent {
     },
     /// Records why the LLM judge did not run for this evaluation.
     LlmJudgeSkipped { mode: String, reason: String },
-    /// Records the side request that is about to be sent to the LLM judge.
+    /// Records the side request that was dispatched to the LLM judge.
+    /// Emitted after `run_llm_judge` returns so the event carries the live
+    /// URL, cache key, and serialized body that actually went on the wire.
     LlmJudgeRequest {
         mode: String,
         provider: Option<String>,

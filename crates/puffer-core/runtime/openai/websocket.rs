@@ -231,8 +231,12 @@ where
         }
     };
 
-    // Cloned out of `options` so the mid-loop fallback paths can still hand a
-    // fresh reflection policy to the SSE path if the websocket dies later.
+    // Clone the reflection config because `options` is still needed — the
+    // mid-loop fallback branches below consume `options` by value when
+    // handing control back to the SSE path, and the SSE path constructs its
+    // own tracker from `options.reflection`. If we moved `options.reflection`
+    // into the websocket tracker instead, those fallbacks would lose the
+    // reflection policy.
     let mut reflection = options
         .reflection
         .clone()
