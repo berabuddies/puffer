@@ -17,8 +17,9 @@ use self::support::{
     validation_improved,
 };
 use self::trace::{
-    batch_observed_event, code_judge_decision_event, final_decision_event, llm_judge_error_event,
-    llm_judge_request_event, llm_judge_response_event, llm_judge_skipped_event,
+    batch_observed_event, code_judge_decision_event, final_decision_event,
+    llm_judge_disabled_event, llm_judge_error_event, llm_judge_request_event,
+    llm_judge_response_event, llm_judge_skipped_event,
 };
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use puffer_resources::LoadedResources;
@@ -720,10 +721,9 @@ impl ReflectionTracker {
         trace_events: &mut Vec<ReflectionTraceEvent>,
     ) -> Option<Option<JudgeSignal>> {
         let Some(config) = self.config.llm_judge.as_ref() else {
-            trace_events.push(ReflectionTraceEvent::LlmJudgeSkipped {
-                mode: "disabled".to_string(),
-                reason: "llm judge disabled in reflection config".to_string(),
-            });
+            trace_events.push(llm_judge_disabled_event(
+                "llm judge disabled in reflection config",
+            ));
             return None;
         };
         if matches!(config.mode, LlmJudgeMode::ConfirmCodeJudge) && code_signal.is_none() {

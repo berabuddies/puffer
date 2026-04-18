@@ -9,6 +9,10 @@ use crate::runtime::openai::{
 };
 use crate::runtime::system_prompt::render_runtime_system_prompt;
 use crate::runtime::{execute_user_prompt_with_options, TurnRequestOptions};
+// `resolve_provider_and_model` / `resolve_model_api` are file-private in
+// `runtime.rs`; pulling them through `super::super` at the import site keeps
+// the reaching-up-two-levels smell confined to one place.
+use super::super::{resolve_model_api, resolve_provider_and_model};
 use crate::AppState;
 use anyhow::Context;
 use puffer_provider_openai::{build_json_post_request, OpenAIResponsesResponse};
@@ -78,7 +82,7 @@ pub(super) fn run_llm_judge(
     let provider = side_state.current_provider.clone();
     let model = side_state.current_model.clone();
 
-    let resolved = match super::super::resolve_provider_and_model(&side_state, providers) {
+    let resolved = match resolve_provider_and_model(&side_state, providers) {
         Ok(value) => value,
         Err(error) => {
             return LlmJudgeAttempt {
@@ -101,7 +105,7 @@ pub(super) fn run_llm_judge(
     };
     let (provider_descriptor, model_id) = resolved;
     let api =
-        super::super::resolve_model_api(&side_state, providers, provider_descriptor, &model_id);
+        resolve_model_api(&side_state, providers, provider_descriptor, &model_id);
 
     if matches!(
         api.as_str(),

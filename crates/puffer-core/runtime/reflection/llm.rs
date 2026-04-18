@@ -409,4 +409,39 @@ mod tests {
                 .expect("independent mode should fall back to code judge on llm failure");
         assert_eq!(selected.source, code_signal.source);
     }
+
+    #[test]
+    fn independent_mode_returns_none_when_both_judges_are_silent() {
+        // code_signal=None + llm_signal=None must collapse to None.
+        // The old flatten-based implementation happened to return None too, but
+        // without asserting it explicitly the new match expression could drift.
+        let selected = select_final_signal(Some(LlmJudgeMode::Independent), None, None);
+        assert!(selected.is_none());
+    }
+
+    #[test]
+    fn independent_mode_surfaces_llm_trigger_verbatim() {
+        // Some(Some(sig)) — LLM raised a reflect/escalate verdict. Must be
+        // returned as-is, ignoring whatever the code judge had to say.
+        let code_signal = JudgeSignal {
+            source: "code_judge",
+            summary: "code stalled".to_string(),
+            reason: "looping".to_string(),
+            next_action: None,
+        };
+        let llm_signal = JudgeSignal {
+            source: "llm_judge",
+            summary: "llm flagged drift".to_string(),
+            reason: "sidequest".to_string(),
+            next_action: Some("refocus on the target file".to_string()),
+        };
+        let selected = select_final_signal(
+            Some(LlmJudgeMode::Independent),
+            Some(code_signal),
+            Some(Some(llm_signal.clone())),
+        )
+        .expect("independent mode should surface the LLM verdict");
+        assert_eq!(selected.source, llm_signal.source);
+        assert_eq!(selected.summary, llm_signal.summary);
+    }
 }

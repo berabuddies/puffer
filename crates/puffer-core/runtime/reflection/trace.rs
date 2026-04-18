@@ -149,6 +149,19 @@ pub(super) fn llm_judge_skipped_event(
     }
 }
 
+/// Records the special skip case where the LLM judge was not configured at
+/// all (i.e. `ReflectionConfig::llm_judge` is `None`). Kept separate from
+/// `llm_judge_skipped_event` so the `"disabled"` label lives in the same
+/// dictionary as the mode labels below.
+pub(super) fn llm_judge_disabled_event(reason: impl Into<String>) -> ReflectionTraceEvent {
+    ReflectionTraceEvent::LlmJudgeSkipped {
+        mode: LLM_MODE_DISABLED_LABEL.to_string(),
+        reason: reason.into(),
+    }
+}
+
+const LLM_MODE_DISABLED_LABEL: &str = "disabled";
+
 pub(super) fn llm_judge_request_event(
     config: &LlmJudgeConfig,
     attempt: &LlmJudgeAttempt,
