@@ -226,6 +226,29 @@ fn execute_openai_once(
         let tool_calls = extract_responses_tool_calls(&parsed)?;
         if tool_calls.is_empty() {
             let assistant_text = parse_openai_assistant_text(&parsed, &response, state)?;
+            // Last-chance reflection hook for completion-claim turns that
+            // emit no new tool calls (see matching patch in the Chat
+            // Completions branch for rationale).
+            if !assistant_text.trim().is_empty() {
+                items.push(ConversationItem::assistant_message(&assistant_text));
+            }
+            if let Some(observation) = reflection.as_mut().and_then(|tracker| {
+                tracker.observe_openai_batch(
+                    &[],
+                    &items,
+                    state,
+                    resources,
+                    providers,
+                    auth_store,
+                )
+            }) {
+                if let Some(checkpoint) = observation.checkpoint {
+                    // Non-streaming path has no on_event callback; just
+                    // inject the checkpoint and continue the turn loop.
+                    items.push(ConversationItem::user_message(checkpoint.prompt));
+                    continue;
+                }
+            }
             run_turn_hooks(resources, &state.cwd, &assistant_text, invocations.len());
             return Ok(super::TurnExecution {
                 assistant_text,
@@ -512,6 +535,30 @@ where
             } else {
                 response.assistant_text
             };
+            // Last-chance reflection hook — see non-streaming path for
+            // rationale. Without this, completion-claim turns that emit no
+            // tool calls exit the loop before the trigger can run.
+            if !assistant_text.trim().is_empty() {
+                items.push(ConversationItem::assistant_message(&assistant_text));
+            }
+            if let Some(observation) = reflection.as_mut().and_then(|tracker| {
+                tracker.observe_openai_batch(
+                    &[],
+                    &items,
+                    state,
+                    resources,
+                    providers,
+                    auth_store,
+                )
+            }) {
+                if let Some(checkpoint) = observation.checkpoint {
+                    on_event(TurnStreamEvent::ReflectionCheckpoint(
+                        checkpoint.summary.clone(),
+                    ));
+                    items.push(ConversationItem::user_message(checkpoint.prompt));
+                    continue;
+                }
+            }
             run_turn_hooks(resources, &state.cwd, &assistant_text, invocations.len());
             return Ok(super::TurnExecution {
                 assistant_text,
@@ -737,6 +784,34 @@ fn execute_openai_completions_once(
             } else {
                 text
             };
+            // Give reflection a last-chance hook to catch completion claims.
+            // The agent's final text-only turn (no tool calls) is exactly
+            // where false-completes emit "Done" signals; without this probe
+            // the completion-claim trigger in `observe_openai_batch` would
+            // never fire for those turns.  If reflection returns a
+            // checkpoint, inject it and continue the loop so the agent has
+            // to either verify for real or resubmit; otherwise fall through
+            // and exit normally.
+            if !assistant_text.trim().is_empty() {
+                items.push(ConversationItem::assistant_message(&assistant_text));
+            }
+            if let Some(observation) = reflection.as_mut().and_then(|tracker| {
+                tracker.observe_openai_batch(
+                    &[],
+                    &items,
+                    state,
+                    resources,
+                    providers,
+                    auth_store,
+                )
+            }) {
+                if let Some(checkpoint) = observation.checkpoint {
+                    // Non-streaming path has no on_event callback; just
+                    // inject the checkpoint and continue the turn loop.
+                    items.push(ConversationItem::user_message(checkpoint.prompt));
+                    continue;
+                }
+            }
             run_turn_hooks(resources, &state.cwd, &assistant_text, invocations.len());
             return Ok(super::TurnExecution {
                 assistant_text,
