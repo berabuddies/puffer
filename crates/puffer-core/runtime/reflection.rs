@@ -252,7 +252,20 @@ pub(super) struct ReflectionTracker {
     last_progress_at_ms: u128,
     last_evaluation_batch: usize,
     last_validation: Option<ValidationSnapshot>,
+    /// Count of reflection-driven checkpoints injected into the
+    /// conversation so far. Capped to prevent the judge-reflect loop
+    /// from running indefinitely when the agent keeps re-declaring
+    /// done after each nudge.
+    checkpoint_injections: usize,
 }
+
+/// Hard ceiling on reflection nudges per session. Harbor's task
+/// timeout is the outer bound, but within it the agent ↔ judge can
+/// ping-pong if the agent keeps producing a terminal turn after each
+/// nudge and the judge keeps saying reflect. Three nudges is enough
+/// to cover "rushed done → verify → iterate → final done"; beyond
+/// that we're burning budget without new information.
+const MAX_CHECKPOINT_INJECTIONS: usize = 3;
 
 impl ReflectionTracker {
     pub(super) fn new(goal: &str, config: ReflectionConfig) -> Self {
@@ -271,6 +284,7 @@ impl ReflectionTracker {
             last_progress_at_ms: now_ms,
             last_evaluation_batch: 0,
             last_validation: None,
+            checkpoint_injections: 0,
         }
     }
 
@@ -388,12 +402,14 @@ impl ReflectionTracker {
                 let batch_gap = self
                     .batch_count
                     .saturating_sub(self.last_evaluation_batch);
+                let under_cap = self.checkpoint_injections < MAX_CHECKPOINT_INJECTIONS;
                 eprintln!(
-                    "[reflection] terminal_turn text={has_text} tools={}/{MIN_TOOL_CALLS_BEFORE_EVALUATION} batch_gap={batch_gap} synth={}",
+                    "[reflection] terminal_turn text={has_text} tools={}/{MIN_TOOL_CALLS_BEFORE_EVALUATION} batch_gap={batch_gap} injections={}/{MAX_CHECKPOINT_INJECTIONS} synth={}",
                     self.total_tool_calls,
-                    has_text && tools_ok,
+                    self.checkpoint_injections,
+                    has_text && tools_ok && under_cap,
                 );
-                if has_text && tools_ok {
+                if has_text && tools_ok && under_cap {
                     self.synthesize_claim_only_observation()
                 } else {
                     return None;
@@ -458,6 +474,9 @@ impl ReflectionTracker {
         let checkpoint = final_signal
             .as_ref()
             .map(|signal| self.build_checkpoint(&observation.assessment, signal));
+        if checkpoint.is_some() {
+            self.checkpoint_injections += 1;
+        }
         if terminal_turn {
             eprintln!(
                 "[reflection] final_decision terminal_turn=true signal={} checkpoint={}",

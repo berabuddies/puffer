@@ -38,9 +38,9 @@ Before opening or running a tool on a file, consider whether it may modify that 
 When a file's contents look unexpected, inspect it with a low-level tool before passing it to a higher-level one that might alter it.
 
 Before you declare the task complete:
-- Check whether the environment ships the evaluation tests (commonly at `/tests/test_outputs.py`, `/app/tests/`, or another path named in the prompt). If such a file exists, READ it and run the exact assertions it runs — your own surrogate tests are not a substitute for the verifier's.
+- If the task prompt mentions a specific test command, file, or entrypoint to run, execute it verbatim and confirm it passes — your own surrogate tests are not a substitute for what the task explicitly asks you to run.
 - Re-list the task's required output directory and confirm only the artifact(s) the task asked for are there — build products, binaries, backup files, or test scratch files left behind will often fail strict file-listing checks.
-- "My self-written test passed" is weaker evidence than "I ran the verifier's actual test and it passed." Prefer the latter whenever the verifier file is accessible.
+- "My self-written test passed" is weaker evidence than "I ran the check the task prompt asked for and it passed." Prefer the latter whenever the task names such a check.
 
 $USING_YOUR_TOOLS
 

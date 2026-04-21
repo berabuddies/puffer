@@ -71,18 +71,18 @@ pub(super) fn build_llm_judge_prompt(
                 ReflectionLanguage::Chinese => format!(
                     "\nAgent 声明已完成（终局 turn，这是最后一次干预机会）：\n\"\"\"\n{truncated}\n\"\"\"\n\
 质疑该声明时重点看：\n\
-- agent 是否跑了 verifier 真的用的测试文件（常见路径：/tests/test_outputs.py、/app/tests/）？还是只跑了 agent 自己造的 smoke test？\n\
+- 任务 prompt 里如果明确指出要运行某个命令/脚本/检查，agent 是否照做并得到通过？还是只跑了 agent 自己造的 smoke test？\n\
 - 产物目录里有没有 agent 测试留下的临时产物（编译中间文件、备份文件等）— 严格的 file-listing 检查会挂。\n\
 - agent 自己的验证断言是否覆盖了任务 requirement 里**全部**的项目（包括数值边界、格式保留、跨输入一致性）？\n\
-- 自信的 \"Done!\" 不是证据；\"我跑了 /tests/test_outputs.py 全过\" 才是证据。\n",
+- 自信的 \"Done!\" 不是证据；\"我跑了任务要求的那个检查并通过\" 才是证据。\n",
                 ),
                 ReflectionLanguage::English => format!(
                     "\nAgent claims completion (terminal turn — last chance to intervene):\n\"\"\"\n{truncated}\n\"\"\"\n\
 When questioning the claim, focus on:\n\
-- Did the agent run the verifier's actual test file (common paths: /tests/test_outputs.py, /app/tests/)? Or only a surrogate smoke test they wrote themselves?\n\
+- If the task prompt names a specific test/check/command to run, did the agent run it verbatim and confirm it passes? Or only a surrogate smoke test they wrote themselves?\n\
 - Are there leftover build/test artifacts in the output directory — strict file-listing checks in the verifier will fail.\n\
 - Does the agent's self-verification cover **every** requirement item (numeric bounds, format preservation, cross-input consistency)?\n\
-- A confident \"Done!\" is not evidence; \"I ran /tests/test_outputs.py and it passed\" is.\n",
+- A confident \"Done!\" is not evidence; \"I ran the check the task prompt asked for and it passed\" is.\n",
                 ),
             }
         }
