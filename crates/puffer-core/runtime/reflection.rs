@@ -1,24 +1,28 @@
 use super::openai::conversation::ConversationItem;
-use super::{execute_user_prompt_with_options, ToolInvocation, TurnRequestOptions};
+use super::ToolInvocation;
 use crate::AppState;
+mod judge;
 mod llm;
 mod support;
+mod trace;
 
 use self::llm::{
-    build_llm_judge_prompt, parse_llm_judge_decision, parse_llm_judge_response, render_judge_lines,
-    render_llm_judge_context, render_relevant_paths, select_final_signal, LlmJudgeDecision,
-    LlmJudgeResponse,
+    parse_llm_judge_decision, parse_llm_judge_response, render_judge_lines, render_relevant_paths,
+    select_final_signal, LlmJudgeDecision,
 };
 use self::support::{
-    content_is_meaningful, count_case_insensitive, extract_artifact_candidates, extract_count,
-    extract_path_candidates, first_non_empty_line, is_runtime_path, looks_like_validation_command,
-    normalize_text, path_matches_targets, summarize_goal,
+    build_prompt, classify_edit_progress, classify_validation, classify_write_progress,
+    extract_artifact_candidates, extract_path_candidates, is_runtime_path, language_label,
+    observe_invocation, path_matches_targets, render_action_preview, summarize_goal, unix_time_ms,
+    validation_improved,
+};
+use self::trace::{
+    batch_observed_event, code_judge_decision_event, final_decision_event, llm_judge_error_event,
+    llm_judge_request_event, llm_judge_response_event, llm_judge_skipped_event,
 };
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use puffer_resources::LoadedResources;
-use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, VecDeque};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
 mod tests;
@@ -27,8 +31,11 @@ const MIN_TOOL_CALLS_BEFORE_EVALUATION: usize = 4;
 const MIN_BATCHES_BETWEEN_EVALUATIONS: usize = 2;
 const RECENT_ACTION_WINDOW: usize = 10;
 const RECENT_ACTION_PREVIEW: usize = 4;
+const EVALUATION_TRIGGER_SCORE: u8 = 3;
 const DEFAULT_LLM_JUDGE_MODEL_SELECTOR: &str = "openai/gpt-5.4";
 const DEFAULT_LLM_JUDGE_EFFORT_LEVEL: &str = "low";
+
+pub use self::trace::ReflectionTraceEvent;
 
 /// Selects the natural language used for reflection checkpoints and LLM judging.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,12 +103,26 @@ impl Default for LlmJudgeContextScope {
     }
 }
 
+/// Controls whether the LLM judge reuses the main agent prompt cache key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmJudgePromptCacheMode {
+    InheritMainAgent,
+    Dedicated,
+}
+
+impl Default for LlmJudgePromptCacheMode {
+    fn default() -> Self {
+        Self::InheritMainAgent
+    }
+}
+
 /// Configures the optional LLM-based reflection judge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LlmJudgeConfig {
     pub mode: LlmJudgeMode,
     pub model_selector: Option<String>,
     pub effort_level: Option<String>,
+    pub prompt_cache_mode: LlmJudgePromptCacheMode,
     pub context_scope: LlmJudgeContextScope,
     pub recent_item_count: usize,
     pub max_context_chars: usize,
@@ -114,6 +135,7 @@ impl Default for LlmJudgeConfig {
             mode: LlmJudgeMode::default(),
             model_selector: Some(DEFAULT_LLM_JUDGE_MODEL_SELECTOR.to_string()),
             effort_level: Some(DEFAULT_LLM_JUDGE_EFFORT_LEVEL.to_string()),
+            prompt_cache_mode: LlmJudgePromptCacheMode::default(),
             context_scope: LlmJudgeContextScope::default(),
             recent_item_count: 12,
             max_context_chars: 12_000,
@@ -181,6 +203,12 @@ struct BatchAssessment {
     time_since_progress_ms: u128,
     signal_notes: Vec<String>,
     recent_actions: Vec<String>,
+    /// When the most recent assistant message contains a "Done / All set /
+    /// verified" style completion claim, the agent is about to hand the task
+    /// back to Harbor. Reflection should force-evaluate regardless of the
+    /// normal stall / progress gates so the code / LLM judge has a chance to
+    /// catch false-completes before the verifier rejects the submission.
+    completion_claim: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -189,6 +217,26 @@ struct JudgeSignal {
     summary: String,
     reason: String,
     next_action: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct EvaluationGate {
+    should_evaluate: bool,
+    skip_reason: Option<String>,
+    score: u8,
+    threshold: u8,
+}
+
+#[derive(Debug, Clone)]
+struct BatchObservation {
+    assessment: BatchAssessment,
+    evaluation: EvaluationGate,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ReflectionObservation {
+    pub(super) trace_events: Vec<ReflectionTraceEvent>,
+    pub(super) checkpoint: Option<ReflectionCheckpoint>,
 }
 
 #[derive(Debug, Clone)]
@@ -226,11 +274,17 @@ impl ReflectionTracker {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn relevant_paths_for_test(&self) -> &BTreeSet<String> {
+        &self.relevant_paths
+    }
+
     pub(super) fn observe_batch(
         &mut self,
         invocations: &[ToolInvocation],
     ) -> Option<ReflectionCheckpoint> {
-        self.observe_batch_at(invocations, unix_time_ms())
+        self.observe_batch_with_trace_at(invocations, unix_time_ms())
+            .and_then(|observation| observation.checkpoint)
     }
 
     pub(super) fn observe_batch_at(
@@ -238,10 +292,58 @@ impl ReflectionTracker {
         invocations: &[ToolInvocation],
         now_ms: u128,
     ) -> Option<ReflectionCheckpoint> {
-        let assessment = self.observe_batch_internal(invocations, now_ms)?;
-        let signal = self.code_judge_signal(&assessment)?;
+        self.observe_batch_with_trace_at(invocations, now_ms)
+            .and_then(|observation| observation.checkpoint)
+    }
+
+    pub(super) fn observe_batch_with_trace(
+        &mut self,
+        invocations: &[ToolInvocation],
+    ) -> Option<ReflectionObservation> {
+        self.observe_batch_with_trace_at(invocations, unix_time_ms())
+    }
+
+    pub(super) fn observe_batch_with_trace_at(
+        &mut self,
+        invocations: &[ToolInvocation],
+        now_ms: u128,
+    ) -> Option<ReflectionObservation> {
+        let observation = self.observe_batch_internal(invocations, now_ms)?;
+        let mut trace_events = vec![batch_observed_event(
+            &observation.assessment,
+            self.batch_count,
+            self.total_tool_calls,
+            observation.evaluation.should_evaluate,
+            observation.evaluation.skip_reason.clone(),
+            observation.evaluation.score,
+            observation.evaluation.threshold,
+            &self.relevant_paths,
+        )];
+        if !observation.evaluation.should_evaluate {
+            return Some(ReflectionObservation {
+                trace_events,
+                checkpoint: None,
+            });
+        }
+
+        let score = self.code_judge_score(&observation.assessment);
+        let signal = self.code_judge_signal(&observation.assessment);
+        let threshold = self
+            .config
+            .code_judge
+            .as_ref()
+            .map(|config| config.min_score)
+            .unwrap_or_default();
+        trace_events.push(code_judge_decision_event(score, threshold, signal.as_ref()));
         self.last_evaluation_batch = self.batch_count;
-        Some(self.build_checkpoint(&assessment, &signal))
+        let checkpoint = signal
+            .as_ref()
+            .map(|value| self.build_checkpoint(&observation.assessment, value));
+        trace_events.push(final_decision_event(signal.as_ref(), checkpoint.as_ref()));
+        Some(ReflectionObservation {
+            trace_events,
+            checkpoint,
+        })
     }
 
     pub(super) fn observe_openai_batch(
@@ -252,32 +354,95 @@ impl ReflectionTracker {
         resources: &LoadedResources,
         providers: &ProviderRegistry,
         auth_store: &mut AuthStore,
-    ) -> Option<ReflectionCheckpoint> {
-        let assessment = self.observe_batch_internal(invocations, unix_time_ms())?;
-        let code_signal = self.code_judge_signal(&assessment);
+    ) -> Option<ReflectionObservation> {
+        let mut observation = self.observe_batch_internal(invocations, unix_time_ms())?;
+        // Detect "I'm done" style completion claims in the latest assistant
+        // message. When the agent declares success, force an evaluation even
+        // if the heuristic gate would otherwise skip — false-completes were
+        // the dominant failure mode on TB2 (9 out of 36 fails in the Kimi
+        // OAuth run), and every one of them had a plausible "Done." sign-off
+        // that the normal stall-based trigger couldn't see.
+        observation.assessment.completion_claim = latest_assistant_completion_claim(items);
+        let completion_forced = observation.assessment.completion_claim.is_some()
+            && !observation.evaluation.should_evaluate
+            // Respect the minimum-tool-calls and rate-limit gates even on a
+            // completion claim: firing a judge after 1 turn would just cost
+            // tokens without meaningful signal.
+            && self.total_tool_calls >= MIN_TOOL_CALLS_BEFORE_EVALUATION
+            && self.batch_count.saturating_sub(self.last_evaluation_batch)
+                >= MIN_BATCHES_BETWEEN_EVALUATIONS;
+        if completion_forced {
+            observation.evaluation.should_evaluate = true;
+            observation.evaluation.skip_reason = None;
+            observation
+                .assessment
+                .signal_notes
+                .push("completion_claim_forced_evaluation".to_string());
+        }
+        let mut trace_events = vec![batch_observed_event(
+            &observation.assessment,
+            self.batch_count,
+            self.total_tool_calls,
+            observation.evaluation.should_evaluate,
+            observation.evaluation.skip_reason.clone(),
+            observation.evaluation.score,
+            observation.evaluation.threshold,
+            &self.relevant_paths,
+        )];
+        if !observation.evaluation.should_evaluate {
+            return Some(ReflectionObservation {
+                trace_events,
+                checkpoint: None,
+            });
+        }
+
+        let code_score = self.code_judge_score(&observation.assessment);
+        let code_signal = self.code_judge_signal(&observation.assessment);
+        let code_threshold = self
+            .config
+            .code_judge
+            .as_ref()
+            .map(|config| config.min_score)
+            .unwrap_or_default();
+        trace_events.push(code_judge_decision_event(
+            code_score,
+            code_threshold,
+            code_signal.as_ref(),
+        ));
         let llm_signal = self.llm_judge_signal(
-            &assessment,
+            &observation.assessment,
             code_signal.as_ref(),
             items,
             state,
             resources,
             providers,
             auth_store,
+            &mut trace_events,
         );
         let final_signal = select_final_signal(
             self.config.llm_judge.as_ref().map(|config| config.mode),
             code_signal,
             llm_signal,
-        )?;
+        );
         self.last_evaluation_batch = self.batch_count;
-        Some(self.build_checkpoint(&assessment, &final_signal))
+        let checkpoint = final_signal
+            .as_ref()
+            .map(|signal| self.build_checkpoint(&observation.assessment, signal));
+        trace_events.push(final_decision_event(
+            final_signal.as_ref(),
+            checkpoint.as_ref(),
+        ));
+        Some(ReflectionObservation {
+            trace_events,
+            checkpoint,
+        })
     }
 
     fn observe_batch_internal(
         &mut self,
         invocations: &[ToolInvocation],
         now_ms: u128,
-    ) -> Option<BatchAssessment> {
+    ) -> Option<BatchObservation> {
         if invocations.is_empty() {
             return None;
         }
@@ -294,6 +459,7 @@ impl ReflectionTracker {
             time_since_progress_ms: 0,
             signal_notes: Vec::new(),
             recent_actions: Vec::new(),
+            completion_claim: None,
         };
         let mut saw_progress = false;
 
@@ -355,11 +521,10 @@ impl ReflectionTracker {
         assessment.time_since_progress_ms = now_ms.saturating_sub(self.last_progress_at_ms);
         assessment.signal_notes = self.signal_notes(&assessment);
 
-        if !self.should_evaluate(&assessment) {
-            return None;
-        }
-
-        Some(assessment)
+        Some(BatchObservation {
+            evaluation: self.evaluation_gate(&assessment),
+            assessment,
+        })
     }
 
     fn push_recent_action(&mut self, action: ActionObservation) {
@@ -472,22 +637,65 @@ impl ReflectionTracker {
         notes
     }
 
-    fn should_evaluate(&self, assessment: &BatchAssessment) -> bool {
+    fn evaluation_gate(&self, assessment: &BatchAssessment) -> EvaluationGate {
         if self.total_tool_calls < MIN_TOOL_CALLS_BEFORE_EVALUATION {
-            return false;
+            return EvaluationGate {
+                should_evaluate: false,
+                skip_reason: Some(format!(
+                    "total_tool_calls {} below minimum {}",
+                    self.total_tool_calls, MIN_TOOL_CALLS_BEFORE_EVALUATION
+                )),
+                score: 0,
+                threshold: EVALUATION_TRIGGER_SCORE,
+            };
         }
         if self.batch_count.saturating_sub(self.last_evaluation_batch)
             < MIN_BATCHES_BETWEEN_EVALUATIONS
         {
-            return false;
+            return EvaluationGate {
+                should_evaluate: false,
+                skip_reason: Some(format!(
+                    "only {} batches since last evaluation; minimum is {}",
+                    self.batch_count.saturating_sub(self.last_evaluation_batch),
+                    MIN_BATCHES_BETWEEN_EVALUATIONS
+                )),
+                score: 0,
+                threshold: EVALUATION_TRIGGER_SCORE,
+            };
         }
         if assessment.validation_progress
             || assessment.artifact_progress
             || assessment.edit_progress
         {
-            return false;
+            return EvaluationGate {
+                should_evaluate: false,
+                skip_reason: Some("recent real progress detected".to_string()),
+                score: 0,
+                threshold: EVALUATION_TRIGGER_SCORE,
+            };
         }
 
+        let score = self.code_judge_score(assessment);
+        if score >= EVALUATION_TRIGGER_SCORE {
+            EvaluationGate {
+                should_evaluate: true,
+                skip_reason: None,
+                score,
+                threshold: EVALUATION_TRIGGER_SCORE,
+            }
+        } else {
+            EvaluationGate {
+                should_evaluate: false,
+                skip_reason: Some(format!(
+                    "stall score {score} below evaluation threshold {EVALUATION_TRIGGER_SCORE}"
+                )),
+                score,
+                threshold: EVALUATION_TRIGGER_SCORE,
+            }
+        }
+    }
+
+    fn code_judge_score(&self, assessment: &BatchAssessment) -> u8 {
         let config = self.config.code_judge.as_ref().cloned().unwrap_or_default();
         let mut score = 0u8;
         if assessment.time_since_progress_ms >= config.soft_stall_ms {
@@ -500,22 +708,12 @@ impl ReflectionTracker {
         if assessment.focus_bad {
             score += 1;
         }
-        score >= 3
+        score
     }
 
     fn code_judge_signal(&self, assessment: &BatchAssessment) -> Option<JudgeSignal> {
         let config = self.config.code_judge.as_ref()?;
-        let mut score = 0u8;
-        if assessment.time_since_progress_ms >= config.soft_stall_ms {
-            score += 2;
-        }
-        if assessment.time_since_progress_ms >= config.hard_stall_ms {
-            score += 2;
-        }
-        score += assessment.loopiness_score.min(3);
-        if assessment.focus_bad {
-            score += 1;
-        }
+        let score = self.code_judge_score(assessment);
         if score < config.min_score {
             return None;
         }
@@ -549,13 +747,27 @@ impl ReflectionTracker {
         resources: &LoadedResources,
         providers: &ProviderRegistry,
         auth_store: &mut AuthStore,
+        trace_events: &mut Vec<ReflectionTraceEvent>,
     ) -> Option<Option<JudgeSignal>> {
-        let config = self.config.llm_judge.as_ref()?;
+        let Some(config) = self.config.llm_judge.as_ref() else {
+            trace_events.push(ReflectionTraceEvent::LlmJudgeSkipped {
+                mode: "disabled".to_string(),
+                reason: "llm judge disabled in reflection config".to_string(),
+            });
+            return None;
+        };
         if matches!(config.mode, LlmJudgeMode::ConfirmCodeJudge) && code_signal.is_none() {
+            trace_events.push(llm_judge_skipped_event(
+                config.mode,
+                "confirm_code_judge mode requires a code-judge trigger first",
+            ));
             return None;
         }
 
-        let response = self.run_llm_judge(
+        let attempt = judge::run_llm_judge(
+            &self.goal,
+            &self.relevant_paths,
+            self.config.language,
             config,
             assessment,
             code_signal,
@@ -564,8 +776,46 @@ impl ReflectionTracker {
             resources,
             providers,
             auth_store,
-        )?;
-        let decision = parse_llm_judge_decision(&response.decision)?;
+        );
+        trace_events.push(llm_judge_request_event(config, &attempt));
+        if let Some(error) = &attempt.error {
+            trace_events.push(llm_judge_error_event(
+                "execution_failed",
+                error,
+                &attempt,
+                code_signal.is_some(),
+            ));
+            return None;
+        }
+        let raw_response_text = attempt.raw_response_text.clone().unwrap_or_default();
+        let Some(response) = parse_llm_judge_response(&raw_response_text) else {
+            trace_events.push(llm_judge_error_event(
+                "parse_failed",
+                "llm judge response did not contain a valid JSON object",
+                &attempt.with_raw_response_text(Some(raw_response_text)),
+                code_signal.is_some(),
+            ));
+            return None;
+        };
+        let decision = match parse_llm_judge_decision(&response.decision) {
+            Some(value) => value,
+            None => {
+                trace_events.push(llm_judge_error_event(
+                    "invalid_decision",
+                    format!("unsupported llm judge decision {:?}", response.decision),
+                    &attempt.with_raw_response_text(Some(raw_response_text)),
+                    code_signal.is_some(),
+                ));
+                return None;
+            }
+        };
+        trace_events.push(llm_judge_response_event(
+            &attempt,
+            &response.decision,
+            response.confidence.map(|value| format!("{value:.2}")),
+            &response.reason,
+            &response.next_action,
+        ));
         if matches!(decision, LlmJudgeDecision::Continue) {
             return Some(None);
         }
@@ -585,65 +835,6 @@ impl ReflectionTracker {
             reason: response.reason,
             next_action: Some(response.next_action),
         }))
-    }
-
-    fn run_llm_judge(
-        &self,
-        config: &LlmJudgeConfig,
-        assessment: &BatchAssessment,
-        code_signal: Option<&JudgeSignal>,
-        items: &[ConversationItem],
-        state: &AppState,
-        resources: &LoadedResources,
-        providers: &ProviderRegistry,
-        auth_store: &mut AuthStore,
-    ) -> Option<LlmJudgeResponse> {
-        let prompt = build_llm_judge_prompt(
-            self.config.language,
-            &self.goal,
-            assessment,
-            code_signal,
-            &render_llm_judge_context(
-                items,
-                config.context_scope,
-                config.recent_item_count,
-                config.max_context_chars,
-                config.max_tool_output_chars,
-            ),
-            &render_relevant_paths(&self.relevant_paths),
-        );
-
-        // The main agent keeps using its configured execution model. Reflection
-        // judging is a side request that can be routed to a separate
-        // provider/model pair so the decision policy stays configurable and
-        // inexpensive by default.
-        let mut side_state = state.clone();
-        if let Some(selector) = &config.model_selector {
-            side_state.current_model = Some(selector.clone());
-            if let Some((provider, _)) = selector.split_once('/') {
-                side_state.current_provider = Some(provider.to_string());
-            }
-        }
-        if let Some(effort) = &config.effort_level {
-            side_state.effort_level = effort.clone();
-        }
-
-        let mut side_resources = resources.clone();
-        side_resources.tools.clear();
-        let execution = execute_user_prompt_with_options(
-            &mut side_state,
-            &side_resources,
-            providers,
-            auth_store,
-            &prompt,
-            TurnRequestOptions {
-                structured_output: None,
-                tool_filter: None,
-                reflection: None,
-            },
-        )
-        .ok()?;
-        parse_llm_judge_response(&execution.assistant_text)
     }
 
     fn build_checkpoint(
@@ -677,7 +868,7 @@ impl ReflectionTracker {
             signal.source,
             (assessment.time_since_progress_ms / 1000) as u64
         );
-        let prompt = build_prompt(
+        let mut prompt = build_prompt(
             self.config.language,
             &self.goal,
             &summary,
@@ -686,218 +877,168 @@ impl ReflectionTracker {
             &relevant_paths,
             &judge_lines,
         );
+        // When the checkpoint fired because the agent declared the task done,
+        // append a claim-specific nudge. Data from the 89-task Kimi OAuth run
+        // showed that solved tasks are 2.3× more likely to have executed a
+        // test than unsolved ones; 21 of 27 unsolved long-trajectory tasks
+        // declared "Done" without ever running `pytest`, `/app/test_*.py`, or
+        // equivalent. We ask the agent to close that gap BEFORE re-submitting
+        // — this is prompt guidance, not verifier tampering.
+        if assessment.completion_claim.is_some() {
+            let addendum = match self.config.language {
+                ReflectionLanguage::Chinese => {
+                    "\n\n<system-reminder>\n你刚刚声明任务已完成。但注意：**TB2 的 verifier 测试文件位于任务目录内部、不会挂载到 /app**，所以你看不见也无法直接跑它。你能做的是**自己构造一条对照任务要求的独立检查**，跑一遍看自己的方案是否真的满足：\n\n1. 回到最初的 prompt，逐条列出 explicit requirement（输出文件路径、函数签名、数值精度、bool flag、输出格式约束等）。\n2. 针对每条 requirement 写一段 `/tmp/check.py` 或 bash 检查：**读你产出的 artifact，验证它是否满足这条 requirement**。不是运行你自己写的函数确认 happy-path，而是**模拟 verifier 会怎么检查你**。\n   - 数值任务：sanity-check 数值是否落在物理/合理区间（raman G 峰应 ~1580，不是 19196）。\n   - 文件产出：用 `jq` / `python -m json.tool` 校验结构；用 `head`/`wc` 校验规模。\n   - 代码任务：import 并调用 API，造 corner case 输入，断言输出。\n3. 检查失败就继续修；全部通过再声明完成。\n\n不要再次跳过验证就汇报『已完成』。\n</system-reminder>"
+                }
+                ReflectionLanguage::English => {
+                    "\n\n<system-reminder>\nYou just declared the task complete. But: **TB2's verifier tests live inside the task directory and are not mounted into /app** — you cannot see or run them directly. What you CAN do is construct an **independent check against the task requirements** and run it:\n\n1. Re-read the original prompt. List every explicit requirement (output file path, function signature, numeric tolerance, bool flag, output-format constraint).\n2. Write a `/tmp/check.py` or bash one-liner per requirement that **reads your produced artifact and verifies it meets that requirement**. Not a smoke-test of your own code's happy path — a simulation of what the verifier will check.\n   - Numeric tasks: sanity-check that values land in physically / logically plausible ranges (graphene Raman G peak is ~1580, not 19196).\n   - File outputs: validate structure with `jq` / `python -m json.tool`; check scale with `head` / `wc`.\n   - Code tasks: import + call the API, feed corner-case inputs, assert outputs.\n3. If any check fails, keep working. Only declare done once all pass.\n\nDo not skip verification and claim \"completed\" again.\n</system-reminder>"
+                }
+            };
+            prompt.push_str(addendum);
+        }
         ReflectionCheckpoint { prompt, summary }
     }
 }
 
-#[derive(Debug, Clone)]
-struct WriteProgress {
-    path: String,
-    meaningful: bool,
-    artifact: bool,
-}
-
-#[derive(Debug, Clone)]
-struct EditProgress {
-    path: String,
-    meaningful: bool,
-}
-
-fn classify_write_progress(
-    invocation: &ToolInvocation,
-    artifact_paths: &BTreeSet<String>,
-) -> Option<WriteProgress> {
-    let input = serde_json::from_str::<Value>(&invocation.input).ok()?;
-    let path = input.get("file_path")?.as_str()?.to_string();
-    let content = input
-        .get("content")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    Some(WriteProgress {
-        artifact: path_matches_targets(&path, artifact_paths),
-        meaningful: content_is_meaningful(content),
-        path,
-    })
-}
-
-fn classify_edit_progress(
-    invocation: &ToolInvocation,
-    target_paths: &BTreeSet<String>,
-) -> Option<EditProgress> {
-    let input = serde_json::from_str::<Value>(&invocation.input).ok()?;
-    let path = input.get("file_path")?.as_str()?.to_string();
-    let old_string = input
-        .get("old_string")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let new_string = input
-        .get("new_string")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let meaningful = old_string.trim() != new_string.trim()
-        && (!new_string.trim().is_empty() || path_matches_targets(&path, target_paths));
-    Some(EditProgress { path, meaningful })
-}
-
-fn classify_validation(invocation: &ToolInvocation) -> Option<ValidationSnapshot> {
-    let input = serde_json::from_str::<Value>(&invocation.input).ok()?;
-    let command = input
-        .get("command")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let description = input
-        .get("description")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if !looks_like_validation_command(command, description) {
-        return None;
-    }
-    let failed = extract_count(invocation.output.as_str(), "failed");
-    let passed = extract_count(invocation.output.as_str(), "passed");
-    let error_count = Some(count_case_insensitive(invocation.output.as_str(), "error:") as u32);
-    Some(ValidationSnapshot {
-        success: invocation.success,
-        failed,
-        passed,
-        error_count,
-    })
-}
-
-fn validation_improved(previous: Option<ValidationSnapshot>, current: ValidationSnapshot) -> bool {
-    let Some(previous) = previous else {
-        return current.success;
-    };
-    if current.success && !previous.success {
-        return true;
-    }
-    if let (Some(prev_failed), Some(curr_failed)) = (previous.failed, current.failed) {
-        if curr_failed < prev_failed {
-            return true;
+/// Walks conversation items back-to-front and returns the text of the most
+/// recent assistant message that contains a "completion claim" — words the
+/// model typically uses when it thinks it has finished the task (and is
+/// about to hand control back to Harbor's verifier). Returns `None` if the
+/// latest assistant message is either a pure tool-call or doesn't contain
+/// any such phrasing.
+fn latest_assistant_completion_claim(items: &[ConversationItem]) -> Option<String> {
+    for item in items.iter().rev() {
+        match item {
+            ConversationItem::FunctionCall { .. } | ConversationItem::FunctionCallOutput { .. } => {
+                // Tool activity after the claim — model resumed work, not
+                // claiming done yet. Skip past these to find the claim-text.
+                continue;
+            }
+            ConversationItem::Message { role, content } if role == "assistant" => {
+                let text = content
+                    .iter()
+                    .filter_map(|part| match part {
+                        crate::runtime::openai::conversation::ContentPart::Text { text } => {
+                            Some(text.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if is_completion_claim(&text) {
+                    return Some(text);
+                }
+                return None;
+            }
+            _ => continue,
         }
-    }
-    if let (Some(prev_passed), Some(curr_passed)) = (previous.passed, current.passed) {
-        if curr_passed > prev_passed {
-            return true;
-        }
-    }
-    if let (Some(prev_errors), Some(curr_errors)) = (previous.error_count, current.error_count) {
-        if curr_errors < prev_errors {
-            return true;
-        }
-    }
-    false
-}
-
-fn observe_invocation(invocation: &ToolInvocation) -> ActionObservation {
-    let primary_path = primary_path(invocation);
-    let fingerprint = normalized_fingerprint(invocation, primary_path.as_deref());
-    let error_signature = if invocation.success {
-        None
-    } else {
-        first_non_empty_line(&invocation.output).map(normalize_text)
-    };
-    ActionObservation {
-        kind: action_kind(&invocation.tool_id),
-        fingerprint,
-        error_signature,
-        primary_path,
-    }
-}
-
-fn action_kind(tool_id: &str) -> ActionKind {
-    match tool_id {
-        "Read" => ActionKind::Read,
-        "Write" => ActionKind::Write,
-        "Edit" => ActionKind::Edit,
-        "Bash" => ActionKind::Bash,
-        _ => ActionKind::Other,
-    }
-}
-
-fn render_action_preview(action: &ActionObservation) -> String {
-    match &action.primary_path {
-        Some(path) => format!("{:?} {}", action.kind, path),
-        None => action.fingerprint.clone(),
-    }
-}
-
-fn primary_path(invocation: &ToolInvocation) -> Option<String> {
-    let input = serde_json::from_str::<Value>(&invocation.input).ok()?;
-    if let Some(path) = input.get("file_path").and_then(Value::as_str) {
-        return Some(path.to_string());
-    }
-    if invocation.tool_id == "Bash" {
-        let command = input
-            .get("command")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        return extract_path_candidates(command).into_iter().next();
     }
     None
 }
 
-fn normalized_fingerprint(invocation: &ToolInvocation, primary_path: Option<&str>) -> String {
-    match invocation.tool_id.as_str() {
-        "Read" | "Write" | "Edit" => format!(
-            "{}:{}",
-            invocation.tool_id.to_ascii_lowercase(),
-            primary_path.unwrap_or("unknown")
-        ),
-        "Bash" => {
-            let input = serde_json::from_str::<Value>(&invocation.input).ok();
-            let command = input
-                .as_ref()
-                .and_then(|value| value.get("command"))
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let normalized = normalize_text(command);
-            let head = normalized
-                .split_whitespace()
-                .take(4)
-                .collect::<Vec<_>>()
-                .join(" ");
-            match primary_path {
-                Some(path) => format!("bash:{head}:{path}"),
-                None => format!("bash:{head}"),
-            }
+/// Heuristic classifier for whether an assistant message looks like a
+/// "I finished the task" signal. Tuned against the 25 verifier-reject
+/// trajectories from the Kimi OAuth TB2 run — every one of them ended
+/// with one of these phrasings.
+fn is_completion_claim(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Only consider the first ~200 chars of the message; the claim is
+    // almost always a leading sentence before any bullet-list walk-through.
+    let prefix_len = trimmed.char_indices().nth(200).map(|(i, _)| i).unwrap_or(trimmed.len());
+    let head = trimmed[..prefix_len].to_ascii_lowercase();
+    // Markers derived from the Kimi OAuth TB2 run's 25 verifier-reject
+    // trajectories — every one of them ended with one of these phrasings.
+    let markers: &[&str] = &[
+        "done",
+        "complete",
+        "completed",
+        "finished",
+        "all set",
+        "all done",
+        "ready",
+        "verified",
+        "task is complete",
+        "task complete",
+        "successfully",
+        "has been written",
+        "have been written",
+        "has been saved",
+        "saved to `",
+        "saved to /",
+        "implemented",
+        "i have implemented",
+        "i have created",
+        "i have written",
+        "i have successfully",
+        "i've implemented",
+        "i've created",
+        "i've written",
+        "✅",
+    ];
+    markers.iter().any(|m| head.contains(m))
+}
+
+#[cfg(test)]
+mod completion_claim_tests {
+    use super::*;
+    use crate::runtime::openai::conversation::{ContentPart, ConversationItem};
+
+    fn msg(role: &str, text: &str) -> ConversationItem {
+        ConversationItem::Message {
+            role: role.to_string(),
+            content: vec![ContentPart::Text {
+                text: text.to_string(),
+            }],
         }
-        _ => format!(
-            "{}:{}",
-            invocation.tool_id.to_ascii_lowercase(),
-            normalize_text(&invocation.input)
-        ),
     }
-}
 
-fn build_prompt(
-    language: ReflectionLanguage,
-    goal: &str,
-    summary: &str,
-    signal_lines: &str,
-    recent_actions: &str,
-    relevant_paths: &str,
-    judge_lines: &str,
-) -> String {
-    match language {
-        ReflectionLanguage::Chinese => format!(
-            "<system-reminder>\n反思检查点已触发。\n{summary}\n\n当前目标摘要：\n- {goal}\n\nJudge 结论：\n{judge_lines}\n\n最近信号：\n{signal_lines}\n\n最近动作：\n{recent_actions}\n\n相关文件：\n{relevant_paths}\n\n先在内部用中文回答下面 5 个问题，再继续执行任务。除非你决定升级处理，否则不要把这段反思原样告诉用户。\n1. 当前目标是什么？\n2. 有哪些证据说明当前方法有效或无效？\n3. 自上次 checkpoint 以来有什么变化？\n4. 现在最好的下一步动作是什么？\n5. 继续、重规划，还是升级处理？\n\n输出约束：\n- 先在内部得出一个决定：CONTINUE、REPLAN 或 ESCALATE。\n- 如果决定是 REPLAN，立刻换方法，不要重复刚才那条路径。\n- 如果决定是 ESCALATE，但当前没有用户可问，就简短说明阻塞点并采取成本最低的 fallback，而不是继续死循环。\n- 不要只停在反思；反思后要继续做事。\n</system-reminder>"
-        ),
-        ReflectionLanguage::English => format!(
-            "<system-reminder>\nReflection checkpoint triggered.\n{summary}\n\nCurrent goal summary:\n- {goal}\n\nJudge verdict:\n{judge_lines}\n\nRecent signals:\n{signal_lines}\n\nRecent actions:\n{recent_actions}\n\nRelevant files:\n{relevant_paths}\n\nAnswer the following 5 questions internally in English before you continue. Do not echo the full reflection to the user unless you decide to escalate.\n1. What is the current goal?\n2. What evidence says the current approach is or is not working?\n3. What changed since the last checkpoint?\n4. What is the next best action?\n5. Continue, replan, or escalate?\n\nOutput constraints:\n- Decide internally: CONTINUE, REPLAN, or ESCALATE.\n- If the decision is REPLAN, switch methods immediately instead of repeating the current path.\n- If the decision is ESCALATE and no user interaction is available, state the blocker briefly and take the cheapest viable fallback instead of looping.\n- Do not stop at reflection; continue the task.\n</system-reminder>"
-        ),
+    #[test]
+    fn detects_done_claims() {
+        assert!(is_completion_claim("Done! The function is in /app/run.py"));
+        assert!(is_completion_claim("The task is complete."));
+        assert!(is_completion_claim("All set! Here's what was configured"));
+        assert!(is_completion_claim("I've created the polyglot file"));
+        assert!(is_completion_claim("The implementation is complete."));
+        assert!(is_completion_claim(
+            "The text in the G-code spells out: MAKER. This has been written to /app/out.txt."
+        ));
     }
-}
 
-fn language_label(language: ReflectionLanguage) -> &'static str {
-    match language {
-        ReflectionLanguage::English => "en",
-        ReflectionLanguage::Chinese => "zh",
+    #[test]
+    fn ignores_non_claims() {
+        assert!(!is_completion_claim(""));
+        assert!(!is_completion_claim("Let me start by listing /app"));
+        assert!(!is_completion_claim("I need to understand the task first"));
     }
-}
 
-fn unix_time_ms() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
+    #[test]
+    fn walks_past_trailing_tool_calls() {
+        let items = vec![
+            msg("user", "do the thing"),
+            msg("assistant", "Done! The task is complete."),
+            ConversationItem::FunctionCall {
+                call_id: "c1".into(),
+                name: "Bash".into(),
+                arguments: "{}".into(),
+            },
+            ConversationItem::FunctionCallOutput {
+                call_id: "c1".into(),
+                output: crate::runtime::openai::conversation::ToolOutputPayload::success(
+                    "ok".into(),
+                ),
+            },
+        ];
+        assert!(latest_assistant_completion_claim(&items).is_some());
+    }
+
+    #[test]
+    fn returns_none_when_last_assistant_is_not_a_claim() {
+        let items = vec![
+            msg("user", "do the thing"),
+            msg("assistant", "Let me start investigating"),
+        ];
+        assert!(latest_assistant_completion_claim(&items).is_none());
+    }
 }

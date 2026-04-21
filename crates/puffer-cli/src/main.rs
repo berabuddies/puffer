@@ -1,5 +1,6 @@
 mod auth_credentials;
 mod auth_provider;
+mod benchmark_reflection;
 mod authflow;
 mod benchmark_run;
 mod cli_args;
@@ -19,6 +20,11 @@ use command_surface::{
 };
 use puffer_config::{ensure_workspace_dirs, load_config, ConfigPaths};
 use puffer_core::{resolve_resume_launch, supported_commands, AppState, ResumeLaunchResolution};
+use puffer_provider_openai::kimi_oauth::{
+    poll_for_device_token as kimi_poll_for_device_token,
+    refresh_kimi_token,
+    request_device_authorization as kimi_request_device_authorization,
+};
 use puffer_provider_openai::{
     exchange_authorization_code as exchange_openai_code,
     parse_authorization_input as parse_openai_authorization_input,
@@ -44,7 +50,8 @@ use uuid::Uuid;
 use crate::auth_credentials::{
     anthropic_refresh_scopes, inferred_anthropic_redirect_uri,
     registry_to_anthropic_oauth_credential, set_stored_credential, store_anthropic_credential,
-    store_ready_credential_from_anthropic, to_registry_oauth_credential_openai,
+    store_ready_credential_from_anthropic, to_registry_oauth_credential_kimi,
+    to_registry_oauth_credential_openai,
 };
 use crate::auth_provider::{
     oauth_family_for_provider, oauth_login_bundle_for_provider, oauth_start_bundle_for_provider,
@@ -767,6 +774,9 @@ fn run_auth_command(
                     )?;
                     store_anthropic_credential(auth_store, &provider, credential)?;
                 }
+                Some(OauthFamily::KimiDevice) => anyhow::bail!(
+                    "kimi device-code flow does not use oauth-exchange; use `puffer auth login {provider}` instead"
+                ),
                 None => anyhow::bail!("oauth exchange is not implemented for {provider}"),
             }
             auth_store.save(auth_path)?;
@@ -793,6 +803,9 @@ fn run_auth_command(
                         Some(&registry_to_anthropic_oauth_credential(existing)),
                     )?)?
                 }
+                Some(OauthFamily::KimiDevice) => StoredCredential::OAuth(
+                    to_registry_oauth_credential_kimi(refresh_kimi_token(&existing.refresh_token)?),
+                ),
                 None => anyhow::bail!("oauth refresh is not implemented for {provider}"),
             };
             set_stored_credential(auth_store, provider.clone(), refreshed);
@@ -817,6 +830,16 @@ fn run_login_flow(
     auth_path: &std::path::Path,
     providers: &ProviderRegistry,
 ) -> Result<()> {
+    // Kimi Code uses OAuth 2.0 device-code flow (RFC 8628) — no PKCE, no
+    // localhost callback, just "show user a URL + code, poll the server".
+    // Dispatch early so the rest of this function stays PKCE-specific.
+    if matches!(
+        oauth_family_for_provider(providers, provider),
+        Some(OauthFamily::KimiDevice)
+    ) {
+        return run_kimi_device_login_flow(provider, auth_store, auth_path);
+    }
+
     let callback_listener = if stdin || value.is_some() {
         None
     } else {
@@ -889,11 +912,63 @@ fn run_login_flow(
             )?;
             store_anthropic_credential(auth_store, provider, credential)?;
         }
+        Some(OauthFamily::KimiDevice) => {
+            // Early-return above should prevent reaching here; guard anyway.
+            unreachable!("kimi device-code flow is dispatched before PKCE exchange")
+        }
         None => anyhow::bail!("oauth login is not implemented for {provider}"),
     }
 
     auth_store.save(auth_path)?;
     println!("stored oauth credentials for {provider}");
+    Ok(())
+}
+
+fn run_kimi_device_login_flow(
+    provider: &str,
+    auth_store: &mut AuthStore,
+    auth_path: &std::path::Path,
+) -> Result<()> {
+    println!("Requesting device authorization from https://auth.kimi.com ...");
+    let auth = kimi_request_device_authorization()?;
+
+    let boxed = format!(
+        "\n   ┌─────────────────────────────────────────────────────────┐\
+         \n   │  Visit this URL and confirm the code below:             │\
+         \n   │                                                         │\
+         \n   │    {url:<54}│\
+         \n   │                                                         │\
+         \n   │    Code:  {code:<46}│\
+         \n   └─────────────────────────────────────────────────────────┘\n",
+        url = auth.verification_uri_complete,
+        code = auth.user_code,
+    );
+    println!("{boxed}");
+
+    if authflow::open_browser(&auth.verification_uri_complete) {
+        println!("Opened the verification URL in your default browser.");
+    } else {
+        println!("Could not auto-open a browser; please copy the URL above manually.");
+    }
+    println!("Waiting for Kimi to confirm the authorization (up to 10 minutes)...\n");
+
+    let max_wait = auth
+        .expires_in
+        .unwrap_or(600)
+        .min(900)
+        .max(60);
+
+    let credential = kimi_poll_for_device_token(&auth, max_wait, |msg| {
+        eprintln!("[login] {msg}");
+    })?;
+
+    println!("\n✓ Kimi authorization complete.");
+    auth_store.set_oauth(
+        provider.to_string(),
+        to_registry_oauth_credential_kimi(credential),
+    );
+    auth_store.save(auth_path)?;
+    println!("Stored OAuth credentials for {provider} at {}", auth_path.display());
     Ok(())
 }
 

@@ -16,4 +16,9 @@ sha2.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 url = "2.5.7"
+hostname = "0.4"
+fslock.workspace = true
 puffer-provider-registry = { path = "../puffer-provider-registry" }
+
+[dev-dependencies]
+tempfile.workspace = true

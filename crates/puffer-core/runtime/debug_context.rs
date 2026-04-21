@@ -27,23 +27,36 @@ pub(crate) fn render_debug_context(
     let api = resolve_model_api(state, providers, provider, &model_id);
     let permission_context = load_runtime_permission_context(&state.cwd, resources, state)?;
     let registry = ToolRegistry::from_resources(resources);
-    let enabled_tools = crate::runtime::context_usage::enabled_tool_names(&api, &registry, &permission_context)?;
+    let enabled_tools =
+        crate::runtime::context_usage::enabled_tool_names(&api, &registry, &permission_context)?;
     let system_prompt = render_runtime_system_prompt(state, resources, &model_id, &enabled_tools)?;
     let plan_mode_context = preview_plan_mode_context_message(state, resources)?;
 
     let mut out = String::new();
 
     // ── Model / Provider ──
-    let _ = writeln!(&mut out, "━━━ MODEL: {}/{} (api: {}) ━━━\n", provider.id, model_id, api);
+    let _ = writeln!(
+        &mut out,
+        "━━━ MODEL: {}/{} (api: {}) ━━━\n",
+        provider.id, model_id, api
+    );
 
     // ── System prompt ──
-    let _ = writeln!(&mut out, "┌─── SYSTEM PROMPT ({} chars) ───", system_prompt.len());
+    let _ = writeln!(
+        &mut out,
+        "┌─── SYSTEM PROMPT ({} chars) ───",
+        system_prompt.len()
+    );
     let _ = writeln!(&mut out, "{}", system_prompt);
     let _ = writeln!(&mut out, "└─── END SYSTEM PROMPT ───\n");
 
     // ── Plan mode context ──
     if let Some(plan) = plan_mode_context.as_deref() {
-        let _ = writeln!(&mut out, "┌─── PLAN MODE CONTEXT ({} chars) ───", plan.len());
+        let _ = writeln!(
+            &mut out,
+            "┌─── PLAN MODE CONTEXT ({} chars) ───",
+            plan.len()
+        );
         let _ = writeln!(&mut out, "{}", plan);
         let _ = writeln!(&mut out, "└─── END PLAN MODE CONTEXT ───\n");
     }
@@ -51,8 +64,12 @@ pub(crate) fn render_debug_context(
     // ── Tool definitions ──
     let _ = writeln!(&mut out, "┌─── TOOLS ({}) ───", enabled_tools.len());
     if api == "anthropic-messages" {
-        let definitions =
-            anthropic_tool_definitions_for_request(&registry, None, Some(&permission_context), None)?;
+        let definitions = anthropic_tool_definitions_for_request(
+            &registry,
+            None,
+            Some(&permission_context),
+            None,
+        )?;
         for def in &definitions {
             let pretty = serde_json::to_string_pretty(def).unwrap_or_else(|_| format!("{:?}", def));
             let _ = writeln!(&mut out, "{}", pretty);
@@ -73,7 +90,11 @@ pub(crate) fn render_debug_context(
     let _ = writeln!(&mut out, "└─── END TOOLS ───\n");
 
     // ── Conversation messages ──
-    let _ = writeln!(&mut out, "┌─── CONVERSATION ({} messages) ───", state.transcript.len());
+    let _ = writeln!(
+        &mut out,
+        "┌─── CONVERSATION ({} messages) ───",
+        state.transcript.len()
+    );
     for (i, msg) in state.transcript.iter().enumerate() {
         let role = match msg.role {
             MessageRole::User => "USER",
@@ -96,13 +117,23 @@ pub(crate) fn render_debug_context(
         }
         let text = &msg.text;
         if text.len() > 2000 {
-            let _ = writeln!(&mut out, "{}…\n  ({} chars total, truncated for display)", &text[..2000], text.len());
+            let _ = writeln!(
+                &mut out,
+                "{}…\n  ({} chars total, truncated for display)",
+                truncate_utf8_prefix(text, 2000),
+                text.len()
+            );
         } else {
             let _ = writeln!(&mut out, "{}", text);
         }
         if let Some(input) = &msg.tool_input {
             if input.len() > 500 {
-                let _ = writeln!(&mut out, "  input: {}… ({} chars)", &input[..500], input.len());
+                let _ = writeln!(
+                    &mut out,
+                    "  input: {}… ({} chars)",
+                    truncate_utf8_prefix(input, 500),
+                    input.len()
+                );
             } else {
                 let _ = writeln!(&mut out, "  input: {}", input);
             }
@@ -111,4 +142,45 @@ pub(crate) fn render_debug_context(
     let _ = writeln!(&mut out, "\n└─── END CONVERSATION ───");
 
     Ok(out)
+}
+
+/// Truncates a string to at most `max_bytes` bytes, respecting UTF-8 char
+/// boundaries. Naive `&text[..max_bytes]` panics when the cut falls inside a
+/// multi-byte codepoint (e.g. `≤` = 3 bytes) — seen in the wild on the TB2
+/// `distribution-search` prompt.
+fn truncate_utf8_prefix(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_utf8_prefix;
+
+    #[test]
+    fn truncates_inside_multibyte_char() {
+        // "≤" is U+2264, 3 bytes (e2 89 a4). Cutting at byte 1 or 2 of it
+        // would panic; the helper must back off to the char boundary.
+        let s = "foo≤bar";
+        for cap in 0..=s.len() {
+            let out = truncate_utf8_prefix(s, cap);
+            assert!(
+                s.is_char_boundary(out.len()),
+                "cap {cap} produced non-boundary slice of len {}",
+                out.len()
+            );
+        }
+    }
+
+    #[test]
+    fn short_text_returned_whole() {
+        assert_eq!(truncate_utf8_prefix("hi", 100), "hi");
+        assert_eq!(truncate_utf8_prefix("", 10), "");
+    }
 }

@@ -255,14 +255,25 @@ fn build_request_to_path<T: Serialize>(
     accept_event_stream: bool,
 ) -> anyhow::Result<BuiltOpenAIRequest> {
     let normalized_path = normalized_path(&config.base_url, path);
-    let mut headers = vec![
-        ("Content-Type".to_string(), "application/json".to_string()),
-        (
+    // When the provider's yaml (or the Kimi OAuth path) has already supplied
+    // a `User-Agent`, skip the default Codex UA so we don't emit two of them.
+    // reqwest will concatenate duplicate headers with commas, which breaks
+    // Kimi's UA whitelist ("KimiCLI/*, codex_cli_rs/...").
+    let has_custom_user_agent = config
+        .custom_headers
+        .iter()
+        .any(|(key, _)| key.eq_ignore_ascii_case("user-agent"));
+    let mut headers = vec![(
+        "Content-Type".to_string(),
+        "application/json".to_string(),
+    )];
+    if !has_custom_user_agent {
+        headers.push((
             "User-Agent".to_string(),
             codex_user_agent(&config.version, &config.originator),
-        ),
-        ("originator".to_string(), config.originator.clone()),
-    ];
+        ));
+    }
+    headers.push(("originator".to_string(), config.originator.clone()));
     if normalized_path.ends_with("/responses") && accept_event_stream {
         headers.push(("Accept".to_string(), "text/event-stream".to_string()));
     }

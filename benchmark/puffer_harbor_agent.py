@@ -65,6 +65,24 @@ class PufferBenchAgent(BaseInstalledAgent):
                 f"  if [ -f {quoted_codex_dir}/config.toml ]; then "
                 f'    cp {quoted_codex_dir}/config.toml "$agent_home/.codex/config.toml"; '
                 "  fi; "
+                # Puffer credentials live at $HOME/.puffer/auth.json + two
+                # sibling files: `.credentials.json` (OAuth access/refresh
+                # token body, 0600) and `kimi-device-id` (persistent UUID we
+                # send in `X-Msh-Device-Id`). The benchmark side-channels all
+                # three through codex_dir since Harbor already mounts it.
+                f"  if [ -f {quoted_codex_dir}/puffer-auth.json ]; then "
+                '    mkdir -p "$agent_home/.puffer"; '
+                f'    cp {quoted_codex_dir}/puffer-auth.json "$agent_home/.puffer/auth.json"; '
+                "  fi; "
+                f"  if [ -f {quoted_codex_dir}/puffer-credentials.json ]; then "
+                '    mkdir -p "$agent_home/.puffer"; '
+                f'    cp {quoted_codex_dir}/puffer-credentials.json "$agent_home/.puffer/.credentials.json"; '
+                '    chmod 600 "$agent_home/.puffer/.credentials.json"; '
+                "  fi; "
+                f"  if [ -f {quoted_codex_dir}/puffer-kimi-device-id ]; then "
+                '    mkdir -p "$agent_home/.puffer"; '
+                f'    cp {quoted_codex_dir}/puffer-kimi-device-id "$agent_home/.puffer/kimi-device-id"; '
+                "  fi; "
                 "fi; "
                 f"{quoted_bin} benchmark-run --help >/dev/null"
             ),
@@ -106,6 +124,8 @@ class PufferBenchAgent(BaseInstalledAgent):
             "OPENAI_API_KEY",
             "OPENAI_BASE_URL",
             "PUFFER_OPENAI_STREAM_READ_TIMEOUT_MS",
+            "PUFFER_BENCHMARK_LLM_JUDGE_MODEL",
+            "PUFFER_BENCHMARK_LLM_JUDGE_EFFORT",
         ):
             value = os.environ.get(key, "")
             if value:

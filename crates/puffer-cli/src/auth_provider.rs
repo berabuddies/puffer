@@ -14,6 +14,11 @@ use puffer_transport_anthropic::{
 pub(crate) enum OauthFamily {
     Anthropic,
     OpenAi,
+    /// OAuth 2.0 device-code flow used by Moonshot's Kimi Code platform.
+    /// The CLI posts to `https://auth.kimi.com/api/oauth/device_authorization`,
+    /// shows the user a URL + code, then polls for the token — no localhost
+    /// callback involved.
+    KimiDevice,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,7 +44,13 @@ pub(crate) fn oauth_family_for_provider(
         "openai-responses"
         | "openai-completions"
         | "azure-openai-responses"
-        | "openai-codex-responses" => Some(OauthFamily::OpenAi),
+        | "openai-codex-responses" => {
+            if provider.base_url.contains("api.kimi.com") || provider.id.starts_with("kimi-") {
+                Some(OauthFamily::KimiDevice)
+            } else {
+                Some(OauthFamily::OpenAi)
+            }
+        }
         "anthropic-messages" => Some(OauthFamily::Anthropic),
         _ => None,
     }
@@ -86,6 +97,9 @@ pub(crate) fn oauth_start_bundle_for_provider(
                 manual_redirect_uri: Some(ANTHROPIC_MANUAL_REDIRECT_URL.to_string()),
             })
         }
+        Some(OauthFamily::KimiDevice) => Err(anyhow!(
+            "kimi device-code flow does not use a PKCE bundle; call `puffer auth login {provider_id}` instead"
+        )),
         None => Err(anyhow!("oauth is not implemented for {provider_id}")),
     }
 }
@@ -136,6 +150,9 @@ pub(crate) fn oauth_login_bundle_for_provider(
                 manual_redirect_uri: Some(manual.redirect_uri),
             })
         }
+        Some(OauthFamily::KimiDevice) => Err(anyhow!(
+            "kimi device-code flow does not use a localhost callback; call `puffer auth login {provider_id}` instead"
+        )),
         None => Err(anyhow!("oauth is not implemented for {provider_id}")),
     }
 }

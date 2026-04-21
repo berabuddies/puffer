@@ -9,6 +9,7 @@ mod codex;
 mod request;
 mod response;
 mod usage;
+pub mod kimi_oauth;
 
 pub use auth::OpenAIAuth;
 pub use auth::OpenAIOAuthConfig;

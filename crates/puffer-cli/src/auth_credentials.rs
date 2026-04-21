@@ -53,6 +53,35 @@ pub(crate) fn to_registry_oauth_credential_openai(
     }
 }
 
+/// Converts Kimi device-code OAuth credentials into the registry storage shape.
+pub(crate) fn to_registry_oauth_credential_kimi(
+    credential: puffer_provider_openai::kimi_oauth::KimiOAuthCredentials,
+) -> OAuthCredential {
+    let scopes = if credential.scope.is_empty() {
+        Vec::new()
+    } else {
+        credential
+            .scope
+            .split_whitespace()
+            .map(String::from)
+            .collect()
+    };
+    OAuthCredential {
+        access_token: credential.access_token,
+        refresh_token: credential.refresh_token,
+        expires_at_ms: credential.expires_at_ms,
+        account_id: None,
+        organization_id: None,
+        email: None,
+        plan_type: None,
+        rate_limit_tier: None,
+        scopes,
+        organization_name: None,
+        organization_role: None,
+        workspace_role: None,
+    }
+}
+
 /// Converts Anthropic OAuth credentials into the registry storage shape.
 pub(crate) fn to_registry_oauth_credential_anthropic(
     credential: AnthropicOAuthCredentials,

@@ -272,7 +272,7 @@ fn execute_openai_once(
 
         // Shared: append tool calls + outputs to canonical items.
         append_tool_results(&mut items, &tool_results.invocations);
-        if let Some(checkpoint) = reflection.as_mut().and_then(|tracker| {
+        if let Some(observation) = reflection.as_mut().and_then(|tracker| {
             tracker.observe_openai_batch(
                 &tool_results.invocations,
                 &items,
@@ -282,7 +282,9 @@ fn execute_openai_once(
                 auth_store,
             )
         }) {
-            items.push(ConversationItem::user_message(checkpoint.prompt));
+            if let Some(checkpoint) = observation.checkpoint {
+                items.push(ConversationItem::user_message(checkpoint.prompt));
+            }
         }
         invocations.extend(tool_results.invocations);
 
@@ -566,7 +568,7 @@ where
 
         // Shared: append tool calls + outputs to canonical items.
         append_tool_results(&mut items, &tool_results.invocations);
-        if let Some(checkpoint) = reflection.as_mut().and_then(|tracker| {
+        if let Some(observation) = reflection.as_mut().and_then(|tracker| {
             tracker.observe_openai_batch(
                 &tool_results.invocations,
                 &items,
@@ -576,10 +578,12 @@ where
                 auth_store,
             )
         }) {
-            on_event(TurnStreamEvent::ReflectionCheckpoint(
-                checkpoint.summary.clone(),
-            ));
-            items.push(ConversationItem::user_message(checkpoint.prompt));
+            if let Some(checkpoint) = observation.checkpoint {
+                on_event(TurnStreamEvent::ReflectionCheckpoint(
+                    checkpoint.summary.clone(),
+                ));
+                items.push(ConversationItem::user_message(checkpoint.prompt));
+            }
         }
         invocations.extend(tool_results.invocations);
 
@@ -764,7 +768,7 @@ fn execute_openai_completions_once(
 
         // Shared: append tool calls + outputs to canonical items.
         append_tool_results(&mut items, &tool_results.invocations);
-        if let Some(checkpoint) = reflection.as_mut().and_then(|tracker| {
+        if let Some(observation) = reflection.as_mut().and_then(|tracker| {
             tracker.observe_openai_batch(
                 &tool_results.invocations,
                 &items,
@@ -774,7 +778,9 @@ fn execute_openai_completions_once(
                 auth_store,
             )
         }) {
-            items.push(ConversationItem::user_message(checkpoint.prompt));
+            if let Some(checkpoint) = observation.checkpoint {
+                items.push(ConversationItem::user_message(checkpoint.prompt));
+            }
         }
         invocations.extend(tool_results.invocations);
 
@@ -1211,6 +1217,28 @@ pub(super) fn resolve_openai_execution_config(
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect::<Vec<_>>();
     append_default_openai_headers(&mut custom_headers, provider.id.as_str());
+    // Kimi expects the same X-Msh-* device headers on chat API calls that it
+    // requires during OAuth login — without them, rate-limit tracking and
+    // subscription gating silently degrade. We append them for any provider
+    // whose base URL points at Kimi's coding endpoint, regardless of whether
+    // the user is authenticating with a sk-kimi-* key or a JWT.
+    if is_kimi_provider(provider) {
+        if let Ok(kimi_headers) = puffer_provider_openai::kimi_oauth::kimi_common_headers() {
+            for (name, value) in kimi_headers {
+                // Let the yaml's `headers:` block win for User-Agent so local
+                // overrides (e.g. benchmarking with a frozen version) still
+                // work. The remaining X-Msh-* keys are always safe to set.
+                if name.eq_ignore_ascii_case("user-agent")
+                    && custom_headers
+                        .iter()
+                        .any(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+                {
+                    continue;
+                }
+                custom_headers.push((name, value));
+            }
+        }
+    }
     let session_id = Some(state.session.id.to_string());
     let originator = OPENAI_CODEX_ORIGINATOR.to_string();
     match auth_store.get(provider.id.as_str()) {
@@ -1279,6 +1307,69 @@ pub(super) fn resolve_openai_execution_config(
     }
 }
 
+/// Returns true when the provider fronts Kimi's managed coding endpoint
+/// (either through an OAuth JWT or a legacy sk-kimi-* API key).
+fn is_kimi_provider(provider: &ProviderDescriptor) -> bool {
+    provider.id.starts_with("kimi-") || provider.base_url.contains("api.kimi.com")
+}
+
+/// Dispatches the right OAuth refresh endpoint for a provider. OpenAI / Codex
+/// refresh at auth.openai.com; Kimi refreshes at auth.kimi.com with a
+/// different grant body + cross-process file lock so 20 concurrent bench
+/// workers sharing one credential file don't racing-invalidate each other.
+/// Both paths return the same `OAuthCredential` registry shape so callers
+/// stay provider-agnostic.
+fn refresh_oauth_for_provider(
+    provider_id: &str,
+    refresh_token: &Option<String>,
+) -> Result<puffer_provider_registry::OAuthCredential> {
+    let refresh_token = refresh_token
+        .clone()
+        .ok_or_else(|| anyhow!("missing refresh token for OAuth retry ({provider_id})"))?;
+    if provider_id.starts_with("kimi-") {
+        let lock_path = puffer_provider_openai::kimi_oauth::default_kimi_lock_path()?;
+        let kimi = puffer_provider_openai::kimi_oauth::refresh_kimi_token_locked(
+            &lock_path,
+            &refresh_token,
+            || None, // runtime does not have the AuthStore here; outer layer handles reload
+        )
+        .context("failed to refresh Kimi OAuth credentials after 401")?;
+        Ok(kimi_registry_credential(kimi))
+    } else {
+        let refreshed = refresh_oauth_token(&refresh_token)
+            .context("failed to refresh OpenAI OAuth credentials after 401")?;
+        Ok(openai_registry_credential(refreshed))
+    }
+}
+
+fn kimi_registry_credential(
+    credential: puffer_provider_openai::kimi_oauth::KimiOAuthCredentials,
+) -> puffer_provider_registry::OAuthCredential {
+    let scopes = if credential.scope.is_empty() {
+        Vec::new()
+    } else {
+        credential
+            .scope
+            .split_whitespace()
+            .map(String::from)
+            .collect()
+    };
+    puffer_provider_registry::OAuthCredential {
+        access_token: credential.access_token,
+        refresh_token: credential.refresh_token,
+        expires_at_ms: credential.expires_at_ms,
+        account_id: None,
+        organization_id: None,
+        email: None,
+        plan_type: None,
+        rate_limit_tier: None,
+        scopes,
+        organization_name: None,
+        organization_role: None,
+        workspace_role: None,
+    }
+}
+
 fn codex_style_for_provider(provider: &ProviderDescriptor, oauth: bool) -> bool {
     let requested = if oauth && provider.id == "openai" {
         true
@@ -1320,13 +1411,7 @@ where
         return parse_http_json_response(&request.url, false, response);
     }
 
-    let refresh_token = execution
-        .refresh_token
-        .clone()
-        .ok_or_else(|| anyhow!("missing refresh token for OpenAI OAuth retry"))?;
-    let refreshed = refresh_oauth_token(&refresh_token)
-        .context("failed to refresh OpenAI OAuth credentials after 401")?;
-    let stored = openai_registry_credential(refreshed);
+    let stored = refresh_oauth_for_provider(&execution.provider_id, &execution.refresh_token)?;
     execution.request_config.auth = OpenAIAuth::OAuthBearer(stored.access_token.clone());
     execution.request_config.account_id = stored.account_id.clone();
     execution.refresh_token = Some(stored.refresh_token.clone());
@@ -1362,13 +1447,7 @@ where
         return parse_openai_stream_response(&request.url, response, on_event);
     }
 
-    let refresh_token = execution
-        .refresh_token
-        .clone()
-        .ok_or_else(|| anyhow!("missing refresh token for OpenAI OAuth retry"))?;
-    let refreshed = refresh_oauth_token(&refresh_token)
-        .context("failed to refresh OpenAI OAuth credentials after 401")?;
-    let stored = openai_registry_credential(refreshed);
+    let stored = refresh_oauth_for_provider(&execution.provider_id, &execution.refresh_token)?;
     execution.request_config.auth = OpenAIAuth::OAuthBearer(stored.access_token.clone());
     execution.request_config.account_id = stored.account_id.clone();
     execution.refresh_token = Some(stored.refresh_token.clone());
