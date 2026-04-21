@@ -538,9 +538,17 @@ where
             // Last-chance reflection hook — see non-streaming path for
             // rationale. Without this, completion-claim turns that emit no
             // tool calls exit the loop before the trigger can run.
+            //
+            // CRITICAL: this branch mirrors the normal tool-call path's
+            // items update. We must push BOTH the assistant text AND the
+            // reasoning items produced on this turn, otherwise the next
+            // request (on reflection continue) replays an assistant message
+            // without its reasoning_content and Kimi 400s with "thinking is
+            // enabled but reasoning_content is missing".
             if !assistant_text.trim().is_empty() {
                 items.push(ConversationItem::assistant_message(&assistant_text));
             }
+            append_reasoning_items(&mut items, &response.reasoning_items);
             if let Some(observation) = reflection.as_mut().and_then(|tracker| {
                 tracker.observe_openai_batch(
                     &[],
