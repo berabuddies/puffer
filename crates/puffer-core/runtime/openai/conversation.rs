@@ -434,7 +434,69 @@ pub(crate) fn append_tool_results(
                 ToolOutputPayload::error(inv.output.clone())
             },
         });
+        // If the tool output carries an image payload (currently: the
+        // Read tool returning an image file), follow it with a synthetic
+        // user turn that delivers the pixels as a proper vision content
+        // part. Without this the base64 string lives inside a JSON blob
+        // in the tool output and the model sees only the text; tasks
+        // like chess-best-move (where the prompt references a PNG) would
+        // never actually see the board.
+        if inv.success {
+            if let Some(image) = maybe_extract_image_from_tool_output(&inv.output) {
+                items.push(ConversationItem::Message {
+                    role: "user".to_string(),
+                    content: vec![
+                        ContentPart::Text {
+                            text: image.note,
+                        },
+                        ContentPart::Image { url: image.data_url },
+                    ],
+                });
+            }
+        }
     }
+}
+
+/// An image payload extracted from a Read-tool output.
+struct ExtractedImage {
+    note: String,
+    data_url: String,
+}
+
+/// Looks for the Read tool's image-file payload shape in the given tool
+/// output string and, when present, returns the data URL + a short note
+/// for a follow-on user message. Returns None for text file reads and
+/// all other tool outputs.
+fn maybe_extract_image_from_tool_output(output: &str) -> Option<ExtractedImage> {
+    // Fast path: cheap substring check before we spend JSON parsing on
+    // the (potentially large base64) output.
+    if !output.contains("\"type\"") || !output.contains("\"image\"") {
+        return None;
+    }
+    let v: Value = serde_json::from_str(output).ok()?;
+    if v.get("type").and_then(Value::as_str) != Some("image") {
+        return None;
+    }
+    let file = v.get("file")?;
+    let base64 = file.get("base64").and_then(Value::as_str)?;
+    let mime = file
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("image/png");
+    let size = file
+        .get("originalSize")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let path = file.get("filePath").and_then(Value::as_str).unwrap_or("");
+    let note = if path.is_empty() {
+        format!("Attached image ({}, {} bytes):", mime, size)
+    } else {
+        format!("Attached image from {} ({}, {} bytes):", path, mime, size)
+    };
+    Some(ExtractedImage {
+        note,
+        data_url: format!("data:{};base64,{}", mime, base64),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -522,6 +584,45 @@ fn content_parts_to_text(parts: &[ContentPart]) -> String {
     texts.join("\n")
 }
 
+/// Returns true if any content part is an image. Used to decide whether
+/// a message needs multi-part JSON content instead of a plain string.
+fn content_parts_has_image(parts: &[ContentPart]) -> bool {
+    parts
+        .iter()
+        .any(|p| matches!(p, ContentPart::Image { .. }))
+}
+
+/// Renders content parts as an OpenAI chat-completions `content` value.
+/// Chat Completions accepts either a plain string or an array of parts —
+/// we emit the array form only when at least one image is present (vision
+/// request) so text-only messages stay compatible with the simple
+/// string-content wire shape the rest of the conversion pipeline (and
+/// legacy providers) expects.
+fn content_parts_to_wire_value(parts: &[ContentPart]) -> Value {
+    if !content_parts_has_image(parts) {
+        return json!(content_parts_to_text(parts));
+    }
+    let mut out = Vec::with_capacity(parts.len());
+    for p in parts {
+        match p {
+            ContentPart::Text { text } => {
+                out.push(json!({"type": "text", "text": text}));
+            }
+            ContentPart::Image { url } => {
+                // OpenAI vision / Kimi k2.6 vision accept
+                // `image_url.url = "data:image/png;base64,..."` (or an
+                // http URL). The existing ContentPart::Image carries the
+                // full data URL or URL directly.
+                out.push(json!({
+                    "type": "image_url",
+                    "image_url": {"url": url}
+                }));
+            }
+        }
+    }
+    json!(out)
+}
+
 // ---------------------------------------------------------------------------
 // ConversationItem → Chat Completions wire format
 // ---------------------------------------------------------------------------
@@ -568,8 +669,18 @@ pub(crate) fn items_to_chat_messages(
     while i < items.len() {
         match &items[i] {
             ConversationItem::Message { role, content } => {
-                let text = content_parts_to_text(content);
-                let mut msg = chat_message(role, &text);
+                // Text-only messages keep the plain-string content shape;
+                // messages carrying an image get an OpenAI multi-part
+                // content array so the vision payload actually reaches the
+                // provider (Kimi k2.6 and OpenAI both accept this shape).
+                let wire_content = content_parts_to_wire_value(content);
+                let mut msg = OpenAIChatMessage {
+                    role: role.clone(),
+                    content: Some(wire_content),
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                    reasoning_content: None,
+                };
                 i += 1;
                 if role == "assistant" {
                     // OpenAI spec: one assistant turn = one wire message
