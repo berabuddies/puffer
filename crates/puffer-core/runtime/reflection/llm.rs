@@ -51,6 +51,43 @@ pub(super) fn build_llm_judge_prompt(
     let code_line = code_signal
         .map(render_judge_lines)
         .unwrap_or_else(|| "- code_judge: not triggered".to_string());
+    // When the agent has emitted a text-only terminal turn, the code-judge
+    // path synthesises a claim-only observation with no real progress
+    // markers and the `completion_claim` field carries the agent's final
+    // answer. Surfacing it explicitly (instead of relying on the judge to
+    // fish it out of the context preview) lets us ask the skeptical
+    // question — "did they actually verify, or is this a confident
+    // summary?" — in a way that doesn't get drowned out by the prior
+    // tool trace.
+    let completion_claim_section = match assessment.completion_claim.as_deref() {
+        Some(text) if !text.trim().is_empty() => {
+            let truncated = if text.chars().count() > 1200 {
+                let cut: String = text.chars().take(1200).collect();
+                format!("{cut}…(truncated)")
+            } else {
+                text.to_string()
+            };
+            match language {
+                ReflectionLanguage::Chinese => format!(
+                    "\nAgent 声明已完成（终局 turn，这是最后一次干预机会）：\n\"\"\"\n{truncated}\n\"\"\"\n\
+质疑该声明时重点看：\n\
+- agent 是否跑了 verifier 真的用的测试文件（常见路径：/tests/test_outputs.py、/app/tests/）？还是只跑了 agent 自己造的 smoke test？\n\
+- 产物目录里有没有 agent 测试留下的临时产物（编译中间文件、备份文件等）— 严格的 file-listing 检查会挂。\n\
+- agent 自己的验证断言是否覆盖了任务 requirement 里**全部**的项目（包括数值边界、格式保留、跨输入一致性）？\n\
+- 自信的 \"Done!\" 不是证据；\"我跑了 /tests/test_outputs.py 全过\" 才是证据。\n",
+                ),
+                ReflectionLanguage::English => format!(
+                    "\nAgent claims completion (terminal turn — last chance to intervene):\n\"\"\"\n{truncated}\n\"\"\"\n\
+When questioning the claim, focus on:\n\
+- Did the agent run the verifier's actual test file (common paths: /tests/test_outputs.py, /app/tests/)? Or only a surrogate smoke test they wrote themselves?\n\
+- Are there leftover build/test artifacts in the output directory — strict file-listing checks in the verifier will fail.\n\
+- Does the agent's self-verification cover **every** requirement item (numeric bounds, format preservation, cross-input consistency)?\n\
+- A confident \"Done!\" is not evidence; \"I ran /tests/test_outputs.py and it passed\" is.\n",
+                ),
+            }
+        }
+        _ => String::new(),
+    };
     match language {
         ReflectionLanguage::Chinese => format!(
             "你是一个严格的运行时判断器，不要解决任务本身，只判断主 agent 现在是否应该进入反思。\n\
@@ -60,10 +97,11 @@ pub(super) fn build_llm_judge_prompt(
 最近信号：\n{signal_lines}\n\n\
 最近动作：\n{recent_actions}\n\n\
 相关文件：\n{relevant_paths}\n\n\
-当前上下文窗口：\n{context}\n\n\
+当前上下文窗口：\n{context}\n{completion_claim_section}\n\
 请判断主 agent 现在应该：continue / reflect / escalate。\n\
 判断标准：\n\
 - 如果明显在重复、停滞、偏航，输出 reflect。\n\
+- 如果 agent 声明完成但验证证据不充分（没跑真 verifier 测试、留了测试产物、自测没覆盖 requirement），输出 reflect。\n\
 - 如果只是正常推进中，输出 continue。\n\
 - 如果核心信息缺失、上下文明显不足或需要用户输入才能继续，输出 escalate。\n\n\
 输出 JSON schema：\n\
@@ -77,10 +115,11 @@ Heuristic judge status:\n{code_line}\n\n\
 Recent signals:\n{signal_lines}\n\n\
 Recent actions:\n{recent_actions}\n\n\
 Relevant files:\n{relevant_paths}\n\n\
-Current context window:\n{context}\n\n\
+Current context window:\n{context}\n{completion_claim_section}\n\
 Decide whether the main agent should: continue / reflect / escalate.\n\
 Criteria:\n\
 - If it is clearly looping, stalled, or wandering, output reflect.\n\
+- If the agent claims completion but the evidence is weak (no run of the real verifier tests, leftover test artifacts, self-tests that don't cover the full requirement list), output reflect.\n\
 - If it is progressing normally, output continue.\n\
 - If key information is missing or user input is required, output escalate.\n\n\
 Output JSON schema:\n\
@@ -128,7 +167,14 @@ pub(super) fn select_final_signal(
             (Some(_), Some(None)) => None,
             (None, _) => None,
         },
-        _ => llm_signal.flatten().or(code_signal),
+        // Independent: the LLM decides authoritatively when it was reached.
+        // - Some(Some(sig)) — LLM said REFLECT/ESCALATE, use it.
+        // - Some(None)      — LLM said CONTINUE, suppress code signal.
+        // - None            — LLM was unavailable / errored, fall back to code signal.
+        _ => match llm_signal {
+            Some(value) => value,
+            None => code_signal,
+        },
     }
 }
 
@@ -367,6 +413,39 @@ mod tests {
             None,
         )
         .expect("code judge should survive transport failure");
+        assert_eq!(selected.source, code_signal.source);
+    }
+
+    #[test]
+    fn independent_mode_honours_llm_continue_over_code_signal() {
+        let code_signal = JudgeSignal {
+            source: "code_judge",
+            summary: "stalled".to_string(),
+            reason: "looping".to_string(),
+            next_action: None,
+        };
+        let selected = select_final_signal(
+            Some(LlmJudgeMode::Independent),
+            Some(code_signal),
+            Some(None),
+        );
+        assert!(
+            selected.is_none(),
+            "independent mode should respect an explicit LLM CONTINUE"
+        );
+    }
+
+    #[test]
+    fn independent_mode_falls_back_to_code_when_llm_unreached() {
+        let code_signal = JudgeSignal {
+            source: "code_judge",
+            summary: "stalled".to_string(),
+            reason: "looping".to_string(),
+            next_action: None,
+        };
+        let selected =
+            select_final_signal(Some(LlmJudgeMode::Independent), Some(code_signal.clone()), None)
+                .expect("independent mode should fall back to code judge on llm failure");
         assert_eq!(selected.source, code_signal.source);
     }
 }
