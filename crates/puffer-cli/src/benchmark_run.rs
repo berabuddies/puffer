@@ -1,9 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use indexmap::IndexMap;
 use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
-use puffer_core::{
-    execute_user_turn_streaming_with_reflection, AppState, ReflectionConfig, ReflectionLanguage,
-};
+use puffer_core::{execute_user_turn_streaming_with_reflection, AppState};
 use puffer_provider_registry::{
     detect_import_candidates, AuthStore, ExternalImportFamily, ModelDescriptor, ProviderRegistry,
     StoredCredential,
@@ -19,6 +17,8 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
+
+use crate::benchmark_reflection::benchmark_reflection_config;
 
 const APP_NAME: &str = "puffer-code";
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -36,6 +36,11 @@ When the task already names both the verifier file and the required output file,
 
 Before opening or running a tool on a file, consider whether it may modify that file or its neighbors as a side effect. When in doubt, back up first.
 When a file's contents look unexpected, inspect it with a low-level tool before passing it to a higher-level one that might alter it.
+
+Before you declare the task complete:
+- Check whether the environment ships the evaluation tests (commonly at `/tests/test_outputs.py`, `/app/tests/`, or another path named in the prompt). If such a file exists, READ it and run the exact assertions it runs — your own surrogate tests are not a substitute for the verifier's.
+- Re-list the task's required output directory and confirm only the artifact(s) the task asked for are there — build products, binaries, backup files, or test scratch files left behind will often fail strict file-listing checks.
+- "My self-written test passed" is weaker evidence than "I ran the verifier's actual test and it passed." Prefer the latter whenever the verifier file is accessible.
 
 $USING_YOUR_TOOLS
 
@@ -190,10 +195,7 @@ pub(crate) fn run_benchmark_command(
         providers,
         auth_store,
         &prompt,
-        ReflectionConfig {
-            language: ReflectionLanguage::Chinese,
-            ..ReflectionConfig::default()
-        },
+        benchmark_reflection_config(&model_selector),
         |event| {
             use std::io::Write;
             match &event {
@@ -252,6 +254,55 @@ pub(crate) fn run_benchmark_command(
                             let line = serde_json::json!({
                                 "type": "reflection_checkpoint",
                                 "summary": summary,
+                                "timestamp": unix_time_ms(),
+                            });
+                            let _ = writeln!(f, "{}", line);
+                            let _ = f.flush();
+                        }
+                    }
+                }
+                puffer_core::TurnStreamEvent::ReflectionTrace(trace) => {
+                    let line = serde_json::json!({
+                        "type": "reflection_trace",
+                        "event": trace,
+                        "timestamp": unix_time_ms(),
+                    });
+                    let _ = session_store.append_trace_event(session_id, "runtime_trace", &line);
+                    if let Some(lock) = incremental_ref {
+                        if let Ok(mut f) = lock.lock() {
+                            let _ = writeln!(f, "{}", line);
+                            let _ = f.flush();
+                        }
+                    }
+                }
+                puffer_core::TurnStreamEvent::Usage(report) => {
+                    if let Some(lock) = incremental_ref {
+                        if let Ok(mut f) = lock.lock() {
+                            let line = serde_json::json!({
+                                "type": "usage",
+                                "input_tokens": report.input_tokens,
+                                "output_tokens": report.output_tokens,
+                                "cache_read_tokens": report.cache_read_tokens,
+                                "cache_creation_tokens": report.cache_creation_tokens,
+                                "timestamp": unix_time_ms(),
+                            });
+                            let _ = writeln!(f, "{}", line);
+                            let _ = f.flush();
+                        }
+                    }
+                }
+                puffer_core::TurnStreamEvent::RetryAttempt {
+                    attempt,
+                    max_attempts,
+                    error,
+                } => {
+                    if let Some(lock) = incremental_ref {
+                        if let Ok(mut f) = lock.lock() {
+                            let line = serde_json::json!({
+                                "type": "retry_attempt",
+                                "attempt": attempt,
+                                "max_attempts": max_attempts,
+                                "error": error,
                                 "timestamp": unix_time_ms(),
                             });
                             let _ = writeln!(f, "{}", line);
@@ -731,6 +782,7 @@ fn benchmark_tool_permission<'a>(tool_id: &str, deny_tools: &'a [String]) -> &'a
 #[cfg(test)]
 mod tests {
     use super::*;
+    use puffer_core::ReflectionLanguage;
     use std::ffi::OsString;
 
     struct ScopedBenchmarkWorkingDirs {
@@ -767,6 +819,12 @@ mod tests {
         assert_eq!(
             normalize_model_selector("openai", "other/model"),
             "other/model"
+        );
+        let config = benchmark_reflection_config("openai/gpt-5.3-codex-spark");
+        assert_eq!(config.language, ReflectionLanguage::Chinese);
+        assert_eq!(
+            config.llm_judge.unwrap().model_selector.as_deref(),
+            Some("openai/gpt-5.3-codex-spark")
         );
     }
 
