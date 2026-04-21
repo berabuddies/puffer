@@ -75,21 +75,33 @@ pub fn tool_description(input: &ClaudeBashInput) -> String {
 }
 
 /// Parses JSON input and executes a Claude-style `Bash` tool invocation.
-pub fn execute_from_value(cwd: &Path, session_id: &Uuid, input: Value) -> Result<ClaudeBashExecution> {
+pub fn execute_from_value(
+    cwd: &Path,
+    session_id: &Uuid,
+    input: Value,
+) -> Result<ClaudeBashExecution> {
     let typed: ClaudeBashInput =
         serde_json::from_value(input).context("invalid Bash tool input payload")?;
     execute(cwd, session_id, typed)
 }
 
 /// Executes a Claude-style `Bash` tool invocation in the provided working directory.
-pub fn execute(cwd: &Path, session_id: &Uuid, input: ClaudeBashInput) -> Result<ClaudeBashExecution> {
+pub fn execute(
+    cwd: &Path,
+    session_id: &Uuid,
+    input: ClaudeBashInput,
+) -> Result<ClaudeBashExecution> {
     if input.run_in_background {
         return execute_background(cwd, session_id, input);
     }
     execute_foreground(cwd, input)
 }
 
-fn execute_background(cwd: &Path, session_id: &Uuid, input: ClaudeBashInput) -> Result<ClaudeBashExecution> {
+fn execute_background(
+    cwd: &Path,
+    session_id: &Uuid,
+    input: ClaudeBashInput,
+) -> Result<ClaudeBashExecution> {
     let output_dir = shell_output_dir(cwd)?;
     let pending_output_file =
         output_dir.join(format!("shell-pending-{}.log", unique_output_nonce()));
@@ -143,7 +155,12 @@ fn execute_background(cwd: &Path, session_id: &Uuid, input: ClaudeBashInput) -> 
         let exit_status = child.wait();
         let exit_code = exit_status.ok().and_then(|s| s.code());
         // Best-effort: mark the stored task as completed.
-        let _ = super::workflow::mark_shell_task_completed(&reaper_cwd, &reaper_session_id, &reaper_task_id, exit_code);
+        let _ = super::workflow::mark_shell_task_completed(
+            &reaper_cwd,
+            &reaper_session_id,
+            &reaper_task_id,
+            exit_code,
+        );
     });
 
     Ok(ClaudeBashExecution {
@@ -232,9 +249,17 @@ fn shell_output_path(cwd: &Path, pid: u32) -> Result<std::path::PathBuf> {
 }
 
 fn run_bash_command(cwd: &Path, command: &str, timeout_ms: u64) -> Result<TimedCommandOutput> {
+    // Serialize apt/dpkg invocations against /var/lib/dpkg/lock-frontend.
+    // Agents working in parallel sessions (or a single agent triggering
+    // nested package installs in one command) race on the dpkg frontend
+    // lock; the losing side sees `E: Could not get lock` and typically
+    // gives up, aborting the whole task.  Wrapping with `flock` makes the
+    // second caller wait instead, at the cost of a little serialization
+    // (`apt-get` is serial anyway so this has no steady-state overhead).
+    let command = wrap_dpkg_lock_if_needed(command);
     let mut child = Command::new(puffer_tools::detected_shell())
         .arg("-lc")
-        .arg(command)
+        .arg(&command)
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -272,6 +297,49 @@ fn run_bash_command(cwd: &Path, command: &str, timeout_ms: u64) -> Result<TimedC
     }
 }
 
+/// Max seconds to wait on `/var/lib/dpkg/lock-frontend` before giving up.
+/// `apt-get install` itself runs for hundreds of seconds on heavy installs,
+/// so waiting up to 10 minutes here is reasonable — we'd rather serialize
+/// than bail with `E: Could not get lock`.
+const DPKG_FLOCK_TIMEOUT_SECS: u64 = 600;
+
+/// Wraps the incoming shell command with `flock /var/lib/dpkg/lock-frontend`
+/// when the command looks like it will invoke apt / dpkg. Idempotent:
+/// returns the original if `flock` is already present or no apt/dpkg
+/// invocation is detected.
+fn wrap_dpkg_lock_if_needed(command: &str) -> String {
+    if !looks_like_pkg_install(command) || command.contains("flock") {
+        return command.to_string();
+    }
+    // `flock -c` hands the command to `$SHELL -c`, which is bash on the
+    // Debian / Ubuntu base images TB2 uses.  Escape single quotes in the
+    // original so it survives the outer single-quoted wrapper.
+    let escaped = command.replace('\'', "'\\''");
+    format!(
+        "flock -w {DPKG_FLOCK_TIMEOUT_SECS} /var/lib/dpkg/lock-frontend -c '{escaped}'"
+    )
+}
+
+fn looks_like_pkg_install(command: &str) -> bool {
+    // Tokenize on shell word boundaries — ";", "&&", "||", "|", newlines —
+    // then inspect each fragment's leading words.  Avoids matching strings
+    // like `echo "apt-get"`.
+    command
+        .split(|c: char| matches!(c, ';' | '|' | '&' | '\n'))
+        .any(|segment| {
+            let trimmed = segment.trim_start();
+            // Skip leading `sudo` / `env VAR=...` / variable assignments.
+            let first_cmd_token = trimmed.split_whitespace().find(|token| {
+                !token.contains('=') && *token != "sudo" && *token != "env"
+            });
+            match first_cmd_token {
+                Some("apt-get") | Some("apt") | Some("dpkg") | Some("apt-key")
+                | Some("dpkg-reconfigure") => true,
+                _ => false,
+            }
+        })
+}
+
 const MAX_OUTPUT_CHARS: usize = 30_000;
 
 /// Truncates large output using a middle-truncation strategy (Codex pattern):
@@ -287,9 +355,7 @@ fn truncate_output(output: String) -> String {
     let head: String = chars[..head_len].iter().collect();
     let tail: String = chars[chars.len() - tail_len..].iter().collect();
     let omitted = chars.len() - MAX_OUTPUT_CHARS;
-    format!(
-        "{head}\n\n[…{omitted} chars truncated…]\n\n{tail}"
-    )
+    format!("{head}\n\n[…{omitted} chars truncated…]\n\n{tail}")
 }
 
 /// Builds a human-readable summary line for UI/status displays.
@@ -308,6 +374,57 @@ mod tests {
 
     fn test_session_id() -> Uuid {
         Uuid::nil()
+    }
+
+    #[test]
+    fn wraps_apt_get_install() {
+        let wrapped = wrap_dpkg_lock_if_needed("apt-get install -y curl");
+        assert!(wrapped.starts_with("flock -w 600 /var/lib/dpkg/lock-frontend -c '"));
+        assert!(wrapped.contains("apt-get install -y curl"));
+    }
+
+    #[test]
+    fn wraps_compound_apt_install() {
+        let wrapped =
+            wrap_dpkg_lock_if_needed("apt-get update && apt-get install -y curl build-essential");
+        assert!(wrapped.starts_with("flock -w 600 /var/lib/dpkg/lock-frontend -c '"));
+    }
+
+    #[test]
+    fn wraps_dpkg() {
+        assert!(wrap_dpkg_lock_if_needed("dpkg -i /tmp/pkg.deb").starts_with("flock "));
+    }
+
+    #[test]
+    fn wraps_sudo_apt() {
+        assert!(wrap_dpkg_lock_if_needed("sudo apt install -y nginx").starts_with("flock "));
+    }
+
+    #[test]
+    fn leaves_echo_untouched() {
+        // "apt-get" as a STRING argument is not a package install.
+        let cmd = "echo 'apt-get is a package manager'";
+        assert_eq!(wrap_dpkg_lock_if_needed(cmd), cmd);
+    }
+
+    #[test]
+    fn leaves_non_pkg_command_untouched() {
+        let cmd = "ls -la /app";
+        assert_eq!(wrap_dpkg_lock_if_needed(cmd), cmd);
+    }
+
+    #[test]
+    fn idempotent_when_already_flocked() {
+        let cmd = "flock -w 60 /tmp/my.lock apt-get update";
+        assert_eq!(wrap_dpkg_lock_if_needed(cmd), cmd);
+    }
+
+    #[test]
+    fn escapes_single_quotes_in_inner_command() {
+        let cmd = "apt-get install -y pkg-with-'embedded'-quote";
+        let wrapped = wrap_dpkg_lock_if_needed(cmd);
+        // Original still recoverable from inside the single-quoted wrap.
+        assert!(wrapped.contains("'\\''"));
     }
 
     #[test]
@@ -543,7 +660,10 @@ mod tests {
         assert!(result.success, "command failed: {}", result.output.stderr);
         let stdout = &result.output.stdout;
         // 40000 chars > 30000 limit, must be truncated
-        assert!(stdout.contains("[…"), "large output must be middle-truncated");
+        assert!(
+            stdout.contains("[…"),
+            "large output must be middle-truncated"
+        );
         // Head preserved (starts with A's)
         assert!(stdout.starts_with('A'), "head must start with A");
         // Tail preserved (ends with Z's)
