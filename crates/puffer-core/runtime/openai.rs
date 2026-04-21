@@ -58,6 +58,11 @@ pub(super) struct OpenAIExecutionConfig {
     pub(super) provider_id: String,
     pub(super) request_config: OpenAIRequestConfig,
     pub(super) refresh_token: Option<String>,
+    /// OAuth `expires_at_ms` for the access token in `request_config.auth`.
+    /// Used by `ensure_fresh_oauth_token` to proactively refresh before the
+    /// token expires mid-request (Kimi holds the connection open rather than
+    /// replying 401, so reactive refresh-after-401 isn't enough).
+    pub(super) expires_at_ms: Option<u64>,
     pub(super) codex_style: bool,
 }
 
@@ -1376,6 +1381,7 @@ pub(super) fn resolve_openai_execution_config(
                     .collect(),
             },
             refresh_token: None,
+            expires_at_ms: None,
             codex_style: codex_style_for_provider(provider, false),
         }),
         Some(StoredCredential::OAuth(credential)) => Ok(OpenAIExecutionConfig {
@@ -1395,6 +1401,7 @@ pub(super) fn resolve_openai_execution_config(
                     .collect(),
             },
             refresh_token: Some(credential.refresh_token.clone()),
+            expires_at_ms: Some(credential.expires_at_ms),
             codex_style: codex_style_for_provider(provider, true),
         }),
         None if provider.auth_modes.is_empty() => Ok(OpenAIExecutionConfig {
@@ -1414,6 +1421,7 @@ pub(super) fn resolve_openai_execution_config(
                     .collect(),
             },
             refresh_token: None,
+            expires_at_ms: None,
             codex_style: codex_style_for_provider(provider, false),
         }),
         None => bail!(
@@ -1500,6 +1508,61 @@ fn codex_style_for_provider(provider: &ProviderDescriptor, oauth: bool) -> bool 
             != Some("1")
 }
 
+/// Proactively refresh the OAuth access token if it expires within
+/// `PROACTIVE_REFRESH_WINDOW_MS`. Kimi's bearer tokens have a ~15-minute
+/// TTL but the server holds long-running HTTP requests open rather than
+/// responding with 401 when the token expires mid-flight — so a reactive
+/// "refresh after 401" is not enough on its own. Codex uses the same
+/// pattern (check expiry, refresh with ~60s buffer) to avoid mid-stream
+/// hangs that pin the TCP socket until the client timeout fires. Any
+/// failure here is non-fatal: we fall through to the normal request path
+/// (which will still 401-refresh reactively).
+const PROACTIVE_REFRESH_WINDOW_MS: u64 = 120_000;
+
+fn ensure_fresh_oauth_token(
+    auth_store: &mut AuthStore,
+    execution: &mut OpenAIExecutionConfig,
+) {
+    let Some(expires_at_ms) = execution.expires_at_ms else {
+        return;
+    };
+    if execution.refresh_token.is_none() {
+        return;
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let ttl_ms = expires_at_ms.saturating_sub(now_ms);
+    if ttl_ms > PROACTIVE_REFRESH_WINDOW_MS {
+        return; // token still fresh enough
+    }
+    eprintln!(
+        "[oauth] proactive refresh: {} token ttl={}s (window={}s)",
+        execution.provider_id,
+        ttl_ms / 1000,
+        PROACTIVE_REFRESH_WINDOW_MS / 1000,
+    );
+    match refresh_oauth_for_provider(&execution.provider_id, &execution.refresh_token) {
+        Ok(stored) => {
+            execution.request_config.auth =
+                OpenAIAuth::OAuthBearer(stored.access_token.clone());
+            execution.request_config.account_id = stored.account_id.clone();
+            execution.refresh_token = Some(stored.refresh_token.clone());
+            execution.expires_at_ms = Some(stored.expires_at_ms);
+            auth_store.set_oauth(execution.provider_id.clone(), stored);
+        }
+        Err(error) => {
+            // Don't abort: the request may still succeed if the token hasn't
+            // actually expired yet, and the 401 path will try again.
+            eprintln!(
+                "[oauth] proactive refresh failed for {}: {error:#}",
+                execution.provider_id
+            );
+        }
+    }
+}
+
 pub(super) fn send_openai_request_with_refresh<F>(
     auth_store: &mut AuthStore,
     execution: &mut OpenAIExecutionConfig,
@@ -1508,6 +1571,7 @@ pub(super) fn send_openai_request_with_refresh<F>(
 where
     F: Fn(&OpenAIRequestConfig) -> Result<puffer_provider_openai::BuiltOpenAIRequest>,
 {
+    ensure_fresh_oauth_token(auth_store, execution);
     retry_openai_transport(
         || send_openai_request_with_refresh_once(auth_store, execution, &build_request),
         |_, _, _| {},
@@ -1532,6 +1596,7 @@ where
     execution.request_config.auth = OpenAIAuth::OAuthBearer(stored.access_token.clone());
     execution.request_config.account_id = stored.account_id.clone();
     execution.refresh_token = Some(stored.refresh_token.clone());
+    execution.expires_at_ms = Some(stored.expires_at_ms);
     auth_store.set_oauth(execution.provider_id.clone(), stored);
 
     let retry = build_request(&execution.request_config)?;
@@ -1549,6 +1614,7 @@ where
     F: Fn(&OpenAIRequestConfig) -> Result<puffer_provider_openai::BuiltOpenAIRequest>,
     G: FnMut(TurnStreamEvent),
 {
+    ensure_fresh_oauth_token(auth_store, execution);
     let request = build_request(&execution.request_config)?;
     let response = retry_openai_transport(
         || send_openai_request_stream_raw(&request.url, &request.headers, &request.body),
@@ -1568,6 +1634,7 @@ where
     execution.request_config.auth = OpenAIAuth::OAuthBearer(stored.access_token.clone());
     execution.request_config.account_id = stored.account_id.clone();
     execution.refresh_token = Some(stored.refresh_token.clone());
+    execution.expires_at_ms = Some(stored.expires_at_ms);
     auth_store.set_oauth(execution.provider_id.clone(), stored);
 
     let retry = build_request(&execution.request_config)?;
