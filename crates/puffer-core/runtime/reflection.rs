@@ -355,19 +355,24 @@ impl ReflectionTracker {
         providers: &ProviderRegistry,
         auth_store: &mut AuthStore,
     ) -> Option<ReflectionObservation> {
-        // Agents usually emit their "Done." completion claim in a batch with
-        // NO new tool calls — the last turn before the conversation loop
-        // exits. `observe_batch_internal` early-returns None on empty
-        // invocations, so without this branch our completion-claim trigger
-        // would never actually fire.  When we see a completion claim and
-        // the run has done enough prior work to be worth judging, synthesize
-        // a minimal observation so the code/LLM judges get a chance to
-        // challenge the agent's self-assessment.
+        // Structural "terminal turn" signal:
+        //   `observe_batch_internal` returns None when `invocations` is
+        //   empty. That happens exactly when the agent is about to hand the
+        //   task back to Harbor — a text-only reply with no further tool
+        //   calls. We want the LLM judge to see THAT turn, because it's the
+        //   last chance to challenge an over-confident agent before the
+        //   verifier scores it.
+        //
+        //   No keyword match on the text. Earlier versions of this hook
+        //   required the message to contain "done" / "complete" / "verified"
+        //   etc., but that was both a false-positive magnet ("this subtask
+        //   is complete, now onto the next…") and fragile to phrasings the
+        //   curated list never saw. Treat any terminal text message as a
+        //   candidate and let the LLM judge decide whether it's premature.
         let mut observation = match self.observe_batch_internal(invocations, unix_time_ms()) {
             Some(observation) => observation,
             None => {
-                let claim = latest_assistant_completion_claim(items);
-                if claim.is_some()
+                if latest_assistant_message_text(items).is_some()
                     && self.total_tool_calls >= MIN_TOOL_CALLS_BEFORE_EVALUATION
                     && self
                         .batch_count
@@ -380,29 +385,9 @@ impl ReflectionTracker {
                 }
             }
         };
-        // Detect "I'm done" style completion claims in the latest assistant
-        // message. When the agent declares success, force an evaluation even
-        // if the heuristic gate would otherwise skip — false-completes were
-        // the dominant failure mode on TB2 (9 out of 36 fails in the Kimi
-        // OAuth run), and every one of them had a plausible "Done." sign-off
-        // that the normal stall-based trigger couldn't see.
-        observation.assessment.completion_claim = latest_assistant_completion_claim(items);
-        let completion_forced = observation.assessment.completion_claim.is_some()
-            && !observation.evaluation.should_evaluate
-            // Respect the minimum-tool-calls and rate-limit gates even on a
-            // completion claim: firing a judge after 1 turn would just cost
-            // tokens without meaningful signal.
-            && self.total_tool_calls >= MIN_TOOL_CALLS_BEFORE_EVALUATION
-            && self.batch_count.saturating_sub(self.last_evaluation_batch)
-                >= MIN_BATCHES_BETWEEN_EVALUATIONS;
-        if completion_forced {
-            observation.evaluation.should_evaluate = true;
-            observation.evaluation.skip_reason = None;
-            observation
-                .assessment
-                .signal_notes
-                .push("completion_claim_forced_evaluation".to_string());
-        }
+        // Forward the terminal-turn text to the judges so they can quote it
+        // in their reasoning, but don't gate evaluation on its contents.
+        observation.assessment.completion_claim = latest_assistant_message_text(items);
         let mut trace_events = vec![batch_observed_event(
             &observation.assessment,
             self.batch_count,
@@ -965,17 +950,22 @@ impl ReflectionTracker {
 }
 
 /// Walks conversation items back-to-front and returns the text of the most
-/// recent assistant message that contains a "completion claim" — words the
-/// model typically uses when it thinks it has finished the task (and is
-/// about to hand control back to Harbor's verifier). Returns `None` if the
-/// latest assistant message is either a pure tool-call or doesn't contain
-/// any such phrasing.
-fn latest_assistant_completion_claim(items: &[ConversationItem]) -> Option<String> {
+/// recent assistant message, if any.
+///
+/// The reflection trigger used to gate here on a keyword list ("done",
+/// "complete", "saved to", …) — a classic brittle-heuristic approach that
+/// overfires on mid-task phrases ("this subtask is complete, now doing…")
+/// and misses novel phrasings the keyword list never saw. Dropped in favor
+/// of a **structural** signal: the caller fires the trigger whenever
+/// `observe_openai_batch` sees an empty-invocation turn (agent emitted a
+/// final text-only message with no further tool calls) and the accumulated
+/// tool-call / batch guards are satisfied. The llm judge then reviews the
+/// actual trajectory + this terminal text and decides if the agent is
+/// prematurely done.
+fn latest_assistant_message_text(items: &[ConversationItem]) -> Option<String> {
     for item in items.iter().rev() {
         match item {
             ConversationItem::FunctionCall { .. } | ConversationItem::FunctionCallOutput { .. } => {
-                // Tool activity after the claim — model resumed work, not
-                // claiming done yet. Skip past these to find the claim-text.
                 continue;
             }
             ConversationItem::Message { role, content } if role == "assistant" => {
@@ -989,60 +979,16 @@ fn latest_assistant_completion_claim(items: &[ConversationItem]) -> Option<Strin
                     })
                     .collect::<Vec<_>>()
                     .join(" ");
-                if is_completion_claim(&text) {
-                    return Some(text);
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    return None;
                 }
-                return None;
+                return Some(text);
             }
             _ => continue,
         }
     }
     None
-}
-
-/// Heuristic classifier for whether an assistant message looks like a
-/// "I finished the task" signal. Tuned against the 25 verifier-reject
-/// trajectories from the Kimi OAuth TB2 run — every one of them ended
-/// with one of these phrasings.
-fn is_completion_claim(text: &str) -> bool {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    // Only consider the first ~200 chars of the message; the claim is
-    // almost always a leading sentence before any bullet-list walk-through.
-    let prefix_len = trimmed.char_indices().nth(200).map(|(i, _)| i).unwrap_or(trimmed.len());
-    let head = trimmed[..prefix_len].to_ascii_lowercase();
-    // Markers derived from the Kimi OAuth TB2 run's 25 verifier-reject
-    // trajectories — every one of them ended with one of these phrasings.
-    let markers: &[&str] = &[
-        "done",
-        "complete",
-        "completed",
-        "finished",
-        "all set",
-        "all done",
-        "ready",
-        "verified",
-        "task is complete",
-        "task complete",
-        "successfully",
-        "has been written",
-        "have been written",
-        "has been saved",
-        "saved to `",
-        "saved to /",
-        "implemented",
-        "i have implemented",
-        "i have created",
-        "i have written",
-        "i have successfully",
-        "i've implemented",
-        "i've created",
-        "i've written",
-        "✅",
-    ];
-    markers.iter().any(|m| head.contains(m))
 }
 
 #[cfg(test)]
@@ -1060,29 +1006,13 @@ mod completion_claim_tests {
     }
 
     #[test]
-    fn detects_done_claims() {
-        assert!(is_completion_claim("Done! The function is in /app/run.py"));
-        assert!(is_completion_claim("The task is complete."));
-        assert!(is_completion_claim("All set! Here's what was configured"));
-        assert!(is_completion_claim("I've created the polyglot file"));
-        assert!(is_completion_claim("The implementation is complete."));
-        assert!(is_completion_claim(
-            "The text in the G-code spells out: MAKER. This has been written to /app/out.txt."
-        ));
-    }
-
-    #[test]
-    fn ignores_non_claims() {
-        assert!(!is_completion_claim(""));
-        assert!(!is_completion_claim("Let me start by listing /app"));
-        assert!(!is_completion_claim("I need to understand the task first"));
-    }
-
-    #[test]
-    fn walks_past_trailing_tool_calls() {
+    fn latest_assistant_message_skips_trailing_tool_calls() {
+        // The assistant message sits in the middle of the items list —
+        // a tool call and its output land after. The helper should walk
+        // past those and find the assistant text.
         let items = vec![
             msg("user", "do the thing"),
-            msg("assistant", "Done! The task is complete."),
+            msg("assistant", "All finished successfully."),
             ConversationItem::FunctionCall {
                 call_id: "c1".into(),
                 name: "Bash".into(),
@@ -1095,15 +1025,39 @@ mod completion_claim_tests {
                 ),
             },
         ];
-        assert!(latest_assistant_completion_claim(&items).is_some());
+        let text = latest_assistant_message_text(&items).expect("text present");
+        assert!(text.contains("All finished"));
     }
 
     #[test]
-    fn returns_none_when_last_assistant_is_not_a_claim() {
-        let items = vec![
-            msg("user", "do the thing"),
-            msg("assistant", "Let me start investigating"),
-        ];
-        assert!(latest_assistant_completion_claim(&items).is_none());
+    fn latest_assistant_message_returns_whatever_text_is_there() {
+        // The structural trigger does NOT filter by keywords — any
+        // non-empty assistant text counts. The LLM judge decides whether
+        // the agent is actually done.
+        for text in [
+            "Let me start investigating",
+            "I need to understand the task first",
+            "Here's the answer: 42.",
+            "The best move for White is c1g5.",
+        ] {
+            let items = vec![msg("user", "do"), msg("assistant", text)];
+            assert_eq!(
+                latest_assistant_message_text(&items).as_deref(),
+                Some(text),
+                "got unexpected result for {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn latest_assistant_message_returns_none_on_empty_text() {
+        let items = vec![msg("user", "do"), msg("assistant", "   ")];
+        assert!(latest_assistant_message_text(&items).is_none());
+    }
+
+    #[test]
+    fn latest_assistant_message_returns_none_when_no_assistant_turn() {
+        let items = vec![msg("user", "do")];
+        assert!(latest_assistant_message_text(&items).is_none());
     }
 }
