@@ -355,7 +355,31 @@ impl ReflectionTracker {
         providers: &ProviderRegistry,
         auth_store: &mut AuthStore,
     ) -> Option<ReflectionObservation> {
-        let mut observation = self.observe_batch_internal(invocations, unix_time_ms())?;
+        // Agents usually emit their "Done." completion claim in a batch with
+        // NO new tool calls — the last turn before the conversation loop
+        // exits. `observe_batch_internal` early-returns None on empty
+        // invocations, so without this branch our completion-claim trigger
+        // would never actually fire.  When we see a completion claim and
+        // the run has done enough prior work to be worth judging, synthesize
+        // a minimal observation so the code/LLM judges get a chance to
+        // challenge the agent's self-assessment.
+        let mut observation = match self.observe_batch_internal(invocations, unix_time_ms()) {
+            Some(observation) => observation,
+            None => {
+                let claim = latest_assistant_completion_claim(items);
+                if claim.is_some()
+                    && self.total_tool_calls >= MIN_TOOL_CALLS_BEFORE_EVALUATION
+                    && self
+                        .batch_count
+                        .saturating_sub(self.last_evaluation_batch)
+                        >= MIN_BATCHES_BETWEEN_EVALUATIONS
+                {
+                    self.synthesize_claim_only_observation()
+                } else {
+                    return None;
+                }
+            }
+        };
         // Detect "I'm done" style completion claims in the latest assistant
         // message. When the agent declares success, force an evaluation even
         // if the heuristic gate would otherwise skip — false-completes were
@@ -835,6 +859,47 @@ impl ReflectionTracker {
             reason: response.reason,
             next_action: Some(response.next_action),
         }))
+    }
+
+    /// Builds a minimal `BatchObservation` for the case where the model
+    /// returned a completion-claim text turn WITHOUT any tool calls (so
+    /// `observe_batch_internal` skipped). The synthesized observation has no
+    /// progress signals and passes through a `should_evaluate=true` gate so
+    /// downstream code/LLM judges can run. See `observe_openai_batch` for
+    /// the call-site guard.
+    fn synthesize_claim_only_observation(&mut self) -> BatchObservation {
+        self.batch_count += 1;
+        // Inflate `time_since_progress_ms` past both code-judge stall
+        // thresholds so `code_judge_score` yields ≥ 4 (the default
+        // `min_score`). This lets the code judge emit a signal even though
+        // no real stall occurred — we *want* the completion-claim path to
+        // reach the judges, and under the default `ConfirmCodeJudge` llm
+        // mode the llm judge only runs when the code judge triggered.
+        let stall_ms = self
+            .config
+            .code_judge
+            .as_ref()
+            .map(|config| config.hard_stall_ms.saturating_add(60_000))
+            .unwrap_or(600_000);
+        BatchObservation {
+            assessment: BatchAssessment {
+                validation_progress: false,
+                artifact_progress: false,
+                edit_progress: false,
+                loopiness_score: 0,
+                focus_bad: false,
+                time_since_progress_ms: stall_ms,
+                signal_notes: vec!["synthesized_from_completion_claim".to_string()],
+                recent_actions: Vec::new(),
+                completion_claim: None,
+            },
+            evaluation: EvaluationGate {
+                should_evaluate: true,
+                skip_reason: None,
+                score: 4,
+                threshold: EVALUATION_TRIGGER_SCORE,
+            },
+        }
     }
 
     fn build_checkpoint(
