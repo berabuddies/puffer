@@ -1453,10 +1453,34 @@ fn refresh_oauth_for_provider(
         .ok_or_else(|| anyhow!("missing refresh token for OAuth retry ({provider_id})"))?;
     if provider_id.starts_with("kimi-") {
         let lock_path = puffer_provider_openai::kimi_oauth::default_kimi_lock_path()?;
+        // Inside the cross-process lock, re-read the on-disk AuthStore and,
+        // if a peer (host-side refresher, docker-cred-syncer, another bench
+        // worker) persisted a fresher credential while we were queued for
+        // the lock, adopt that instead of spending our own refresh call —
+        // which would race and 401 since Kimi rotates refresh_tokens.
+        let provider_id_owned = provider_id.to_string();
+        let on_reload = move || -> Option<puffer_provider_openai::kimi_oauth::KimiOAuthCredentials> {
+            let home = std::env::var_os("PUFFER_HOME")
+                .map(std::path::PathBuf::from)
+                .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".puffer")))?;
+            let disk = AuthStore::load(&home.join("auth.json")).ok()?;
+            let cred = disk.get(&provider_id_owned)?;
+            if let puffer_provider_registry::StoredCredential::OAuth(oauth) = cred {
+                Some(puffer_provider_openai::kimi_oauth::KimiOAuthCredentials {
+                    access_token: oauth.access_token.clone(),
+                    refresh_token: oauth.refresh_token.clone(),
+                    expires_at_ms: oauth.expires_at_ms,
+                    scope: oauth.scopes.join(" "),
+                    token_type: String::new(),
+                })
+            } else {
+                None
+            }
+        };
         let kimi = puffer_provider_openai::kimi_oauth::refresh_kimi_token_locked(
             &lock_path,
             &refresh_token,
-            || None, // runtime does not have the AuthStore here; outer layer handles reload
+            on_reload,
         )
         .context("failed to refresh Kimi OAuth credentials after 401")?;
         Ok(kimi_registry_credential(kimi))
@@ -1519,10 +1543,57 @@ fn codex_style_for_provider(provider: &ProviderDescriptor, oauth: bool) -> bool 
 /// (which will still 401-refresh reactively).
 const PROACTIVE_REFRESH_WINDOW_MS: u64 = 120_000;
 
+/// Reloads the on-disk `AuthStore` and, if it carries a newer OAuth
+/// credential for this provider than the one we have in memory, adopts
+/// it. A sibling process (e.g. the docker-cred-syncer that mirrors a
+/// freshly-rotated token into each container, or a peer worker that
+/// just refreshed) may have updated `$HOME/.puffer/auth.json` while our
+/// request was in flight — in that case the `refresh_token` we're
+/// holding has already been invalidated by Kimi and would fail
+/// `invalid_grant` on the next refresh attempt.
+fn adopt_disk_oauth_if_newer(
+    auth_store: &mut AuthStore,
+    execution: &mut OpenAIExecutionConfig,
+) {
+    let home = match std::env::var_os("PUFFER_HOME") {
+        Some(v) => std::path::PathBuf::from(v),
+        None => match std::env::var_os("HOME") {
+            Some(h) => std::path::PathBuf::from(h).join(".puffer"),
+            None => return,
+        },
+    };
+    let path = home.join("auth.json");
+    let Ok(disk_store) = AuthStore::load(&path) else {
+        return;
+    };
+    let Some(disk_cred) = disk_store.get(execution.provider_id.as_str()) else {
+        return;
+    };
+    if let puffer_provider_registry::StoredCredential::OAuth(disk_oauth) = disk_cred {
+        let in_memory_expires = execution.expires_at_ms.unwrap_or(0);
+        if disk_oauth.expires_at_ms > in_memory_expires {
+            eprintln!(
+                "[oauth] adopt disk cred: {} disk_expires={}ms vs in_memory={}ms",
+                execution.provider_id, disk_oauth.expires_at_ms, in_memory_expires,
+            );
+            execution.request_config.auth =
+                OpenAIAuth::OAuthBearer(disk_oauth.access_token.clone());
+            execution.request_config.account_id = disk_oauth.account_id.clone();
+            execution.refresh_token = Some(disk_oauth.refresh_token.clone());
+            execution.expires_at_ms = Some(disk_oauth.expires_at_ms);
+            auth_store.set_oauth(execution.provider_id.clone(), disk_oauth.clone());
+        }
+    }
+}
+
 fn ensure_fresh_oauth_token(
     auth_store: &mut AuthStore,
     execution: &mut OpenAIExecutionConfig,
 ) {
+    // Step 1: sync with disk first — a peer process may have just rotated
+    // the token. If disk is fresher we're done.
+    adopt_disk_oauth_if_newer(auth_store, execution);
+
     let Some(expires_at_ms) = execution.expires_at_ms else {
         return;
     };
@@ -1554,7 +1625,8 @@ fn ensure_fresh_oauth_token(
         }
         Err(error) => {
             // Don't abort: the request may still succeed if the token hasn't
-            // actually expired yet, and the 401 path will try again.
+            // actually expired yet, and the 401 path will try again with
+            // whatever we just pulled in from disk.
             eprintln!(
                 "[oauth] proactive refresh failed for {}: {error:#}",
                 execution.provider_id

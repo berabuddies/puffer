@@ -373,19 +373,27 @@ impl ReflectionTracker {
         let mut observation = match self.observe_batch_internal(invocations, unix_time_ms()) {
             Some(observation) => observation,
             None => {
+                // Terminal turn: the agent is about to hand back to the
+                // harness and we won't get another chance to intervene.
+                // Keep the tool-count floor (don't invoke the judge on
+                // one-shot trivial tasks that genuinely finish in ≤3
+                // calls), but drop the inter-batch cooldown — the whole
+                // point of a cooldown is to avoid re-running the judge
+                // mid-task, and "terminal turn" is by definition the
+                // last batch, so there IS no next batch to cool down
+                // for. The LLM judge still decides Continue vs
+                // Intervene so we don't over-fire.
                 let has_text = latest_assistant_message_text(items).is_some();
                 let tools_ok = self.total_tool_calls >= MIN_TOOL_CALLS_BEFORE_EVALUATION;
-                let batches_ok = self
+                let batch_gap = self
                     .batch_count
-                    .saturating_sub(self.last_evaluation_batch)
-                    >= MIN_BATCHES_BETWEEN_EVALUATIONS;
+                    .saturating_sub(self.last_evaluation_batch);
                 eprintln!(
-                    "[reflection] terminal_turn text={has_text} tools={}/{MIN_TOOL_CALLS_BEFORE_EVALUATION} batch_gap={}/{MIN_BATCHES_BETWEEN_EVALUATIONS} synth={}",
+                    "[reflection] terminal_turn text={has_text} tools={}/{MIN_TOOL_CALLS_BEFORE_EVALUATION} batch_gap={batch_gap} synth={}",
                     self.total_tool_calls,
-                    self.batch_count.saturating_sub(self.last_evaluation_batch),
-                    has_text && tools_ok && batches_ok,
+                    has_text && tools_ok,
                 );
-                if has_text && tools_ok && batches_ok {
+                if has_text && tools_ok {
                     self.synthesize_claim_only_observation()
                 } else {
                     return None;
