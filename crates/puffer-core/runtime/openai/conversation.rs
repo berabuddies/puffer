@@ -2612,4 +2612,120 @@ mod tests {
             Some("BLOB2")
         );
     }
+
+    // =======================================================================
+    // Vision / image passing tests
+    // =======================================================================
+
+    #[test]
+    fn text_only_content_serializes_as_plain_string() {
+        // Regression guard: adding vision support must not break the
+        // fast path for text-only messages (they should stay a plain
+        // string, not become a multi-part array).
+        let items = vec![ConversationItem::Message {
+            role: "user".into(),
+            content: vec![ContentPart::Text {
+                text: "plain user message".into(),
+            }],
+        }];
+        let msgs = items_to_chat_messages(&items, None, None, None);
+        assert_eq!(msgs.len(), 1);
+        let content = msgs[0].content.as_ref().unwrap();
+        assert_eq!(content, &json!("plain user message"));
+    }
+
+    #[test]
+    fn image_content_serializes_as_multipart_array() {
+        // Vision path: a message with one ContentPart::Image should
+        // serialize to an OpenAI-compatible multi-part array with an
+        // `image_url` entry that carries the data URL.
+        let items = vec![ConversationItem::Message {
+            role: "user".into(),
+            content: vec![
+                ContentPart::Text {
+                    text: "describe the board".into(),
+                },
+                ContentPart::Image {
+                    url: "data:image/png;base64,ZmFrZQ==".into(),
+                },
+            ],
+        }];
+        let msgs = items_to_chat_messages(&items, None, None, None);
+        assert_eq!(msgs.len(), 1);
+        let content = msgs[0].content.as_ref().unwrap();
+        let arr = content.as_array().expect("multi-part array expected");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[0]["text"], "describe the board");
+        assert_eq!(arr[1]["type"], "image_url");
+        assert_eq!(
+            arr[1]["image_url"]["url"],
+            "data:image/png;base64,ZmFrZQ=="
+        );
+    }
+
+    #[test]
+    fn read_tool_image_output_triggers_user_image_turn() {
+        // End-to-end at the conversation-layer boundary: when the Read
+        // tool returns its image payload, `append_tool_results` should
+        // push a synthetic user Message with the base64 materialized
+        // as a data URL. Otherwise the pixels never reach Kimi.
+        use crate::runtime::ToolInvocation;
+        let image_json = serde_json::to_string(&serde_json::json!({
+            "type": "image",
+            "file": {
+                "filePath": "/app/chess_board.png",
+                "base64": "iVBORw0KGgoAAAA",
+                "type": "image/png",
+                "originalSize": 1234
+            }
+        }))
+        .unwrap();
+        let inv = ToolInvocation {
+            call_id: "call_1".into(),
+            tool_id: "Read".into(),
+            input: r#"{"file_path":"/app/chess_board.png"}"#.into(),
+            output: image_json,
+            success: true,
+        };
+        let mut items = Vec::new();
+        append_tool_results(&mut items, &[inv]);
+        // Expect: FunctionCall, FunctionCallOutput, synthetic user Message
+        assert_eq!(items.len(), 3);
+        match &items[2] {
+            ConversationItem::Message { role, content } => {
+                assert_eq!(role, "user");
+                assert_eq!(content.len(), 2);
+                let text = match &content[0] {
+                    ContentPart::Text { text } => text,
+                    _ => panic!("expected Text"),
+                };
+                assert!(text.contains("chess_board.png"));
+                assert!(text.contains("image/png"));
+                let url = match &content[1] {
+                    ContentPart::Image { url } => url,
+                    _ => panic!("expected Image"),
+                };
+                assert_eq!(url, "data:image/png;base64,iVBORw0KGgoAAAA");
+            }
+            other => panic!("expected synthetic user Message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_image_tool_output_does_not_inject_user_turn() {
+        // Regression guard: a plain text tool output must NOT produce
+        // an extra user message. Only FunctionCall + FunctionCallOutput.
+        use crate::runtime::ToolInvocation;
+        let inv = ToolInvocation {
+            call_id: "call_1".into(),
+            tool_id: "Bash".into(),
+            input: r#"{"command":"ls"}"#.into(),
+            output: "file1.txt\nfile2.txt".into(),
+            success: true,
+        };
+        let mut items = Vec::new();
+        append_tool_results(&mut items, &[inv]);
+        assert_eq!(items.len(), 2);
+    }
 }
