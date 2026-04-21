@@ -1545,12 +1545,11 @@ const PROACTIVE_REFRESH_WINDOW_MS: u64 = 120_000;
 
 /// Reloads the on-disk `AuthStore` and, if it carries a newer OAuth
 /// credential for this provider than the one we have in memory, adopts
-/// it. A sibling process (e.g. the docker-cred-syncer that mirrors a
-/// freshly-rotated token into each container, or a peer worker that
-/// just refreshed) may have updated `$HOME/.puffer/auth.json` while our
-/// request was in flight — in that case the `refresh_token` we're
-/// holding has already been invalidated by Kimi and would fail
-/// `invalid_grant` on the next refresh attempt.
+/// it. Currently unused — see `ensure_fresh_oauth_token` for why. Kept
+/// wired so we can re-enable after fixing the paired-file staleness
+/// (`.credentials.json` vs `auth.json`) that made this path return an
+/// internally inconsistent credential.
+#[allow(dead_code)]
 fn adopt_disk_oauth_if_newer(
     auth_store: &mut AuthStore,
     execution: &mut OpenAIExecutionConfig,
@@ -1592,7 +1591,16 @@ fn ensure_fresh_oauth_token(
 ) {
     // Step 1: sync with disk first — a peer process may have just rotated
     // the token. If disk is fresher we're done.
-    adopt_disk_oauth_if_newer(auth_store, execution);
+    //
+    // Temporarily disabled: caused empty-response regressions on smoke-
+    // fullfix + v7 retries. Suspect the on-disk state is internally
+    // inconsistent when docker-cred-syncer mirrors `.credentials.json`
+    // into the container without also touching `auth.json` (so the
+    // refresh_token is post-rotation but the stored expires_at_ms is
+    // pre-rotation). Using the stale access_token that pairing happens
+    // to produce makes Kimi hang up with an empty 200. Re-enable once
+    // we either sync both files or validate the pair before adopting.
+    // adopt_disk_oauth_if_newer(auth_store, execution);
 
     let Some(expires_at_ms) = execution.expires_at_ms else {
         return;
