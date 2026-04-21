@@ -91,6 +91,7 @@ When questioning the claim, focus on:\n\
     match language {
         ReflectionLanguage::Chinese => format!(
             "你是一个严格的运行时判断器，不要解决任务本身，只判断主 agent 现在是否应该进入反思。\n\
+**极简推理。这是一个 gate 决策，不是分析题**。reasoning 最多 2-3 句（如果你的 reasoning 超过 500 token 说明你在过度思考——停下直接出 JSON）。\n\
 只输出一个 JSON 对象，不要输出 Markdown 代码块，不要输出额外解释。\n\n\
 目标：\n- {goal}\n\n\
 启发式 judge 状态：\n{code_line}\n\n\
@@ -109,6 +110,7 @@ When questioning the claim, focus on:\n\
         ),
         ReflectionLanguage::English => format!(
             "You are a strict runtime judge. Do not solve the task itself. Only decide whether the main agent should enter reflection now.\n\
+**Minimize reasoning. This is a gate decision, not an analysis.** 2-3 short sentences of reasoning max (if yours runs past ~500 tokens you are overthinking — stop and emit the JSON).\n\
 Return exactly one JSON object and nothing else.\n\n\
 Goal:\n- {goal}\n\n\
 Heuristic judge status:\n{code_line}\n\n\
