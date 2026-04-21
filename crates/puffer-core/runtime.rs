@@ -53,8 +53,8 @@ pub use self::permission_prompt::{
     with_permission_prompt_handler, PermissionPromptAction, PermissionPromptRequest,
 };
 pub use self::reflection::{
-    CodeJudgeConfig, LlmJudgeConfig, LlmJudgeContextScope, LlmJudgeMode, ReflectionConfig,
-    ReflectionLanguage,
+    CodeJudgeConfig, LlmJudgeConfig, LlmJudgeContextScope, LlmJudgeMode, LlmJudgePromptCacheMode,
+    ReflectionConfig, ReflectionLanguage, ReflectionTraceEvent,
 };
 pub(crate) use self::request_tool_filter::{build_request_tool_filter, RequestToolFilter};
 pub use self::structured_output_support::StructuredOutputConfig;
@@ -135,6 +135,7 @@ pub enum TurnStreamEvent {
     TextDelta(String),
     ToolCallsRequested(Vec<ToolCallRequest>),
     ToolInvocations(Vec<ToolInvocation>),
+    ReflectionTrace(ReflectionTraceEvent),
     ReflectionCheckpoint(String),
     /// A transport-level retry is about to be attempted.
     RetryAttempt {
@@ -904,14 +905,19 @@ where
             invocations.extend(tool_results.invocations.clone());
             // Append response content as ConversationItems.
             append_anthropic_response_to_items(&mut items, &response, &tool_results);
-            if let Some(checkpoint) = reflection
+            if let Some(observation) = reflection
                 .as_mut()
-                .and_then(|tracker| tracker.observe_batch(&tool_results.invocations))
+                .and_then(|tracker| tracker.observe_batch_with_trace(&tool_results.invocations))
             {
-                on_event(TurnStreamEvent::ReflectionCheckpoint(
-                    checkpoint.summary.clone(),
-                ));
-                items.push(ConversationItem::user_message(checkpoint.prompt));
+                for trace_event in observation.trace_events {
+                    on_event(TurnStreamEvent::ReflectionTrace(trace_event));
+                }
+                if let Some(checkpoint) = observation.checkpoint {
+                    on_event(TurnStreamEvent::ReflectionCheckpoint(
+                        checkpoint.summary.clone(),
+                    ));
+                    items.push(ConversationItem::user_message(checkpoint.prompt));
+                }
             }
             // Compact between tool iterations.
             let compacted = compact_conversation_with(
@@ -1013,8 +1019,24 @@ fn send_http_request_raw_once(
     body: &str,
     anthropic: bool,
 ) -> Result<RawHttpResponse> {
+    // Reasoning models (Kimi k2.6 with effort=high, DeepSeek-R1, etc.)
+    // legitimately take 5-8 minutes per turn because the entire hidden
+    // chain-of-thought is streamed after the response is queued — a
+    // direct curl to Kimi with max_tokens unbounded measured 498s for
+    // one completion with a ~150-token prompt and 29k completion
+    // tokens. A 300s timeout was shorter than a single real turn, so
+    // reqwest would abort mid-reasoning, retry the transport 3x, and
+    // leave harbor to conclude the agent was hung.
+    //
+    // Use an env override so non-reasoning providers can opt back to
+    // a shorter budget; default to 900s which covers Kimi's observed
+    // worst case with headroom.
+    let timeout_secs = std::env::var("PUFFER_HTTP_REQUEST_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(900);
     let client = Client::builder()
-        .timeout(Duration::from_secs(300))
+        .timeout(Duration::from_secs(timeout_secs))
         .build()
         .unwrap_or_else(|_| Client::new());
     let mut request = client.post(url);
