@@ -39,6 +39,13 @@ pub struct OpenAIChatMessage {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<OpenAIChatToolCall>,
+    /// Vendor extension used by reasoning-capable models reached via the
+    /// Chat Completions API (DeepSeek-R1, Kimi k2/k2.6). Kimi rejects
+    /// replayed assistant tool-call messages with `400 "thinking is
+    /// enabled but reasoning_content is missing"` unless this field is
+    /// populated with the reasoning the model emitted on that turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 /// A tool-call item emitted or replayed through Chat Completions messages.
@@ -473,6 +480,7 @@ mod tests {
                     content: Some(json!("hello")),
                     tool_call_id: None,
                     tool_calls: Vec::new(),
+                    reasoning_content: None,
                 }],
                 tools: vec![OpenAIChatCompletionTool {
                     kind: "function".to_string(),
@@ -516,6 +524,7 @@ mod tests {
                     content: Some(json!("hello")),
                     tool_call_id: None,
                     tool_calls: Vec::new(),
+                    reasoning_content: None,
                 }],
                 tools: Vec::new(),
                 tool_choice: None,
