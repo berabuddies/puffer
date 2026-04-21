@@ -369,16 +369,23 @@ impl ReflectionTracker {
         //   is complete, now onto the next…") and fragile to phrasings the
         //   curated list never saw. Treat any terminal text message as a
         //   candidate and let the LLM judge decide whether it's premature.
+        let terminal_turn = invocations.is_empty();
         let mut observation = match self.observe_batch_internal(invocations, unix_time_ms()) {
             Some(observation) => observation,
             None => {
-                if latest_assistant_message_text(items).is_some()
-                    && self.total_tool_calls >= MIN_TOOL_CALLS_BEFORE_EVALUATION
-                    && self
-                        .batch_count
-                        .saturating_sub(self.last_evaluation_batch)
-                        >= MIN_BATCHES_BETWEEN_EVALUATIONS
-                {
+                let has_text = latest_assistant_message_text(items).is_some();
+                let tools_ok = self.total_tool_calls >= MIN_TOOL_CALLS_BEFORE_EVALUATION;
+                let batches_ok = self
+                    .batch_count
+                    .saturating_sub(self.last_evaluation_batch)
+                    >= MIN_BATCHES_BETWEEN_EVALUATIONS;
+                eprintln!(
+                    "[reflection] terminal_turn text={has_text} tools={}/{MIN_TOOL_CALLS_BEFORE_EVALUATION} batch_gap={}/{MIN_BATCHES_BETWEEN_EVALUATIONS} synth={}",
+                    self.total_tool_calls,
+                    self.batch_count.saturating_sub(self.last_evaluation_batch),
+                    has_text && tools_ok && batches_ok,
+                );
+                if has_text && tools_ok && batches_ok {
                     self.synthesize_claim_only_observation()
                 } else {
                     return None;
@@ -413,6 +420,12 @@ impl ReflectionTracker {
             .as_ref()
             .map(|config| config.min_score)
             .unwrap_or_default();
+        if terminal_turn {
+            eprintln!(
+                "[reflection] code_judge terminal_turn=true score={code_score}/{code_threshold} signal={}",
+                code_signal.is_some(),
+            );
+        }
         trace_events.push(code_judge_decision_event(
             code_score,
             code_threshold,
@@ -437,6 +450,13 @@ impl ReflectionTracker {
         let checkpoint = final_signal
             .as_ref()
             .map(|signal| self.build_checkpoint(&observation.assessment, signal));
+        if terminal_turn {
+            eprintln!(
+                "[reflection] final_decision terminal_turn=true signal={} checkpoint={}",
+                final_signal.as_ref().map(|s| s.source).unwrap_or("none"),
+                checkpoint.is_some(),
+            );
+        }
         trace_events.push(final_decision_event(
             final_signal.as_ref(),
             checkpoint.as_ref(),
