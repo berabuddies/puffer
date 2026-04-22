@@ -186,6 +186,12 @@ pub(crate) fn extract_chat_completions_text(response: &OpenAIChatCompletionsResp
 /// Extracts the `reasoning_content` field from a parsed Chat Completions
 /// response, if the vendor (Kimi, DeepSeek-R1, …) produced one. Returns
 /// `None` for plain OpenAI Chat Completions responses.
+///
+/// Strips NUL bytes and other control chars from the reasoning_content.
+/// Kimi has been observed emitting a `\x00` inside its reasoning output,
+/// and its own API validator then rejects the same string on replay with
+/// `400 "the reasoning_content at position N must be a valid UTF-8 string:
+/// string contains \x00"`. Filtering here keeps the round-trip clean.
 pub(crate) fn extract_chat_completions_reasoning(
     response: &OpenAIChatCompletionsResponse,
 ) -> Option<String> {
@@ -193,7 +199,24 @@ pub(crate) fn extract_chat_completions_reasoning(
         .choices
         .first()
         .and_then(|choice| choice.message.reasoning_content.clone())
+        .map(|text| sanitize_reasoning_text(&text))
         .filter(|text| !text.is_empty())
+}
+
+/// Removes NUL bytes and other C0 control chars (except whitespace) from a
+/// reasoning-content string so it round-trips cleanly through vendor
+/// validators. `\t`, `\n`, `\r` are preserved.
+pub fn sanitize_reasoning_text(text: &str) -> String {
+    text.chars()
+        .filter(|c| {
+            let cp = *c as u32;
+            if cp < 0x20 {
+                matches!(*c, '\t' | '\n' | '\r')
+            } else {
+                cp != 0x7f
+            }
+        })
+        .collect()
 }
 
 /// Extracts tool calls from a parsed OpenAI Chat Completions payload.
