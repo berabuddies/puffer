@@ -403,13 +403,21 @@ impl ReflectionTracker {
                     .batch_count
                     .saturating_sub(self.last_evaluation_batch);
                 let under_cap = self.checkpoint_injections < MAX_CHECKPOINT_INJECTIONS;
+                // `empty_turn`: the model returned neither tool calls nor
+                // assistant text. Without intervention the agent silently
+                // exits with no deliverable — we've observed this on
+                // circuit-fibsqrt / feal-linear-cryptanalysis etc. where
+                // the agent read a few files then went quiet. Synth the
+                // observation in this case too so the judge pipeline can
+                // push back.
+                let empty_turn = !has_text;
+                let synth = under_cap && (empty_turn || tools_ok);
                 eprintln!(
-                    "[reflection] terminal_turn text={has_text} tools={}/{MIN_TOOL_CALLS_BEFORE_EVALUATION} batch_gap={batch_gap} injections={}/{MAX_CHECKPOINT_INJECTIONS} synth={}",
+                    "[reflection] terminal_turn text={has_text} tools={}/{MIN_TOOL_CALLS_BEFORE_EVALUATION} batch_gap={batch_gap} injections={}/{MAX_CHECKPOINT_INJECTIONS} empty_turn={empty_turn} synth={synth}",
                     self.total_tool_calls,
                     self.checkpoint_injections,
-                    has_text && tools_ok && under_cap,
                 );
-                if has_text && tools_ok && under_cap {
+                if synth {
                     self.synthesize_claim_only_observation()
                 } else {
                     return None;
@@ -418,7 +426,16 @@ impl ReflectionTracker {
         };
         // Forward the terminal-turn text to the judges so they can quote it
         // in their reasoning, but don't gate evaluation on its contents.
-        observation.assessment.completion_claim = latest_assistant_message_text(items);
+        // When the model emits an empty terminal turn, feed the judge a
+        // synthetic claim stating so — otherwise the judge sees no
+        // completion_claim at all and under-reacts to a degenerate exit.
+        observation.assessment.completion_claim = match latest_assistant_message_text(items) {
+            Some(text) => Some(text),
+            None => Some(
+                "[empty terminal turn — model produced no text and no tool calls. This is almost certainly a premature exit; the task is not complete.]"
+                    .to_string(),
+            ),
+        };
         let mut trace_events = vec![batch_observed_event(
             &observation.assessment,
             self.batch_count,
