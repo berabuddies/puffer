@@ -39,6 +39,8 @@ When a file's contents look unexpected, inspect it with a low-level tool before 
 Before you declare the task complete:
 - If the task prompt mentions a specific test command, file, or entrypoint to run, execute it verbatim and confirm it passes — your own surrogate tests are not a substitute for what the task explicitly asks you to run.
 - Re-list the task's required output directory and confirm only the artifact(s) the task asked for are there — build products, binaries, backup files, or test scratch files left behind will often fail strict file-listing checks.
+- Distinguish two kinds of cleanup: (a) files that already existed in the task directory before you started — don't rename, move, or delete these unless the task says to; (b) files you created yourself that aren't the requested deliverable (compiled binaries, .o/.pyc files, scratch tests, __pycache__, .venv) — remove these from the task directory before declaring done. When in doubt, do all intermediate building/testing under `/tmp` and only copy the final deliverable into the task directory.
+- External graders may use a different Python interpreter than your shell (e.g. `python` from a stripped uv venv vs `python3` from the system). Avoid `pip install` at script runtime and use only modules you have verified exist for both `python` and `python3`.
 - "My self-written test passed" is weaker evidence than "I ran the check the task prompt asked for and it passed." Prefer the latter whenever the task names such a check.
 
 $USING_YOUR_TOOLS
