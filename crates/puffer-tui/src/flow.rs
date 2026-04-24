@@ -352,6 +352,7 @@ pub(crate) fn handle_prompt_submit(
             auth_store: worker_auth_store,
             session_tool_permissions: worker_state.session_tool_permissions.clone(),
             session_allow_all: worker_state.session_allow_all,
+            project_memory_review_turns: worker_state.project_memory_review_turns,
         }));
     });
     tui.pending_submit = Some(PendingSubmit {
@@ -431,8 +432,9 @@ pub(crate) fn poll_pending_submit(
             Err(TryRecvError::Disconnected) => PendingSubmitEvent::Finished(PendingSubmitResult {
                 outcome: Err("background request disconnected".to_string()),
                 auth_store: auth_store.clone(),
-                session_tool_permissions: std::collections::HashMap::new(),
+                session_tool_permissions: Default::default(),
                 session_allow_all: false,
+                project_memory_review_turns: state.project_memory_review_turns,
             }),
         };
         match event {
@@ -488,6 +490,7 @@ pub(crate) fn poll_pending_submit(
                 if result.session_allow_all {
                     state.session_allow_all = true;
                 }
+                state.project_memory_review_turns = result.project_memory_review_turns;
                 match result.outcome {
                     Ok(turn) => {
                         if rendered_tool_invocations < turn.tool_invocations.len() {

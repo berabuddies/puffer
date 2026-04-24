@@ -1,12 +1,48 @@
 use super::flow_loop::*;
 use super::*;
-use crate::state::LoopKind;
-use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
+use crate::state::{LoopKind, PendingSubmit, PendingSubmitEvent, PendingSubmitResult};
+use puffer_config::{ensure_workspace_dirs, ConfigPaths, MemoryConfig, PufferConfig};
+use puffer_core::TurnExecution;
 use puffer_session_store::SessionMetadata;
+use std::ffi::OsString;
+use std::sync::{mpsc, Mutex, MutexGuard, OnceLock};
 use tempfile::tempdir;
 
 fn sample_state(session: SessionMetadata, cwd: &Path) -> AppState {
     AppState::new(PufferConfig::default(), cwd.to_path_buf(), session)
+}
+
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+struct ScopedPufferHome {
+    old_home: Option<OsString>,
+}
+
+impl ScopedPufferHome {
+    fn set(path: &Path) -> Self {
+        let old_home = std::env::var_os("PUFFER_HOME");
+        std::env::set_var("PUFFER_HOME", path);
+        Self { old_home }
+    }
+}
+
+impl Drop for ScopedPufferHome {
+    fn drop(&mut self) {
+        if let Some(value) = self.old_home.take() {
+            std::env::set_var("PUFFER_HOME", value);
+        } else {
+            std::env::remove_var("PUFFER_HOME");
+        }
+    }
+}
+
+fn lock_env() -> MutexGuard<'static, ()> {
+    env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[test]
@@ -124,6 +160,85 @@ fn handle_prompt_submit_queues_prompt_while_turn_is_running() {
         Some("second")
     );
     assert!(matches!(state.transcript.first(), Some(message) if message.text == "first"));
+}
+
+#[test]
+fn poll_pending_submit_syncs_project_memory_review_turns_back_to_main_state() {
+    let _guard = lock_env();
+    let tempdir = tempdir().unwrap();
+    let home = tempdir.path().join("home");
+    let workspace = tempdir.path().join("workspace");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    let _home = ScopedPufferHome::set(&home);
+    let paths = ConfigPaths::discover(&workspace);
+    ensure_workspace_dirs(&paths).unwrap();
+    std::fs::write(
+        paths.projects_file(),
+        format!(
+            "[[projects]]\nname = \"demo\"\npath = \"{}\"\n",
+            workspace.display()
+        ),
+    )
+    .unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(workspace.to_path_buf())
+        .unwrap();
+    let mut state = AppState::new(
+        PufferConfig {
+            memory: MemoryConfig {
+                review_nudge_interval: 2,
+                ..MemoryConfig::default()
+            },
+            ..PufferConfig::default()
+        },
+        workspace.to_path_buf(),
+        session,
+    );
+    assert!(state.project_memory.is_some());
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let mut auth_store = AuthStore::default();
+    let mut tui = TuiState::default();
+    let (sender, receiver) = mpsc::channel();
+    tui.pending_submit = Some(PendingSubmit {
+        prompt: "remember this".to_string(),
+        receiver,
+        pending_tool_calls: Vec::new(),
+        rendered_tool_invocations: 0,
+        started_at: std::time::Instant::now(),
+        thinking_active: false,
+        status_hint: None,
+    });
+    sender
+        .send(PendingSubmitEvent::Finished(PendingSubmitResult {
+            outcome: Ok(TurnExecution {
+                assistant_text: "ack".to_string(),
+                tool_invocations: Vec::new(),
+                reflection_traces: Vec::new(),
+            }),
+            auth_store: auth_store.clone(),
+            session_tool_permissions: Default::default(),
+            session_allow_all: false,
+            project_memory_review_turns: 1,
+        }))
+        .unwrap();
+
+    let completed = poll_pending_submit(
+        &mut state,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+    )
+    .unwrap();
+
+    assert!(completed);
+    assert_eq!(state.project_memory_review_turns, 1);
+    assert!(state
+        .transcript
+        .iter()
+        .any(|message| message.role == MessageRole::Assistant && message.text == "ack"));
 }
 
 #[test]

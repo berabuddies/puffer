@@ -80,6 +80,8 @@ pub(crate) struct PendingSubmitResult {
     pub(crate) session_tool_permissions: std::collections::HashMap<String, String>,
     /// Whether the user chose "allow all" during this turn.
     pub(crate) session_allow_all: bool,
+    /// Project-memory review turns accumulated on the worker clone.
+    pub(crate) project_memory_review_turns: usize,
 }
 
 /// Carries one event emitted while a provider-backed turn is in flight.
