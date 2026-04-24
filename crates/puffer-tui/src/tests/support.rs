@@ -103,6 +103,8 @@ pub(super) fn sample_resources() -> LoadedResources {
                 model_override: None,
                 mode: None,
                 chained_from: Vec::new(),
+                for_provider: None,
+                for_model: None,
             },
         )],
         skills: vec![loaded_item(

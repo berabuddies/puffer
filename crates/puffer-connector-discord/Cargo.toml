@@ -1,0 +1,21 @@
+[package]
+name = "puffer-connector-discord"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+puffer-connector-core = { path = "../puffer-connector-core" }
+serde.workspace = true
+serde_json.workspace = true
+serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "rustls_backend"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync"] }
+uuid.workspace = true
+
+[dev-dependencies]
+puffer-config = { path = "../puffer-config" }
+puffer-provider-registry = { path = "../puffer-provider-registry" }
+puffer-resources = { path = "../puffer-resources" }
+puffer-session-store = { path = "../puffer-session-store" }
+tempfile.workspace = true

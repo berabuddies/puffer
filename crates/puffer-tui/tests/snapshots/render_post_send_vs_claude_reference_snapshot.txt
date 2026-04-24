@@ -14,26 +14,26 @@ Review the current worktree and call out any risks.
 ❯
 
 Puffer current:
-                ██
-            ██████████    ██
-          ████████████████████
-      ████████████████████████    ╭ Puffer Code ──────────────────────────────────────────────────╮
-      ██████████████████████      │Account   anthropic via API key                                │
-    ████████████████████████████  │Model     anthropic/claude-sonnet-4-5 · tools 3/4              │
-██████████████████████████████    │Session   Shipyard · 12345678-1234-5678-1234-567812345678      │
-  ████████████████████████████    │Mode      effort high · fast · vim                             │
-      ████████████████████████    │Context   puffer · 2 msgs · 2 wds · dockyard@staging · 99% left│
-    ████████████████████████      ╰───────────────────────────────────────────────────────────────╯
+
+                ██                ╭ Puffer Code ──────────────────────────────────────────────────╮
+            ██████████    ██      │Account   anthropic via API key                                │
+          ████████████████████    │Model     anthropic/claude-sonnet-4-5 · tools 3/4              │
+      ████████████████████████    │Session   Shipyard · 12345678-1234-5678-1234-567812345678      │
+      ██████████████████████      │Mode      effort high · fast · vim                             │
+    ████████████████████████████  │Context   puffer · 2 msgs · 2 wds · dockyard@staging · 99% left│
+██████████████████████████████    ╰───────────────────────────────────────────────────────────────╯
+  ████████████████████████████
+      ████████████████████████
+    ████████████████████████
         ████████████████████
         ████████████████
             ████████
+
 › Review the current worktree and call out any risks.
 The working tree is clean.
 
 
   No pending changes are waiting for review.
-
-
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 ❯ Review changes, ask a question, or type /

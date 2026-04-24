@@ -22,7 +22,7 @@ use self::summary::{footer_lines, header_lines, session_lines};
 use self::summary::{footer_status_line, top_panel_height};
 use self::tool_messages::render_tool_message;
 pub(crate) use self::top_panel::initialize_top_panel_image_state;
-use self::top_panel::render_fixed_top_panel;
+use self::top_panel::{render_fixed_top_panel, top_panel_lines};
 use crate::approval_overlay::render_permission_overlay;
 use crate::btw_overlay::render_btw_overlay;
 use crate::markdown::render_markdown;
@@ -129,13 +129,7 @@ pub(crate) fn desired_height(
     input: &str,
     commands: &[CommandSpec],
 ) -> u16 {
-    let _ = providers;
-    let tool_registry = ToolRegistry::from_resources(resources);
     let active_overlay = ACTIVE_OVERLAY.with(|value| value.borrow().clone());
-    let onboarding_active = active_overlay
-        .as_ref()
-        .map(OverlayState::is_onboarding)
-        .unwrap_or(false);
     let help_active = help_pane_active(state, &active_overlay);
     let full_panel_overlay = active_overlay
         .as_ref()
@@ -145,8 +139,9 @@ pub(crate) fn desired_height(
     let footer_height = composer_area_height(help_active, dropdown_height);
     let loop_box_height =
         ACTIVE_LOOP_STATE.with(|value| loop_status::loop_status_height(&value.borrow()));
-    let fixed_top_panel =
-        !help_active && !onboarding_active && ACTIVE_FOLLOW_OUTPUT.with(|value| *value.borrow());
+    let tool_registry = ToolRegistry::from_resources(resources);
+    let pending_submit = pending_submit_state();
+    let fixed_top_panel = use_fixed_top_panel_surface(state, help_active, &pending_submit);
     let header_height = if fixed_top_panel {
         top_panel_height(
             state,
@@ -165,11 +160,11 @@ pub(crate) fn desired_height(
     } else {
         0
     };
-    let pending_submit = pending_submit_state();
     let transcript_height = transcript_line_count_with_width(
         width.max(1),
         state,
         resources,
+        providers,
         auth_store,
         pending_submit.loading_prompt.is_some() || !pending_submit.queued_prompts.is_empty(),
     )
@@ -203,7 +198,6 @@ pub(crate) fn render(
     scroll_offset: u16,
     commands: &[CommandSpec],
 ) {
-    frame.render_widget(Clear, frame.area());
     let tool_registry = ToolRegistry::from_resources(resources);
     let active_overlay = ACTIVE_OVERLAY.with(|value| value.borrow().clone());
     let onboarding_active = active_overlay
@@ -219,10 +213,6 @@ pub(crate) fn render(
         commands,
         frame.area().width,
     );
-    let simplified_surface = help_active;
-    let fixed_top_panel = !simplified_surface
-        && !onboarding_active
-        && ACTIVE_FOLLOW_OUTPUT.with(|value| *value.borrow());
     let custom_status_line = state.config.ui.status_line.as_ref().and_then(|config| {
         state.status_line_text.as_ref().map(|text| {
             let padding = " ".repeat(config.padding as usize);
@@ -231,6 +221,10 @@ pub(crate) fn render(
     });
     let footer_height = composer_area_height(help_active, dropdown_height);
     let body_min_height = 1;
+    let loop_box_height =
+        ACTIVE_LOOP_STATE.with(|value| loop_status::loop_status_height(&value.borrow()));
+    let pending_submit = pending_submit_state();
+    let fixed_top_panel = use_fixed_top_panel_surface(state, help_active, &pending_submit);
     let header_height = if fixed_top_panel {
         top_panel_height(
             state,
@@ -249,8 +243,6 @@ pub(crate) fn render(
     } else {
         0
     };
-    let loop_box_height =
-        ACTIVE_LOOP_STATE.with(|value| loop_status::loop_status_height(&value.borrow()));
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -280,11 +272,11 @@ pub(crate) fn render(
         render_help_pane(frame, layout[1], state, commands, resources);
     } else {
         let follow_output = ACTIVE_FOLLOW_OUTPUT.with(|value| *value.borrow());
-        let pending_submit = pending_submit_state();
         let body_scroll_offset = if follow_output {
             transcript_line_count(
                 state,
                 resources,
+                providers,
                 auth_store,
                 pending_submit.loading_prompt.is_some()
                     || !pending_submit.queued_prompts.is_empty(),
@@ -298,6 +290,7 @@ pub(crate) fn render(
                 layout[1].width.max(1),
                 state,
                 resources,
+                providers,
                 auth_store,
                 &tool_registry,
                 pending_submit,
@@ -443,14 +436,26 @@ pub(crate) fn render(
 }
 
 fn transcript_text(
-    _width: u16,
+    width: u16,
     state: &AppState,
-    _resources: &LoadedResources,
-    _auth_store: &AuthStore,
-    _tool_registry: &ToolRegistry,
+    resources: &LoadedResources,
+    providers: &puffer_provider_registry::ProviderRegistry,
+    auth_store: &AuthStore,
+    tool_registry: &ToolRegistry,
     pending_submit: PendingSubmitRenderState,
 ) -> Text<'static> {
-    let mut lines = Vec::new();
+    let mut lines = if state.transcript.is_empty() {
+        Vec::new()
+    } else {
+        top_panel_lines(
+            width.max(1),
+            state,
+            resources,
+            auth_store,
+            tool_registry,
+            providers,
+        )
+    };
     for message in &state.transcript {
         lines.extend(render_transcript_message(message, false));
     }
@@ -460,9 +465,22 @@ fn transcript_text(
     Text::from(lines)
 }
 
+/// Returns true when the current surface should keep the top panel fixed.
+fn use_fixed_top_panel_surface(
+    state: &AppState,
+    help_active: bool,
+    pending_submit: &PendingSubmitRenderState,
+) -> bool {
+    !help_active
+        && state.transcript.is_empty()
+        && pending_submit.loading_prompt.is_none()
+        && pending_submit.queued_prompts.is_empty()
+}
+
 pub(crate) fn transcript_line_count(
     state: &AppState,
     resources: &LoadedResources,
+    providers: &puffer_provider_registry::ProviderRegistry,
     auth_store: &AuthStore,
     pending_submit: bool,
 ) -> u16 {
@@ -470,6 +488,7 @@ pub(crate) fn transcript_line_count(
         current_transcript_viewport().width.max(1),
         state,
         resources,
+        providers,
         auth_store,
         pending_submit,
     )
@@ -479,6 +498,7 @@ fn transcript_line_count_with_width(
     width: u16,
     state: &AppState,
     resources: &LoadedResources,
+    providers: &puffer_provider_registry::ProviderRegistry,
     auth_store: &AuthStore,
     pending_submit: bool,
 ) -> u16 {
@@ -492,6 +512,7 @@ fn transcript_line_count_with_width(
         width,
         state,
         resources,
+        providers,
         auth_store,
         &tool_registry,
         pending,
@@ -512,9 +533,16 @@ fn render_transcript_message(message: &RenderedMessage, pulse_tool: bool) -> Vec
     // Merge them into the "Tool <id> [status]" format that render_tool_message expects.
     if message.role == MessageRole::ToolResult {
         if let Some(tool_id) = &message.tool_id {
-            let status = if message.success.unwrap_or(true) { "ok" } else { "error" };
+            let status = if message.success.unwrap_or(true) {
+                "ok"
+            } else {
+                "error"
+            };
             let input = message.tool_input.as_deref().unwrap_or("{}");
-            let formatted = format!("Tool {} [{}]\ninput: {}\n{}", tool_id, status, input, message.text);
+            let formatted = format!(
+                "Tool {} [{}]\ninput: {}\n{}",
+                tool_id, status, input, message.text
+            );
             if let Some(lines) = render_tool_message(&formatted, expanded, false) {
                 return lines;
             }

@@ -62,6 +62,8 @@ fn usage_command_reports_runtime_and_resource_counts() {
                 model_override: None,
                 mode: None,
                 chained_from: Vec::new(),
+                for_provider: None,
+                for_model: None,
             },
             source_info: puffer_resources::SourceInfo {
                 path: PathBuf::from("prompts/review.yaml"),
@@ -410,6 +412,8 @@ fn sample_resources() -> LoadedResources {
                 model_override: None,
                 mode: None,
                 chained_from: Vec::new(),
+                for_provider: None,
+                for_model: None,
             },
             source_info: puffer_resources::SourceInfo {
                 path: PathBuf::from("prompts/review.yaml"),

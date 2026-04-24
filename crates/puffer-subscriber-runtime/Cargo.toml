@@ -1,0 +1,19 @@
+[package]
+name = "puffer-subscriber-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "sync", "time"] }
+toml.workspace = true
+tracing = "0.1"
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

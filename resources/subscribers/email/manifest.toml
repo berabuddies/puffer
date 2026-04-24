@@ -1,0 +1,17 @@
+manifest_version = 1
+id = "email"
+kind = "subscriber"
+topic = "email"
+display_name = "Email (IMAP / SMTP)"
+
+# Hidden subcommand baked into the puffer binary; runs the IMAP polling
+# loop. The supervisor invokes this with stdin/stdout piped and reads
+# ndjson events from stdout.
+[run]
+cmd = ["puffer", "__subscriber", "email"]
+
+# State directory — the subscriber persists its IMAP/SMTP credentials
+# and a high-water UID per folder here so polling resumes correctly
+# after restart.
+[state]
+dir = "state"

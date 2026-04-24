@@ -1,0 +1,16 @@
+manifest_version = 1
+id = "telegram-user"
+kind = "subscriber"
+topic = "telegram-user"
+display_name = "Telegram (user account)"
+
+# Hidden subcommand baked into the puffer binary; runs the
+# grammers-client driver. The supervisor invokes this with stdin/stdout
+# piped and reads ndjson events from stdout.
+[run]
+cmd = ["puffer", "__subscriber", "telegram-user"]
+
+# State directory — the subscriber persists its session.bin here so login
+# survives restarts. Created on demand by the supervisor.
+[state]
+dir = "state"

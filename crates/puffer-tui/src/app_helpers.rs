@@ -17,8 +17,7 @@ pub(crate) fn help_pane_active_without_overlay(state: &AppState, tui: &TuiState)
 
 /// Returns true when Puffer should use the content-sized bottom viewport.
 pub(crate) fn should_use_inline_viewport(no_alt_screen: bool) -> bool {
-    let _ = no_alt_screen;
-    true
+    no_alt_screen
 }
 
 /// Applies the selected model, effort, and fast-mode choices to the current session.
@@ -72,4 +71,15 @@ pub(crate) fn apply_selected_model(
             if state.fast_mode { "on" } else { "off" }
         ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_use_inline_viewport;
+
+    #[test]
+    fn inline_viewport_tracks_no_alt_screen_setting() {
+        assert!(should_use_inline_viewport(true));
+        assert!(!should_use_inline_viewport(false));
+    }
 }

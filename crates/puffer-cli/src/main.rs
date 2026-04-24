@@ -5,11 +5,13 @@ mod authflow;
 mod benchmark_run;
 mod cli_args;
 mod command_surface;
+mod connectors;
 mod desktop_api;
 mod desktop_api_types;
 mod resource_fs;
+mod subscriptions;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use benchmark_run::run_benchmark_command;
 use clap::Parser;
 use cli_args::{AuthCommand, Cli, Command, SessionCommand, ToolCommand};
@@ -54,6 +56,16 @@ use crate::auth_provider::{
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Hidden subscriber subcommand dispatches to a baked-in skill driver
+    // before any other Puffer state is loaded. The supervisor invokes
+    // `puffer __subscriber <id>`; that process is dedicated to the
+    // subscriber loop and has no business loading resources, providers,
+    // or the subscription manager itself.
+    if let Some(Command::Subscriber { id }) = &cli.subcommand {
+        return run_subscriber(id);
+    }
+
     let cwd = std::env::current_dir()?;
     let paths = ConfigPaths::discover(&cwd);
     ensure_workspace_dirs(&paths)?;
@@ -90,7 +102,27 @@ fn main() -> Result<()> {
     }
     let _ = providers.discover_and_merge_all(&auth_store);
 
+    // Boot the subscription manager once providers are wired up so the
+    // classifier can fish the Anthropic base URL out of the registry.
+    // Held until end of `main`; dropped on normal exit, draining the
+    // router and supervisors.
+    let anthropic_base = providers
+        .provider("anthropic")
+        .map(|p| p.base_url.clone());
+    let _subscription_runtime =
+        match subscriptions::install(&paths, &auth_store, anthropic_base.as_deref()) {
+            Ok(rt) => Some(rt),
+            Err(error) => {
+                eprintln!("subscription manager failed to start: {error:#}");
+                None
+            }
+        };
+
     match cli.subcommand {
+        Some(Command::Subscriber { .. }) => {
+            // Already handled above; here only to satisfy exhaustiveness.
+            unreachable!("__subscriber dispatched before main match")
+        }
         Some(Command::Agents { setting_sources }) => {
             run_agents_command(&paths, &config, setting_sources.as_deref())
         }
@@ -261,6 +293,16 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
+        Some(Command::Serve { config: config_override }) => run_serve_command(
+            config_override.as_deref(),
+            &cwd,
+            config,
+            resources,
+            providers,
+            auth_store,
+            auth_path,
+            &paths,
+        ),
         Some(Command::Tool { command }) => run_tool_command(command, &resources, &cwd),
         Some(Command::Remote {
             target,
@@ -982,6 +1024,27 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r#"'"'"'"#))
 }
 
+/// Dispatcher for the hidden `__subscriber <id>` subcommand. Each
+/// supported subscriber id maps to one baked-in driver crate. Unknown
+/// ids exit with a clear error so the supervisor's restart loop does not
+/// silently spin forever.
+fn run_subscriber(id: &str) -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name(format!("puffer-subscriber-{id}"))
+        .build()
+        .context("failed to build subscriber tokio runtime")?;
+    runtime.block_on(async move {
+        match id {
+            "telegram-user" => puffer_subscriber_telegram_user::run().await,
+            "email" => puffer_subscriber_email::run().await,
+            other => Err(anyhow::anyhow!(
+                "unknown subscriber id `{other}`; this puffer build does not bundle a driver for it"
+            )),
+        }
+    })
+}
+
 fn resolve_session_query(session_store: &SessionStore, query: &str) -> Result<Uuid> {
     if let Ok(session_id) = query.parse() {
         return Ok(session_id);
@@ -990,4 +1053,67 @@ fn resolve_session_query(session_store: &SessionStore, query: &str) -> Result<Uu
         .find_session(query)?
         .ok_or_else(|| anyhow::anyhow!("no session matched `{query}`"))?;
     Ok(session.id)
+}
+
+/// Runs `puffer serve` — headless connector-only mode. Blocks on
+/// SIGINT/SIGTERM, then drives a graceful shutdown for every connector.
+fn run_serve_command(
+    config_override: Option<&str>,
+    cwd: &std::path::Path,
+    config: puffer_config::PufferConfig,
+    resources: puffer_resources::LoadedResources,
+    providers: ProviderRegistry,
+    auth_store: AuthStore,
+    auth_path: std::path::PathBuf,
+    paths: &ConfigPaths,
+) -> Result<()> {
+    let connectors_config = match config_override {
+        Some(path) => puffer_connector_core::ConnectorsConfig::load(std::path::Path::new(path))?,
+        None => connectors::load_connectors_config(paths)?,
+    };
+
+    if !connectors_config.enabled {
+        eprintln!("connectors are disabled (enabled = false); nothing to run");
+        return Ok(());
+    }
+
+    let session_store = SessionStore::from_paths(paths)?;
+    let map_path = connectors::session_map_path(paths);
+    let runtime = connectors::build_runtime(
+        config,
+        resources,
+        providers,
+        auth_store,
+        auth_path,
+        session_store,
+        cwd.to_path_buf(),
+        &map_path,
+    )?;
+
+    let running = connectors::start_configured_connectors(runtime, &connectors_config)?;
+    if running.is_empty() {
+        eprintln!("no connectors started; add entries to connectors.toml or enable more features");
+        return Ok(());
+    }
+
+    let ids = running.ids();
+    eprintln!("puffer serve: running {} connector(s): {}", ids.len(), ids.join(", "));
+    eprintln!("press Ctrl+C to stop");
+
+    // Block on SIGINT. `ctrlc` installs the handler and signals via the
+    // shared channel; we block on receive once it fires.
+    let (signal_tx, signal_rx) = std::sync::mpsc::channel();
+    ctrlc::set_handler(move || {
+        let _ = signal_tx.send(());
+    })
+    .map_err(|error| anyhow::anyhow!("failed to install Ctrl+C handler: {error}"))?;
+    let _ = signal_rx.recv();
+
+    eprintln!("shutting down connectors…");
+    let errors = running.shutdown();
+    for (id, error) in errors {
+        eprintln!("  connector `{id}` shutdown error: {error:#}");
+    }
+    puffer_core::shutdown_runtime_services().ok();
+    Ok(())
 }

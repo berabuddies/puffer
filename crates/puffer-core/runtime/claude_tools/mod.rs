@@ -479,6 +479,7 @@ pub fn execute_workflow_tool(
         "CronCreate" => workflow::cron_create::execute_cron_create(state, cwd, input),
         "CronDelete" => workflow::cron_delete::execute_cron_delete(state, cwd, input),
         "CronList" => workflow::cron_list::execute_cron_list(state, cwd, input),
+        "EmailConfigure" => workflow::email_configure::execute_email_configure(state, cwd, input),
         "EnterPlanMode" => workflow::enter_plan_mode::execute_enter_plan_mode(state, cwd, input),
         "EnterWorktree" => workflow::enter_worktree::execute_enter_worktree(state, cwd, input),
         "ExitPlanMode" => workflow::exit_plan_mode::execute_exit_plan_mode(state, cwd, input),
@@ -495,6 +496,27 @@ pub fn execute_workflow_tool(
             input,
             structured_output,
         ),
+        "SubscriberInstall" => {
+            workflow::subscriber_install::execute_subscriber_install(state, cwd, input)
+        }
+        "SubscriberList" => {
+            workflow::subscriber_list::execute_subscriber_list(state, cwd, input)
+        }
+        "SubscriberScaffold" => {
+            workflow::subscriber_scaffold::execute_subscriber_scaffold(state, cwd, input)
+        }
+        "SubscriptionCreate" => {
+            workflow::subscription_create::execute_subscription_create(state, cwd, input)
+        }
+        "SubscriptionDelete" => {
+            workflow::subscription_delete::execute_subscription_delete(state, cwd, input)
+        }
+        "SubscriptionList" => {
+            workflow::subscription_list::execute_subscription_list(state, cwd, input)
+        }
+        "SubscriptionPause" => {
+            workflow::subscription_pause::execute_subscription_pause(state, cwd, input)
+        }
         "TaskCreate" => workflow::task_create::execute_task_create(state, cwd, input),
         "TaskGet" => workflow::task_get::execute_task_get(state, cwd, input),
         "TaskList" => workflow::task_list::execute_task_list(state, cwd, input),
@@ -503,6 +525,15 @@ pub fn execute_workflow_tool(
         "TaskUpdate" => workflow::task_update::execute_task_update(state, cwd, input),
         "TeamCreate" => workflow::team_create::execute_team_create(state, cwd, input),
         "TeamDelete" => workflow::team_delete::execute_team_delete(state, cwd, input),
+        "TelegramLoginStart" => {
+            workflow::telegram_login::execute_telegram_login_start(state, cwd, input)
+        }
+        "TelegramLoginSubmitCode" => {
+            workflow::telegram_login::execute_telegram_login_submit_code(state, cwd, input)
+        }
+        "TelegramLoginSubmitPassword" => {
+            workflow::telegram_login::execute_telegram_login_submit_password(state, cwd, input)
+        }
         "TodoWrite" => workflow::todo_write::execute_todo_write(state, cwd, input),
         other => bail!("workflow tool `{other}` is not implemented"),
     }

@@ -6,6 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const ORANGE_ACCENT: Color = Color::Indexed(214);
 const TOOL_OUTPUT_COLOR: Color = Color::DarkGray;
 const RUNNING_PULSE_MS: u128 = 800;
+const DISPLAY_TAB_STOP: usize = 4;
 
 // JSON syntax coloring.
 const JSON_KEY_COLOR: Color = Color::Cyan;
@@ -141,6 +142,17 @@ fn friendly_tool_name(tool_id: &str) -> String {
         "taskstop" => "Task Stop".to_string(),
         "taskoutput" => "Task Output".to_string(),
         "agent" => "Agent".to_string(),
+        "subscriptioncreate" => "Subscription Create".to_string(),
+        "subscriptionlist" => "Subscription List".to_string(),
+        "subscriptionpause" => "Subscription Pause".to_string(),
+        "subscriptiondelete" => "Subscription Delete".to_string(),
+        "subscriberscaffold" => "Subscriber Scaffold".to_string(),
+        "subscriberinstall" => "Subscriber Install".to_string(),
+        "subscriberlist" => "Subscriber List".to_string(),
+        "telegramloginstart" => "Telegram Login".to_string(),
+        "telegramloginsubmitcode" => "Telegram Login (code)".to_string(),
+        "telegramloginsubmitpassword" => "Telegram Login (2FA)".to_string(),
+        "emailconfigure" => "Email Configure".to_string(),
         other => other.replace('_', " "),
     }
 }
@@ -180,6 +192,33 @@ fn summarize_input(tool_id: &str, input: &str) -> Option<String> {
         }
         "taskupdate" => extract_string(parsed.as_ref(), &["id"]).map(normalize_inline_text),
         "task" | "agent" => extract_string(parsed.as_ref(), &["prompt"]).map(normalize_inline_text),
+        "subscriptioncreate" | "subscriptiondelete" | "subscriberscaffold"
+        | "subscriberinstall" => {
+            extract_string(parsed.as_ref(), &["id"]).map(normalize_inline_text)
+        }
+        "subscriptionpause" => {
+            let id = extract_string(parsed.as_ref(), &["id"])?;
+            let paused = parsed
+                .as_ref()
+                .and_then(|v| v.as_object())
+                .and_then(|o| o.get("paused"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            Some(format!(
+                "{id} ({})",
+                if paused { "pause" } else { "resume" }
+            ))
+        }
+        "telegramloginstart" => {
+            extract_string(parsed.as_ref(), &["phone"]).map(normalize_inline_text)
+        }
+        // The submitted code and password are deliberately never rendered.
+        "telegramloginsubmitcode" => Some("(code redacted)".to_string()),
+        "telegramloginsubmitpassword" => Some("(password redacted)".to_string()),
+        // Email configure surfaces the username only — credentials and
+        // hosts stay out of the transcript header.
+        "emailconfigure" => extract_string(parsed.as_ref(), &["username"])
+            .map(normalize_inline_text),
         _ => extract_first_string(parsed.as_ref()).map(normalize_inline_text),
     }?;
     Some(truncate(&summary, 140))
@@ -214,6 +253,10 @@ fn output_display_lines(
     }
 
     let (lines, is_json) = display_output_lines(tool_id, text);
+    let lines = lines
+        .into_iter()
+        .map(|line| sanitize_display_line(&line))
+        .collect::<Vec<_>>();
     if lines.is_empty() {
         return (Vec::new(), false);
     }
@@ -284,6 +327,49 @@ fn display_output_lines(tool_id: &str, output: &str) -> (Vec<String>, bool) {
         }
         "readmcpresourcetool" => {
             if let Some(lines) = read_mcp_resource_output_lines(output) {
+                return (lines, false);
+            }
+        }
+        "subscriptioncreate" => {
+            if let Some(lines) = subscription_create_output_lines(output) {
+                return (lines, false);
+            }
+        }
+        "subscriptionlist" => {
+            if let Some(lines) = subscription_list_output_lines(output) {
+                return (lines, false);
+            }
+        }
+        "subscriptionpause" => {
+            if let Some(lines) = subscription_pause_output_lines(output) {
+                return (lines, false);
+            }
+        }
+        "subscriptiondelete" => {
+            if let Some(lines) = subscription_delete_output_lines(output) {
+                return (lines, false);
+            }
+        }
+        "subscriberscaffold" => {
+            if let Some(lines) = subscriber_scaffold_output_lines(output) {
+                return (lines, false);
+            }
+        }
+        "subscriberinstall" => {
+            if let Some(lines) = subscriber_install_output_lines(output) {
+                return (lines, false);
+            }
+        }
+        "subscriberlist" => {
+            if let Some(lines) = subscriber_list_output_lines(output) {
+                return (lines, false);
+            }
+        }
+        "telegramloginstart"
+        | "telegramloginsubmitcode"
+        | "telegramloginsubmitpassword"
+        | "emailconfigure" => {
+            if let Some(lines) = status_next_output_lines(output) {
                 return (lines, false);
             }
         }
@@ -474,6 +560,138 @@ fn read_mcp_resource_output_lines(output: &str) -> Option<Vec<String>> {
     }
 }
 
+fn subscription_create_output_lines(output: &str) -> Option<Vec<String>> {
+    let parsed = serde_json::from_str::<Value>(output).ok()?;
+    let id = parsed.get("id").and_then(Value::as_str)?;
+    let topic = parsed
+        .get("source_topic")
+        .and_then(Value::as_str)
+        .unwrap_or("?");
+    let action_type = parsed
+        .get("action")
+        .and_then(|a| a.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or("?");
+    let mut lines = vec![format!(
+        "Created subscription {id} (topic={topic}, action={action_type})"
+    )];
+    if parsed.get("classify_prompt").and_then(Value::as_str).is_some() {
+        lines.push("LLM judge enabled".to_string());
+    }
+    if let Some(prefilter_kind) = parsed
+        .get("prefilter")
+        .and_then(|p| p.get("type"))
+        .and_then(Value::as_str)
+    {
+        lines.push(format!("prefilter: {prefilter_kind}"));
+    }
+    Some(lines)
+}
+
+fn subscription_list_output_lines(output: &str) -> Option<Vec<String>> {
+    let parsed = serde_json::from_str::<Value>(output).ok()?;
+    let subs = parsed.get("subscriptions").and_then(Value::as_array)?;
+    let mut lines = Vec::new();
+    if subs.is_empty() {
+        lines.push("(no subscriptions)".to_string());
+    } else {
+        for sub in subs {
+            let id = sub.get("id").and_then(Value::as_str).unwrap_or("?");
+            let status = sub.get("status").and_then(Value::as_str).unwrap_or("?");
+            let topic = sub.get("source_topic").and_then(Value::as_str).unwrap_or("?");
+            let action_type = sub
+                .get("action")
+                .and_then(|a| a.get("type"))
+                .and_then(Value::as_str)
+                .unwrap_or("?");
+            lines.push(format!("{id}  [{status}]  {topic} -> {action_type}"));
+        }
+    }
+    if let Some(running) = parsed
+        .get("running_subscribers")
+        .and_then(Value::as_array)
+        .filter(|r| !r.is_empty())
+    {
+        let names: Vec<&str> = running.iter().filter_map(Value::as_str).collect();
+        lines.push(format!("running subscribers: {}", names.join(", ")));
+    }
+    Some(lines)
+}
+
+fn subscription_pause_output_lines(output: &str) -> Option<Vec<String>> {
+    let parsed = serde_json::from_str::<Value>(output).ok()?;
+    let id = parsed.get("id").and_then(Value::as_str)?;
+    let status = parsed.get("status").and_then(Value::as_str).unwrap_or("?");
+    Some(vec![format!("{id} -> {status}")])
+}
+
+fn subscription_delete_output_lines(output: &str) -> Option<Vec<String>> {
+    let parsed = serde_json::from_str::<Value>(output).ok()?;
+    let deleted = parsed.get("deleted").and_then(Value::as_str)?;
+    Some(vec![format!("deleted {deleted}")])
+}
+
+fn subscriber_scaffold_output_lines(output: &str) -> Option<Vec<String>> {
+    let parsed = serde_json::from_str::<Value>(output).ok()?;
+    let dir = parsed.get("dir").and_then(Value::as_str)?;
+    let mut lines = vec![format!("scaffolded {dir}")];
+    if let Some(next) = parsed.get("next").and_then(Value::as_str) {
+        lines.push(next.to_string());
+    }
+    Some(lines)
+}
+
+fn subscriber_install_output_lines(output: &str) -> Option<Vec<String>> {
+    let parsed = serde_json::from_str::<Value>(output).ok()?;
+    let id = parsed.get("id").and_then(Value::as_str)?;
+    let topic = parsed.get("topic").and_then(Value::as_str).unwrap_or(id);
+    let dir = parsed.get("dir").and_then(Value::as_str).unwrap_or("");
+    let mut lines = vec![format!("started {id} (topic={topic})")];
+    if !dir.is_empty() {
+        lines.push(dir.to_string());
+    }
+    Some(lines)
+}
+
+fn subscriber_list_output_lines(output: &str) -> Option<Vec<String>> {
+    let parsed = serde_json::from_str::<Value>(output).ok()?;
+    let items = parsed.as_array()?;
+    if items.is_empty() {
+        return Some(vec!["(no subscribers discovered)".to_string()]);
+    }
+    Some(
+        items
+            .iter()
+            .map(|item| {
+                let id = item.get("id").and_then(Value::as_str).unwrap_or("?");
+                let topic = item.get("topic").and_then(Value::as_str).unwrap_or("?");
+                let source = item.get("source").and_then(Value::as_str).unwrap_or("?");
+                let running = item
+                    .get("running")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let state = if running { "running" } else { "stopped" };
+                format!("{id}  [{state}]  ({source})  topic={topic}")
+            })
+            .collect(),
+    )
+}
+
+fn status_next_output_lines(output: &str) -> Option<Vec<String>> {
+    let parsed = serde_json::from_str::<Value>(output).ok()?;
+    let mut lines = Vec::new();
+    if let Some(status) = parsed.get("status").and_then(Value::as_str) {
+        lines.push(format!("status: {status}"));
+    }
+    if let Some(next) = parsed.get("next").and_then(Value::as_str) {
+        lines.push(next.to_string());
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    Some(lines)
+}
+
 fn generic_json_output_lines(output: &str) -> Option<Vec<String>> {
     let parsed = serde_json::from_str::<Value>(output).ok()?;
     if let Some(text) = parsed.get("result").and_then(Value::as_str) {
@@ -615,6 +833,36 @@ fn truncate(text: &str, max_chars: usize) -> String {
     format!("{retained}…")
 }
 
+fn sanitize_display_line(text: &str) -> String {
+    let mut rendered = String::with_capacity(text.len());
+    let mut column = 0usize;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\t' => {
+                let spaces = DISPLAY_TAB_STOP - (column % DISPLAY_TAB_STOP);
+                rendered.push_str(&" ".repeat(spaces));
+                column += spaces;
+            }
+            '\u{1b}' => {
+                if chars.next_if_eq(&'[').is_some() {
+                    while let Some(next) = chars.next() {
+                        if ('@'..='~').contains(&next) {
+                            break;
+                        }
+                    }
+                }
+            }
+            control if control.is_control() => {}
+            _ => {
+                rendered.push(ch);
+                column += 1;
+            }
+        }
+    }
+    rendered
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -683,9 +931,17 @@ mod tests {
             text,
             vec![
                 "● Read /tmp/demo.txt".to_string(),
-                "└      1\thello".to_string(),
-                "       2\tworld".to_string(),
+                "└      1  hello".to_string(),
+                "       2  world".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn tool_output_sanitizes_tabs_and_control_characters() {
+        assert_eq!(
+            sanitize_display_line("     1\thello\r\x1b[31m"),
+            "     1  hello"
         );
     }
 
@@ -727,5 +983,66 @@ mod tests {
                 "└ Rust TUI streaming guide".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn telegram_login_submit_password_redacts_value_in_header() {
+        let rendered = render_tool_message(
+            "Tool TelegramLoginSubmitPassword [ok]\ninput: {\"password\":\"hunter2\"}\n{\"status\":\"submitted\"}",
+            false,
+            false,
+        )
+        .expect("rendered");
+        let header = rendered[0].to_string();
+        assert!(header.contains("Telegram Login (2FA)"), "got: {header}");
+        assert!(header.contains("redacted"), "got: {header}");
+        assert!(!header.contains("hunter2"), "header leaked password: {header}");
+    }
+
+    #[test]
+    fn email_configure_header_shows_username_only() {
+        let rendered = render_tool_message(
+            "Tool EmailConfigure [ok]\ninput: {\"imap_host\":\"imap.example.com\",\"smtp_host\":\"smtp.example.com\",\"username\":\"alice@example.com\",\"password\":\"sekret\",\"from_address\":\"alice@example.com\"}\n{\"status\":\"configured\"}",
+            false,
+            false,
+        )
+        .expect("rendered");
+        let header = rendered[0].to_string();
+        assert!(header.contains("alice@example.com"));
+        assert!(!header.contains("sekret"), "header leaked password");
+        assert!(!header.contains("imap.example.com"), "header leaked host");
+    }
+
+    #[test]
+    fn subscription_create_output_summarizes_topic_and_action() {
+        let rendered = render_tool_message(
+            "Tool SubscriptionCreate [ok]\ninput: {\"id\":\"ioc-watch\"}\n{\"id\":\"ioc-watch\",\"source_topic\":\"telegram-user\",\"action\":{\"type\":\"sqlite_insert\",\"path\":\"/tmp/x.db\",\"table\":\"t\"}}",
+            true,
+            false,
+        )
+        .expect("rendered");
+        let body: Vec<String> = rendered.into_iter().map(|l| l.to_string()).collect();
+        assert!(body[0].contains("ioc-watch"), "got: {body:?}");
+        assert!(
+            body.iter()
+                .any(|l| l.contains("telegram-user") && l.contains("sqlite_insert")),
+            "got: {body:?}"
+        );
+    }
+
+    #[test]
+    fn subscription_list_output_lists_each_subscription() {
+        let rendered = render_tool_message(
+            "Tool SubscriptionList [ok]\ninput: {}\n{\"subscriptions\":[{\"id\":\"a\",\"status\":\"enabled\",\"source_topic\":\"telegram-user\",\"action\":{\"type\":\"sqlite_insert\"}},{\"id\":\"b\",\"status\":\"paused\",\"source_topic\":\"email\",\"action\":{\"type\":\"forward_message\"}}],\"running_subscribers\":[\"telegram-user\"]}",
+            true,
+            false,
+        )
+        .expect("rendered");
+        let body: Vec<String> = rendered.into_iter().map(|l| l.to_string()).collect();
+        assert!(body.iter().any(|l| l.contains("a") && l.contains("enabled")));
+        assert!(body.iter().any(|l| l.contains("b") && l.contains("paused")));
+        assert!(body
+            .iter()
+            .any(|l| l.contains("running subscribers") && l.contains("telegram-user")));
     }
 }

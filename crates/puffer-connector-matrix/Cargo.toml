@@ -1,0 +1,24 @@
+[package]
+name = "puffer-connector-matrix"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+puffer-connector-core = { path = "../puffer-connector-core" }
+serde.workspace = true
+serde_json.workspace = true
+# matrix-sdk is a heavy dependency. We disable its default features (which
+# pull in sqlite + olm/e2ee native libs) and keep only a TLS backend so the
+# build stays lean. v1 is a plaintext-only bot; E2EE rooms are a TODO.
+matrix-sdk = { version = "0.16", default-features = false, features = ["native-tls"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync"] }
+uuid.workspace = true
+
+[dev-dependencies]
+puffer-config = { path = "../puffer-config" }
+puffer-provider-registry = { path = "../puffer-provider-registry" }
+puffer-resources = { path = "../puffer-resources" }
+puffer-session-store = { path = "../puffer-session-store" }
+tempfile.workspace = true

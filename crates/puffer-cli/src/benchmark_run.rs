@@ -406,6 +406,8 @@ fn benchmark_resources(resources: &LoadedResources) -> LoadedResources {
                 model_override: None,
                 mode: None,
                 chained_from: Vec::new(),
+                for_provider: None,
+                for_model: None,
             },
             source_info: SourceInfo {
                 path: PathBuf::from("benchmark/prompts/system-base.yaml"),
@@ -942,6 +944,8 @@ mod tests {
                     model_override: None,
                     mode: None,
                     chained_from: Vec::new(),
+                    for_provider: None,
+                    for_model: None,
                 },
                 source_info: SourceInfo {
                     path: PathBuf::from("resources/prompts/system-base.yaml"),

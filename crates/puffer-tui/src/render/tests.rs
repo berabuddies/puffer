@@ -1,5 +1,6 @@
 use super::*;
 use crate::usage::UsageOverlay;
+use crate::ModelPickerEntry;
 use insta::assert_snapshot;
 use puffer_config::PufferConfig;
 use puffer_core::CommandKind;
@@ -45,8 +46,8 @@ fn header_snapshot_reports_compact_status() {
     .collect::<Vec<_>>()
     .join("\n");
     assert_snapshot!(
-        snapshot,
-        @r"
+                            snapshot,
+                            @r"
 Puffer Code
 Account   anthropic via API key
 Model     anthropic/claude-sonnet-4-5 · tools 3/4
@@ -54,7 +55,7 @@ Session   Shipyard · 12345678-1234-5678-1234-567812345678
 Mode      effort high · fast · vim
 Context   puffer · 2 msgs · 2 wds · dockyard@staging
 "
-    );
+                        );
 }
 
 #[test]
@@ -67,11 +68,11 @@ fn footer_snapshot_reports_compact_prompt_rail() {
         .collect::<Vec<_>>()
         .join("\n");
     assert_snapshot!(
-        snapshot,
-        @r"
+                            snapshot,
+                            @r"
 anthropic/claude-sonnet-4-5 · 99% left · /tmp/puffer · sandbox workspace-write
 "
-    );
+                        );
 }
 
 #[test]
@@ -94,8 +95,8 @@ fn header_snapshot_includes_oauth_identity_when_available() {
     .collect::<Vec<_>>()
     .join("\n");
     assert_snapshot!(
-        snapshot,
-        @r"
+                            snapshot,
+                            @r"
 Puffer Code
 Account   dev@example.com · plan Pro · acct acct-1
 Model     openai/gpt-5 · tools 3/4
@@ -103,7 +104,7 @@ Session   Shipyard · 12345678-1234-5678-1234-567812345678
 Mode      effort high · fast · vim
 Context   puffer · 2 msgs · 2 wds · dockyard@staging
 "
-    );
+                        );
 }
 
 #[test]
@@ -370,6 +371,7 @@ fn render_empty_state_shows_transcript_guidance() {
     let rendered = terminal_view(&terminal);
     assert!(rendered.contains("Puffer Code"));
     assert!(rendered.contains("Account"));
+    assert!(has_top_panel(&rendered));
     assert!(!rendered.contains("Welcome to Puffer Code"));
     assert!(!rendered.contains("Tips to get started"));
 }
@@ -403,10 +405,59 @@ fn render_empty_state_compacts_on_narrow_width() {
 
     let rendered = terminal_view(&terminal);
     assert!(rendered.contains("Puffer Code"));
+    assert!(has_top_panel(&rendered));
     assert!(!rendered.contains("Welcome to Puffer Code"));
     assert!(!rendered.contains("██"));
     assert!(rendered.contains("100% left"));
     assert!(rendered.contains("Review changes, ask a question, or type /"));
+}
+
+#[test]
+fn render_onboarding_empty_state_keeps_fixed_top_panel() {
+    let backend = TestBackend::new(100, 28);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut state = sample_state();
+    state.transcript.clear();
+    let resources = sample_resources();
+    let providers = sample_providers();
+    let auth_store = sample_auth_store();
+
+    terminal
+        .draw(|frame| {
+            set_active_overlay(Some(OverlayState::ThemePicker {
+                entries: vec![
+                    ModelPickerEntry {
+                        selector: "puffer".to_string(),
+                        description: "Default Puffer text style".to_string(),
+                        command: None,
+                    },
+                    ModelPickerEntry {
+                        selector: "harbor".to_string(),
+                        description: "Calmer contrast for long sessions".to_string(),
+                        command: None,
+                    },
+                ],
+                selection: 0,
+            }));
+            render(
+                frame,
+                &state,
+                &resources,
+                &providers,
+                &auth_store,
+                "",
+                0,
+                0,
+                0,
+                &sample_commands(),
+            );
+            set_active_overlay(None);
+        })
+        .unwrap();
+
+    let rendered = terminal_view(&terminal);
+    assert!(rendered.contains("Puffer Code"));
+    assert!(has_top_panel(&rendered));
 }
 
 #[test]
@@ -874,6 +925,8 @@ fn loaded_prompt(id: &str, description: &str) -> LoadedItem<puffer_resources::Pr
             model_override: None,
             mode: None,
             chained_from: Vec::new(),
+            for_provider: None,
+            for_model: None,
         },
         source_info: SourceInfo {
             path: PathBuf::from(format!("{id}.yaml")),

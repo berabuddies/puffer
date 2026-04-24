@@ -1,7 +1,7 @@
 use crate::plans::{plan_file_path, plan_has_user_content, read_plan_text};
 use crate::AppState;
 use anyhow::Result;
-use puffer_resources::{render_prompt_by_id, LoadedResources};
+use puffer_resources::{render_prompt_for, LoadedResources};
 use std::collections::BTreeMap;
 
 const TURNS_BETWEEN_ATTACHMENTS: usize = 5;
@@ -100,9 +100,15 @@ fn render_exit_attachment(
             ),
         );
     }
-    let rendered = render_prompt_by_id(resources, "plan-mode-exited", &variables)
-        .map(|prompt| prompt.trim().to_string())
-        .filter(|prompt| !prompt.is_empty());
+    let rendered = render_prompt_for(
+        resources,
+        "plan-mode-exited",
+        state.current_provider.as_deref(),
+        state.current_model.as_deref(),
+        &variables,
+    )
+    .map(|prompt| prompt.trim().to_string())
+    .filter(|prompt| !prompt.is_empty());
     if consume {
         state.plan_mode_needs_exit_attachment = false;
     }
@@ -160,9 +166,15 @@ fn render_main_plan_prompt(
         "EXIT_PLAN_MODE_TOOL_NAME".to_string(),
         "ExitPlanMode".to_string(),
     );
-    Ok(render_prompt_by_id(resources, prompt_id, &variables)
-        .map(|prompt| prompt.trim().to_string())
-        .filter(|prompt| !prompt.is_empty()))
+    Ok(render_prompt_for(
+        resources,
+        prompt_id,
+        state.current_provider.as_deref(),
+        state.current_model.as_deref(),
+        &variables,
+    )
+    .map(|prompt| prompt.trim().to_string())
+    .filter(|prompt| !prompt.is_empty()))
 }
 
 fn render_reentry_prompt(state: &AppState, resources: &LoadedResources) -> Result<Option<String>> {
@@ -176,11 +188,15 @@ fn render_reentry_prompt(state: &AppState, resources: &LoadedResources) -> Resul
             "ExitPlanMode".to_string(),
         ),
     ]);
-    Ok(
-        render_prompt_by_id(resources, "plan-mode-reentry", &variables)
-            .map(|prompt| prompt.trim().to_string())
-            .filter(|prompt| !prompt.is_empty()),
+    Ok(render_prompt_for(
+        resources,
+        "plan-mode-reentry",
+        state.current_provider.as_deref(),
+        state.current_model.as_deref(),
+        &variables,
     )
+    .map(|prompt| prompt.trim().to_string())
+    .filter(|prompt| !prompt.is_empty()))
 }
 
 fn next_attachment_is_full(state: &AppState) -> bool {

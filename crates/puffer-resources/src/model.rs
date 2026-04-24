@@ -88,6 +88,10 @@ pub struct PromptTemplate {
     pub mode: Option<String>,
     #[serde(default)]
     pub chained_from: Vec<String>,
+    #[serde(default, alias = "forProvider", alias = "for-provider")]
+    pub for_provider: Option<String>,
+    #[serde(default, alias = "forModel", alias = "for-model")]
+    pub for_model: Option<String>,
 }
 
 /// Declares a YAML-editable subagent definition.

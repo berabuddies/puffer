@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 
 pub use loader::{
     agent_by_id, hook_by_id, load_resources, plugin_by_id, plugin_lsp_servers, plugin_mcp_servers,
-    prompt_by_id, skill_by_name,
+    prompt_by_id, prompt_for, skill_by_name,
 };
 pub use model::{
     AgentMcpServerSpec, AgentMemoryScope, AgentSpec, HookSpec, IdeSpec, LoadedItem,
@@ -36,20 +36,48 @@ pub fn hooks_for_event<'a>(
 }
 
 /// Renders a prompt template by id, including any chained parent prompts.
+///
+/// Equivalent to [`render_prompt_for`] with no provider/model context — base
+/// prompts are always selected regardless of which variants are loaded.
 pub fn render_prompt_by_id(
     resources: &LoadedResources,
     id: &str,
     variables: &std::collections::BTreeMap<String, String>,
 ) -> Option<String> {
+    render_prompt_for(resources, id, None, None, variables)
+}
+
+/// Renders a prompt template by id with provider/model-specific override fallback.
+///
+/// When both `provider` and `model` are `None`, behaves identically to
+/// [`render_prompt_by_id`]. Each chained parent is resolved with the same
+/// provider/model context, so a base chain can pull in model-specific variants.
+pub fn render_prompt_for(
+    resources: &LoadedResources,
+    id: &str,
+    provider: Option<&str>,
+    model: Option<&str>,
+    variables: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
     let mut visited = BTreeSet::new();
     let mut sections = Vec::new();
-    append_prompt_sections(resources, id, variables, &mut visited, &mut sections);
+    append_prompt_sections(
+        resources,
+        id,
+        provider,
+        model,
+        variables,
+        &mut visited,
+        &mut sections,
+    );
     (!sections.is_empty()).then(|| sections.join("\n\n"))
 }
 
 fn append_prompt_sections(
     resources: &LoadedResources,
     id: &str,
+    provider: Option<&str>,
+    model: Option<&str>,
     variables: &std::collections::BTreeMap<String, String>,
     visited: &mut BTreeSet<String>,
     sections: &mut Vec<String>,
@@ -57,11 +85,13 @@ fn append_prompt_sections(
     if !visited.insert(id.to_string()) {
         return;
     }
-    let Some(prompt) = prompt_by_id(resources, id) else {
+    let Some(prompt) = prompt_for(resources, id, provider, model) else {
         return;
     };
     for chained in &prompt.value.chained_from {
-        append_prompt_sections(resources, chained, variables, visited, sections);
+        append_prompt_sections(
+            resources, chained, provider, model, variables, visited, sections,
+        );
     }
     sections.push(prompt.value.render(variables));
 }
@@ -93,6 +123,8 @@ mod tests {
                         model_override: None,
                         mode: None,
                         chained_from: Vec::new(),
+                        for_provider: None,
+                        for_model: None,
                     },
                     source_info: SourceInfo {
                         path: PathBuf::from("base.yaml"),
@@ -115,6 +147,8 @@ mod tests {
                         model_override: None,
                         mode: Some("review".to_string()),
                         chained_from: vec!["base".to_string()],
+                        for_provider: None,
+                        for_model: None,
                     },
                     source_info: SourceInfo {
                         path: PathBuf::from("review.yaml"),
@@ -135,5 +169,100 @@ mod tests {
         .expect("rendered prompt");
         assert!(rendered.contains("Base now"));
         assert!(rendered.contains("Review /tmp/work"));
+    }
+
+    fn make_prompt(id: &str, template: &str, for_model: Option<&str>) -> LoadedItem<PromptTemplate> {
+        LoadedItem {
+            value: PromptTemplate {
+                id: id.to_string(),
+                description: String::new(),
+                template: template.to_string(),
+                variables: Vec::new(),
+                allowed_tools: Vec::new(),
+                provider_override: None,
+                model_override: None,
+                mode: None,
+                chained_from: Vec::new(),
+                for_provider: None,
+                for_model: for_model.map(str::to_string),
+            },
+            source_info: SourceInfo {
+                path: PathBuf::from(format!("{id}.yaml")),
+                kind: SourceKind::Builtin,
+            },
+        }
+    }
+
+    #[test]
+    fn render_prompt_for_selects_model_override_when_available() {
+        let resources = LoadedResources {
+            prompts: vec![
+                make_prompt("system-base", "base body", None),
+                make_prompt("system-base", "override body", Some("claude-opus-4-6")),
+            ],
+            ..LoadedResources::default()
+        };
+        let rendered = render_prompt_for(
+            &resources,
+            "system-base",
+            Some("anthropic"),
+            Some("claude-opus-4-6"),
+            &BTreeMap::new(),
+        )
+        .expect("rendered prompt");
+        assert_eq!(rendered, "override body");
+    }
+
+    #[test]
+    fn render_prompt_for_falls_back_to_base_when_model_does_not_match() {
+        let resources = LoadedResources {
+            prompts: vec![
+                make_prompt("system-base", "base body", None),
+                make_prompt("system-base", "override body", Some("claude-opus-4-6")),
+            ],
+            ..LoadedResources::default()
+        };
+        let rendered = render_prompt_for(
+            &resources,
+            "system-base",
+            Some("openai"),
+            Some("gpt-5"),
+            &BTreeMap::new(),
+        )
+        .expect("rendered prompt");
+        assert_eq!(rendered, "base body");
+    }
+
+    #[test]
+    fn render_prompt_for_strips_provider_prefix_from_model_id() {
+        let resources = LoadedResources {
+            prompts: vec![
+                make_prompt("system-base", "base body", None),
+                make_prompt("system-base", "override body", Some("gpt-5")),
+            ],
+            ..LoadedResources::default()
+        };
+        let rendered = render_prompt_for(
+            &resources,
+            "system-base",
+            None,
+            Some("openai/gpt-5"),
+            &BTreeMap::new(),
+        )
+        .expect("rendered prompt");
+        assert_eq!(rendered, "override body");
+    }
+
+    #[test]
+    fn prompt_by_id_returns_base_variant_ignoring_overrides() {
+        let resources = LoadedResources {
+            prompts: vec![
+                make_prompt("system-base", "base body", None),
+                make_prompt("system-base", "override body", Some("gpt-5")),
+            ],
+            ..LoadedResources::default()
+        };
+        let prompt = prompt_by_id(&resources, "system-base").expect("base prompt");
+        assert_eq!(prompt.value.template, "base body");
     }
 }

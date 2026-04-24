@@ -1,0 +1,18 @@
+[package]
+name = "puffer-subscriber-telegram-user"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+grammers-client = "0.7"
+grammers-session = "0.7"
+grammers-tl-types = "0.7"
+puffer-subscriber-runtime = { path = "../puffer-subscriber-runtime" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "io-std", "sync", "time", "fs"] }
+tracing = "0.1"

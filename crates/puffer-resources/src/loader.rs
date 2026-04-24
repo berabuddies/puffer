@@ -22,77 +22,77 @@ pub fn load_resources(paths: &ConfigPaths) -> Result<LoadedResources> {
         merge_by_id(
             &mut loaded.providers,
             load_yaml_dir::<ProviderPack>(&root.join("providers"), kind)?,
-            |item| item.value.id.clone(),
+            |item| MergeKey::simple(item.value.id.clone()),
             "provider",
             &mut loaded.diagnostics,
         );
         merge_by_id(
             &mut loaded.tools,
             load_yaml_dir::<ToolSpec>(&root.join("tools"), kind)?,
-            |item| item.value.id.clone(),
+            |item| MergeKey::simple(item.value.id.clone()),
             "tool",
             &mut loaded.diagnostics,
         );
         merge_by_id(
             &mut loaded.agents,
             load_yaml_dir::<AgentSpec>(&root.join("agents"), kind)?,
-            |item| item.value.id.clone(),
+            |item| MergeKey::simple(item.value.id.clone()),
             "agent",
             &mut loaded.diagnostics,
         );
         merge_by_id(
             &mut loaded.prompts,
             load_yaml_dir::<PromptTemplate>(&root.join("prompts"), kind)?,
-            |item| item.value.id.clone(),
+            |item| prompt_variant_key(&item.value),
             "prompt",
             &mut loaded.diagnostics,
         );
         merge_by_id(
             &mut loaded.hooks,
             load_yaml_dir::<HookSpec>(&root.join("hooks"), kind)?,
-            |item| item.value.id.clone(),
+            |item| MergeKey::simple(item.value.id.clone()),
             "hook",
             &mut loaded.diagnostics,
         );
         merge_by_id(
             &mut loaded.skills,
             load_skill_dir(&root.join("skills"), kind)?,
-            |item| item.value.name.clone(),
+            |item| MergeKey::simple(item.value.name.clone()),
             "skill",
             &mut loaded.diagnostics,
         );
         merge_by_id(
             &mut loaded.mascots,
             load_yaml_dir::<MascotSpec>(&root.join("mascots"), kind)?,
-            |item| item.value.id.clone(),
+            |item| MergeKey::simple(item.value.id.clone()),
             "mascot",
             &mut loaded.diagnostics,
         );
         merge_by_id(
             &mut loaded.plugins,
             plugins.clone(),
-            |item| item.value.id.clone(),
+            |item| MergeKey::simple(item.value.id.clone()),
             "plugin",
             &mut loaded.diagnostics,
         );
         merge_by_id(
             &mut loaded.agents,
             plugin_agent_specs(&plugins),
-            |item| item.value.id.clone(),
+            |item| MergeKey::simple(item.value.id.clone()),
             "agent",
             &mut loaded.diagnostics,
         );
         merge_by_id(
             &mut loaded.mcp_servers,
             load_mcp_server_manifests(&root, kind)?,
-            |item| item.value.id.clone(),
+            |item| MergeKey::simple(item.value.id.clone()),
             "mcp_server",
             &mut loaded.diagnostics,
         );
         merge_by_id(
             &mut loaded.ides,
             load_yaml_dir::<IdeSpec>(&root.join("ides"), kind)?,
-            |item| item.value.id.clone(),
+            |item| MergeKey::simple(item.value.id.clone()),
             "ide",
             &mut loaded.diagnostics,
         );
@@ -100,15 +100,93 @@ pub fn load_resources(paths: &ConfigPaths) -> Result<LoadedResources> {
     Ok(loaded)
 }
 
-/// Looks up a prompt template by id.
+/// Looks up the base (no-variant) prompt template by id.
 pub fn prompt_by_id<'a>(
     resources: &'a LoadedResources,
     id: &str,
 ) -> Option<&'a LoadedItem<PromptTemplate>> {
-    resources
-        .prompts
-        .iter()
-        .find(|prompt| prompt.value.id == id)
+    resources.prompts.iter().find(|prompt| {
+        prompt.value.id == id
+            && prompt.value.for_provider.is_none()
+            && prompt.value.for_model.is_none()
+    })
+}
+
+/// Looks up a prompt template by id, preferring provider/model-specific variants.
+///
+/// Fallback order: (id + provider + model) → (id + model) → (id + provider) → (id, base).
+/// `provider` and `model` are normalized by lowercasing; `model` additionally has any
+/// `provider/` prefix stripped before matching.
+pub fn prompt_for<'a>(
+    resources: &'a LoadedResources,
+    id: &str,
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> Option<&'a LoadedItem<PromptTemplate>> {
+    let provider_norm = provider.map(|value| value.trim().to_ascii_lowercase());
+    let model_norm = model.map(normalize_model_id);
+
+    let candidates: [(Option<&str>, Option<&str>); 4] = [
+        (provider_norm.as_deref(), model_norm.as_deref()),
+        (None, model_norm.as_deref()),
+        (provider_norm.as_deref(), None),
+        (None, None),
+    ];
+
+    for (want_provider, want_model) in candidates {
+        if let Some(found) = find_prompt_variant(resources, id, want_provider, want_model) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn find_prompt_variant<'a>(
+    resources: &'a LoadedResources,
+    id: &str,
+    want_provider: Option<&str>,
+    want_model: Option<&str>,
+) -> Option<&'a LoadedItem<PromptTemplate>> {
+    resources.prompts.iter().find(|prompt| {
+        prompt.value.id == id
+            && prompt_field_matches(prompt.value.for_provider.as_deref(), want_provider)
+            && prompt_field_matches(prompt.value.for_model.as_deref(), want_model)
+    })
+}
+
+fn prompt_field_matches(field: Option<&str>, want: Option<&str>) -> bool {
+    match (field, want) {
+        (None, None) => true,
+        (Some(lhs), Some(rhs)) => lhs.trim().eq_ignore_ascii_case(rhs),
+        _ => false,
+    }
+}
+
+fn normalize_model_id(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let without_provider = trimmed.split_once('/').map(|(_, rest)| rest).unwrap_or(trimmed);
+    without_provider.to_ascii_lowercase()
+}
+
+fn prompt_variant_key(template: &PromptTemplate) -> MergeKey {
+    let dedup = format!(
+        "{}|{}|{}",
+        template.id,
+        template.for_provider.as_deref().unwrap_or(""),
+        template.for_model.as_deref().unwrap_or(""),
+    );
+    let mut display = template.id.clone();
+    let qualifiers = [
+        ("provider", template.for_provider.as_deref()),
+        ("model", template.for_model.as_deref()),
+    ]
+    .into_iter()
+    .filter_map(|(label, value)| value.map(|v| format!("{label}={v}")))
+    .collect::<Vec<_>>();
+    if !qualifiers.is_empty() {
+        display = format!("{} ({})", display, qualifiers.join(", "));
+    }
+    MergeKey::new(dedup, display)
 }
 
 /// Looks up an agent definition by id.
@@ -519,25 +597,49 @@ fn merge_by_id<T, F>(
     diagnostics: &mut Vec<String>,
 ) where
     T: Clone,
-    F: Fn(&LoadedItem<T>) -> String,
+    F: Fn(&LoadedItem<T>) -> MergeKey,
 {
-    let mut merged = IndexMap::new();
+    let mut merged: IndexMap<String, (LoadedItem<T>, String)> = IndexMap::new();
     for item in existing.iter().cloned() {
-        merged.insert(key(&item), item);
+        let MergeKey { dedup, display } = key(&item);
+        merged.insert(dedup, (item, display));
     }
     for item in incoming {
-        let id = key(&item);
-        if let Some(previous) = merged.get(&id) {
+        let MergeKey { dedup, display } = key(&item);
+        if let Some((previous, _)) = merged.get(&dedup) {
             diagnostics.push(describe_override(
                 label,
-                &id,
+                &display,
                 &previous.source_info,
                 &item.source_info,
             ));
         }
-        merged.insert(id, item);
+        merged.insert(dedup, (item, display));
     }
-    *existing = merged.into_values().collect();
+    *existing = merged.into_values().map(|(item, _)| item).collect();
+}
+
+/// Pairs the dedup key used to merge resources with a user-friendly id for diagnostics.
+struct MergeKey {
+    dedup: String,
+    display: String,
+}
+
+impl MergeKey {
+    fn simple(id: impl Into<String>) -> Self {
+        let value = id.into();
+        Self {
+            display: value.clone(),
+            dedup: value,
+        }
+    }
+
+    fn new(dedup: impl Into<String>, display: impl Into<String>) -> Self {
+        Self {
+            dedup: dedup.into(),
+            display: display.into(),
+        }
+    }
 }
 
 fn describe_override(
@@ -837,6 +939,108 @@ mod tests {
             .diagnostics
             .iter()
             .any(|item| item.contains("workspace hook `tool-end`")));
+    }
+
+    #[test]
+    fn per_model_prompt_variants_coexist_and_resolve_with_fallback() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        let builtin = root.join("resources/prompts");
+        fs::create_dir_all(&builtin).unwrap();
+        fs::write(
+            builtin.join("system-base.yaml"),
+            "id: system-base\ndescription: Base\ntemplate: base body\n",
+        )
+        .unwrap();
+        fs::write(
+            builtin.join("system-base.opus.yaml"),
+            "id: system-base\ndescription: Opus override\ntemplate: opus body\nfor_model: claude-opus-4-6\n",
+        )
+        .unwrap();
+        fs::write(
+            builtin.join("system-base.openai.yaml"),
+            "id: system-base\ndescription: OpenAI override\ntemplate: openai body\nfor_provider: openai\n",
+        )
+        .unwrap();
+
+        let paths = ConfigPaths {
+            workspace_root: root.clone(),
+            workspace_config_dir: root.join(".puffer"),
+            user_config_dir: root.join(".home/.puffer"),
+            builtin_resources_dir: root.join("resources"),
+        };
+        let loaded = load_resources(&paths).unwrap();
+        assert_eq!(loaded.prompts.len(), 3);
+        assert_eq!(
+            prompt_for(&loaded, "system-base", None, Some("claude-opus-4-6"))
+                .unwrap()
+                .value
+                .template,
+            "opus body"
+        );
+        assert_eq!(
+            prompt_for(&loaded, "system-base", Some("openai"), Some("gpt-5"))
+                .unwrap()
+                .value
+                .template,
+            "openai body"
+        );
+        assert_eq!(
+            prompt_for(&loaded, "system-base", None, None)
+                .unwrap()
+                .value
+                .template,
+            "base body"
+        );
+        assert_eq!(prompt_by_id(&loaded, "system-base").unwrap().value.template, "base body");
+    }
+
+    #[test]
+    fn workspace_variant_overrides_builtin_variant_with_same_model() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        let builtin = root.join("resources/prompts");
+        let workspace = root.join(".puffer/resources/prompts");
+        fs::create_dir_all(&builtin).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(
+            builtin.join("system-base.yaml"),
+            "id: system-base\ndescription: Base\ntemplate: base body\n",
+        )
+        .unwrap();
+        fs::write(
+            builtin.join("system-base.opus.yaml"),
+            "id: system-base\ndescription: Builtin opus\ntemplate: builtin opus\nfor_model: claude-opus-4-6\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("system-base.opus.yaml"),
+            "id: system-base\ndescription: Workspace opus\ntemplate: workspace opus\nfor_model: claude-opus-4-6\n",
+        )
+        .unwrap();
+
+        let paths = ConfigPaths {
+            workspace_root: root.clone(),
+            workspace_config_dir: root.join(".puffer"),
+            user_config_dir: root.join(".home/.puffer"),
+            builtin_resources_dir: root.join("resources"),
+        };
+        let loaded = load_resources(&paths).unwrap();
+        assert_eq!(loaded.prompts.len(), 2);
+        assert_eq!(
+            prompt_for(&loaded, "system-base", None, Some("claude-opus-4-6"))
+                .unwrap()
+                .value
+                .template,
+            "workspace opus"
+        );
+        assert_eq!(
+            prompt_for(&loaded, "system-base", None, None)
+                .unwrap()
+                .value
+                .template,
+            "base body"
+        );
     }
 
     #[test]

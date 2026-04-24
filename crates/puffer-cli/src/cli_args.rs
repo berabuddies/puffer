@@ -136,6 +136,23 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: DesktopApiCommand,
     },
+    /// Run Puffer in connector-only mode (Telegram, Slack, …).
+    ///
+    /// Reads `.puffer/connectors.toml` (workspace) or
+    /// `~/.puffer/connectors.toml` (user) and starts every enabled,
+    /// compiled-in platform connector. Blocks until SIGINT/SIGTERM.
+    Serve {
+        /// Override the connectors config path.
+        #[arg(long = "config")]
+        config: Option<String>,
+    },
+    /// Internal: run a baked-in subscriber skill driver. Invoked by the
+    /// subscriber supervisor; not intended for direct use.
+    #[command(hide = true, name = "__subscriber")]
+    Subscriber {
+        /// Subscriber id, matches `manifest.id` (e.g. `telegram-user`).
+        id: String,
+    },
     /// Run one unattended benchmark turn and emit result artifacts.
     #[command(hide = true)]
     BenchmarkRun {

@@ -19,7 +19,7 @@ use crate::{
 };
 use anyhow::Result;
 use puffer_provider_registry::{AuthMode, AuthStore, ProviderRegistry};
-use puffer_resources::{prompt_by_id, render_prompt_by_id, skill_by_name, LoadedResources};
+use puffer_resources::{prompt_by_id, render_prompt_for, skill_by_name, LoadedResources};
 use puffer_session_store::{SessionStore, TranscriptEvent};
 use serde::Serialize;
 use std::fmt::Write as _;
@@ -687,8 +687,14 @@ fn execute_prompt_command(
             unreachable!("handled above")
         }
         Some(crate::command_helpers::prompt::PromptCommandPreparation::VariableOverrides(_))
-        | None => render_prompt_by_id(resources, &command.name, &variables)
-            .unwrap_or_else(|| format!("Prompt command /{} invoked with: {}", command.name, args)),
+        | None => render_prompt_for(
+            resources,
+            &command.name,
+            state.current_provider.as_deref(),
+            state.current_model.as_deref(),
+            &variables,
+        )
+        .unwrap_or_else(|| format!("Prompt command /{} invoked with: {}", command.name, args)),
         Some(crate::command_helpers::prompt::PromptCommandPreparation::HandledLocally) => {
             unreachable!("handled above")
         }

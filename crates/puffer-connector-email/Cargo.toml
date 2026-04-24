@@ -1,0 +1,26 @@
+[package]
+name = "puffer-connector-email"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
+async-native-tls = { version = "0.6", default-features = false, features = ["runtime-tokio"] }
+futures = "0.3"
+lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
+mail-parser = "0.11"
+puffer-connector-core = { path = "../puffer-connector-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net"] }
+uuid.workspace = true
+
+[dev-dependencies]
+puffer-config = { path = "../puffer-config" }
+puffer-provider-registry = { path = "../puffer-provider-registry" }
+puffer-resources = { path = "../puffer-resources" }
+puffer-session-store = { path = "../puffer-session-store" }
+tempfile.workspace = true

@@ -38,6 +38,20 @@ pub mod teammate_loop;
 mod tool_executor;
 
 mod debug_context;
+
+/// Installs the process-wide subscription manager so workflow tools
+/// can dispatch into it. See `claude_tools::workflow::subscription_globals`.
+pub fn install_subscription_manager(
+    manager: std::sync::Arc<puffer_subscriptions::SubscriptionManager>,
+) -> Result<()> {
+    claude_tools::workflow::subscription_globals::install(manager)
+}
+
+/// Returns the installed subscription manager, or an error.
+pub fn subscription_manager() -> Result<std::sync::Arc<puffer_subscriptions::SubscriptionManager>> {
+    claude_tools::workflow::subscription_globals::manager()
+}
+
 pub(crate) use self::context_usage::render_context_usage_summary;
 pub(crate) use self::debug_context::render_debug_context;
 pub(crate) use self::hook_support::run_turn_hooks;

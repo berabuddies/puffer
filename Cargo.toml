@@ -2,11 +2,22 @@
 members = [
     "crates/puffer-cli",
     "crates/puffer-config",
+    "crates/puffer-connector-core",
+    "crates/puffer-connector-discord",
+    "crates/puffer-connector-email",
+    "crates/puffer-connector-matrix",
+    "crates/puffer-connector-slack",
+    "crates/puffer-connector-telegram",
+    "crates/puffer-connector-webhook",
     "crates/puffer-core",
     "crates/puffer-provider-openai",
     "crates/puffer-provider-registry",
     "crates/puffer-resources",
     "crates/puffer-session-store",
+    "crates/puffer-subscriber-email",
+    "crates/puffer-subscriber-runtime",
+    "crates/puffer-subscriber-telegram-user",
+    "crates/puffer-subscriptions",
     "crates/puffer-test-support",
     "crates/puffer-tools",
     "crates/puffer-transport-anthropic",
@@ -43,6 +54,8 @@ shell-words = "1.1.0"
 sha2 = "0.10.9"
 tempfile = "3.23.0"
 thiserror = "2.0.17"
+regex = "1.10"
+rusqlite = { version = "0.31", features = ["bundled"] }
 time = { version = "0.3.44", features = ["formatting", "local-offset", "parsing"] }
 toml = "0.9.8"
 tungstenite = { version = "0.24", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }

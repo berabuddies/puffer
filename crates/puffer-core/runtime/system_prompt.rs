@@ -1,7 +1,7 @@
 use crate::memory::ProjectMemoryContext;
 use crate::AppState;
 use anyhow::Result;
-use puffer_resources::{render_prompt_by_id, LoadedResources};
+use puffer_resources::{render_prompt_for, LoadedResources};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::path::{Path, PathBuf};
@@ -95,8 +95,15 @@ pub(super) fn render_runtime_system_prompt(
             build_environment_section(state, model_id)?,
         ),
     ]);
-    let rendered = render_prompt_by_id(resources, SYSTEM_PROMPT_ID, &variables)
-        .unwrap_or_else(|| render_fallback_prompt(&variables));
+    let provider_id = state.current_provider.as_deref();
+    let rendered = render_prompt_for(
+        resources,
+        SYSTEM_PROMPT_ID,
+        provider_id,
+        Some(model_id),
+        &variables,
+    )
+    .unwrap_or_else(|| render_fallback_prompt(&variables));
     let mut prompt = normalize_prompt_whitespace(&rendered);
     // Project memory is injected from the session-scoped snapshot already loaded
     // into AppState. Disk writes do not hot-reload this prompt content unless the
@@ -411,9 +418,61 @@ mod tests {
     use super::render_runtime_system_prompt;
     use crate::runtime::tests::{refresh_env_lock, state};
     use puffer_config::{ensure_workspace_dirs, resolve_project_memory, ConfigPaths};
-    use puffer_resources::LoadedResources;
+    use puffer_resources::{
+        LoadedItem, LoadedResources, PromptTemplate, SourceInfo, SourceKind,
+    };
     use std::collections::BTreeSet;
+    use std::path::PathBuf;
     use tempfile::tempdir;
+
+    fn prompt_template(template: &str, for_model: Option<&str>) -> LoadedItem<PromptTemplate> {
+        LoadedItem {
+            value: PromptTemplate {
+                id: "system-base".to_string(),
+                description: String::new(),
+                template: template.to_string(),
+                variables: Vec::new(),
+                allowed_tools: Vec::new(),
+                provider_override: None,
+                model_override: None,
+                mode: None,
+                chained_from: Vec::new(),
+                for_provider: None,
+                for_model: for_model.map(str::to_string),
+            },
+            source_info: SourceInfo {
+                path: PathBuf::from("system-base.yaml"),
+                kind: SourceKind::Builtin,
+            },
+        }
+    }
+
+    #[test]
+    fn runtime_system_prompt_uses_model_specific_override_when_present() {
+        let state = state();
+        let resources = LoadedResources {
+            prompts: vec![
+                prompt_template("BASE SYSTEM BODY for $ENVIRONMENT", None),
+                prompt_template("GPT5 SYSTEM BODY for $ENVIRONMENT", Some("gpt-5")),
+            ],
+            ..LoadedResources::default()
+        };
+
+        let prompt =
+            render_runtime_system_prompt(&state, &resources, "gpt-5", &BTreeSet::new()).unwrap();
+        assert!(prompt.contains("GPT5 SYSTEM BODY"));
+        assert!(!prompt.contains("BASE SYSTEM BODY"));
+
+        let fallback = render_runtime_system_prompt(
+            &state,
+            &resources,
+            "claude-opus-4-6",
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        assert!(fallback.contains("BASE SYSTEM BODY"));
+        assert!(!fallback.contains("GPT5 SYSTEM BODY"));
+    }
 
     #[test]
     fn runtime_system_prompt_mentions_tools_and_environment() {
