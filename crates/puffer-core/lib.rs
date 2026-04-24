@@ -4,6 +4,7 @@ mod command_helpers;
 mod command_summary;
 mod config_settings;
 mod hooks;
+mod memory;
 mod model_preferences;
 mod permissions;
 mod plan_mode;
@@ -28,6 +29,7 @@ pub use command_helpers::PluginActionEntry;
 pub use command_helpers::ResumeLaunchResolution;
 pub use command_helpers::SessionOverlayView;
 pub use command_helpers::TaskActionEntry;
+pub use memory::{flush_project_memory, project_memory_turn_completed, spawn_project_memory_review};
 pub(crate) use command_summary::{render_buddy_summary, render_cost_summary, render_usage_summary};
 pub use hooks::run_resource_hooks;
 pub use model_preferences::{

@@ -336,6 +336,17 @@ pub(crate) fn handle_prompt_submit(
             },
         )
         .map_err(|error| error.to_string());
+        if let Ok(turn) = &outcome {
+            worker_state.push_message(MessageRole::Assistant, turn.assistant_text.clone());
+            if puffer_core::project_memory_turn_completed(&mut worker_state) {
+                puffer_core::spawn_project_memory_review(
+                    &worker_state,
+                    &worker_resources,
+                    &worker_providers,
+                    &worker_auth_store,
+                );
+            }
+        }
         let _ = sender.send(PendingSubmitEvent::Finished(PendingSubmitResult {
             outcome,
             auth_store: worker_auth_store,
@@ -618,6 +629,9 @@ pub(crate) fn handle_submit(
                     text: turn.assistant_text,
                 },
             )?;
+            if puffer_core::project_memory_turn_completed(state) {
+                puffer_core::spawn_project_memory_review(state, resources, providers, auth_store);
+            }
         }
         Err(error) => {
             let message = format!("Provider request failed: {error}");

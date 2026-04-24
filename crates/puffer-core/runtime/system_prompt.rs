@@ -1,3 +1,4 @@
+use crate::memory::ProjectMemoryContext;
 use crate::AppState;
 use anyhow::Result;
 use puffer_resources::{render_prompt_by_id, LoadedResources};
@@ -97,9 +98,15 @@ pub(super) fn render_runtime_system_prompt(
     let rendered = render_prompt_by_id(resources, SYSTEM_PROMPT_ID, &variables)
         .unwrap_or_else(|| render_fallback_prompt(&variables));
     let mut prompt = normalize_prompt_whitespace(&rendered);
-    // Inject CLAUDE.md / memory contents if present (matches CC's memory section).
+    if let Some(memory) = state
+        .project_memory
+        .as_ref()
+        .and_then(ProjectMemoryContext::format_for_system_prompt)
+    {
+        prompt.push_str("\n\n");
+        prompt.push_str(&memory);
+    }
     if let Some(mut memory) = load_memory_prompt(&state.cwd) {
-        // CC limits memory to 40K characters to avoid bloating the system prompt.
         const MAX_MEMORY_CHARS: usize = 40_000;
         if memory.chars().count() > MAX_MEMORY_CHARS {
             memory = memory.chars().take(MAX_MEMORY_CHARS).collect();
@@ -311,10 +318,11 @@ fn prepend_bullets(items: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+/// Returns the session-specific scratchpad directory under $HOME/.puffer/
+/// (not in the project directory, to avoid polluting workspace listings).
 /// Loads CLAUDE.md from the working directory and user home, concatenating both if present.
 fn load_memory_prompt(cwd: &Path) -> Option<String> {
     let mut parts = Vec::new();
-    // Project-level CLAUDE.md
     let project_path = cwd.join("CLAUDE.md");
     if let Ok(content) = std::fs::read_to_string(&project_path) {
         let trimmed = content.trim();
@@ -322,7 +330,6 @@ fn load_memory_prompt(cwd: &Path) -> Option<String> {
             parts.push(trimmed.to_string());
         }
     }
-    // User-level CLAUDE.md (in ~/.claude/ or ~/.puffer/)
     if let Some(home) = env::var_os("HOME") {
         for dir in &[".claude", ".puffer"] {
             let user_path = Path::new(&home).join(dir).join("CLAUDE.md");
@@ -341,9 +348,6 @@ fn load_memory_prompt(cwd: &Path) -> Option<String> {
     }
 }
 
-/// Returns the session-specific scratchpad directory, creating it if needed.
-/// Returns the session-specific scratchpad directory under $HOME/.puffer/
-/// (not in the project directory, to avoid polluting workspace listings).
 fn scratchpad_dir(state: &AppState) -> Option<PathBuf> {
     let home = env::var_os("HOME")?;
     let dir = Path::new(&home)
@@ -402,9 +406,11 @@ fn os_version() -> String {
 #[cfg(test)]
 mod tests {
     use super::render_runtime_system_prompt;
-    use crate::runtime::tests::state;
+    use crate::runtime::tests::{refresh_env_lock, state};
+    use puffer_config::{ensure_workspace_dirs, resolve_project_memory, ConfigPaths};
     use puffer_resources::LoadedResources;
     use std::collections::BTreeSet;
+    use tempfile::tempdir;
 
     #[test]
     fn runtime_system_prompt_mentions_tools_and_environment() {
@@ -432,5 +438,96 @@ mod tests {
         assert!(prompt.contains("AskUserQuestion"));
         assert!(prompt.contains("# Environment"));
         assert!(prompt.contains("Primary working directory:"));
+    }
+
+    #[test]
+    fn runtime_system_prompt_includes_registered_project_memory() {
+        let _guard = refresh_env_lock().lock().unwrap();
+        let old_home = std::env::var_os("PUFFER_HOME");
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        let workspace = temp.path().join("workspace");
+        let project_root = workspace.join("apps/puffer-demo");
+        let cwd = project_root.join("src");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::env::set_var("PUFFER_HOME", &home);
+
+        let paths = ConfigPaths::discover(&workspace);
+        ensure_workspace_dirs(&paths).unwrap();
+        std::fs::write(
+            paths.projects_file(),
+            format!(
+                "[[projects]]\nname = \"demo\"\npath = \"{}\"\n",
+                project_root.display()
+            ),
+        )
+        .unwrap();
+        let resolved = resolve_project_memory(&paths, &cwd)
+            .unwrap()
+            .expect("project memory");
+        std::fs::create_dir_all(resolved.memory_file.parent().unwrap()).unwrap();
+        std::fs::write(&resolved.memory_file, "Project memory from ~/.puffer/projects.").unwrap();
+
+        let mut state = crate::runtime::tests::state();
+        state.cwd = cwd.clone();
+        state.session.cwd = cwd;
+        state.refresh_project_memory();
+        let prompt = render_runtime_system_prompt(
+            &state,
+            &LoadedResources::default(),
+            "gpt-5",
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert!(prompt.contains("Project memory from ~/.puffer/projects."));
+        assert!(prompt.contains("PROJECT MEMORY (demo)"));
+
+        if let Some(value) = old_home {
+            std::env::set_var("PUFFER_HOME", value);
+        } else {
+            std::env::remove_var("PUFFER_HOME");
+        }
+    }
+
+    #[test]
+    fn runtime_system_prompt_falls_back_to_claude_files_when_present() {
+        let _guard = refresh_env_lock().lock().unwrap();
+        let old_puffer_home = std::env::var_os("PUFFER_HOME");
+        let old_home = std::env::var_os("HOME");
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::env::set_var("PUFFER_HOME", &home);
+        std::env::set_var("HOME", &home);
+        std::fs::write(workspace.join("CLAUDE.md"), "workspace claude memory").unwrap();
+        std::fs::write(home.join(".claude/CLAUDE.md"), "user claude memory").unwrap();
+
+        let state = crate::runtime::tests::state();
+        let prompt = render_runtime_system_prompt(
+            &crate::AppState::new(state.config.clone(), workspace.clone(), state.session.clone()),
+            &LoadedResources::default(),
+            "gpt-5",
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert!(prompt.contains("workspace claude memory"));
+        assert!(prompt.contains("user claude memory"));
+        assert!(prompt.contains("# Project Context (CLAUDE.md)"));
+
+        if let Some(value) = old_puffer_home {
+            std::env::set_var("PUFFER_HOME", value);
+        } else {
+            std::env::remove_var("PUFFER_HOME");
+        }
+        if let Some(value) = old_home {
+            std::env::set_var("HOME", value);
+        } else {
+            std::env::remove_var("HOME");
+        }
     }
 }

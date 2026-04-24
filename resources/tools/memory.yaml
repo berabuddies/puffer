@@ -1,0 +1,36 @@
+id: Memory
+name: Memory
+description: |-
+  Save durable project-specific information to the active project's MEMORY.md.
+
+  Use this tool for stable project knowledge only:
+  - confirmed repository conventions,
+  - recurring workflow rules,
+  - environment quirks relevant to this project,
+  - user corrections that should persist for future work in this project.
+
+  Do not save temporary task progress, one-off debugging state, speculative ideas,
+  or transient file paths.
+
+  Actions:
+  - add: append a new entry
+  - replace: replace a matching entry identified by old_text
+  - remove: delete a matching entry identified by old_text
+handler: runtime:project_memory
+approval_policy: auto
+sandbox_policy: workspace-write
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - add
+        - replace
+        - remove
+    content:
+      type: string
+    old_text:
+      type: string
+  required:
+    - action
