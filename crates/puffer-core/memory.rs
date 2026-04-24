@@ -24,6 +24,9 @@ pub struct ProjectMemoryContext {
     pub project_name: String,
     pub project_root: PathBuf,
     pub memory_file: PathBuf,
+    // Session-scoped frozen snapshot used for prompt injection. Mutations persist
+    // to disk immediately, but the already-loaded snapshot is not automatically
+    // refreshed for the current session unless refresh_project_memory() is called.
     snapshot: Option<String>,
     pub char_limit: usize,
 }

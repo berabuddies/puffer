@@ -98,6 +98,9 @@ pub(super) fn render_runtime_system_prompt(
     let rendered = render_prompt_by_id(resources, SYSTEM_PROMPT_ID, &variables)
         .unwrap_or_else(|| render_fallback_prompt(&variables));
     let mut prompt = normalize_prompt_whitespace(&rendered);
+    // Project memory is injected from the session-scoped snapshot already loaded
+    // into AppState. Disk writes do not hot-reload this prompt content unless the
+    // caller explicitly refreshes project_memory on the state.
     if let Some(memory) = state
         .project_memory
         .as_ref()

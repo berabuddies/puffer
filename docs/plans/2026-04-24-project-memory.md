@@ -34,6 +34,7 @@
 - Preserved fallback support for repo `CLAUDE.md` and user `~/.claude/CLAUDE.md` / `~/.puffer/CLAUDE.md`.
 - Project memory and Claude fallback can coexist in the rendered system prompt.
 - Renamed the injected heading to generic `# Project Context` for project memory, while legacy Claude fallback keeps its own CLAUDE-specific heading.
+- Project memory is currently treated as a **session snapshot**: writes persist to disk immediately, but the already-loaded in-memory snapshot is not automatically refreshed for the current session unless explicitly reloaded.
 
 ### Task 4: Point `/memory project` at the resolved project file
 - Updated `/memory` helpers so project scope opens the resolved `MEMORY.md` when configured.
