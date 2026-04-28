@@ -20,27 +20,32 @@
 </script>
 
 <script lang="ts">
+  import BrandLogo from "../design/BrandLogo.svelte";
   import Puffer from "../design/Puffer.svelte";
   import Icon, { type IconName } from "../design/Icon.svelte";
   import type { ScreenId } from "./tweaks.ts";
 
   type Props = {
     screen: ScreenId;
+    collapsed?: boolean;
     onSelectScreen: (id: ScreenId) => void;
     agents: ActiveAgent[];
     activeAgentId?: string | null;
     onOpenAgent?: (id: string) => void;
     onToggleAgentPin?: (id: string, pinned: boolean) => void;
+    onToggleCollapse?: () => void;
     user?: UserChip | null;
   };
 
   let {
     screen,
+    collapsed = false,
     onSelectScreen,
     agents,
     activeAgentId = null,
     onOpenAgent,
     onToggleAgentPin,
+    onToggleCollapse,
     user = null
   }: Props = $props();
 
@@ -66,8 +71,20 @@
   );
 </script>
 
-<aside class="pf-sidebar">
+<aside class="pf-sidebar" data-collapsed={collapsed}>
   <div class="pf-sidebar-section">
+    <div class="pf-sidebar-brand">
+      <BrandLogo size={24} />
+      <button
+        type="button"
+        class="pf-sidebar-collapse"
+        onclick={() => onToggleCollapse?.()}
+        aria-label={collapsed ? "Expand navigation" : "Collapse navigation"}
+        title={collapsed ? "Expand navigation" : "Collapse navigation"}
+      >
+        <Icon name={collapsed ? "panelOpen" : "panelClose"} size={14} />
+      </button>
+    </div>
     {#each screens as s (s.id)}
       <button
         type="button"
@@ -75,7 +92,7 @@
         data-active={screen === s.id}
         onclick={() => onSelectScreen(s.id)}
       >
-        <Icon name={s.icon} size={14} color="var(--muted-foreground)" />
+        <Icon name={s.icon} size={14} />
         <span>{s.label}</span>
       </button>
     {/each}

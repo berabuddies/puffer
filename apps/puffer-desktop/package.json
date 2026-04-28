@@ -15,6 +15,7 @@
     "@tauri-apps/plugin-dialog": "^2.0.0",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
+    "lucide-svelte": "^1.0.1",
     "svelte": "^5.0.0"
   },
   "devDependencies": {

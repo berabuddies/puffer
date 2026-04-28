@@ -12,6 +12,7 @@ export type Tweaks = {
   density: DensityKey;
   fontMix: FontMixKey;
   showSidebar: boolean;
+  collapsedSidebar: boolean;
   agentState: AgentState;
 };
 
@@ -22,6 +23,7 @@ export const defaultTweaks: Tweaks = {
   density: "comfortable",
   fontMix: "sans-mono",
   showSidebar: true,
+  collapsedSidebar: false,
   agentState: "running"
 };
 

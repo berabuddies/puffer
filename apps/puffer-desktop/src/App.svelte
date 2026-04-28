@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
 
-  import TitleBar, { type TitleTab } from "./lib/shell/TitleBar.svelte";
+  import TitleBar from "./lib/shell/TitleBar.svelte";
   import Sidebar, { type ActiveAgent, type UserChip } from "./lib/shell/Sidebar.svelte";
   import {
     applyTweaksToDocument,
@@ -260,22 +260,6 @@
         }
       : null
   );
-
-  let tabs = $derived<TitleTab[]>(
-    selectedSession
-      ? [
-          {
-            id: selectedSession.id,
-            title: sessionDisplayName(selectedSession),
-            state: tweaks.agentState
-          }
-        ]
-      : []
-  );
-  let activeTab = $state<string>("");
-  $effect(() => {
-    if (selectedSession) activeTab = selectedSession.id;
-  });
 
   // ─────────────────────────────────────────────────────────────
   // Init
@@ -698,10 +682,6 @@
     }
   }
 
-  function onSelectTab(id: string) {
-    activeTab = id;
-  }
-
   function onOpenAgent(id: string) {
     const realTarget = groups.flatMap((g) => g.sessions).find((s) => s.id === id);
     if (!realTarget) return;
@@ -1101,12 +1081,7 @@
 </script>
 
 <div class="pf-mac">
-  <TitleBar
-    {tabs}
-    {activeTab}
-    onSelectTab={onSelectTab}
-    onOpenSettings={onboarding ? undefined : () => onSelectScreen("settings")}
-  />
+  <TitleBar />
   {#if onboarding}
     <div class="pf-app-body">
       <div class="pf-main">
@@ -1134,11 +1109,13 @@
       {#if tweaks.showSidebar}
         <Sidebar
           screen={tweaks.screen}
+          collapsed={tweaks.collapsedSidebar}
           onSelectScreen={onSelectScreen}
           agents={activeAgents}
           activeAgentId={selectedSession?.id ?? null}
           onOpenAgent={onOpenAgent}
           onToggleAgentPin={(id, pinned) => void toggleDesktopPin("agent", id, pinned)}
+          onToggleCollapse={() => updateTweak("collapsedSidebar", !tweaks.collapsedSidebar)}
           user={userChip}
         />
       {/if}

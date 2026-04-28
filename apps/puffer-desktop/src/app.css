@@ -201,8 +201,8 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
 }
 
 .pf-titlebar {
-  height: 40px; flex-shrink: 0;
-  display: flex; align-items: center;
+  height: 0; flex-shrink: 0;
+  display: none; align-items: center;
   padding: 0 12px;
   border-bottom: 1px solid var(--border);
   background: var(--background);
@@ -270,6 +270,37 @@ html.is-tauri-mac .pf-titlebar { padding-left: 84px; }
   font-size: 13px;
 }
 .pf-sidebar-section { padding: 8px 8px 4px; }
+.pf-sidebar-section:first-child {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.pf-sidebar-brand {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 2px 10px;
+}
+.pf-sidebar-collapse {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  transition: background 120ms, color 120ms, border-color 120ms;
+  flex-shrink: 0;
+}
+.pf-sidebar-collapse:hover {
+  background: color-mix(in oklab, var(--muted) 68%, var(--background));
+  border-color: color-mix(in oklab, var(--muted-foreground) 14%, var(--border));
+  color: var(--foreground);
+}
 .pf-sidebar-section + .pf-sidebar-section { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 8px; }
 .pf-sidebar-label {
   font-size: 10.5px; text-transform: uppercase;
@@ -287,21 +318,30 @@ html.is-tauri-mac .pf-titlebar { padding-left: 84px; }
   display: flex; align-items: center; gap: 10px;
   padding: 6px 10px;
   border-radius: 6px;
-  color: var(--foreground);
+  color: var(--muted-foreground);
   cursor: pointer;
-  transition: background 100ms;
+  transition: background 120ms, color 120ms, border-color 120ms, box-shadow 120ms;
   min-height: 30px; white-space: nowrap; overflow: hidden;
-  background: transparent; border: 0; width: 100%;
+  background: transparent; border: 1px solid transparent; width: 100%;
   text-align: left; font-size: inherit;
 }
 .pf-sidebar-item > span:not(.pf-meta):not(.pf-task-status) {
   overflow: hidden; text-overflow: ellipsis;
 }
-.pf-sidebar-item:hover { background: color-mix(in oklab, var(--accent) 60%, transparent); }
+.pf-sidebar-item:hover {
+  background: color-mix(in oklab, var(--muted) 68%, var(--background));
+  border-color: color-mix(in oklab, var(--muted-foreground) 16%, var(--border));
+  color: var(--foreground);
+}
 .pf-sidebar-item[data-active="true"] {
-  background: var(--background);
+  background: color-mix(in oklab, var(--muted) 82%, var(--background));
+  border-color: color-mix(in oklab, var(--muted-foreground) 20%, var(--border));
   box-shadow: var(--shadow-xs);
-  font-weight: 500;
+  color: var(--foreground);
+  font-weight: 600;
+}
+.pf-sidebar-item[data-active="true"] svg {
+  color: var(--foreground);
 }
 .pf-sidebar-item .pf-row-stack {
   display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0;
@@ -339,6 +379,8 @@ html.is-tauri-mac .pf-titlebar { padding-left: 84px; }
   margin: 0 4px;
   border-radius: 6px;
   overflow: hidden;
+  border: 1px solid transparent;
+  transition: background 120ms, border-color 120ms, box-shadow 120ms;
 }
 .pf-sidebar-agent {
   display: flex; align-items: center; gap: 10px;
@@ -351,9 +393,13 @@ html.is-tauri-mac .pf-titlebar { padding-left: 84px; }
   background: transparent; border: 0; flex: 1; min-width: 0;
   text-align: left;
 }
-.pf-sidebar-agent-row:hover { background: color-mix(in oklab, var(--accent) 60%, transparent); }
+.pf-sidebar-agent-row:hover {
+  background: color-mix(in oklab, var(--muted) 62%, var(--background));
+  border-color: color-mix(in oklab, var(--muted-foreground) 12%, var(--border));
+}
 .pf-sidebar-agent-row[data-active="true"] {
-  background: var(--background);
+  background: color-mix(in oklab, var(--muted) 76%, var(--background));
+  border-color: color-mix(in oklab, var(--muted-foreground) 16%, var(--border));
   box-shadow: var(--shadow-xs);
   font-weight: 500;
 }
@@ -388,6 +434,30 @@ html.is-tauri-mac .pf-titlebar { padding-left: 84px; }
   color: var(--foreground);
   opacity: 1;
 }
+.pf-sidebar[data-collapsed="true"] {
+  width: 56px;
+}
+.pf-sidebar[data-collapsed="true"] .pf-sidebar-brand {
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+  padding-bottom: 8px;
+}
+.pf-sidebar[data-collapsed="true"] .pf-sidebar-item > span:not(.pf-meta):not(.pf-task-status) {
+  display: none;
+}
+.pf-sidebar[data-collapsed="true"] .pf-sidebar-item .pf-row-stack {
+  display: none;
+}
+.pf-sidebar[data-collapsed="true"] .pf-sidebar-item {
+  justify-content: center;
+  padding: 8px;
+}
+.pf-sidebar[data-collapsed="true"] .pf-sidebar-label,
+.pf-sidebar[data-collapsed="true"] .pf-sidebar-filters,
+.pf-sidebar[data-collapsed="true"] .pf-sidebar-agents-list {
+  display: none;
+}
 .pf-sidebar-empty {
   padding: 16px 14px;
   font-size: 11.5px;
@@ -401,6 +471,7 @@ html.is-tauri-mac .pf-titlebar { padding-left: 84px; }
 /* Medium: collapse sidebar labels, keep icons only */
 @media (max-width: 960px) {
   .pf-sidebar { width: 56px; }
+  .pf-sidebar-brand { padding-bottom: 8px; }
   .pf-sidebar-item > span:not(.pf-meta):not(.pf-task-status) { display: none; }
   .pf-sidebar-item .pf-row-stack { display: none; }
   .pf-sidebar-item { justify-content: center; padding: 8px; }
