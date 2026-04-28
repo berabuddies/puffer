@@ -52,6 +52,7 @@ pub(crate) struct BurbotRuntime {
     workspace_root: PathBuf,
     trace_stats: ActionTraceStats,
     repeated_failures: HashMap<String, u64>,
+    executed_action_epochs: HashMap<String, u64>,
     state_epoch: u64,
 }
 
@@ -74,6 +75,7 @@ impl BurbotRuntime {
             workspace_root,
             trace_stats: ActionTraceStats::default(),
             repeated_failures: HashMap::new(),
+            executed_action_epochs: HashMap::new(),
             state_epoch: 0,
         })
     }
@@ -563,6 +565,10 @@ impl BurbotRuntime {
         if observation.success && self.action_changes_state(&action_ref) {
             self.state_epoch = self.state_epoch.saturating_add(1);
         }
+        if observation.success {
+            self.executed_action_epochs
+                .insert(action_key(&action_ref, &selected.payload), self.state_epoch);
+        }
         let mut executed = trace_event(
             run_id,
             TraceEventType::ActionExecuted,
@@ -598,6 +604,7 @@ impl BurbotRuntime {
             if !self.goal_verified_or_expand(
                 run_id,
                 graph,
+                beliefs,
                 goal,
                 node_id,
                 &action_ref,
@@ -618,7 +625,7 @@ impl BurbotRuntime {
             return Ok(Some(artifact));
         }
         if observation.success && self.should_schedule_verification(graph, node_id, &verification) {
-            self.add_verification_candidates(
+            let added = self.add_verification_candidates(
                 run_id,
                 graph,
                 node_id,
@@ -626,7 +633,9 @@ impl BurbotRuntime {
                 &selected.payload,
                 &observation.output,
             )?;
-            return Ok(None);
+            if added > 0 {
+                return Ok(None);
+            }
         }
         if observation.success
             && verification.passed
@@ -635,6 +644,7 @@ impl BurbotRuntime {
             if !self.goal_verified_or_expand(
                 run_id,
                 graph,
+                beliefs,
                 goal,
                 node_id,
                 &action_ref,
@@ -804,7 +814,7 @@ impl BurbotRuntime {
     ) -> bool {
         verification.required
             && !verification.passed
-            && self.completion_role_for_node(graph, node_id) == CompletionRole::Terminal
+            && !self.is_verification_action(graph, node_id)
             && !graph.edges.iter().any(|edge| {
                 edge.target == node_id
                     && edge.kind == PlanEdgeKind::Verifies

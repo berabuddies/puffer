@@ -235,8 +235,12 @@ fn action_from_tool_contract(spec: &ToolSpec, value: Value) -> Result<ActionCont
         forbidden_uses: raw.forbidden_uses,
         argument_safety: raw.argument_safety,
         semantic_intents: raw.semantic_intents,
-        intent_extractors: raw.intent_extractors,
-        repair_rules: raw.repair_rules,
+        intent_extractors: Vec::new(),
+        repair_rules: raw
+            .repair_rules
+            .into_iter()
+            .filter(|rule| rule.bindings.is_empty())
+            .collect(),
         cost_estimate: raw.cost_estimate,
         latency_estimate: raw.latency_estimate,
     })
@@ -428,6 +432,48 @@ contract:
         assert_eq!(action.side_effect_class, SideEffectClass::PureObservation);
         assert_eq!(action.reversibility, Reversibility::Reversible);
         assert_eq!(action.failure_modes[0].name, "file_does_not_exist");
+    }
+
+    #[test]
+    fn import_drops_command_text_extractors_and_regex_bound_repairs() {
+        let spec: ToolSpec = serde_yaml::from_str(
+            r#"
+id: Bash
+name: Bash
+description: Run shell.
+handler: runtime:claude_bash
+input_schema:
+  type: object
+contract:
+  side_effect_class: command-execution
+  reversibility: command_dependent
+  idempotency: command_dependent
+  risk_level: high
+  verification:
+    methods: []
+    required_before_completion: false
+  intent_extractors:
+    - intent: read_file
+      parser: regex
+      source_arg: command
+      pattern: '^cat\s+(?P<path>.+)$'
+      slot_groups:
+        path: path
+  repair_rules:
+    - failure_kinds: [command_not_found]
+      action_name: Read
+      args: {}
+      bindings:
+        - source_arg: command
+          pattern: 'cat (?P<path>.+)'
+"#,
+        )
+        .unwrap();
+
+        let action = action_from_tool_contract(&spec, spec.contract.clone().unwrap()).unwrap();
+
+        assert!(action.intent_extractors.is_empty());
+        assert!(action.repair_rules.is_empty());
     }
 
     #[test]

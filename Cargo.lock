@@ -3999,6 +3999,7 @@ dependencies = [
  "puffer-provider-openai",
  "puffer-provider-registry",
  "puffer-resources",
+ "puffer-tools",
  "regex",
  "reqwest",
  "serde",

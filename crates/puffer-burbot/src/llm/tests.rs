@@ -243,6 +243,43 @@ fn candidate_list_parser_preserves_more_than_eight_candidates() {
 }
 
 #[test]
+fn candidate_list_parser_rejects_invalid_candidates_instead_of_dropping_them() {
+    let contract = tool_contract();
+    let text = json!({
+        "candidates": [
+            {
+                "tool_id": "Bash",
+                "args": {"command": "printf ok"},
+                "completion_role": "support",
+                "rationale": "valid"
+            },
+            {
+                "tool_id": "Bash",
+                "args": {},
+                "completion_role": "support",
+                "rationale": "invalid"
+            }
+        ]
+    })
+    .to_string();
+
+    let error = parse_candidate_list_json(&text, &contract).unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("invalid candidate proposal entries"));
+    assert!(error.to_string().contains("do not match input_schema"));
+}
+
+#[test]
+fn candidate_list_parser_rejects_empty_candidates() {
+    let contract = tool_contract();
+    let error = parse_candidate_list_json("{\"candidates\":[]}", &contract).unwrap_err();
+
+    assert!(error.to_string().contains("contained no candidates"));
+}
+
+#[test]
 fn goal_verification_parser_preserves_more_than_eight_suggestions() {
     let contract = tool_contract();
     let suggestions = (0..12)
@@ -267,6 +304,50 @@ fn goal_verification_parser_preserves_more_than_eight_suggestions() {
 
     assert_eq!(parsed.suggested_candidates.len(), 12);
     assert_eq!(parsed.suggested_candidates[11].args["command"], "printf 11");
+}
+
+#[test]
+fn goal_verification_parser_rejects_unsatisfied_without_followups() {
+    let contract = tool_contract();
+    let text = json!({
+        "satisfied": false,
+        "confidence": 0.2,
+        "missing_evidence": ["need stronger evidence"],
+        "suggested_candidates": []
+    })
+    .to_string();
+
+    let error = parse_goal_verification_json(&text, &contract).unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("unsatisfied without structural follow-up candidates"));
+}
+
+#[test]
+fn goal_verification_parser_rejects_invalid_followups_instead_of_dropping_them() {
+    let contract = tool_contract();
+    let text = json!({
+        "satisfied": false,
+        "confidence": 0.2,
+        "missing_evidence": ["need stronger evidence"],
+        "suggested_candidates": [
+            {
+                "tool_id": "Bash",
+                "args": {},
+                "completion_role": "verification",
+                "rationale": "invalid"
+            }
+        ]
+    })
+    .to_string();
+
+    let error = parse_goal_verification_json(&text, &contract).unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("invalid goal verification suggested_candidates entries"));
+    assert!(error.to_string().contains("do not match input_schema"));
 }
 
 #[test]

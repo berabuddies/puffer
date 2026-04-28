@@ -1,5 +1,7 @@
 use super::BurbotRuntime;
+use crate::belief::BeliefGraph;
 use crate::contract::{ActionContract, CapabilityContract, ContractRegistry};
+use crate::failure::FailureKind;
 use crate::graph::{
     scores_for_action, ActionRef, PlanEdgeKind, PlanGraph, PlanNodeKind, PlanStatus,
 };
@@ -10,6 +12,7 @@ use crate::llm::{
 };
 use crate::planner::{ActionCandidate, CandidateSource, CompletionRole};
 use crate::puffer_tools::PUFFER_TOOLS_CONTRACT_ID;
+use crate::rules::action_key;
 use crate::runtime::RunOptions;
 use crate::semantics::{
     payload_for_intent, read_only_side_effect, semantic_symbol, NormalizedIntent,
@@ -38,18 +41,21 @@ impl BurbotRuntime {
         let context = json!({
             "phase": "initial",
             "frontier": frontier_summary(graph),
-            "history": action_history_summary(graph),
+            "history": action_history_summary(graph, self.contracts.as_ref()),
         });
         let mut added = 0;
         if let Some(candidate) = self.workspace_survey_candidate() {
-            if !graph_has_action_candidate(graph, &candidate.action_ref, &candidate.args) {
+            if !self.has_current_action_candidate(graph, &candidate.action_ref, &candidate.args) {
                 self.add_candidate_node(run_id, graph, candidate, Some(NodeId(0)), None)?;
                 added += 1;
             }
         }
         let contract = self.puffer_tools_contract()?;
         let image_context = accumulated_image_context(graph, None);
-        let mut proposals = propose_observe_act_candidates(
+        let mut proposals = self.propose_observe_act_candidates_or_empty(
+            run_id,
+            NodeId(0),
+            CandidateSource::ModelProposal,
             &self.workspace_root,
             model,
             goal,
@@ -61,7 +67,20 @@ impl BurbotRuntime {
             if graph_has_executable_frontier(graph) {
                 return Ok(0);
             }
-            proposals.push(self.single_tool_proposal(model, goal, &contract, Some(&context))?);
+            if let Some(proposal) = self.single_tool_proposal_or_record(
+                run_id,
+                NodeId(0),
+                CandidateSource::ModelProposal,
+                model,
+                goal,
+                &contract,
+                Some(&context),
+                Some(&image_context),
+                CompletionRole::Support,
+                "single structural tool-call fallback for initial evidence gathering",
+            )? {
+                proposals.push(proposal);
+            }
         }
         added += self.add_model_candidate_proposals(
             run_id,
@@ -98,11 +117,14 @@ impl BurbotRuntime {
             "success": success,
             "output": compact_value(output),
             "frontier": frontier_summary(graph),
-            "history": action_history_summary(graph),
+            "history": action_history_summary(graph, self.contracts.as_ref()),
         });
         let contract = self.puffer_tools_contract()?;
         let image_context = accumulated_image_context(graph, Some(output));
-        let mut proposals = propose_observe_act_candidates(
+        let mut proposals = self.propose_observe_act_candidates_or_empty(
+            run_id,
+            observation_id,
+            CandidateSource::ModelObservationProposal,
             &self.workspace_root,
             model,
             goal,
@@ -111,7 +133,20 @@ impl BurbotRuntime {
             Some(&image_context),
         )?;
         if proposals.is_empty() {
-            proposals.push(self.single_tool_proposal(model, goal, &contract, Some(&context))?);
+            if let Some(proposal) = self.single_tool_proposal_or_record(
+                run_id,
+                observation_id,
+                CandidateSource::ModelObservationProposal,
+                model,
+                goal,
+                &contract,
+                Some(&context),
+                Some(&image_context),
+                CompletionRole::Support,
+                "single structural tool-call fallback for post-observation evidence gathering",
+            )? {
+                proposals.push(proposal);
+            }
         }
         let added = self.add_model_candidate_proposals(
             run_id,
@@ -159,11 +194,14 @@ impl BurbotRuntime {
             "reason": reason,
             "detail": compact_value(&detail),
             "frontier": frontier_summary(graph),
-            "history": action_history_summary(graph),
+            "history": action_history_summary(graph, self.contracts.as_ref()),
         });
         let contract = self.puffer_tools_contract()?;
         let image_context = accumulated_image_context(graph, image_context);
-        let proposals = propose_observe_act_candidates(
+        let proposals = self.propose_observe_act_candidates_or_empty(
+            run_id,
+            support_source,
+            CandidateSource::ModelObservationProposal,
             &self.workspace_root,
             model,
             goal,
@@ -182,10 +220,21 @@ impl BurbotRuntime {
         if added > 0 {
             return Ok(added);
         }
-        if graph_has_executable_frontier(graph) {
+        let Some(fallback) = self.single_tool_proposal_or_record(
+            run_id,
+            support_source,
+            CandidateSource::ModelObservationProposal,
+            model,
+            goal,
+            &contract,
+            Some(&context),
+            Some(&image_context),
+            CompletionRole::Support,
+            "single structural tool-call fallback for recovery evidence gathering",
+        )?
+        else {
             return Ok(0);
-        }
-        let fallback = self.single_tool_proposal(model, goal, &contract, Some(&context))?;
+        };
         self.add_model_candidate_proposals(
             run_id,
             graph,
@@ -200,6 +249,7 @@ impl BurbotRuntime {
         &mut self,
         run_id: RunId,
         graph: &mut PlanGraph,
+        beliefs: &mut BeliefGraph,
         goal: &str,
         action_id: NodeId,
         action_ref: &ActionRef,
@@ -216,18 +266,61 @@ impl BurbotRuntime {
             "args": compact_value(args),
             "output": compact_value(output),
             "frontier": frontier_summary(graph),
-            "history": action_history_summary(graph),
+            "history": action_history_summary(graph, self.contracts.as_ref()),
         });
         let contract = self.puffer_tools_contract()?;
         let image_context = accumulated_image_context(graph, Some(output));
-        let decision = verify_goal_satisfied(
+        let decision = match verify_goal_satisfied(
             &self.workspace_root,
             model,
             goal,
             &contract,
             &context,
             Some(&image_context),
-        )?;
+        ) {
+            Ok(decision) => decision,
+            Err(error) => {
+                let failure_output = json!({
+                    "satisfied": false,
+                    "confidence": 0.0,
+                    "missing_evidence": [],
+                    "error": error.to_string(),
+                    "verification_context": context.clone(),
+                });
+                self.append(trace_event(
+                    run_id,
+                    TraceEventType::GoalVerificationPerformed,
+                    Some(action_id),
+                    context.clone(),
+                    {
+                        let mut output = failure_output.clone();
+                        output["suggested_candidates"] = json!(0);
+                        output
+                    },
+                ))?;
+                self.record_failure(
+                    run_id,
+                    graph,
+                    beliefs,
+                    action_id,
+                    action_ref,
+                    args,
+                    &failure_output,
+                    FailureKind::GoalUnsatisfied,
+                )?;
+                self.add_recovery_model_candidates(
+                    run_id,
+                    graph,
+                    goal,
+                    action_id,
+                    "goal_verifier_failed",
+                    failure_output,
+                    Some(output),
+                    options,
+                )?;
+                return Ok(false);
+            }
+        };
         let satisfied = decision.satisfied;
         let confidence = decision.confidence;
         let missing_evidence = decision.missing_evidence.clone();
@@ -249,6 +342,22 @@ impl BurbotRuntime {
         {
             return Ok(true);
         }
+        let insufficiency_output = json!({
+            "satisfied": satisfied,
+            "confidence": confidence,
+            "missing_evidence": missing_evidence.clone(),
+            "verification_context": context,
+        });
+        self.record_failure(
+            run_id,
+            graph,
+            beliefs,
+            action_id,
+            action_ref,
+            args,
+            &insufficiency_output,
+            FailureKind::GoalUnsatisfied,
+        )?;
         let added = self.add_model_candidate_proposals(
             run_id,
             graph,
@@ -257,7 +366,7 @@ impl BurbotRuntime {
             CandidateSource::ModelGoalVerifier,
             decision.suggested_candidates,
         )?;
-        if added == 0 && !graph_has_executable_frontier(graph) {
+        if added == 0 {
             self.add_recovery_model_candidates(
                 run_id,
                 graph,
@@ -267,8 +376,8 @@ impl BurbotRuntime {
                 json!({
                     "satisfied": satisfied,
                     "confidence": confidence,
-                    "missing_evidence": missing_evidence,
-                    "verification_context": context,
+                    "missing_evidence": missing_evidence.clone(),
+                    "verification_context": insufficiency_output["verification_context"].clone(),
                 }),
                 Some(output),
                 options,
@@ -288,13 +397,15 @@ impl BurbotRuntime {
     ) -> Result<usize> {
         let mut added = 0;
         let mut skipped_wait = 0;
+        let mut skipped_duplicate = 0;
         for proposal in proposals {
             let candidate = self.model_candidate_to_action_candidate(proposal, source.clone())?;
             if self.should_skip_model_wait_candidate(graph, &candidate) {
                 skipped_wait += 1;
                 continue;
             }
-            if graph_has_action_candidate(graph, &candidate.action_ref, &candidate.args) {
+            if self.has_current_action_candidate(graph, &candidate.action_ref, &candidate.args) {
+                skipped_duplicate += 1;
                 continue;
             }
             let verifies = (candidate.completion_role == CompletionRole::Verification)
@@ -308,7 +419,11 @@ impl BurbotRuntime {
             TraceEventType::ModelCandidatesProposed,
             Some(support_source),
             json!({"source": source}),
-            json!({"added": added, "skipped_wait": skipped_wait}),
+            json!({
+                "added": added,
+                "skipped_wait": skipped_wait,
+                "skipped_duplicate": skipped_duplicate,
+            }),
         ))?;
         Ok(added)
     }
@@ -405,6 +520,9 @@ impl BurbotRuntime {
         goal: &str,
         contract: &CapabilityContract,
         context: Option<&Value>,
+        image_context: Option<&Value>,
+        completion_role: CompletionRole,
+        rationale: &str,
     ) -> Result<ModelCandidateProposal> {
         let expanded_goal;
         let proposal_goal = if let Some(context) = context {
@@ -421,14 +539,98 @@ impl BurbotRuntime {
             model,
             proposal_goal,
             contract,
-            context,
+            image_context,
         )?;
         Ok(ModelCandidateProposal {
             tool_id: proposal.tool_id,
             args: proposal.args,
-            completion_role: CompletionRole::Terminal,
-            rationale: "single structural tool-call fallback after empty candidate set".to_string(),
+            completion_role,
+            rationale: rationale.to_string(),
         })
+    }
+
+    fn propose_observe_act_candidates_or_empty(
+        &self,
+        run_id: RunId,
+        support_source: NodeId,
+        source: CandidateSource,
+        workspace_root: &std::path::Path,
+        model: &str,
+        goal: &str,
+        contract: &CapabilityContract,
+        context: &Value,
+        image_context: Option<&Value>,
+    ) -> Result<Vec<ModelCandidateProposal>> {
+        match propose_observe_act_candidates(
+            workspace_root,
+            model,
+            goal,
+            contract,
+            context,
+            image_context,
+        ) {
+            Ok(proposals) => Ok(proposals),
+            Err(error) => {
+                self.append(trace_event(
+                    run_id,
+                    TraceEventType::ModelCandidatesProposed,
+                    Some(support_source),
+                    json!({
+                        "source": source,
+                        "proposal_failure": "observe_act",
+                    }),
+                    json!({
+                        "added": 0,
+                        "skipped_wait": 0,
+                        "error": error.to_string(),
+                    }),
+                ))?;
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    fn single_tool_proposal_or_record(
+        &self,
+        run_id: RunId,
+        support_source: NodeId,
+        source: CandidateSource,
+        model: &str,
+        goal: &str,
+        contract: &CapabilityContract,
+        context: Option<&Value>,
+        image_context: Option<&Value>,
+        completion_role: CompletionRole,
+        rationale: &str,
+    ) -> Result<Option<ModelCandidateProposal>> {
+        match self.single_tool_proposal(
+            model,
+            goal,
+            contract,
+            context,
+            image_context,
+            completion_role,
+            rationale,
+        ) {
+            Ok(proposal) => Ok(Some(proposal)),
+            Err(error) => {
+                self.append(trace_event(
+                    run_id,
+                    TraceEventType::ModelCandidatesProposed,
+                    Some(support_source),
+                    json!({
+                        "source": source,
+                        "proposal_failure": "single_tool",
+                    }),
+                    json!({
+                        "added": 0,
+                        "skipped_wait": 0,
+                        "error": error.to_string(),
+                    }),
+                ))?;
+                Ok(None)
+            }
+        }
     }
 
     fn workspace_survey_candidate(&self) -> Option<ActionCandidate> {
@@ -466,18 +668,25 @@ impl BurbotRuntime {
         }
         None
     }
-}
 
-fn graph_has_action_candidate(graph: &PlanGraph, action_ref: &ActionRef, args: &Value) -> bool {
-    graph.nodes.values().any(|node| {
-        node.kind == PlanNodeKind::Action
-            && matches!(
-                node.status,
-                PlanStatus::Open | PlanStatus::Executed | PlanStatus::Satisfied
-            )
-            && node.action_ref.as_ref() == Some(action_ref)
-            && node.payload == *args
-    })
+    fn has_current_action_candidate(
+        &self,
+        graph: &PlanGraph,
+        action_ref: &ActionRef,
+        args: &Value,
+    ) -> bool {
+        if graph.nodes.values().any(|node| {
+            node.kind == PlanNodeKind::Action
+                && node.status == PlanStatus::Open
+                && node.action_ref.as_ref() == Some(action_ref)
+                && node.payload == *args
+        }) {
+            return true;
+        }
+        self.executed_action_epochs
+            .get(&action_key(action_ref, args))
+            .is_some_and(|epoch| *epoch == self.state_epoch)
+    }
 }
 
 fn graph_has_executable_frontier(graph: &PlanGraph) -> bool {
@@ -522,26 +731,62 @@ fn frontier_summary(graph: &PlanGraph) -> Vec<Value> {
         .collect()
 }
 
-fn action_history_summary(graph: &PlanGraph) -> Vec<Value> {
-    let mut actions = graph
+fn action_history_summary(graph: &PlanGraph, contracts: &dyn ContractRegistry) -> Vec<Value> {
+    let actions = graph
         .nodes
         .iter()
-        .filter_map(|(id, node)| {
+        .enumerate()
+        .filter_map(|(index, (id, node))| {
             (node.kind == PlanNodeKind::Action).then(|| {
-                json!({
-                    "id": id.0,
-                    "status": node.status,
-                    "action_ref": node.action_ref,
-                    "args": compact_value(&node.payload),
-                    "output": observation_output_for_action(graph, *id).map(|value| compact_value(&value)),
-                })
+                (
+                    index,
+                    *id,
+                    preserves_goal_relevant_history(graph, contracts, *id, node),
+                    json!({
+                        "id": id.0,
+                        "status": node.status,
+                        "action_ref": node.action_ref,
+                        "args": compact_value(&node.payload),
+                        "output": observation_output_for_action(graph, *id).map(|value| compact_value(&value)),
+                    }),
+                )
             })
         })
         .collect::<Vec<_>>();
-    if actions.len() > 40 {
-        actions = actions.split_off(actions.len() - 40);
-    }
+    let recent_start = actions.len().saturating_sub(40);
     actions
+        .into_iter()
+        .filter_map(|(index, _, goal_relevant, value)| {
+            (index >= recent_start || goal_relevant).then_some(value)
+        })
+        .collect()
+}
+
+fn preserves_goal_relevant_history(
+    graph: &PlanGraph,
+    contracts: &dyn ContractRegistry,
+    node_id: NodeId,
+    node: &crate::graph::PlanNode,
+) -> bool {
+    let completion_role = graph
+        .edges
+        .iter()
+        .find(|edge| edge.target == node_id && edge.kind == PlanEdgeKind::Supports)
+        .and_then(|edge| edge.payload.get("completion_role"))
+        .and_then(Value::as_str)
+        .unwrap_or("terminal");
+    if matches!(completion_role, "terminal" | "repair") {
+        return true;
+    }
+    node.action_ref
+        .as_ref()
+        .and_then(|action_ref| {
+            contracts.get_action(&action_ref.contract_id, &action_ref.action_name)
+        })
+        .is_some_and(|action| {
+            !read_only_side_effect(&action.side_effect_class)
+                && !matches!(completion_role, "verification" | "support")
+        })
 }
 
 fn observation_output_for_action(graph: &PlanGraph, action_id: NodeId) -> Option<Value> {

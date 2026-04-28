@@ -344,20 +344,12 @@ fn apply_arg_templates(
 
 fn capture_repair_bindings(
     rule: &RepairRuleSpec,
-    failed_args: &Value,
+    _failed_args: &Value,
 ) -> Option<BTreeMap<String, String>> {
-    let mut bindings = BTreeMap::new();
-    for binding in &rule.bindings {
-        let text = failed_args.get(&binding.source_arg)?.as_str()?;
-        let regex = regex::Regex::new(&binding.pattern).ok()?;
-        let captures = regex.captures(text)?;
-        for name in regex.capture_names().flatten() {
-            if let Some(value) = captures.name(name) {
-                bindings.insert(name.to_string(), value.as_str().to_string());
-            }
-        }
+    if !rule.bindings.is_empty() {
+        return None;
     }
-    Some(bindings)
+    Some(BTreeMap::new())
 }
 
 fn render_template(
@@ -436,9 +428,9 @@ mod tests {
     use super::*;
     use crate::contract::{
         ApprovalSpec, CapabilityContract, ContractStatus, ExtractorSlotSpec, Idempotency,
-        InMemoryContractRegistry, IntentExtractorSpec, RepairRuleSpec, Reversibility, RiskLevel,
-        SemanticIntentSpec, SideEffectClass, TrustLevel, VerificationSpec,
-        VerificationTemplateSpec,
+        InMemoryContractRegistry, IntentExtractorSpec, RepairBindingSpec, RepairRuleSpec,
+        Reversibility, RiskLevel, SemanticIntentSpec, SideEffectClass, TrustLevel,
+        VerificationSpec, VerificationTemplateSpec,
     };
     use std::collections::BTreeMap;
 
@@ -579,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_bash_cat_gets_read_substitution() {
+    fn explicit_bash_cat_does_not_get_read_substitution_without_structural_intent() {
         let options = RunOptions {
             puffer_tool: Some("Bash".to_string()),
             puffer_args: Some(json!({"command": "cat /tmp/example.txt"})),
@@ -592,7 +584,7 @@ mod tests {
             goal_verification_min_confidence: 0.75,
         };
         let candidates = initial_candidates(&registry(), "read file", &options);
-        assert!(candidates
+        assert!(!candidates
             .iter()
             .any(|candidate| candidate.action_ref.action_name == "Read"));
     }
@@ -632,5 +624,34 @@ mod tests {
         assert_eq!(candidates[0].action_ref, puffer_action("Read"));
         assert_eq!(candidates[0].args, json!({"file_path": "/tmp/example.txt"}));
         assert_eq!(candidates[0].completion_role, CompletionRole::Verification);
+    }
+
+    #[test]
+    fn repair_rules_with_regex_bindings_are_ignored() {
+        let rule = RepairRuleSpec {
+            failure_kinds: Vec::new(),
+            contract_id: None,
+            action_name: "Read".to_string(),
+            args: json!({"file_path": "{binding.path}"}),
+            arg_templates: BTreeMap::new(),
+            bindings: vec![RepairBindingSpec {
+                source_arg: "command".to_string(),
+                pattern: "cat (?P<path>.+)".to_string(),
+            }],
+            source: Some("repair".to_string()),
+            completion_role: Some("repair".to_string()),
+            rationale: None,
+            expected_progress: None,
+        };
+
+        let seed = repair_seed_from_rule(
+            &rule,
+            &puffer_action("Bash"),
+            &json!({"command": "cat src/lib.rs"}),
+            &json!({"success": false}),
+            FailureKind::Unknown,
+        );
+
+        assert!(seed.is_none());
     }
 }

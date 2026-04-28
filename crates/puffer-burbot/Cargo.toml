@@ -19,6 +19,7 @@ puffer-core = { path = "../puffer-core" }
 puffer-provider-openai = { path = "../puffer-provider-openai" }
 puffer-provider-registry = { path = "../puffer-provider-registry" }
 puffer-resources = { path = "../puffer-resources" }
+puffer-tools = { path = "../puffer-tools" }
 reqwest.workspace = true
 regex.workspace = true
 serde.workspace = true

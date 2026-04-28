@@ -1,6 +1,4 @@
-use crate::contract::{
-    ActionContract, IntentExtractorSpec, RiskLevel, SemanticIntentSpec, SideEffectClass,
-};
+use crate::contract::{ActionContract, RiskLevel, SemanticIntentSpec, SideEffectClass};
 use crate::graph::ActionRef;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -16,7 +14,6 @@ pub(crate) struct NormalizedIntent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum IntentSource {
     Direct,
-    Extracted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,16 +23,11 @@ pub(crate) struct ActionIntentMatch {
     pub(crate) source: IntentSource,
 }
 
-/// Returns direct and extracted semantic intents for an action payload.
+/// Returns contract-declared semantic intents for an action payload.
 pub(crate) fn action_intents(action: &ActionContract, payload: &Value) -> Vec<ActionIntentMatch> {
     let mut intents = Vec::new();
     for spec in &action.semantic_intents {
         if let Some(intent) = direct_intent(action, spec, payload) {
-            intents.push(intent);
-        }
-    }
-    for spec in &action.intent_extractors {
-        if let Some(intent) = extracted_intent(spec, payload) {
             intents.push(intent);
         }
     }
@@ -107,7 +99,6 @@ pub(crate) fn intent_preference(
 ) -> (u8, u8, u64) {
     let source_rank = match intent.source {
         IntentSource::Direct => 0,
-        IntentSource::Extracted => 1,
     };
     (source_rank, risk_rank(&action.risk_level), node_id.0)
 }
@@ -131,50 +122,6 @@ pub(crate) fn semantic_symbol(value: &str) -> String {
     } else {
         trimmed.to_string()
     }
-}
-
-/// Splits a simple shell command and rejects syntax with control or redirection effects.
-pub(crate) fn split_simple_command(command: &str) -> Option<Vec<String>> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    let mut quote = None;
-    let mut escaped = false;
-    for character in command.chars() {
-        if escaped {
-            current.push(character);
-            escaped = false;
-            continue;
-        }
-        if character == '\\' {
-            escaped = true;
-            continue;
-        }
-        if let Some(active_quote) = quote {
-            if character == active_quote {
-                quote = None;
-            } else {
-                current.push(character);
-            }
-            continue;
-        }
-        match character {
-            '\'' | '"' => quote = Some(character),
-            character if character.is_ascii_whitespace() => {
-                if !current.is_empty() {
-                    tokens.push(std::mem::take(&mut current));
-                }
-            }
-            '|' | '&' | ';' | '>' | '<' | '`' | '$' => return None,
-            character => current.push(character),
-        }
-    }
-    if quote.is_some() || escaped {
-        return None;
-    }
-    if !current.is_empty() {
-        tokens.push(current);
-    }
-    Some(tokens)
 }
 
 fn direct_intent(
@@ -205,87 +152,6 @@ fn direct_intent(
             .unwrap_or_else(|| action.side_effect_class.clone()),
         source: IntentSource::Direct,
     })
-}
-
-fn extracted_intent(spec: &IntentExtractorSpec, payload: &Value) -> Option<ActionIntentMatch> {
-    match normalize_token(&spec.parser).as_str() {
-        "regex" => extracted_regex_intent(spec, payload),
-        "simple_shell" => extracted_token_intent(spec, payload),
-        _ => None,
-    }
-}
-
-fn extracted_regex_intent(
-    spec: &IntentExtractorSpec,
-    payload: &Value,
-) -> Option<ActionIntentMatch> {
-    let text = payload.get(&spec.source_arg)?.as_str()?;
-    let pattern = spec.pattern.as_ref()?;
-    let regex = regex::Regex::new(pattern).ok()?;
-    let captures = regex.captures(text)?;
-    let mut slots = BTreeMap::new();
-    for (slot, group) in &spec.slot_groups {
-        let value = captures.name(group)?.as_str();
-        let slot_name = normalize_token(slot);
-        slots.insert(slot_name.clone(), normalize_slot_value(&slot_name, value));
-    }
-    for (slot, group) in &spec.optional_slot_groups {
-        if let Some(value) = captures.name(group) {
-            let slot_name = normalize_token(slot);
-            slots.insert(
-                slot_name.clone(),
-                normalize_slot_value(&slot_name, value.as_str()),
-            );
-        }
-    }
-    Some(extracted_match(spec, slots))
-}
-
-fn extracted_token_intent(
-    spec: &IntentExtractorSpec,
-    payload: &Value,
-) -> Option<ActionIntentMatch> {
-    let command = payload.get(&spec.source_arg)?.as_str()?.trim();
-    let tokens = split_simple_command(command)?;
-    let (command_name, args) = tokens.split_first()?;
-    if command_name != &spec.command {
-        return None;
-    }
-    for literal in &spec.literals {
-        if args.get(literal.position).map(String::as_str) != Some(literal.value.as_str()) {
-            return None;
-        }
-    }
-    let mut slots = BTreeMap::new();
-    for slot in &spec.slots {
-        let slot_name = normalize_token(&slot.name);
-        let value = args.get(slot.position)?;
-        slots.insert(slot_name.clone(), normalize_slot_value(&slot_name, value));
-    }
-    for slot in &spec.optional_slots {
-        if let Some(value) = args.get(slot.position) {
-            let slot_name = normalize_token(&slot.name);
-            slots.insert(slot_name.clone(), normalize_slot_value(&slot_name, value));
-        }
-    }
-    Some(extracted_match(spec, slots))
-}
-
-fn extracted_match(
-    spec: &IntentExtractorSpec,
-    slots: BTreeMap<String, String>,
-) -> ActionIntentMatch {
-    ActionIntentMatch {
-        normalized: NormalizedIntent {
-            intent: normalize_token(&spec.intent),
-            slots,
-        },
-        side_effect_class: spec
-            .side_effect_class
-            .clone()
-            .unwrap_or(SideEffectClass::PureObservation),
-        source: IntentSource::Extracted,
-    }
 }
 
 fn risk_rank(risk: &RiskLevel) -> u8 {
@@ -358,7 +224,10 @@ fn normalize_read_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contract::{ApprovalSpec, Idempotency, Reversibility, VerificationSpec};
+    use crate::contract::{
+        ApprovalSpec, ExtractorSlotSpec, Idempotency, IntentExtractorSpec, Reversibility,
+        VerificationSpec,
+    };
 
     fn action() -> ActionContract {
         ActionContract {
@@ -419,5 +288,31 @@ mod tests {
         let intents = action_intents(&action(), &json!({"file_path": "src/../lib.rs"}));
 
         assert_eq!(intents[0].normalized.slots["path"], "src/../lib.rs");
+    }
+
+    #[test]
+    fn command_text_extractors_do_not_create_intents() {
+        let mut action = action();
+        action.semantic_intents = Vec::new();
+        action.intent_extractors = vec![IntentExtractorSpec {
+            intent: "read_file".to_string(),
+            parser: "simple_shell".to_string(),
+            source_arg: "command".to_string(),
+            pattern: None,
+            command: "cat".to_string(),
+            slots: vec![ExtractorSlotSpec {
+                name: "path".to_string(),
+                position: 0,
+            }],
+            optional_slots: Vec::new(),
+            slot_groups: BTreeMap::new(),
+            optional_slot_groups: BTreeMap::new(),
+            literals: Vec::new(),
+            side_effect_class: Some(SideEffectClass::LocalRead),
+        }];
+
+        let intents = action_intents(&action, &json!({"command": "cat src/lib.rs"}));
+
+        assert!(intents.is_empty());
     }
 }

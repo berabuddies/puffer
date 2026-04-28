@@ -143,7 +143,10 @@ pub(crate) fn propose_puffer_tool_call(
          Return exactly one JSON object with this schema: {{\"tool_id\":\"<available tool id>\",\"args\":{{...}}}}.\n\
          The tool call will be executed once through Puffer's existing tool runtime in the current workspace.\n\
          Choose only one of the available contract-declared tools below. Prefer the lowest-risk tool whose schema can satisfy the goal. \
-         Do not include markdown.\n\n\
+         Do not include markdown. The proposal is invalid if it only prints, echoes, comments on, or restates future work instead of \
+         actually inspecting evidence, creating or changing the required artifact, starting a required service, running a concrete check, \
+         or repairing a concrete failure. Do not submit placeholder commands, TODO scaffolds, fake success markers, or commands whose \
+         only effect is describing what should be implemented.\n\n\
          Available tools:\n{}\n\n\
          Goal:\n{goal}",
         serde_json::to_string_pretty(&available_tools)?
@@ -395,13 +398,10 @@ fn parse_candidate_list_json(
         .get("candidates")
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow!("LLM candidate proposal missing array `candidates`"))?;
-    let mut parsed = Vec::new();
-    for candidate in candidates {
-        if let Ok(candidate) = parse_model_candidate(candidate, contract) {
-            parsed.push(candidate);
-        }
+    if candidates.is_empty() {
+        return Err(anyhow!("LLM candidate proposal contained no candidates"));
     }
-    Ok(parsed)
+    parse_model_candidate_array(candidates, contract, "candidate proposal")
 }
 
 fn parse_goal_verification_json(
@@ -431,22 +431,47 @@ fn parse_goal_verification_json(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let suggested_candidates = value
+    let suggested_candidate_values = value
         .get("suggested_candidates")
         .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| parse_model_candidate(item, contract).ok())
-                .collect::<Vec<_>>()
-        })
+        .cloned()
         .unwrap_or_default();
+    let suggested_candidates = parse_model_candidate_array(
+        &suggested_candidate_values,
+        contract,
+        "goal verification suggested_candidates",
+    )?;
+    if (!satisfied || !missing_evidence.is_empty()) && suggested_candidates.is_empty() {
+        return Err(anyhow!(
+            "LLM goal verification marked the goal unsatisfied without structural follow-up candidates"
+        ));
+    }
     Ok(GoalVerificationResult {
         satisfied,
         confidence,
         missing_evidence,
         suggested_candidates,
     })
+}
+
+fn parse_model_candidate_array(
+    candidates: &[Value],
+    contract: &CapabilityContract,
+    source: &str,
+) -> Result<Vec<ModelCandidateProposal>> {
+    let mut parsed = Vec::new();
+    let mut errors = Vec::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        match parse_model_candidate(candidate, contract) {
+            Ok(candidate) => parsed.push(candidate),
+            Err(error) => errors.push(format!("{index}: {error}")),
+        }
+    }
+    if errors.is_empty() {
+        Ok(parsed)
+    } else {
+        Err(anyhow!("invalid {source} entries: {}", errors.join("; ")))
+    }
 }
 
 fn parse_model_candidate(

@@ -7,9 +7,13 @@ use puffer_resources::load_resources;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::Instant;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ActionInvocation {
@@ -43,6 +47,7 @@ pub(crate) struct ExecutorDispatcher {
 
 pub(crate) struct PufferToolExecutor {
     inner: Mutex<StandaloneToolExecutor>,
+    workspace_root: PathBuf,
 }
 
 impl ExecutorDispatcher {
@@ -98,10 +103,11 @@ impl PufferToolExecutor {
         let config = load_config(&paths)?;
         let resources = load_resources(&paths)?;
         let inner = StandaloneToolExecutor::new(config, workspace_root.clone(), resources)
-            .with_working_dirs(vec![workspace_root])
+            .with_working_dirs(vec![workspace_root.clone()])
             .with_sandbox_mode("workspace-write");
         Ok(Self {
             inner: Mutex::new(inner),
+            workspace_root,
         })
     }
 }
@@ -113,6 +119,15 @@ impl Executor for PufferToolExecutor {
 
     fn execute(&self, invocation: ActionInvocation) -> Result<Observation> {
         let started = Instant::now();
+        if invocation.action_name == "Bash"
+            && invocation
+                .args
+                .get("run_in_background")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        {
+            return self.execute_background_bash(invocation, started);
+        }
         let result = self
             .inner
             .lock()
@@ -148,6 +163,105 @@ impl Executor for PufferToolExecutor {
                 ))
             }
         }
+    }
+}
+
+impl PufferToolExecutor {
+    fn execute_background_bash(
+        &self,
+        invocation: ActionInvocation,
+        started: Instant,
+    ) -> Result<Observation> {
+        let background_output = match self.start_background_bash(&invocation) {
+            Ok(output) => output,
+            Err(error) => {
+                let message = error.to_string();
+                return Ok(observation(
+                    invocation,
+                    false,
+                    json!({
+                        "success": false,
+                        "tool_id": "Bash",
+                        "error": message.clone(),
+                    }),
+                    Some(message),
+                    started,
+                ));
+            }
+        };
+        let stdout = serde_json::to_string_pretty(&background_output)?;
+        let structured_output = structured_stdout(&stdout);
+        Ok(observation(
+            invocation,
+            true,
+            json!({
+                "success": true,
+                "tool_id": "Bash",
+                "stdout": stdout,
+                "stderr": "",
+                "metadata": {
+                    "burbot_background": true,
+                },
+                "structured_output": structured_output,
+            }),
+            None,
+            started,
+        ))
+    }
+
+    fn start_background_bash(&self, invocation: &ActionInvocation) -> Result<Value> {
+        let command = invocation
+            .args
+            .get("command")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if command.is_empty() {
+            return Err(anyhow!("Bash command cannot be empty"));
+        }
+
+        let output_dir = self
+            .workspace_root
+            .join(".puffer")
+            .join("burbot")
+            .join("background");
+        fs::create_dir_all(&output_dir)?;
+        let output_file = output_dir.join(format!("shell-{}.log", Uuid::new_v4()));
+        let stdout = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&output_file)?;
+        let stderr = stdout.try_clone()?;
+        let mut child = Command::new(puffer_tools::detected_shell())
+            .arg("-lc")
+            .arg(&command)
+            .current_dir(&self.workspace_root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr))
+            .spawn()?;
+        let task_id = format!("burbot-shell-{}", child.id());
+        thread::spawn(move || {
+            let _ = child.wait();
+        });
+
+        Ok(json!({
+            "stdout": "",
+            "stderr": "",
+            "interrupted": false,
+            "backgroundTaskId": task_id,
+            "outputFile": output_file.display().to_string(),
+            "backgroundedByUser": false,
+            "assistantAutoBackgrounded": false,
+            "dangerouslyDisableSandbox": invocation
+                .args
+                .get("dangerouslyDisableSandbox")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            "noOutputExpected": true,
+        }))
     }
 }
 
@@ -260,5 +374,36 @@ mod tests {
         assert!(observation.output["stdout"]
             .as_str()
             .is_some_and(|stdout| stdout.contains("\"completed\": true")));
+    }
+
+    #[test]
+    fn puffer_tool_executor_runs_background_bash_without_standalone_rejection() {
+        let workspace = tempfile::tempdir().unwrap();
+        let executor = PufferToolExecutor::new(workspace.path().to_path_buf()).unwrap();
+        let observation = executor
+            .execute(ActionInvocation {
+                run_id: RunId::new(),
+                plan_node_id: NodeId(1),
+                contract_id: PUFFER_TOOLS_CONTRACT_ID.to_string(),
+                action_name: "Bash".to_string(),
+                args: json!({
+                    "command": "printf ready",
+                    "run_in_background": true,
+                }),
+            })
+            .unwrap();
+
+        assert!(observation.success);
+        assert_eq!(
+            observation.output["structured_output"]["interrupted"],
+            false
+        );
+        assert!(observation.output["structured_output"]["backgroundTaskId"]
+            .as_str()
+            .is_some_and(|task_id| task_id.starts_with("burbot-shell-")));
+        let output_file = observation.output["structured_output"]["outputFile"]
+            .as_str()
+            .unwrap();
+        assert!(std::path::Path::new(output_file).exists());
     }
 }

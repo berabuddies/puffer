@@ -115,10 +115,16 @@ pub(super) fn observe_act_prompt(
     observation_context: &Value,
 ) -> Result<String> {
     Ok(format!(
-        "Return exactly this JSON shape: {{\"candidates\":[{{\"tool_id\":\"<available tool id>\",\"args\":{{}},\"completion_role\":\"terminal|support|verification|repair\",\"rationale\":\"why this next action is safe and useful\"}}]}}.\n\
+         "Return exactly this JSON shape: {{\"candidates\":[{{\"tool_id\":\"<available tool id>\",\"args\":{{}},\"completion_role\":\"terminal|support|verification|repair\",\"rationale\":\"why this next action is safe and useful\"}}]}}.\n\
          The `candidates` array must be non-empty. Each candidate must choose one available tool, object args, completion_role, and rationale.\n\
          Propose only actions that materially advance the goal from the given structural context. \
+         A structurally valid candidate is still invalid if it only prints, echoes, comments on, or restates future work instead of actually \
+         inspecting evidence, creating or changing the required artifact, starting a required service, running a concrete check, or repairing a concrete failure. \
+         Do not submit placeholder commands, TODO scaffolds, fake success markers, or commands whose only effect is describing what should be implemented. \
          Prefer cheap observations before risky changes, and include verification candidates when useful.\n\n\
+         When the context reports missing evidence, a goal-verifier failure, or invalid prior candidates, propose concrete \
+         valid tool calls that directly collect or repair that evidence. Do not repeat checks already shown successful \
+         unless the context shows relevant state changed after those checks.\n\n\
          Available tools:\n{}\n\n\
          Goal:\n{goal}\n\n\
          Structural context JSON:\n{}",
@@ -133,15 +139,23 @@ pub(super) fn goal_verification_prompt(
     verification_context: &Value,
 ) -> Result<String> {
     Ok(format!(
-        "Return exactly this JSON shape: {{\"satisfied\":false,\"confidence\":0.0,\"missing_evidence\":[],\"suggested_candidates\":[]}}. \
+         "Return exactly this JSON shape: {{\"satisfied\":false,\"confidence\":0.0,\"missing_evidence\":[],\"suggested_candidates\":[{{\"tool_id\":\"<available tool id>\",\"args\":{{}},\"completion_role\":\"verification|support|repair\",\"rationale\":\"why this exact follow-up resolves missing evidence\"}}]}}. \
          Decide whether the goal is satisfied by the structural evidence. \
-         If evidence is missing, set satisfied=false and include concrete follow-up candidates with completion_role and rationale. \
+         If evidence is missing, set satisfied=false and include concrete follow-up candidates with tool_id, object args, completion_role, and rationale. \
+         Suggested candidates must execute concrete inspection, repair, artifact creation, service startup, or verification work; \
+         never suggest placeholder commands, TODO scaffolds, fake success markers, or commands that only describe future work. \
          Do not infer success from a tool exit code alone when the goal requires an artifact or semantic result. \
          For generated code, migrations, ports, reimplementations, protocol services, or other behavioral artifacts, \
          a narrow self-check is not enough: require independent project tests when available, or broad representative checks \
          that exercise stateful/repeated operations, failure paths, edge cases, and final artifacts required by the goal. \
+         For interface, protocol, schema, API, CLI, file-format, or wire-format goals, exact declared names are semantic \
+         requirements: service names, method names, message names, field names, route names, ports, file names, command names, \
+         enum variants, and parameter names must match the goal or source contract. Tests that only use generated clients, \
+         wrappers, or helpers from the current artifact do not prove exact contract compatibility unless they also compare \
+         the generated definitions or external contract text against the requested names. \
          If the evidence only compares one current input, one happy path, or a single synthetic example, mark the goal unsatisfied \
-         and propose stronger verification or repair candidates.\n\n\
+         and propose stronger verification or repair candidates. If required artifact contents, diffs, test results, or contract \
+         comparisons are absent from the evidence, propose concrete read/search/test candidates instead of returning no candidates.\n\n\
          Available tools:\n{}\n\n\
          Goal:\n{goal}\n\n\
          Evidence JSON:\n{}",
@@ -531,5 +545,11 @@ mod tests {
         assert!(prompt.contains("narrow self-check is not enough"));
         assert!(prompt.contains("stateful/repeated operations"));
         assert!(prompt.contains("one current input"));
+        assert!(prompt.contains("field names"));
+        assert!(prompt.contains("parameter names"));
+        assert!(prompt.contains("generated clients"));
+        assert!(prompt.contains("propose concrete read/search/test candidates"));
+        assert!(prompt.contains("\"tool_id\""));
+        assert!(prompt.contains("object args"));
     }
 }

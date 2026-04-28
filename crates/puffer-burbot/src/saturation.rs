@@ -453,7 +453,6 @@ fn side_effect_payload(side_effect_class: &SideEffectClass) -> Value {
 fn intent_source_label(source: &IntentSource) -> &'static str {
     match source {
         IntentSource::Direct => "direct",
-        IntentSource::Extracted => "extracted",
     }
 }
 
@@ -535,6 +534,18 @@ mod tests {
             cost_estimate: None,
             latency_estimate: None,
         }
+    }
+
+    fn read_capable_bash() -> ActionContract {
+        let mut action = action("Bash", SideEffectClass::Unknown);
+        action.semantic_intents = vec![SemanticIntentSpec {
+            intent: "read_file".to_string(),
+            slots: [("path".to_string(), "file_path".to_string())].into(),
+            optional_slots: BTreeMap::new(),
+            defaults: BTreeMap::new(),
+            side_effect_class: Some(SideEffectClass::LocalRead),
+        }];
+        action
     }
 
     fn semantic_intents(name: &str) -> Vec<SemanticIntentSpec> {
@@ -633,7 +644,7 @@ mod tests {
     }
 
     #[test]
-    fn read_replaces_matching_bash_cat() {
+    fn read_does_not_replace_bash_command_without_structural_intent() {
         let registry = registry_with(vec![
             action("Read", SideEffectClass::PureObservation),
             action("Bash", SideEffectClass::Unknown),
@@ -644,25 +655,21 @@ mod tests {
 
         let report = saturate_guarded_substitutions(&mut graph, &registry).unwrap();
 
-        assert_eq!(report.can_replace_edges, 1);
-        assert_eq!(report.pruned_actions, 1);
-        assert!(graph.has_edge(read_id, bash_id, PlanEdgeKind::CanReplace));
-        assert_eq!(graph.node(bash_id).unwrap().status, PlanStatus::Pruned);
-        assert_eq!(
-            graph.node(bash_id).unwrap().payload["dominated_by"]["node_id"],
-            json!(read_id.0)
-        );
+        assert_eq!(report.can_replace_edges, 0);
+        assert_eq!(report.pruned_actions, 0);
+        assert!(!graph.has_edge(read_id, bash_id, PlanEdgeKind::CanReplace));
+        assert_eq!(graph.node(bash_id).unwrap().status, PlanStatus::Open);
     }
 
     #[test]
     fn guarded_edge_payload_records_class_proof_and_dominance() {
         let registry = registry_with(vec![
             action("Read", SideEffectClass::PureObservation),
-            action("Bash", SideEffectClass::Unknown),
+            read_capable_bash(),
         ]);
         let mut graph = PlanGraph::new();
         let read_id = graph.add_node(action_node("Read", json!({"file_path": "src/lib.rs"})));
-        let bash_id = graph.add_node(action_node("Bash", json!({"command": "cat src/lib.rs"})));
+        let bash_id = graph.add_node(action_node("Bash", json!({"file_path": "src/lib.rs"})));
 
         let changes = add_guarded_substitution_edges(&mut graph, &registry).unwrap();
 
@@ -689,7 +696,7 @@ mod tests {
         );
         assert_eq!(
             edge.payload["dominance"]["reasons"][0],
-            json!("direct_semantic_intent_preferred")
+            json!("stable_node_order_tiebreaker")
         );
         assert_eq!(
             edge.payload["proof"]["read_only_safe_alternatives"][1]["safe_by"],
@@ -698,7 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn grep_replaces_matching_bash_grep() {
+    fn grep_does_not_replace_bash_command_without_structural_intent() {
         let registry = registry_with(vec![
             action("Grep", SideEffectClass::PureObservation),
             action("Bash", SideEffectClass::Unknown),
@@ -715,12 +722,12 @@ mod tests {
 
         let changes = add_guarded_substitution_edges(&mut graph, &registry).unwrap();
 
-        assert_eq!(changes, 1);
-        assert!(graph.has_edge(grep_id, bash_id, PlanEdgeKind::CanReplace));
+        assert_eq!(changes, 0);
+        assert!(!graph.has_edge(grep_id, bash_id, PlanEdgeKind::CanReplace));
     }
 
     #[test]
-    fn glob_replaces_matching_bash_find_name() {
+    fn glob_does_not_replace_bash_command_without_structural_intent() {
         let registry = registry_with(vec![
             action("Glob", SideEffectClass::PureObservation),
             action("Bash", SideEffectClass::Unknown),
@@ -737,8 +744,8 @@ mod tests {
 
         let changes = add_guarded_substitution_edges(&mut graph, &registry).unwrap();
 
-        assert_eq!(changes, 1);
-        assert!(graph.has_edge(glob_id, bash_id, PlanEdgeKind::CanReplace));
+        assert_eq!(changes, 0);
+        assert!(!graph.has_edge(glob_id, bash_id, PlanEdgeKind::CanReplace));
     }
 
     #[test]
@@ -763,11 +770,11 @@ mod tests {
     fn preserves_protected_scheduling_edges() {
         let registry = registry_with(vec![
             action("Read", SideEffectClass::PureObservation),
-            action("Bash", SideEffectClass::Unknown),
+            read_capable_bash(),
         ]);
         let mut graph = PlanGraph::new();
         let read_id = graph.add_node(action_node("Read", json!({"file_path": "src/lib.rs"})));
-        let bash_id = graph.add_node(action_node("Bash", json!({"command": "cat src/lib.rs"})));
+        let bash_id = graph.add_node(action_node("Bash", json!({"file_path": "src/lib.rs"})));
         graph.add_edge(read_id, bash_id, PlanEdgeKind::DependsOn, json!({}));
 
         let changes = add_guarded_substitution_edges(&mut graph, &registry).unwrap();
@@ -776,7 +783,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_intents_on_one_node_do_not_create_self_replacement() {
+    fn ignored_extractors_do_not_create_self_replacement() {
         let mut read = action("Read", SideEffectClass::PureObservation);
         read.intent_extractors = vec![extractor("read_file", "cat", [("path", 0)], [])];
         let registry = registry_with(vec![read]);
@@ -811,11 +818,11 @@ mod tests {
     fn does_not_duplicate_existing_can_replace_edge() {
         let registry = registry_with(vec![
             action("Read", SideEffectClass::PureObservation),
-            action("Bash", SideEffectClass::Unknown),
+            read_capable_bash(),
         ]);
         let mut graph = PlanGraph::new();
         let read_id = graph.add_node(action_node("Read", json!({"file_path": "src/lib.rs"})));
-        let bash_id = graph.add_node(action_node("Bash", json!({"command": "cat src/lib.rs"})));
+        let bash_id = graph.add_node(action_node("Bash", json!({"file_path": "src/lib.rs"})));
         graph.add_edge(read_id, bash_id, PlanEdgeKind::CanReplace, json!({}));
 
         let changes = add_guarded_substitution_edges(&mut graph, &registry).unwrap();

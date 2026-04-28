@@ -10,6 +10,7 @@ pub(crate) enum FailureKind {
     PermissionDenied,
     TimedOut,
     VerificationFailed,
+    GoalUnsatisfied,
     NonZeroExit,
     ToolExecutionError,
     Contract(String),
@@ -24,6 +25,7 @@ impl FailureKind {
             Self::PermissionDenied => "permission_denied",
             Self::TimedOut => "timed_out",
             Self::VerificationFailed => "verification_failed",
+            Self::GoalUnsatisfied => "goal_unsatisfied",
             Self::NonZeroExit => "non_zero_exit",
             Self::ToolExecutionError => "tool_execution_error",
             Self::Contract(name) => name,
@@ -38,6 +40,7 @@ impl FailureKind {
             "permission_denied" => Self::PermissionDenied,
             "timed_out" => Self::TimedOut,
             "verification_failed" => Self::VerificationFailed,
+            "goal_unsatisfied" => Self::GoalUnsatisfied,
             "non_zero_exit" => Self::NonZeroExit,
             "tool_execution_error" => Self::ToolExecutionError,
             "unknown" => Self::Unknown,
@@ -71,9 +74,6 @@ fn detection_clause_matches(clause: &str, output: &Value) -> bool {
     if clause.is_empty() {
         return false;
     }
-    if let Some(needle) = clause.strip_prefix("text_contains:") {
-        return contains_text(output, needle);
-    }
     if let Some(expression) = clause.strip_prefix("json_bool:") {
         let Some((key, expected)) = expression.split_once('=') else {
             return false;
@@ -91,34 +91,7 @@ fn detection_clause_matches(clause: &str, output: &Value) -> bool {
     if let Some(key) = clause.strip_prefix("json_present:") {
         return value_deep(output, key.trim()).is_some_and(|value| !value.is_null());
     }
-    contains_text(output, clause)
-}
-
-fn contains_text(output: &Value, needle: &str) -> bool {
-    let needle = needle.trim().to_ascii_lowercase();
-    !needle.is_empty() && failure_text(output).to_ascii_lowercase().contains(&needle)
-}
-
-fn failure_text(output: &Value) -> String {
-    let mut parts = Vec::new();
-    collect_output_text(output, &mut parts);
-    parts.join("\n")
-}
-
-fn collect_output_text(value: &Value, parts: &mut Vec<String>) {
-    for key in ["stdout", "stderr", "error", "message"] {
-        if let Some(value) = value.get(key) {
-            match value {
-                Value::String(text) => parts.push(text.clone()),
-                other => parts.push(other.to_string()),
-            }
-        }
-    }
-    for key in ["metadata", "structured_output"] {
-        if let Some(value) = value.get(key) {
-            collect_output_text(value, parts);
-        }
-    }
+    false
 }
 
 fn output_i64_deep(output: &Value, key: &str) -> Option<i64> {
@@ -199,7 +172,7 @@ mod tests {
     }
 
     #[test]
-    fn classifies_nested_command_not_found() {
+    fn ignores_text_failure_detection_for_command_not_found() {
         let output = json!({
             "success": false,
             "stdout": "{\"stderr\":\"sh: nope: command not found\\n\",\"exit_code\":127}",
@@ -211,11 +184,11 @@ mod tests {
 
         let kind = classify_failure(Some(&action), &output);
 
-        assert_eq!(kind, FailureKind::CommandNotFound);
+        assert_eq!(kind, FailureKind::Unknown);
     }
 
     #[test]
-    fn classifies_nested_missing_path() {
+    fn ignores_text_failure_detection_for_missing_path() {
         let output = json!({
             "success": false,
             "stdout": "{\"stderr\":\"cat: crates/nope.rs: No such file or directory\\n\",\"exit_code\":1}",
@@ -227,7 +200,7 @@ mod tests {
 
         let kind = classify_failure(Some(&action), &output);
 
-        assert_eq!(kind, FailureKind::MissingPath);
+        assert_eq!(kind, FailureKind::Unknown);
     }
 
     #[test]
@@ -247,14 +220,16 @@ mod tests {
     }
 
     #[test]
-    fn supports_contract_specific_failure_names() {
+    fn supports_contract_specific_failure_names_from_structured_detection() {
         let output = json!({
             "success": false,
-            "stderr": "remote quota exhausted",
+            "structured_output": {
+                "quota_exhausted": true,
+            },
         });
         let action = action(vec![mode(
             "provider_quota_exhausted",
-            "text_contains:quota exhausted",
+            "json_bool:quota_exhausted=true",
         )]);
 
         let kind = classify_failure(Some(&action), &output);

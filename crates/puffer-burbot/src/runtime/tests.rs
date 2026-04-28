@@ -8,6 +8,7 @@ use crate::graph::scores_for_action;
 use crate::llm::ModelCandidateProposal;
 use crate::planner::{CandidateSource, CompletionRole};
 use crate::puffer_tools::PUFFER_TOOLS_CONTRACT_ID;
+use crate::rules::action_key;
 use crate::trace::TraceEventType;
 
 fn action(name: &str, risk: RiskLevel) -> ActionContract {
@@ -644,4 +645,123 @@ fn terminal_model_wait_candidate_is_allowed_when_it_is_the_only_path() {
             .as_ref()
             .is_some_and(|action_ref| action_ref.action_name == "Sleep")
     }));
+}
+
+#[test]
+fn model_candidate_dedupe_allows_rerun_after_state_change() {
+    let mut registry = InMemoryContractRegistry::default();
+    registry
+        .register(CapabilityContract {
+            contract_id: PUFFER_TOOLS_CONTRACT_ID.to_string(),
+            version: "0.1.0".to_string(),
+            status: ContractStatus::Active,
+            trust_level: TrustLevel::Sandboxed,
+            description: "tools".to_string(),
+            actions: vec![action("Bash", RiskLevel::High)],
+            global_constraints: Vec::new(),
+            forbidden_uses: Vec::new(),
+            local_rules: Vec::new(),
+            examples: Vec::new(),
+            contract_hash: None,
+        })
+        .unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let trace = JsonlTraceStore::new(workspace.path().join("traces"));
+    let mut runtime = BurbotRuntime::new(registry, workspace.path().into(), trace).unwrap();
+    let mut graph = PlanGraph::from_goal("verify".to_string());
+    let action_ref = ActionRef {
+        contract_id: PUFFER_TOOLS_CONTRACT_ID.to_string(),
+        action_name: "Bash".to_string(),
+    };
+    let args = json!({"command": "python test.py"});
+    runtime
+        .executed_action_epochs
+        .insert(action_key(&action_ref, &args), runtime.state_epoch);
+
+    let same_epoch_added = runtime
+        .add_model_candidate_proposals(
+            RunId::new(),
+            &mut graph,
+            NodeId(0),
+            None,
+            CandidateSource::ModelGoalVerifier,
+            vec![ModelCandidateProposal {
+                tool_id: "Bash".to_string(),
+                args: args.clone(),
+                completion_role: CompletionRole::Verification,
+                rationale: "repeat verification".to_string(),
+            }],
+        )
+        .unwrap();
+
+    runtime.state_epoch = runtime.state_epoch.saturating_add(1);
+    let next_epoch_added = runtime
+        .add_model_candidate_proposals(
+            RunId::new(),
+            &mut graph,
+            NodeId(0),
+            None,
+            CandidateSource::ModelGoalVerifier,
+            vec![ModelCandidateProposal {
+                tool_id: "Bash".to_string(),
+                args,
+                completion_role: CompletionRole::Verification,
+                rationale: "repeat verification after repair".to_string(),
+            }],
+        )
+        .unwrap();
+
+    assert_eq!(same_epoch_added, 0);
+    assert_eq!(next_epoch_added, 1);
+}
+
+#[test]
+fn required_repair_action_schedules_verification() {
+    let mut registry = InMemoryContractRegistry::default();
+    registry
+        .register(CapabilityContract {
+            contract_id: PUFFER_TOOLS_CONTRACT_ID.to_string(),
+            version: "0.1.0".to_string(),
+            status: ContractStatus::Active,
+            trust_level: TrustLevel::Sandboxed,
+            description: "tools".to_string(),
+            actions: vec![action("Edit", RiskLevel::Medium)],
+            global_constraints: Vec::new(),
+            forbidden_uses: Vec::new(),
+            local_rules: Vec::new(),
+            examples: Vec::new(),
+            contract_hash: None,
+        })
+        .unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let trace = JsonlTraceStore::new(workspace.path().join("traces"));
+    let runtime = BurbotRuntime::new(registry, workspace.path().into(), trace).unwrap();
+    let mut graph = PlanGraph::from_goal("repair".to_string());
+    let edit_id = graph.add_node(PlanNode {
+        id: NodeId(0),
+        kind: PlanNodeKind::Action,
+        status: PlanStatus::Executed,
+        label: "edit".to_string(),
+        payload: json!({"file_path": "/tmp/example.txt"}),
+        action_ref: Some(ActionRef {
+            contract_id: PUFFER_TOOLS_CONTRACT_ID.to_string(),
+            action_name: "Edit".to_string(),
+        }),
+        scores: ActionScores::default(),
+    });
+    graph.add_edge(
+        NodeId(0),
+        edit_id,
+        PlanEdgeKind::Supports,
+        json!({"completion_role": "repair"}),
+    );
+
+    assert!(runtime.should_schedule_verification(
+        &graph,
+        edit_id,
+        &VerificationOutcome {
+            required: true,
+            passed: false,
+        },
+    ));
 }

@@ -376,6 +376,18 @@ mod tests {
         }
     }
 
+    fn read_capable_bash() -> ActionContract {
+        let mut action = action("Bash", SideEffectClass::Unknown);
+        action.semantic_intents = vec![SemanticIntentSpec {
+            intent: "read_file".to_string(),
+            slots: [("path".to_string(), "file_path".to_string())].into(),
+            optional_slots: BTreeMap::new(),
+            defaults: BTreeMap::new(),
+            side_effect_class: Some(SideEffectClass::LocalRead),
+        }];
+        action
+    }
+
     fn semantic_intents(name: &str) -> Vec<SemanticIntentSpec> {
         match name {
             "Read" => vec![SemanticIntentSpec {
@@ -427,7 +439,7 @@ mod tests {
     }
 
     #[test]
-    fn egg_read_replaces_matching_bash_cat() {
+    fn egg_does_not_parse_bash_command_text_for_equivalence() {
         let registry = registry_with(vec![
             action("Read", SideEffectClass::PureObservation),
             action("Bash", SideEffectClass::Unknown),
@@ -438,18 +450,18 @@ mod tests {
 
         let changes = add_read_only_equivalence_edges(&mut graph, &registry).unwrap();
 
-        assert_eq!(changes, 1);
-        assert!(graph.has_edge(read_id, bash_id, PlanEdgeKind::CanReplace));
+        assert_eq!(changes, 0);
+        assert!(!graph.has_edge(read_id, bash_id, PlanEdgeKind::CanReplace));
     }
 
     #[test]
     fn egg_payload_records_class_proof_rules_and_dominance() {
         let registry = registry_with(vec![
             action("Read", SideEffectClass::PureObservation),
-            action("Bash", SideEffectClass::Unknown),
+            read_capable_bash(),
         ]);
         let mut graph = PlanGraph::new();
-        let bash_id = graph.add_node(action_node("Bash", json!({"command": "cat src/lib.rs"})));
+        let bash_id = graph.add_node(action_node("Bash", json!({"file_path": "src/lib.rs"})));
         let read_id = graph.add_node(action_node("Read", json!({"file_path": "src/lib.rs"})));
 
         let changes = add_read_only_equivalence_edges(&mut graph, &registry).unwrap();
@@ -546,11 +558,11 @@ mod tests {
     fn egg_preserves_dependency_edges_by_skipping_node() {
         let registry = registry_with(vec![
             action("Read", SideEffectClass::PureObservation),
-            action("Bash", SideEffectClass::Unknown),
+            read_capable_bash(),
         ]);
         let mut graph = PlanGraph::new();
         let read_id = graph.add_node(action_node("Read", json!({"file_path": "src/lib.rs"})));
-        let bash_id = graph.add_node(action_node("Bash", json!({"command": "cat src/lib.rs"})));
+        let bash_id = graph.add_node(action_node("Bash", json!({"file_path": "src/lib.rs"})));
         graph.add_edge(read_id, bash_id, PlanEdgeKind::DependsOn, json!({}));
 
         let changes = add_read_only_equivalence_edges(&mut graph, &registry).unwrap();
