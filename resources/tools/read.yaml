@@ -4,6 +4,17 @@ description: Read a file from the workspace.
 handler: read_file
 approval_policy: auto
 sandbox_policy: read-only
+contract:
+  side_effect_class: local_read
+  reversibility: reversible
+  idempotency: idempotent
+  risk_level: low
+  verification:
+    methods:
+      - confirm returned path matches requested workspace path
+    required_before_completion: false
+  approval:
+    required: false
 enabled_if: never
 display:
   group: files

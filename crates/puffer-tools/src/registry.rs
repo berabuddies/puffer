@@ -377,6 +377,7 @@ mod tests {
             shared_lib: None,
             enabled_if: None,
             input_schema: None,
+            contract: None,
             metadata: Default::default(),
             display: Default::default(),
         }
@@ -425,6 +426,7 @@ mod tests {
                         "required": ["duration_ms"],
                         "additionalProperties": false
                     })),
+                    contract: None,
                     metadata: Default::default(),
                     display: Default::default(),
                 },
@@ -521,6 +523,7 @@ mod tests {
                     shared_lib: None,
                     enabled_if: None,
                     input_schema: None,
+                    contract: None,
                     metadata: Default::default(),
                     display: Default::default(),
                 },
@@ -791,6 +794,7 @@ mod tests {
                         "required": ["message", "status"],
                         "additionalProperties": false
                     })),
+                    contract: None,
                     metadata: Default::default(),
                     display: Default::default(),
                 },
@@ -833,6 +837,7 @@ mod tests {
                         "required": ["query"],
                         "additionalProperties": false
                     })),
+                    contract: None,
                     metadata: Default::default(),
                     display: Default::default(),
                 },

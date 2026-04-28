@@ -12,6 +12,69 @@ description: |-
 handler: runtime:claude_write
 approval_policy: on-request
 sandbox_policy: workspace-write
+contract:
+  status: active
+  trust_level: sandboxed
+  side_effect_class: filesystem-write
+  reversibility: conditional
+  idempotency: idempotent_with_same_content
+  risk_level: medium
+  preconditions:
+    - file_path is an absolute path.
+    - parent directory exists and is writable within the active sandbox.
+    - existing files have been read first when preserving prior content matters.
+    - caller has explicit intent to create or fully replace the file contents.
+  postconditions:
+    - file at file_path contains exactly the supplied content on success.
+    - any previous file contents at file_path are overwritten on success.
+  verification:
+    methods:
+      - read the file after writing when the exact persisted content matters.
+      - inspect version control diff for tracked files.
+    templates:
+      - contract_id: puffer.tools
+        action_name: Read
+        args:
+          file_path: "{arg.file_path}"
+        reason: read the written file from disk.
+    required_before_completion: true
+  failure_modes:
+    - name: permission_denied
+      detection: "text_contains:permission denied || text_contains:operation not permitted || text_contains:sandbox"
+      repair_strategy: choose a lower-privilege path or request explicit approval.
+      confidence: 0.8
+    - name: missing_path
+      detection: "text_contains:no such file or directory || text_contains:parent directory does not exist"
+      repair_strategy: inspect or create the intended parent directory only when task-relevant.
+      confidence: 0.8
+    - name: path_is_directory
+      detection: "text_contains:is a directory || text_contains:file_path points to a directory"
+      repair_strategy: choose a concrete file path before retrying.
+      confidence: 0.75
+    - name: filesystem_error
+      detection: "text_contains:disk || text_contains:filesystem error || text_contains:input/output error"
+      repair_strategy: stop and surface the filesystem error before retrying.
+      confidence: 0.65
+  forbidden_uses:
+    - overwriting user work without first reading and preserving intended content.
+    - creating documentation files unless explicitly requested by the user.
+    - writing secrets, credentials, or tokens unless explicitly requested and appropriate.
+  argument_safety:
+    - source_arg: file_path
+      blocked_patterns:
+        - name: protected_system_path
+          pattern: '^/(proc|sys|dev|run|boot|etc|usr|bin|sbin|lib|lib64)(/|$)'
+          reason: protected system locations are outside normal workspace writes.
+          confidence: 0.95
+        - name: parent_traversal
+          pattern: '(^|/)\.\.(/|$)'
+          reason: parent traversal makes the write target ambiguous.
+          confidence: 0.9
+      approval_patterns:
+        - name: version_control_metadata
+          pattern: '(^|/)\.git(/|$)'
+          reason: modifying version-control metadata requires explicit approval.
+          confidence: 0.95
 input_schema:
   type: object
   properties:

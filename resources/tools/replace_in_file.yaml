@@ -4,4 +4,22 @@ description: Replace text in a workspace file.
 handler: replace_in_file
 approval_policy: on-request
 sandbox_policy: workspace-write
+contract:
+  side_effect_class: local_write
+  reversibility: conditionally_reversible
+  idempotency: non_idempotent
+  risk_level: medium
+  preconditions:
+    - original file content should be known
+    - replacement should be minimal and task-relevant
+    - path must be inside allowed workspace
+  postconditions:
+    - workspace file content may change
+  verification:
+    methods:
+      - inspect changed file content
+      - run relevant verification command if available
+    required_before_completion: true
+  approval:
+    required: false
 enabled_if: never

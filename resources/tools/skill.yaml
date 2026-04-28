@@ -25,6 +25,26 @@ description: |-
 handler: runtime:skill
 approval_policy: auto
 sandbox_policy: read-only
+contract:
+  side_effect_class: unknown
+  reversibility: irreversible
+  idempotency: unknown
+  risk_level: medium
+  preconditions:
+    - requested skill must match the user task or explicit slash-command request
+    - skill must not already be running in the current conversation
+  postconditions:
+    - matching skill instructions may be loaded into the conversation
+    - subsequent behavior depends on the selected skill instructions
+  verification:
+    methods:
+      - observation:json_bool:success=true
+      - observation:non_empty:stdout
+      - confirm the invoked skill name matches the user request
+      - follow the loaded skill instructions before completing the task
+    required_before_completion: true
+  approval:
+    required: false
 input_schema:
   type: object
   properties:

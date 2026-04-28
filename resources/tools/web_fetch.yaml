@@ -22,6 +22,24 @@ description: |-
 handler: runtime:claude_web_fetch
 approval_policy: auto
 sandbox_policy: read-only
+contract:
+  side_effect_class: external_read
+  reversibility: reversible
+  idempotency: unknown
+  risk_level: medium
+  preconditions:
+    - URL must be public and unauthenticated
+  postconditions:
+    - external web content is observed but not modified
+  verification:
+    methods:
+      - observation:json_bool:success=true
+      - observation:non_empty:stdout
+      - verify returned content against the requested URL and redirect host
+      - corroborate important claims with another source when accuracy matters
+    required_before_completion: true
+  approval:
+    required: false
 input_schema:
   type: object
   properties:

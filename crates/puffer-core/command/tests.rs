@@ -206,6 +206,7 @@ fn permissions_command_creates_workspace_permissions_file() {
             shared_lib: None,
             enabled_if: None,
             input_schema: None,
+            contract: None,
             metadata: Default::default(),
             display: Default::default(),
         },

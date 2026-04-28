@@ -4,4 +4,21 @@ description: Write a file in the workspace.
 handler: write_file
 approval_policy: on-request
 sandbox_policy: workspace-write
+contract:
+  side_effect_class: local_write
+  reversibility: conditionally_reversible
+  idempotency: non_idempotent
+  risk_level: medium
+  preconditions:
+    - write must be task-relevant
+    - path must be inside allowed workspace
+  postconditions:
+    - workspace file content may change
+  verification:
+    methods:
+      - inspect changed file content
+      - run relevant verification command if available
+    required_before_completion: true
+  approval:
+    required: false
 enabled_if: never

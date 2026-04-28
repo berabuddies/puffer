@@ -13,6 +13,20 @@ description: |-
 handler: runtime:tool_search
 approval_policy: auto
 sandbox_policy: read-only
+contract:
+  side_effect_class: local_read
+  reversibility: reversible
+  idempotency: idempotent
+  risk_level: low
+  postconditions:
+    - matching deferred tool schemas are returned when available
+    - tool registry contents are observed but not modified
+  verification:
+    methods:
+      - confirm returned tool names match the requested query before invoking them
+    required_before_completion: false
+  approval:
+    required: false
 input_schema:
   type: object
   properties:

@@ -38,6 +38,9 @@ pub use runtime::background_tasks;
 pub use runtime::claude_tools::execute_workflow_tool;
 pub use runtime::execute_user_prompt as execute_user_turn;
 pub use runtime::install_subscription_manager;
+pub use runtime::standalone_tools::{
+    StandaloneProviderContext, StandaloneToolExecutor, StandaloneToolResult,
+};
 pub use runtime::subscription_manager;
 pub use runtime::teammate_loop;
 pub use runtime::{

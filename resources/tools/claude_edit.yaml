@@ -13,6 +13,70 @@ description: |-
 handler: runtime:claude_edit
 approval_policy: on-request
 sandbox_policy: workspace-write
+contract:
+  status: active
+  trust_level: sandboxed
+  side_effect_class: filesystem-write
+  reversibility: conditional
+  idempotency: conditionally_idempotent
+  risk_level: medium
+  preconditions:
+    - file_path is an absolute path.
+    - target file has been read in the conversation before editing.
+    - old_string exactly matches existing file content.
+    - old_string is unique unless replace_all is intentionally enabled.
+  postconditions:
+    - matching text is replaced with new_string on success.
+    - unrelated file content is preserved on success.
+    - no change is made if the required match conditions fail.
+  verification:
+    methods:
+      - read the edited region after modification when content correctness matters.
+      - inspect version control diff for tracked files.
+    templates:
+      - contract_id: puffer.tools
+        action_name: Read
+        args:
+          file_path: "{arg.file_path}"
+        reason: read the edited file from disk.
+    required_before_completion: true
+  failure_modes:
+    - name: permission_denied
+      detection: "text_contains:permission denied || text_contains:operation not permitted || text_contains:sandbox"
+      repair_strategy: choose a lower-privilege edit path or request explicit approval.
+      confidence: 0.8
+    - name: missing_precondition
+      detection: "text_contains:must read || text_contains:not read before editing"
+      repair_strategy: read the target file before retrying the edit.
+      confidence: 0.85
+    - name: match_failed
+      detection: "text_contains:old_string || text_contains:pattern not found || text_contains:ambiguous"
+      repair_strategy: read exact surrounding context before retrying with a precise match.
+      confidence: 0.8
+    - name: concurrent_change
+      detection: "text_contains:concurrent || text_contains:modified since"
+      repair_strategy: re-read the file and recalculate the edit.
+      confidence: 0.7
+  forbidden_uses:
+    - broad replacements without confirming intended scope.
+    - editing generated, vendored, or unrelated user files without explicit need.
+    - writing secrets, credentials, or tokens unless explicitly requested and appropriate.
+  argument_safety:
+    - source_arg: file_path
+      blocked_patterns:
+        - name: protected_system_path
+          pattern: '^/(proc|sys|dev|run|boot|etc|usr|bin|sbin|lib|lib64)(/|$)'
+          reason: protected system locations are outside normal workspace edits.
+          confidence: 0.95
+        - name: parent_traversal
+          pattern: '(^|/)\.\.(/|$)'
+          reason: parent traversal makes the edit target ambiguous.
+          confidence: 0.9
+      approval_patterns:
+        - name: version_control_metadata
+          pattern: '(^|/)\.git(/|$)'
+          reason: modifying version-control metadata requires explicit approval.
+          confidence: 0.95
 input_schema:
   type: object
   properties:

@@ -77,6 +77,7 @@ mod tests {
                 shared_lib: None,
                 enabled_if: None,
                 input_schema: None,
+                contract: None,
                 metadata: Default::default(),
                 display: Default::default(),
             },

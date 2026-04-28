@@ -14,6 +14,54 @@ description: |-
 handler: runtime:claude_grep
 approval_policy: auto
 sandbox_policy: read-only
+contract:
+  status: active
+  trust_level: sandboxed
+  side_effect_class: none
+  reversibility: not_applicable
+  idempotency: idempotent
+  risk_level: low
+  preconditions:
+    - pattern is a valid ripgrep-compatible regular expression.
+    - path, glob, and type filters identify readable files within the active sandbox.
+    - multiline mode is enabled only when cross-line matching is required.
+  postconditions:
+    - filesystem contents are unchanged.
+    - matching content, matching file paths, counts, or a search error are returned.
+  semantic_intents:
+    - intent: search_text
+      slots:
+        pattern: pattern
+      optional_slots:
+        path: path
+      defaults:
+        output_mode: content
+        head_limit: 200
+  verification:
+    methods:
+      - refine path, glob, type, or output_mode when results are unexpectedly broad or empty.
+      - use Read on relevant matches before relying on surrounding file context.
+    required_before_completion: false
+  failure_modes:
+    - name: invalid_pattern
+      detection: "text_contains:invalid regular expression || text_contains:regex parse error"
+      repair_strategy: simplify or escape the search pattern before retrying.
+      confidence: 0.8
+    - name: missing_path
+      detection: "text_contains:no such file or directory || text_contains:path does not exist || text_contains:cannot find the path"
+      repair_strategy: inspect available paths before retrying with a corrected path.
+      confidence: 0.85
+    - name: truncated_output
+      detection: "text_contains:truncated || text_contains:head_limit"
+      repair_strategy: narrow path, glob, or output_mode before retrying.
+      confidence: 0.7
+    - name: skipped_content
+      detection: binary or ignored files are not searched by default ripgrep behavior.
+      repair_strategy: adjust search options or read a specific candidate file.
+      confidence: 0.5
+  forbidden_uses:
+    - modifying files or directories.
+    - using search results as a substitute for reading the exact file context before editing.
 input_schema:
   type: object
   properties:

@@ -64,6 +64,8 @@ pub struct ToolSpec {
     pub enabled_if: Option<String>,
     #[serde(default)]
     pub input_schema: Option<Value>,
+    #[serde(default, skip_serializing)]
+    pub contract: Option<Value>,
     #[serde(default)]
     pub metadata: ToolMetadataSpec,
     #[serde(default)]

@@ -15,6 +15,23 @@ description: |-
 handler: runtime:sleep
 approval_policy: never
 sandbox_policy: read-only
+contract:
+  side_effect_class: pure_observation
+  reversibility: irreversible
+  idempotency: non_idempotent
+  risk_level: low
+  postconditions:
+    - elapsed time is observed
+  verification:
+    methods:
+      - confirm the sleep completed or was interrupted
+    required_before_completion: false
+  semantic_intents:
+    - intent: await_async_progress
+      defaults:
+        duration_ms: 1000
+  approval:
+    required: false
 input_schema:
   type: object
   properties:

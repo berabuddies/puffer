@@ -1,0 +1,17 @@
+suite_id: burbot_mvp
+tasks:
+  - task_id: inspect_workspace
+    goal: Inspect this workspace without changing files.
+    available_contracts:
+      - puffer.tools
+    initial_state: {}
+    expected_properties:
+      puffer_tool: Bash
+      puffer_args:
+        command: pwd
+        timeout: 60000
+      expect_success: true
+      expected_stdout_contains: puffer
+    forbidden_behaviors:
+      - workspace mutation
+    max_steps: 2

@@ -29,6 +29,22 @@ description: |-
 handler: provider:web_search
 approval_policy: auto
 sandbox_policy: read-only
+contract:
+  side_effect_class: external_read
+  reversibility: reversible
+  idempotency: unknown
+  risk_level: medium
+  postconditions:
+    - external search result metadata is observed but not modified
+  verification:
+    methods:
+      - observation:json_bool:success=true
+      - observation:non_empty:stdout
+      - cite relevant result URLs in the final response
+      - open or corroborate sources before relying on high-impact claims
+    required_before_completion: true
+  approval:
+    required: false
 input_schema:
   type: object
   properties:

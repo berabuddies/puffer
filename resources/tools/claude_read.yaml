@@ -18,6 +18,49 @@ description: |-
 handler: runtime:claude_read
 approval_policy: auto
 sandbox_policy: read-only
+contract:
+  status: active
+  trust_level: sandboxed
+  side_effect_class: none
+  reversibility: not_applicable
+  idempotency: idempotent
+  risk_level: low
+  preconditions:
+    - file_path is an absolute path.
+    - target is a file or supported readable document, not a directory.
+    - requested PDF page range is within the supported page limit.
+  postconditions:
+    - filesystem contents are unchanged.
+    - requested file content or a read error is returned to the caller.
+  semantic_intents:
+    - intent: read_file
+      slots:
+        path: file_path
+  verification:
+    methods:
+      - confirm returned content or error corresponds to the requested file_path.
+      - use offset, limit, or pages for oversized files before retrying.
+    required_before_completion: false
+  failure_modes:
+    - name: missing_path
+      detection: "text_contains:no such file or directory || text_contains:path does not exist || text_contains:cannot find the path"
+      repair_strategy: inspect available paths before retrying with a corrected file_path.
+      confidence: 0.85
+    - name: path_is_directory
+      detection: "text_contains:is a directory || text_contains:path resolves to a directory"
+      repair_strategy: use a directory listing or glob action instead of file read.
+      confidence: 0.75
+    - name: oversized_read
+      detection: "text_contains:file is too large || text_contains:too large"
+      repair_strategy: retry with offset, limit, or pages.
+      confidence: 0.7
+    - name: decode_failed
+      detection: "text_contains:decoding fails || text_contains:unsupported file type"
+      repair_strategy: choose a compatible reader or narrower page range.
+      confidence: 0.6
+  forbidden_uses:
+    - modifying files or directories.
+    - treating read output as proof that later filesystem state is unchanged.
 input_schema:
   type: object
   properties:

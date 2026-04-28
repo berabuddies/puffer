@@ -32,6 +32,7 @@ mod permission_prompt;
 mod reflection;
 mod request_tool_filter;
 mod side_question;
+pub mod standalone_tools;
 mod structured_output_support;
 mod system_prompt;
 pub mod teammate_loop;

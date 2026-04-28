@@ -22,8 +22,12 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HARBOR_BIN = REPO_ROOT / "benchmark/.venv-harbor/bin/harbor"
 TRAJECTORY_ROOT = REPO_ROOT / "benchmark/tb2-trajectory"
-TASK_ROOT = REPO_ROOT / "benchmark/harbor-cache/tasks/terminal-bench"
-DEFAULT_AGENT_IMPORT = "benchmark.puffer_harbor_agent:PufferBenchAgent"
+TASK_ROOT_CANDIDATES = [
+    REPO_ROOT / "benchmark/harbor-cache/tasks/terminal-bench",
+    REPO_ROOT / "benchmark/harbor-cache/tasks/terminal-bench-2",
+]
+PUFFER_AGENT_IMPORT = "benchmark.puffer_harbor_agent:PufferBenchAgent"
+BURBOT_AGENT_IMPORT = "benchmark.burbot_harbor_agent:BurbotBenchAgent"
 DATASET_DOWNLOAD_COMMAND = (
     "benchmark/.venv-harbor/bin/harbor dataset download "
     "terminal-bench/terminal-bench-2 --output-dir benchmark/harbor-cache/tasks"
@@ -52,6 +56,13 @@ class TrialSummary:
     exception_type: str | None
     exception_message: str | None
     retry_exhausted: bool
+    burbot_status: str | None
+    burbot_run_id: str | None
+    burbot_open_actions: int | None
+    burbot_selected_artifact_action: dict[str, Any] | None
+    burbot_debug_dir: str | None
+    process_return_code: int | None
+    agent_log: str
 
 
 def parse_args() -> argparse.Namespace:
@@ -69,6 +80,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=5,
         help="Retries for Harbor command failures before batch backoff.",
+    )
+    parser.add_argument(
+        "--allow-unsolved",
+        action="store_true",
+        help="Exit zero for completed but unsolved benchmark attempts.",
     )
     parser.add_argument(
         "--sleep-after-exhausted-seconds",
@@ -94,9 +110,18 @@ def parse_args() -> argparse.Namespace:
         help="Specific task slug(s) to run instead of random sampling.",
     )
     parser.add_argument(
+        "--agent",
+        choices=["puffer", "burbot"],
+        default="puffer",
+        help="Benchmark agent adapter to mount and run.",
+    )
+    parser.add_argument(
         "--model",
-        default="openai/gpt-5.4",
-        help="Model selector recorded by Harbor and passed to Puffer.",
+        default=os.environ.get("PUFFER_BENCH_MODEL", "openai/gpt-5.4"),
+        help=(
+            "Model selector recorded by Harbor and passed to the agent. "
+            "Defaults to PUFFER_BENCH_MODEL or openai/gpt-5.4."
+        ),
     )
     parser.add_argument(
         "--effort",
@@ -125,6 +150,17 @@ def parse_args() -> argparse.Namespace:
         "--puffer-bin",
         default=None,
         help="Host path to the Puffer binary to mount into Harbor environments.",
+    )
+    parser.add_argument(
+        "--burbot-bin",
+        default=None,
+        help="Host path to the Burbot binary to mount into Harbor environments.",
+    )
+    parser.add_argument(
+        "--burbot-auth-source",
+        default="local-codex",
+        choices=("local-codex", "codex", "codex-oauth", "local-codex-oauth", "env"),
+        help="OpenAI auth source for Burbot runs. Default uses the local Codex credential.",
     )
     parser.add_argument(
         "--resources-dir",
@@ -181,6 +217,24 @@ def resolve_puffer_bin(explicit_path: str | None) -> Path:
     raise FileNotFoundError("No Puffer binary found in target/release or target/debug")
 
 
+def resolve_burbot_bin(explicit_path: str | None) -> Path:
+    """Resolve the mounted Burbot binary path."""
+    if explicit_path:
+        path = Path(explicit_path).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"Burbot binary not found: {path}")
+        return path
+
+    candidates = [
+        REPO_ROOT / "target/release/burbot",
+        REPO_ROOT / "target/debug/burbot",
+    ]
+    for path in candidates:
+        if path.is_file():
+            return path
+    raise FileNotFoundError("No Burbot binary found in target/release or target/debug")
+
+
 def resolve_harbor_bin() -> Path:
     """Resolve the local Harbor CLI path used to launch trials."""
     if HARBOR_BIN.is_file():
@@ -195,14 +249,19 @@ def resolve_harbor_bin() -> Path:
 
 def discover_tasks() -> list[TaskEntry]:
     """Return all locally cached Terminal Bench task directories."""
-    tasks: list[TaskEntry] = []
-    for task_toml in sorted(TASK_ROOT.glob("*/*/task.toml")):
-        task_dir = task_toml.parent
-        slug = task_dir.parent.name
-        tasks.append(TaskEntry(slug=slug, task_dir=task_dir))
+    tasks_by_dir: dict[Path, TaskEntry] = {}
+    for root in TASK_ROOT_CANDIDATES:
+        for task_toml in sorted(root.glob("*/task.toml")):
+            task_dir = task_toml.parent
+            tasks_by_dir[task_dir] = TaskEntry(slug=task_dir.name, task_dir=task_dir)
+        for task_toml in sorted(root.glob("*/*/task.toml")):
+            task_dir = task_toml.parent
+            tasks_by_dir[task_dir] = TaskEntry(slug=task_dir.parent.name, task_dir=task_dir)
+    tasks = sorted(tasks_by_dir.values(), key=lambda task: (task.slug, str(task.task_dir)))
     if not tasks:
+        checked = "\n".join(str(root) for root in TASK_ROOT_CANDIDATES)
         raise FileNotFoundError(
-            f"No cached tasks found under {TASK_ROOT}.\n"
+            f"No cached tasks found under:\n{checked}\n"
             "Download the dataset with:\n"
             f"{DATASET_DOWNLOAD_COMMAND}"
         )
@@ -231,25 +290,44 @@ def select_tasks(
 
 
 def build_mounts(
+    agent: str,
     puffer_bin: Path,
+    burbot_bin: Path | None,
     resources_dir: Path,
     codex_dir: Path,
 ) -> list[dict[str, Any]]:
     """Build Docker bind mounts for Harbor's task container."""
-    mounts: list[dict[str, Any]] = [
-        {
-            "type": "bind",
-            "source": str(puffer_bin),
-            "target": "/opt/puffer/puffer",
-            "read_only": True,
-        },
+    mounts: list[dict[str, Any]] = []
+    if agent == "burbot":
+        if burbot_bin is None:
+            raise ValueError("Burbot binary is required")
+        mounts.extend(
+            [
+                {
+                    "type": "bind",
+                    "source": str(burbot_bin),
+                    "target": "/opt/puffer/burbot",
+                    "read_only": True,
+                },
+            ]
+        )
+    else:
+        mounts.append(
+            {
+                "type": "bind",
+                "source": str(puffer_bin),
+                "target": "/opt/puffer/puffer",
+                "read_only": True,
+            }
+        )
+    mounts.append(
         {
             "type": "bind",
             "source": str(resources_dir),
             "target": "/opt/puffer/resources",
             "read_only": True,
-        },
-    ]
+        }
+    )
     if codex_dir.is_dir():
         mounts.append(
             {
@@ -283,6 +361,16 @@ def harbor_attempt_failed(result: dict[str, Any] | None) -> bool:
     return metadata.get("success") is False
 
 
+def burbot_metadata(result: dict[str, Any] | None) -> dict[str, Any]:
+    """Return Burbot adapter telemetry from Harbor agent metadata when present."""
+    if not result:
+        return {}
+    metadata = ((result.get("agent_result") or {}).get("metadata")) or {}
+    if not isinstance(metadata, dict):
+        return {}
+    return metadata
+
+
 def solved_from_rewards(rewards: dict[str, float | int] | None) -> bool:
     """Treat a task as solved when every reported reward is positive."""
     if not rewards:
@@ -310,6 +398,9 @@ def run_single_task(
 ) -> TrialSummary:
     """Run one Harbor trial with retry-on-error semantics for agent failures."""
     trial_dir = trial_root / task.slug
+    agent_import_path = (
+        BURBOT_AGENT_IMPORT if args.agent == "burbot" else PUFFER_AGENT_IMPORT
+    )
 
     for attempt in range(1, args.max_agent_retries + 2):
         if attempt > 1:
@@ -326,7 +417,7 @@ def run_single_task(
             "--trials-dir",
             str(trial_root),
             "--agent-import-path",
-            DEFAULT_AGENT_IMPORT,
+            agent_import_path,
             "--model",
             args.model,
             "--agent-kwarg",
@@ -335,10 +426,6 @@ def run_single_task(
             f"effort={args.effort}",
             "--agent-kwarg",
             f"fast={'true' if args.fast else 'false'}",
-            "--agent-kwarg",
-            "puffer_bin_path=/opt/puffer/puffer",
-            "--agent-kwarg",
-            "resources_dir=/opt/puffer/resources",
             "--agent-kwarg",
             "codex_dir=/opt/puffer/codex",
             "--environment-type",
@@ -350,6 +437,26 @@ def run_single_task(
             "--mounts-json",
             mounts_json,
         ]
+        if args.agent == "burbot":
+            command.extend(
+                [
+                    "--agent-kwarg",
+                    "burbot_bin_path=/opt/puffer/burbot",
+                    "--agent-kwarg",
+                    "tools_dir=/opt/puffer/resources/tools",
+                    "--agent-kwarg",
+                    f"auth_source={args.burbot_auth_source}",
+                ]
+            )
+        else:
+            command.extend(
+                [
+                    "--agent-kwarg",
+                    "puffer_bin_path=/opt/puffer/puffer",
+                    "--agent-kwarg",
+                    "resources_dir=/opt/puffer/resources",
+                ]
+            )
         if args.override_cpus is not None:
             command.extend(["--override-cpus", str(args.override_cpus)])
         if args.override_memory_mb is not None:
@@ -375,6 +482,7 @@ def run_single_task(
         result, rewards = load_trial_result(trial_dir)
         if completed.returncode == 0 and not harbor_attempt_failed(result):
             exception_info = (result or {}).get("exception_info") or {}
+            metadata = burbot_metadata(result)
             return TrialSummary(
                 slug=task.slug,
                 task_dir=str(task.task_dir),
@@ -386,6 +494,15 @@ def run_single_task(
                 exception_type=exception_info.get("exception_type"),
                 exception_message=exception_info.get("exception_message"),
                 retry_exhausted=False,
+                burbot_status=metadata.get("burbot_status"),
+                burbot_run_id=metadata.get("burbot_run_id"),
+                burbot_open_actions=metadata.get("burbot_open_actions"),
+                burbot_selected_artifact_action=metadata.get(
+                    "burbot_selected_artifact_action"
+                ),
+                burbot_debug_dir=metadata.get("burbot_debug_dir"),
+                process_return_code=metadata.get("process_return_code"),
+                agent_log=str(trial_dir / "agent" / "burbot.txt"),
             )
 
         if (
@@ -398,6 +515,7 @@ def run_single_task(
         if attempt > args.max_agent_retries:
             result, rewards = load_trial_result(trial_dir)
             exception_info = (result or {}).get("exception_info") or {}
+            metadata = burbot_metadata(result)
             return TrialSummary(
                 slug=task.slug,
                 task_dir=str(task.task_dir),
@@ -409,6 +527,15 @@ def run_single_task(
                 exception_type=exception_info.get("exception_type"),
                 exception_message=exception_info.get("exception_message"),
                 retry_exhausted=True,
+                burbot_status=metadata.get("burbot_status"),
+                burbot_run_id=metadata.get("burbot_run_id"),
+                burbot_open_actions=metadata.get("burbot_open_actions"),
+                burbot_selected_artifact_action=metadata.get(
+                    "burbot_selected_artifact_action"
+                ),
+                burbot_debug_dir=metadata.get("burbot_debug_dir"),
+                process_return_code=metadata.get("process_return_code"),
+                agent_log=str(trial_dir / "agent" / "burbot.txt"),
             )
 
     raise AssertionError("unreachable")
@@ -443,10 +570,12 @@ def run_batch(
 
 def write_manifest(
     path: Path,
+    agent: str,
     seed: int,
     parallelism: int,
     tasks: list[TaskEntry],
     puffer_bin: Path,
+    burbot_bin: Path | None,
     resources_dir: Path,
     codex_dir: Path,
     model: str,
@@ -456,9 +585,11 @@ def write_manifest(
     override_memory_mb: int | None,
     override_storage_mb: int | None,
     override_gpus: int | None,
+    burbot_auth_source: str,
 ) -> None:
     """Persist the sampled task set and run configuration."""
     payload = {
+        "agent": agent,
         "seed": seed,
         "parallelism": parallelism,
         "tasks": [
@@ -469,6 +600,7 @@ def write_manifest(
             for task in tasks
         ],
         "puffer_bin": str(puffer_bin),
+        "burbot_bin": str(burbot_bin) if burbot_bin else None,
         "resources_dir": str(resources_dir),
         "codex_dir": str(codex_dir),
         "model": model,
@@ -478,6 +610,7 @@ def write_manifest(
         "override_memory_mb": override_memory_mb,
         "override_storage_mb": override_storage_mb,
         "override_gpus": override_gpus,
+        "burbot_auth_source": burbot_auth_source,
     }
     path.write_text(json.dumps(payload, indent=2) + "\n")
 
@@ -488,6 +621,9 @@ def main() -> int:
     seed = args.seed if args.seed is not None else int(time.time())
     resolve_harbor_bin()
     puffer_bin = resolve_puffer_bin(args.puffer_bin)
+    burbot_bin = (
+        resolve_burbot_bin(args.burbot_bin) if args.agent == "burbot" else None
+    )
     resources_dir = Path(args.resources_dir).expanduser().resolve()
     codex_dir = Path(args.codex_dir).expanduser().resolve()
     all_tasks = discover_tasks()
@@ -497,10 +633,12 @@ def main() -> int:
     trial_root.mkdir(parents=True, exist_ok=True)
     write_manifest(
         trial_root / "selection.json",
+        args.agent,
         seed,
         args.parallelism,
         selected_tasks,
         puffer_bin,
+        burbot_bin,
         resources_dir,
         codex_dir,
         args.model,
@@ -510,6 +648,7 @@ def main() -> int:
         args.override_memory_mb,
         args.override_storage_mb,
         args.override_gpus,
+        args.burbot_auth_source,
     )
 
     harbor_env = os.environ.copy()
@@ -518,7 +657,15 @@ def main() -> int:
         f"{REPO_ROOT}:{existing_pythonpath}" if existing_pythonpath else str(REPO_ROOT)
     )
 
-    mounts_json = json.dumps(build_mounts(puffer_bin, resources_dir, codex_dir))
+    mounts_json = json.dumps(
+        build_mounts(
+            args.agent,
+            puffer_bin,
+            burbot_bin,
+            resources_dir,
+            codex_dir,
+        )
+    )
 
     parallelism = max(1, args.parallelism)
     remaining = selected_tasks
@@ -547,23 +694,46 @@ def main() -> int:
             for summary in exhausted
         ]
 
+    ordered_summaries = [all_summaries[task.slug] for task in selected_tasks]
+    solved_count = sum(1 for summary in ordered_summaries if summary.solved)
+    total_count = len(ordered_summaries)
+    failed = [
+        summary
+        for summary in ordered_summaries
+        if summary.return_code != 0 and summary.retry_exhausted
+    ]
+    unsolved = [summary for summary in ordered_summaries if not summary.solved]
     summary_payload = {
         "parallelism_final": parallelism,
-        "summaries": [asdict(all_summaries[task.slug]) for task in selected_tasks],
+        "solved_count": solved_count,
+        "total_count": total_count,
+        "solve_rate": solved_count / total_count if total_count else 0.0,
+        "agent_failure_count": len(failed),
+        "unsolved_count": len(unsolved),
+        "missing_reward_count": sum(
+            1 for summary in ordered_summaries if summary.rewards is None
+        ),
+        "mean_attempts": (
+            sum(summary.attempts for summary in ordered_summaries) / total_count
+            if total_count
+            else 0.0
+        ),
+        "burbot_status_by_task": {
+            summary.slug: summary.burbot_status
+            for summary in ordered_summaries
+            if summary.burbot_status is not None
+        },
+        "summaries": [asdict(summary) for summary in ordered_summaries],
     }
     (trial_root / "run-summary.json").write_text(
         json.dumps(summary_payload, indent=2) + "\n"
     )
 
-    failed = [
-        summary
-        for summary in all_summaries.values()
-        if summary.return_code != 0 and summary.retry_exhausted
-    ]
     for summary in summary_payload["summaries"]:
         status = "solved" if summary["solved"] else "unsolved"
         attempts = summary["attempts"]
-        print(f"{summary['slug']}: {status} (attempts={attempts})")
+        reason = summary.get("burbot_status") or summary.get("exception_type") or "reward=0"
+        print(f"{summary['slug']}: {status} (attempts={attempts}, reason={reason})")
     if failed:
         print(
             "agent_failures="
@@ -571,6 +741,12 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+    if unsolved and not args.allow_unsolved:
+        print(
+            "unsolved=" + ",".join(sorted(summary.slug for summary in unsolved)),
+            file=sys.stderr,
+        )
+        return 2
     return 0
 
 

@@ -9,6 +9,25 @@ description: |-
 handler: runtime:read_mcp_resource
 approval_policy: auto
 sandbox_policy: read-only
+contract:
+  side_effect_class: external_read
+  reversibility: reversible
+  idempotency: unknown
+  risk_level: medium
+  preconditions:
+    - requested MCP server must be configured and reachable
+    - resource URI must come from user intent or prior MCP resource listing
+  postconditions:
+    - MCP resource content is observed but not modified
+  verification:
+    methods:
+      - observation:json_bool:success=true
+      - observation:non_empty:stdout
+      - confirm returned content corresponds to the requested server and URI
+      - corroborate important claims when resource freshness or authority matters
+    required_before_completion: true
+  approval:
+    required: false
 input_schema:
   type: object
   properties:

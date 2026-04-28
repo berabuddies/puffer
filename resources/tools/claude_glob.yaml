@@ -9,6 +9,46 @@ description: |-
 handler: runtime:claude_glob
 approval_policy: auto
 sandbox_policy: read-only
+contract:
+  status: active
+  trust_level: sandboxed
+  side_effect_class: none
+  reversibility: not_applicable
+  idempotency: idempotent
+  risk_level: low
+  preconditions:
+    - pattern is a valid glob expression.
+    - path is omitted for the current working directory or points to a valid readable directory.
+  postconditions:
+    - filesystem contents are unchanged.
+    - matching file paths sorted by modification time or a glob error are returned.
+  semantic_intents:
+    - intent: glob_paths
+      slots:
+        pattern: pattern
+      optional_slots:
+        path: path
+  verification:
+    methods:
+      - refine pattern or path when results are unexpectedly broad or empty.
+      - use Read or Grep on matched files before relying on file contents.
+    required_before_completion: false
+  failure_modes:
+    - name: invalid_pattern
+      detection: "text_contains:invalid glob || text_contains:pattern error"
+      repair_strategy: simplify or narrow the glob pattern before retrying.
+      confidence: 0.75
+    - name: missing_path
+      detection: "text_contains:no such file or directory || text_contains:path does not exist || text_contains:not a directory"
+      repair_strategy: inspect a broader workspace path before retrying.
+      confidence: 0.8
+    - name: permission_denied
+      detection: "text_contains:permission denied || text_contains:operation not permitted"
+      repair_strategy: choose a lower-privilege path or request explicit approval.
+      confidence: 0.75
+  forbidden_uses:
+    - modifying files or directories.
+    - treating matched file names as proof of file contents.
 input_schema:
   type: object
   properties:

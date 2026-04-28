@@ -11,6 +11,22 @@ description: |-
 handler: runtime:list_mcp_resources
 approval_policy: auto
 sandbox_policy: read-only
+contract:
+  side_effect_class: external_read
+  reversibility: reversible
+  idempotency: unknown
+  risk_level: medium
+  preconditions:
+    - requested MCP server must be configured and reachable
+  postconditions:
+    - MCP resource metadata is observed but not modified
+  verification:
+    methods:
+      - confirm returned resources are from the requested MCP server when a server filter is supplied
+      - inspect resource metadata before relying on a specific resource URI
+    required_before_completion: false
+  approval:
+    required: false
 input_schema:
   type: object
   properties:

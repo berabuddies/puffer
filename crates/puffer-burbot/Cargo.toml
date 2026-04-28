@@ -1,0 +1,36 @@
+[package]
+name = "puffer-burbot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "burbot"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+egg = { workspace = true, optional = true }
+indexmap.workspace = true
+jsonschema.workspace = true
+puffer-config = { path = "../puffer-config" }
+puffer-core = { path = "../puffer-core" }
+puffer-provider-openai = { path = "../puffer-provider-openai" }
+puffer-provider-registry = { path = "../puffer-provider-registry" }
+puffer-resources = { path = "../puffer-resources" }
+reqwest.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+sha2.workspace = true
+time.workspace = true
+uuid.workspace = true
+
+[features]
+default = []
+egg-optimizer = ["dep:egg"]
+
+[dev-dependencies]
+tempfile.workspace = true

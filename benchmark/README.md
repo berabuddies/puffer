@@ -17,3 +17,9 @@ python3 benchmark/run_tb2.py --count 5 --parallelism 1
 ```
 
 Add `--seed <n>` for a reproducible sample, or `--task <slug>` to run specific tasks.
+
+To run the same Harbor task launcher with Burbot instead of Puffer:
+
+```bash
+python3 benchmark/run_tb2.py --agent burbot --count 5 --parallelism 1 --model openai/gpt-5.5
+```

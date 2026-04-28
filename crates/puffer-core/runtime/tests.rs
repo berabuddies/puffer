@@ -99,6 +99,7 @@ fn loaded_tool(id: &str, description: &str, handler: &str) -> LoadedItem<ToolSpe
             shared_lib: None,
             enabled_if: None,
             input_schema: None,
+            contract: None,
             metadata: Default::default(),
             display: Default::default(),
         },

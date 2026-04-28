@@ -49,6 +49,183 @@ description: |-
 handler: runtime:claude_bash
 approval_policy: on-request
 sandbox_policy: workspace-write
+contract:
+  status: active
+  trust_level: sandboxed
+  side_effect_class: command-execution
+  reversibility: command_dependent
+  idempotency: command_dependent
+  risk_level: high
+  preconditions:
+    - command intent is clear and appropriate for shell execution.
+    - dedicated tools have been considered for file reads, searches, edits, and writes.
+    - working directory and referenced paths are explicit when command behavior depends on location.
+    - destructive, networked, privileged, or long-running commands have explicit user intent or approval policy coverage.
+  postconditions:
+    - command stdout, stderr, exit status, or background task status is returned.
+    - filesystem, process, network, or external service state may change according to the command.
+  semantic_intents:
+    - intent: shell_command
+      slots:
+        command: command
+  intent_extractors:
+    - intent: read_file
+      parser: regex
+      source_arg: command
+      pattern: '^cat\s+(?P<path>[^|&;<>`$]+)$'
+      side_effect_class: local_read
+      slot_groups:
+        path: path
+    - intent: search_text
+      parser: regex
+      source_arg: command
+      pattern: '^grep\s+(?P<pattern>\S+)(?:\s+(?P<path>[^|&;<>`$]+))?$'
+      side_effect_class: local_read
+      slot_groups:
+        pattern: pattern
+      optional_slot_groups:
+        path: path
+    - intent: search_text
+      parser: regex
+      source_arg: command
+      pattern: '^rg\s+(?P<pattern>\S+)(?:\s+(?P<path>[^|&;<>`$]+))?$'
+      side_effect_class: local_read
+      slot_groups:
+        pattern: pattern
+      optional_slot_groups:
+        path: path
+    - intent: glob_paths
+      parser: regex
+      source_arg: command
+      pattern: '^find\s+(?P<path>\S+)\s+-name\s+(?P<pattern>\S+)$'
+      side_effect_class: local_read
+      slot_groups:
+        path: path
+        pattern: pattern
+  repair_rules:
+    - failure_kinds:
+        - command_not_found
+      action_name: Glob
+      args:
+        pattern: "{Cargo.toml,package.json,pyproject.toml,go.mod,uv.lock,poetry.lock}"
+      source: repair
+      completion_role: repair
+      rationale: inspect project metadata before retrying a missing command.
+      expected_progress: 0.9
+    - failure_kinds:
+        - missing_path
+      action_name: Glob
+      args:
+        pattern: "**/*"
+      source: repair
+      completion_role: repair
+      rationale: inspect available paths before retrying a missing path.
+      expected_progress: 0.8
+    - failure_kinds:
+        - command_not_found
+        - non_zero_exit
+      bindings:
+        - source_arg: command
+          pattern: '(^|\s)(pytest|python)(\s|$)'
+      action_name: Glob
+      args:
+        pattern: "{pyproject.toml,uv.lock,poetry.lock,requirements*.txt,pytest.ini}"
+      source: repair
+      completion_role: repair
+      rationale: inspect Python project metadata before changing dependencies.
+      expected_progress: 1.0
+    - failure_kinds:
+        - command_not_found
+        - non_zero_exit
+      bindings:
+        - source_arg: command
+          pattern: '(^|\s)cargo(\s|$)'
+      action_name: Glob
+      args:
+        pattern: "{Cargo.toml,Cargo.lock,crates/*/Cargo.toml}"
+      source: repair
+      completion_role: repair
+      rationale: inspect Rust workspace metadata before retrying a Cargo command.
+      expected_progress: 1.0
+    - failure_kinds:
+        - timed_out
+      action_name: Glob
+      args:
+        pattern: "{Cargo.toml,package.json,pyproject.toml,go.mod}"
+      source: repair
+      completion_role: repair
+      rationale: inspect project metadata before retrying a timed-out command.
+      expected_progress: 0.8
+  verification:
+    methods:
+      - observation:json_bool:success=true
+      - observation:json_bool:structured_output.interrupted=false
+      - inspect command output and exit status.
+      - run targeted follow-up checks for commands that modify files, services, dependencies, or git state.
+      - inspect version control diff after commands that may edit tracked files.
+    required_before_completion: true
+  failure_modes:
+    - name: command_not_found
+      detection: "text_contains:command not found || text_contains:not recognized as"
+      repair_strategy: inspect project metadata before installing or retrying a command.
+      confidence: 0.85
+    - name: missing_path
+      detection: "text_contains:no such file or directory || text_contains:path does not exist || text_contains:cannot find the path"
+      repair_strategy: inspect available paths before retrying with a corrected path.
+      confidence: 0.85
+    - name: timed_out
+      detection: "json_bool:timed_out=true || text_contains:timed out || text_contains:timeout"
+      repair_strategy: inspect project metadata and choose a narrower or longer-running follow-up.
+      confidence: 0.8
+    - name: permission_denied
+      detection: "text_contains:permission denied || text_contains:operation not permitted"
+      repair_strategy: choose a lower-privilege alternative or request explicit approval.
+      confidence: 0.8
+    - name: non_zero_exit
+      detection: "json_bool:success=false || json_i64_nonzero:exit_code || json_i64_nonzero:status_code"
+      repair_strategy: inspect stdout and stderr before retrying or changing state.
+      confidence: 0.7
+    - name: unintended_mutation
+      detection: command mutates unintended files or external state.
+      repair_strategy: stop, inspect version control state, and ask before further mutation.
+      confidence: 0.5
+    - name: background_continues
+      detection: background command continues after the immediate tool response.
+      repair_strategy: inspect background task status before taking dependent actions.
+      confidence: 0.5
+  forbidden_uses:
+    - bypassing dedicated tools for routine file search, reads, edits, or writes without need.
+    - running destructive broad commands without explicit user intent.
+    - piping untrusted downloaded content directly into an interpreter or shell.
+    - using dangerouslyDisableSandbox without a concrete sandbox-related requirement.
+  argument_safety:
+    - source_arg: command
+      blocked_patterns:
+        - name: remove_filesystem_root
+          pattern: '(^|[;&|]\s*)rm\s+-rf\s+(/|/\*|~|~/?\*)($|\s|[;&|])'
+          reason: command can erase broad filesystem roots.
+          confidence: 0.95
+        - name: format_or_overwrite_block_device
+          pattern: '(^|[;&|]\s*)(mkfs|fdisk|parted|dd\s+.*\bof=/dev/)'
+          reason: command can destroy disks or partitions.
+          confidence: 0.95
+        - name: pipe_remote_script_to_shell
+          pattern: '(curl|wget)\b.*\|\s*(sh|bash|zsh|fish|python|perl|ruby)\b'
+          reason: command executes remote content without inspection.
+          confidence: 0.9
+      approval_patterns:
+        - name: destructive_remove
+          pattern: '(^|[;&|]\s*)rm\s+(-[A-Za-z]*r[A-Za-z]*|-rf|-fr)\b'
+          reason: recursive deletion requires explicit caller approval.
+          confidence: 0.85
+        - name: git_destructive_reset
+          pattern: '(^|[;&|]\s*)git\s+(reset\s+--hard|clean\s+-[A-Za-z]*f)'
+          reason: destructive git operations can discard user work.
+          confidence: 0.85
+        - name: sandbox_bypass
+          pattern: 'dangerouslyDisableSandbox'
+          reason: sandbox bypass requires explicit approval.
+          confidence: 0.8
 input_schema:
   type: object
   properties:

@@ -4,4 +4,15 @@ description: Search for text in workspace files.
 handler: search_text
 approval_policy: auto
 sandbox_policy: read-only
+contract:
+  side_effect_class: local_read
+  reversibility: reversible
+  idempotency: idempotent
+  risk_level: low
+  verification:
+    methods:
+      - inspect matching file paths before relying on results
+    required_before_completion: false
+  approval:
+    required: false
 enabled_if: never

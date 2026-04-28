@@ -4,4 +4,22 @@ description: Remove a workspace file or directory.
 handler: remove_path
 approval_policy: on-request
 sandbox_policy: workspace-write
+contract:
+  side_effect_class: destructive_write
+  reversibility: conditionally_reversible
+  idempotency: non_idempotent
+  risk_level: high
+  preconditions:
+    - removal must be explicitly task-relevant
+    - path must be inside allowed workspace
+  postconditions:
+    - workspace file or directory may be deleted
+  verification:
+    methods:
+      - confirm the intended path no longer exists
+      - inspect version control status when available
+    required_before_completion: true
+  approval:
+    required: true
+    reason: removes workspace files or directories
 enabled_if: never

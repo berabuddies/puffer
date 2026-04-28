@@ -20,6 +20,48 @@ description: |-
 handler: runtime:notebook_edit
 approval_policy: on-request
 sandbox_policy: workspace-write
+contract:
+  side_effect_class: local_write
+  reversibility: conditionally_reversible
+  idempotency: non_idempotent
+  risk_level: medium
+  preconditions:
+    - notebook_path must be an absolute path inside the allowed workspace
+    - target notebook must have been read before editing when preserving existing cells matters
+    - edit_mode, cell_id, cell_type, and new_source must describe the intended notebook cell change
+  postconditions:
+    - target notebook cell content, structure, or ordering may change
+    - unrelated notebook cells should be preserved on success
+  verification:
+    methods:
+      - read the notebook after editing when cell content or ordering matters
+      - inspect version control diff for tracked notebooks
+    templates:
+      - contract_id: puffer.tools
+        action_name: Read
+        args:
+          file_path: "{arg.notebook_path}"
+        reason: read the edited notebook from disk.
+    required_before_completion: true
+  approval:
+    required: true
+    reason: modifies workspace notebook files
+  argument_safety:
+    - source_arg: notebook_path
+      blocked_patterns:
+        - name: protected_system_path
+          pattern: '^/(proc|sys|dev|run|boot|etc|usr|bin|sbin|lib|lib64)(/|$)'
+          reason: protected system locations are outside normal workspace notebook edits.
+          confidence: 0.95
+        - name: parent_traversal
+          pattern: '(^|/)\.\.(/|$)'
+          reason: parent traversal makes the notebook edit target ambiguous.
+          confidence: 0.9
+      approval_patterns:
+        - name: version_control_metadata
+          pattern: '(^|/)\.git(/|$)'
+          reason: modifying version-control metadata requires explicit approval.
+          confidence: 0.95
 input_schema:
   type: object
   properties:

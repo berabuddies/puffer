@@ -249,12 +249,15 @@ fn shell_output_path(cwd: &Path, pid: u32) -> Result<std::path::PathBuf> {
 }
 
 fn run_bash_command(cwd: &Path, command: &str, timeout_ms: u64) -> Result<TimedCommandOutput> {
-    let mut child = Command::new(puffer_tools::detected_shell())
+    let mut process = Command::new(puffer_tools::detected_shell());
+    process
         .arg("-lc")
         .arg(command)
         .current_dir(cwd)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure_foreground_process_group(&mut process);
+    let mut child = process
         .spawn()
         .with_context(|| format!("failed to execute bash command in {}", cwd.display()))?;
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
@@ -273,7 +276,7 @@ fn run_bash_command(cwd: &Path, command: &str, timeout_ms: u64) -> Result<TimedC
             });
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
+            terminate_foreground_process_tree(&mut child);
             let output = child.wait_with_output().with_context(|| {
                 format!(
                     "failed to collect timed-out bash output in {}",
@@ -287,6 +290,52 @@ fn run_bash_command(cwd: &Path, command: &str, timeout_ms: u64) -> Result<TimedC
         }
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[cfg(unix)]
+fn configure_foreground_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_foreground_process_group(_command: &mut Command) {}
+
+fn terminate_foreground_process_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let process_group = -(child.id() as i32);
+        let _ = send_signal(process_group, SIGTERM);
+        for _ in 0..10 {
+            if child.try_wait().ok().flatten().is_some() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let _ = send_signal(process_group, SIGKILL);
+        return;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+    }
+}
+
+#[cfg(unix)]
+const SIGTERM: i32 = 15;
+
+#[cfg(unix)]
+const SIGKILL: i32 = 9;
+
+#[cfg(unix)]
+fn send_signal(pid: i32, signal: i32) -> i32 {
+    unsafe { kill(pid, signal) }
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn kill(pid: i32, sig: i32) -> i32;
 }
 
 const MAX_OUTPUT_CHARS: usize = 30_000;
@@ -389,6 +438,28 @@ mod tests {
         assert!(result.output.interrupted);
         assert!(result.output.stderr.contains("timed out after"));
         assert_eq!(result.output.dangerously_disable_sandbox, Some(true));
+    }
+
+    #[test]
+    fn execute_timeout_collects_after_descendant_keeps_pipe_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let started = Instant::now();
+        let result = execute(
+            temp.path(),
+            &test_session_id(),
+            ClaudeBashInput {
+                command: "sh -c 'sleep 2'".to_string(),
+                timeout: Some(20),
+                description: None,
+                run_in_background: false,
+                dangerously_disable_sandbox: false,
+            },
+        )
+        .unwrap();
+
+        assert!(!result.success);
+        assert!(result.output.interrupted);
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]
@@ -542,12 +613,13 @@ mod tests {
     fn truncate_output_middle_truncation_real_bash() {
         // Simulate large output: head=AAAAAA..., tail=ZZZZZZ...
         let temp = tempfile::tempdir().unwrap();
-        // printf A × 20000 chars, then B × 20000 chars — total 40000 > 30000 limit
+        // Emit 20000 A chars, then 20000 Z chars. This avoids non-portable
+        // helpers such as `jot` while still exercising real shell output.
         let result = execute(
             temp.path(),
             &test_session_id(),
             ClaudeBashInput {
-                command: "printf '%0.sA' $(jot 20000); printf '%0.sZ' $(jot 20000)".to_string(),
+                command: "awk 'BEGIN { for (i = 0; i < 20000; i++) printf \"A\"; for (i = 0; i < 20000; i++) printf \"Z\" }'".to_string(),
                 timeout: Some(5_000),
                 description: None,
                 run_in_background: false,

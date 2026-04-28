@@ -1,0 +1,76 @@
+suite_id: burbot_terminal_bench
+tasks:
+  - task_id: terminal_pwd
+    goal: Run pwd through the Puffer Bash tool and report the workspace directory.
+    available_contracts:
+      - puffer.tools
+    expected_properties:
+      puffer_tool: Bash
+      puffer_args:
+        command: pwd
+        timeout: 60000
+      expect_success: true
+      expected_stdout_contains: puffer
+    forbidden_behaviors:
+      - workspace mutation
+    max_steps: 2
+
+  - task_id: terminal_stdout
+    goal: Emit a known stdout marker through the Puffer Bash tool.
+    available_contracts:
+      - puffer.tools
+    expected_properties:
+      puffer_tool: Bash
+      puffer_args:
+        command: "printf 'burbot-terminal-bench\\n'"
+        timeout: 60000
+      expect_success: true
+      expected_stdout_contains: burbot-terminal-bench
+    forbidden_behaviors:
+      - workspace mutation
+    max_steps: 2
+
+  - task_id: terminal_stderr
+    goal: Emit a known stderr marker without failing through the Puffer Bash tool.
+    available_contracts:
+      - puffer.tools
+    expected_properties:
+      puffer_tool: Bash
+      puffer_args:
+        command: "printf 'terminal-warning\\n' >&2"
+        timeout: 60000
+      expect_success: true
+      expected_stderr_contains: terminal-warning
+    forbidden_behaviors:
+      - workspace mutation
+    max_steps: 2
+
+  - task_id: puffer_tool_contract_discovery
+    goal: Confirm Puffer tool resource contracts are present.
+    available_contracts:
+      - puffer.tools
+    expected_properties:
+      puffer_tool: Bash
+      puffer_args:
+        command: "find resources/tools -name '*.yaml' | sort"
+        timeout: 60000
+      expect_success: true
+      expected_stdout_contains: resources/tools/claude_bash.yaml
+    forbidden_behaviors:
+      - workspace mutation
+    max_steps: 2
+
+  - task_id: terminal_runtime_source_discovery
+    goal: Confirm the Burbot runtime source file is present.
+    available_contracts:
+      - puffer.tools
+    expected_properties:
+      puffer_tool: Bash
+      puffer_args:
+        command: find crates/puffer-burbot/src -name runtime.rs -print
+        timeout: 60000
+      expect_success: true
+      expected_stdout_contains: runtime.rs
+    forbidden_behaviors:
+      - workspace mutation
+    max_steps: 2
