@@ -781,7 +781,11 @@ fn send_and_parse_once(client: &Client, request: &BuiltOpenAIRequest) -> Result<
 }
 
 fn retryable_openai_error(error: &anyhow::Error) -> bool {
-    let message = error.to_string();
+    retryable_openai_error_message(&error.to_string())
+}
+
+/// Returns whether an OpenAI error message represents a retryable transport failure.
+pub(crate) fn retryable_openai_error_message(message: &str) -> bool {
     message.contains("timed out")
         || message.contains("connection error")
         || message.contains("status 408")

@@ -2,7 +2,7 @@ use super::*;
 use crate::contract::{
     ActionContract, ApprovalSpec, ArgumentPatternSpec, ArgumentSafetySpec, CapabilityContract,
     ContractStatus, Idempotency, RepairRuleSpec, Reversibility, RiskLevel, SemanticIntentSpec,
-    TrustLevel, VerificationSpec,
+    SideEffectClass, TrustLevel, VerificationSpec,
 };
 use crate::graph::scores_for_action;
 use crate::llm::ModelCandidateProposal;
@@ -65,11 +65,21 @@ fn repair_rules(name: &str) -> Vec<RepairRuleSpec> {
 fn sleep_action() -> ActionContract {
     let mut sleep = action("Sleep", RiskLevel::Low);
     sleep.side_effect_class = SideEffectClass::PureObservation;
+    sleep.input_schema = json!({
+        "type": "object",
+        "properties": {
+            "duration_ms": {"type": "integer"},
+            "reason": {"type": "string"}
+        },
+        "required": ["duration_ms"]
+    });
+    let mut defaults = std::collections::BTreeMap::new();
+    defaults.insert("duration_ms".to_string(), json!(1000));
     sleep.semantic_intents = vec![SemanticIntentSpec {
         intent: "await_async_progress".to_string(),
         slots: Default::default(),
         optional_slots: Default::default(),
-        defaults: Default::default(),
+        defaults,
         side_effect_class: Some(SideEffectClass::PureObservation),
     }];
     sleep
@@ -764,4 +774,163 @@ fn required_repair_action_schedules_verification() {
             passed: false,
         },
     ));
+}
+
+#[test]
+fn retryable_model_error_adds_contract_declared_wait_candidate() {
+    let mut registry = InMemoryContractRegistry::default();
+    registry
+        .register(CapabilityContract {
+            contract_id: PUFFER_TOOLS_CONTRACT_ID.to_string(),
+            version: "0.1.0".to_string(),
+            status: ContractStatus::Active,
+            trust_level: TrustLevel::Sandboxed,
+            description: "tools".to_string(),
+            actions: vec![sleep_action()],
+            global_constraints: Vec::new(),
+            forbidden_uses: Vec::new(),
+            local_rules: Vec::new(),
+            examples: Vec::new(),
+            contract_hash: None,
+        })
+        .unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let trace = JsonlTraceStore::new(workspace.path().join("traces"));
+    let mut runtime = BurbotRuntime::new(registry, workspace.path().into(), trace).unwrap();
+    let mut graph = PlanGraph::from_goal("retry".to_string());
+
+    let added = runtime
+        .add_model_retry_candidate(
+            RunId::new(),
+            &mut graph,
+            NodeId(0),
+            "provider_unavailable",
+            "OpenAI request failed with status 503",
+        )
+        .unwrap();
+
+    assert_eq!(added, 1);
+    let wait = graph
+        .nodes
+        .values()
+        .find(|node| {
+            node.action_ref
+                .as_ref()
+                .is_some_and(|action_ref| action_ref.action_name == "Sleep")
+        })
+        .expect("sleep retry candidate should be present");
+    assert_eq!(wait.payload["duration_ms"], 1000);
+    assert!(wait.payload["reason"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("provider_unavailable")));
+    assert!(graph.edges.iter().any(|edge| {
+        edge.target == wait.id && edge.payload["completion_role"] == json!("terminal")
+    }));
+    let wait_id = wait.id;
+    graph.node_mut(wait_id).unwrap().status = PlanStatus::Executed;
+    let blocked = runtime
+        .add_model_retry_candidate(
+            RunId::new(),
+            &mut graph,
+            NodeId(0),
+            "provider_unavailable",
+            "OpenAI request failed with status 503",
+        )
+        .unwrap();
+    assert_eq!(blocked, 0);
+    runtime.state_epoch = runtime.state_epoch.saturating_add(1);
+    let allowed_after_state_change = runtime
+        .add_model_retry_candidate(
+            RunId::new(),
+            &mut graph,
+            NodeId(0),
+            "provider_unavailable",
+            "OpenAI request failed with status 503",
+        )
+        .unwrap();
+    assert_eq!(allowed_after_state_change, 1);
+}
+
+#[test]
+fn goal_unsatisfied_prunes_same_batch_model_siblings() {
+    let mut registry = InMemoryContractRegistry::default();
+    registry
+        .register(CapabilityContract {
+            contract_id: PUFFER_TOOLS_CONTRACT_ID.to_string(),
+            version: "0.1.0".to_string(),
+            status: ContractStatus::Active,
+            trust_level: TrustLevel::Sandboxed,
+            description: "tools".to_string(),
+            actions: vec![action("Bash", RiskLevel::High)],
+            global_constraints: Vec::new(),
+            forbidden_uses: Vec::new(),
+            local_rules: Vec::new(),
+            examples: Vec::new(),
+            contract_hash: None,
+        })
+        .unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let trace = JsonlTraceStore::new(workspace.path().join("traces"));
+    let mut runtime = BurbotRuntime::new(registry, workspace.path().into(), trace).unwrap();
+    let mut graph = PlanGraph::from_goal("repair".to_string());
+    let action_ref = ActionRef {
+        contract_id: PUFFER_TOOLS_CONTRACT_ID.to_string(),
+        action_name: "Bash".to_string(),
+    };
+    let first = runtime
+        .add_candidate_node(
+            RunId::new(),
+            &mut graph,
+            ActionCandidate {
+                action_ref: action_ref.clone(),
+                args: json!({"command": "first"}),
+                source: CandidateSource::ModelObservationProposal,
+                completion_role: CompletionRole::Terminal,
+                rationale: "first".to_string(),
+                scores: ActionScores::default(),
+            },
+            Some(NodeId(0)),
+            None,
+        )
+        .unwrap();
+    let sibling = runtime
+        .add_candidate_node(
+            RunId::new(),
+            &mut graph,
+            ActionCandidate {
+                action_ref: action_ref.clone(),
+                args: json!({"command": "stale sibling"}),
+                source: CandidateSource::ModelObservationProposal,
+                completion_role: CompletionRole::Terminal,
+                rationale: "sibling".to_string(),
+                scores: ActionScores::default(),
+            },
+            Some(NodeId(0)),
+            None,
+        )
+        .unwrap();
+    let explicit = runtime
+        .add_candidate_node(
+            RunId::new(),
+            &mut graph,
+            ActionCandidate {
+                action_ref,
+                args: json!({"command": "explicit"}),
+                source: CandidateSource::ExplicitUserTool,
+                completion_role: CompletionRole::Terminal,
+                rationale: "explicit".to_string(),
+                scores: ActionScores::default(),
+            },
+            Some(NodeId(0)),
+            None,
+        )
+        .unwrap();
+
+    let pruned = runtime
+        .prune_stale_model_siblings_after_goal_unsatisfied(RunId::new(), &mut graph, first)
+        .unwrap();
+
+    assert_eq!(pruned, 1);
+    assert_eq!(graph.node(sibling).unwrap().status, PlanStatus::Pruned);
+    assert_eq!(graph.node(explicit).unwrap().status, PlanStatus::Open);
 }

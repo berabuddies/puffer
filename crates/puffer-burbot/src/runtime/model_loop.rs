@@ -1,31 +1,30 @@
 use super::BurbotRuntime;
 use crate::belief::BeliefGraph;
-use crate::contract::{ActionContract, CapabilityContract, ContractRegistry};
+use crate::contract::{CapabilityContract, ContractRegistry};
 use crate::failure::FailureKind;
 use crate::graph::{
     scores_for_action, ActionRef, PlanEdgeKind, PlanGraph, PlanNodeKind, PlanStatus,
 };
 use crate::ids::{NodeId, RunId};
 use crate::llm::{
-    propose_observe_act_candidates, propose_puffer_tool_call, verify_goal_satisfied,
-    ModelCandidateProposal,
+    propose_observe_act_candidates, propose_puffer_tool_call, retryable_openai_error_message,
+    verify_goal_satisfied, ModelCandidateProposal,
 };
 use crate::planner::{ActionCandidate, CandidateSource, CompletionRole};
 use crate::puffer_tools::PUFFER_TOOLS_CONTRACT_ID;
 use crate::rules::action_key;
-use crate::runtime::RunOptions;
-use crate::semantics::{
-    payload_for_intent, read_only_side_effect, semantic_symbol, NormalizedIntent,
+use crate::runtime::model_loop_support::{
+    accumulated_image_context, action_has_intent, action_history_summary, compact_value,
+    frontier_summary, graph_has_async_progress_source, graph_has_executable_frontier,
+    model_support_edge_for, ModelProposalAttempt, SingleModelProposalAttempt,
+    AWAIT_ASYNC_PROGRESS_INTENT,
 };
+use crate::runtime::RunOptions;
+use crate::semantics::{payload_for_intent, read_only_side_effect, NormalizedIntent};
 use crate::trace::{trace_event, TraceEventType};
 use anyhow::{anyhow, Result};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
-
-const MAX_MODEL_STRING_CHARS: usize = 6_000;
-const MAX_MODEL_ARRAY_ITEMS: usize = 20;
-const AWAIT_ASYNC_PROGRESS_INTENT: &str = "await_async_progress";
-const CREATES_ASYNC_PROGRESS_INTENT: &str = "creates_async_progress";
 
 impl BurbotRuntime {
     pub(super) fn add_initial_model_candidates(
@@ -52,7 +51,7 @@ impl BurbotRuntime {
         }
         let contract = self.puffer_tools_contract()?;
         let image_context = accumulated_image_context(graph, None);
-        let mut proposals = self.propose_observe_act_candidates_or_empty(
+        let attempt = self.propose_observe_act_candidates_attempt(
             run_id,
             NodeId(0),
             CandidateSource::ModelProposal,
@@ -63,11 +62,13 @@ impl BurbotRuntime {
             &context,
             Some(&image_context),
         )?;
+        let mut proposals = attempt.proposals;
+        let mut retryable_error = attempt.retryable_error;
         if proposals.is_empty() {
             if graph_has_executable_frontier(graph) {
                 return Ok(0);
             }
-            if let Some(proposal) = self.single_tool_proposal_or_record(
+            let fallback = self.single_tool_proposal_attempt(
                 run_id,
                 NodeId(0),
                 CandidateSource::ModelProposal,
@@ -78,7 +79,9 @@ impl BurbotRuntime {
                 Some(&image_context),
                 CompletionRole::Support,
                 "single structural tool-call fallback for initial evidence gathering",
-            )? {
+            )?;
+            retryable_error = retryable_error.or(fallback.retryable_error);
+            if let Some(proposal) = fallback.proposal {
                 proposals.push(proposal);
             }
         }
@@ -90,6 +93,17 @@ impl BurbotRuntime {
             CandidateSource::ModelProposal,
             proposals,
         )?;
+        if added == 0 {
+            if let Some(error) = retryable_error {
+                added += self.add_model_retry_candidate(
+                    run_id,
+                    graph,
+                    NodeId(0),
+                    "initial_model_proposal_unavailable",
+                    &error,
+                )?;
+            }
+        }
         Ok(added)
     }
 
@@ -121,7 +135,7 @@ impl BurbotRuntime {
         });
         let contract = self.puffer_tools_contract()?;
         let image_context = accumulated_image_context(graph, Some(output));
-        let mut proposals = self.propose_observe_act_candidates_or_empty(
+        let attempt = self.propose_observe_act_candidates_attempt(
             run_id,
             observation_id,
             CandidateSource::ModelObservationProposal,
@@ -132,8 +146,10 @@ impl BurbotRuntime {
             &context,
             Some(&image_context),
         )?;
+        let mut proposals = attempt.proposals;
+        let mut retryable_error = attempt.retryable_error;
         if proposals.is_empty() {
-            if let Some(proposal) = self.single_tool_proposal_or_record(
+            let fallback = self.single_tool_proposal_attempt(
                 run_id,
                 observation_id,
                 CandidateSource::ModelObservationProposal,
@@ -144,7 +160,9 @@ impl BurbotRuntime {
                 Some(&image_context),
                 CompletionRole::Support,
                 "single structural tool-call fallback for post-observation evidence gathering",
-            )? {
+            )?;
+            retryable_error = retryable_error.or(fallback.retryable_error);
+            if let Some(proposal) = fallback.proposal {
                 proposals.push(proposal);
             }
         }
@@ -162,7 +180,7 @@ impl BurbotRuntime {
         if graph_has_executable_frontier(graph) {
             return Ok(0);
         }
-        self.add_recovery_model_candidates(
+        let mut recovered = self.add_recovery_model_candidates(
             run_id,
             graph,
             goal,
@@ -171,7 +189,19 @@ impl BurbotRuntime {
             context,
             Some(output),
             options,
-        )
+        )?;
+        if recovered == 0 {
+            if let Some(error) = retryable_error {
+                recovered += self.add_model_retry_candidate(
+                    run_id,
+                    graph,
+                    observation_id,
+                    "post_observation_model_proposal_unavailable",
+                    &error,
+                )?;
+            }
+        }
+        Ok(recovered)
     }
 
     /// Adds structural recovery candidates when the graph has exhausted runnable actions.
@@ -198,7 +228,7 @@ impl BurbotRuntime {
         });
         let contract = self.puffer_tools_contract()?;
         let image_context = accumulated_image_context(graph, image_context);
-        let proposals = self.propose_observe_act_candidates_or_empty(
+        let attempt = self.propose_observe_act_candidates_attempt(
             run_id,
             support_source,
             CandidateSource::ModelObservationProposal,
@@ -209,18 +239,19 @@ impl BurbotRuntime {
             &context,
             Some(&image_context),
         )?;
+        let mut retryable_error = attempt.retryable_error;
         let added = self.add_model_candidate_proposals(
             run_id,
             graph,
             support_source,
             None,
             CandidateSource::ModelObservationProposal,
-            proposals,
+            attempt.proposals,
         )?;
         if added > 0 {
             return Ok(added);
         }
-        let Some(fallback) = self.single_tool_proposal_or_record(
+        let fallback = self.single_tool_proposal_attempt(
             run_id,
             support_source,
             CandidateSource::ModelObservationProposal,
@@ -231,8 +262,18 @@ impl BurbotRuntime {
             Some(&image_context),
             CompletionRole::Support,
             "single structural tool-call fallback for recovery evidence gathering",
-        )?
-        else {
+        )?;
+        retryable_error = retryable_error.or(fallback.retryable_error);
+        let Some(fallback) = fallback.proposal else {
+            if let Some(error) = retryable_error {
+                return self.add_model_retry_candidate(
+                    run_id,
+                    graph,
+                    support_source,
+                    "recovery_model_proposal_unavailable",
+                    &error,
+                );
+            }
             return Ok(0);
         };
         self.add_model_candidate_proposals(
@@ -280,11 +321,14 @@ impl BurbotRuntime {
         ) {
             Ok(decision) => decision,
             Err(error) => {
+                let error = error.to_string();
+                let retryable = retryable_openai_error_message(&error);
                 let failure_output = json!({
                     "satisfied": false,
                     "confidence": 0.0,
                     "missing_evidence": [],
-                    "error": error.to_string(),
+                    "error": error,
+                    "retryable": retryable,
                     "verification_context": context.clone(),
                 });
                 self.append(trace_event(
@@ -294,10 +338,20 @@ impl BurbotRuntime {
                     context.clone(),
                     {
                         let mut output = failure_output.clone();
-                        output["suggested_candidates"] = json!(0);
+                        output["suggested_candidates"] = Value::Null;
                         output
                     },
                 ))?;
+                if retryable {
+                    self.add_model_retry_candidate(
+                        run_id,
+                        graph,
+                        action_id,
+                        "goal_verifier_unavailable",
+                        failure_output["error"].as_str().unwrap_or_default(),
+                    )?;
+                    return Ok(false);
+                }
                 self.record_failure(
                     run_id,
                     graph,
@@ -358,6 +412,7 @@ impl BurbotRuntime {
             &insufficiency_output,
             FailureKind::GoalUnsatisfied,
         )?;
+        self.prune_stale_model_siblings_after_goal_unsatisfied(run_id, graph, action_id)?;
         let added = self.add_model_candidate_proposals(
             run_id,
             graph,
@@ -549,7 +604,7 @@ impl BurbotRuntime {
         })
     }
 
-    fn propose_observe_act_candidates_or_empty(
+    fn propose_observe_act_candidates_attempt(
         &self,
         run_id: RunId,
         support_source: NodeId,
@@ -560,7 +615,7 @@ impl BurbotRuntime {
         contract: &CapabilityContract,
         context: &Value,
         image_context: Option<&Value>,
-    ) -> Result<Vec<ModelCandidateProposal>> {
+    ) -> Result<ModelProposalAttempt> {
         match propose_observe_act_candidates(
             workspace_root,
             model,
@@ -569,8 +624,12 @@ impl BurbotRuntime {
             context,
             image_context,
         ) {
-            Ok(proposals) => Ok(proposals),
+            Ok(proposals) => Ok(ModelProposalAttempt {
+                proposals,
+                retryable_error: None,
+            }),
             Err(error) => {
+                let error = error.to_string();
                 self.append(trace_event(
                     run_id,
                     TraceEventType::ModelCandidatesProposed,
@@ -582,15 +641,20 @@ impl BurbotRuntime {
                     json!({
                         "added": 0,
                         "skipped_wait": 0,
-                        "error": error.to_string(),
+                        "retryable": retryable_openai_error_message(&error),
+                        "error": error,
                     }),
                 ))?;
-                Ok(Vec::new())
+                let retryable_error = retryable_openai_error_message(&error).then_some(error);
+                Ok(ModelProposalAttempt {
+                    proposals: Vec::new(),
+                    retryable_error,
+                })
             }
         }
     }
 
-    fn single_tool_proposal_or_record(
+    fn single_tool_proposal_attempt(
         &self,
         run_id: RunId,
         support_source: NodeId,
@@ -602,7 +666,7 @@ impl BurbotRuntime {
         image_context: Option<&Value>,
         completion_role: CompletionRole,
         rationale: &str,
-    ) -> Result<Option<ModelCandidateProposal>> {
+    ) -> Result<SingleModelProposalAttempt> {
         match self.single_tool_proposal(
             model,
             goal,
@@ -612,8 +676,12 @@ impl BurbotRuntime {
             completion_role,
             rationale,
         ) {
-            Ok(proposal) => Ok(Some(proposal)),
+            Ok(proposal) => Ok(SingleModelProposalAttempt {
+                proposal: Some(proposal),
+                retryable_error: None,
+            }),
             Err(error) => {
+                let error = error.to_string();
                 self.append(trace_event(
                     run_id,
                     TraceEventType::ModelCandidatesProposed,
@@ -625,12 +693,161 @@ impl BurbotRuntime {
                     json!({
                         "added": 0,
                         "skipped_wait": 0,
-                        "error": error.to_string(),
+                        "retryable": retryable_openai_error_message(&error),
+                        "error": error,
                     }),
                 ))?;
-                Ok(None)
+                let retryable_error = retryable_openai_error_message(&error).then_some(error);
+                Ok(SingleModelProposalAttempt {
+                    proposal: None,
+                    retryable_error,
+                })
             }
         }
+    }
+
+    /// Adds a contract-declared wait action after a retryable model provider failure.
+    pub(super) fn add_model_retry_candidate(
+        &mut self,
+        run_id: RunId,
+        graph: &mut PlanGraph,
+        support_source: NodeId,
+        reason: &str,
+        error: &str,
+    ) -> Result<usize> {
+        if graph_has_executable_frontier(graph) {
+            return Ok(0);
+        }
+        if self.model_retry_epoch == Some(self.state_epoch) {
+            self.append(trace_event(
+                run_id,
+                TraceEventType::ModelCandidatesProposed,
+                Some(support_source),
+                json!({
+                    "source": "model_retry_wait",
+                    "reason": reason,
+                    "blocked": "repeated_model_provider_error",
+                }),
+                json!({
+                    "added": 0,
+                    "state_epoch": self.state_epoch,
+                    "error": error,
+                }),
+            ))?;
+            return Ok(0);
+        }
+        let Some(action_ref) = self.await_progress_action_ref() else {
+            return Ok(0);
+        };
+        let action = self
+            .contracts
+            .get_action(&action_ref.contract_id, &action_ref.action_name)
+            .ok_or_else(|| anyhow!("missing await-progress action {}", action_ref.action_name))?;
+        self.model_retry_sequence = self.model_retry_sequence.saturating_add(1);
+        let mut scores = scores_for_action(&action);
+        scores.information_gain += 0.1;
+        scores.uncertainty_penalty += 0.05;
+        let intent = NormalizedIntent {
+            intent: AWAIT_ASYNC_PROGRESS_INTENT.to_string(),
+            slots: BTreeMap::new(),
+        };
+        let mut args = payload_for_intent(&action, &intent).unwrap_or_else(|| json!({}));
+        if let Value::Object(object) = &mut args {
+            if action.input_schema.pointer("/properties/reason").is_some() {
+                object.insert(
+                    "reason".to_string(),
+                    json!(format!(
+                        "{reason}: retryable model provider error #{}",
+                        self.model_retry_sequence
+                    )),
+                );
+            }
+        }
+        let candidate = ActionCandidate {
+            action_ref,
+            args,
+            source: CandidateSource::ModelObservationProposal,
+            completion_role: CompletionRole::Terminal,
+            rationale: format!(
+                "retry structural model proposal after retryable provider error: {error}"
+            ),
+            scores,
+        };
+        self.add_candidate_node(run_id, graph, candidate, Some(support_source), None)?;
+        self.model_retry_epoch = Some(self.state_epoch);
+        Ok(1)
+    }
+
+    fn await_progress_action_ref(&self) -> Option<ActionRef> {
+        for contract in self.contracts.active_contracts() {
+            let contract_id = contract.contract_id;
+            for action in contract.actions {
+                if action_has_intent(&action, AWAIT_ASYNC_PROGRESS_INTENT) {
+                    return Some(ActionRef {
+                        contract_id,
+                        action_name: action.name,
+                    });
+                }
+            }
+        }
+        None
+    }
+
+    /// Prunes stale same-batch model actions after a concrete unsatisfied verifier result.
+    pub(super) fn prune_stale_model_siblings_after_goal_unsatisfied(
+        &self,
+        run_id: RunId,
+        graph: &mut PlanGraph,
+        action_id: NodeId,
+    ) -> Result<usize> {
+        let Some((support_source, source)) = model_support_edge_for(graph, action_id) else {
+            return Ok(0);
+        };
+        if !matches!(
+            source.as_str(),
+            "model_proposal" | "model_observation_proposal" | "model_goal_verifier"
+        ) {
+            return Ok(0);
+        }
+        let mut pruned = 0;
+        let sibling_ids = graph
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.kind == PlanEdgeKind::Supports
+                    && edge.source == support_source
+                    && edge.target != action_id
+                    && edge.payload.get("source").and_then(Value::as_str) == Some(source.as_str())
+                    && edge
+                        .payload
+                        .get("completion_role")
+                        .and_then(Value::as_str)
+                        .map(|role| matches!(role, "terminal" | "support"))
+                        .unwrap_or(true)
+            })
+            .map(|edge| edge.target)
+            .collect::<Vec<_>>();
+        for sibling_id in sibling_ids {
+            let node = graph.node_mut(sibling_id)?;
+            if node.kind == PlanNodeKind::Action && node.status == PlanStatus::Open {
+                node.status = PlanStatus::Pruned;
+                pruned += 1;
+            }
+        }
+        if pruned > 0 {
+            self.append(trace_event(
+                run_id,
+                TraceEventType::RewriteApplied,
+                Some(action_id),
+                json!({"rule": "PruneStaleModelSiblingsAfterGoalUnsatisfied"}),
+                json!({
+                    "pruned": pruned,
+                    "support_source": support_source.0,
+                    "source": source,
+                }),
+            ))?;
+        }
+        Ok(pruned)
     }
 
     fn workspace_survey_candidate(&self) -> Option<ActionCandidate> {
@@ -687,181 +904,4 @@ impl BurbotRuntime {
             .get(&action_key(action_ref, args))
             .is_some_and(|epoch| *epoch == self.state_epoch)
     }
-}
-
-fn graph_has_executable_frontier(graph: &PlanGraph) -> bool {
-    !graph.executable_frontier_actions().is_empty()
-}
-
-fn graph_has_async_progress_source(graph: &PlanGraph, contracts: &dyn ContractRegistry) -> bool {
-    graph.nodes.values().any(|node| {
-        matches!(node.status, PlanStatus::Executed | PlanStatus::Satisfied)
-            && node.kind == PlanNodeKind::Action
-            && node
-                .action_ref
-                .as_ref()
-                .and_then(|action_ref| {
-                    contracts.get_action(&action_ref.contract_id, &action_ref.action_name)
-                })
-                .is_some_and(|action| action_has_intent(&action, CREATES_ASYNC_PROGRESS_INTENT))
-    })
-}
-
-fn action_has_intent(action: &ActionContract, intent: &str) -> bool {
-    action
-        .semantic_intents
-        .iter()
-        .any(|declared| semantic_symbol(&declared.intent) == intent)
-}
-
-fn frontier_summary(graph: &PlanGraph) -> Vec<Value> {
-    graph
-        .frontier_actions()
-        .into_iter()
-        .filter_map(|id| graph.node(id).ok())
-        .take(20)
-        .map(|node| {
-            json!({
-                "id": node.id.0,
-                "label": node.label,
-                "action_ref": node.action_ref,
-                "args": compact_value(&node.payload),
-            })
-        })
-        .collect()
-}
-
-fn action_history_summary(graph: &PlanGraph, contracts: &dyn ContractRegistry) -> Vec<Value> {
-    let actions = graph
-        .nodes
-        .iter()
-        .enumerate()
-        .filter_map(|(index, (id, node))| {
-            (node.kind == PlanNodeKind::Action).then(|| {
-                (
-                    index,
-                    *id,
-                    preserves_goal_relevant_history(graph, contracts, *id, node),
-                    json!({
-                        "id": id.0,
-                        "status": node.status,
-                        "action_ref": node.action_ref,
-                        "args": compact_value(&node.payload),
-                        "output": observation_output_for_action(graph, *id).map(|value| compact_value(&value)),
-                    }),
-                )
-            })
-        })
-        .collect::<Vec<_>>();
-    let recent_start = actions.len().saturating_sub(40);
-    actions
-        .into_iter()
-        .filter_map(|(index, _, goal_relevant, value)| {
-            (index >= recent_start || goal_relevant).then_some(value)
-        })
-        .collect()
-}
-
-fn preserves_goal_relevant_history(
-    graph: &PlanGraph,
-    contracts: &dyn ContractRegistry,
-    node_id: NodeId,
-    node: &crate::graph::PlanNode,
-) -> bool {
-    let completion_role = graph
-        .edges
-        .iter()
-        .find(|edge| edge.target == node_id && edge.kind == PlanEdgeKind::Supports)
-        .and_then(|edge| edge.payload.get("completion_role"))
-        .and_then(Value::as_str)
-        .unwrap_or("terminal");
-    if matches!(completion_role, "terminal" | "repair") {
-        return true;
-    }
-    node.action_ref
-        .as_ref()
-        .and_then(|action_ref| {
-            contracts.get_action(&action_ref.contract_id, &action_ref.action_name)
-        })
-        .is_some_and(|action| {
-            !read_only_side_effect(&action.side_effect_class)
-                && !matches!(completion_role, "verification" | "support")
-        })
-}
-
-fn observation_output_for_action(graph: &PlanGraph, action_id: NodeId) -> Option<Value> {
-    graph
-        .edges
-        .iter()
-        .find(|edge| edge.source == action_id && edge.kind == PlanEdgeKind::Produces)
-        .and_then(|edge| graph.nodes.get(&edge.target))
-        .map(|node| node.payload.clone())
-}
-
-fn accumulated_image_context(graph: &PlanGraph, current: Option<&Value>) -> Value {
-    let mut values = Vec::new();
-    if let Some(current) = current {
-        values.push(current.clone());
-    }
-    for node in graph.nodes.values() {
-        if node.kind == PlanNodeKind::Observation {
-            values.push(node.payload.clone());
-        }
-    }
-    Value::Array(values)
-}
-
-fn compact_value(value: &Value) -> Value {
-    match value {
-        Value::String(text) if text.chars().count() > MAX_MODEL_STRING_CHARS => {
-            let prefix = text
-                .chars()
-                .take(MAX_MODEL_STRING_CHARS)
-                .collect::<String>();
-            json!({
-                "truncated_string_prefix": prefix,
-                "original_chars": text.chars().count(),
-            })
-        }
-        Value::Array(items) => Value::Array(
-            items
-                .iter()
-                .take(MAX_MODEL_ARRAY_ITEMS)
-                .map(compact_value)
-                .collect(),
-        ),
-        Value::Object(object) => {
-            if let Some(image) = compact_image_metadata(object) {
-                return image;
-            }
-            let mut compact = Map::new();
-            for (key, value) in object.iter().take(MAX_MODEL_ARRAY_ITEMS) {
-                compact.insert(key.clone(), compact_value(value));
-            }
-            Value::Object(compact)
-        }
-        other => other.clone(),
-    }
-}
-
-fn compact_image_metadata(object: &Map<String, Value>) -> Option<Value> {
-    let mime = string_field(object, &["type", "mime_type", "media_type"])?;
-    if !mime.starts_with("image/") {
-        return None;
-    }
-    let _ = string_field(object, &["base64", "data"])?;
-    Some(json!({
-        "type": "image_observation",
-        "mime_type": mime,
-        "base64_attached_to_model": true,
-        "original_size": object.get("originalSize")
-            .or_else(|| object.get("original_size"))
-            .cloned()
-            .unwrap_or(Value::Null),
-    }))
-}
-
-fn string_field<'a>(object: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a str> {
-    keys.iter()
-        .find_map(|key| object.get(*key).and_then(Value::as_str))
 }

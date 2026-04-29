@@ -1,5 +1,5 @@
 use crate::belief::BeliefGraph;
-use crate::contract::{ContractRegistry, InMemoryContractRegistry, SideEffectClass};
+use crate::contract::{ContractRegistry, InMemoryContractRegistry};
 use crate::executor::{ActionInvocation, ExecutorDispatcher, Observation, PufferToolExecutor};
 use crate::failure::{classify_failure, FailureKind};
 use crate::graph::{
@@ -25,13 +25,16 @@ mod support;
 pub(crate) use support::default_trace_dir;
 mod model;
 mod model_loop;
+mod model_loop_support;
 mod parallel;
+mod progress;
 mod repair;
 mod safety;
 mod snapshot;
 use model::VerificationOutcome;
 pub(crate) use model::{RunOptions, RunResult};
 use parallel::{parallel_batch_payload, select_parallel_read_batch};
+use progress::{model_proposed_node, model_unknown_terminal_without_progress, progress_evidence};
 #[cfg(test)]
 pub(crate) use safety::BlockReason;
 pub(crate) use safety::{ApprovalStore, RuntimeContext, SafetyGate};
@@ -53,6 +56,8 @@ pub(crate) struct BurbotRuntime {
     trace_stats: ActionTraceStats,
     repeated_failures: HashMap<String, u64>,
     executed_action_epochs: HashMap<String, u64>,
+    model_retry_sequence: u64,
+    model_retry_epoch: Option<u64>,
     state_epoch: u64,
 }
 
@@ -76,6 +81,8 @@ impl BurbotRuntime {
             trace_stats: ActionTraceStats::default(),
             repeated_failures: HashMap::new(),
             executed_action_epochs: HashMap::new(),
+            model_retry_sequence: 0,
+            model_retry_epoch: None,
             state_epoch: 0,
         })
     }
@@ -562,7 +569,13 @@ impl BurbotRuntime {
             &observation.output,
             observation.success,
         );
-        if observation.success && self.action_changes_state(&action_ref) {
+        let progress = progress_evidence(
+            self.contracts
+                .get_action(&action_ref.contract_id, &action_ref.action_name)
+                .as_ref(),
+            &observation.output,
+        );
+        if observation.success && progress.changes_state {
             self.state_epoch = self.state_epoch.saturating_add(1);
         }
         if observation.success {
@@ -636,6 +649,43 @@ impl BurbotRuntime {
             if added > 0 {
                 return Ok(None);
             }
+        }
+        if observation.success
+            && model_unknown_terminal_without_progress(
+                self.contracts
+                    .get_action(&action_ref.contract_id, &action_ref.action_name)
+                    .as_ref(),
+                self.completion_role_for_node(graph, node_id),
+                model_proposed_node(graph, node_id),
+                &progress,
+            )
+        {
+            graph.node_mut(node_id)?.status = PlanStatus::Failed;
+            self.record_failure(
+                run_id,
+                graph,
+                beliefs,
+                node_id,
+                &action_ref,
+                &selected.payload,
+                &observation.output,
+                FailureKind::NoProgress,
+            )?;
+            if options.enable_observe_act_llm {
+                self.add_model_observe_act_candidates(
+                    run_id,
+                    graph,
+                    goal,
+                    observation_id,
+                    node_id,
+                    &action_ref,
+                    &selected.payload,
+                    false,
+                    &observation.output,
+                    &options,
+                )?;
+            }
+            return Ok(None);
         }
         if observation.success
             && verification.passed
@@ -761,12 +811,7 @@ impl BurbotRuntime {
                 .contracts
                 .get_action(&action_ref.contract_id, &action_ref.action_name)
             {
-                if !matches!(
-                    action.side_effect_class,
-                    SideEffectClass::PureObservation
-                        | SideEffectClass::LocalRead
-                        | SideEffectClass::ExternalRead
-                ) {
+                if progress_evidence(Some(&action), output).changes_state {
                     beliefs.mark_changed_state(
                         action_key(action_ref, args),
                         "action with possible side effects succeeded",
@@ -783,19 +828,6 @@ impl BurbotRuntime {
                 output.clone(),
             );
         }
-    }
-
-    fn action_changes_state(&self, action_ref: &ActionRef) -> bool {
-        self.contracts
-            .get_action(&action_ref.contract_id, &action_ref.action_name)
-            .is_some_and(|action| {
-                !matches!(
-                    action.side_effect_class,
-                    SideEffectClass::PureObservation
-                        | SideEffectClass::LocalRead
-                        | SideEffectClass::ExternalRead
-                )
-            })
     }
 
     fn is_verification_action(&self, graph: &PlanGraph, node_id: NodeId) -> bool {
@@ -937,5 +969,7 @@ impl BurbotRuntime {
     }
 }
 
+#[cfg(test)]
+mod progress_tests;
 #[cfg(test)]
 mod tests;
