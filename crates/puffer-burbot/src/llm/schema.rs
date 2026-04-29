@@ -1,4 +1,4 @@
-use super::is_codex_backend;
+use super::{is_codex_backend, supports_responses_api};
 use crate::contract::CapabilityContract;
 use anyhow::{anyhow, Result};
 use puffer_provider_openai::{
@@ -192,7 +192,7 @@ fn build_structured_json_request(
             "prompt_cache_key": prompt_cache_key
         });
         build_json_post_request(config, "/responses", &body)
-    } else if image_data_urls.is_empty() {
+    } else if supports_responses_api(&config.base_url) && image_data_urls.is_empty() {
         build_responses_request(
             config,
             &OpenAIResponsesRequest {
@@ -201,7 +201,7 @@ fn build_structured_json_request(
                 text: Some(text),
             },
         )
-    } else {
+    } else if supports_responses_api(&config.base_url) {
         let body = json!({
             "model": model,
             "input": [{
@@ -211,6 +211,8 @@ fn build_structured_json_request(
             "text": text,
         });
         build_json_post_request(config, "/v1/responses", &body)
+    } else {
+        build_chat_json_object_request(config, model, prompt, image_data_urls, Some(instructions))
     }
 }
 
@@ -240,7 +242,7 @@ fn build_plain_json_request(
             "prompt_cache_key": prompt_cache_key
         });
         build_json_post_request(config, "/responses", &body)
-    } else if image_data_urls.is_empty() {
+    } else if supports_responses_api(&config.base_url) && image_data_urls.is_empty() {
         build_responses_request(
             config,
             &OpenAIResponsesRequest {
@@ -249,7 +251,7 @@ fn build_plain_json_request(
                 text: None,
             },
         )
-    } else {
+    } else if supports_responses_api(&config.base_url) {
         let body = json!({
             "model": model,
             "input": [{
@@ -258,6 +260,8 @@ fn build_plain_json_request(
             }],
         });
         build_json_post_request(config, "/v1/responses", &body)
+    } else {
+        build_chat_json_object_request(config, model, prompt, image_data_urls, Some(instructions))
     }
 }
 
@@ -271,6 +275,47 @@ fn multimodal_content(prompt: &str, image_data_urls: &[String]) -> Vec<Value> {
         })
     }));
     content
+}
+
+fn build_chat_json_object_request(
+    config: &OpenAIRequestConfig,
+    model: &str,
+    prompt: &str,
+    image_data_urls: &[String],
+    instructions: Option<&str>,
+) -> Result<BuiltOpenAIRequest> {
+    let mut messages = Vec::new();
+    if let Some(instructions) = instructions {
+        messages.push(json!({
+            "role": "system",
+            "content": instructions
+        }));
+    }
+    messages.push(json!({
+        "role": "user",
+        "content": chat_content(prompt, image_data_urls)
+    }));
+    let body = json!({
+        "model": model,
+        "messages": messages,
+        "response_format": {"type": "json_object"},
+        "stream": false
+    });
+    build_json_post_request(config, "/v1/chat/completions", &body)
+}
+
+fn chat_content(prompt: &str, image_data_urls: &[String]) -> Value {
+    if image_data_urls.is_empty() {
+        return Value::String(prompt.to_string());
+    }
+    let mut content = vec![json!({"type": "text", "text": prompt})];
+    content.extend(image_data_urls.iter().map(|image_url| {
+        json!({
+            "type": "image_url",
+            "image_url": {"url": image_url}
+        })
+    }));
+    Value::Array(content)
 }
 
 fn tool_call_text_config(contract: &CapabilityContract) -> Result<OpenAIResponsesTextConfig> {

@@ -5,9 +5,10 @@ use crate::planner::CompletionRole;
 use anyhow::{anyhow, Context, Result};
 use puffer_config::{load_config, ConfigPaths};
 use puffer_provider_openai::{
-    build_json_post_request, build_responses_request, extract_responses_text,
-    parse_responses_response, refresh_oauth_token, BuiltOpenAIRequest, OpenAIAuth,
-    OpenAIRequestConfig, OpenAIResponsesRequest,
+    build_json_post_request, build_responses_request, extract_chat_completions_text,
+    extract_responses_text, parse_chat_completions_response, parse_responses_response,
+    refresh_oauth_token, BuiltOpenAIRequest, OpenAIAuth, OpenAIRequestConfig,
+    OpenAIResponsesRequest,
 };
 use puffer_provider_registry::{
     detect_import_candidates, AuthStore, ExternalImportFamily, ProviderRegistry, StoredCredential,
@@ -247,10 +248,7 @@ pub(crate) fn validate_puffer_tool_call(
 fn resolve_openai_credential(workspace_root: &Path) -> Result<OpenAiCredential> {
     let paths = ConfigPaths::discover(workspace_root);
     let config = load_config(&paths).unwrap_or_default();
-    let base_url = config
-        .openai_base_url
-        .clone()
-        .unwrap_or_else(|| "https://api.openai.com".to_string());
+    let base_url = configured_openai_base_url(config.openai_base_url.clone());
     if let Some(oauth_only) = forced_codex_credential_mode() {
         return resolve_forced_codex_credential(oauth_only);
     }
@@ -722,7 +720,7 @@ fn build_probe_request(
             "prompt_cache_key": "burbot-smoke-test"
         });
         build_json_post_request(config, "/responses", &body)
-    } else {
+    } else if supports_responses_api(&config.base_url) {
         build_responses_request(
             config,
             &OpenAIResponsesRequest {
@@ -731,6 +729,23 @@ fn build_probe_request(
                 text: None,
             },
         )
+    } else {
+        let body = json!({
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are Burbot's smoke-test operator. Reply with a concise JSON object."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "response_format": {"type": "json_object"},
+            "stream": false
+        });
+        build_json_post_request(config, "/v1/chat/completions", &body)
     }
 }
 
@@ -771,12 +786,21 @@ fn send_and_parse_once(client: &Client, request: &BuiltOpenAIRequest) -> Result<
             "OpenAI request failed with status {status}: {text}"
         ));
     }
-    let parsed = parse_responses_response(&text)?;
-    let output = extract_responses_text(&parsed);
+    let output = parse_llm_response_text(&request.url, &text)?;
     if output.trim().is_empty() {
         Ok(text)
     } else {
         Ok(output)
+    }
+}
+
+fn parse_llm_response_text(url: &str, text: &str) -> Result<String> {
+    if is_chat_completions_url(url) {
+        let parsed = parse_chat_completions_response(text)?;
+        Ok(extract_chat_completions_text(&parsed))
+    } else {
+        let parsed = parse_responses_response(text)?;
+        Ok(extract_responses_text(&parsed))
     }
 }
 
@@ -817,11 +841,48 @@ fn response_format_schema_rejected(error: &anyhow::Error) -> bool {
     let message = error.to_string();
     message.contains("Invalid schema for response_format")
         || message.contains("unsupported response_format")
+        || message.contains("response_format type is unavailable")
 }
 
 fn is_codex_backend(base_url: &str) -> bool {
     let trimmed = base_url.trim_end_matches('/');
     trimmed.contains("/backend-api") || trimmed.contains("/api/codex")
+}
+
+fn supports_responses_api(base_url: &str) -> bool {
+    is_codex_backend(base_url) || base_url.contains("api.openai.com")
+}
+
+fn is_chat_completions_url(url: &str) -> bool {
+    url.split('?')
+        .next()
+        .unwrap_or(url)
+        .trim_end_matches('/')
+        .ends_with("/chat/completions")
+}
+
+fn configured_openai_base_url(config_base_url: Option<String>) -> String {
+    resolve_openai_base_url(config_base_url, env_openai_base_url())
+}
+
+fn resolve_openai_base_url(
+    config_base_url: Option<String>,
+    env_base_url: Option<String>,
+) -> String {
+    env_base_url
+        .or(config_base_url)
+        .unwrap_or_else(|| "https://api.openai.com".to_string())
+}
+
+fn env_openai_base_url() -> Option<String> {
+    std::env::var("OPENAI_BASE_URL").ok().and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
 }
 
 fn resource_openai_base_url(workspace_root: &Path) -> Option<String> {

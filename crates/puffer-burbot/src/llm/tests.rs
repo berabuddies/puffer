@@ -76,6 +76,61 @@ fn api_key_credential_uses_v1_responses() {
 }
 
 #[test]
+fn env_openai_base_url_overrides_config_base_url() {
+    let resolved = resolve_openai_base_url(
+        Some("https://api.openai.com".to_string()),
+        Some("https://api.deepseek.com".to_string()),
+    );
+
+    assert_eq!(resolved, "https://api.deepseek.com");
+}
+
+#[test]
+fn openai_compatible_base_url_uses_chat_completions_json_object() {
+    let credential = OpenAiCredential {
+        auth: OpenAIAuth::ApiKey("sk-test".to_string()),
+        auth_source: "test".to_string(),
+        base_url: "https://api.deepseek.com".to_string(),
+        account_id: None,
+        refresh_token: None,
+        custom_headers: Vec::new(),
+        query_params: Vec::new(),
+    };
+    let request = build_tool_call_request(
+        &request_config(&credential),
+        "deepseek-v4-pro",
+        "run pwd",
+        &tool_contract(),
+        &[],
+    )
+    .unwrap();
+    let body: Value = serde_json::from_str(&request.body).unwrap();
+
+    assert_eq!(request.url, "https://api.deepseek.com/v1/chat/completions");
+    assert_eq!(body["response_format"]["type"], json!("json_object"));
+    assert_eq!(body["messages"][0]["role"], json!("system"));
+    assert_eq!(body["messages"][1]["role"], json!("user"));
+}
+
+#[test]
+fn chat_completion_response_text_is_extracted() {
+    let text = parse_llm_response_text(
+        "https://api.deepseek.com/v1/chat/completions",
+        r#"{
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "{\"tool_id\":\"Bash\",\"args\":{\"command\":\"pwd\"}}"
+                }
+            }]
+        }"#,
+    )
+    .unwrap();
+
+    assert_eq!(text, r#"{"tool_id":"Bash","args":{"command":"pwd"}}"#);
+}
+
+#[test]
 fn oauth_credential_uses_codex_backend() {
     let stored = StoredCredential::OAuth(OAuthCredential {
         access_token: "access".to_string(),
