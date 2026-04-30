@@ -3,8 +3,9 @@ use crate::usage::UsageOverlay;
 use anyhow::Result;
 use puffer_config::ConfigPaths;
 use puffer_core::{
-    default_effort_level, load_agent_catalog, normalized_effort_level, provider_preference_family,
-    resumable_sessions_for_picker, supported_effort_levels, AppState, ModelPreferenceFamily,
+    default_effort_level, load_agent_catalog_for_runtime, normalized_effort_level,
+    provider_preference_family, resumable_sessions_for_picker, supported_effort_levels, AppState,
+    ModelPreferenceFamily,
 };
 use puffer_provider_registry::{
     detect_import_candidates, AuthMode, AuthStore, ExternalImportCandidate, ExternalImportFamily,
@@ -89,33 +90,37 @@ pub(crate) fn overlay_from_command(
             model_picker(providers, provider_id, false)
         }),
         "agents" if args.is_empty() => {
-            let entries = load_agent_catalog(&state.cwd, state.current_model.as_deref())?
-                .into_iter()
-                .map(|agent| ModelPickerEntry {
-                    selector: agent.selector,
-                    description: format!(
-                        "[{}] model={}{}{} {}",
-                        match agent.source_kind {
-                            puffer_resources::SourceKind::Builtin => "builtin",
-                            puffer_resources::SourceKind::User => "user",
-                            puffer_resources::SourceKind::Workspace => "workspace",
-                        },
-                        agent.model.unwrap_or_else(|| "<inherit>".to_string()),
-                        agent
-                            .effort
-                            .as_deref()
-                            .map(|effort| format!(" effort={effort}"))
-                            .unwrap_or_default(),
-                        agent
-                            .permission_mode
-                            .as_deref()
-                            .map(|mode| format!(" mode={mode}"))
-                            .unwrap_or_default(),
-                        agent.description
-                    ),
-                    command: None,
-                })
-                .collect::<Vec<_>>();
+            let entries = load_agent_catalog_for_runtime(
+                &state.cwd,
+                state.current_model.as_deref(),
+                state.config.remote_tool_runner.as_ref(),
+            )?
+            .into_iter()
+            .map(|agent| ModelPickerEntry {
+                selector: agent.selector,
+                description: format!(
+                    "[{}] model={}{}{} {}",
+                    match agent.source_kind {
+                        puffer_resources::SourceKind::Builtin => "builtin",
+                        puffer_resources::SourceKind::User => "user",
+                        puffer_resources::SourceKind::Workspace => "workspace",
+                    },
+                    agent.model.unwrap_or_else(|| "<inherit>".to_string()),
+                    agent
+                        .effort
+                        .as_deref()
+                        .map(|effort| format!(" effort={effort}"))
+                        .unwrap_or_default(),
+                    agent
+                        .permission_mode
+                        .as_deref()
+                        .map(|mode| format!(" mode={mode}"))
+                        .unwrap_or_default(),
+                    agent.description
+                ),
+                command: None,
+            })
+            .collect::<Vec<_>>();
             if entries.is_empty() {
                 None
             } else {

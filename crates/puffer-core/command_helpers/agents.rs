@@ -1,5 +1,7 @@
 use super::emit_system;
-use crate::agent_catalog::{load_agent_catalog, workspace_agent_manifest_path, AgentCatalogEntry};
+use crate::agent_catalog::{
+    load_agent_catalog_for_runtime, workspace_agent_manifest_path, AgentCatalogEntry,
+};
 use crate::AppState;
 use anyhow::Result;
 use puffer_config::{ensure_workspace_dirs, ConfigPaths};
@@ -14,12 +16,20 @@ pub(crate) fn handle_agents_command(
     session_store: &SessionStore,
     args: &str,
 ) -> Result<()> {
+    let remote_tool_runner = state.config.remote_tool_runner.as_ref();
+    let remote_tool_runner_enabled = remote_tool_runner.is_some();
     let paths = ConfigPaths::discover(&state.cwd);
-    ensure_workspace_dirs(&paths)?;
     let agents_dir = paths.workspace_config_dir.join("resources/agents");
-    fs::create_dir_all(&agents_dir)?;
+    if !remote_tool_runner_enabled {
+        ensure_workspace_dirs(&paths)?;
+        fs::create_dir_all(&agents_dir)?;
+    }
     let workspace_manifest = workspace_agent_manifest_path(&paths);
-    let agents = load_agent_catalog(&state.cwd, state.current_model.as_deref())?;
+    let agents = load_agent_catalog_for_runtime(
+        &state.cwd,
+        state.current_model.as_deref(),
+        remote_tool_runner,
+    )?;
     let trimmed = args.trim();
 
     match trimmed {

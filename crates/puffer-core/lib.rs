@@ -9,6 +9,7 @@ mod permissions;
 mod plan_mode;
 mod plans;
 mod runtime;
+mod runtime_resources;
 mod skill_support;
 mod state;
 #[cfg(test)]
@@ -16,7 +17,7 @@ pub(crate) mod test_locks;
 mod tool_names;
 mod workspace_paths;
 
-pub use agent_catalog::{load_agent_catalog, AgentCatalogEntry};
+pub use agent_catalog::{load_agent_catalog, load_agent_catalog_for_runtime, AgentCatalogEntry};
 pub use command::{
     command_surface, dispatch_command, find_command, supported_commands, CommandKind, CommandSpec,
 };
@@ -57,6 +58,7 @@ pub use runtime::{
     ToolOutputStream, TurnExecution, TurnStreamEvent, TurnUsageReport, UserQuestionPromptRequest,
     UserQuestionPromptResponse,
 };
+pub use runtime_resources::load_runtime_resources_for_paths;
 pub use state::{AppState, MessageRole, RenderedMessage, TaskRecord, TaskStatus};
 
 use anyhow::Result;

@@ -413,6 +413,9 @@ pub(crate) fn load_runtime_sandbox_settings(
     cwd: &Path,
     state: &AppState,
 ) -> Result<SandboxSettings> {
+    if state.config.remote_tool_runner.is_some() {
+        return Ok(SandboxSettings::from_mode(&state.sandbox_mode));
+    }
     let paths = ConfigPaths::discover(cwd);
     let sandbox_path = paths.workspace_config_dir.join("sandbox.toml");
     if sandbox_path.exists() {
@@ -442,7 +445,9 @@ pub(crate) fn load_runtime_permission_context(
 ) -> Result<RuntimePermissionContext> {
     let paths = ConfigPaths::discover(cwd);
     let permissions_path = paths.workspace_config_dir.join("permissions.toml");
-    let mut permissions = if permissions_path.exists() {
+    let mut permissions = if state.config.remote_tool_runner.is_some() {
+        PermissionsSettings::default()
+    } else if permissions_path.exists() {
         load_permissions_settings(&permissions_path)?
     } else {
         PermissionsSettings::default()

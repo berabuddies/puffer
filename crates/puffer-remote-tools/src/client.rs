@@ -1,6 +1,11 @@
 use crate::model::proto::tool_runner_client::ToolRunnerClient;
-use crate::model::proto::{DescribeCapabilitiesRequest, ExecuteToolEvent};
-use crate::{RemoteToolCapabilities, RemoteToolChunk, RemoteToolChunkStream, RemoteToolRequest};
+use crate::model::proto::{
+    DescribeCapabilitiesRequest, ExecuteToolEvent, LoadProjectResourcesRequest,
+};
+use crate::{
+    RemoteProjectResourceFile, RemoteToolCapabilities, RemoteToolChunk, RemoteToolChunkStream,
+    RemoteToolRequest,
+};
 use anyhow::{anyhow, Context, Result};
 use puffer_tools::ToolExecutionResult;
 use std::sync::mpsc;
@@ -108,6 +113,45 @@ where
     }
 }
 
+/// Loads project-local resources from a remote tool runner.
+pub fn load_project_resources_blocking(
+    endpoint: &str,
+    auth_token: Option<&str>,
+    project_root: &str,
+) -> Result<Vec<RemoteProjectResourceFile>> {
+    let endpoint = endpoint.to_string();
+    let auth_token = auth_token.map(ToOwned::to_owned);
+    let project_root = project_root.to_string();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("build tokio runtime")
+            .and_then(|runtime| {
+                runtime.block_on(async move {
+                    let mut client = connect_client(&endpoint).await?;
+                    let request = authenticated_request(
+                        LoadProjectResourcesRequest { project_root },
+                        auth_token,
+                    )?;
+                    let response = client
+                        .load_project_resources(request)
+                        .await
+                        .context("load remote project resources")?;
+                    Ok(response
+                        .into_inner()
+                        .files
+                        .into_iter()
+                        .map(RemoteProjectResourceFile::from)
+                        .collect())
+                })
+            });
+        let _ = tx.send(result);
+    });
+    rx.recv()
+        .map_err(|_| anyhow!("remote project resource request disconnected"))?
+}
 async fn connect_client(endpoint: &str) -> Result<ToolRunnerClient<tonic::transport::Channel>> {
     let channel = tonic::transport::Channel::from_shared(endpoint.to_string())
         .with_context(|| format!("invalid tool runner endpoint `{endpoint}`"))?

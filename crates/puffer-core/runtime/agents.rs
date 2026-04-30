@@ -253,8 +253,12 @@ fn prepare_agent_execution(
     cwd: &Path,
     input: AgentToolInput,
 ) -> Result<PreparedAgentExecution> {
-    let current_resources = load_agent_resources(cwd, state.current_model.as_deref())
-        .unwrap_or_else(|_| resources.clone());
+    let current_resources = load_agent_resources(
+        cwd,
+        state.current_model.as_deref(),
+        state.config.remote_tool_runner.as_ref(),
+    )
+    .unwrap_or_else(|_| resources.clone());
     let selected_agent = input
         .subagent_type
         .as_deref()

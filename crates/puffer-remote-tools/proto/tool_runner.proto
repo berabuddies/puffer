@@ -5,6 +5,7 @@ package puffer.remote_tools.v1;
 service ToolRunner {
   rpc DescribeCapabilities(DescribeCapabilitiesRequest) returns (DescribeCapabilitiesResponse);
   rpc ExecuteTool(ExecuteToolRequest) returns (stream ExecuteToolEvent);
+  rpc LoadProjectResources(LoadProjectResourcesRequest) returns (LoadProjectResourcesResponse);
 }
 
 message DescribeCapabilitiesRequest {}
@@ -23,6 +24,7 @@ message ExecuteToolRequest {
   string cwd = 5;
   repeated string working_dirs = 6;
   string sandbox_mode = 7;
+  string execution_context_json = 8;
 }
 
 message ExecuteToolEvent {
@@ -48,4 +50,17 @@ message ExecuteToolCompleted {
 
 message ExecuteToolFailed {
   string message = 1;
+}
+
+message LoadProjectResourcesRequest {
+  string project_root = 1;
+}
+
+message LoadProjectResourcesResponse {
+  repeated ProjectResourceFile files = 1;
+}
+
+message ProjectResourceFile {
+  string relative_path = 1;
+  string content = 2;
 }

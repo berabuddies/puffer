@@ -109,7 +109,7 @@ fn execute_user_prompt_round_trips_remote_runner_results_back_to_openai_provider
     let mut state = super::temp_state();
     state.current_provider = Some("openai".to_string());
     state.current_model = Some("openai/gpt-5".to_string());
-    super::configure_remote_tool_runner(&mut state, &runner, &["Bash"]);
+    super::configure_remote_tool_runner(&mut state, &runner);
 
     let mut deltas = Vec::new();
     let mut on_delta = |delta| deltas.push(delta);
@@ -146,8 +146,12 @@ fn execute_user_prompt_round_trips_remote_runner_results_back_to_openai_provider
 
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
-    assert!(requests[0].to_ascii_lowercase().contains("post /api/codex/responses"));
-    assert!(requests[1].to_ascii_lowercase().contains("post /api/codex/responses"));
+    assert!(requests[0]
+        .to_ascii_lowercase()
+        .contains("post /api/codex/responses"));
+    assert!(requests[1]
+        .to_ascii_lowercase()
+        .contains("post /api/codex/responses"));
 
     let second_body = request_json_body(&requests[1]);
     let second_input = second_body["input"]
@@ -223,7 +227,7 @@ fn execute_user_prompt_streaming_emits_remote_runner_events_and_continues_provid
     let mut state = super::temp_state();
     state.current_provider = Some("openai".to_string());
     state.current_model = Some("openai/gpt-5".to_string());
-    super::configure_remote_tool_runner(&mut state, &runner, &["Bash"]);
+    super::configure_remote_tool_runner(&mut state, &runner);
 
     let mut text_deltas = Vec::new();
     let mut requested = Vec::new();
@@ -249,7 +253,10 @@ fn execute_user_prompt_streaming_emits_remote_runner_events_and_continues_provid
     server.join().unwrap();
 
     assert_eq!(turn.assistant_text, "remote roundtrip ok");
-    assert_eq!(text_deltas, vec!["remote ".to_string(), "roundtrip ok".to_string()]);
+    assert_eq!(
+        text_deltas,
+        vec!["remote ".to_string(), "roundtrip ok".to_string()]
+    );
     assert_eq!(requested.len(), 1);
     assert_eq!(requested[0].call_id, "call_remote_bash");
     assert_eq!(requested[0].tool_id, "Bash");

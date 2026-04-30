@@ -126,10 +126,16 @@ pub(super) fn execute_tool_call(
         },
     };
     let hook_input = input.clone();
+    let remote_execution_context =
+        claude_tools::build_remote_execution_context(tool_id, &provider_context, &input)?;
     run_tool_start_hooks(resources, cwd, tool_id, &hook_input);
-    let result = if let Some(result) =
-        maybe_execute_remote_tool_call(state, call_id, tool_id, input.clone())?
-    {
+    let result = if let Some(result) = maybe_execute_remote_tool_call(
+        state,
+        call_id,
+        tool_id,
+        input.clone(),
+        remote_execution_context.as_ref(),
+    )? {
         result
     } else if definition.handler == "runtime:agent" {
         let output = execute_agent_tool(state, resources, providers, auth_store, cwd, input)?;

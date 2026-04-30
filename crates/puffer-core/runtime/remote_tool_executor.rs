@@ -1,10 +1,11 @@
-use super::claude_tools::{apply_remote_tool_state_update, validate_remote_tool_preconditions};
 use super::tool_stream::emit_tool_stream_delta;
 use super::{ToolOutputDelta, ToolOutputStream};
 use crate::AppState;
 use anyhow::{anyhow, Context, Result};
 use puffer_config::{RemotePathMapConfig, RemoteToolRunnerConfig};
-use puffer_remote_tools::{execute_tool_blocking, RemoteToolChunkStream, RemoteToolRequest};
+use puffer_remote_tools::{
+    execute_tool_blocking, RemoteToolChunkStream, RemoteToolExecutionContext, RemoteToolRequest,
+};
 use puffer_tools::ToolExecutionResult;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -14,6 +15,7 @@ pub(super) fn maybe_execute_remote_tool_call(
     call_id: Option<&str>,
     tool_id: &str,
     input: Value,
+    execution_context: Option<&RemoteToolExecutionContext>,
 ) -> Result<Option<ToolExecutionResult>> {
     let Some(config) = state.config.remote_tool_runner.as_ref() else {
         return Ok(None);
@@ -27,8 +29,7 @@ pub(super) fn maybe_execute_remote_tool_call(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow!("remote tool runner endpoint is not configured"))?;
-    validate_remote_tool_preconditions(state, tool_id, &input)?;
-    let request = build_remote_request(state, config, call_id, tool_id, &input)?;
+    let request = build_remote_request(state, config, call_id, tool_id, &input, execution_context)?;
     let auth_token = resolve_auth_token(config)?;
     let result = execute_tool_blocking(endpoint, auth_token.as_deref(), request, |chunk| {
         emit_tool_stream_delta(ToolOutputDelta {
@@ -41,9 +42,6 @@ pub(super) fn maybe_execute_remote_tool_call(
             text: chunk.text,
         });
     })?;
-    if result.success {
-        apply_remote_tool_state_update(state, tool_id, &input)?;
-    }
     Ok(Some(result))
 }
 
@@ -56,19 +54,10 @@ pub(super) fn remote_tool_parallel_safe(state: &AppState, tool_id: &str) -> bool
 }
 
 fn tool_enabled_for_remote(config: &RemoteToolRunnerConfig, tool_id: &str) -> bool {
-    let supported = super::remote_tools::remote_tool_runner_supported_tools()
+    let _ = config;
+    super::remote_tools::remote_tool_runner_supported_tools()
         .iter()
-        .any(|candidate| *candidate == tool_id);
-    if !supported {
-        return false;
-    }
-    if config.enabled_tools.is_empty() {
-        return true;
-    }
-    config
-        .enabled_tools
-        .iter()
-        .any(|candidate| candidate == tool_id)
+        .any(|candidate| *candidate == tool_id)
 }
 
 fn resolve_auth_token(config: &RemoteToolRunnerConfig) -> Result<Option<String>> {
@@ -102,6 +91,7 @@ fn build_remote_request(
     call_id: Option<&str>,
     tool_id: &str,
     input: &Value,
+    execution_context: Option<&RemoteToolExecutionContext>,
 ) -> Result<RemoteToolRequest> {
     let remote_cwd = resolve_remote_cwd(state, config);
     let working_dirs = if state.working_dirs.is_empty() {
@@ -122,6 +112,7 @@ fn build_remote_request(
         cwd: remote_cwd.display().to_string(),
         working_dirs,
         sandbox_mode: state.sandbox_mode.clone(),
+        execution_context_json: execution_context.map(serde_json::to_string).transpose()?,
     })
 }
 

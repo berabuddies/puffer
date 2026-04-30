@@ -3,9 +3,11 @@ use puffer_core::{execute_remote_tool, remote_tool_runner_capabilities};
 use puffer_remote_tools::proto::tool_runner_server::{ToolRunner, ToolRunnerServer};
 use puffer_remote_tools::proto::{
     DescribeCapabilitiesRequest, DescribeCapabilitiesResponse, ExecuteToolCompleted,
-    ExecuteToolEvent, ExecuteToolFailed, ExecuteToolRequest, StreamChunk,
+    ExecuteToolEvent, ExecuteToolFailed, ExecuteToolRequest, LoadProjectResourcesRequest,
+    LoadProjectResourcesResponse, ProjectResourceFile, StreamChunk,
 };
 use puffer_remote_tools::RemoteToolRequest;
+use puffer_resources::collect_project_resource_files;
 use rand::RngCore;
 use serde::Serialize;
 use std::fs;
@@ -136,6 +138,29 @@ impl ToolRunner for ToolRunnerService {
             Box::pin(ReceiverStream::new(rx).map(|item| item)) as Self::ExecuteToolStream,
         ))
     }
+
+    async fn load_project_resources(
+        &self,
+        request: Request<LoadProjectResourcesRequest>,
+    ) -> std::result::Result<Response<LoadProjectResourcesResponse>, Status> {
+        authorize(&self.auth, &request)?;
+        let project_root = request.into_inner().project_root;
+        if project_root.trim().is_empty() {
+            return Err(Status::invalid_argument("project_root must not be empty"));
+        }
+        let project_root = PathBuf::from(project_root);
+        let files = collect_project_resource_files(&project_root)
+            .map_err(|error| Status::internal(error.to_string()))?;
+        Ok(Response::new(LoadProjectResourcesResponse {
+            files: files
+                .into_iter()
+                .map(|file| ProjectResourceFile {
+                    relative_path: file.relative_path.to_string_lossy().replace('\\', "/"),
+                    content: file.content,
+                })
+                .collect(),
+        }))
+    }
 }
 
 /// Loads the configured token or generates a random fallback token.
@@ -201,6 +226,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use puffer_remote_tools::proto::execute_tool_event::Payload;
+    use tempfile::tempdir;
     use tokio_stream::StreamExt;
     use tonic::metadata::MetadataValue;
 
@@ -275,6 +301,7 @@ mod tests {
                     cwd: cwd.display().to_string(),
                     working_dirs: vec![cwd.display().to_string()],
                     sandbox_mode: "workspace-write".to_string(),
+                    execution_context_json: String::new(),
                 },
                 "secret",
             ))
@@ -299,5 +326,44 @@ mod tests {
         assert_eq!(completed.tool_id, "Sleep");
         assert!(completed.success);
         assert!(completed.stdout.contains("\"completed\": true"));
+    }
+
+    #[tokio::test]
+    async fn load_project_resources_returns_workspace_files() {
+        let temp = tempdir().unwrap();
+        let project = temp.path();
+        fs::create_dir_all(project.join("resources/prompts")).unwrap();
+        fs::create_dir_all(project.join(".puffer/resources/skills/reviewer")).unwrap();
+        fs::write(
+            project.join("resources/prompts/review.yaml"),
+            "id: review\ndescription: Review\ntemplate: remote\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join(".puffer/resources/skills/reviewer/SKILL.md"),
+            "---\nname: reviewer\n---\nRemote body\n",
+        )
+        .unwrap();
+
+        let service = ToolRunnerService::new("secret".to_string());
+        let response = service
+            .load_project_resources(authorized_request(
+                LoadProjectResourcesRequest {
+                    project_root: project.display().to_string(),
+                },
+                "secret",
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(response
+            .files
+            .iter()
+            .any(|file| file.relative_path == "resources/prompts/review.yaml"));
+        assert!(response
+            .files
+            .iter()
+            .any(|file| file.relative_path == ".puffer/resources/skills/reviewer/SKILL.md"));
     }
 }

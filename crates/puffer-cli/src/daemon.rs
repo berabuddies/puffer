@@ -35,16 +35,17 @@ use puffer_config::{
     ensure_workspace_dirs, load_config, save_user_config, ConfigPaths, PufferConfig,
 };
 use puffer_core::{
-    execute_user_turn_streaming_with_permissions, with_user_question_prompt_handler, AppState,
-    MessageRole, PermissionPromptAction, PermissionPromptRequest, TurnStreamEvent,
-    UserQuestionPromptRequest, UserQuestionPromptResponse,
+    execute_user_turn_streaming_with_permissions, load_runtime_resources_for_paths,
+    with_user_question_prompt_handler, AppState, MessageRole, PermissionPromptAction,
+    PermissionPromptRequest, TurnStreamEvent, UserQuestionPromptRequest,
+    UserQuestionPromptResponse,
 };
 use puffer_provider_openai::{
     exchange_authorization_code as exchange_openai_authorization_code,
     parse_authorization_input as parse_openai_authorization_input,
 };
 use puffer_provider_registry::{AuthStore, ProviderRegistry, StoredCredential};
-use puffer_resources::{load_resources, LoadedResources, McpServerSpec};
+use puffer_resources::{LoadedResources, McpServerSpec};
 use puffer_session_store::{SessionStore, TranscriptEvent};
 use puffer_transport_anthropic::{
     exchange_authorization_code as exchange_anthropic_authorization_code,
@@ -254,6 +255,17 @@ impl DaemonState {
     pub(crate) fn config_paths(&self) -> &ConfigPaths {
         &self.paths
     }
+
+    /// Returns true when the daemon should treat the current workspace as remote-only.
+    pub(crate) fn remote_tool_runner_enabled(&self) -> bool {
+        self.config.lock().unwrap().remote_tool_runner.is_some()
+    }
+
+    /// Loads runtime resources using the daemon's current remote-runner policy.
+    pub(crate) fn load_runtime_resources(&self) -> Result<LoadedResources> {
+        let remote_tool_runner = self.config.lock().unwrap().remote_tool_runner.clone();
+        load_runtime_resources_for_paths(&self.paths, remote_tool_runner.as_ref())
+    }
 }
 
 struct TurnHandle {
@@ -328,7 +340,7 @@ impl DaemonState {
     fn build_runtime_inputs(&self) -> Result<RuntimeInputs> {
         let auth_path = self.paths.user_config_dir.join("auth.json");
         let auth_store = AuthStore::load(&auth_path)?;
-        let resources = load_resources(&self.paths)?;
+        let resources = self.load_runtime_resources()?;
         let mut providers = ProviderRegistry::new();
         for provider in &resources.providers {
             providers.register_with_source(

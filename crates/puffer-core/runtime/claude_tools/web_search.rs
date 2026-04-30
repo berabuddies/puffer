@@ -5,6 +5,9 @@ use puffer_provider_openai::{
     OpenAIRequestConfig, OpenAIResponsesTool, OpenAIResponsesToolChoice,
     OpenAIResponsesToolChoiceMode, OpenAIResponsesToolRequest,
 };
+use puffer_remote_tools::{
+    RemoteToolExecutionContext, RemoteWebSearchBackend, RemoteWebSearchRequest,
+};
 use puffer_transport_anthropic::{
     build_messages_request, AnthropicMessage, AnthropicModelRequest, AnthropicRequestConfig,
 };
@@ -56,8 +59,97 @@ pub fn execute_claude_openai_web_search(
     model_id: &str,
     raw_input: Value,
 ) -> Result<String> {
-    let input = parse_input(raw_input)?;
+    let request = build_openai_remote_request(request_config, model_id, raw_input)?;
+    execute_remote_web_search(&request)
+}
 
+/// Executes Claude-style WebSearch against an Anthropic Messages-compatible endpoint.
+pub fn execute_claude_anthropic_web_search(
+    request_config: &AnthropicRequestConfig,
+    model_id: &str,
+    raw_input: Value,
+) -> Result<String> {
+    let request = build_anthropic_remote_request(request_config, model_id, raw_input)?;
+    execute_remote_web_search(&request)
+}
+
+/// Builds the provider-specific remote execution context for one WebSearch call.
+pub(crate) fn build_remote_web_search_context(
+    provider_context: &super::ProviderToolContext<'_>,
+    raw_input: Value,
+) -> Result<RemoteToolExecutionContext> {
+    match provider_context {
+        super::ProviderToolContext::OpenAI {
+            request_config,
+            model_id,
+            ..
+        } => Ok(RemoteToolExecutionContext::WebSearch(
+            build_openai_remote_request(request_config, model_id, raw_input)?,
+        )),
+        super::ProviderToolContext::Anthropic {
+            request_config,
+            model_id,
+            ..
+        } => Ok(RemoteToolExecutionContext::WebSearch(
+            build_anthropic_remote_request(request_config, model_id, raw_input)?,
+        )),
+        super::ProviderToolContext::None => {
+            bail!("WebSearch requires provider execution context")
+        }
+    }
+}
+
+/// Executes one prebuilt remote WebSearch request and formats the response.
+pub(crate) fn execute_remote_web_search(request: &RemoteWebSearchRequest) -> Result<String> {
+    let response = send_json_request(&request.url, &request.headers, &request.body)?;
+    match request.backend {
+        RemoteWebSearchBackend::OpenAi => {
+            let parsed = parse_responses_response(&serde_json::to_string(&response)?)?;
+            let text = extract_responses_text(&parsed);
+            if text.trim().is_empty() {
+                bail!("OpenAI web search returned no text");
+            }
+            Ok(format_search_output(
+                text,
+                extract_openai_sources(&response),
+            ))
+        }
+        RemoteWebSearchBackend::Anthropic => Ok(format_search_output(
+            extract_anthropic_text(&response)?,
+            extract_anthropic_sources(&response),
+        )),
+    }
+}
+
+fn parse_input(raw_input: Value) -> Result<ClaudeWebSearchInput> {
+    let input: ClaudeWebSearchInput =
+        serde_json::from_value(raw_input).context("invalid WebSearch input")?;
+    if input.query.trim().len() < 2 {
+        bail!("WebSearch query must be at least 2 characters");
+    }
+    if !input.allowed_domains.is_empty() && !input.blocked_domains.is_empty() {
+        bail!("cannot specify both allowed_domains and blocked_domains in one request");
+    }
+    Ok(input)
+}
+
+fn build_openai_filters(input: &ClaudeWebSearchInput) -> Option<Value> {
+    let mut filters = serde_json::Map::new();
+    if !input.allowed_domains.is_empty() {
+        filters.insert("allowed_domains".to_string(), json!(input.allowed_domains));
+    }
+    if !input.blocked_domains.is_empty() {
+        filters.insert("blocked_domains".to_string(), json!(input.blocked_domains));
+    }
+    (!filters.is_empty()).then(|| Value::Object(filters))
+}
+
+fn build_openai_remote_request(
+    request_config: &OpenAIRequestConfig,
+    model_id: &str,
+    raw_input: Value,
+) -> Result<RemoteWebSearchRequest> {
+    let input = parse_input(raw_input)?;
     let request = build_tool_responses_request(
         request_config,
         &OpenAIResponsesToolRequest {
@@ -81,28 +173,20 @@ pub fn execute_claude_openai_web_search(
             text: None,
         },
     )?;
-
-    let response = send_json_request(&request.url, &request.headers, &request.body, false)?;
-    let parsed = parse_responses_response(&serde_json::to_string(&response)?)?;
-    let text = extract_responses_text(&parsed);
-    if text.trim().is_empty() {
-        bail!("OpenAI web search returned no text");
-    }
-
-    Ok(format_search_output(
-        text,
-        extract_openai_sources(&response),
-    ))
+    Ok(RemoteWebSearchRequest {
+        backend: RemoteWebSearchBackend::OpenAi,
+        url: request.url,
+        headers: request.headers,
+        body: request.body,
+    })
 }
 
-/// Executes Claude-style WebSearch against an Anthropic Messages-compatible endpoint.
-pub fn execute_claude_anthropic_web_search(
+fn build_anthropic_remote_request(
     request_config: &AnthropicRequestConfig,
     model_id: &str,
     raw_input: Value,
-) -> Result<String> {
+) -> Result<RemoteWebSearchRequest> {
     let input = parse_input(raw_input)?;
-
     let request = build_messages_request(
         request_config,
         &AnthropicModelRequest {
@@ -132,44 +216,15 @@ pub fn execute_claude_anthropic_web_search(
         "max_uses": 8,
     })]);
     body["tool_choice"] = json!({ "type": "auto" });
-
-    let response = send_json_request(&request.url, &request.headers, &body.to_string(), true)?;
-    let text = extract_anthropic_text(&response)?;
-    Ok(format_search_output(
-        text,
-        extract_anthropic_sources(&response),
-    ))
+    Ok(RemoteWebSearchRequest {
+        backend: RemoteWebSearchBackend::Anthropic,
+        url: request.url,
+        headers: request.headers,
+        body: body.to_string(),
+    })
 }
 
-fn parse_input(raw_input: Value) -> Result<ClaudeWebSearchInput> {
-    let input: ClaudeWebSearchInput =
-        serde_json::from_value(raw_input).context("invalid WebSearch input")?;
-    if input.query.trim().len() < 2 {
-        bail!("WebSearch query must be at least 2 characters");
-    }
-    if !input.allowed_domains.is_empty() && !input.blocked_domains.is_empty() {
-        bail!("cannot specify both allowed_domains and blocked_domains in one request");
-    }
-    Ok(input)
-}
-
-fn build_openai_filters(input: &ClaudeWebSearchInput) -> Option<Value> {
-    let mut filters = serde_json::Map::new();
-    if !input.allowed_domains.is_empty() {
-        filters.insert("allowed_domains".to_string(), json!(input.allowed_domains));
-    }
-    if !input.blocked_domains.is_empty() {
-        filters.insert("blocked_domains".to_string(), json!(input.blocked_domains));
-    }
-    (!filters.is_empty()).then(|| Value::Object(filters))
-}
-
-fn send_json_request(
-    url: &str,
-    headers: &[(String, String)],
-    body: &str,
-    anthropic: bool,
-) -> Result<Value> {
+fn send_json_request(url: &str, headers: &[(String, String)], body: &str) -> Result<Value> {
     let client = Client::new();
     let response = retry_http_send(3, || {
         let mut request = client.post(url);
@@ -181,13 +236,6 @@ fn send_json_request(
             .any(|(key, _)| key.eq_ignore_ascii_case("content-type"))
         {
             request = request.header("content-type", "application/json");
-        }
-        if anthropic
-            && !headers
-                .iter()
-                .any(|(key, _)| key.eq_ignore_ascii_case("anthropic-version"))
-        {
-            request = request.header("anthropic-version", "2023-06-01");
         }
         request
             .body(body.to_string())

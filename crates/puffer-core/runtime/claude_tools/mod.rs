@@ -4,6 +4,7 @@ use crate::workspace_paths;
 use crate::AppState;
 use anyhow::{bail, Context, Result};
 use puffer_provider_openai::OpenAIRequestConfig;
+use puffer_remote_tools::RemoteToolExecutionContext;
 use puffer_resources::LoadedResources;
 use puffer_tools::{ToolDefinition, ToolExecutionResult, ToolOutput, ToolRegistry};
 use puffer_transport_anthropic::AnthropicRequestConfig;
@@ -25,7 +26,7 @@ pub(crate) mod read;
 pub(crate) mod skill;
 pub(crate) mod tool_search;
 pub(crate) mod web_fetch;
-mod web_search;
+pub(crate) mod web_search;
 
 /// Retries a blocking HTTP send operation up to `max_attempts` times with 1s delay
 /// on transient connection/timeout errors.
@@ -72,6 +73,21 @@ pub(crate) enum ProviderToolContext<'a> {
         model_id: &'a str,
         structured_output: Option<&'a StructuredOutputConfig>,
     },
+}
+
+/// Builds any remote execution context required for a provider-backed tool.
+pub(crate) fn build_remote_execution_context(
+    tool_id: &str,
+    provider_context: &ProviderToolContext<'_>,
+    input: &Value,
+) -> Result<Option<RemoteToolExecutionContext>> {
+    match tool_id {
+        "WebSearch" => Ok(Some(web_search::build_remote_web_search_context(
+            provider_context,
+            input.clone(),
+        )?)),
+        _ => Ok(None),
+    }
 }
 
 /// Returns true when the handler should be routed through the Claude tool dispatcher.

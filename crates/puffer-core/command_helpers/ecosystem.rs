@@ -4,7 +4,7 @@ use super::CommandActionEntry;
 use crate::AppState;
 use anyhow::Result;
 use puffer_config::{ensure_workspace_dirs, ConfigPaths};
-use puffer_resources::{load_resources, plugin_mcp_servers, LoadedResources, SourceKind};
+use puffer_resources::{plugin_mcp_servers, LoadedResources, SourceKind};
 use puffer_session_store::SessionStore;
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
@@ -272,14 +272,23 @@ pub(crate) fn handle_ide_command(
 #[allow(dead_code)]
 pub(crate) fn reload_resources_from_disk(state: &AppState) -> Result<LoadedResources> {
     let paths = ConfigPaths::discover(&state.cwd);
-    ensure_workspace_dirs(&paths)?;
-    reload_resources_from_paths(&paths)
+    let remote_tool_runner = state.config.remote_tool_runner.as_ref();
+    let remote_tool_runner_enabled = remote_tool_runner.is_some();
+    if !remote_tool_runner_enabled {
+        ensure_workspace_dirs(&paths)?;
+    }
+    reload_resources_from_paths(&paths, remote_tool_runner)
 }
 
 #[allow(dead_code)]
-fn reload_resources_from_paths(paths: &ConfigPaths) -> Result<LoadedResources> {
-    let mut resources = load_resources(paths)?;
-    apply_mcp_enablement_overrides(paths, &mut resources)?;
+fn reload_resources_from_paths(
+    paths: &ConfigPaths,
+    remote_tool_runner: Option<&puffer_config::RemoteToolRunnerConfig>,
+) -> Result<LoadedResources> {
+    let mut resources = crate::load_runtime_resources_for_paths(paths, remote_tool_runner)?;
+    if remote_tool_runner.is_none() {
+        apply_mcp_enablement_overrides(paths, &mut resources)?;
+    }
     Ok(resources)
 }
 

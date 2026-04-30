@@ -1,11 +1,13 @@
 mod loader;
 mod model;
+mod project_resources;
 
 use std::collections::BTreeSet;
 
 pub use loader::{
-    agent_by_id, hook_by_id, load_resources, plugin_by_id, plugin_lsp_servers, plugin_mcp_servers,
-    prompt_by_id, prompt_for, skill_by_name,
+    agent_by_id, hook_by_id, load_resources, load_resources_for_runtime,
+    load_resources_for_runtime_with_extra_roots, plugin_by_id, plugin_lsp_servers,
+    plugin_mcp_servers, prompt_by_id, prompt_for, skill_by_name, RuntimeResourceRoot,
 };
 pub use model::{
     AgentMcpServerSpec, AgentMemoryScope, AgentSpec, HookSpec, IdeSpec, LoadedItem,
@@ -13,6 +15,7 @@ pub use model::{
     PromptTemplate, PromptVariableSpec, ProviderPack, SkillSpec, SourceInfo, SourceKind,
     ToolDisplaySpec, ToolMetadataSpec, ToolSpec,
 };
+pub use project_resources::{collect_project_resource_files, ProjectResourceFile};
 
 /// Looks up a mascot by id.
 pub fn mascot_by_id<'a>(resources: &'a LoadedResources, id: &str) -> Option<&'a MascotSpec> {

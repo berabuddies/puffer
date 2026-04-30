@@ -24,6 +24,14 @@ use std::path::{Path, PathBuf};
 /// `no providers are registered`.
 static BUILTIN_RESOURCES: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../resources");
 
+/// Describes one runtime-visible resource root plus the path shown in provenance metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeResourceRoot {
+    pub filesystem_root: PathBuf,
+    pub logical_root: PathBuf,
+    pub kind: SourceKind,
+}
+
 /// Loads bundled, user, and workspace resources into one in-memory registry.
 ///
 /// Merge order (later wins on id collision):
@@ -37,93 +45,30 @@ static BUILTIN_RESOURCES: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../reso
 ///    files (e.g. add a custom provider) without touching the install.
 /// 4. **Workspace** — `<cwd>/.puffer/resources/`. Project-level overrides.
 pub fn load_resources(paths: &ConfigPaths) -> Result<LoadedResources> {
+    load_resources_for_runtime(paths, false)
+}
+
+/// Loads runtime resources, optionally excluding workspace-local project layers.
+pub fn load_resources_for_runtime(
+    paths: &ConfigPaths,
+    remote_tool_runner_enabled: bool,
+) -> Result<LoadedResources> {
+    load_resources_for_runtime_with_extra_roots(paths, remote_tool_runner_enabled, &[], &[])
+}
+
+/// Loads runtime resources while layering additional filesystem roots into the merge order.
+pub fn load_resources_for_runtime_with_extra_roots(
+    paths: &ConfigPaths,
+    remote_tool_runner_enabled: bool,
+    extra_roots: &[RuntimeResourceRoot],
+    diagnostics: &[String],
+) -> Result<LoadedResources> {
     let mut loaded = LoadedResources::default();
     apply_embedded_resources(&mut loaded)?;
-    for (root, kind) in resource_roots(paths) {
-        // Filesystem layers are optional. Without this guard the misleading
-        // "no providers are registered" error used to fire whenever the
-        // user ran puffer from a directory with no sibling `resources/`.
-        if !root.exists() {
-            continue;
-        }
-        let plugins = load_yaml_dir::<PluginSpec>(&root.join("plugins"), kind)?;
-        merge_by_id(
-            &mut loaded.providers,
-            load_yaml_dir::<ProviderPack>(&root.join("providers"), kind)?,
-            |item| MergeKey::simple(item.value.id.clone()),
-            "provider",
-            &mut loaded.diagnostics,
-        );
-        merge_by_id(
-            &mut loaded.tools,
-            load_yaml_dir::<ToolSpec>(&root.join("tools"), kind)?,
-            |item| MergeKey::simple(item.value.id.clone()),
-            "tool",
-            &mut loaded.diagnostics,
-        );
-        merge_by_id(
-            &mut loaded.agents,
-            load_yaml_dir::<AgentSpec>(&root.join("agents"), kind)?,
-            |item| MergeKey::simple(item.value.id.clone()),
-            "agent",
-            &mut loaded.diagnostics,
-        );
-        merge_by_id(
-            &mut loaded.prompts,
-            load_yaml_dir::<PromptTemplate>(&root.join("prompts"), kind)?,
-            |item| prompt_variant_key(&item.value),
-            "prompt",
-            &mut loaded.diagnostics,
-        );
-        merge_by_id(
-            &mut loaded.hooks,
-            load_yaml_dir::<HookSpec>(&root.join("hooks"), kind)?,
-            |item| MergeKey::simple(item.value.id.clone()),
-            "hook",
-            &mut loaded.diagnostics,
-        );
-        merge_by_id(
-            &mut loaded.skills,
-            load_skill_dir(&root.join("skills"), kind)?,
-            |item| MergeKey::simple(item.value.name.clone()),
-            "skill",
-            &mut loaded.diagnostics,
-        );
-        merge_by_id(
-            &mut loaded.mascots,
-            load_yaml_dir::<MascotSpec>(&root.join("mascots"), kind)?,
-            |item| MergeKey::simple(item.value.id.clone()),
-            "mascot",
-            &mut loaded.diagnostics,
-        );
-        merge_by_id(
-            &mut loaded.plugins,
-            plugins.clone(),
-            |item| MergeKey::simple(item.value.id.clone()),
-            "plugin",
-            &mut loaded.diagnostics,
-        );
-        merge_by_id(
-            &mut loaded.agents,
-            plugin_agent_specs(&plugins),
-            |item| MergeKey::simple(item.value.id.clone()),
-            "agent",
-            &mut loaded.diagnostics,
-        );
-        merge_by_id(
-            &mut loaded.mcp_servers,
-            load_mcp_server_manifests(&root, kind)?,
-            |item| MergeKey::simple(item.value.id.clone()),
-            "mcp_server",
-            &mut loaded.diagnostics,
-        );
-        merge_by_id(
-            &mut loaded.ides,
-            load_yaml_dir::<IdeSpec>(&root.join("ides"), kind)?,
-            |item| MergeKey::simple(item.value.id.clone()),
-            "ide",
-            &mut loaded.diagnostics,
-        );
+    let roots = resource_roots(paths, remote_tool_runner_enabled, extra_roots);
+    loaded.diagnostics.extend(diagnostics.iter().cloned());
+    for root in roots {
+        load_resource_root_into(&mut loaded, &root)?;
     }
     Ok(loaded)
 }
@@ -301,15 +246,195 @@ fn plugin_agent_specs(plugins: &[LoadedItem<PluginSpec>]) -> Vec<LoadedItem<Agen
         .collect()
 }
 
-fn resource_roots(paths: &ConfigPaths) -> Vec<(PathBuf, SourceKind)> {
-    vec![
-        (paths.builtin_resources_dir.clone(), SourceKind::Builtin),
-        (paths.user_config_dir.join("resources"), SourceKind::User),
-        (
-            paths.workspace_config_dir.join("resources"),
-            SourceKind::Workspace,
+fn resource_roots(
+    paths: &ConfigPaths,
+    remote_tool_runner_enabled: bool,
+    extra_roots: &[RuntimeResourceRoot],
+) -> Vec<RuntimeResourceRoot> {
+    let mut roots = Vec::with_capacity(4 + extra_roots.len());
+    let mut extra_builtin_roots = Vec::new();
+    let mut extra_user_roots = Vec::new();
+    let mut extra_workspace_roots = Vec::new();
+    for root in extra_roots.iter().cloned() {
+        match root.kind {
+            SourceKind::Builtin => extra_builtin_roots.push(root),
+            SourceKind::User => extra_user_roots.push(root),
+            SourceKind::Workspace => extra_workspace_roots.push(root),
+        }
+    }
+
+    roots.extend(extra_builtin_roots);
+
+    if !remote_tool_runner_enabled
+        || !path_belongs_to_workspace_project(&paths.workspace_root, &paths.builtin_resources_dir)
+    {
+        roots.push(RuntimeResourceRoot {
+            filesystem_root: paths.builtin_resources_dir.clone(),
+            logical_root: paths.builtin_resources_dir.clone(),
+            kind: SourceKind::Builtin,
+        });
+    }
+    roots.push(RuntimeResourceRoot {
+        filesystem_root: paths.user_config_dir.join("resources"),
+        logical_root: paths.user_config_dir.join("resources"),
+        kind: SourceKind::User,
+    });
+    roots.extend(extra_user_roots);
+    if !remote_tool_runner_enabled {
+        roots.push(RuntimeResourceRoot {
+            filesystem_root: paths.workspace_config_dir.join("resources"),
+            logical_root: paths.workspace_config_dir.join("resources"),
+            kind: SourceKind::Workspace,
+        });
+    } else {
+        roots.extend(extra_workspace_roots);
+    }
+    roots
+}
+
+fn load_resource_root_into(loaded: &mut LoadedResources, root: &RuntimeResourceRoot) -> Result<()> {
+    if !root.filesystem_root.exists() {
+        return Ok(());
+    }
+    let plugins = rebase_source_paths(
+        load_yaml_dir::<PluginSpec>(&root.filesystem_root.join("plugins"), root.kind)?,
+        &root.filesystem_root,
+        &root.logical_root,
+    );
+    merge_by_id(
+        &mut loaded.providers,
+        rebase_source_paths(
+            load_yaml_dir::<ProviderPack>(&root.filesystem_root.join("providers"), root.kind)?,
+            &root.filesystem_root,
+            &root.logical_root,
         ),
-    ]
+        |item| MergeKey::simple(item.value.id.clone()),
+        "provider",
+        &mut loaded.diagnostics,
+    );
+    merge_by_id(
+        &mut loaded.tools,
+        rebase_source_paths(
+            load_yaml_dir::<ToolSpec>(&root.filesystem_root.join("tools"), root.kind)?,
+            &root.filesystem_root,
+            &root.logical_root,
+        ),
+        |item| MergeKey::simple(item.value.id.clone()),
+        "tool",
+        &mut loaded.diagnostics,
+    );
+    merge_by_id(
+        &mut loaded.agents,
+        rebase_source_paths(
+            load_yaml_dir::<AgentSpec>(&root.filesystem_root.join("agents"), root.kind)?,
+            &root.filesystem_root,
+            &root.logical_root,
+        ),
+        |item| MergeKey::simple(item.value.id.clone()),
+        "agent",
+        &mut loaded.diagnostics,
+    );
+    merge_by_id(
+        &mut loaded.prompts,
+        rebase_source_paths(
+            load_yaml_dir::<PromptTemplate>(&root.filesystem_root.join("prompts"), root.kind)?,
+            &root.filesystem_root,
+            &root.logical_root,
+        ),
+        |item| prompt_variant_key(&item.value),
+        "prompt",
+        &mut loaded.diagnostics,
+    );
+    merge_by_id(
+        &mut loaded.hooks,
+        rebase_source_paths(
+            load_yaml_dir::<HookSpec>(&root.filesystem_root.join("hooks"), root.kind)?,
+            &root.filesystem_root,
+            &root.logical_root,
+        ),
+        |item| MergeKey::simple(item.value.id.clone()),
+        "hook",
+        &mut loaded.diagnostics,
+    );
+    merge_by_id(
+        &mut loaded.skills,
+        rebase_source_paths(
+            load_skill_dir(&root.filesystem_root.join("skills"), root.kind)?,
+            &root.filesystem_root,
+            &root.logical_root,
+        ),
+        |item| MergeKey::simple(item.value.name.clone()),
+        "skill",
+        &mut loaded.diagnostics,
+    );
+    merge_by_id(
+        &mut loaded.mascots,
+        rebase_source_paths(
+            load_yaml_dir::<MascotSpec>(&root.filesystem_root.join("mascots"), root.kind)?,
+            &root.filesystem_root,
+            &root.logical_root,
+        ),
+        |item| MergeKey::simple(item.value.id.clone()),
+        "mascot",
+        &mut loaded.diagnostics,
+    );
+    merge_by_id(
+        &mut loaded.plugins,
+        plugins.clone(),
+        |item| MergeKey::simple(item.value.id.clone()),
+        "plugin",
+        &mut loaded.diagnostics,
+    );
+    merge_by_id(
+        &mut loaded.agents,
+        plugin_agent_specs(&plugins),
+        |item| MergeKey::simple(item.value.id.clone()),
+        "agent",
+        &mut loaded.diagnostics,
+    );
+    merge_by_id(
+        &mut loaded.mcp_servers,
+        rebase_source_paths(
+            load_mcp_server_manifests(&root.filesystem_root, root.kind)?,
+            &root.filesystem_root,
+            &root.logical_root,
+        ),
+        |item| MergeKey::simple(item.value.id.clone()),
+        "mcp_server",
+        &mut loaded.diagnostics,
+    );
+    merge_by_id(
+        &mut loaded.ides,
+        rebase_source_paths(
+            load_yaml_dir::<IdeSpec>(&root.filesystem_root.join("ides"), root.kind)?,
+            &root.filesystem_root,
+            &root.logical_root,
+        ),
+        |item| MergeKey::simple(item.value.id.clone()),
+        "ide",
+        &mut loaded.diagnostics,
+    );
+    Ok(())
+}
+
+fn rebase_source_paths<T>(
+    items: Vec<LoadedItem<T>>,
+    filesystem_root: &Path,
+    logical_root: &Path,
+) -> Vec<LoadedItem<T>> {
+    items
+        .into_iter()
+        .map(|mut item| {
+            if let Ok(relative) = item.source_info.path.strip_prefix(filesystem_root) {
+                item.source_info.path = logical_root.join(relative);
+            }
+            item
+        })
+        .collect()
+}
+
+fn path_belongs_to_workspace_project(workspace_root: &Path, candidate: &Path) -> bool {
+    candidate.starts_with(workspace_root)
 }
 
 /// Applies the compile-time-embedded resources as the base layer of the
@@ -1111,6 +1236,78 @@ mod tests {
             .diagnostics
             .iter()
             .any(|item| item.contains("workspace prompt `review`")));
+    }
+
+    #[test]
+    fn remote_runtime_skips_workspace_project_resource_roots() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        let builtin = root.join("resources/prompts");
+        let workspace = root.join(".puffer/resources/prompts");
+        let user = root.join(".home/.puffer/resources/prompts");
+        fs::create_dir_all(&builtin).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&user).unwrap();
+        fs::write(
+            builtin.join("project-only.yaml"),
+            "id: project-only\ndescription: Project\ntemplate: project\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("workspace-only.yaml"),
+            "id: workspace-only\ndescription: Workspace\ntemplate: workspace\n",
+        )
+        .unwrap();
+        fs::write(
+            user.join("user-only.yaml"),
+            "id: user-only\ndescription: User\ntemplate: user\n",
+        )
+        .unwrap();
+
+        let paths = ConfigPaths {
+            workspace_root: root.clone(),
+            workspace_config_dir: root.join(".puffer"),
+            user_config_dir: root.join(".home/.puffer"),
+            builtin_resources_dir: root.join("resources"),
+        };
+        let loaded = load_resources_for_runtime(&paths, true).unwrap();
+        assert!(prompt_by_id(&loaded, "project-only").is_none());
+        assert!(prompt_by_id(&loaded, "workspace-only").is_none());
+        assert_eq!(
+            prompt_by_id(&loaded, "user-only")
+                .expect("user resource should still load")
+                .value
+                .template,
+            "user"
+        );
+    }
+
+    #[test]
+    fn remote_runtime_keeps_external_builtin_resource_roots() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        let external = temp.path().join("external/resources/prompts");
+        fs::create_dir_all(&external).unwrap();
+        fs::write(
+            external.join("external-only.yaml"),
+            "id: external-only\ndescription: External\ntemplate: external\n",
+        )
+        .unwrap();
+
+        let paths = ConfigPaths {
+            workspace_root: root.clone(),
+            workspace_config_dir: root.join(".puffer"),
+            user_config_dir: root.join(".home/.puffer"),
+            builtin_resources_dir: temp.path().join("external/resources"),
+        };
+        let loaded = load_resources_for_runtime(&paths, true).unwrap();
+        assert_eq!(
+            prompt_by_id(&loaded, "external-only")
+                .expect("external builtin override should still load")
+                .value
+                .template,
+            "external"
+        );
     }
 
     #[test]

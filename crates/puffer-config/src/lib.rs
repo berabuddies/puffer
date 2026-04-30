@@ -53,8 +53,6 @@ pub struct RemoteToolRunnerConfig {
     #[serde(default)]
     pub remote_cwd: Option<String>,
     #[serde(default)]
-    pub enabled_tools: Vec<String>,
-    #[serde(default)]
     pub path_map: Option<RemotePathMapConfig>,
 }
 

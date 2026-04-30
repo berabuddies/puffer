@@ -12,3 +12,5 @@ benchmark/*.pyc
 # Claude Code + OMX tool metadata
 .claude/
 .omx/
+
+**/.DS_Store

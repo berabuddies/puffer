@@ -3,7 +3,8 @@ use super::claude_tools::{
 };
 use anyhow::{anyhow, bail, Context, Result};
 use puffer_remote_tools::{
-    RemoteToolCapabilities, RemoteToolChunk, RemoteToolChunkStream, RemoteToolRequest,
+    RemoteToolCapabilities, RemoteToolChunk, RemoteToolChunkStream, RemoteToolExecutionContext,
+    RemoteToolRequest, RemoteWebSearchRequest,
 };
 use puffer_tools::{ToolExecutionResult, ToolOutput};
 use serde_json::{json, Value};
@@ -20,6 +21,7 @@ const REMOTE_TOOL_IDS: &[&str] = &[
     "Grep",
     "NotebookEdit",
     "WebFetch",
+    "WebSearch",
     "Sleep",
 ];
 
@@ -113,6 +115,12 @@ where
             serde_json::to_string_pretty(&web_fetch::execute_claude_web_fetch(input)?)
                 .context("failed to serialize WebFetch output")?,
         ),
+        "WebSearch" => execute_remote_stdout_tool(
+            &request.tool_id,
+            super::claude_tools::web_search::execute_remote_web_search(
+                &remote_web_search_request(request)?,
+            )?,
+        ),
         "Sleep" => execute_remote_stdout_tool(&request.tool_id, execute_remote_sleep(input)?),
         other => bail!("tool `{other}` is not supported by the remote runner"),
     }
@@ -177,4 +185,16 @@ fn execute_remote_sleep(input: Value) -> Result<String> {
         "completed": true,
         "reason": input.get("reason").cloned().unwrap_or(Value::Null),
     }))?)
+}
+
+fn remote_web_search_request(request: &RemoteToolRequest) -> Result<RemoteWebSearchRequest> {
+    let raw = request
+        .execution_context_json
+        .as_deref()
+        .ok_or_else(|| anyhow!("WebSearch remote execution context is missing"))?;
+    let context: RemoteToolExecutionContext =
+        serde_json::from_str(raw).context("invalid WebSearch remote execution context")?;
+    match context {
+        RemoteToolExecutionContext::WebSearch(request) => Ok(request),
+    }
 }

@@ -5,7 +5,7 @@ use crate::resource_fs::{
 };
 use anyhow::{Context, Result};
 use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
-use puffer_core::load_agent_catalog;
+use puffer_core::load_agent_catalog_for_runtime;
 use puffer_provider_registry::{AuthMode, AuthStore, ProviderRegistry};
 use puffer_resources::{LoadedResources, McpServerSpec, PluginSpec, SourceKind};
 use serde::{Deserialize, Serialize};
@@ -22,8 +22,14 @@ pub(crate) fn run_agents_command(
     config: &PufferConfig,
     setting_sources: Option<&str>,
 ) -> Result<()> {
-    ensure_workspace_dirs(paths)?;
-    let agents = load_agent_catalog(&paths.workspace_root, config.default_model.as_deref())?;
+    if config.remote_tool_runner.is_none() {
+        ensure_workspace_dirs(paths)?;
+    }
+    let agents = load_agent_catalog_for_runtime(
+        &paths.workspace_root,
+        config.default_model.as_deref(),
+        config.remote_tool_runner.as_ref(),
+    )?;
     let agents_path = paths
         .workspace_config_dir
         .join("resources/agents/workspace.yaml");

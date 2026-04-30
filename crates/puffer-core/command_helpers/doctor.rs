@@ -332,9 +332,13 @@ fn append_resource_section(
         text,
         "- providers={} agents_in_workspace={}",
         resources.providers.len(),
-        crate::load_agent_catalog(&state.cwd, state.current_model.as_deref())
-            .map(|agents| agents.len())
-            .unwrap_or(0)
+        crate::load_agent_catalog_for_runtime(
+            &state.cwd,
+            state.current_model.as_deref(),
+            state.config.remote_tool_runner.as_ref(),
+        )
+        .map(|agents| agents.len())
+        .unwrap_or(0)
     )?;
     if resources.diagnostics.is_empty() {
         writeln!(text, "- resource_diagnostics=none")?;

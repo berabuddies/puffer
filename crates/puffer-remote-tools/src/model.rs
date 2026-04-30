@@ -16,6 +16,32 @@ pub struct RemoteToolRequest {
     pub cwd: String,
     pub working_dirs: Vec<String>,
     pub sandbox_mode: String,
+    pub execution_context_json: Option<String>,
+}
+
+/// Carries provider-specific execution context for remote-only tool behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "request", rename_all = "snake_case")]
+pub enum RemoteToolExecutionContext {
+    WebSearch(RemoteWebSearchRequest),
+}
+
+/// Identifies which response parser one remote WebSearch request needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RemoteWebSearchBackend {
+    #[serde(rename = "openai")]
+    OpenAi,
+    #[serde(rename = "anthropic")]
+    Anthropic,
+}
+
+/// Stores one fully built HTTP request for remote WebSearch execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteWebSearchRequest {
+    pub backend: RemoteWebSearchBackend,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: String,
 }
 
 /// Identifies which output stream emitted one chunk.
@@ -40,6 +66,12 @@ pub struct RemoteToolCapabilities {
     pub streams_stdout_stderr: bool,
 }
 
+/// Carries one remote project resource file returned by the tool runner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteProjectResourceFile {
+    pub relative_path: String,
+    pub content: String,
+}
 impl From<RemoteToolRequest> for proto::ExecuteToolRequest {
     fn from(value: RemoteToolRequest) -> Self {
         Self {
@@ -50,6 +82,7 @@ impl From<RemoteToolRequest> for proto::ExecuteToolRequest {
             cwd: value.cwd,
             working_dirs: value.working_dirs,
             sandbox_mode: value.sandbox_mode,
+            execution_context_json: value.execution_context_json.unwrap_or_default(),
         }
     }
 }
@@ -72,6 +105,8 @@ impl TryFrom<proto::ExecuteToolRequest> for RemoteToolRequest {
             cwd: value.cwd,
             working_dirs: value.working_dirs,
             sandbox_mode: value.sandbox_mode,
+            execution_context_json: (!value.execution_context_json.trim().is_empty())
+                .then_some(value.execution_context_json),
         })
     }
 }
@@ -82,6 +117,15 @@ impl From<proto::DescribeCapabilitiesResponse> for RemoteToolCapabilities {
             version: value.version,
             supported_tools: value.supported_tools,
             streams_stdout_stderr: value.streams_stdout_stderr,
+        }
+    }
+}
+
+impl From<proto::ProjectResourceFile> for RemoteProjectResourceFile {
+    fn from(value: proto::ProjectResourceFile) -> Self {
+        Self {
+            relative_path: value.relative_path,
+            content: value.content,
         }
     }
 }

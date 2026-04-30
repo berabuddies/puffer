@@ -31,14 +31,16 @@ use command_surface::{
     run_update_command,
 };
 use puffer_config::{ensure_workspace_dirs, load_config, ConfigPaths};
-use puffer_core::{resolve_resume_launch, supported_commands, AppState, ResumeLaunchResolution};
+use puffer_core::{
+    load_runtime_resources_for_paths, resolve_resume_launch, supported_commands, AppState,
+    ResumeLaunchResolution,
+};
 use puffer_provider_openai::{
     exchange_authorization_code as exchange_openai_code,
     parse_authorization_input as parse_openai_authorization_input,
     refresh_oauth_token as refresh_openai_oauth_token,
 };
 use puffer_provider_registry::{AuthMode, AuthStore, ProviderRegistry, StoredCredential};
-use puffer_resources::load_resources;
 use puffer_session_store::SessionStore;
 use puffer_tools::ToolRegistry;
 use puffer_transport_anthropic::{
@@ -82,7 +84,8 @@ fn main() -> Result<()> {
     let config = load_config(&paths)?;
     let auth_path = paths.user_config_dir.join("auth.json");
     let mut auth_store = AuthStore::load(&auth_path)?;
-    let mut resources = load_resources(&paths)?;
+    let mut resources =
+        load_runtime_resources_for_paths(&paths, config.remote_tool_runner.as_ref())?;
 
     let mut providers = ProviderRegistry::new();
     for provider in &resources.providers {

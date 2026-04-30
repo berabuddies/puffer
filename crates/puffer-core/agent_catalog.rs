@@ -1,5 +1,5 @@
 use anyhow::Result;
-use puffer_config::{ensure_workspace_dirs, ConfigPaths};
+use puffer_config::{ensure_workspace_dirs, ConfigPaths, RemoteToolRunnerConfig};
 use puffer_resources::{load_resources, plugin_mcp_servers, LoadedResources, SourceKind};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -31,7 +31,16 @@ pub fn load_agent_catalog(
     cwd: &Path,
     current_model: Option<&str>,
 ) -> Result<Vec<AgentCatalogEntry>> {
-    let resources = load_agent_resources(cwd, current_model)?;
+    load_agent_catalog_for_runtime(cwd, current_model, None)
+}
+
+/// Loads the current agent catalog using the active remote-runner resource policy.
+pub fn load_agent_catalog_for_runtime(
+    cwd: &Path,
+    current_model: Option<&str>,
+    remote_tool_runner: Option<&RemoteToolRunnerConfig>,
+) -> Result<Vec<AgentCatalogEntry>> {
+    let resources = load_agent_resources(cwd, current_model, remote_tool_runner)?;
     let available_mcp_servers = available_mcp_server_names(&resources);
     let mut agents = resources
         .agents
@@ -75,8 +84,12 @@ pub fn load_agent_catalog(
 pub(crate) fn load_agent_resources(
     cwd: &Path,
     current_model: Option<&str>,
+    remote_tool_runner: Option<&RemoteToolRunnerConfig>,
 ) -> Result<LoadedResources> {
     let paths = ConfigPaths::discover(cwd);
+    if let Some(config) = remote_tool_runner {
+        return crate::load_runtime_resources_for_paths(&paths, Some(config));
+    }
     ensure_workspace_dirs(&paths)?;
     let agents_dir = workspace_agents_dir(&paths);
     fs::create_dir_all(&agents_dir)?;
