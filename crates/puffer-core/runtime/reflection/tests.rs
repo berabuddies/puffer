@@ -10,6 +10,7 @@ fn bash_invocation(command: &str, output: &str, success: bool) -> ToolInvocation
         input: format!(r#"{{"command":"{command}","description":"run verifier"}}"#),
         output: output.to_string(),
         success,
+        terminate: false,
     }
 }
 
@@ -20,6 +21,7 @@ fn write_invocation(path: &str, content: &str) -> ToolInvocation {
         input: format!(r#"{{"file_path":"{path}","content":{content:?}}}"#),
         output: String::new(),
         success: true,
+        terminate: false,
     }
 }
 

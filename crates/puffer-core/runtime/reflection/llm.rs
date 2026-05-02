@@ -231,6 +231,7 @@ fn render_items(items: &[ConversationItem], max_tool_output_chars: usize) -> Str
             ConversationItem::Reasoning {
                 summary,
                 encrypted_content: _,
+                redacted: _,
             } => {
                 let text = summary
                     .iter()

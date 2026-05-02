@@ -42,15 +42,17 @@ pub use runtime::subscription_manager;
 pub use runtime::teammate_loop;
 pub use runtime::{
     execute_side_question, execute_user_prompt_streaming as execute_user_turn_streaming,
+    execute_user_prompt_streaming_with_cancel as execute_user_turn_streaming_with_cancel,
     execute_user_prompt_streaming_with_permissions as execute_user_turn_streaming_with_permissions,
     execute_user_prompt_streaming_with_reflection as execute_user_turn_streaming_with_reflection,
     execute_user_prompt_streaming_with_structured_output as execute_user_turn_streaming_with_structured_output,
     execute_user_prompt_with_structured_output as execute_user_turn_with_structured_output,
     shutdown_runtime_services, with_permission_prompt_handler, with_user_question_prompt_handler,
-    CodeJudgeConfig, LlmJudgeConfig, LlmJudgeContextScope, LlmJudgeMode, LlmJudgePromptCacheMode,
-    PermissionPromptAction, PermissionPromptRequest, ReflectionConfig, ReflectionLanguage,
-    ReflectionTraceEvent, StructuredOutputConfig, ToolCallRequest, ToolInvocation, TurnExecution,
-    TurnStreamEvent, TurnUsageReport, UserQuestionPromptRequest, UserQuestionPromptResponse,
+    CancelToken, CodeJudgeConfig, LlmJudgeConfig, LlmJudgeContextScope, LlmJudgeMode,
+    LlmJudgePromptCacheMode, PermissionPromptAction, PermissionPromptRequest, ReflectionConfig,
+    ReflectionLanguage, ReflectionTraceEvent, StructuredOutputConfig, ToolCallRequest,
+    ToolInvocation, TurnExecution, TurnStreamEvent, TurnUsageReport, UserQuestionPromptRequest,
+    UserQuestionPromptResponse,
 };
 pub use state::{AppState, MessageRole, RenderedMessage, TaskRecord, TaskStatus};
 

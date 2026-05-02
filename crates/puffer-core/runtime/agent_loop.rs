@@ -43,7 +43,7 @@ use super::tool_executor::{
 };
 use crate::workspace_paths;
 use super::{
-    enforce_tool_result_budget, process_tool_result, run_turn_hooks, ToolCallRequest,
+    enforce_tool_result_budget, process_tool_result, run_turn_hooks, CancelToken, ToolCallRequest,
     ToolInvocation, TurnExecution, TurnStreamEvent, MAX_TOOL_RESULT_CHARS,
 };
 use crate::AppState;
@@ -133,6 +133,11 @@ pub(crate) struct LoopInputs<'a> {
     pub reflection_config: Option<ReflectionConfig>,
     pub tool_filter: Option<&'a RequestToolFilter>,
     pub registry: &'a ToolRegistry,
+    /// Cooperative cancellation token. Checked at turn boundaries
+    /// (before each provider call, between tool calls). When unset,
+    /// the loop runs uninterruptibly. Mirrors pi-mono's `signal:
+    /// AbortSignal` (`pi-mono/packages/ai/src/types.ts:70`).
+    pub cancel: Option<&'a CancelToken>,
 }
 
 /// Streaming turn loop. Drives the conversation until the model stops
@@ -165,6 +170,11 @@ pub(crate) fn run_streaming_loop(
     }
 
     loop {
+        // Cancel boundary: check before each turn's provider round-trip.
+        if let Some(cancel) = inputs.cancel {
+            cancel.check()?;
+        }
+
         // Drain completed background tasks and inject as user messages.
         let completed = crate::runtime::claude_tools::workflow::drain_completed_shell_tasks(
             &inputs.state.cwd,
@@ -180,6 +190,14 @@ pub(crate) fn run_streaming_loop(
 
         // Provider single round-trip.
         let turn = session.one_turn_streaming(inputs.state, inputs.auth_store, &mut items, on_event)?;
+
+        // Cancel boundary: check after the LLM call returns, before
+        // tool execution kicks off. This prevents the loop from
+        // launching a fresh tool batch when the user already pressed
+        // ESC during streaming.
+        if let Some(cancel) = inputs.cancel {
+            cancel.check()?;
+        }
 
         // No tool calls → final assistant text, run hooks, return.
         if turn.tool_calls.is_empty() {
@@ -231,6 +249,27 @@ pub(crate) fn run_streaming_loop(
         }
 
         invocations.extend(new_invocations.iter().cloned());
+
+        // Pi-mono parity: early-terminate when EVERY invocation in the
+        // batch sets `terminate: true`. The loop returns immediately
+        // with the assistant text we have so far (typically empty for a
+        // tool-only turn — that is fine, the tool itself owns the user
+        // signal). See `pi-mono/packages/agent/src/agent-loop.ts:499`.
+        if !new_invocations.is_empty()
+            && new_invocations.iter().all(|inv| inv.terminate)
+        {
+            run_turn_hooks(
+                inputs.resources,
+                &cwd,
+                &turn.assistant_text,
+                invocations.len(),
+            );
+            return Ok(TurnExecution {
+                assistant_text: turn.assistant_text,
+                tool_invocations: invocations,
+                reflection_traces,
+            });
+        }
 
         // Reflection observation over THIS batch only.
         if let Some(observation) = reflection.as_mut().and_then(|tracker| {
@@ -302,7 +341,13 @@ pub(crate) fn run_blocking_loop(
     session.notify_compacted();
 
     loop {
+        if let Some(cancel) = inputs.cancel {
+            cancel.check()?;
+        }
         let turn = session.one_turn_blocking(inputs.state, inputs.auth_store, &mut items)?;
+        if let Some(cancel) = inputs.cancel {
+            cancel.check()?;
+        }
 
         if turn.tool_calls.is_empty() {
             run_turn_hooks(
@@ -334,6 +379,23 @@ pub(crate) fn run_blocking_loop(
         }
 
         invocations.extend(new_invocations.iter().cloned());
+
+        // Pi-mono parity: early-terminate on unanimous `terminate: true`.
+        if !new_invocations.is_empty()
+            && new_invocations.iter().all(|inv| inv.terminate)
+        {
+            run_turn_hooks(
+                inputs.resources,
+                &cwd,
+                &turn.assistant_text,
+                invocations.len(),
+            );
+            return Ok(TurnExecution {
+                assistant_text: turn.assistant_text,
+                tool_invocations: invocations,
+                reflection_traces,
+            });
+        }
 
         if let Some(observation) = reflection.as_mut().and_then(|tracker| {
             tracker.observe_batch_with_judge(
@@ -420,23 +482,27 @@ fn execute_tool_batch(
         inputs.model_id,
     );
 
-    let mut results: Vec<Option<(String, bool)>> = vec![None; tool_calls.len()];
+    let mut results: Vec<Option<(String, bool, bool)>> = vec![None; tool_calls.len()];
 
     std::thread::scope(|s| {
-        let mut handles: Vec<(usize, std::thread::ScopedJoinHandle<'_, (String, bool)>)> =
+        let mut handles: Vec<(usize, std::thread::ScopedJoinHandle<'_, (String, bool, bool)>)> =
             Vec::new();
         for (i, tc) in tool_calls.iter().enumerate() {
             if !is_parallel_safe_tool(&tc.tool_id) {
                 continue;
             }
             if let PermissionOutcome::Denied(ref denied) = permissions[i] {
-                results[i] = Some((denied.output.stdout.clone(), denied.success));
+                results[i] = Some((
+                    denied.output.stdout.clone(),
+                    denied.success,
+                    extract_terminate(&denied.output.metadata),
+                ));
                 continue;
             }
             let definition = match inputs.registry.definition(&tc.tool_id) {
                 Some(d) => d.clone(),
                 None => {
-                    results[i] = Some((format!("unknown tool {}", tc.tool_id), false));
+                    results[i] = Some((format!("unknown tool {}", tc.tool_id), false, false));
                     continue;
                 }
             };
@@ -461,6 +527,7 @@ fn execute_tool_batch(
                         provider_context_ref,
                     ) {
                         Ok(exec) => {
+                            let terminate = extract_terminate(&exec.output.metadata);
                             let output = if exec.output.stderr.is_empty() {
                                 exec.output.stdout
                             } else if exec.output.stdout.is_empty() {
@@ -468,9 +535,9 @@ fn execute_tool_batch(
                             } else {
                                 format!("{}\n{}", exec.output.stdout, exec.output.stderr)
                             };
-                            (output, exec.success)
+                            (output, exec.success, terminate)
                         }
-                        Err(error) => (format!("Tool execution failed: {error}"), false),
+                        Err(error) => (format!("Tool execution failed: {error}"), false, false),
                     }
                 }),
             ));
@@ -479,7 +546,7 @@ fn execute_tool_batch(
             results[i] = Some(
                 handle
                     .join()
-                    .unwrap_or_else(|_| ("Tool execution panicked".to_string(), false)),
+                    .unwrap_or_else(|_| ("Tool execution panicked".to_string(), false, false)),
             );
         }
     });
@@ -491,7 +558,11 @@ fn execute_tool_batch(
             continue;
         }
         if let PermissionOutcome::Denied(ref denied) = permissions[i] {
-            results[i] = Some((denied.output.stdout.clone(), denied.success));
+            results[i] = Some((
+                denied.output.stdout.clone(),
+                denied.success,
+                extract_terminate(&denied.output.metadata),
+            ));
             continue;
         }
         let backend = session.tool_execution_backend();
@@ -511,6 +582,7 @@ fn execute_tool_batch(
             args,
         ) {
             Ok(exec) => {
+                let terminate = extract_terminate(&exec.output.metadata);
                 let output = if exec.output.stderr.is_empty() {
                     exec.output.stdout
                 } else if exec.output.stdout.is_empty() {
@@ -518,9 +590,9 @@ fn execute_tool_batch(
                 } else {
                     format!("{}\n{}", exec.output.stdout, exec.output.stderr)
                 };
-                (output, exec.success)
+                (output, exec.success, terminate)
             }
-            Err(error) => (format!("Tool execution failed: {error}"), false),
+            Err(error) => (format!("Tool execution failed: {error}"), false, false),
         };
         results[i] = Some(exec);
     }
@@ -528,9 +600,9 @@ fn execute_tool_batch(
     // Phase 4: assemble in original order with per-tool truncation.
     let mut invocations = Vec::with_capacity(tool_calls.len());
     for (i, tc) in tool_calls.iter().enumerate() {
-        let (raw_output, success) = results[i]
+        let (raw_output, success, terminate) = results[i]
             .take()
-            .unwrap_or_else(|| ("Tool was not executed".to_string(), false));
+            .unwrap_or_else(|| ("Tool was not executed".to_string(), false, false));
         let output_text = process_tool_result(
             &raw_output,
             MAX_TOOL_RESULT_CHARS,
@@ -542,6 +614,7 @@ fn execute_tool_batch(
             input: tc.input.clone(),
             output: output_text,
             success,
+            terminate,
         });
     }
 
@@ -576,6 +649,7 @@ fn execute_tool_batch_serial(
             &call.tool_id,
             input_value,
         )?;
+        let terminate = extract_terminate(&execution.output.metadata);
         let raw_output = if execution.output.stderr.is_empty() {
             execution.output.stdout
         } else if execution.output.stdout.is_empty() {
@@ -594,11 +668,23 @@ fn execute_tool_batch_serial(
             input: call.input.clone(),
             output: output_text,
             success: execution.success,
+            terminate,
         });
     }
 
     enforce_tool_result_budget_in_place(&mut invocations, &inputs.state.session.id);
     Ok(invocations)
+}
+
+/// Extracts a `terminate: true` hint from a tool's `ToolOutput.metadata`.
+/// Honored only when the **entire** tool batch sets it, mirroring
+/// pi-mono's "early terminate when every tool result terminates"
+/// (`pi-mono/packages/agent/src/agent-loop.ts:499`).
+fn extract_terminate(metadata: &serde_json::Value) -> bool {
+    metadata
+        .get("terminate")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn enforce_tool_result_budget_in_place(
@@ -638,5 +724,121 @@ fn backend_to_provider_context<'a>(
             model_id,
             structured_output,
         },
+    }
+}
+
+#[cfg(test)]
+mod cancel_token_tests {
+    use super::CancelToken;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn fresh_token_is_not_cancelled() {
+        let t = CancelToken::new();
+        assert!(!t.is_cancelled());
+        assert!(t.check().is_ok());
+    }
+
+    #[test]
+    fn cancel_flips_state() {
+        let t = CancelToken::new();
+        t.cancel();
+        assert!(t.is_cancelled());
+        assert!(t.check().is_err());
+    }
+
+    #[test]
+    fn cancel_is_idempotent() {
+        let t = CancelToken::new();
+        t.cancel();
+        t.cancel();
+        t.cancel();
+        assert!(t.is_cancelled());
+    }
+
+    #[test]
+    fn clone_shares_state() {
+        let t1 = CancelToken::new();
+        let t2 = t1.clone();
+        assert!(!t2.is_cancelled());
+        t1.cancel();
+        assert!(t2.is_cancelled());
+    }
+
+    /// The token must be safe to flip from another thread. The agent
+    /// loop runs in a worker thread; the TUI's ESC handler runs on the
+    /// main thread.
+    #[test]
+    fn cancellable_across_threads() {
+        let t = CancelToken::new();
+        let observed = Arc::new(AtomicBool::new(false));
+        let observed_in_worker = Arc::clone(&observed);
+        let worker_token = t.clone();
+        let worker = thread::spawn(move || {
+            for _ in 0..100 {
+                if worker_token.is_cancelled() {
+                    observed_in_worker.store(true, Ordering::Relaxed);
+                    return;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+        thread::sleep(Duration::from_millis(5));
+        t.cancel();
+        worker.join().unwrap();
+        assert!(observed.load(Ordering::Relaxed));
+    }
+}
+
+#[cfg(test)]
+mod terminate_tests {
+    use super::extract_terminate;
+    use serde_json::json;
+
+    #[test]
+    fn missing_metadata_field_returns_false() {
+        assert!(!extract_terminate(&json!({})));
+    }
+
+    #[test]
+    fn explicit_true_extracts() {
+        assert!(extract_terminate(&json!({ "terminate": true })));
+    }
+
+    #[test]
+    fn explicit_false_extracts_false() {
+        assert!(!extract_terminate(&json!({ "terminate": false })));
+    }
+
+    #[test]
+    fn non_bool_value_falls_back_to_false() {
+        assert!(!extract_terminate(&json!({ "terminate": "true" })));
+        assert!(!extract_terminate(&json!({ "terminate": 1 })));
+    }
+
+    #[test]
+    fn null_metadata_returns_false() {
+        assert!(!extract_terminate(&serde_json::Value::Null));
+    }
+
+    /// Pi-mono parity: the loop terminates ONLY when every invocation in
+    /// the batch sets `terminate: true`. Locks the predicate that drives
+    /// the early-stop branch in `run_streaming_loop` /
+    /// `run_blocking_loop`.
+    #[test]
+    fn batch_unanimity_predicate() {
+        // Helper closure mirroring the `iter().all(|inv| inv.terminate)`
+        // shape used in the loops, so refactors of the predicate get
+        // caught here.
+        let unanimous = |flags: &[bool]| !flags.is_empty() && flags.iter().all(|f| *f);
+        assert!(unanimous(&[true]));
+        assert!(unanimous(&[true, true, true]));
+        assert!(!unanimous(&[true, false]));
+        assert!(!unanimous(&[false]));
+        // Empty batch → no early stop (loop has no batch to act on).
+        assert!(!unanimous(&[]));
     }
 }

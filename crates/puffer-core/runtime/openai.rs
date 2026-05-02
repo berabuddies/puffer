@@ -587,6 +587,7 @@ pub(super) fn execute_openai_tool_calls(
             input: serde_json::to_string(&tc.arguments)?,
             output,
             success,
+            terminate: false,
         });
     }
 
@@ -664,6 +665,7 @@ fn execute_openai_tool_calls_serial(
             input: serde_json::to_string(&tool_call.arguments)?,
             output,
             success,
+            terminate: false,
         });
     }
 
@@ -1270,6 +1272,7 @@ fn run_responses_attempt(
         reflection_config: options.reflection.clone(),
         tool_filter: options.tool_filter,
         registry: &registry,
+        cancel: options.cancel,
     };
     match on_event {
         Some(sink) => super::agent_loop::run_streaming_loop(&mut inputs, &mut session, sink),
@@ -1430,6 +1433,7 @@ fn run_completions_attempt(
         reflection_config: options.reflection.clone(),
         tool_filter: options.tool_filter,
         registry: &registry,
+        cancel: options.cancel,
     };
     match on_event {
         Some(sink) => super::agent_loop::run_streaming_loop(&mut inputs, &mut session, sink),

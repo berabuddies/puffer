@@ -130,6 +130,7 @@ pub(super) fn run_llm_judge(
             structured_output: None,
             tool_filter: None,
             reflection: None,
+            cancel: None,
         },
     ) {
         Ok(response) => LlmJudgeAttempt {

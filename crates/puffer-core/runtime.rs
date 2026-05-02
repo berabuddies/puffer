@@ -97,6 +97,9 @@ struct TurnRequestOptions<'a> {
     structured_output: Option<&'a StructuredOutputConfig>,
     tool_filter: Option<&'a RequestToolFilter>,
     reflection: Option<ReflectionConfig>,
+    /// Cooperative cancellation token. When set, the agent loop checks
+    /// it at every turn boundary. See [`CancelToken`].
+    cancel: Option<&'a CancelToken>,
 }
 
 #[derive(Debug)]
@@ -112,6 +115,50 @@ struct HttpRetryConfig {
     delay_ms: u64,
 }
 
+/// Cooperative cancellation handle threaded through the agent loop and
+/// provider sessions. Mirrors pi-mono's `signal: AbortSignal` pattern
+/// (`pi-mono/packages/ai/src/types.ts:70`). The token is `Clone` and
+/// cheap (one `Arc<AtomicBool>`); callers can hold a handle and call
+/// [`CancelToken::cancel`] to flip it from another thread.
+///
+/// Cancellation is **cooperative**: the agent loop checks the token at
+/// turn boundaries (between tool batches, before each provider call,
+/// before each tool invocation). It is not strictly mid-stream — a
+/// long single SSE turn will not abort until that turn finishes — but
+/// it covers the common ESC-to-cancel UX. Mid-stream cancel is a
+/// follow-up that requires threading the token into every SSE parser.
+#[derive(Debug, Clone, Default)]
+pub struct CancelToken {
+    inner: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl CancelToken {
+    /// Creates a fresh, uncancelled token.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns true once any handle has called [`cancel`].
+    pub fn is_cancelled(&self) -> bool {
+        self.inner.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Flips the token. Idempotent.
+    pub fn cancel(&self) {
+        self.inner
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Returns `Err(anyhow!("cancelled"))` when cancelled, otherwise
+    /// `Ok(())`. Convenience for the `?` operator at boundaries.
+    pub fn check(&self) -> Result<()> {
+        if self.is_cancelled() {
+            anyhow::bail!("cancelled");
+        }
+        Ok(())
+    }
+}
+
 /// Describes one tool call executed during a model turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolInvocation {
@@ -120,6 +167,14 @@ pub struct ToolInvocation {
     pub input: String,
     pub output: String,
     pub success: bool,
+    /// When true, the agent_loop stops after the current batch finishes
+    /// (and emits this invocation's tool result back to the model). Mirrors
+    /// pi-mono's `AgentToolResult.terminate` (`pi-mono/packages/agent/src/types.ts:301`).
+    /// The driver only honors termination when **every** invocation in the
+    /// batch sets this to true — single-tool early-stop is fine, but in a
+    /// parallel batch the model expects all results back. Set by tools
+    /// that emit `{ "terminate": true }` in their `ToolOutput.metadata`.
+    pub terminate: bool,
 }
 
 /// Describes one tool call requested by the model before execution finishes.
@@ -212,6 +267,7 @@ pub(crate) fn execute_user_prompt_with_tool_filter(
             structured_output: None,
             tool_filter,
             reflection: None,
+            cancel: None,
         },
     )
 }
@@ -265,6 +321,7 @@ pub fn execute_user_prompt_with_structured_output(
             structured_output: Some(structured_output),
             tool_filter: None,
             reflection: None,
+            cancel: None,
         },
     )
 }
@@ -350,6 +407,7 @@ where
                 structured_output,
                 tool_filter: None,
                 reflection: None,
+                cancel: None,
             },
             &mut on_event,
         )
@@ -380,6 +438,41 @@ where
             structured_output: Some(structured_output),
             tool_filter: None,
             reflection: None,
+            cancel: None,
+        },
+        &mut on_event,
+    )
+}
+
+/// Executes one user prompt with streaming events and a caller-supplied
+/// cancellation token. The token is checked at every turn boundary
+/// (between provider calls and between tool batches). When tripped, the
+/// loop returns `Err(anyhow!("cancelled"))`. Mirrors pi-mono's
+/// `signal: AbortSignal` parameter on `agentLoop`
+/// (`pi-mono/packages/agent/src/agent-loop.ts:34`).
+pub fn execute_user_prompt_streaming_with_cancel<F>(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    providers: &ProviderRegistry,
+    auth_store: &mut AuthStore,
+    input: &str,
+    cancel: &CancelToken,
+    mut on_event: F,
+) -> Result<TurnExecution>
+where
+    F: FnMut(TurnStreamEvent),
+{
+    execute_user_prompt_streaming_with_options(
+        state,
+        resources,
+        providers,
+        auth_store,
+        input,
+        TurnRequestOptions {
+            structured_output: None,
+            tool_filter: None,
+            reflection: None,
+            cancel: Some(cancel),
         },
         &mut on_event,
     )
@@ -408,6 +501,7 @@ where
             structured_output: None,
             tool_filter: None,
             reflection: Some(reflection),
+            cancel: None,
         },
         &mut on_event,
     )

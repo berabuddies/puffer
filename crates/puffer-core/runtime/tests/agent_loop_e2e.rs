@@ -355,6 +355,100 @@ fn openai_responses_streaming_agent_loop_runs_tool_then_text() {
 }
 
 // ---------------------------------------------------------------------------
+// OpenAI Responses — streaming SSE with reasoning summary deltas.
+// Verifies that `response.reasoning_summary_text.delta` events round-trip
+// from the SSE parser through the agent_loop session out to the
+// `on_event` callback as `TurnStreamEvent::ThinkingDelta`. Locks in the
+// hanbbq-relay reasoning visibility regression: the relay returns
+// 80+ reasoning summary deltas per turn but the TUI was showing no
+// thinking block, suggesting the chain was being broken somewhere.
+// ---------------------------------------------------------------------------
+
+fn openai_responses_reasoning_sse() -> String {
+    concat!(
+        "event: response.created\n",
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_r\"}}\n\n",
+        "event: response.output_item.added\n",
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[]}}\n\n",
+        "event: response.reasoning_summary_part.added\n",
+        "data: {\"type\":\"response.reasoning_summary_part.added\",\"output_index\":0,\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"\"}}\n\n",
+        "event: response.reasoning_summary_text.delta\n",
+        "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"Step 1.\",\"output_index\":0,\"summary_index\":0}\n\n",
+        "event: response.reasoning_summary_text.delta\n",
+        "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\" Step 2.\",\"output_index\":0,\"summary_index\":0}\n\n",
+        "event: response.reasoning_summary_text.done\n",
+        "data: {\"type\":\"response.reasoning_summary_text.done\",\"output_index\":0,\"summary_index\":0,\"text\":\"Step 1. Step 2.\"}\n\n",
+        "event: response.output_item.done\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Step 1. Step 2.\"}]}}\n\n",
+        "event: response.output_item.added\n",
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\"}}\n\n",
+        "event: response.output_text.delta\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Yes\"}\n\n",
+        "event: response.output_text.done\n",
+        "data: {\"type\":\"response.output_text.done\",\"text\":\"Yes\"}\n\n",
+        "event: response.output_item.done\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Yes\"}]}}\n\n",
+        "event: response.completed\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_r\",\"status\":\"completed\",\"usage\":{\"input_tokens\":50,\"output_tokens\":10,\"input_tokens_details\":{\"cached_tokens\":0}}}}\n\n"
+    ).to_string()
+}
+
+#[test]
+fn openai_responses_streaming_emits_thinking_for_reasoning_summary() {
+    let temp = tempfile::tempdir().unwrap();
+    let (base_url, _requests, server) = spawn_server("text/event-stream", 1, |_| {
+        openai_responses_reasoning_sse()
+    });
+
+    let mut registry = ProviderRegistry::new();
+    registry.register(openai_provider(base_url));
+    let mut auth_store = AuthStore::default();
+    auth_store.set_api_key("openai", "sk-openai");
+
+    let mut state = AppState::new(
+        PufferConfig::default(),
+        temp.path().to_path_buf(),
+        session_for(temp.path()),
+    );
+    state.current_provider = Some("openai".to_string());
+    state.current_model = Some("openai/gpt-5".to_string());
+    state.session_allow_all = true;
+
+    let resources = LoadedResources::default();
+
+    let mut thinking_deltas: Vec<String> = Vec::new();
+    let mut text_deltas: Vec<String> = Vec::new();
+    let turn = execute_user_prompt_streaming(
+        &mut state,
+        &resources,
+        &registry,
+        &mut auth_store,
+        "is 17 prime?",
+        |event| match event {
+            TurnStreamEvent::ThinkingDelta(d) => thinking_deltas.push(d),
+            TurnStreamEvent::TextDelta(d) => text_deltas.push(d),
+            _ => {}
+        },
+    )
+    .unwrap();
+
+    server.join().unwrap();
+
+    assert_eq!(turn.assistant_text, "Yes");
+    assert!(
+        !thinking_deltas.is_empty(),
+        "ThinkingDelta MUST fire for response.reasoning_summary_text.delta events; \
+         got 0 deltas — the SSE→on_event chain is broken"
+    );
+    assert_eq!(
+        thinking_deltas.iter().map(String::as_str).collect::<Vec<_>>(),
+        vec!["Step 1.", " Step 2."],
+        "ThinkingDelta payloads must mirror the SSE delta tokens 1:1"
+    );
+    assert_eq!(text_deltas, vec!["Yes".to_string()]);
+}
+
+// ---------------------------------------------------------------------------
 // OpenAI Chat Completions — 2 turns (tool → text).
 // ---------------------------------------------------------------------------
 
@@ -778,3 +872,231 @@ fn openai_responses_agent_loop_threads_previous_response_id() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Anthropic multi-turn thinking round-trip — locks in the
+// `kimi-coding/k2p5` regression. Turn 1 returns
+// `[thinking{signature}, tool_use]`; Turn 2's wire body must replay the
+// thinking block (with signature) BEFORE the tool_use block within the
+// assistant message. Without this, providers like Kimi reject with
+// "reasoning_content is missing in assistant tool call message".
+// ---------------------------------------------------------------------------
+
+#[test]
+fn anthropic_agent_loop_replays_thinking_signature_on_next_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("fixture.txt"), "shared-text").unwrap();
+
+    let (base_url, requests, server) = spawn_server("application/json", 2, |index| {
+        if index == 0 {
+            // Turn 1: upstream produced a thinking block (with
+            // signature) followed by a tool_use block — exactly the
+            // shape Anthropic / Kimi return when extended thinking is
+            // enabled and the model decided to call a tool.
+            json!({
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "thinking",
+                        "thinking": "I should read fixture.txt to answer.",
+                        "signature": "sig-multi-turn-test"
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "call_kimi",
+                        "name": "read_file",
+                        "input": { "path": "fixture.txt" }
+                    }
+                ],
+                "stop_reason": "tool_use"
+            })
+            .to_string()
+        } else {
+            json!({
+                "id": "msg_2",
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "text", "text": "shared outcome" }],
+                "stop_reason": "end_turn"
+            })
+            .to_string()
+        }
+    });
+
+    let resources = LoadedResources {
+        tools: vec![loaded_tool("read_file", "Read a file", "read_file")],
+        ..LoadedResources::default()
+    };
+
+    let mut descriptor = provider();
+    descriptor.id = "local-anthropic".to_string();
+    descriptor.base_url = base_url;
+    descriptor.auth_modes.clear();
+    descriptor.models[0].provider = "local-anthropic".to_string();
+    let mut registry = ProviderRegistry::new();
+    registry.register(descriptor);
+
+    let mut state = AppState::new(
+        PufferConfig::default(),
+        temp.path().to_path_buf(),
+        session_for(temp.path()),
+    );
+    state.current_provider = Some("local-anthropic".to_string());
+    state.current_model = Some("local-anthropic/claude-sonnet-4-5".to_string());
+    state.session_allow_all = true;
+
+    let turn = execute_user_prompt(
+        &mut state,
+        &resources,
+        &registry,
+        &mut AuthStore::default(),
+        "please read fixture.txt",
+    )
+    .unwrap();
+    server.join().unwrap();
+
+    assert_eq!(turn.assistant_text, "shared outcome");
+    assert_eq!(turn.tool_invocations.len(), 1);
+    assert_eq!(turn.tool_invocations[0].call_id, "call_kimi");
+    assert!(turn.tool_invocations[0].output.contains("shared-text"));
+
+    let captured = requests.lock().unwrap();
+    assert_eq!(captured.len(), 2, "expected exactly two upstream requests");
+
+    let body2 = extract_request_body(&captured[1]);
+    let body2_json: Value = serde_json::from_str(body2).unwrap_or(Value::Null);
+    let messages = body2_json
+        .get("messages")
+        .and_then(Value::as_array)
+        .expect("messages array on second request");
+
+    // Find the assistant message that wraps the tool_use replay.
+    let assistant_msg = messages
+        .iter()
+        .find(|m| {
+            m.get("role").and_then(Value::as_str) == Some("assistant")
+                && m.get("content")
+                    .and_then(Value::as_array)
+                    .map(|blocks| blocks.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("tool_use")))
+                    .unwrap_or(false)
+        })
+        .expect("assistant message containing tool_use must be present in turn 2 wire body");
+
+    let blocks = assistant_msg["content"]
+        .as_array()
+        .expect("assistant message content must be a block array");
+
+    let kinds: Vec<&str> = blocks
+        .iter()
+        .filter_map(|b| b.get("type").and_then(Value::as_str))
+        .collect();
+    assert!(
+        kinds.first() == Some(&"thinking"),
+        "first content block must be `thinking` (Anthropic ordering rule), got: {kinds:?}\nbody: {body2}"
+    );
+    assert!(
+        kinds.contains(&"tool_use"),
+        "tool_use must be present in the assistant message, got: {kinds:?}"
+    );
+    let thinking_block = &blocks[0];
+    assert_eq!(thinking_block["thinking"], "I should read fixture.txt to answer.");
+    assert_eq!(thinking_block["signature"], "sig-multi-turn-test");
+
+    // Tool-use block must keep its original call_id so the upstream's
+    // own pairing logic still validates.
+    let tool_use_block = blocks
+        .iter()
+        .find(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
+        .expect("tool_use block expected");
+    assert_eq!(tool_use_block["id"], "call_kimi");
+    assert_eq!(tool_use_block["name"], "read_file");
+}
+
+// ---------------------------------------------------------------------------
+// Cancellation: when a `CancelToken` is passed via the public API and
+// flipped before the loop runs the next iteration, the loop returns
+// `Err("cancelled")` instead of completing the second turn.
+// Pi-mono parity: `agent-loop.ts` checks `signal` between turns.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cancel_token_aborts_agent_loop_between_turns() {
+    use crate::runtime::CancelToken;
+
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("fixture.txt"), "fixture-contents").unwrap();
+
+    // The mock server is told to expect 2 requests but the cancellation
+    // mid-flight should keep the second one from happening. We pre-flip
+    // the token AFTER the first response, so the loop's "before turn 2"
+    // boundary check trips. Use a request counter to flip the token in
+    // the response builder thread.
+    let cancel = CancelToken::new();
+    let cancel_for_server = cancel.clone();
+    let (base_url, requests, server) = spawn_server("application/json", 2, move |index| {
+        if index == 0 {
+            // Trip cancel right after responding to turn 1, so the
+            // loop's "before next provider call" check fires.
+            let body = openai_responses_tool_turn();
+            cancel_for_server.cancel();
+            body
+        } else {
+            // We never expect to reach this — the second mock response
+            // is here just so the server thread doesn't deadlock when
+            // it accepts a stray retry.
+            openai_responses_final_turn()
+        }
+    });
+
+    let mut registry = ProviderRegistry::new();
+    registry.register(openai_provider(base_url));
+    let mut auth_store = AuthStore::default();
+    auth_store.set_api_key("openai", "sk-openai");
+
+    let mut state = AppState::new(
+        PufferConfig::default(),
+        temp.path().to_path_buf(),
+        session_for(temp.path()),
+    );
+    state.current_provider = Some("openai".to_string());
+    state.current_model = Some("openai/gpt-5".to_string());
+    state.session_allow_all = true;
+
+    let resources = LoadedResources {
+        tools: vec![loaded_tool("read_file", "Read a file", "read_file")],
+        ..LoadedResources::default()
+    };
+
+    let result = crate::runtime::execute_user_prompt_streaming_with_cancel(
+        &mut state,
+        &resources,
+        &registry,
+        &mut auth_store,
+        "please read fixture.txt",
+        &cancel,
+        |_| {},
+    );
+
+    // The server thread expects 2 connections — once we cancel, we
+    // never make the 2nd. Drop the listener bound state by joining
+    // (it'll exit when its accept loop times out).
+    drop(server);
+
+    let err = result.expect_err("cancel must abort the loop");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("cancelled"),
+        "expected 'cancelled' in error, got: {msg}"
+    );
+
+    // Exactly one upstream request was made (turn 1) — turn 2 was
+    // skipped by the cancel boundary check.
+    let captured = requests.lock().unwrap();
+    assert_eq!(
+        captured.len(),
+        1,
+        "cancel should stop after turn 1; got {} requests",
+        captured.len()
+    );
+}
