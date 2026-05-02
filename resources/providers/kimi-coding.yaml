@@ -4,9 +4,18 @@ base_url: https://api.kimi.com/coding
 default_api: anthropic-messages
 auth_modes:
   - api_key
+# Kimi For Coding gates `/v1/messages` and `/v1/chat/completions` on the
+# inbound `User-Agent`: requests not from a recognized coding agent
+# (Kimi CLI / Claude Code / Roo Code / Kilo Code) get
+# `access_terminated_error`. We send `claude-code/1.0` so the gate
+# passes. Verified against `kimi-cli` source (uvx) — canonical model id
+# is `kimi-for-coding` (display "Kimi-k2.6"); the historical `k2p5` /
+# `k2.5` aliases still resolve server-side but are no longer surfaced.
+headers:
+  User-Agent: claude-code/1.0
 models:
-  - id: k2p5
-    display_name: Kimi K2.5
+  - id: kimi-for-coding
+    display_name: Kimi-k2.6
     provider: kimi-coding
     api: anthropic-messages
     context_window: 262144

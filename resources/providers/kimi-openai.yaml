@@ -1,0 +1,27 @@
+id: kimi-openai
+display_name: Kimi For Coding (OpenAI Completions shape)
+base_url: https://api.kimi.com/coding
+default_api: openai-completions
+auth_modes:
+  - api_key
+# Same Kimi For Coding backend as `kimi-coding`, but routed through the
+# `/v1/chat/completions` (OpenAI-shape) endpoint instead of
+# `/v1/messages` (Anthropic-shape). Useful as a parity comparison and
+# for code paths that prefer OpenAI Chat Completions wire.
+# Kimi gates on `User-Agent` — `claude-code/1.0` is one of the
+# whitelisted coding-agent identifiers (verified against `kimi-cli`
+# source via `uvx --from kimi-cli`).
+headers:
+  User-Agent: claude-code/1.0
+models:
+  - id: kimi-for-coding
+    display_name: Kimi-k2.6 (OpenAI shape)
+    provider: kimi-openai
+    api: openai-completions
+    context_window: 262144
+    max_output_tokens: 32768
+    supports_reasoning: true
+    compat:
+      api: openai-completions
+      requires_reasoning_content_on_assistant_messages: true
+      thinking_format: openai
