@@ -190,13 +190,14 @@ pub(super) fn openai_responses_text_config(
     }
     let config = structured_output?;
     Some(OpenAIResponsesTextConfig {
-        format: OpenAIResponsesTextFormat {
+        format: Some(OpenAIResponsesTextFormat {
             kind: "json_schema".to_string(),
             name: config.name.clone(),
             description: config.description.clone(),
             schema: openai_compatible_schema(config.schema.clone()),
             strict: true,
-        },
+        }),
+        verbosity: None,
     })
 }
 
@@ -558,9 +559,10 @@ mod tests {
     fn openai_native_responses_format_is_emitted_when_enabled() {
         let config = StructuredOutputConfig::new("shape", json!({ "type": "object" }));
         let text = openai_responses_text_config(Some(&config), true).unwrap();
-        assert_eq!(text.format.kind, "json_schema");
-        assert_eq!(text.format.name, "shape");
-        assert!(text.format.strict);
+        let format = text.format.expect("format must be emitted for structured output");
+        assert_eq!(format.kind, "json_schema");
+        assert_eq!(format.name, "shape");
+        assert!(format.strict);
     }
 
     #[test]

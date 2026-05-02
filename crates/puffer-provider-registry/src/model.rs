@@ -189,13 +189,67 @@ pub struct OpenAiResponsesCompat {
 
 /// Compat flags for OpenAI Chat-Completions-shaped providers (the
 /// canonical OpenAI Chat Completions API plus its many "compatible"
-/// relays — groq, cerebras, openrouter, etc.).
+/// relays — groq, cerebras, openrouter, deepseek, zai, qwen, kimi).
+///
+/// Mirrors pi-mono's `OpenAICompletionsCompat`
+/// (`pi-mono/packages/ai/src/types.ts:277`). Each flag is `Option<…>`
+/// so existing model yamls keep parsing; runtime helpers fall back to
+/// URL-based auto-detection when unset.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OpenAiCompletionsCompat {
-    // Reserved — pi-mono uses this slot for `supportsStore`,
-    // `supportsDeveloperRole`, `reasoningEffortMap`, etc. Adding the
-    // first such flag here is mechanical once a third-party endpoint
-    // forces it. Empty struct round-trips through serde without churn.
+    /// Whether replayed assistant messages must include an empty
+    /// `reasoning_content` field when reasoning is enabled. DeepSeek V4
+    /// rejects multi-turn requests without it. Pi-mono auto-enables this
+    /// for any model whose id contains `deepseek-v4` and runs through
+    /// `openai-completions`.
+    #[serde(default)]
+    pub requires_reasoning_content_on_assistant_messages: Option<bool>,
+    /// Wire format for reasoning/thinking parameters. Defaults to
+    /// `Openai` (top-level `reasoning_effort: "<level>"`). Provider
+    /// variants:
+    /// - `Openrouter`: `reasoning: { effort: "<level>" }`
+    /// - `Deepseek`: `thinking: { type: "enabled" }` plus
+    ///   `reasoning_effort`
+    /// - `Zai`: top-level `enable_thinking: true`
+    /// - `Qwen`: top-level `enable_thinking: true`
+    /// - `QwenChatTemplate`: `chat_template_kwargs.enable_thinking: true`
+    #[serde(default)]
+    pub thinking_format: Option<ThinkingFormat>,
+    /// Optional mapping from puffer effort levels (`minimal` / `low` /
+    /// `medium` / `high` / `xhigh`) to the vendor-specific string sent
+    /// in `reasoning_effort`. Useful for relays that use non-standard
+    /// names (e.g. DeepSeek V4 maps `xhigh` → `max`). Mirrors pi-mono's
+    /// `reasoningEffortMap`.
+    #[serde(default)]
+    pub reasoning_effort_map: Option<IndexMap<String, String>>,
+    /// Whether the provider supports `reasoning_effort` (or its
+    /// thinking-format equivalent) at all. Defaults to true when the
+    /// model has `supports_reasoning: true`. Set to `Some(false)` for
+    /// reasoning-capable relays whose API does not accept the field.
+    #[serde(default)]
+    pub supports_reasoning_effort: Option<bool>,
+}
+
+/// Wire format for the reasoning/thinking parameter on OpenAI
+/// Chat-Completions-shaped requests. Default = `Openai`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingFormat {
+    /// `reasoning_effort: "<level>"` at the top level (canonical
+    /// OpenAI shape). Default.
+    Openai,
+    /// `reasoning: { effort: "<level>" }` (OpenRouter).
+    Openrouter,
+    /// `thinking: { type: "enabled" }` plus `reasoning_effort`
+    /// (DeepSeek V4).
+    Deepseek,
+    /// Top-level `enable_thinking: true` (Z.ai).
+    Zai,
+    /// Top-level `enable_thinking: true` (Qwen direct API).
+    Qwen,
+    /// `chat_template_kwargs: { enable_thinking: true }` (Qwen via
+    /// vLLM / chat template).
+    QwenChatTemplate,
 }
 
 /// Compat flags for Anthropic Messages-shaped providers (canonical

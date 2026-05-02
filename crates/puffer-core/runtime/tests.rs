@@ -679,7 +679,7 @@ fn build_codex_openai_request_body_includes_native_structured_output_config() {
         &Vec::new(),
         true,
         Some(OpenAIResponsesTextConfig {
-            format: OpenAIResponsesTextFormat {
+            format: Some(OpenAIResponsesTextFormat {
                 kind: "json_schema".to_string(),
                 name: "answer_shape".to_string(),
                 description: None,
@@ -690,7 +690,8 @@ fn build_codex_openai_request_body_includes_native_structured_output_config() {
                     }
                 }),
                 strict: true,
-            },
+            }),
+            verbosity: None,
         }),
         false,
     );

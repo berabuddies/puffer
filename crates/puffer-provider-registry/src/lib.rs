@@ -14,5 +14,6 @@ pub use model::{
     AnthropicMessagesCompat, Modality, ModelCompat, ModelCost, ModelDescriptor,
     ModelDiscoveryConfig, ModelDiscoveryFormat, OpenAiCompletionsCompat, OpenAiResponsesCompat,
     ProviderDescriptor, ProviderSource, ProviderSourceKind, RegisteredProvider, ResponsesPath,
+    ThinkingFormat,
 };
 pub use registry::ProviderRegistry;

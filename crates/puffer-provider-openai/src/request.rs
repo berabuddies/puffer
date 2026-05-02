@@ -27,6 +27,28 @@ pub struct OpenAIChatCompletionsRequest {
     pub tool_choice: Option<OpenAIResponsesToolChoiceMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_format: Option<OpenAIChatResponseFormat>,
+    /// Top-level `reasoning_effort` (canonical OpenAI shape, also
+    /// honored by Moonshot Kimi and DeepSeek V4 alongside their own
+    /// thinking flag). Maps to one of the puffer effort levels (or
+    /// the per-model `reasoning_effort_map` override).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// OpenRouter-style nested reasoning param: `{ "effort": "..." }`.
+    /// Mutually exclusive with `reasoning_effort` in practice; both
+    /// are emitted only when the model's compat says so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<Value>,
+    /// DeepSeek V4 style `thinking: { type: "enabled" }` plus
+    /// `reasoning_effort` at the top level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<Value>,
+    /// Z.ai / Qwen style `enable_thinking: true` at the top level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_thinking: Option<bool>,
+    /// Qwen via vLLM / chat-template style
+    /// `chat_template_kwargs: { enable_thinking: true }`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_template_kwargs: Option<Value>,
 }
 
 /// A message item accepted by the OpenAI Chat Completions API.
@@ -39,6 +61,13 @@ pub struct OpenAIChatMessage {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<OpenAIChatToolCall>,
+    /// Empty `reasoning_content` injected on assistant messages when
+    /// the provider's compat specifies
+    /// `requires_reasoning_content_on_assistant_messages: true`.
+    /// DeepSeek V4 rejects multi-turn requests without this. Other
+    /// providers ignore the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 /// A tool-call item emitted or replayed through Chat Completions messages.
@@ -92,10 +121,18 @@ pub struct OpenAIResponsesToolRequest {
     pub text: Option<OpenAIResponsesTextConfig>,
 }
 
-/// Structured output configuration for the OpenAI Responses API.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// Top-level `text` block on the OpenAI Responses API. Carries
+/// either a structured-output `format` (used for JSON-schema
+/// coercion) or a `verbosity` knob, or both. Codex CLI sets
+/// `verbosity` to one of `low` / `medium` / `high` to control how
+/// terse the assistant's prose is. Pi-mono parity:
+/// `pi-mono/packages/ai/src/providers/openai-codex-responses.ts:328`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct OpenAIResponsesTextConfig {
-    pub format: OpenAIResponsesTextFormat,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<OpenAIResponsesTextFormat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verbosity: Option<String>,
 }
 
 /// One structured output format accepted by the OpenAI Responses API.
