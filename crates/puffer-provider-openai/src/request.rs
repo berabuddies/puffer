@@ -499,6 +499,7 @@ mod tests {
                     content: Some(json!("hello")),
                     tool_call_id: None,
                     tool_calls: Vec::new(),
+                    reasoning_content: None,
                 }],
                 tools: vec![OpenAIChatCompletionTool {
                     kind: "function".to_string(),
@@ -511,6 +512,11 @@ mod tests {
                 }],
                 tool_choice: Some(OpenAIResponsesToolChoiceMode::Auto),
                 response_format: None,
+                reasoning_effort: None,
+                reasoning: None,
+                thinking: None,
+                enable_thinking: None,
+                chat_template_kwargs: None,
             },
         )
         .unwrap();
@@ -542,9 +548,15 @@ mod tests {
                     content: Some(json!("hello")),
                     tool_call_id: None,
                     tool_calls: Vec::new(),
+                    reasoning_content: None,
                 }],
                 tools: Vec::new(),
                 tool_choice: None,
+                reasoning_effort: None,
+                reasoning: None,
+                thinking: None,
+                enable_thinking: None,
+                chat_template_kwargs: None,
                 response_format: Some(OpenAIChatResponseFormat {
                     kind: "json_schema".to_string(),
                     json_schema: OpenAIChatResponseJsonSchema {
@@ -593,7 +605,8 @@ mod tests {
                 tool_choice: None,
                 previous_response_id: None,
                 text: Some(OpenAIResponsesTextConfig {
-                    format: OpenAIResponsesTextFormat {
+                    verbosity: None,
+                    format: Some(OpenAIResponsesTextFormat {
                         kind: "json_schema".to_string(),
                         name: "answer".to_string(),
                         description: Some("Structured answer".to_string()),
@@ -605,7 +618,7 @@ mod tests {
                             "required": ["value"]
                         }),
                         strict: true,
-                    },
+                    }),
                 }),
             },
         )

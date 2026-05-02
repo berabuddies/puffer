@@ -41,6 +41,20 @@ where
         // Ignore "event:" lines — we parse type from data payload
     }
 
+    // EOF: flush any pending data lines that lacked a trailing blank line.
+    // Some upstreams (and `BufReader::lines()` swallowing the final newline)
+    // can leave the terminal `data: {message_stop}` event in the buffer
+    // without a separator. Without this flush we would mis-classify a fully
+    // delivered stream as truncated. Pi-mono parity:
+    // `pi-mono/.../anthropic.ts:353,371` consume the trailing buffer too.
+    if !data_lines.is_empty() {
+        let done = flush_anthropic_event(&data_lines, &mut state, on_event)?;
+        data_lines.clear();
+        if done {
+            return Ok(state.into_response());
+        }
+    }
+
     // Stream ended without `message_stop`. Pi-mono parity
     // (`pi-mono/packages/ai/src/providers/anthropic.ts` 83592bb2): when
     // we saw `message_start` we know the upstream is a real Anthropic
@@ -353,5 +367,33 @@ mod tests {
         let result = parse_anthropic_sse(stream.as_bytes(), &mut |_| {});
         let err = result.expect_err("empty stream must bail");
         assert!(err.to_string().contains("without message_stop"), "got: {err}");
+    }
+
+    /// Pi-mono parity: when the upstream delivers the final
+    /// `data: message_stop` event but the trailing blank-line separator
+    /// is missing (relay framing quirk, or `BufReader::lines()`
+    /// swallowing the last newline), the EOF flush must still observe
+    /// the terminal event instead of mis-classifying it as truncation.
+    /// Codex review caught this: previously we only flushed on empty
+    /// lines, so the last event sat in `data_lines` until EOF and was
+    /// then discarded.
+    #[test]
+    fn message_stop_without_trailing_blank_line_is_accepted() {
+        let stream = concat!(
+            "event:message_start\n",
+            "data:{\"type\":\"message_start\",\"message\":{\"id\":\"msg_e\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+            "event:content_block_start\n",
+            "data:{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event:content_block_delta\n",
+            "data:{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+            "event:content_block_stop\n",
+            "data:{\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event:message_stop\n",
+            "data:{\"type\":\"message_stop\"}\n",
+            // EOF here — no trailing blank line.
+        );
+        let result = parse_anthropic_sse(stream.as_bytes(), &mut |_| {})
+            .expect("trailing message_stop without blank line must succeed");
+        assert_eq!(result["content"][0]["text"], "hi");
     }
 }

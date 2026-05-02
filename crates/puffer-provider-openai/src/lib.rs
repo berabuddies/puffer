@@ -280,10 +280,16 @@ mod tests {
                     content: Some(json!("hello")),
                     tool_call_id: None,
                     tool_calls: Vec::new(),
+                    reasoning_content: None,
                 }],
                 tools: Vec::new(),
                 tool_choice: None,
                 response_format: None,
+                reasoning_effort: None,
+                reasoning: None,
+                thinking: None,
+                enable_thinking: None,
+                chat_template_kwargs: None,
             },
         )
         .expect("request should build");
