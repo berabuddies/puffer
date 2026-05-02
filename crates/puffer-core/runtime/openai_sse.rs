@@ -142,15 +142,22 @@ fn openai_sse_trace_file() -> Option<File> {
     OpenOptions::new().create(true).append(true).open(path).ok()
 }
 
+fn trace_now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
 fn trace_openai_sse_line(trace: &mut Option<File>, read: usize, line: &str) {
     if let Some(trace) = trace {
-        let _ = writeln!(trace, "READ {read}: {:?}", line);
+        let _ = writeln!(trace, "{} READ {read}: {:?}", trace_now_ms(), line);
     }
 }
 
 fn trace_openai_sse_message(trace: &mut Option<File>, message: &str) {
     if let Some(trace) = trace {
-        let _ = writeln!(trace, "TRACE: {message}");
+        let _ = writeln!(trace, "{} TRACE: {message}", trace_now_ms());
     }
 }
 
