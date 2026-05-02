@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -73,10 +73,22 @@ pub(crate) enum RiskLevel {
 pub(crate) struct VerificationSpec {
     pub(crate) methods: Vec<String>,
     #[serde(default)]
+    pub(crate) observation_checks: Vec<ObservationCheckSpec>,
+    #[serde(default)]
+    pub(crate) method_templates: Vec<VerificationTemplateSpec>,
+    #[serde(default)]
     pub(crate) templates: Vec<VerificationTemplateSpec>,
     pub(crate) required_before_completion: bool,
     #[serde(default = "default_half")]
     pub(crate) confidence: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub(crate) enum ObservationCheckSpec {
+    JsonBool { path: Vec<String>, expected: bool },
+    Present { path: Vec<String> },
+    NonEmpty { path: Vec<String> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -107,6 +119,22 @@ pub(crate) struct ArgumentPatternSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub(crate) enum StructuredArgumentSafetySpec {
+    BlockPathPrefix {
+        source_arg: String,
+        prefixes: Vec<String>,
+    },
+    BlockParentTraversal {
+        source_arg: String,
+    },
+    RequireApprovalPathComponent {
+        source_arg: String,
+        component: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct ApprovalSpec {
     pub(crate) required: bool,
     pub(crate) reason: Option<String>,
@@ -116,9 +144,32 @@ pub(crate) struct ApprovalSpec {
 pub(crate) struct FailureModeSpec {
     pub(crate) name: String,
     pub(crate) detection: String,
+    #[serde(default)]
+    pub(crate) detection_rules: Vec<FailureDetectionSpec>,
     pub(crate) repair_strategy: String,
     #[serde(default = "default_half")]
     pub(crate) confidence: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub(crate) enum FailureDetectionSpec {
+    JsonBool {
+        path: Vec<String>,
+        expected: bool,
+        #[serde(default)]
+        structured_output_fallback: bool,
+    },
+    JsonI64NonZero {
+        path: Vec<String>,
+        #[serde(default)]
+        structured_output_fallback: bool,
+    },
+    Present {
+        path: Vec<String>,
+        #[serde(default)]
+        structured_output_fallback: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -132,6 +183,16 @@ pub(crate) struct SemanticIntentSpec {
     pub(crate) defaults: BTreeMap<String, Value>,
     #[serde(default)]
     pub(crate) side_effect_class: Option<SideEffectClass>,
+    #[serde(default)]
+    pub(crate) slot_kinds: BTreeMap<String, SemanticSlotKind>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SemanticSlotKind {
+    Opaque,
+    FilesystemPath,
+    FilesystemDirectory,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -215,6 +276,8 @@ pub(crate) struct ActionContract {
     pub(crate) forbidden_uses: Vec<String>,
     #[serde(default)]
     pub(crate) argument_safety: Vec<ArgumentSafetySpec>,
+    #[serde(default)]
+    pub(crate) structured_argument_safety: Vec<StructuredArgumentSafetySpec>,
     #[serde(default)]
     pub(crate) semantic_intents: Vec<SemanticIntentSpec>,
     #[serde(default)]
@@ -321,8 +384,197 @@ pub(crate) fn parse_contract_md(input: &str) -> Result<CapabilityContract> {
     let mut contract: CapabilityContract =
         serde_yaml::from_str(&yaml).context("failed to deserialize machine contract YAML")?;
     contract.contract_hash = Some(contract_hash(&yaml));
+    normalize_legacy_contract_fields(&mut contract);
     validate_action_schemas(&contract)?;
     Ok(contract)
+}
+
+pub(crate) fn normalize_legacy_contract_fields(contract: &mut CapabilityContract) {
+    for action in &mut contract.actions {
+        normalize_legacy_verification(&mut action.verification);
+        for failure_mode in &mut action.failure_modes {
+            if failure_mode.detection_rules.is_empty() {
+                failure_mode.detection_rules =
+                    legacy_failure_detection_specs(&failure_mode.detection);
+            }
+        }
+        if action.structured_argument_safety.is_empty() {
+            action.structured_argument_safety =
+                legacy_argument_safety_specs(&action.argument_safety);
+        }
+        for intent in &mut action.semantic_intents {
+            normalize_legacy_semantic_slot_kinds(intent);
+        }
+    }
+}
+
+pub(crate) fn normalize_legacy_verification(verification: &mut VerificationSpec) {
+    if verification.observation_checks.is_empty() {
+        verification.observation_checks = legacy_observation_check_specs(&verification.methods);
+    }
+    if verification.method_templates.is_empty() {
+        verification.method_templates = legacy_verification_method_templates(&verification.methods);
+    }
+}
+
+pub(crate) fn legacy_failure_detection_specs(detection: &str) -> Vec<FailureDetectionSpec> {
+    detection
+        .split("||")
+        .filter_map(|clause| legacy_failure_detection_clause(clause.trim()))
+        .collect()
+}
+
+pub(crate) fn legacy_observation_check_specs(methods: &[String]) -> Vec<ObservationCheckSpec> {
+    methods
+        .iter()
+        .filter_map(|method| legacy_observation_check(method))
+        .collect()
+}
+
+pub(crate) fn legacy_verification_method_templates(
+    methods: &[String],
+) -> Vec<VerificationTemplateSpec> {
+    methods
+        .iter()
+        .filter_map(|method| legacy_verification_method_template(method))
+        .collect()
+}
+
+pub(crate) fn legacy_argument_safety_specs(
+    specs: &[ArgumentSafetySpec],
+) -> Vec<StructuredArgumentSafetySpec> {
+    let mut structured = Vec::new();
+    for spec in specs {
+        for pattern in &spec.blocked_patterns {
+            match pattern.name.as_str() {
+                "protected_system_path" => {
+                    structured.push(StructuredArgumentSafetySpec::BlockPathPrefix {
+                        source_arg: spec.source_arg.clone(),
+                        prefixes: vec![
+                            "/proc".to_string(),
+                            "/sys".to_string(),
+                            "/dev".to_string(),
+                            "/run".to_string(),
+                            "/boot".to_string(),
+                            "/etc".to_string(),
+                            "/usr".to_string(),
+                            "/bin".to_string(),
+                            "/sbin".to_string(),
+                            "/lib".to_string(),
+                            "/lib64".to_string(),
+                        ],
+                    });
+                }
+                "parent_traversal" => {
+                    structured.push(StructuredArgumentSafetySpec::BlockParentTraversal {
+                        source_arg: spec.source_arg.clone(),
+                    });
+                }
+                _ => {}
+            }
+        }
+        for pattern in &spec.approval_patterns {
+            if pattern.name.as_str() == "version_control_metadata" {
+                structured.push(StructuredArgumentSafetySpec::RequireApprovalPathComponent {
+                    source_arg: spec.source_arg.clone(),
+                    component: ".git".to_string(),
+                });
+            }
+        }
+    }
+    structured
+}
+
+fn legacy_failure_detection_clause(clause: &str) -> Option<FailureDetectionSpec> {
+    if let Some(expression) = clause.strip_prefix("json_bool:") {
+        let (path, expected) = expression.split_once('=')?;
+        let expected = legacy_bool(expected.trim())?;
+        return Some(FailureDetectionSpec::JsonBool {
+            path: legacy_path(path.trim())?,
+            expected,
+            structured_output_fallback: true,
+        });
+    }
+    if let Some(path) = clause.strip_prefix("json_i64_nonzero:") {
+        return Some(FailureDetectionSpec::JsonI64NonZero {
+            path: legacy_path(path.trim())?,
+            structured_output_fallback: true,
+        });
+    }
+    if let Some(path) = clause.strip_prefix("json_present:") {
+        return Some(FailureDetectionSpec::Present {
+            path: legacy_path(path.trim())?,
+            structured_output_fallback: true,
+        });
+    }
+    None
+}
+
+fn legacy_observation_check(method: &str) -> Option<ObservationCheckSpec> {
+    let raw = method.trim().strip_prefix("observation:")?;
+    if let Some(expression) = raw.strip_prefix("json_bool:") {
+        let (path, expected) = expression.split_once('=')?;
+        return Some(ObservationCheckSpec::JsonBool {
+            path: legacy_path(path.trim())?,
+            expected: legacy_bool(expected.trim())?,
+        });
+    }
+    if let Some(path) = raw.strip_prefix("present:") {
+        return Some(ObservationCheckSpec::Present {
+            path: legacy_path(path.trim())?,
+        });
+    }
+    None
+}
+
+fn legacy_verification_method_template(method: &str) -> Option<VerificationTemplateSpec> {
+    let method = method.trim();
+    let action_ref = method
+        .strip_prefix("action:")
+        .or_else(|| method.strip_prefix("tool:"))
+        .unwrap_or(method)
+        .trim();
+    let (contract_id, action_name) = action_ref.rsplit_once('.')?;
+    if contract_id.is_empty() || action_name.is_empty() {
+        return None;
+    }
+    Some(VerificationTemplateSpec {
+        contract_id: contract_id.to_string(),
+        action_name: action_name.to_string(),
+        args: json!({
+            "source_action": "{source_action}",
+            "output": "{output}",
+        }),
+        reason: None,
+    })
+}
+
+pub(crate) fn normalize_legacy_semantic_slot_kinds(intent: &mut SemanticIntentSpec) {
+    let normalized_intent = semantic_token(&intent.intent);
+    if normalized_intent == "read_file" {
+        intent
+            .slot_kinds
+            .entry("path".to_string())
+            .or_insert(SemanticSlotKind::FilesystemPath);
+    }
+}
+
+fn legacy_bool(value: &str) -> Option<bool> {
+    match value {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn legacy_path(value: &str) -> Option<Vec<String>> {
+    let path = value
+        .split('.')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    (!path.is_empty()).then_some(path)
 }
 
 pub(crate) fn lint_contract(contract: &CapabilityContract) -> Vec<ContractLintError> {
@@ -390,6 +642,26 @@ pub(crate) fn lint_contract(contract: &CapabilityContract) -> Vec<ContractLintEr
 
 fn default_half() -> f64 {
     0.5
+}
+
+fn semantic_token(value: &str) -> String {
+    let mut token = String::new();
+    let mut last_separator = false;
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() {
+            token.push(character.to_ascii_lowercase());
+            last_separator = false;
+        } else if !last_separator {
+            token.push('_');
+            last_separator = true;
+        }
+    }
+    let trimmed = token.trim_matches('_');
+    if trimmed.is_empty() {
+        "intent".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn extract_machine_contract_block(input: &str) -> Result<String> {

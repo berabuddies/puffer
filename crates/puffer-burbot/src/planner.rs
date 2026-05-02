@@ -457,6 +457,8 @@ mod tests {
                 postconditions: Vec::new(),
                 verification: VerificationSpec {
                     methods: Vec::new(),
+                    observation_checks: Vec::new(),
+                    method_templates: Vec::new(),
                     templates: verification_templates(name),
                     required_before_completion: matches!(name, "Bash" | "Write"),
                     confidence: 0.5,
@@ -468,6 +470,7 @@ mod tests {
                 failure_modes: Vec::new(),
                 forbidden_uses: Vec::new(),
                 argument_safety: Vec::new(),
+                structured_argument_safety: Vec::new(),
                 semantic_intents: semantic_intents(name),
                 intent_extractors: intent_extractors(name),
                 repair_rules: repair_rules(name),
@@ -527,6 +530,7 @@ mod tests {
             optional_slots: BTreeMap::new(),
             defaults: BTreeMap::new(),
             side_effect_class: None,
+            slot_kinds: Default::default(),
         }
     }
 
@@ -582,6 +586,7 @@ mod tests {
             enable_observe_act_llm: false,
             model: None,
             goal_verification_min_confidence: 0.75,
+            yolo: false,
         };
         let candidates = initial_candidates(&registry(), "read file", &options);
         assert!(!candidates
@@ -604,6 +609,7 @@ mod tests {
             enable_observe_act_llm: false,
             model: None,
             goal_verification_min_confidence: 0.75,
+            yolo: false,
         };
         let candidates = initial_candidates(&registry(), "find tool contracts", &options);
         assert!(!candidates

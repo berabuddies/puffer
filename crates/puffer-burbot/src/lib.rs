@@ -20,6 +20,7 @@ mod graph;
 mod graph_store;
 mod ids;
 mod llm;
+mod model_policy;
 mod plan_synthesis;
 mod planner;
 mod promotion;

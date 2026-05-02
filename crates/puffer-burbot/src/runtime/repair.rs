@@ -1,3 +1,4 @@
+use super::model_loop_support::compact_history_value;
 use super::BurbotRuntime;
 use crate::belief::BeliefGraph;
 use crate::contract::ContractRegistry;
@@ -10,7 +11,7 @@ use crate::ids::{NodeId, RunId};
 use crate::planner::{
     repair_candidates_for_failure, ActionCandidate, CandidateSource, CompletionRole,
 };
-use crate::rules::action_key;
+use crate::rules::action_key_for_contracts;
 use crate::trace::{trace_event, TraceEventType};
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -27,8 +28,10 @@ impl BurbotRuntime {
         output: &Value,
         failure_kind: FailureKind,
     ) -> Result<()> {
-        self.repeated_failures
-            .insert(action_key(action_ref, args), self.state_epoch);
+        self.repeated_failures.insert(
+            action_key_for_contracts(self.contracts.as_ref(), action_ref, args),
+            self.state_epoch,
+        );
         beliefs.record_action_failure(
             action_ref.contract_id.clone(),
             action_ref.action_name.clone(),
@@ -45,7 +48,10 @@ impl BurbotRuntime {
                 "contract_id": action_ref.contract_id,
                 "action_name": action_ref.action_name,
                 "args": args,
+                "output": compact_history_value(output),
                 "failure_mode": failure_kind.as_str(),
+                "completion_role": self.completion_role_for_node(graph, action_id),
+                "state_epoch": self.state_epoch,
             }),
             action_ref: None,
             scores: ActionScores::default(),
@@ -79,6 +85,23 @@ impl BurbotRuntime {
         }
         classified.output["repairable"] = json!(!repair_candidates.is_empty());
         self.append(classified)?;
+        if let Some(event) = super::write_preconditions::add_failed_file_write_refresh(
+            run_id,
+            graph,
+            self.contracts.as_ref(),
+            &self.workspace_root,
+            failure_id,
+            action_id,
+            action_ref,
+            args,
+        )? {
+            self.append(event)?;
+        }
+        for event in
+            super::stale::prune_stale_model_frontier_after_failure(run_id, graph, action_id)
+        {
+            self.append(event)?;
+        }
         for candidate in repair_candidates {
             self.add_repair_candidate_node(run_id, graph, failure_id, candidate)?;
         }

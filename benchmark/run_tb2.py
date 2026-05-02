@@ -163,6 +163,12 @@ def parse_args() -> argparse.Namespace:
         help="OpenAI auth source for Burbot runs. Default uses the local Codex credential.",
     )
     parser.add_argument(
+        "--burbot-yolo",
+        action="store_true",
+        default=False,
+        help="Bypass Burbot's safety gate inside the trial container.",
+    )
+    parser.add_argument(
         "--resources-dir",
         default=str(REPO_ROOT / "resources"),
         help="Host path to Puffer resources.",
@@ -446,6 +452,8 @@ def run_single_task(
                     "tools_dir=/opt/puffer/resources/tools",
                     "--agent-kwarg",
                     f"auth_source={args.burbot_auth_source}",
+                    "--agent-kwarg",
+                    f"yolo={'true' if args.burbot_yolo else 'false'}",
                 ]
             )
         else:

@@ -110,6 +110,17 @@ pub(crate) fn choose_next_action(
     graph: &PlanGraph,
     weights: &SchedulerWeights,
 ) -> Option<SelectedAction> {
+    scored_executable_actions(graph, weights)
+        .into_iter()
+        .max_by(|left, right| {
+            left.breakdown
+                .total
+                .partial_cmp(&right.breakdown.total)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+}
+
+fn scored_executable_actions(graph: &PlanGraph, weights: &SchedulerWeights) -> Vec<SelectedAction> {
     graph
         .executable_frontier_actions()
         .into_iter()
@@ -119,12 +130,7 @@ pub(crate) fn choose_next_action(
             let breakdown = score_action(&estimate, weights);
             Some(SelectedAction { node_id, breakdown })
         })
-        .max_by(|left, right| {
-            left.breakdown
-                .total
-                .partial_cmp(&right.breakdown.total)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
+        .collect()
 }
 
 /// Scores an action estimate and returns a term-by-term breakdown.

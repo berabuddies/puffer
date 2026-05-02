@@ -23,6 +23,7 @@ class BurbotBenchAgent(BaseInstalledAgent):
         CliFlag("effort", cli="--effort", type="str", default="xhigh"),
         CliFlag("fast", cli="--fast", type="bool", default=True),
         CliFlag("auth_source", cli="--auth-source", type="str", default="local-codex"),
+        CliFlag("yolo", cli="--yolo", type="bool", default=False),
     ]
 
     def __init__(
@@ -35,6 +36,7 @@ class BurbotBenchAgent(BaseInstalledAgent):
         provider: str = "openai",
         effort: str = "xhigh",
         fast: bool = True,
+        yolo: bool = False,
         *args: Any,
         **kwargs: Any,
     ) -> None:
@@ -46,6 +48,7 @@ class BurbotBenchAgent(BaseInstalledAgent):
         self.provider = provider
         self.effort = effort
         self.fast = fast
+        self.yolo = yolo
 
     @staticmethod
     def name() -> str:
@@ -81,33 +84,122 @@ class BurbotBenchAgent(BaseInstalledAgent):
             ),
         )
 
-    def populate_context_post_run(self, context: AgentContext) -> None:
-        """Populate Harbor metadata from Burbot's result artifact when available."""
-        result_path = self.logs_dir / "result.json"
-        if not result_path.exists():
-            return
+    @staticmethod
+    def _parse_burbot_summary(text: str) -> dict[str, Any] | None:
+        """Return the last embedded summary object Burbot wrote to stdout."""
+        decoder = json.JSONDecoder()
+        summary: dict[str, Any] | None = None
+        for index, char in enumerate(text):
+            if char != "{":
+                continue
+            try:
+                value, _ = decoder.raw_decode(text[index:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict) and "status" in value and "run_id" in value:
+                summary = value
+        return summary
 
-        try:
-            payload = json.loads(result_path.read_text())
-        except (OSError, json.JSONDecodeError):
-            return
+    @staticmethod
+    def _selected_artifact_action(
+        summary: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Extract the artifact action descriptor for Harbor metadata."""
+        if not isinstance(summary, dict):
+            return None
+        artifact = summary.get("artifact")
+        if not isinstance(artifact, dict):
+            return None
+        action_name = artifact.get("action_name")
+        contract_id = artifact.get("contract_id")
+        if action_name is None and contract_id is None:
+            return None
+        return {"action_name": action_name, "contract_id": contract_id}
+
+    def populate_context_post_run(self, context: AgentContext) -> None:
+        """Parse the captured Burbot stdout and emit result + trajectory artifacts."""
+        agent_dir = self.logs_dir
+        burbot_log = agent_dir / "burbot.txt"
+        rc_path = agent_dir / "burbot.rc"
+
+        stdout = burbot_log.read_text(errors="replace") if burbot_log.exists() else ""
+        rc: int | None = None
+        if rc_path.exists():
+            try:
+                rc = int(rc_path.read_text().strip())
+            except ValueError:
+                rc = None
+
+        summary = self._parse_burbot_summary(stdout)
+        artifact_action = self._selected_artifact_action(summary)
+        burbot_status = summary.get("status") if isinstance(summary, dict) else None
+        burbot_run_id = summary.get("run_id") if isinstance(summary, dict) else None
+        burbot_open_actions = (
+            summary.get("open_actions") if isinstance(summary, dict) else None
+        )
+        success = rc == 0 and burbot_status == "completed"
+
+        debug_dir = agent_dir / "burbot-debug"
+        debug_dir_str = str(debug_dir) if debug_dir.exists() else None
+
+        provider = str(getattr(self, "provider", "openai"))
+        auth_source = str(getattr(self, "auth_source", "local-codex"))
+        effort = str(getattr(self, "effort", "xhigh"))
+        fast_mode = bool(getattr(self, "fast", True))
+        prompt = getattr(self, "_prompt", "")
+        command = getattr(self, "_command", [])
+
+        result = {
+            "success": success,
+            "process_return_code": rc,
+            "provider": provider,
+            "auth_source": auth_source,
+            "model": self.model_name,
+            "effort": effort,
+            "fast_mode": fast_mode,
+            "prompt": prompt,
+            "assistant_text": stdout,
+            "burbot_summary": summary,
+            "burbot_status": burbot_status,
+            "burbot_run_id": burbot_run_id,
+            "burbot_open_actions": burbot_open_actions,
+            "burbot_selected_artifact_action": artifact_action,
+            "burbot_debug_dir": debug_dir_str,
+            "error": None if success else stdout[-4000:],
+        }
+        (agent_dir / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+
+        trajectory = {
+            "type": "burbot_run",
+            "command": command,
+            "return_code": rc,
+            "process_return_code": rc,
+            "burbot_summary": summary,
+            "burbot_status": burbot_status,
+            "burbot_run_id": burbot_run_id,
+            "burbot_open_actions": burbot_open_actions,
+            "burbot_selected_artifact_action": artifact_action,
+            "stdout": stdout,
+            "burbot_debug_dir": debug_dir_str,
+        }
+        (agent_dir / "trajectory.json").write_text(
+            json.dumps(trajectory, indent=2) + "\n"
+        )
 
         context.metadata = {
-            "assistant_text": payload.get("assistant_text"),
-            "burbot_open_actions": payload.get("burbot_open_actions"),
-            "burbot_run_id": payload.get("burbot_run_id"),
-            "burbot_debug_dir": payload.get("burbot_debug_dir"),
-            "burbot_selected_artifact_action": payload.get(
-                "burbot_selected_artifact_action"
-            ),
-            "burbot_status": payload.get("burbot_status"),
-            "effort": payload.get("effort"),
-            "fast_mode": payload.get("fast_mode"),
-            "model": payload.get("model"),
-            "process_return_code": payload.get("process_return_code"),
-            "provider": payload.get("provider"),
-            "success": payload.get("success"),
-            "auth_source": payload.get("auth_source"),
+            "assistant_text": stdout,
+            "burbot_open_actions": burbot_open_actions,
+            "burbot_run_id": burbot_run_id,
+            "burbot_debug_dir": debug_dir_str,
+            "burbot_selected_artifact_action": artifact_action,
+            "burbot_status": burbot_status,
+            "effort": effort,
+            "fast_mode": fast_mode,
+            "model": self.model_name,
+            "process_return_code": rc,
+            "provider": provider,
+            "success": success,
+            "auth_source": auth_source,
         }
 
     @with_prompt_template
@@ -141,134 +233,54 @@ class BurbotBenchAgent(BaseInstalledAgent):
             if value:
                 env[key] = value
 
+        yolo_enabled = bool(getattr(self, "yolo", False))
+        self._prompt = instruction
+        self._command = [
+            self._burbot_bin_path,
+            "run",
+            "--goal",
+            instruction,
+            "--tools",
+            self._tools_dir,
+            "--llm-tool-call",
+            "--model",
+            self.model_name,
+        ]
+        if yolo_enabled:
+            self._command.append("--yolo")
+
         prompt_path = "/tmp/burbot-benchmark-prompt.txt"
         quoted_instruction = shlex.quote(instruction)
+        quoted_prompt_path = shlex.quote(prompt_path)
         quoted_bin = shlex.quote(self._burbot_bin_path)
         quoted_tools = shlex.quote(self._tools_dir)
         quoted_model = shlex.quote(self.model_name)
-        quoted_provider = shlex.quote(str(getattr(self, "provider", "openai")))
-        quoted_effort = shlex.quote(str(getattr(self, "effort", "xhigh")))
-        quoted_fast = shlex.quote(str(getattr(self, "fast", True)).lower())
+        yolo_flag = " --yolo" if yolo_enabled else ""
 
         await self.exec_as_agent(
             environment,
             command=(
-                "set -euo pipefail; "
-                f"printf '%s' {quoted_instruction} > {prompt_path}; "
-                f"BURBOT_BIN={quoted_bin} "
-                f"BURBOT_TOOLS={quoted_tools} "
-                f"BURBOT_PROMPT_PATH={prompt_path} "
-                f"BURBOT_MODEL={quoted_model} "
-                f"BURBOT_PROVIDER={quoted_provider} "
-                f"BURBOT_EFFORT={quoted_effort} "
-                f"BURBOT_FAST={quoted_fast} "
-                "python3 - <<'PY'\n"
-                "import json\n"
-                "import os\n"
-                "import shutil\n"
-                "import subprocess\n"
-                "from pathlib import Path\n"
-                "prompt = Path(os.environ['BURBOT_PROMPT_PATH']).read_text()\n"
-                "cmd = [\n"
-                "    os.environ['BURBOT_BIN'],\n"
-                "    'run',\n"
-                "    '--goal',\n"
-                "    prompt,\n"
-                "    '--tools',\n"
-                "    os.environ['BURBOT_TOOLS'],\n"
-                "    '--llm-tool-call',\n"
-                "    '--model',\n"
-                "    os.environ['BURBOT_MODEL'],\n"
-                "]\n"
-                "proc = subprocess.run(\n"
-                "    cmd,\n"
-                "    stdout=subprocess.PIPE,\n"
-                "    stderr=subprocess.STDOUT,\n"
-                "    text=True,\n"
-                "    check=False,\n"
-                ")\n"
-                "debug_dir = Path('/logs/agent/burbot-debug')\n"
-                "trace_source = Path.cwd() / '.puffer' / 'burbot'\n"
-                "if trace_source.exists():\n"
-                "    if debug_dir.exists():\n"
-                "        shutil.rmtree(debug_dir)\n"
-                "    shutil.copytree(trace_source, debug_dir)\n"
-                "def parse_burbot_summary(text):\n"
-                "    decoder = json.JSONDecoder()\n"
-                "    summary = None\n"
-                "    for index, char in enumerate(text):\n"
-                "        if char != '{':\n"
-                "            continue\n"
-                "        try:\n"
-                "            value, _ = decoder.raw_decode(text[index:])\n"
-                "        except json.JSONDecodeError:\n"
-                "            continue\n"
-                "        if isinstance(value, dict) and 'status' in value and 'run_id' in value:\n"
-                "            summary = value\n"
-                "    return summary\n"
-                "def selected_artifact_action(summary):\n"
-                "    if not isinstance(summary, dict):\n"
-                "        return None\n"
-                "    artifact = summary.get('artifact')\n"
-                "    if not isinstance(artifact, dict):\n"
-                "        return None\n"
-                "    action_name = artifact.get('action_name')\n"
-                "    contract_id = artifact.get('contract_id')\n"
-                "    if action_name is None and contract_id is None:\n"
-                "        return None\n"
-                "    return {\n"
-                "        'action_name': action_name,\n"
-                "        'contract_id': contract_id,\n"
-                "    }\n"
-                "burbot_summary = parse_burbot_summary(proc.stdout)\n"
-                "artifact_action = selected_artifact_action(burbot_summary)\n"
-                "burbot_status = (\n"
-                "    burbot_summary.get('status') if isinstance(burbot_summary, dict) else None\n"
-                ")\n"
-                "agent_success = proc.returncode == 0 and burbot_status == 'completed'\n"
-                "Path('/logs/agent/burbot.txt').write_text(proc.stdout)\n"
-                "result = {\n"
-                "    'success': agent_success,\n"
-                "    'process_return_code': proc.returncode,\n"
-                "    'provider': os.environ['BURBOT_PROVIDER'],\n"
-                "    'auth_source': os.environ.get('BURBOT_OPENAI_AUTH_SOURCE'),\n"
-                "    'model': os.environ['BURBOT_MODEL'],\n"
-                "    'effort': os.environ['BURBOT_EFFORT'],\n"
-                "    'fast_mode': os.environ['BURBOT_FAST'] == 'true',\n"
-                "    'prompt': prompt,\n"
-                "    'assistant_text': proc.stdout,\n"
-                "    'burbot_summary': burbot_summary,\n"
-                "    'burbot_status': burbot_status,\n"
-                "    'burbot_run_id': (\n"
-                "        burbot_summary.get('run_id') if isinstance(burbot_summary, dict) else None\n"
-                "    ),\n"
-                "    'burbot_open_actions': (\n"
-                "        burbot_summary.get('open_actions')\n"
-                "        if isinstance(burbot_summary, dict)\n"
-                "        else None\n"
-                "    ),\n"
-                "    'burbot_selected_artifact_action': artifact_action,\n"
-                "    'burbot_debug_dir': str(debug_dir) if debug_dir.exists() else None,\n"
-                "    'error': None if agent_success else proc.stdout[-4000:],\n"
-                "}\n"
-                "Path('/logs/agent/result.json').write_text(json.dumps(result, indent=2) + '\\n')\n"
-                "trajectory = {\n"
-                "    'type': 'burbot_run',\n"
-                "    'command': cmd,\n"
-                "    'return_code': proc.returncode,\n"
-                "    'process_return_code': proc.returncode,\n"
-                "    'burbot_summary': burbot_summary,\n"
-                "    'burbot_status': result['burbot_status'],\n"
-                "    'burbot_run_id': result['burbot_run_id'],\n"
-                "    'burbot_open_actions': result['burbot_open_actions'],\n"
-                "    'burbot_selected_artifact_action': artifact_action,\n"
-                "    'stdout': proc.stdout,\n"
-                "    'burbot_debug_dir': result['burbot_debug_dir'],\n"
-                "}\n"
-                "Path('/logs/agent/trajectory.json').write_text(json.dumps(trajectory, indent=2) + '\\n')\n"
-                "raise SystemExit(0 if agent_success else (proc.returncode or 1))\n"
-                "PY\n"
-                "cat /logs/agent/burbot.txt"
+                "set -uo pipefail; "
+                "mkdir -p /logs/agent; "
+                f"printf '%s' {quoted_instruction} > {quoted_prompt_path}; "
+                f"{quoted_bin} run "
+                "--goal \"$("
+                f"cat {quoted_prompt_path}"
+                ")\" "
+                f"--tools {quoted_tools} "
+                "--llm-tool-call "
+                f"--model {quoted_model}"
+                f"{yolo_flag} "
+                ">/logs/agent/burbot.txt 2>&1; "
+                "rc=$?; "
+                "printf '%s' \"$rc\" > /logs/agent/burbot.rc; "
+                "trace_src=\"$(pwd)/.puffer/burbot\"; "
+                "if [ -d \"$trace_src\" ]; then "
+                "  rm -rf /logs/agent/burbot-debug; "
+                "  cp -r \"$trace_src\" /logs/agent/burbot-debug; "
+                "fi; "
+                "cat /logs/agent/burbot.txt; "
+                "exit 0"
             ),
             env=env,
         )

@@ -2,7 +2,7 @@ use super::*;
 use crate::contract::{
     ActionContract, ApprovalSpec, ArgumentPatternSpec, ArgumentSafetySpec, CapabilityContract,
     ContractStatus, Idempotency, RepairRuleSpec, Reversibility, RiskLevel, SemanticIntentSpec,
-    SideEffectClass, TrustLevel, VerificationSpec,
+    SideEffectClass, StructuredArgumentSafetySpec, TrustLevel, VerificationSpec,
 };
 use crate::graph::scores_for_action;
 use crate::llm::ModelCandidateProposal;
@@ -25,6 +25,8 @@ fn action(name: &str, risk: RiskLevel) -> ActionContract {
         postconditions: Vec::new(),
         verification: VerificationSpec {
             methods: Vec::new(),
+            observation_checks: Vec::new(),
+            method_templates: Vec::new(),
             templates: Vec::new(),
             required_before_completion: false,
             confidence: 0.5,
@@ -36,6 +38,7 @@ fn action(name: &str, risk: RiskLevel) -> ActionContract {
         failure_modes: Vec::new(),
         forbidden_uses: Vec::new(),
         argument_safety: Vec::new(),
+        structured_argument_safety: Vec::new(),
         semantic_intents: Vec::new(),
         intent_extractors: Vec::new(),
         repair_rules: repair_rules(name),
@@ -81,6 +84,7 @@ fn sleep_action() -> ActionContract {
         optional_slots: Default::default(),
         defaults,
         side_effect_class: Some(SideEffectClass::PureObservation),
+        slot_kinds: Default::default(),
     }];
     sleep
 }
@@ -115,6 +119,47 @@ fn scheduler_prefers_lower_risk_comparable_action() {
         scheduler.choose_next_action(&graph).unwrap().node_id,
         low_id
     );
+}
+
+#[test]
+fn low_scored_model_action_remains_schedulable_when_it_is_frontier() {
+    let mut graph = PlanGraph::from_goal("solve".to_string());
+    let mut scores = ActionScores {
+        expected_progress: 0.1,
+        information_gain: 0.0,
+        verification_value: 0.0,
+        reversibility_bonus: 0.0,
+        cache_reuse_bonus: 0.0,
+        risk_penalty: 4.0,
+        cost_penalty: 1.0,
+        latency_penalty: 1.0,
+        uncertainty_penalty: 2.0,
+        repeated_failure_penalty: 0.0,
+    };
+    scores.expected_progress = 0.1;
+    let action_id = graph.add_node(PlanNode {
+        id: NodeId(0),
+        kind: PlanNodeKind::Action,
+        status: PlanStatus::Open,
+        label: "bash".to_string(),
+        payload: json!({"command": "python solve.py"}),
+        action_ref: Some(ActionRef {
+            contract_id: PUFFER_TOOLS_CONTRACT_ID.to_string(),
+            action_name: "Bash".to_string(),
+        }),
+        scores,
+    });
+    graph.add_edge(
+        NodeId(0),
+        action_id,
+        PlanEdgeKind::Supports,
+        json!({"source": "model_observation_proposal", "completion_role": "repair"}),
+    );
+    let selected = Scheduler::default().choose_next_action(&graph).unwrap();
+
+    assert_eq!(selected.node_id, action_id);
+    assert!(selected.breakdown.total < 0.0);
+    assert_eq!(graph.node(action_id).unwrap().status, PlanStatus::Open);
 }
 
 #[test]
@@ -221,25 +266,20 @@ fn safety_gate_blocks_explicit_contract_approval_even_with_safe_arguments() {
 }
 
 #[test]
-fn safety_gate_enforces_argument_safety_patterns() {
+fn safety_gate_enforces_structured_argument_safety() {
     let mut registry = InMemoryContractRegistry::default();
     let mut shell = action("Shell", RiskLevel::High);
     shell.side_effect_class = SideEffectClass::Unknown;
-    shell.argument_safety = vec![ArgumentSafetySpec {
-        source_arg: "command".to_string(),
-        blocked_patterns: vec![ArgumentPatternSpec {
-            name: "root_delete".to_string(),
-            pattern: r"(^|[;&|]\s*)rm\s+-rf\s+(/|/\*)($|\s|[;&|])".to_string(),
-            reason: None,
-            confidence: 1.0,
-        }],
-        approval_patterns: vec![ArgumentPatternSpec {
-            name: "recursive_delete".to_string(),
-            pattern: r"(^|[;&|]\s*)rm\s+-r[f]?\s+".to_string(),
-            reason: None,
-            confidence: 0.9,
-        }],
-    }];
+    shell.structured_argument_safety = vec![
+        StructuredArgumentSafetySpec::BlockPathPrefix {
+            source_arg: "file_path".to_string(),
+            prefixes: vec!["/etc".to_string()],
+        },
+        StructuredArgumentSafetySpec::RequireApprovalPathComponent {
+            source_arg: "file_path".to_string(),
+            component: ".git".to_string(),
+        },
+    ];
     registry
         .register(CapabilityContract {
             contract_id: "shell".to_string(),
@@ -260,7 +300,7 @@ fn safety_gate_enforces_argument_safety_patterns() {
         kind: PlanNodeKind::Action,
         status: PlanStatus::Open,
         label: "shell".to_string(),
-        payload: json!({"command": "rm -rf /"}),
+        payload: json!({"file_path": "/etc/passwd"}),
         action_ref: Some(ActionRef {
             contract_id: "shell".to_string(),
             action_name: "Shell".to_string(),
@@ -276,7 +316,7 @@ fn safety_gate_enforces_argument_safety_patterns() {
         SafetyGate.blocks(&node, &ctx).unwrap(),
         Some(BlockReason::ArgumentBlocked)
     );
-    node.payload = json!({"command": "rm -rf target/tmp"});
+    node.payload = json!({"file_path": "/workspace/.git/config"});
     assert_eq!(
         SafetyGate.blocks(&node, &ctx).unwrap(),
         Some(BlockReason::ArgumentApprovalRequired)
@@ -462,6 +502,7 @@ fn expected_terminal_failure_can_complete_with_evidence() {
                 enable_observe_act_llm: false,
                 model: None,
                 goal_verification_min_confidence: 0.75,
+                yolo: false,
             },
         )
         .unwrap();
@@ -527,6 +568,7 @@ fn seed_actions_groups_initial_candidates_under_plan_subgoals() {
                 enable_observe_act_llm: false,
                 model: None,
                 goal_verification_min_confidence: 0.75,
+                yolo: false,
             },
         )
         .unwrap();
@@ -594,15 +636,17 @@ fn model_wait_candidate_is_not_inserted_when_terminal_action_is_executable() {
             None,
             CandidateSource::ModelObservationProposal,
             vec![ModelCandidateProposal {
+                id: Some("wait".to_string()),
                 tool_id: "Sleep".to_string(),
                 args: json!({"duration_ms": 1000}),
                 completion_role: CompletionRole::Support,
+                depends_on: Vec::new(),
                 rationale: "structured wait proposal".to_string(),
             }],
         )
         .unwrap();
 
-    assert_eq!(added, 0);
+    assert_eq!(added.added, 0);
     assert!(!graph.nodes.values().any(|node| {
         node.action_ref
             .as_ref()
@@ -641,15 +685,17 @@ fn terminal_model_wait_candidate_is_allowed_when_it_is_the_only_path() {
             None,
             CandidateSource::ModelProposal,
             vec![ModelCandidateProposal {
+                id: Some("wait".to_string()),
                 tool_id: "Sleep".to_string(),
                 args: json!({"duration_ms": 1000}),
                 completion_role: CompletionRole::Terminal,
+                depends_on: Vec::new(),
                 rationale: "structured wait proposal".to_string(),
             }],
         )
         .unwrap();
 
-    assert_eq!(added, 1);
+    assert_eq!(added.added, 1);
     assert!(graph.nodes.values().any(|node| {
         node.action_ref
             .as_ref()
@@ -696,9 +742,11 @@ fn model_candidate_dedupe_allows_rerun_after_state_change() {
             None,
             CandidateSource::ModelGoalVerifier,
             vec![ModelCandidateProposal {
+                id: Some("verify".to_string()),
                 tool_id: "Bash".to_string(),
                 args: args.clone(),
                 completion_role: CompletionRole::Verification,
+                depends_on: Vec::new(),
                 rationale: "repeat verification".to_string(),
             }],
         )
@@ -713,16 +761,18 @@ fn model_candidate_dedupe_allows_rerun_after_state_change() {
             None,
             CandidateSource::ModelGoalVerifier,
             vec![ModelCandidateProposal {
+                id: Some("verify-after-repair".to_string()),
                 tool_id: "Bash".to_string(),
                 args,
                 completion_role: CompletionRole::Verification,
+                depends_on: Vec::new(),
                 rationale: "repeat verification after repair".to_string(),
             }],
         )
         .unwrap();
 
-    assert_eq!(same_epoch_added, 0);
-    assert_eq!(next_epoch_added, 1);
+    assert_eq!(same_epoch_added.added, 0);
+    assert_eq!(next_epoch_added.added, 1);
 }
 
 #[test]
@@ -774,81 +824,6 @@ fn required_repair_action_schedules_verification() {
             passed: false,
         },
     ));
-}
-
-#[test]
-fn retryable_model_error_adds_contract_declared_wait_candidate() {
-    let mut registry = InMemoryContractRegistry::default();
-    registry
-        .register(CapabilityContract {
-            contract_id: PUFFER_TOOLS_CONTRACT_ID.to_string(),
-            version: "0.1.0".to_string(),
-            status: ContractStatus::Active,
-            trust_level: TrustLevel::Sandboxed,
-            description: "tools".to_string(),
-            actions: vec![sleep_action()],
-            global_constraints: Vec::new(),
-            forbidden_uses: Vec::new(),
-            local_rules: Vec::new(),
-            examples: Vec::new(),
-            contract_hash: None,
-        })
-        .unwrap();
-    let workspace = tempfile::tempdir().unwrap();
-    let trace = JsonlTraceStore::new(workspace.path().join("traces"));
-    let mut runtime = BurbotRuntime::new(registry, workspace.path().into(), trace).unwrap();
-    let mut graph = PlanGraph::from_goal("retry".to_string());
-
-    let added = runtime
-        .add_model_retry_candidate(
-            RunId::new(),
-            &mut graph,
-            NodeId(0),
-            "provider_unavailable",
-            "OpenAI request failed with status 503",
-        )
-        .unwrap();
-
-    assert_eq!(added, 1);
-    let wait = graph
-        .nodes
-        .values()
-        .find(|node| {
-            node.action_ref
-                .as_ref()
-                .is_some_and(|action_ref| action_ref.action_name == "Sleep")
-        })
-        .expect("sleep retry candidate should be present");
-    assert_eq!(wait.payload["duration_ms"], 1000);
-    assert!(wait.payload["reason"]
-        .as_str()
-        .is_some_and(|reason| reason.contains("provider_unavailable")));
-    assert!(graph.edges.iter().any(|edge| {
-        edge.target == wait.id && edge.payload["completion_role"] == json!("terminal")
-    }));
-    let wait_id = wait.id;
-    graph.node_mut(wait_id).unwrap().status = PlanStatus::Executed;
-    let blocked = runtime
-        .add_model_retry_candidate(
-            RunId::new(),
-            &mut graph,
-            NodeId(0),
-            "provider_unavailable",
-            "OpenAI request failed with status 503",
-        )
-        .unwrap();
-    assert_eq!(blocked, 0);
-    runtime.state_epoch = runtime.state_epoch.saturating_add(1);
-    let allowed_after_state_change = runtime
-        .add_model_retry_candidate(
-            RunId::new(),
-            &mut graph,
-            NodeId(0),
-            "provider_unavailable",
-            "OpenAI request failed with status 503",
-        )
-        .unwrap();
-    assert_eq!(allowed_after_state_change, 1);
 }
 
 #[test]
@@ -926,11 +901,10 @@ fn goal_unsatisfied_prunes_same_batch_model_siblings() {
         )
         .unwrap();
 
-    let pruned = runtime
-        .prune_stale_model_siblings_after_goal_unsatisfied(RunId::new(), &mut graph, first)
-        .unwrap();
+    let events =
+        stale::prune_stale_model_siblings_after_goal_unsatisfied(RunId::new(), &mut graph, first);
 
-    assert_eq!(pruned, 1);
+    assert_eq!(events.len(), 1);
     assert_eq!(graph.node(sibling).unwrap().status, PlanStatus::Pruned);
     assert_eq!(graph.node(explicit).unwrap().status, PlanStatus::Open);
 }

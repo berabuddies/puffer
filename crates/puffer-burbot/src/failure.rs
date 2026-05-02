@@ -1,4 +1,4 @@
-use crate::contract::{ActionContract, FailureModeSpec};
+use crate::contract::{ActionContract, FailureDetectionSpec, FailureModeSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -53,10 +53,21 @@ impl FailureKind {
 }
 
 pub(crate) fn classify_failure(action: Option<&ActionContract>, output: &Value) -> FailureKind {
+    if structurally_timed_out(output) {
+        return FailureKind::TimedOut;
+    }
     if let Some(kind) = action.and_then(|action| classify_contract_failure(action, output)) {
         return kind;
     }
     FailureKind::Unknown
+}
+
+fn structurally_timed_out(output: &Value) -> bool {
+    value_deep(output, &[String::from("timed_out")], true).and_then(|value| value.as_bool())
+        == Some(true)
+        || value_deep(output, &[String::from("interrupted")], true)
+            .and_then(|value| value.as_bool())
+            == Some(true)
 }
 
 fn classify_contract_failure(action: &ActionContract, output: &Value) -> Option<FailureKind> {
@@ -68,58 +79,48 @@ fn classify_contract_failure(action: &ActionContract, output: &Value) -> Option<
 }
 
 fn failure_mode_matches(mode: &FailureModeSpec, output: &Value) -> bool {
-    mode.detection
-        .split("||")
-        .any(|clause| detection_clause_matches(clause.trim(), output))
+    mode.detection_rules
+        .iter()
+        .any(|rule| detection_rule_matches(rule, output))
 }
 
-fn detection_clause_matches(clause: &str, output: &Value) -> bool {
-    if clause.is_empty() {
-        return false;
+fn detection_rule_matches(rule: &FailureDetectionSpec, output: &Value) -> bool {
+    match rule {
+        FailureDetectionSpec::JsonBool {
+            path,
+            expected,
+            structured_output_fallback,
+        } => {
+            value_deep(output, path, *structured_output_fallback).and_then(|value| value.as_bool())
+                == Some(*expected)
+        }
+        FailureDetectionSpec::JsonI64NonZero {
+            path,
+            structured_output_fallback,
+        } => value_deep(output, path, *structured_output_fallback)
+            .and_then(|value| value.as_i64())
+            .is_some_and(|value| value != 0),
+        FailureDetectionSpec::Present {
+            path,
+            structured_output_fallback,
+        } => value_deep(output, path, *structured_output_fallback)
+            .is_some_and(|value| !value.is_null()),
     }
-    if let Some(expression) = clause.strip_prefix("json_bool:") {
-        let Some((key, expected)) = expression.split_once('=') else {
-            return false;
-        };
-        let expected = match expected.trim() {
-            "true" => true,
-            "false" => false,
-            _ => return false,
-        };
-        return output_bool_deep(output, key.trim()) == Some(expected);
-    }
-    if let Some(key) = clause.strip_prefix("json_i64_nonzero:") {
-        return output_i64_deep(output, key.trim()).is_some_and(|value| value != 0);
-    }
-    if let Some(key) = clause.strip_prefix("json_present:") {
-        return value_deep(output, key.trim()).is_some_and(|value| !value.is_null());
-    }
-    false
 }
 
-fn output_i64_deep(output: &Value, key: &str) -> Option<i64> {
-    value_deep(output, key).and_then(|value| value.as_i64())
-}
-
-fn output_bool_deep(output: &Value, key: &str) -> Option<bool> {
-    value_deep(output, key).and_then(|value| value.as_bool())
-}
-
-fn value_deep(output: &Value, key: &str) -> Option<Value> {
-    value_at_path(output, key).cloned().or_else(|| {
-        output
-            .get("structured_output")
-            .and_then(|nested| value_at_path(nested, key).cloned())
+fn value_deep(output: &Value, path: &[String], structured_output_fallback: bool) -> Option<Value> {
+    value_at_path(output, path).cloned().or_else(|| {
+        structured_output_fallback
+            .then(|| output.get("structured_output"))
+            .flatten()
+            .and_then(|nested| value_at_path(nested, path).cloned())
     })
 }
 
-fn value_at_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
+fn value_at_path<'a>(value: &'a Value, path: &[String]) -> Option<&'a Value> {
     let mut current = value;
-    for segment in path.split('.') {
-        if segment.is_empty() {
-            return None;
-        }
-        current = current.get(segment)?;
+    for segment in path {
+        current = current.get(segment.as_str())?;
     }
     Some(current)
 }
@@ -128,7 +129,8 @@ fn value_at_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
 mod tests {
     use super::*;
     use crate::contract::{
-        ApprovalSpec, Idempotency, Reversibility, RiskLevel, SideEffectClass, VerificationSpec,
+        legacy_failure_detection_specs, ApprovalSpec, Idempotency, Reversibility, RiskLevel,
+        SideEffectClass, VerificationSpec,
     };
     use serde_json::json;
 
@@ -146,6 +148,8 @@ mod tests {
             postconditions: Vec::new(),
             verification: VerificationSpec {
                 methods: Vec::new(),
+                observation_checks: Vec::new(),
+                method_templates: Vec::new(),
                 templates: Vec::new(),
                 required_before_completion: false,
                 confidence: 0.5,
@@ -157,6 +161,7 @@ mod tests {
             failure_modes,
             forbidden_uses: Vec::new(),
             argument_safety: Vec::new(),
+            structured_argument_safety: Vec::new(),
             semantic_intents: Vec::new(),
             intent_extractors: Vec::new(),
             repair_rules: Vec::new(),
@@ -169,6 +174,7 @@ mod tests {
         FailureModeSpec {
             name: name.to_string(),
             detection: detection.to_string(),
+            detection_rules: legacy_failure_detection_specs(detection),
             repair_strategy: "repair".to_string(),
             confidence: 0.8,
         }
@@ -220,6 +226,21 @@ mod tests {
         let kind = classify_failure(Some(&action), &output);
 
         assert_eq!(kind, FailureKind::NonZeroExit);
+    }
+
+    #[test]
+    fn structural_timeout_takes_priority_over_generic_nonzero_exit() {
+        let output = json!({
+            "success": false,
+            "structured_output": {
+                "interrupted": true,
+            },
+        });
+        let action = action(vec![mode("non_zero_exit", "json_bool:success=false")]);
+
+        let kind = classify_failure(Some(&action), &output);
+
+        assert_eq!(kind, FailureKind::TimedOut);
     }
 
     #[test]

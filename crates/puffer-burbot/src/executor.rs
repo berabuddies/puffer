@@ -3,10 +3,10 @@ use crate::puffer_tools::PUFFER_TOOLS_CONTRACT_ID;
 use anyhow::{anyhow, Result};
 use puffer_config::{load_config, ConfigPaths};
 use puffer_core::StandaloneToolExecutor;
-use puffer_resources::load_resources;
+use puffer_resources::{load_resources, LoadedResources};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -48,6 +48,7 @@ pub(crate) struct ExecutorDispatcher {
 pub(crate) struct PufferToolExecutor {
     inner: Mutex<StandaloneToolExecutor>,
     workspace_root: PathBuf,
+    structured_stdout_tools: HashSet<String>,
 }
 
 impl ExecutorDispatcher {
@@ -102,12 +103,14 @@ impl PufferToolExecutor {
         let paths = ConfigPaths::discover(&workspace_root);
         let config = load_config(&paths)?;
         let resources = load_resources(&paths)?;
+        let structured_stdout_tools = structured_stdout_tool_ids(&resources);
         let inner = StandaloneToolExecutor::new(config, workspace_root.clone(), resources)
             .with_working_dirs(vec![workspace_root.clone()])
             .with_sandbox_mode("workspace-write");
         Ok(Self {
             inner: Mutex::new(inner),
             workspace_root,
+            structured_stdout_tools,
         })
     }
 }
@@ -136,18 +139,26 @@ impl Executor for PufferToolExecutor {
         match result {
             Ok(result) => {
                 let success = result.success;
-                let structured_output = structured_stdout(&result.stdout);
+                let structured_output = trusted_structured_stdout(
+                    result.tool_id.as_str(),
+                    &result.stdout,
+                    &self.structured_stdout_tools,
+                );
+                let mut output = json!({
+                    "success": success,
+                    "tool_id": result.tool_id,
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                    "metadata": result.metadata,
+                    "structured_output": structured_output.clone().unwrap_or(Value::Null),
+                });
+                if structured_output.is_some() {
+                    output["structured_output_source"] = json!("puffer_runtime_handler");
+                }
                 Ok(observation(
                     invocation,
                     success,
-                    json!({
-                        "success": success,
-                        "tool_id": result.tool_id,
-                        "stdout": result.stdout,
-                        "stderr": result.stderr,
-                        "metadata": result.metadata,
-                        "structured_output": structured_output,
-                    }),
+                    output,
                     (!success).then(|| "Puffer tool returned unsuccessful result".to_string()),
                     started,
                 ))
@@ -190,7 +201,6 @@ impl PufferToolExecutor {
             }
         };
         let stdout = serde_json::to_string_pretty(&background_output)?;
-        let structured_output = structured_stdout(&stdout);
         Ok(observation(
             invocation,
             true,
@@ -202,7 +212,8 @@ impl PufferToolExecutor {
                 "metadata": {
                     "burbot_background": true,
                 },
-                "structured_output": structured_output,
+                "structured_output": background_output,
+                "structured_output_source": "burbot_background_bash",
             }),
             None,
             started,
@@ -265,8 +276,37 @@ impl PufferToolExecutor {
     }
 }
 
-fn structured_stdout(stdout: &str) -> Value {
-    serde_json::from_str(stdout).unwrap_or(Value::Null)
+fn structured_stdout_tool_ids(resources: &LoadedResources) -> HashSet<String> {
+    resources
+        .tools
+        .iter()
+        .filter(|item| item.value.contract.is_some())
+        .filter(|item| handler_returns_structured_stdout(item.value.handler.as_str()))
+        .map(|item| item.value.id.clone())
+        .collect()
+}
+
+fn handler_returns_structured_stdout(handler: &str) -> bool {
+    handler.starts_with("runtime:claude_")
+        || matches!(
+            handler,
+            "runtime:notebook_edit"
+                | "runtime:tool_search"
+                | "runtime:list_mcp_resources"
+                | "runtime:read_mcp_resource"
+                | "runtime:sleep"
+        )
+}
+
+fn trusted_structured_stdout(
+    tool_id: &str,
+    stdout: &str,
+    structured_stdout_tools: &HashSet<String>,
+) -> Option<Value> {
+    structured_stdout_tools
+        .contains(tool_id)
+        .then(|| serde_json::from_str(stdout).ok())
+        .flatten()
 }
 
 fn observation(
@@ -374,6 +414,47 @@ mod tests {
         assert!(observation.output["stdout"]
             .as_str()
             .is_some_and(|stdout| stdout.contains("\"completed\": true")));
+        assert_eq!(observation.output["structured_output"]["completed"], true);
+        assert_eq!(
+            observation.output["structured_output_source"],
+            "puffer_runtime_handler"
+        );
+    }
+
+    #[test]
+    fn untrusted_stdout_json_is_not_promoted_to_structured_output() {
+        let structured_tools = HashSet::new();
+        let output = trusted_structured_stdout(
+            "ExternalTool",
+            "{\"filePath\":\"/tmp/not-a-contract-result\"}",
+            &structured_tools,
+        );
+
+        assert!(output.is_none());
+    }
+
+    #[test]
+    fn foreground_bash_keeps_command_json_as_nested_stdout_text() {
+        let workspace = tempfile::tempdir().unwrap();
+        let executor = PufferToolExecutor::new(workspace.path().to_path_buf()).unwrap();
+        let observation = executor
+            .execute(ActionInvocation {
+                run_id: RunId::new(),
+                plan_node_id: NodeId(1),
+                contract_id: PUFFER_TOOLS_CONTRACT_ID.to_string(),
+                action_name: "Bash".to_string(),
+                args: json!({
+                    "command": "printf '{\"filePath\":\"/tmp/not-structural\"}'",
+                }),
+            })
+            .unwrap();
+
+        assert!(observation.success);
+        assert_eq!(
+            observation.output["structured_output"]["stdout"],
+            "{\"filePath\":\"/tmp/not-structural\"}"
+        );
+        assert!(observation.output["structured_output"]["filePath"].is_null());
     }
 
     #[test]

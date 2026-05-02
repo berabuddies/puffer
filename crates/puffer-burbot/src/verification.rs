@@ -1,4 +1,6 @@
-use crate::contract::{ActionContract, SideEffectClass, VerificationTemplateSpec};
+use crate::contract::{
+    ActionContract, ObservationCheckSpec, SideEffectClass, VerificationTemplateSpec,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -55,9 +57,11 @@ pub(crate) fn verification_templates_for(
 ) -> Vec<VerificationActionTemplate> {
     action
         .verification
-        .methods
+        .method_templates
         .iter()
-        .filter_map(|method| template_from_method(method, action, executed_output))
+        .map(|template| {
+            executable_template_from_structured(template, action, &json!({}), executed_output)
+        })
         .collect()
 }
 
@@ -80,16 +84,15 @@ pub(crate) fn executable_verification_templates_for(
 
 /// Evaluates machine-readable observation checks declared in verification methods.
 pub(crate) fn observation_checks_pass(action: &ActionContract, output: &Value) -> Option<bool> {
-    let checks = action
-        .verification
-        .methods
-        .iter()
-        .filter_map(|method| ObservationCheck::parse(method))
-        .collect::<Vec<_>>();
+    let checks = &action.verification.observation_checks;
     if checks.is_empty() {
         return None;
     }
-    Some(checks.iter().all(|check| check.matches(output)))
+    Some(
+        checks
+            .iter()
+            .all(|check| observation_check_matches(check, output)),
+    )
 }
 
 /// Builds both simple requirements and action templates for a completed action.
@@ -110,30 +113,6 @@ pub(crate) struct PlannedVerification {
     pub(crate) templates: Vec<VerificationActionTemplate>,
 }
 
-fn template_from_method(
-    method: &str,
-    action: &ActionContract,
-    executed_output: &Value,
-) -> Option<VerificationActionTemplate> {
-    let method = method.trim();
-    let action_ref = method
-        .strip_prefix("action:")
-        .or_else(|| method.strip_prefix("tool:"))
-        .unwrap_or(method)
-        .trim();
-    let (contract_id, action_name) = action_ref.rsplit_once('.')?;
-    if contract_id.is_empty() || action_name.is_empty() {
-        return None;
-    }
-
-    Some(VerificationActionTemplate {
-        contract_id: contract_id.to_string(),
-        action_name: action_name.to_string(),
-        args: verification_args(action, executed_output),
-        reason: format!("verify {}", action.name),
-    })
-}
-
 fn executable_template_from_structured(
     template: &VerificationTemplateSpec,
     action: &ActionContract,
@@ -147,16 +126,9 @@ fn executable_template_from_structured(
         reason: template
             .reason
             .clone()
+            .clone()
             .unwrap_or_else(|| format!("verify {}", action.name)),
     }
-}
-
-fn verification_args(action: &ActionContract, executed_output: &Value) -> Value {
-    json!({
-        "source_action": action.name,
-        "postconditions": action.postconditions,
-        "output": executed_output,
-    })
 }
 
 fn render_structured_args(
@@ -247,59 +219,32 @@ fn output_indicates_failure(output: &Value) -> bool {
         || output.get("error").is_some_and(|error| !error.is_null())
 }
 
-enum ObservationCheck {
-    JsonBool { path: String, expected: bool },
-    Present { path: String },
-    NonEmpty { path: String },
-}
-
-impl ObservationCheck {
-    fn parse(method: &str) -> Option<Self> {
-        let raw = method.trim().strip_prefix("observation:")?;
-        if let Some(expression) = raw.strip_prefix("json_bool:") {
-            let (path, expected) = expression.split_once('=')?;
-            let expected = match expected.trim() {
-                "true" => true,
-                "false" => false,
-                _ => return None,
-            };
-            return Some(Self::JsonBool {
-                path: path.trim().to_string(),
-                expected,
-            });
+fn observation_check_matches(check: &ObservationCheckSpec, output: &Value) -> bool {
+    match check {
+        ObservationCheckSpec::JsonBool { path, expected } => {
+            value_at_path(output, path).and_then(Value::as_bool) == Some(*expected)
         }
-        raw.strip_prefix("present:")
-            .map(|path| Self::Present {
-                path: path.trim().to_string(),
-            })
-            .or_else(|| {
-                raw.strip_prefix("non_empty:").map(|path| Self::NonEmpty {
-                    path: path.trim().to_string(),
-                })
-            })
-    }
-
-    fn matches(&self, output: &Value) -> bool {
-        match self {
-            Self::JsonBool { path, expected } => {
-                value_at_path(output, path).and_then(Value::as_bool) == Some(*expected)
-            }
-            Self::Present { path } => {
-                value_at_path(output, path).is_some_and(|value| !value.is_null())
-            }
-            Self::NonEmpty { path } => value_at_path(output, path)
-                .is_some_and(|value| value.as_str().is_some_and(|text| !text.trim().is_empty())),
+        ObservationCheckSpec::Present { path } => {
+            value_at_path(output, path).is_some_and(|value| !value.is_null())
+        }
+        ObservationCheckSpec::NonEmpty { path } => {
+            value_at_path(output, path).is_some_and(non_empty_structural_value)
         }
     }
 }
 
-fn value_at_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
+fn non_empty_structural_value(value: &Value) -> bool {
+    match value {
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(object) => !object.is_empty(),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
+    }
+}
+
+fn value_at_path<'a>(value: &'a Value, path: &[String]) -> Option<&'a Value> {
     let mut current = value;
-    for segment in path.split('.') {
-        if segment.is_empty() {
-            return None;
-        }
-        current = current.get(segment)?;
+    for segment in path {
+        current = current.get(segment.as_str())?;
     }
     Some(current)
 }
@@ -317,7 +262,8 @@ fn state_changes_need_verification(action: &ActionContract) -> bool {
 mod tests {
     use super::*;
     use crate::contract::{
-        ApprovalSpec, Idempotency, Reversibility, RiskLevel, VerificationSpec,
+        legacy_observation_check_specs, legacy_verification_method_templates, ApprovalSpec,
+        Idempotency, ObservationCheckSpec, Reversibility, RiskLevel, VerificationSpec,
         VerificationTemplateSpec,
     };
     use serde_json::json;
@@ -343,6 +289,8 @@ mod tests {
             preconditions: Vec::new(),
             postconditions: vec!["file exists".to_string()],
             verification: VerificationSpec {
+                observation_checks: legacy_observation_check_specs(&methods),
+                method_templates: legacy_verification_method_templates(&methods),
                 methods,
                 templates,
                 required_before_completion,
@@ -355,6 +303,7 @@ mod tests {
             failure_modes: Vec::new(),
             forbidden_uses: Vec::new(),
             argument_safety: Vec::new(),
+            structured_argument_safety: Vec::new(),
             semantic_intents: Vec::new(),
             intent_extractors: Vec::new(),
             repair_rules: Vec::new(),
@@ -499,5 +448,50 @@ mod tests {
             executable_verification_templates_for(&action, &json!({}), &json!({"success": true}));
 
         assert!(templates.is_empty());
+    }
+
+    #[test]
+    fn legacy_non_empty_observation_method_is_ignored() {
+        let action = action(vec!["observation:non_empty:stdout".to_string()], true);
+
+        assert!(action.verification.observation_checks.is_empty());
+        assert_eq!(
+            observation_checks_pass(&action, &json!({"stdout": "free text"})),
+            None
+        );
+    }
+
+    #[test]
+    fn explicit_non_empty_observation_check_does_not_match_strings() {
+        let mut action = action(Vec::new(), true);
+        action.verification.observation_checks = vec![ObservationCheckSpec::NonEmpty {
+            path: vec!["stdout".to_string()],
+        }];
+
+        assert_eq!(
+            observation_checks_pass(&action, &json!({"stdout": "free text"})),
+            Some(false)
+        );
+        assert_eq!(
+            observation_checks_pass(&action, &json!({"items": ["structural"]})),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn explicit_non_empty_observation_check_matches_structural_containers() {
+        let mut action = action(Vec::new(), true);
+        action.verification.observation_checks = vec![ObservationCheckSpec::NonEmpty {
+            path: vec!["items".to_string()],
+        }];
+
+        assert_eq!(
+            observation_checks_pass(&action, &json!({"items": ["structural"]})),
+            Some(true)
+        );
+        assert_eq!(
+            observation_checks_pass(&action, &json!({"items": []})),
+            Some(false)
+        );
     }
 }

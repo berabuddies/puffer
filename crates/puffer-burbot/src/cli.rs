@@ -66,6 +66,9 @@ enum Command {
         /// Execute contract-proven read-only frontier actions in a safe parallel batch.
         #[arg(long, default_value_t = false)]
         parallel_read_only: bool,
+        /// YOLO mode: bypass the safety gate entirely. Risky; use only in sandboxed benchmarks.
+        #[arg(long, default_value_t = false)]
+        yolo: bool,
     },
     /// Inspect JSONL traces written by Burbot.
     Trace {
@@ -184,6 +187,7 @@ struct CliRunOptions {
     expect_failure: bool,
     symbolic_workers: bool,
     parallel_read_only: bool,
+    yolo: bool,
 }
 
 pub(crate) fn run() -> Result<()> {
@@ -201,6 +205,7 @@ pub(crate) fn run() -> Result<()> {
             expect_failure,
             symbolic_workers,
             parallel_read_only,
+            yolo,
         } => run_goal(CliRunOptions {
             goal,
             llm_tool_call,
@@ -212,6 +217,7 @@ pub(crate) fn run() -> Result<()> {
             expect_failure,
             symbolic_workers,
             parallel_read_only,
+            yolo,
         }),
         Command::Trace { command } => run_trace(command),
         Command::Eval { command } => run_eval(command),
@@ -354,7 +360,8 @@ fn run_goal(options: CliRunOptions) -> Result<()> {
             enable_parallel_read_only: options.parallel_read_only,
             enable_observe_act_llm,
             model: enable_observe_act_llm.then_some(options.model),
-            goal_verification_min_confidence: 0.75,
+            goal_verification_min_confidence: 0.4,
+            yolo: options.yolo,
         },
     )?;
     println!(

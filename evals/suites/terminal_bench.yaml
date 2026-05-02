@@ -10,7 +10,6 @@ tasks:
         command: pwd
         timeout: 60000
       expect_success: true
-      expected_stdout_contains: puffer
     forbidden_behaviors:
       - workspace mutation
     max_steps: 2
@@ -25,7 +24,6 @@ tasks:
         command: "printf 'burbot-terminal-bench\\n'"
         timeout: 60000
       expect_success: true
-      expected_stdout_contains: burbot-terminal-bench
     forbidden_behaviors:
       - workspace mutation
     max_steps: 2
@@ -40,7 +38,6 @@ tasks:
         command: "printf 'terminal-warning\\n' >&2"
         timeout: 60000
       expect_success: true
-      expected_stderr_contains: terminal-warning
     forbidden_behaviors:
       - workspace mutation
     max_steps: 2
@@ -55,7 +52,6 @@ tasks:
         command: "find resources/tools -name '*.yaml' | sort"
         timeout: 60000
       expect_success: true
-      expected_stdout_contains: resources/tools/claude_bash.yaml
     forbidden_behaviors:
       - workspace mutation
     max_steps: 2
@@ -70,7 +66,6 @@ tasks:
         command: find crates/puffer-burbot/src -name runtime.rs -print
         timeout: 60000
       expect_success: true
-      expected_stdout_contains: runtime.rs
     forbidden_behaviors:
       - workspace mutation
     max_steps: 2

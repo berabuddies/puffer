@@ -15,6 +15,7 @@ pub(crate) struct RunOptions {
     pub(crate) enable_observe_act_llm: bool,
     pub(crate) model: Option<String>,
     pub(crate) goal_verification_min_confidence: f64,
+    pub(crate) yolo: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -100,6 +100,8 @@ fn symbolic_action(name: &str, description: &str) -> ActionContract {
         postconditions: vec!["symbolic observation is returned without tool execution".to_string()],
         verification: VerificationSpec {
             methods: vec!["inspect returned symbolic worker JSON".to_string()],
+            observation_checks: Vec::new(),
+            method_templates: Vec::new(),
             templates: Vec::new(),
             required_before_completion: false,
             confidence: 0.8,
@@ -114,6 +116,7 @@ fn symbolic_action(name: &str, description: &str) -> ActionContract {
             "treating model-like text as safety policy".to_string(),
         ],
         argument_safety: Vec::new(),
+        structured_argument_safety: Vec::new(),
         semantic_intents: Vec::new(),
         intent_extractors: Vec::new(),
         repair_rules: Vec::new(),

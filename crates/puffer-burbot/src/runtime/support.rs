@@ -140,12 +140,13 @@ fn precondition_source_satisfied(node: &PlanNode) -> bool {
     matches!(node.status, PlanStatus::Executed | PlanStatus::Satisfied)
 }
 
-pub(super) fn parse_completion_role(value: &str) -> CompletionRole {
+pub(super) fn parse_completion_role(value: &str) -> Option<CompletionRole> {
     match value {
-        "support" => CompletionRole::Support,
-        "verification" => CompletionRole::Verification,
-        "repair" => CompletionRole::Repair,
-        _ => CompletionRole::Terminal,
+        "terminal" => Some(CompletionRole::Terminal),
+        "support" => Some(CompletionRole::Support),
+        "verification" => Some(CompletionRole::Verification),
+        "repair" => Some(CompletionRole::Repair),
+        _ => None,
     }
 }
 
@@ -166,9 +167,8 @@ pub(super) fn failed_terminal_completion_allowed(
             .iter()
             .find(|edge| edge.target == node_id && edge.kind == PlanEdgeKind::Supports)
             .and_then(|edge| edge.payload.get("completion_role").and_then(Value::as_str))
-            .map(parse_completion_role)
-            .unwrap_or(CompletionRole::Terminal)
-            == CompletionRole::Terminal
+            .and_then(parse_completion_role)
+            == Some(CompletionRole::Terminal)
 }
 
 pub(super) fn failure_completion_artifact(

@@ -7,6 +7,7 @@ use serde_json::Value;
 
 pub(super) struct ProgressEvidence {
     pub(super) changes_state: bool,
+    pub(super) has_state_witness: bool,
     pub(super) has_structural_witness: bool,
     pub(super) has_output_witness: bool,
 }
@@ -16,31 +17,43 @@ pub(super) fn progress_evidence(
     action: Option<&ActionContract>,
     output: &Value,
 ) -> ProgressEvidence {
-    let has_structural_witness = structured_object_has_witness(output)
-        || non_empty_object_at(output, &["metadata"])
+    let has_declared_output_witness = explicit_output_witness(output);
+    let has_structural_witness = workspace_witness_has_changes(output)
         || value_present_deep(output, "backgroundTaskId")
-        || value_present_deep(output, "outputFile");
-    let has_output_witness = string_at(output, &["stdout"]).is_some_and(non_empty_text)
-        || string_at(output, &["stderr"]).is_some_and(non_empty_text)
-        || string_at(output, &["error"]).is_some_and(non_empty_text)
-        || has_structural_witness;
+        || value_present_deep(output, "outputFile")
+        || has_declared_output_witness;
+    let has_state_witness = workspace_witness_has_changes(output)
+        || value_present_deep(output, "backgroundTaskId")
+        || value_present_deep(output, "outputFile")
+        || value_present_at_any_path(
+            output,
+            &[
+                &["filePath"],
+                &["file_path"],
+                &["file", "filePath"],
+                &["file", "file_path"],
+                &["structured_output", "filePath"],
+                &["structured_output", "file_path"],
+                &["structured_output", "file", "filePath"],
+                &["structured_output", "file", "file_path"],
+            ],
+        );
+    let has_output_witness = has_declared_output_witness || has_structural_witness;
     let changes_state = action.is_some_and(|action| {
         if read_only_side_effect(&action.side_effect_class) {
             return false;
         }
-        match action.side_effect_class {
-            SideEffectClass::Unknown => has_structural_witness,
-            _ => true,
-        }
+        has_state_witness
     });
     ProgressEvidence {
         changes_state,
+        has_state_witness,
         has_structural_witness,
         has_output_witness,
     }
 }
 
-/// Returns true when a model-generated unknown-side-effect terminal action made no progress.
+/// Returns true when a model-generated unknown-side-effect completion action made no progress.
 pub(super) fn model_unknown_terminal_without_progress(
     action: Option<&ActionContract>,
     completion_role: CompletionRole,
@@ -49,12 +62,13 @@ pub(super) fn model_unknown_terminal_without_progress(
 ) -> bool {
     action.is_some_and(|action| action.side_effect_class == SideEffectClass::Unknown)
         && model_proposed
-        && matches!(
-            completion_role,
-            CompletionRole::Terminal | CompletionRole::Repair
-        )
-        && !progress.has_structural_witness
-        && !progress.has_output_witness
+        && match completion_role {
+            CompletionRole::Repair => !progress.has_structural_witness,
+            CompletionRole::Terminal => {
+                !progress.has_structural_witness && !progress.has_output_witness
+            }
+            CompletionRole::Support | CompletionRole::Verification => false,
+        }
 }
 
 /// Returns true when the selected node came from a structural model proposal source.
@@ -73,33 +87,43 @@ pub(super) fn model_proposed_node(graph: &PlanGraph, node_id: NodeId) -> bool {
         })
 }
 
-fn structured_object_has_witness(output: &Value) -> bool {
-    value_at(output, &["structured_output"])
-        .and_then(Value::as_object)
-        .is_some_and(|object| {
-            object.iter().any(|(key, value)| {
-                !matches!(
-                    key.as_str(),
-                    "noOutputExpected" | "interrupted" | "success" | "exit_code"
-                ) && concrete_value(value)
-            })
-        })
-}
-
-fn non_empty_object_at(output: &Value, path: &[&str]) -> bool {
-    value_at(output, path)
-        .and_then(Value::as_object)
-        .is_some_and(|object| !object.is_empty())
+fn workspace_witness_has_changes(output: &Value) -> bool {
+    let Some(witness) = value_at(output, &["filesystem_witness"]) else {
+        return false;
+    };
+    ["created", "modified", "removed"].iter().any(|key| {
+        witness
+            .get(*key)
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty())
+    })
 }
 
 fn value_present_deep(output: &Value, key: &str) -> bool {
     value_at(output, &[key]).is_some_and(concrete_value)
         || value_at(output, &["structured_output", key]).is_some_and(concrete_value)
-        || value_at(output, &["metadata", key]).is_some_and(concrete_value)
 }
 
-fn string_at<'a>(output: &'a Value, path: &[&str]) -> Option<&'a str> {
-    value_at(output, path).and_then(Value::as_str)
+fn value_present_at_any_path(output: &Value, paths: &[&[&str]]) -> bool {
+    paths
+        .iter()
+        .any(|path| value_at(output, path).is_some_and(concrete_value))
+}
+
+fn explicit_output_witness(output: &Value) -> bool {
+    let paths: &[&[&str]] = &[
+        &["produced_output"],
+        &["progress_kind"],
+        &["artifact_ids"],
+        &["verification_evidence"],
+        &["structured_output", "produced_output"],
+        &["structured_output", "progress_kind"],
+        &["structured_output", "artifact_ids"],
+        &["structured_output", "verification_evidence"],
+    ];
+    paths
+        .iter()
+        .any(|path| value_at(output, path).is_some_and(explicit_witness_value))
 }
 
 fn value_at<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
@@ -122,4 +146,14 @@ fn concrete_value(value: &Value) -> bool {
 
 fn non_empty_text(text: &str) -> bool {
     !text.trim().is_empty()
+}
+
+fn explicit_witness_value(value: &Value) -> bool {
+    match value {
+        Value::Null | Value::String(_) => false,
+        Value::Bool(value) => *value,
+        Value::Number(value) => value.as_f64().is_some_and(|value| value != 0.0),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(object) => !object.is_empty(),
+    }
 }

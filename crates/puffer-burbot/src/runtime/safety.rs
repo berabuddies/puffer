@@ -1,5 +1,5 @@
 use crate::belief::BeliefGraph;
-use crate::contract::{ArgumentSafetySpec, ContractRegistry, SideEffectClass};
+use crate::contract::{ContractRegistry, SideEffectClass, StructuredArgumentSafetySpec};
 use crate::graph::PlanNode;
 use crate::ids::NodeId;
 use anyhow::{anyhow, Result};
@@ -73,11 +73,18 @@ impl SafetyGate {
         if action.side_effect_class == SideEffectClass::FinancialOrLegalEffect {
             return Ok(Some(BlockReason::FinancialOrLegalActionBlocked));
         }
-        if argument_safety_matches(&node.payload, &action.argument_safety, true) {
+        if structured_argument_safety_matches(
+            &node.payload,
+            &action.structured_argument_safety,
+            true,
+        ) {
             return Ok(Some(BlockReason::ArgumentBlocked));
         }
-        if argument_safety_matches(&node.payload, &action.argument_safety, false)
-            && !ctx.approvals.has_approval_for(node.id)
+        if structured_argument_safety_matches(
+            &node.payload,
+            &action.structured_argument_safety,
+            false,
+        ) && !ctx.approvals.has_approval_for(node.id)
         {
             return Ok(Some(BlockReason::ArgumentApprovalRequired));
         }
@@ -93,20 +100,54 @@ impl SafetyGate {
     }
 }
 
-fn argument_safety_matches(payload: &Value, specs: &[ArgumentSafetySpec], blocked: bool) -> bool {
-    specs.iter().any(|spec| {
-        let Some(text) = payload.get(&spec.source_arg).and_then(Value::as_str) else {
-            return false;
-        };
-        let patterns = if blocked {
-            &spec.blocked_patterns
-        } else {
-            &spec.approval_patterns
-        };
-        patterns.iter().any(|pattern| {
-            regex::Regex::new(&pattern.pattern)
-                .map(|regex| regex.is_match(text))
-                .unwrap_or(false)
-        })
-    })
+fn structured_argument_safety_matches(
+    payload: &Value,
+    specs: &[StructuredArgumentSafetySpec],
+    blocked: bool,
+) -> bool {
+    specs
+        .iter()
+        .any(|spec| structured_argument_safety_match(payload, spec, blocked))
+}
+
+fn structured_argument_safety_match(
+    payload: &Value,
+    spec: &StructuredArgumentSafetySpec,
+    blocked: bool,
+) -> bool {
+    match spec {
+        StructuredArgumentSafetySpec::BlockPathPrefix {
+            source_arg,
+            prefixes,
+        } if blocked => payload
+            .get(source_arg)
+            .and_then(Value::as_str)
+            .is_some_and(|path| path_has_prefix(path, prefixes)),
+        StructuredArgumentSafetySpec::BlockParentTraversal { source_arg } if blocked => payload
+            .get(source_arg)
+            .and_then(Value::as_str)
+            .is_some_and(path_has_parent_traversal),
+        StructuredArgumentSafetySpec::RequireApprovalPathComponent {
+            source_arg,
+            component,
+        } if !blocked => payload
+            .get(source_arg)
+            .and_then(Value::as_str)
+            .is_some_and(|path| path_has_component(path, component)),
+        _ => false,
+    }
+}
+
+fn path_has_prefix(path: &str, prefixes: &[String]) -> bool {
+    prefixes
+        .iter()
+        .any(|prefix| path == prefix || path.starts_with(&format!("{prefix}/")))
+}
+
+fn path_has_parent_traversal(path: &str) -> bool {
+    path.split('/').any(|segment| segment == "..")
+}
+
+fn path_has_component(path: &str, component: &str) -> bool {
+    path.split('/').any(|segment| segment == component)
 }

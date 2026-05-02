@@ -1,5 +1,8 @@
 use crate::belief::BeliefGraph;
-use crate::contract::{ContractRegistry, InMemoryContractRegistry};
+use crate::contract::{
+    ActionContract, ContractRegistry, InMemoryContractRegistry, SemanticSlotKind,
+    StructuredArgumentSafetySpec,
+};
 use crate::executor::{ActionInvocation, ExecutorDispatcher, Observation, PufferToolExecutor};
 use crate::failure::{classify_failure, FailureKind};
 use crate::graph::{
@@ -10,30 +13,44 @@ use crate::planner::{
     initial_candidate_plans, verification_candidates_for_action, ActionCandidate, ActionPlan,
     CompletionRole, PlanDependencyKind,
 };
-use crate::rules::{action_key, RewriteEngine, RuleContext};
+use crate::rules::{action_key_for_contracts, RewriteEngine, RuleContext};
 use crate::saturation::saturate_guarded_substitutions;
 use crate::scheduler::Scheduler;
+use crate::semantics::action_intents;
 use crate::stats::ActionTraceStats;
 use crate::trace::{trace_event, JsonlTraceStore, TraceEvent, TraceEventType};
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 mod support;
 pub(crate) use support::default_trace_dir;
+mod artifact_context;
+mod artifact_review;
+mod dependencies;
+mod filesystem_witness;
 mod model;
+mod model_candidates;
+mod model_feedback;
 mod model_loop;
 mod model_loop_support;
+mod model_retry;
+mod observation;
 mod parallel;
 mod progress;
 mod repair;
 mod safety;
 mod snapshot;
+mod stale;
+mod write_preconditions;
+use dependencies::block_actions_with_dead_dependencies;
+use filesystem_witness::{snapshot_workspace, witness_has_changes, workspace_change_witness};
 use model::VerificationOutcome;
 pub(crate) use model::{RunOptions, RunResult};
 use parallel::{parallel_batch_payload, select_parallel_read_batch};
+use progress::ProgressEvidence;
 use progress::{model_proposed_node, model_unknown_terminal_without_progress, progress_evidence};
 #[cfg(test)]
 pub(crate) use safety::BlockReason;
@@ -56,10 +73,16 @@ pub(crate) struct BurbotRuntime {
     trace_stats: ActionTraceStats,
     repeated_failures: HashMap<String, u64>,
     executed_action_epochs: HashMap<String, u64>,
+    fresh_read_action_keys: HashSet<String>,
+    fresh_read_paths: HashMap<String, HashSet<String>>,
+    full_file_read_epochs: HashMap<String, u64>,
+    quarantined_artifact_paths: HashSet<String>,
     model_retry_sequence: u64,
-    model_retry_epoch: Option<u64>,
     state_epoch: u64,
+    state_advancing_since_goal_check: u64,
 }
+
+const FORCED_GOAL_CHECK_INTERVAL: u64 = 4;
 
 impl BurbotRuntime {
     pub(crate) fn new(
@@ -81,14 +104,23 @@ impl BurbotRuntime {
             trace_stats: ActionTraceStats::default(),
             repeated_failures: HashMap::new(),
             executed_action_epochs: HashMap::new(),
+            fresh_read_action_keys: HashSet::new(),
+            fresh_read_paths: HashMap::new(),
+            full_file_read_epochs: HashMap::new(),
+            quarantined_artifact_paths: HashSet::new(),
             model_retry_sequence: 0,
-            model_retry_epoch: None,
             state_epoch: 0,
+            state_advancing_since_goal_check: 0,
         })
     }
 
     pub(crate) fn run_goal(&mut self, goal: String, options: RunOptions) -> Result<RunResult> {
         self.trace_stats = ActionTraceStats::from_trace_store(&self.trace_store);
+        self.full_file_read_epochs.clear();
+        self.fresh_read_action_keys.clear();
+        self.fresh_read_paths.clear();
+        self.quarantined_artifact_paths.clear();
+        self.state_advancing_since_goal_check = 0;
         let run_id = RunId::new();
         let mut graph = PlanGraph::from_goal(goal.clone());
         let mut beliefs = BeliefGraph::new();
@@ -118,14 +150,23 @@ impl BurbotRuntime {
             self.apply_rewrites(run_id, &mut graph, &options)?;
             self.apply_saturation(run_id, &mut graph)?;
             let Some(selected_action) = self.scheduler.choose_next_action(&graph) else {
+                let events = block_actions_with_dead_dependencies(run_id, &mut graph);
+                for event in events {
+                    self.append(event)?;
+                }
+                if self.scheduler.choose_next_action(&graph).is_some() {
+                    continue;
+                }
                 if options.enable_observe_act_llm {
+                    let (support_source, reason, detail) =
+                        self.no_executable_recovery_context(&graph, current_step);
                     let added = self.add_recovery_model_candidates(
                         run_id,
                         &mut graph,
                         &goal,
-                        NodeId(0),
-                        "no_executable_actions",
-                        json!({"step": current_step}),
+                        support_source,
+                        reason,
+                        detail,
                         None,
                         &options,
                     )?;
@@ -145,6 +186,18 @@ impl BurbotRuntime {
             };
             let node_id = selected_action.node_id;
             let selected = graph.node(node_id)?.clone();
+            if let Some(event) = write_preconditions::ensure_existing_file_read_precondition(
+                run_id,
+                &mut graph,
+                self.contracts.as_ref(),
+                &self.workspace_root,
+                &self.full_file_read_epochs,
+                self.state_epoch,
+                node_id,
+            )? {
+                self.append(event)?;
+                continue;
+            }
             let mut selected_event = trace_event(
                 run_id,
                 TraceEventType::ActionSelected,
@@ -160,31 +213,41 @@ impl BurbotRuntime {
 
             let ctx = self.context_for_selected(&graph, &selected, &options, &beliefs);
             if let Some(reason) = self.safety_gate.blocks(&selected, &ctx)? {
-                graph.node_mut(node_id)?.status = PlanStatus::Blocked;
-                self.append(trace_event(
-                    run_id,
-                    TraceEventType::SafetyBlocked,
-                    Some(node_id),
-                    selected.payload.clone(),
-                    json!({"reason": reason.clone()}),
-                ))?;
-                if options.enable_observe_act_llm {
-                    self.add_recovery_model_candidates(
+                if options.yolo {
+                    self.append(trace_event(
                         run_id,
-                        &mut graph,
-                        &goal,
-                        node_id,
-                        "safety_blocked",
-                        json!({
-                            "blocked_action": selected.action_ref,
-                            "args": selected.payload,
-                            "reason": reason,
-                        }),
-                        None,
-                        &options,
-                    )?;
+                        TraceEventType::SafetyBlocked,
+                        Some(node_id),
+                        selected.payload.clone(),
+                        json!({"reason": reason, "bypassed": true}),
+                    ))?;
+                } else {
+                    graph.node_mut(node_id)?.status = PlanStatus::Blocked;
+                    self.append(trace_event(
+                        run_id,
+                        TraceEventType::SafetyBlocked,
+                        Some(node_id),
+                        selected.payload.clone(),
+                        json!({"reason": reason.clone()}),
+                    ))?;
+                    if options.enable_observe_act_llm {
+                        self.add_recovery_model_candidates(
+                            run_id,
+                            &mut graph,
+                            &goal,
+                            node_id,
+                            "safety_blocked",
+                            json!({
+                                "blocked_action": selected.action_ref,
+                                "args": selected.payload,
+                                "reason": reason,
+                            }),
+                            None,
+                            &options,
+                        )?;
+                    }
+                    continue;
                 }
-                continue;
             }
 
             if options.enable_parallel_read_only {
@@ -236,7 +299,9 @@ impl BurbotRuntime {
             }
 
             let invocation = self.invocation_for_node(run_id, &graph, node_id)?;
-            let observation = self.executors.execute(invocation)?;
+            let before_snapshot = self.workspace_snapshot_for_action(&graph, node_id)?;
+            let mut observation = self.executors.execute(invocation)?;
+            self.attach_workspace_change_witness(before_snapshot, &mut observation)?;
             if let Some(artifact) = self.process_observation(
                 run_id,
                 current_step,
@@ -541,6 +606,176 @@ impl BurbotRuntime {
         })
     }
 
+    fn workspace_snapshot_for_action(
+        &self,
+        graph: &PlanGraph,
+        node_id: NodeId,
+    ) -> Result<Option<filesystem_witness::WorkspaceSnapshot>> {
+        let Some(node) = graph.node(node_id).ok() else {
+            return Ok(None);
+        };
+        let Some(action_ref) = node.action_ref.as_ref() else {
+            return Ok(None);
+        };
+        let Some(action) = self
+            .contracts
+            .get_action(&action_ref.contract_id, &action_ref.action_name)
+        else {
+            return Ok(None);
+        };
+        if action.side_effect_class == crate::contract::SideEffectClass::Unknown {
+            return Ok(Some(snapshot_workspace(&self.workspace_root)?));
+        }
+        Ok(None)
+    }
+
+    fn attach_workspace_change_witness(
+        &self,
+        before: Option<filesystem_witness::WorkspaceSnapshot>,
+        observation: &mut Observation,
+    ) -> Result<()> {
+        let Some(before) = before else {
+            return Ok(());
+        };
+        let after = snapshot_workspace(&self.workspace_root)?;
+        let witness = workspace_change_witness(&before, &after);
+        if !witness_has_changes(&witness) {
+            return Ok(());
+        }
+        if let Some(object) = observation.output.as_object_mut() {
+            object.insert("filesystem_witness".to_string(), witness);
+        }
+        Ok(())
+    }
+
+    fn record_fresh_read_action(&mut self, action_ref: &ActionRef, args: &Value) {
+        let Some(path_key) = self.read_file_path_key(action_ref, args) else {
+            return;
+        };
+        let action_key = action_key_for_contracts(self.contracts.as_ref(), action_ref, args);
+        self.fresh_read_action_keys.insert(action_key.clone());
+        self.fresh_read_paths
+            .entry(path_key)
+            .or_default()
+            .insert(action_key);
+    }
+
+    fn read_file_path_key(&self, action_ref: &ActionRef, args: &Value) -> Option<String> {
+        let action = self
+            .contracts
+            .get_action(&action_ref.contract_id, &action_ref.action_name)?;
+        action_intents(&action, args)
+            .into_iter()
+            .find(|intent| intent.normalized.intent == "read_file")
+            .and_then(|intent| {
+                intent
+                    .normalized
+                    .slots
+                    .get("path")
+                    .or_else(|| intent.normalized.slots.get("file_path"))
+                    .cloned()
+            })
+            .map(|path| self.workspace_path_key(&path))
+    }
+
+    fn action_execution_fresh(&self, action_ref: &ActionRef, args: &Value) -> bool {
+        let key = action_key_for_contracts(self.contracts.as_ref(), action_ref, args);
+        self.executed_action_epochs
+            .get(&key)
+            .is_some_and(|epoch| *epoch == self.state_epoch)
+            || self.fresh_read_action_keys.contains(&key)
+    }
+
+    fn invalidate_fresh_reads_for_observation(&mut self, output: &Value) {
+        for path_key in self.changed_file_path_keys(output) {
+            let Some(keys) = self.fresh_read_paths.remove(&path_key) else {
+                continue;
+            };
+            for key in keys {
+                self.fresh_read_action_keys.remove(&key);
+            }
+        }
+    }
+
+    fn changed_file_path_keys(&self, output: &Value) -> Vec<String> {
+        let mut paths = Vec::new();
+        collect_output_path_strings(output.get("filePath"), &mut paths);
+        collect_output_path_strings(output.get("file_path"), &mut paths);
+        collect_output_path_strings(
+            output
+                .get("structured_output")
+                .and_then(|value| value.get("filePath")),
+            &mut paths,
+        );
+        collect_output_path_strings(
+            output
+                .get("structured_output")
+                .and_then(|value| value.get("file"))
+                .and_then(|value| value.get("filePath")),
+            &mut paths,
+        );
+        if let Some(witness) = output.get("filesystem_witness") {
+            for key in ["created", "modified", "removed"] {
+                collect_output_path_strings(witness.get(key), &mut paths);
+            }
+        }
+        paths.sort();
+        paths.dedup();
+        paths
+            .into_iter()
+            .map(|path| self.workspace_path_key(&path))
+            .collect()
+    }
+
+    fn artifact_path_keys_for_action(
+        &self,
+        action_ref: &ActionRef,
+        args: &Value,
+        output: &Value,
+    ) -> Vec<String> {
+        let mut paths = Vec::new();
+        if let Some(action) = self
+            .contracts
+            .get_action(&action_ref.contract_id, &action_ref.action_name)
+        {
+            collect_contract_path_arg_strings(&action, args, &mut paths);
+        }
+        collect_trusted_artifact_output_paths(output, &mut paths);
+        if let Some(witness) = output.get("filesystem_witness") {
+            for key in ["created", "modified", "removed"] {
+                collect_output_path_strings(witness.get(key), &mut paths);
+            }
+        }
+        paths.sort();
+        paths.dedup();
+        paths
+            .into_iter()
+            .map(|path| self.workspace_path_key(&path))
+            .collect()
+    }
+
+    fn quarantine_artifact_paths(&mut self, action_ref: &ActionRef, args: &Value, output: &Value) {
+        for path in self.artifact_path_keys_for_action(action_ref, args, output) {
+            self.quarantined_artifact_paths.insert(path);
+        }
+    }
+
+    fn release_artifact_paths(&mut self, action_ref: &ActionRef, args: &Value, output: &Value) {
+        for path in self.artifact_path_keys_for_action(action_ref, args, output) {
+            self.quarantined_artifact_paths.remove(&path);
+        }
+    }
+
+    fn workspace_path_key(&self, path: &str) -> String {
+        let path = PathBuf::from(path);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            self.workspace_root.join(path)
+        };
+        path.canonicalize().unwrap_or(path).display().to_string()
+    }
+
     fn process_observation(
         &mut self,
         run_id: RunId,
@@ -577,10 +812,26 @@ impl BurbotRuntime {
         );
         if observation.success && progress.changes_state {
             self.state_epoch = self.state_epoch.saturating_add(1);
+            self.invalidate_fresh_reads_for_observation(&observation.output);
         }
         if observation.success {
-            self.executed_action_epochs
-                .insert(action_key(&action_ref, &selected.payload), self.state_epoch);
+            self.state_advancing_since_goal_check =
+                self.state_advancing_since_goal_check.saturating_add(1);
+        }
+        write_preconditions::record_full_file_read_epoch(
+            self.contracts.as_ref(),
+            &action_ref,
+            &selected.payload,
+            observation.success,
+            self.state_epoch,
+            &self.workspace_root,
+            &mut self.full_file_read_epochs,
+        );
+        if observation.success {
+            let key =
+                action_key_for_contracts(self.contracts.as_ref(), &action_ref, &selected.payload);
+            self.executed_action_epochs.insert(key, self.state_epoch);
+            self.record_fresh_read_action(&action_ref, &selected.payload);
         }
         let mut executed = trace_event(
             run_id,
@@ -613,8 +864,9 @@ impl BurbotRuntime {
             observation.success,
             &observation.output,
         )?;
-        if observation.success && self.is_verification_action(graph, node_id) {
-            if !self.goal_verified_or_expand(
+        if observation.success
+            && options.enable_observe_act_llm
+            && self.review_generated_artifact_if_needed(
                 run_id,
                 graph,
                 beliefs,
@@ -623,19 +875,44 @@ impl BurbotRuntime {
                 &action_ref,
                 &selected.payload,
                 &observation.output,
-                &options,
-            )? {
+                &progress,
+                options,
+            )?
+        {
+            return Ok(None);
+        }
+        if observation.success && self.is_verification_action(graph, node_id) {
+            if self.verification_action_verifies_terminal(graph, node_id) {
+                if self.scheduler.choose_next_action(graph).is_some() {
+                    return Ok(None);
+                }
+                if !self.goal_verified_or_expand(
+                    run_id,
+                    graph,
+                    beliefs,
+                    goal,
+                    node_id,
+                    &action_ref,
+                    &selected.payload,
+                    &observation.output,
+                    &options,
+                )? {
+                    return Ok(None);
+                }
+                let artifact =
+                    self.verified_success_artifact(graph, node_id, &observation.output)?;
+                self.append(trace_event(
+                    run_id,
+                    TraceEventType::CompletionDeclared,
+                    Some(node_id),
+                    json!({"step": step}),
+                    artifact.clone(),
+                ))?;
+                return Ok(Some(artifact));
+            }
+            if self.scheduler.choose_next_action(graph).is_some() {
                 return Ok(None);
             }
-            let artifact = self.verified_success_artifact(graph, node_id, &observation.output)?;
-            self.append(trace_event(
-                run_id,
-                TraceEventType::CompletionDeclared,
-                Some(node_id),
-                json!({"step": step}),
-                artifact.clone(),
-            ))?;
-            return Ok(Some(artifact));
         }
         if observation.success && self.should_schedule_verification(graph, node_id, &verification) {
             let added = self.add_verification_candidates(
@@ -655,7 +932,8 @@ impl BurbotRuntime {
                 self.contracts
                     .get_action(&action_ref.contract_id, &action_ref.action_name)
                     .as_ref(),
-                self.completion_role_for_node(graph, node_id),
+                self.completion_role_for_node(graph, node_id)
+                    .unwrap_or(CompletionRole::Support),
                 model_proposed_node(graph, node_id),
                 &progress,
             )
@@ -689,7 +967,8 @@ impl BurbotRuntime {
         }
         if observation.success
             && verification.passed
-            && self.completion_role_for_node(graph, node_id) == CompletionRole::Terminal
+            && self.completion_role_for_node(graph, node_id) == Some(CompletionRole::Terminal)
+            && self.should_verify_terminal_completion(graph, node_id, &progress)
         {
             if !self.goal_verified_or_expand(
                 run_id,
@@ -714,8 +993,43 @@ impl BurbotRuntime {
             ))?;
             return Ok(Some(artifact));
         }
+        if observation.success
+            && verification.passed
+            && options.enable_observe_act_llm
+            && self.completion_role_for_node(graph, node_id) != Some(CompletionRole::Terminal)
+            && self.state_advancing_since_goal_check >= FORCED_GOAL_CHECK_INTERVAL
+        {
+            self.state_advancing_since_goal_check = 0;
+            if self.goal_verified_or_expand(
+                run_id,
+                graph,
+                beliefs,
+                goal,
+                node_id,
+                &action_ref,
+                &selected.payload,
+                &observation.output,
+                &options,
+            )? {
+                let artifact = success_artifact(&action_ref, &observation.output, &verification);
+                self.append(trace_event(
+                    run_id,
+                    TraceEventType::CompletionDeclared,
+                    Some(node_id),
+                    json!({"step": step, "forced_goal_check": true}),
+                    artifact.clone(),
+                ))?;
+                return Ok(Some(artifact));
+            }
+        }
         if observation.success && !verification.passed {
             graph.node_mut(node_id)?.status = PlanStatus::Failed;
+        }
+        if observation.success
+            && verification.passed
+            && (progress.has_state_witness || progress.has_structural_witness)
+        {
+            self.resolve_repair_anchors(graph, node_id)?;
         }
         if !observation.success || !verification.passed {
             let failure_kind = if observation.success && !verification.passed {
@@ -813,7 +1127,7 @@ impl BurbotRuntime {
             {
                 if progress_evidence(Some(&action), output).changes_state {
                     beliefs.mark_changed_state(
-                        action_key(action_ref, args),
+                        action_key_for_contracts(self.contracts.as_ref(), action_ref, args),
                         "action with possible side effects succeeded",
                         output.clone(),
                     );
@@ -835,7 +1149,16 @@ impl BurbotRuntime {
             .edges
             .iter()
             .any(|edge| edge.source == node_id && edge.kind == PlanEdgeKind::Verifies)
-            || self.completion_role_for_node(graph, node_id) == CompletionRole::Verification
+    }
+
+    fn verification_action_verifies_terminal(&self, graph: &PlanGraph, node_id: NodeId) -> bool {
+        graph
+            .edges
+            .iter()
+            .filter(|edge| edge.source == node_id && edge.kind == PlanEdgeKind::Verifies)
+            .any(|edge| {
+                self.completion_role_for_node(graph, edge.target) == Some(CompletionRole::Terminal)
+            })
     }
 
     fn should_schedule_verification(
@@ -857,6 +1180,15 @@ impl BurbotRuntime {
             })
     }
 
+    fn should_verify_terminal_completion(
+        &self,
+        graph: &PlanGraph,
+        node_id: NodeId,
+        progress: &ProgressEvidence,
+    ) -> bool {
+        progress.has_state_witness || self.is_verification_action(graph, node_id)
+    }
+
     fn add_verification_candidates(
         &mut self,
         run_id: RunId,
@@ -876,15 +1208,50 @@ impl BurbotRuntime {
         Ok(added)
     }
 
-    fn completion_role_for_node(&self, graph: &PlanGraph, node_id: NodeId) -> CompletionRole {
+    fn resolve_repair_anchors(&self, graph: &mut PlanGraph, action_id: NodeId) -> Result<()> {
+        let anchors = graph
+            .edges
+            .iter()
+            .filter(|edge| edge.target == action_id && edge.kind == PlanEdgeKind::Repairs)
+            .map(|edge| edge.source)
+            .collect::<Vec<_>>();
+        for anchor in anchors {
+            if let Some(node) = graph.nodes.get_mut(&anchor) {
+                if matches!(node.kind, PlanNodeKind::Failure | PlanNodeKind::Repair)
+                    && node.status == PlanStatus::Open
+                {
+                    node.status = PlanStatus::Satisfied;
+                }
+            }
+            let dependent_repairs = graph
+                .edges
+                .iter()
+                .filter(|edge| edge.source == anchor && edge.kind == PlanEdgeKind::Repairs)
+                .map(|edge| edge.target)
+                .collect::<Vec<_>>();
+            for repair in dependent_repairs {
+                if let Some(node) = graph.nodes.get_mut(&repair) {
+                    if node.kind == PlanNodeKind::Repair && node.status == PlanStatus::Open {
+                        node.status = PlanStatus::Satisfied;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn completion_role_for_node(
+        &self,
+        graph: &PlanGraph,
+        node_id: NodeId,
+    ) -> Option<CompletionRole> {
         graph
             .edges
             .iter()
             .find(|edge| edge.target == node_id && edge.kind == PlanEdgeKind::Supports)
             .and_then(|edge| edge.payload.get("completion_role"))
             .and_then(Value::as_str)
-            .map(parse_completion_role)
-            .unwrap_or(CompletionRole::Terminal)
+            .and_then(parse_completion_role)
     }
 
     fn verified_success_artifact(
@@ -925,43 +1292,52 @@ impl BurbotRuntime {
             .map(|node| node.payload.clone())
     }
 
-    fn verify_observation(
+    fn no_executable_recovery_context(
         &self,
-        run_id: RunId,
-        node_id: NodeId,
-        action_ref: &ActionRef,
-        observation_success: bool,
-        output: &Value,
-    ) -> Result<VerificationOutcome> {
-        let action = self
-            .contracts
-            .get_action(&action_ref.contract_id, &action_ref.action_name)
-            .ok_or_else(|| anyhow!("missing action contract"))?;
-        let required = action.verification.required_before_completion;
-        let passed = if required {
-            observation_success
-                && crate::verification::observation_checks_pass(&action, output).unwrap_or(false)
-        } else {
-            observation_success
-        };
-        if required {
-            let mut event = trace_event(
-                run_id,
-                TraceEventType::VerificationPerformed,
-                Some(node_id),
-                output.clone(),
+        graph: &PlanGraph,
+        current_step: usize,
+    ) -> (NodeId, &'static str, Value) {
+        if let Some((id, node)) = latest_open_node(graph, PlanNodeKind::Failure) {
+            return (
+                id,
+                "no_executable_actions_after_failure",
                 json!({
-                    "passed": passed,
-                    "methods": action.verification.methods,
-                    "source": if passed { "observation_check" } else { "pending_or_failed" },
+                    "step": current_step,
+                    "failure_node": id.0,
+                    "failure": node.payload,
                 }),
             );
-            event.contract_id = Some(action_ref.contract_id.clone());
-            event.action_name = Some(action_ref.action_name.clone());
-            event.success = Some(passed);
-            self.append(event)?;
         }
-        Ok(VerificationOutcome { required, passed })
+        if let Some((id, node)) = latest_open_node(graph, PlanNodeKind::Repair) {
+            return (
+                id,
+                "no_executable_actions_after_failure",
+                json!({
+                    "step": current_step,
+                    "repair_node": id.0,
+                    "repair": node.payload,
+                }),
+            );
+        }
+        if graph_has_executed_non_support_action(graph) {
+            return (
+                NodeId(0),
+                "no_executable_actions_after_model_work",
+                json!({"step": current_step}),
+            );
+        }
+        if graph_has_executed_support_action(graph) {
+            return (
+                NodeId(0),
+                "no_executable_actions_after_support",
+                json!({"step": current_step}),
+            );
+        }
+        (
+            NodeId(0),
+            "no_executable_actions",
+            json!({"step": current_step}),
+        )
     }
 
     fn append(&self, event: TraceEvent) -> Result<()> {
@@ -969,7 +1345,121 @@ impl BurbotRuntime {
     }
 }
 
+fn latest_open_node(graph: &PlanGraph, kind: PlanNodeKind) -> Option<(NodeId, &PlanNode)> {
+    graph.nodes.iter().rev().find_map(|(id, node)| {
+        (node.kind == kind && node.status == PlanStatus::Open).then_some((*id, node))
+    })
+}
+
+fn graph_has_executed_non_support_action(graph: &PlanGraph) -> bool {
+    graph.nodes.iter().any(|(id, node)| {
+        node.kind == PlanNodeKind::Action
+            && matches!(node.status, PlanStatus::Executed | PlanStatus::Satisfied)
+            && completion_role_payload_for_node(graph, *id).is_some_and(|role| role != "support")
+    })
+}
+
+fn graph_has_executed_support_action(graph: &PlanGraph) -> bool {
+    graph.nodes.iter().any(|(id, node)| {
+        node.kind == PlanNodeKind::Action
+            && matches!(node.status, PlanStatus::Executed | PlanStatus::Satisfied)
+            && completion_role_payload_for_node(graph, *id) == Some("support")
+    })
+}
+
+fn completion_role_payload_for_node<'a>(graph: &'a PlanGraph, node_id: NodeId) -> Option<&'a str> {
+    graph
+        .edges
+        .iter()
+        .find(|edge| edge.target == node_id && edge.kind == PlanEdgeKind::Supports)
+        .and_then(|edge| edge.payload.get("completion_role"))
+        .and_then(Value::as_str)
+}
+
+fn collect_output_path_strings(value: Option<&Value>, paths: &mut Vec<String>) {
+    match value {
+        Some(Value::String(path)) if !path.trim().is_empty() => {
+            paths.push(path.trim().to_string());
+        }
+        Some(Value::Array(items)) => {
+            for item in items {
+                collect_output_path_strings(Some(item), paths);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_contract_path_arg_strings(
+    action: &ActionContract,
+    args: &Value,
+    paths: &mut Vec<String>,
+) {
+    for arg in contract_path_argument_names(action) {
+        collect_output_path_strings(args.get(&arg), paths);
+    }
+}
+
+fn contract_path_argument_names(action: &ActionContract) -> BTreeSet<String> {
+    let mut args = BTreeSet::new();
+    for intent in &action.semantic_intents {
+        for (slot, arg) in intent.slots.iter().chain(intent.optional_slots.iter()) {
+            if intent
+                .slot_kinds
+                .get(slot)
+                .is_some_and(filesystem_slot_kind)
+            {
+                args.insert(arg.clone());
+            }
+        }
+    }
+    for safety in &action.structured_argument_safety {
+        args.insert(structured_safety_source_arg(safety).to_string());
+    }
+    args
+}
+
+fn filesystem_slot_kind(kind: &SemanticSlotKind) -> bool {
+    matches!(
+        kind,
+        SemanticSlotKind::FilesystemPath | SemanticSlotKind::FilesystemDirectory
+    )
+}
+
+fn structured_safety_source_arg(safety: &StructuredArgumentSafetySpec) -> &str {
+    match safety {
+        StructuredArgumentSafetySpec::BlockPathPrefix { source_arg, .. }
+        | StructuredArgumentSafetySpec::BlockParentTraversal { source_arg }
+        | StructuredArgumentSafetySpec::RequireApprovalPathComponent { source_arg, .. } => {
+            source_arg
+        }
+    }
+}
+
+fn collect_trusted_artifact_output_paths(output: &Value, paths: &mut Vec<String>) {
+    collect_output_path_strings(output.get("filePath"), paths);
+    collect_output_path_strings(output.get("file_path"), paths);
+    collect_output_path_strings(
+        output
+            .get("structured_output")
+            .and_then(|value| value.get("filePath")),
+        paths,
+    );
+    collect_output_path_strings(
+        output
+            .get("structured_output")
+            .and_then(|value| value.get("file_path")),
+        paths,
+    );
+}
+
+#[cfg(test)]
+mod liveness_tests;
+#[cfg(test)]
+mod model_feedback_tests;
 #[cfg(test)]
 mod progress_tests;
+#[cfg(test)]
+mod retry_tests;
 #[cfg(test)]
 mod tests;

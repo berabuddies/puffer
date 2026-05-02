@@ -117,6 +117,7 @@ pub(crate) fn propose_mutations(events: &[TraceEvent]) -> Vec<MutationCandidate>
             failure_mode: FailureModeSpec {
                 name: failure_mode.to_string(),
                 detection,
+                detection_rules: Vec::new(),
                 repair_strategy,
                 confidence: 0.6,
             },
@@ -257,6 +258,8 @@ mod tests {
                 postconditions: Vec::new(),
                 verification: VerificationSpec {
                     methods: Vec::new(),
+                    observation_checks: Vec::new(),
+                    method_templates: Vec::new(),
                     templates: Vec::new(),
                     required_before_completion: false,
                     confidence: 0.5,
@@ -268,6 +271,7 @@ mod tests {
                 failure_modes: Vec::new(),
                 forbidden_uses: Vec::new(),
                 argument_safety: Vec::new(),
+                structured_argument_safety: Vec::new(),
                 semantic_intents: Vec::new(),
                 intent_extractors: Vec::new(),
                 repair_rules: Vec::new(),

@@ -25,6 +25,7 @@ pub(crate) enum TraceEventType {
     RepairAdded,
     VerificationPerformed,
     GoalVerificationPerformed,
+    ArtifactReviewPerformed,
     CompletionDeclared,
     RunFinished,
     MutationProposed,

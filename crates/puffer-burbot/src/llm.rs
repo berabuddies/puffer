@@ -1,14 +1,31 @@
+mod chat;
+mod openai_error;
+mod parse;
 mod schema;
 
-use crate::contract::{ActionContract, CapabilityContract};
+use crate::contract::CapabilityContract;
 use crate::planner::CompletionRole;
 use anyhow::{anyhow, Context, Result};
+use chat::{
+    build_chat_tool_call_request, send_and_parse_chat_candidate_list,
+    send_and_parse_chat_goal_verification, send_and_parse_chat_tool_call,
+};
+pub(crate) use openai_error::retryable_openai_error;
+use openai_error::{
+    assistant_content_missing, assistant_content_stopped_by_length, openai_error_status,
+    response_error_field_equals, OpenAINoStructuralAssistantContent, OpenAIStatusError,
+    OpenAIWallTimeoutError,
+};
+pub(crate) use parse::model_proposal_violations;
+#[cfg(test)]
+use parse::parse_model_candidate;
+pub(crate) use parse::validate_puffer_tool_call;
+use parse::{parse_candidate_list_json, parse_goal_verification_json, parse_tool_call_json};
 use puffer_config::{load_config, ConfigPaths};
 use puffer_provider_openai::{
-    build_json_post_request, build_responses_request, extract_chat_completions_text,
-    extract_responses_text, parse_chat_completions_response, parse_responses_response,
-    refresh_oauth_token, BuiltOpenAIRequest, OpenAIAuth, OpenAIRequestConfig,
-    OpenAIResponsesRequest,
+    build_json_post_request, build_responses_request, extract_responses_text,
+    parse_responses_response, refresh_oauth_token, BuiltOpenAIRequest, OpenAIAuth,
+    OpenAIRequestConfig, OpenAIResponsesRequest,
 };
 use puffer_provider_registry::{
     detect_import_candidates, AuthStore, ExternalImportFamily, ProviderRegistry, StoredCredential,
@@ -16,9 +33,14 @@ use puffer_provider_registry::{
 use puffer_resources::load_resources;
 use reqwest::blocking::Client;
 use schema::{
-    build_goal_verification_plain_request, build_goal_verification_request,
+    apply_chat_compatibility_overrides, build_artifact_review_chat_tool_request,
+    build_artifact_review_plain_request, build_artifact_review_request,
+    build_goal_verification_chat_tool_request, build_goal_verification_plain_request,
+    build_goal_verification_request, build_observe_act_chat_tool_request,
     build_observe_act_plain_request, build_observe_act_request, build_tool_call_plain_request,
-    build_tool_call_request, goal_verification_prompt, observe_act_prompt,
+    build_tool_call_request, generated_artifact_review_prompt, goal_verification_prompt,
+    observe_act_prompt, CHAT_ARTIFACT_REVIEW_TOOL_NAME, CHAT_GOAL_VERIFICATION_TOOL_NAME,
+    CHAT_OBSERVE_ACT_TOOL_NAME,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -52,9 +74,11 @@ pub(crate) struct PufferToolCallProposal {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct ModelCandidateProposal {
+    pub(crate) id: Option<String>,
     pub(crate) tool_id: String,
     pub(crate) args: Value,
     pub(crate) completion_role: CompletionRole,
+    pub(crate) depends_on: Vec<String>,
     pub(crate) rationale: String,
 }
 
@@ -64,6 +88,7 @@ pub(crate) struct GoalVerificationResult {
     pub(crate) confidence: f64,
     pub(crate) missing_evidence: Vec<String>,
     pub(crate) suggested_candidates: Vec<ModelCandidateProposal>,
+    pub(crate) rejected_suggested_candidates: Vec<String>,
 }
 
 struct OpenAiCredential {
@@ -133,20 +158,36 @@ pub(crate) fn propose_puffer_tool_call(
             json!({
                 "tool_id": action.name,
                 "description": action.description,
-                "input_schema": action.input_schema,
+                "input_schema": crate::model_policy::model_proposal_args_schema(action),
                 "side_effect_class": action.side_effect_class,
                 "risk_level": action.risk_level,
             })
         })
         .collect::<Vec<_>>();
+    let tool_prompt = format!(
+        "You are Burbot's bounded Puffer-tool proposal operator.\n\
+         Choose exactly one attached contract-declared tool call. Prefer the lowest-risk tool whose schema can satisfy the goal. \
+         The tool call will be executed once through Puffer's existing tool runtime in the current workspace. \
+         Do not use prose as an action. If the next step requires substantial analysis, search, compilation, symbolic work, \
+         or computation, call a workspace tool that performs that work against local artifacts instead of trying to finish \
+         the analysis in this response. The proposal is invalid if it only prints, echoes, comments on, or restates future work \
+         instead of actually inspecting evidence, creating or changing the required artifact, starting a required service, \
+         running a concrete check, or repairing a concrete failure. If creating or replacing a file, use a file-writing tool \
+         with object args instead of shell heredocs, redirects, or inline generated file payloads. Do not submit placeholder commands, TODO scaffolds, \
+         fake success markers, or commands whose only effect is describing what should be implemented.\n\n\
+         Goal:\n{goal}"
+    );
     let prompt = format!(
         "You are Burbot's bounded Puffer-tool proposal operator.\n\
          Return exactly one JSON object with this schema: {{\"tool_id\":\"<available tool id>\",\"args\":{{...}}}}.\n\
          The tool call will be executed once through Puffer's existing tool runtime in the current workspace.\n\
          Choose only one of the available contract-declared tools below. Prefer the lowest-risk tool whose schema can satisfy the goal. \
+         If the next step requires substantial analysis, search, compilation, symbolic work, or computation, choose a workspace \
+         tool that performs that work against local artifacts instead of trying to finish the analysis in this response. \
          Do not include markdown. The proposal is invalid if it only prints, echoes, comments on, or restates future work instead of \
          actually inspecting evidence, creating or changing the required artifact, starting a required service, running a concrete check, \
-         or repairing a concrete failure. Do not submit placeholder commands, TODO scaffolds, fake success markers, or commands whose \
+         or repairing a concrete failure. If creating or replacing a file, use a file-writing tool with object args instead of shell heredocs, \
+         redirects, or inline generated file payloads. Do not submit placeholder commands, TODO scaffolds, fake success markers, or commands whose \
          only effect is describing what should be implemented.\n\n\
          Available tools:\n{}\n\n\
          Goal:\n{goal}",
@@ -156,10 +197,20 @@ pub(crate) fn propose_puffer_tool_call(
         .map(image_data_urls_from_context)
         .unwrap_or_default();
     let normalized_model = normalize_openai_model(model);
+    if use_chat_tool_calls(&config.base_url) {
+        let request =
+            build_chat_tool_call_request(&config, &normalized_model, &tool_prompt, contract)?;
+        match send_and_parse_chat_tool_call(&request, contract) {
+            Ok(proposal) => return Ok(proposal),
+            Err(error)
+                if !retryable_openai_error(&error) || chat_tool_call_request_rejected(&error) => {}
+            Err(error) => return Err(error),
+        }
+    }
     let request = build_tool_call_request(&config, &normalized_model, &prompt, contract, &images)?;
     let text = match send_and_parse(&request) {
         Ok(text) => text,
-        Err(error) if response_format_schema_rejected(&error) => {
+        Err(error) if should_retry_without_response_format(&error) => {
             let fallback =
                 build_tool_call_plain_request(&config, &normalized_model, &prompt, &images)?;
             send_and_parse(&fallback)?
@@ -182,11 +233,25 @@ pub(crate) fn propose_observe_act_candidates(
     let prompt = observe_act_prompt(goal, contract, observation_context)?;
     let images = image_data_urls_from_context(image_context.unwrap_or(observation_context));
     let normalized_model = normalize_openai_model(model);
+    if use_chat_tool_calls(&config.base_url) {
+        let request = build_observe_act_chat_tool_request(
+            &config,
+            &normalized_model,
+            &prompt,
+            contract,
+            &images,
+        )?;
+        match send_and_parse_chat_candidate_list(&request, contract, CHAT_OBSERVE_ACT_TOOL_NAME) {
+            Ok(candidates) => return Ok(candidates),
+            Err(error) if chat_tool_call_fallback_allowed(&error) => {}
+            Err(error) => return Err(error),
+        }
+    }
     let request =
         build_observe_act_request(&config, &normalized_model, &prompt, contract, &images)?;
     let text = match send_and_parse(&request) {
         Ok(text) => text,
-        Err(error) if response_format_schema_rejected(&error) => {
+        Err(error) if should_retry_without_response_format(&error) => {
             let fallback =
                 build_observe_act_plain_request(&config, &normalized_model, &prompt, &images)?;
             send_and_parse(&fallback)?
@@ -209,11 +274,29 @@ pub(crate) fn verify_goal_satisfied(
     let prompt = goal_verification_prompt(goal, contract, verification_context)?;
     let images = image_data_urls_from_context(image_context.unwrap_or(verification_context));
     let normalized_model = normalize_openai_model(model);
+    if use_chat_tool_calls(&config.base_url) {
+        let request = build_goal_verification_chat_tool_request(
+            &config,
+            &normalized_model,
+            &prompt,
+            contract,
+            &images,
+        )?;
+        match send_and_parse_chat_goal_verification(
+            &request,
+            contract,
+            CHAT_GOAL_VERIFICATION_TOOL_NAME,
+        ) {
+            Ok(verification) => return Ok(verification),
+            Err(error) if chat_tool_call_fallback_allowed(&error) => {}
+            Err(error) => return Err(error),
+        }
+    }
     let request =
         build_goal_verification_request(&config, &normalized_model, &prompt, contract, &images)?;
     let text = match send_and_parse(&request) {
         Ok(text) => text,
-        Err(error) if response_format_schema_rejected(&error) => {
+        Err(error) if should_retry_without_response_format(&error) => {
             let fallback = build_goal_verification_plain_request(
                 &config,
                 &normalized_model,
@@ -227,22 +310,49 @@ pub(crate) fn verify_goal_satisfied(
     parse_goal_verification_json(&text, contract)
 }
 
-/// Validates a structural Puffer tool call against the imported tool contract.
-pub(crate) fn validate_puffer_tool_call(
-    tool_id: &str,
-    args: Value,
+pub(crate) fn review_generated_artifact(
+    workspace_root: &Path,
+    model: &str,
+    goal: &str,
     contract: &CapabilityContract,
-) -> Result<PufferToolCallProposal> {
-    if tool_id.is_empty() {
-        return Err(anyhow!("Puffer tool-call proposal missing `tool_id`"));
+    review_context: &Value,
+    image_context: Option<&Value>,
+) -> Result<GoalVerificationResult> {
+    let credential = resolve_openai_credential(workspace_root)?;
+    let config = request_config(&credential);
+    let prompt = generated_artifact_review_prompt(goal, contract, review_context)?;
+    let images = image_data_urls_from_context(image_context.unwrap_or(review_context));
+    let normalized_model = normalize_openai_model(model);
+    if use_chat_tool_calls(&config.base_url) {
+        let request = build_artifact_review_chat_tool_request(
+            &config,
+            &normalized_model,
+            &prompt,
+            contract,
+            &images,
+        )?;
+        match send_and_parse_chat_goal_verification(
+            &request,
+            contract,
+            CHAT_ARTIFACT_REVIEW_TOOL_NAME,
+        ) {
+            Ok(verification) => return Ok(verification),
+            Err(error) if chat_tool_call_fallback_allowed(&error) => {}
+            Err(error) => return Err(error),
+        }
     }
-    let action = action_for_tool_id(contract, tool_id)?;
-    validate_tool_args_object(tool_id, &args)?;
-    validate_tool_args_schema(action, &args)?;
-    Ok(PufferToolCallProposal {
-        tool_id: tool_id.to_string(),
-        args,
-    })
+    let request =
+        build_artifact_review_request(&config, &normalized_model, &prompt, contract, &images)?;
+    let text = match send_and_parse(&request) {
+        Ok(text) => text,
+        Err(error) if should_retry_without_response_format(&error) => {
+            let fallback =
+                build_artifact_review_plain_request(&config, &normalized_model, &prompt, &images)?;
+            send_and_parse(&fallback)?
+        }
+        Err(error) => return Err(error),
+    };
+    parse_goal_verification_json(&text, contract)
 }
 
 fn resolve_openai_credential(workspace_root: &Path) -> Result<OpenAiCredential> {
@@ -375,147 +485,6 @@ fn normalize_openai_model(model: &str) -> String {
         .to_string()
 }
 
-fn parse_tool_call_json(
-    text: &str,
-    contract: &CapabilityContract,
-) -> Result<PufferToolCallProposal> {
-    let value: Value = serde_json::from_str(text.trim()).with_context(|| {
-        format!("failed to parse LLM tool-call proposal as strict JSON object: {text}")
-    })?;
-    validate_tool_call_value(value, contract)
-}
-
-fn parse_candidate_list_json(
-    text: &str,
-    contract: &CapabilityContract,
-) -> Result<Vec<ModelCandidateProposal>> {
-    let value: Value = serde_json::from_str(text.trim()).with_context(|| {
-        format!("failed to parse LLM candidate proposal as strict JSON object: {text}")
-    })?;
-    let candidates = value
-        .get("candidates")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("LLM candidate proposal missing array `candidates`"))?;
-    if candidates.is_empty() {
-        return Err(anyhow!("LLM candidate proposal contained no candidates"));
-    }
-    parse_model_candidate_array(candidates, contract, "candidate proposal")
-}
-
-fn parse_goal_verification_json(
-    text: &str,
-    contract: &CapabilityContract,
-) -> Result<GoalVerificationResult> {
-    let value: Value = serde_json::from_str(text.trim()).with_context(|| {
-        format!("failed to parse LLM goal verification as strict JSON object: {text}")
-    })?;
-    let satisfied = value
-        .get("satisfied")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| anyhow!("LLM goal verification missing bool `satisfied`"))?;
-    let confidence = value
-        .get("confidence")
-        .and_then(Value::as_f64)
-        .unwrap_or(0.0)
-        .clamp(0.0, 1.0);
-    let missing_evidence = value
-        .get("missing_evidence")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let suggested_candidate_values = value
-        .get("suggested_candidates")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let suggested_candidates = parse_model_candidate_array(
-        &suggested_candidate_values,
-        contract,
-        "goal verification suggested_candidates",
-    )?;
-    if (!satisfied || !missing_evidence.is_empty()) && suggested_candidates.is_empty() {
-        return Err(anyhow!(
-            "LLM goal verification marked the goal unsatisfied without structural follow-up candidates"
-        ));
-    }
-    Ok(GoalVerificationResult {
-        satisfied,
-        confidence,
-        missing_evidence,
-        suggested_candidates,
-    })
-}
-
-fn parse_model_candidate_array(
-    candidates: &[Value],
-    contract: &CapabilityContract,
-    source: &str,
-) -> Result<Vec<ModelCandidateProposal>> {
-    let mut parsed = Vec::new();
-    let mut errors = Vec::new();
-    for (index, candidate) in candidates.iter().enumerate() {
-        match parse_model_candidate(candidate, contract) {
-            Ok(candidate) => parsed.push(candidate),
-            Err(error) => errors.push(format!("{index}: {error}")),
-        }
-    }
-    if errors.is_empty() {
-        Ok(parsed)
-    } else {
-        Err(anyhow!("invalid {source} entries: {}", errors.join("; ")))
-    }
-}
-
-fn parse_model_candidate(
-    value: &Value,
-    contract: &CapabilityContract,
-) -> Result<ModelCandidateProposal> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| anyhow!("model candidate must be a JSON object"))?;
-    let tool_id = object
-        .get("tool_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("model candidate missing `tool_id`"))?;
-    let args = object
-        .get("args")
-        .cloned()
-        .ok_or_else(|| anyhow!("model candidate missing object `args`"))?;
-    let role = object
-        .get("completion_role")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("model candidate missing `completion_role`"))
-        .and_then(parse_completion_role)?;
-    let rationale = object
-        .get("rationale")
-        .and_then(Value::as_str)
-        .unwrap_or("model proposed this contract-gated action")
-        .to_string();
-    let proposal = validate_puffer_tool_call(tool_id, args, contract)?;
-    Ok(ModelCandidateProposal {
-        tool_id: proposal.tool_id,
-        args: proposal.args,
-        completion_role: role,
-        rationale,
-    })
-}
-
-fn parse_completion_role(value: &str) -> Result<CompletionRole> {
-    match value {
-        "terminal" => Ok(CompletionRole::Terminal),
-        "support" => Ok(CompletionRole::Support),
-        "verification" => Ok(CompletionRole::Verification),
-        "repair" => Ok(CompletionRole::Repair),
-        _ => Err(anyhow!("unknown model candidate completion_role `{value}`")),
-    }
-}
-
 fn image_data_urls_from_context(value: &Value) -> Vec<String> {
     let mut urls = Vec::new();
     collect_image_data_urls(value, &mut urls);
@@ -574,73 +543,6 @@ fn image_data_url_from_object(object: &serde_json::Map<String, Value>) -> Option
 fn string_field<'a>(object: &'a serde_json::Map<String, Value>, keys: &[&str]) -> Option<&'a str> {
     keys.iter()
         .find_map(|key| object.get(*key).and_then(Value::as_str))
-}
-
-fn validate_tool_call_value(
-    value: Value,
-    contract: &CapabilityContract,
-) -> Result<PufferToolCallProposal> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| anyhow!("LLM tool-call proposal must be a JSON object"))?;
-    for key in object.keys() {
-        if key != "tool_id" && key != "args" {
-            return Err(anyhow!(
-                "LLM tool-call proposal contained unsupported field `{key}`"
-            ));
-        }
-    }
-    let tool_id = object
-        .get("tool_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("LLM tool-call proposal missing `tool_id`"))?;
-    let args = object
-        .get("args")
-        .cloned()
-        .ok_or_else(|| anyhow!("LLM tool-call proposal missing object `args`"))?;
-    validate_puffer_tool_call(tool_id, args, contract)
-}
-
-fn action_for_tool_id<'a>(
-    contract: &'a CapabilityContract,
-    tool_id: &str,
-) -> Result<&'a ActionContract> {
-    contract
-        .actions
-        .iter()
-        .find(|action| action.name == tool_id)
-        .ok_or_else(|| {
-            anyhow!("Puffer tool-call proposal selected unavailable Puffer tool `{tool_id}`")
-        })
-}
-
-fn validate_tool_args_object(tool_id: &str, args: &Value) -> Result<()> {
-    if args.is_object() {
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "Puffer tool-call proposal args for `{tool_id}` must be a JSON object"
-        ))
-    }
-}
-
-fn validate_tool_args_schema(action: &ActionContract, args: &Value) -> Result<()> {
-    let validator = jsonschema::validator_for(&action.input_schema)
-        .with_context(|| format!("invalid input_schema for Puffer tool {}", action.name))?;
-    let errors = validator
-        .iter_errors(args)
-        .take(5)
-        .map(|error| error.to_string())
-        .collect::<Vec<_>>();
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "Puffer tool-call proposal args for `{}` do not match input_schema: {}",
-            action.name,
-            errors.join(", ")
-        ))
-    }
 }
 
 fn credential_from_stored(
@@ -730,7 +632,7 @@ fn build_probe_request(
             },
         )
     } else {
-        let body = json!({
+        let mut body = json!({
             "model": model,
             "messages": [
                 {
@@ -745,19 +647,59 @@ fn build_probe_request(
             "response_format": {"type": "json_object"},
             "stream": false
         });
+        apply_chat_compatibility_overrides(config, &mut body);
         build_json_post_request(config, "/v1/chat/completions", &body)
     }
 }
 
 fn send_and_parse(request: &BuiltOpenAIRequest) -> Result<String> {
+    let attempts = openai_retry_attempts();
+    let mut last_error = None;
+    for attempt in 0..attempts {
+        match send_and_extract_once(request) {
+            Ok(output) => return Ok(output),
+            Err(error)
+                if attempt + 1 < attempts
+                    && retryable_openai_error(&error)
+                    && !assistant_content_stopped_by_length(&error) =>
+            {
+                last_error = Some(error);
+                std::thread::sleep(std::time::Duration::from_millis(
+                    500 * u64::from(attempt + 1),
+                ));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow!("OpenAI request failed without an error")))
+}
+
+fn send_and_extract_once(request: &BuiltOpenAIRequest) -> Result<String> {
+    let text = send_and_read_success(request)?;
+    let output = parse_llm_response_text(&request.url, &text)?;
+    if !output.trim().is_empty() {
+        return Ok(output);
+    }
+    Err(no_structural_content_error(
+        endpoint_kind(&request.url),
+        None,
+        Vec::new(),
+    ))
+}
+
+fn send_and_read_success(request: &BuiltOpenAIRequest) -> Result<String> {
+    let timeout_secs = openai_timeout_secs();
+    let timeout = std::time::Duration::from_secs(timeout_secs);
+    let connect_timeout = timeout.min(std::time::Duration::from_secs(30));
     let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(openai_timeout_secs()))
+        .connect_timeout(connect_timeout)
+        .timeout(timeout)
         .build()
         .context("failed to build OpenAI HTTP client")?;
     let attempts = openai_retry_attempts();
     let mut last_error = None;
     for attempt in 0..attempts {
-        match send_and_parse_once(&client, request) {
+        match send_and_parse_once_with_wall_timeout(&client, request, timeout_secs) {
             Ok(text) => return Ok(text),
             Err(error) if attempt + 1 < attempts && retryable_openai_error(&error) => {
                 last_error = Some(error);
@@ -771,6 +713,32 @@ fn send_and_parse(request: &BuiltOpenAIRequest) -> Result<String> {
     Err(last_error.unwrap_or_else(|| anyhow!("OpenAI request failed without an error")))
 }
 
+fn send_and_parse_once_with_wall_timeout(
+    client: &Client,
+    request: &BuiltOpenAIRequest,
+    timeout_secs: u64,
+) -> Result<String> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let client = client.clone();
+    let request = request.clone();
+    std::thread::Builder::new()
+        .name("burbot-openai-request".to_string())
+        .spawn(move || {
+            let _ = sender.send(send_and_parse_once(&client, &request));
+        })
+        .context("failed to spawn OpenAI request worker")?;
+    receiver
+        .recv_timeout(std::time::Duration::from_secs(timeout_secs))
+        .map_err(|error| match error {
+            std::sync::mpsc::RecvTimeoutError::Timeout => {
+                anyhow!(OpenAIWallTimeoutError { timeout_secs })
+            }
+            std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                anyhow!("OpenAI request worker exited without returning a result")
+            }
+        })?
+}
+
 fn send_and_parse_once(client: &Client, request: &BuiltOpenAIRequest) -> Result<String> {
     let mut builder = client.post(&request.url).body(request.body.clone());
     for (name, value) in &request.headers {
@@ -782,42 +750,135 @@ fn send_and_parse_once(client: &Client, request: &BuiltOpenAIRequest) -> Result<
     let status = response.status();
     let text = response.text().context("failed to read OpenAI response")?;
     if !status.is_success() {
-        return Err(anyhow!(
-            "OpenAI request failed with status {status}: {text}"
-        ));
+        return Err(OpenAIStatusError { status, body: text }.into());
     }
-    let output = parse_llm_response_text(&request.url, &text)?;
-    if output.trim().is_empty() {
-        Ok(text)
-    } else {
-        Ok(output)
-    }
+    Ok(text)
 }
 
 fn parse_llm_response_text(url: &str, text: &str) -> Result<String> {
     if is_chat_completions_url(url) {
-        let parsed = parse_chat_completions_response(text)?;
-        Ok(extract_chat_completions_text(&parsed))
+        extract_chat_completions_payload_text(text)
     } else {
         let parsed = parse_responses_response(text)?;
         Ok(extract_responses_text(&parsed))
     }
 }
 
-fn retryable_openai_error(error: &anyhow::Error) -> bool {
-    retryable_openai_error_message(&error.to_string())
+fn extract_chat_completions_payload_text(text: &str) -> Result<String> {
+    let value: Value =
+        serde_json::from_str(text).context("failed to parse OpenAI Chat Completions payload")?;
+    let Some(message) = value
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(Value::as_object)
+    else {
+        return Err(no_structural_content_error(
+            "chat_completions",
+            chat_finish_reason(&value),
+            Vec::new(),
+        ));
+    };
+    let finish_reason = chat_finish_reason(&value);
+    if finish_reason.as_deref() == Some("length") {
+        return Err(no_structural_content_error(
+            "chat_completions",
+            finish_reason,
+            message.keys().cloned().collect::<Vec<_>>(),
+        ));
+    }
+    let Some(content) = message.get("content") else {
+        return Err(missing_chat_completion_content_error(&value, message));
+    };
+    if let Some(content) = content.as_str() {
+        if !content.trim().is_empty() {
+            return Ok(content.to_string());
+        }
+        return Err(missing_chat_completion_content_error(&value, message));
+    }
+    if let Some(items) = content.as_array() {
+        let text = items
+            .iter()
+            .filter_map(|item| {
+                item.get("text")
+                    .and_then(Value::as_str)
+                    .or_else(|| item.get("content").and_then(Value::as_str))
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        if !text.trim().is_empty() {
+            return Ok(text);
+        }
+        return Err(missing_chat_completion_content_error(&value, message));
+    }
+    if content.is_object() || content.is_array() {
+        return Ok(content.to_string());
+    }
+    Err(missing_chat_completion_content_error(&value, message))
 }
 
-/// Returns whether an OpenAI error message represents a retryable transport failure.
-pub(crate) fn retryable_openai_error_message(message: &str) -> bool {
-    message.contains("timed out")
-        || message.contains("connection error")
-        || message.contains("status 408")
-        || message.contains("status 429")
-        || message.contains("status 500")
-        || message.contains("status 502")
-        || message.contains("status 503")
-        || message.contains("status 504")
+fn missing_chat_completion_content_error(
+    response: &Value,
+    message: &serde_json::Map<String, Value>,
+) -> anyhow::Error {
+    no_structural_content_error(
+        "chat_completions",
+        chat_finish_reason(response),
+        message.keys().cloned().collect::<Vec<_>>(),
+    )
+}
+
+fn chat_finish_reason(response: &Value) -> Option<String> {
+    response
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("finish_reason"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+}
+
+fn no_structural_content_error(
+    endpoint_kind: &'static str,
+    finish_reason: Option<String>,
+    message_keys: Vec<String>,
+) -> anyhow::Error {
+    OpenAINoStructuralAssistantContent {
+        endpoint_kind,
+        finish_reason,
+        message_keys,
+    }
+    .into()
+}
+
+fn endpoint_kind(url: &str) -> &'static str {
+    if is_chat_completions_url(url) {
+        "chat_completions"
+    } else {
+        "responses"
+    }
+}
+
+fn should_retry_without_response_format(error: &anyhow::Error) -> bool {
+    response_format_schema_rejected(error) || assistant_content_missing(error)
+}
+
+fn chat_tool_call_fallback_allowed(error: &anyhow::Error) -> bool {
+    chat_tool_call_request_rejected(error)
+        || assistant_content_missing(error)
+        || non_retryable_structural_chat_tool_error(error)
+}
+
+fn response_format_schema_rejected(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<OpenAIStatusError>()
+            .is_some_and(|error| {
+                error.status == reqwest::StatusCode::BAD_REQUEST
+                    && response_error_field_equals(&error.body, "param", "response_format")
+            })
+    })
 }
 
 fn refresh_credential(credential: &mut OpenAiCredential) -> Result<()> {
@@ -834,14 +895,15 @@ fn refresh_credential(credential: &mut OpenAiCredential) -> Result<()> {
 }
 
 fn is_unauthorized(error: &anyhow::Error) -> bool {
-    error.to_string().contains("status 401")
+    openai_error_status(error) == Some(reqwest::StatusCode::UNAUTHORIZED)
 }
 
-fn response_format_schema_rejected(error: &anyhow::Error) -> bool {
-    let message = error.to_string();
-    message.contains("Invalid schema for response_format")
-        || message.contains("unsupported response_format")
-        || message.contains("response_format type is unavailable")
+fn chat_tool_call_request_rejected(error: &anyhow::Error) -> bool {
+    openai_error_status(error) == Some(reqwest::StatusCode::BAD_REQUEST)
+}
+
+fn non_retryable_structural_chat_tool_error(error: &anyhow::Error) -> bool {
+    openai_error_status(error).is_none() && !retryable_openai_error(error)
 }
 
 fn is_codex_backend(base_url: &str) -> bool {
@@ -849,8 +911,27 @@ fn is_codex_backend(base_url: &str) -> bool {
     trimmed.contains("/backend-api") || trimmed.contains("/api/codex")
 }
 
+fn use_chat_tool_calls(base_url: &str) -> bool {
+    if supports_responses_api(base_url) {
+        return false;
+    }
+    match std::env::var("BURBOT_OPENAI_USE_CHAT_TOOL_CALLS")
+        .ok()
+        .map(|value| value.to_ascii_lowercase())
+    {
+        Some(value) if matches!(value.as_str(), "0" | "false" | "no" | "off") => false,
+        Some(value) if matches!(value.as_str(), "1" | "true" | "yes" | "on") => true,
+        Some(_) => true,
+        None => !is_deepseek_base_url(base_url),
+    }
+}
+
 fn supports_responses_api(base_url: &str) -> bool {
     is_codex_backend(base_url) || base_url.contains("api.openai.com")
+}
+
+fn is_deepseek_base_url(base_url: &str) -> bool {
+    base_url.contains("api.deepseek.com")
 }
 
 fn is_chat_completions_url(url: &str) -> bool {
@@ -937,5 +1018,7 @@ async fn _llm_layer_is_future_async_capable(_: Value) -> Result<Value> {
     Ok(json!({}))
 }
 
+#[cfg(test)]
+mod policy_tests;
 #[cfg(test)]
 mod tests;

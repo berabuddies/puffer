@@ -1,8 +1,10 @@
 use crate::contract::{
-    lint_contract, ActionContract, ApprovalSpec, ArgumentSafetySpec, CapabilityContract,
-    ContractLintError, ContractStatus, FailureModeSpec, Idempotency, IntentExtractorSpec,
-    RepairRuleSpec, Reversibility, RiskLevel, SemanticIntentSpec, SideEffectClass, TrustLevel,
-    VerificationSpec, VerificationTemplateSpec,
+    legacy_argument_safety_specs, legacy_failure_detection_specs, legacy_observation_check_specs,
+    legacy_verification_method_templates, lint_contract, normalize_legacy_semantic_slot_kinds,
+    ActionContract, ApprovalSpec, ArgumentSafetySpec, CapabilityContract, ContractLintError,
+    ContractStatus, FailureDetectionSpec, FailureModeSpec, Idempotency, IntentExtractorSpec,
+    ObservationCheckSpec, RepairRuleSpec, Reversibility, RiskLevel, SemanticIntentSpec,
+    SideEffectClass, TrustLevel, VerificationSpec, VerificationTemplateSpec,
 };
 use anyhow::{anyhow, Context, Result};
 use puffer_resources::ToolSpec;
@@ -71,6 +73,10 @@ struct RawVerificationSpec {
     #[serde(default)]
     methods: Vec<String>,
     #[serde(default)]
+    observation_checks: Vec<ObservationCheckSpec>,
+    #[serde(default)]
+    method_templates: Vec<VerificationTemplateSpec>,
+    #[serde(default)]
     templates: Vec<VerificationTemplateSpec>,
     #[serde(default)]
     required_before_completion: bool,
@@ -79,16 +85,14 @@ struct RawVerificationSpec {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum RawFailureMode {
-    Text(String),
-    Spec {
-        name: String,
-        detection: String,
-        repair_strategy: String,
-        #[serde(default)]
-        confidence: Option<f64>,
-    },
+struct RawFailureMode {
+    name: String,
+    detection: String,
+    #[serde(default)]
+    detection_rules: Vec<FailureDetectionSpec>,
+    repair_strategy: String,
+    #[serde(default)]
+    confidence: Option<f64>,
 }
 
 pub(crate) fn lint_puffer_tool_contracts(path: &Path) -> Result<PufferToolContractReport> {
@@ -201,6 +205,12 @@ fn action_from_tool_contract(spec: &ToolSpec, value: Value) -> Result<ActionCont
         .clone()
         .unwrap_or_else(default_open_object_schema);
     let output_schema = raw.output_schema.unwrap_or_else(default_open_object_schema);
+    let argument_safety = raw.argument_safety;
+    let structured_argument_safety = legacy_argument_safety_specs(&argument_safety);
+    let mut semantic_intents = raw.semantic_intents;
+    for intent in &mut semantic_intents {
+        normalize_legacy_semantic_slot_kinds(intent);
+    }
 
     jsonschema::validator_for(&input_schema)
         .with_context(|| format!("invalid input_schema for tool {}", spec.id))?;
@@ -219,6 +229,16 @@ fn action_from_tool_contract(spec: &ToolSpec, value: Value) -> Result<ActionCont
         preconditions: raw.preconditions,
         postconditions: raw.postconditions,
         verification: VerificationSpec {
+            observation_checks: if raw.verification.observation_checks.is_empty() {
+                legacy_observation_check_specs(&raw.verification.methods)
+            } else {
+                raw.verification.observation_checks
+            },
+            method_templates: if raw.verification.method_templates.is_empty() {
+                legacy_verification_method_templates(&raw.verification.methods)
+            } else {
+                raw.verification.method_templates
+            },
             methods: raw.verification.methods,
             templates: raw.verification.templates,
             required_before_completion: raw.verification.required_before_completion,
@@ -233,8 +253,9 @@ fn action_from_tool_contract(spec: &ToolSpec, value: Value) -> Result<ActionCont
             .map(raw_failure_mode)
             .collect(),
         forbidden_uses: raw.forbidden_uses,
-        argument_safety: raw.argument_safety,
-        semantic_intents: raw.semantic_intents,
+        argument_safety,
+        structured_argument_safety,
+        semantic_intents,
         intent_extractors: Vec::new(),
         repair_rules: raw
             .repair_rules
@@ -247,26 +268,16 @@ fn action_from_tool_contract(spec: &ToolSpec, value: Value) -> Result<ActionCont
 }
 
 fn raw_failure_mode(raw: RawFailureMode) -> FailureModeSpec {
-    match raw {
-        RawFailureMode::Text(text) => FailureModeSpec {
-            name: slugify_failure_name(&text),
-            detection: text,
-            repair_strategy:
-                "inspect the observation and choose a narrower or safer follow-up action"
-                    .to_string(),
-            confidence: 0.5,
+    FailureModeSpec {
+        name: raw.name,
+        detection_rules: if raw.detection_rules.is_empty() {
+            legacy_failure_detection_specs(&raw.detection)
+        } else {
+            raw.detection_rules
         },
-        RawFailureMode::Spec {
-            name,
-            detection,
-            repair_strategy,
-            confidence,
-        } => FailureModeSpec {
-            name,
-            detection,
-            repair_strategy,
-            confidence: confidence.unwrap_or(0.5),
-        },
+        detection: raw.detection,
+        repair_strategy: raw.repair_strategy,
+        confidence: raw.confidence.unwrap_or(0.5),
     }
 }
 
@@ -373,26 +384,6 @@ fn normalize_token(value: &str) -> String {
     value.trim().to_ascii_lowercase().replace('-', "_")
 }
 
-fn slugify_failure_name(value: &str) -> String {
-    let mut slug = String::new();
-    let mut last_was_separator = false;
-    for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() {
-            slug.push(ch.to_ascii_lowercase());
-            last_was_separator = false;
-        } else if !last_was_separator {
-            slug.push('_');
-            last_was_separator = true;
-        }
-    }
-    let slug = slug.trim_matches('_');
-    if slug.is_empty() {
-        "failure".to_string()
-    } else {
-        slug.chars().take(64).collect()
-    }
-}
-
 fn default_open_object_schema() -> Value {
     json!({
         "type": "object",
@@ -406,7 +397,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn imports_contract_with_aliases_and_string_failure_modes() {
+    fn imports_contract_with_aliases_and_structured_failure_modes() {
         let spec: ToolSpec = serde_yaml::from_str(
             r#"
 id: Read
@@ -424,14 +415,16 @@ contract:
     methods: []
     required_before_completion: false
   failure_modes:
-    - file does not exist
+    - name: missing_path
+      detection: json_bool:success=false
+      repair_strategy: inspect available paths before retrying with a corrected file_path.
 "#,
         )
         .unwrap();
         let action = action_from_tool_contract(&spec, spec.contract.clone().unwrap()).unwrap();
         assert_eq!(action.side_effect_class, SideEffectClass::PureObservation);
         assert_eq!(action.reversibility, Reversibility::Reversible);
-        assert_eq!(action.failure_modes[0].name, "file_does_not_exist");
+        assert_eq!(action.failure_modes[0].name, "missing_path");
     }
 
     #[test]

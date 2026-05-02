@@ -3,7 +3,7 @@ use crate::contract::{
     ActionContract, ApprovalSpec, CapabilityContract, ContractStatus, Idempotency, Reversibility,
     RiskLevel, SideEffectClass, TrustLevel, VerificationSpec,
 };
-use crate::planner::CandidateSource;
+use crate::planner::{CandidateSource, CompletionRole};
 use crate::puffer_tools::PUFFER_TOOLS_CONTRACT_ID;
 use crate::trace::TraceEventType;
 use serde_json::json;
@@ -22,6 +22,8 @@ fn action(name: &str, risk: RiskLevel) -> ActionContract {
         postconditions: Vec::new(),
         verification: VerificationSpec {
             methods: Vec::new(),
+            observation_checks: Vec::new(),
+            method_templates: Vec::new(),
             templates: Vec::new(),
             required_before_completion: false,
             confidence: 0.5,
@@ -33,6 +35,7 @@ fn action(name: &str, risk: RiskLevel) -> ActionContract {
         failure_modes: Vec::new(),
         forbidden_uses: Vec::new(),
         argument_safety: Vec::new(),
+        structured_argument_safety: Vec::new(),
         semantic_intents: Vec::new(),
         intent_extractors: Vec::new(),
         repair_rules: Vec::new(),
@@ -103,6 +106,7 @@ fn model_unknown_terminal_empty_output_records_no_progress() {
                 enable_observe_act_llm: false,
                 model: None,
                 goal_verification_min_confidence: 0.75,
+                yolo: false,
             },
             Observation {
                 invocation: ActionInvocation {
@@ -151,8 +155,11 @@ fn no_output_expected_flag_alone_is_not_progress_evidence() {
             "stderr": "",
             "metadata": {},
             "structured_output": {
+                "stdout": "",
+                "stderr": "",
                 "noOutputExpected": true,
-                "interrupted": false
+                "interrupted": false,
+                "dangerouslyDisableSandbox": false
             }
         }),
     );
@@ -160,4 +167,170 @@ fn no_output_expected_flag_alone_is_not_progress_evidence() {
     assert!(!evidence.changes_state);
     assert!(!evidence.has_structural_witness);
     assert!(!evidence.has_output_witness);
+}
+
+#[test]
+fn serialized_empty_tool_output_is_not_progress_evidence() {
+    let mut bash = action("Bash", RiskLevel::High);
+    bash.side_effect_class = SideEffectClass::Unknown;
+
+    let evidence = progress_evidence(
+        Some(&bash),
+        &json!({
+            "success": true,
+            "stdout": "{\n  \"stdout\": \"\",\n  \"stderr\": \"\",\n  \"interrupted\": false,\n  \"dangerouslyDisableSandbox\": false,\n  \"noOutputExpected\": true\n}",
+            "stderr": "",
+            "metadata": null,
+            "structured_output": {
+                "stdout": "",
+                "stderr": "",
+                "interrupted": false,
+                "dangerouslyDisableSandbox": false,
+                "noOutputExpected": true
+            }
+        }),
+    );
+
+    assert!(!evidence.changes_state);
+    assert!(!evidence.has_structural_witness);
+    assert!(!evidence.has_output_witness);
+}
+
+#[test]
+fn arbitrary_structured_text_is_not_progress_evidence() {
+    let mut bash = action("Bash", RiskLevel::High);
+    bash.side_effect_class = SideEffectClass::Unknown;
+
+    let evidence = progress_evidence(
+        Some(&bash),
+        &json!({
+            "success": true,
+            "stdout": "",
+            "stderr": "",
+            "metadata": null,
+            "structured_output": {
+                "message": "finished something",
+                "summary": "looks useful",
+                "stderr": "",
+                "stdout": ""
+            }
+        }),
+    );
+
+    assert!(!evidence.changes_state);
+    assert!(!evidence.has_structural_witness);
+    assert!(!evidence.has_output_witness);
+}
+
+#[test]
+fn declared_progress_fields_are_structural_progress_evidence() {
+    let mut bash = action("Bash", RiskLevel::High);
+    bash.side_effect_class = SideEffectClass::Unknown;
+
+    let evidence = progress_evidence(
+        Some(&bash),
+        &json!({
+            "success": true,
+            "stdout": "",
+            "stderr": "",
+            "metadata": null,
+            "structured_output": {
+                "produced_output": true,
+                "artifact_ids": ["artifact-1"]
+            }
+        }),
+    );
+
+    assert!(!evidence.changes_state);
+    assert!(evidence.has_structural_witness);
+    assert!(evidence.has_output_witness);
+}
+
+#[test]
+fn explicit_progress_string_fields_are_not_progress_evidence() {
+    let mut bash = action("Bash", RiskLevel::High);
+    bash.side_effect_class = SideEffectClass::Unknown;
+
+    let evidence = progress_evidence(
+        Some(&bash),
+        &json!({
+            "success": true,
+            "stdout": "",
+            "stderr": "",
+            "metadata": null,
+            "structured_output": {
+                "progress_kind": "artifact_verified",
+                "verification_evidence": "looks good",
+                "produced_output": false
+            }
+        }),
+    );
+
+    assert!(!evidence.changes_state);
+    assert!(!evidence.has_structural_witness);
+    assert!(!evidence.has_output_witness);
+}
+
+#[test]
+fn model_unknown_repair_requires_structural_progress() {
+    let mut bash = action("Bash", RiskLevel::High);
+    bash.side_effect_class = SideEffectClass::Unknown;
+    let evidence = progress_evidence(
+        Some(&bash),
+        &json!({
+            "success": true,
+            "stdout": "printed useful text",
+            "stderr": "",
+            "metadata": null,
+            "structured_output": {
+                "stdout": "printed useful text",
+                "stderr": "",
+                "interrupted": false
+            }
+        }),
+    );
+
+    assert!(!evidence.has_output_witness);
+    assert!(!evidence.has_structural_witness);
+    assert!(model_unknown_terminal_without_progress(
+        Some(&bash),
+        CompletionRole::Repair,
+        true,
+        &evidence
+    ));
+    assert!(!model_unknown_terminal_without_progress(
+        Some(&bash),
+        CompletionRole::Verification,
+        true,
+        &evidence
+    ));
+}
+
+#[test]
+fn filesystem_witness_counts_as_structural_progress() {
+    let mut bash = action("Bash", RiskLevel::High);
+    bash.side_effect_class = SideEffectClass::Unknown;
+
+    let evidence = progress_evidence(
+        Some(&bash),
+        &json!({
+            "success": true,
+            "stdout": "",
+            "stderr": "",
+            "metadata": null,
+            "structured_output": {
+                "stdout": "",
+                "stderr": "",
+                "interrupted": false
+            },
+            "filesystem_witness": {
+                "created": ["attack"],
+                "modified": [],
+                "removed": []
+            }
+        }),
+    );
+
+    assert!(evidence.changes_state);
+    assert!(evidence.has_structural_witness);
 }

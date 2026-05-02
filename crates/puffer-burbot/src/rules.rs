@@ -1,4 +1,4 @@
-use crate::contract::{ContractRegistry, RiskLevel, SideEffectClass};
+use crate::contract::{ActionContract, ContractRegistry, RiskLevel, SideEffectClass};
 use crate::graph::{
     scores_for_action, ActionRef, PlanEdgeKind, PlanGraph, PlanNode, PlanNodeKind, PlanStatus,
 };
@@ -7,7 +7,7 @@ use crate::planner::{CandidateSource, CompletionRole};
 use crate::semantics::{payload_for_intent, read_only_side_effect, NormalizedIntent};
 use anyhow::Result;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 pub(crate) struct RuleContext<'a> {
     pub(crate) contracts: &'a dyn ContractRegistry,
@@ -320,7 +320,11 @@ impl RewriteRule for BlockRepeatedFailure {
             };
             if ctx
                 .repeated_failures
-                .get(&action_key(&action_ref, &node.payload))
+                .get(&action_key_for_contracts(
+                    ctx.contracts,
+                    &action_ref,
+                    &node.payload,
+                ))
                 .is_some_and(|failed_epoch| *failed_epoch == ctx.state_epoch)
             {
                 let node = graph.node_mut(id)?;
@@ -392,12 +396,69 @@ impl RewriteRule for InsertRepairCandidatesFromContract {
 }
 
 pub(crate) fn action_key(action_ref: &ActionRef, args: &serde_json::Value) -> String {
+    action_key_for_args(action_ref, args)
+}
+
+pub(crate) fn action_key_for_contracts(
+    contracts: &dyn ContractRegistry,
+    action_ref: &ActionRef,
+    args: &serde_json::Value,
+) -> String {
+    contracts
+        .get_action(&action_ref.contract_id, &action_ref.action_name)
+        .map(|action| canonical_action_args(&action, args))
+        .map(|args| action_key_for_args(action_ref, &args))
+        .unwrap_or_else(|| action_key_for_args(action_ref, args))
+}
+
+fn action_key_for_args(action_ref: &ActionRef, args: &serde_json::Value) -> String {
     format!(
         "{}.{}:{}",
         action_ref.contract_id,
         action_ref.action_name,
         serde_json::to_string(args).unwrap_or_default()
     )
+}
+
+fn canonical_action_args(action: &ActionContract, args: &serde_json::Value) -> serde_json::Value {
+    let slots = action_semantic_slots(action);
+    if slots.is_empty() {
+        return args.clone();
+    }
+    let Some(object) = args.as_object() else {
+        return args.clone();
+    };
+    let required = required_schema_args(action);
+    let mut canonical = serde_json::Map::new();
+    for (key, value) in object {
+        if slots.contains(key.as_str())
+            || required.contains(key.as_str())
+            || !matches!(value, serde_json::Value::String(_))
+        {
+            canonical.insert(key.clone(), value.clone());
+        }
+    }
+    serde_json::Value::Object(canonical)
+}
+
+fn action_semantic_slots(action: &ActionContract) -> BTreeSet<&str> {
+    action
+        .semantic_intents
+        .iter()
+        .flat_map(|intent| intent.slots.values().chain(intent.optional_slots.values()))
+        .map(String::as_str)
+        .collect()
+}
+
+fn required_schema_args(action: &ActionContract) -> BTreeSet<&str> {
+    action
+        .input_schema
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect()
 }
 
 fn action_ref_from_payload(payload: &serde_json::Value) -> Option<ActionRef> {
@@ -412,7 +473,8 @@ mod tests {
     use super::*;
     use crate::contract::{
         ActionContract, ApprovalSpec, ArgumentPatternSpec, ArgumentSafetySpec, ContractStatus,
-        Idempotency, InMemoryContractRegistry, Reversibility, TrustLevel, VerificationSpec,
+        Idempotency, InMemoryContractRegistry, Reversibility, SemanticIntentSpec, TrustLevel,
+        VerificationSpec,
     };
     use crate::graph::{scores_for_action, ActionScores};
 
@@ -450,6 +512,8 @@ mod tests {
             postconditions: Vec::new(),
             verification: VerificationSpec {
                 methods: vec!["exit code zero".to_string()],
+                observation_checks: Vec::new(),
+                method_templates: Vec::new(),
                 templates: Vec::new(),
                 required_before_completion: true,
                 confidence: 0.5,
@@ -461,6 +525,7 @@ mod tests {
             failure_modes: Vec::new(),
             forbidden_uses: Vec::new(),
             argument_safety: Vec::new(),
+            structured_argument_safety: Vec::new(),
             semantic_intents: Vec::new(),
             intent_extractors: Vec::new(),
             repair_rules: Vec::new(),
@@ -558,6 +623,60 @@ mod tests {
         BlockRepeatedFailure.apply(&mut graph, &ctx).unwrap();
 
         assert_eq!(graph.node(id).unwrap().status, PlanStatus::Open);
+    }
+
+    #[test]
+    fn repeated_failure_ignores_non_slot_optional_description_for_semantic_actions() {
+        let mut action = action();
+        action.input_schema = json!({
+            "type": "object",
+            "properties": {
+                "command": {"type": "string"},
+                "description": {"type": "string"}
+            },
+            "required": ["command"]
+        });
+        action.semantic_intents = vec![SemanticIntentSpec {
+            intent: "shell_command".to_string(),
+            slots: BTreeMap::from([("command".to_string(), "command".to_string())]),
+            optional_slots: BTreeMap::new(),
+            defaults: BTreeMap::new(),
+            side_effect_class: None,
+            slot_kinds: Default::default(),
+        }];
+        let registry = registry_with(action.clone());
+        let action_ref = ActionRef {
+            contract_id: "puffer.tools".to_string(),
+            action_name: action.name,
+        };
+        let mut graph = PlanGraph::from_goal("run".to_string());
+        let id = graph.add_node(PlanNode {
+            id: NodeId(0),
+            kind: PlanNodeKind::Action,
+            status: PlanStatus::Open,
+            label: "Bash".to_string(),
+            payload: json!({"command": "make test", "description": "second wording"}),
+            action_ref: Some(action_ref.clone()),
+            scores: ActionScores::default(),
+        });
+        let repeated = HashMap::from([(
+            action_key_for_contracts(
+                &registry,
+                &action_ref,
+                &json!({"command": "make test", "description": "first wording"}),
+            ),
+            0,
+        )]);
+        let ctx = RuleContext {
+            contracts: &registry,
+            repeated_failures: &repeated,
+            state_epoch: 0,
+            approved_nodes: &HashSet::new(),
+        };
+
+        BlockRepeatedFailure.apply(&mut graph, &ctx).unwrap();
+
+        assert_eq!(graph.node(id).unwrap().status, PlanStatus::Blocked);
     }
 
     #[test]

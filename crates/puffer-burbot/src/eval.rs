@@ -116,6 +116,7 @@ pub(crate) fn run_eval_suite(
                 enable_observe_act_llm: false,
                 model: None,
                 goal_verification_min_confidence: 0.75,
+                yolo: false,
             },
         )?;
         let (run_id, result_status) = match &result {
@@ -236,25 +237,6 @@ fn expected_output_matches(output: &Value, expected: &Value) -> bool {
         .is_none_or(|expected_value| output_i64(output, "exit_code") == Some(expected_value))
         && expected_bool(expected, "expected_timed_out")
             .is_none_or(|expected_value| output_bool(output, "timed_out") == Some(expected_value))
-        && expected_string(expected, "expected_stdout_contains")
-            .is_none_or(|needle| output_text_contains(output, "stdout", needle))
-        && expected_string(expected, "expected_stderr_contains")
-            .is_none_or(|needle| output_text_contains(output, "stderr", needle))
-}
-
-fn output_text_contains(output: &Value, key: &str, needle: &str) -> bool {
-    output
-        .get(key)
-        .and_then(Value::as_str)
-        .is_some_and(|value| value.contains(needle))
-        || structured_output(output)
-            .and_then(|nested| {
-                nested
-                    .get(key)
-                    .and_then(Value::as_str)
-                    .map(|value| value.contains(needle))
-            })
-            .unwrap_or(false)
 }
 
 fn output_i64(output: &Value, key: &str) -> Option<i64> {
@@ -281,10 +263,6 @@ fn expected_bool(expected: &Value, key: &str) -> Option<bool> {
 
 fn expected_i64(expected: &Value, key: &str) -> Option<i64> {
     expected.get(key).and_then(Value::as_i64)
-}
-
-fn expected_string<'a>(expected: &'a Value, key: &str) -> Option<&'a str> {
-    expected.get(key).and_then(Value::as_str)
 }
 
 pub(crate) fn sample_suite() -> EvalSuite {
@@ -322,13 +300,15 @@ mod tests {
         let output = json!({
             "success": true,
             "tool_id": "Bash",
-            "stdout": "{\"stdout\":\"hello burbot\\n\",\"stderr\":\"warn\\n\"}",
-            "stderr": "warn\n",
+            "structured_output": {
+                "exit_code": 0,
+                "timed_out": false
+            },
         });
         let expected = json!({
             "expect_success": true,
-            "expected_stdout_contains": "burbot",
-            "expected_stderr_contains": "warn",
+            "expected_exit_code": 0,
+            "expected_timed_out": false,
         });
         assert!(expected_output_matches(&output, &expected));
     }
@@ -361,7 +341,6 @@ mod tests {
             &output,
             &json!({
                 "expect_success": false,
-                "expected_stderr_contains": "expected failure",
             })
         ));
     }

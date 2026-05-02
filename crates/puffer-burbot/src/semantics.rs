@@ -1,4 +1,6 @@
-use crate::contract::{ActionContract, RiskLevel, SemanticIntentSpec, SideEffectClass};
+use crate::contract::{
+    ActionContract, RiskLevel, SemanticIntentSpec, SemanticSlotKind, SideEffectClass,
+};
 use crate::graph::ActionRef;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -133,12 +135,18 @@ fn direct_intent(
     for (slot, arg) in &spec.slots {
         let slot_name = normalize_token(slot);
         let value = payload.get(arg)?.as_str()?;
-        slots.insert(slot_name.clone(), normalize_slot_value(&slot_name, value));
+        slots.insert(
+            slot_name.clone(),
+            normalize_slot_value(spec.slot_kinds.get(&slot_name), value),
+        );
     }
     for (slot, arg) in &spec.optional_slots {
         if let Some(value) = payload.get(arg).and_then(Value::as_str) {
             let slot_name = normalize_token(slot);
-            slots.insert(slot_name.clone(), normalize_slot_value(&slot_name, value));
+            slots.insert(
+                slot_name.clone(),
+                normalize_slot_value(spec.slot_kinds.get(&slot_name), value),
+            );
         }
     }
     Some(ActionIntentMatch {
@@ -167,20 +175,13 @@ fn normalize_token(value: &str) -> String {
     semantic_symbol(value)
 }
 
-fn normalize_slot_value(slot: &str, value: &str) -> String {
-    if path_like_slot(slot) {
-        normalize_path(value)
-    } else {
-        value.trim().to_string()
+fn normalize_slot_value(kind: Option<&SemanticSlotKind>, value: &str) -> String {
+    match kind {
+        Some(SemanticSlotKind::FilesystemPath | SemanticSlotKind::FilesystemDirectory) => {
+            normalize_path(value)
+        }
+        Some(SemanticSlotKind::Opaque) | None => value.trim().to_string(),
     }
-}
-
-fn path_like_slot(slot: &str) -> bool {
-    slot == "path"
-        || slot.ends_with("_path")
-        || slot == "dir"
-        || slot.ends_with("_dir")
-        || slot.contains("directory")
 }
 
 fn normalize_path(path: &str) -> String {
@@ -243,6 +244,8 @@ mod tests {
             postconditions: Vec::new(),
             verification: VerificationSpec {
                 methods: Vec::new(),
+                observation_checks: Vec::new(),
+                method_templates: Vec::new(),
                 templates: Vec::new(),
                 required_before_completion: false,
                 confidence: 0.5,
@@ -254,12 +257,14 @@ mod tests {
             failure_modes: Vec::new(),
             forbidden_uses: Vec::new(),
             argument_safety: Vec::new(),
+            structured_argument_safety: Vec::new(),
             semantic_intents: vec![SemanticIntentSpec {
                 intent: "read_file".to_string(),
                 slots: [("path".to_string(), "file_path".to_string())].into(),
                 optional_slots: BTreeMap::new(),
                 defaults: BTreeMap::new(),
                 side_effect_class: None,
+                slot_kinds: [("path".to_string(), SemanticSlotKind::FilesystemPath)].into(),
             }],
             intent_extractors: Vec::new(),
             repair_rules: Vec::new(),
