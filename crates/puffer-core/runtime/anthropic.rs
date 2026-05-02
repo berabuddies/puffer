@@ -17,7 +17,8 @@ use super::agent_loop::{
 };
 use super::anthropic_sse::parse_anthropic_sse;
 use super::openai::conversation::{
-    build_system_reminder, items_to_anthropic_messages, ConversationItem, ToolOutputPayload,
+    build_system_reminder, items_to_anthropic_messages, ConversationItem, ReasoningSummary,
+    ToolOutputPayload,
 };
 use super::request_tool_filter::RequestToolFilter;
 use super::structured_output_support::{
@@ -237,6 +238,13 @@ impl TurnSession for AnthropicTurnSession {
     ) -> Result<AssistantTurn> {
         let body = self.build_body(items, state, true);
 
+        // Mirror the blocking path's wire trace for streaming requests
+        // when `PUFFER_HTTP_TRACE_PATH` is set, so multi-turn tool flows
+        // are debuggable end-to-end (e.g. for diagnosing relay-specific
+        // shape requirements like Kimi's "reasoning_content is missing
+        // in assistant tool call message" rejection).
+        trace_anthropic_stream_request(&self.request_url, &body);
+
         // Send streaming request.
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(300))
@@ -257,6 +265,11 @@ impl TurnSession for AnthropicTurnSession {
         if !http_response.status().is_success() {
             let status = http_response.status();
             let text = http_response.text().unwrap_or_default();
+            // Capture error responses too so 400/429 wire bodies are
+            // visible in the trace file. Without this, only successful
+            // SSE-parsed responses would be logged and rate-limit /
+            // schema-rejection diagnoses would be opaque.
+            trace_anthropic_stream_error(&self.request_url, status.as_u16(), &text);
             bail!("request failed with status {status}: {text}");
         }
 
@@ -264,6 +277,11 @@ impl TurnSession for AnthropicTurnSession {
         // `parse_anthropic_sse<F: FnMut(...)>` signature accepts it.
         let mut wrapped = |event: TurnStreamEvent| on_event(event);
         let response = parse_anthropic_sse(http_response, &mut wrapped)?;
+        // Trace the reconstructed response so we can see what content
+        // blocks (text, thinking, tool_use) the upstream actually
+        // produced. Critical for diagnosing replay-shape bugs like
+        // "reasoning_content missing in assistant tool call message".
+        trace_anthropic_stream_response(&self.request_url, &response);
         turn_from_response(&response)
     }
 
@@ -353,47 +371,102 @@ fn turn_from_response(response: &Value) -> Result<AssistantTurn> {
     })
 }
 
-/// Pulls assistant text + reasoning + tool_use blocks from an Anthropic
+/// Pulls assistant thinking + text + tool_use blocks from an Anthropic
 /// response Value into neutral `ConversationItem`s. The loop driver
 /// later appends `FunctionCallOutput` entries from tool execution.
+///
+/// Order matters: `thinking` precedes `text` precedes `tool_use` in the
+/// resulting items so that on the next turn `items_to_anthropic_messages`
+/// re-emits them in the same order Anthropic requires within an assistant
+/// message. Capturing the thinking block (with its `signature`) is what
+/// keeps providers like `kimi-coding/k2p5` from rejecting the next-turn
+/// request with "reasoning_content is missing in assistant tool call
+/// message".
 fn synthesize_pre_tool_items(response: &Value) -> Vec<ConversationItem> {
     let mut out = Vec::new();
-    if let Some(content) = response.get("content").and_then(Value::as_array) {
-        let texts: Vec<&str> = content
-            .iter()
-            .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
-            .filter_map(|block| block.get("text").and_then(Value::as_str))
-            .collect();
-        if !texts.is_empty() {
-            out.push(ConversationItem::assistant_message(texts.join("\n")));
-        }
-    }
-    if let Some(content) = response.get("content").and_then(Value::as_array) {
-        for block in content {
-            if block.get("type").and_then(Value::as_str) != Some("tool_use") {
-                continue;
+    let Some(content) = response.get("content").and_then(Value::as_array) else {
+        return out;
+    };
+
+    for block in content {
+        match block.get("type").and_then(Value::as_str) {
+            Some("thinking") => {
+                // Anthropic requires `signature` to round-trip the thinking
+                // block; without it the upstream rejects the replay.
+                let Some(signature) = block.get("signature").and_then(Value::as_str) else {
+                    continue;
+                };
+                let thinking_text = block
+                    .get("thinking")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let summary = if thinking_text.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![ReasoningSummary::SummaryText {
+                        text: thinking_text,
+                    }]
+                };
+                out.push(ConversationItem::Reasoning {
+                    summary,
+                    encrypted_content: Some(signature.to_string()),
+                    redacted: false,
+                });
             }
-            let call_id = block
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let name = block
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let arguments = block
-                .get("input")
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "{}".to_string());
-            out.push(ConversationItem::FunctionCall {
-                call_id,
-                name,
-                arguments,
-            });
+            Some("redacted_thinking") => {
+                // Pi-mono parity: capture the opaque `data` payload so
+                // we can re-emit it as `redacted_thinking` on the next
+                // turn. Without this, providers that expect contiguous
+                // reasoning context reject the replay. See
+                // `pi-mono/packages/ai/src/providers/anthropic.ts:511`.
+                let Some(data) = block.get("data").and_then(Value::as_str) else {
+                    continue;
+                };
+                out.push(ConversationItem::Reasoning {
+                    summary: Vec::new(),
+                    encrypted_content: Some(data.to_string()),
+                    redacted: true,
+                });
+            }
+            _ => {}
         }
     }
+
+    let texts: Vec<&str> = content
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .collect();
+    if !texts.is_empty() {
+        out.push(ConversationItem::assistant_message(texts.join("\n")));
+    }
+
+    for block in content {
+        if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+            continue;
+        }
+        let call_id = block
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let name = block
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let arguments = block
+            .get("input")
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "{}".to_string());
+        out.push(ConversationItem::FunctionCall {
+            call_id,
+            name,
+            arguments,
+        });
+    }
+
     out
 }
 
@@ -538,6 +611,68 @@ fn anthropic_system_blocks(
     blocks
 }
 
+/// Echoes the streaming-request URL + body to `PUFFER_HTTP_TRACE_PATH`
+/// when set, so multi-turn tool flows can be inspected end-to-end.
+/// Mirrors `trace_http_response`'s output style for the blocking path,
+/// just on the request side. Cheap no-op when the env var is unset.
+fn trace_anthropic_stream_request(url: &str, body: &serde_json::Value) {
+    write_trace(|file| {
+        use std::io::Write as _;
+        let pretty = serde_json::to_string_pretty(body).unwrap_or_else(|_| body.to_string());
+        writeln!(
+            file,
+            "--- ANTHROPIC STREAM REQUEST {} ---\n{}\n",
+            url, pretty
+        )
+    });
+}
+
+/// Echoes the reconstructed response payload (after SSE accumulation)
+/// to the trace file. Captures the upstream's content blocks
+/// (text / thinking / tool_use) so we can correlate request shape
+/// with response shape on multi-turn flows.
+fn trace_anthropic_stream_response(url: &str, body: &serde_json::Value) {
+    write_trace(|file| {
+        use std::io::Write as _;
+        let pretty = serde_json::to_string_pretty(body).unwrap_or_else(|_| body.to_string());
+        writeln!(
+            file,
+            "--- ANTHROPIC STREAM RESPONSE {} ---\n{}\n",
+            url, pretty
+        )
+    });
+}
+
+/// Echoes a non-2xx error response to the trace file. Useful for
+/// inspecting 400 / 429 bodies that never reach the SSE parser.
+fn trace_anthropic_stream_error(url: &str, status: u16, body: &str) {
+    write_trace(|file| {
+        use std::io::Write as _;
+        writeln!(
+            file,
+            "--- ANTHROPIC STREAM ERROR {} status={} ---\n{}\n",
+            url, status, body
+        )
+    });
+}
+
+fn write_trace<F>(write: F)
+where
+    F: FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+{
+    let Ok(path) = std::env::var("PUFFER_HTTP_TRACE_PATH") else {
+        return;
+    };
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    else {
+        return;
+    };
+    let _ = write(&mut file);
+}
+
 /// Resolve whether the model accepts the Anthropic-style `thinking`
 /// block. Decision is **family-based**, not id-based: this function
 /// only runs inside the Anthropic-Messages adapter, so by the time we
@@ -609,6 +744,7 @@ impl super::provider_adapter::ProviderAdapter for AnthropicAdapter {
             reflection_config: options.reflection.clone(),
             tool_filter: options.tool_filter,
             registry: &registry,
+            cancel: options.cancel,
         };
         agent_loop::run_blocking_loop(&mut inputs, &mut session)
     }
@@ -640,6 +776,7 @@ impl super::provider_adapter::ProviderAdapter for AnthropicAdapter {
             reflection_config: options.reflection.clone(),
             tool_filter: options.tool_filter,
             registry: &registry,
+            cancel: options.cancel,
         };
         agent_loop::run_streaming_loop(&mut inputs, &mut session, on_event)
     }
@@ -775,6 +912,7 @@ pub(super) fn execute_anthropic_tool_calls(
             input: call.input.clone(),
             output: output_text.clone(),
             success: execution.success,
+            terminate: false,
         });
     }
 
@@ -892,5 +1030,264 @@ mod thinking_gate_tests {
         let provider = provider_with("kimi-coding", "https://api.kimi.com/coding", None);
         // No model with id="not-a-model" → no compat to read → default true.
         assert!(anthropic_supports_thinking_api(&provider, "not-a-model"));
+    }
+}
+
+#[cfg(test)]
+mod thinking_round_trip_tests {
+    use super::synthesize_pre_tool_items;
+    use crate::runtime::openai::conversation::{
+        items_to_anthropic_messages, ConversationItem, ReasoningSummary,
+    };
+    use serde_json::json;
+
+    /// Regression: Anthropic relays like `kimi-coding/k2p5` reject the
+    /// next-turn replay with "reasoning_content is missing in assistant
+    /// tool call message" when the assistant message preceding a
+    /// `tool_result` does not include a paired `thinking` block. The
+    /// fix captures `thinking` blocks (with their `signature`) into a
+    /// `Reasoning` item and re-emits them as a `thinking` content block
+    /// before the `tool_use` block on the next request.
+    #[test]
+    fn synthesize_then_replay_preserves_thinking_signature() {
+        let response = json!({
+            "content": [
+                {
+                    "type": "thinking",
+                    "thinking": "Need to read /tmp/sample.txt.",
+                    "signature": "sig-abc-123",
+                },
+                {
+                    "type": "tool_use",
+                    "id": "tool_1",
+                    "name": "Read",
+                    "input": { "path": "/tmp/sample.txt" },
+                }
+            ]
+        });
+
+        let items = synthesize_pre_tool_items(&response);
+
+        // Expected order: Reasoning first (so it merges into the same
+        // assistant message and lands BEFORE tool_use, as Anthropic
+        // requires).
+        assert_eq!(items.len(), 2);
+        match &items[0] {
+            ConversationItem::Reasoning {
+                summary,
+                encrypted_content,
+                redacted,
+            } => {
+                assert!(!*redacted);
+                assert_eq!(encrypted_content.as_deref(), Some("sig-abc-123"));
+                let ReasoningSummary::SummaryText { text } = &summary[0];
+                assert_eq!(text, "Need to read /tmp/sample.txt.");
+            }
+            other => panic!("expected Reasoning, got {other:?}"),
+        }
+        assert!(matches!(&items[1], ConversationItem::FunctionCall { .. }));
+
+        // Now replay through items_to_anthropic_messages and verify the
+        // assistant message contains the thinking block followed by the
+        // tool_use block.
+        let mut transcript = vec![ConversationItem::user_message("read it")];
+        transcript.extend(items);
+
+        let messages = items_to_anthropic_messages(&transcript);
+        // [user, assistant]
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1]["role"], "assistant");
+        let content = messages[1]["content"]
+            .as_array()
+            .expect("assistant content should be a block array");
+        assert_eq!(content.len(), 2, "expected [thinking, tool_use], got {content:?}");
+        assert_eq!(content[0]["type"], "thinking");
+        assert_eq!(content[0]["thinking"], "Need to read /tmp/sample.txt.");
+        assert_eq!(content[0]["signature"], "sig-abc-123");
+        assert_eq!(content[1]["type"], "tool_use");
+        assert_eq!(content[1]["id"], "tool_1");
+    }
+
+    /// Anthropic returns thinking signatures with a multi-block content
+    /// shape (thinking + text + tool_use). Verify all three round-trip
+    /// in the correct order: thinking → text → tool_use.
+    #[test]
+    fn synthesize_then_replay_preserves_thinking_text_and_tool_use_order() {
+        let response = json!({
+            "content": [
+                {
+                    "type": "thinking",
+                    "thinking": "I will list the dir first.",
+                    "signature": "sig-1",
+                },
+                {
+                    "type": "text",
+                    "text": "Listing /tmp.",
+                },
+                {
+                    "type": "tool_use",
+                    "id": "call_42",
+                    "name": "Bash",
+                    "input": { "command": "ls /tmp" },
+                }
+            ]
+        });
+
+        let items = synthesize_pre_tool_items(&response);
+        let messages = items_to_anthropic_messages(&items);
+        let assistant = messages
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("assistant message should be present");
+        let content = assistant["content"]
+            .as_array()
+            .expect("multi-block content");
+        let kinds: Vec<&str> = content
+            .iter()
+            .map(|b| b["type"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(kinds, vec!["thinking", "text", "tool_use"]);
+    }
+
+    /// Thinking blocks without a `signature` are unverifiable on replay
+    /// (Anthropic rejects the request). Drop them rather than send an
+    /// invalid block — the fall-through is "no thinking block in
+    /// replay", which is the same shape we had before this fix and
+    /// should not regress.
+    #[test]
+    fn synthesize_drops_thinking_block_without_signature() {
+        let response = json!({
+            "content": [
+                {
+                    "type": "thinking",
+                    "thinking": "Stub without signature.",
+                },
+                {
+                    "type": "tool_use",
+                    "id": "call_x",
+                    "name": "Read",
+                    "input": { "path": "/x" },
+                }
+            ]
+        });
+
+        let items = synthesize_pre_tool_items(&response);
+        assert_eq!(items.len(), 1);
+        assert!(matches!(&items[0], ConversationItem::FunctionCall { .. }));
+    }
+
+    /// Pi-mono parity: when a Reasoning item lacks a signature (e.g.,
+    /// from an aborted stream that left the item in transcript), the
+    /// Anthropic wire builder falls back to emitting the thinking text
+    /// as a plain `text` block instead of dropping it. Preserves the
+    /// model's chain-of-thought without sending an invalid signature.
+    #[test]
+    fn replay_without_signature_falls_back_to_text_block() {
+        let items = vec![
+            ConversationItem::user_message("hi"),
+            ConversationItem::Reasoning {
+                summary: vec![ReasoningSummary::SummaryText {
+                    text: "Reasoned without signature.".to_string(),
+                }],
+                encrypted_content: None,
+                redacted: false,
+            },
+            ConversationItem::FunctionCall {
+                call_id: "call_y".to_string(),
+                name: "Bash".to_string(),
+                arguments: "{\"command\":\"ls\"}".to_string(),
+            },
+        ];
+        let messages = items_to_anthropic_messages(&items);
+        let assistant = messages
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("assistant message");
+        let content = assistant["content"]
+            .as_array()
+            .expect("multi-block assistant content");
+        // [text fallback, tool_use]
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "Reasoned without signature.");
+        assert_eq!(content[1]["type"], "tool_use");
+    }
+
+    /// Pi-mono parity: when the upstream returns a `redacted_thinking`
+    /// block (encrypted reasoning blocked from display by safety
+    /// filters), Puffer captures the opaque `data` payload and
+    /// re-emits it verbatim on the next turn. Emitting the data as a
+    /// regular thinking signature would fail upstream cryptographic
+    /// verification.
+    #[test]
+    fn redacted_thinking_round_trips_via_data_payload() {
+        let response = json!({
+            "content": [
+                {
+                    "type": "redacted_thinking",
+                    "data": "OPAQUE-REDACTED-PAYLOAD",
+                },
+                {
+                    "type": "tool_use",
+                    "id": "call_redacted",
+                    "name": "Read",
+                    "input": { "path": "fixture.txt" }
+                }
+            ]
+        });
+
+        let items = synthesize_pre_tool_items(&response);
+        assert_eq!(items.len(), 2);
+        match &items[0] {
+            ConversationItem::Reasoning {
+                summary,
+                encrypted_content,
+                redacted,
+            } => {
+                assert!(*redacted);
+                assert_eq!(encrypted_content.as_deref(), Some("OPAQUE-REDACTED-PAYLOAD"));
+                assert!(summary.is_empty());
+            }
+            other => panic!("expected redacted Reasoning, got {other:?}"),
+        }
+
+        // Round-trip through items_to_anthropic_messages: assistant
+        // message must include {type: "redacted_thinking", data: ...}
+        // BEFORE the tool_use block.
+        let mut transcript = vec![ConversationItem::user_message("read it")];
+        transcript.extend(items);
+        let messages = items_to_anthropic_messages(&transcript);
+        let assistant = messages
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("assistant message expected");
+        let blocks = assistant["content"]
+            .as_array()
+            .expect("multi-block content array");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "redacted_thinking");
+        assert_eq!(blocks[0]["data"], "OPAQUE-REDACTED-PAYLOAD");
+        assert_eq!(blocks[1]["type"], "tool_use");
+    }
+
+    /// `redacted_thinking` blocks lacking a `data` field are dropped
+    /// rather than emitting a malformed block (the upstream would
+    /// reject `redacted_thinking` without `data`).
+    #[test]
+    fn redacted_thinking_without_data_is_dropped() {
+        let response = json!({
+            "content": [
+                { "type": "redacted_thinking" },
+                {
+                    "type": "tool_use",
+                    "id": "call_x",
+                    "name": "Read",
+                    "input": { "path": "x" }
+                }
+            ]
+        });
+        let items = synthesize_pre_tool_items(&response);
+        assert_eq!(items.len(), 1);
+        assert!(matches!(&items[0], ConversationItem::FunctionCall { .. }));
     }
 }

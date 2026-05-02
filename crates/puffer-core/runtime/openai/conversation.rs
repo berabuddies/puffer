@@ -115,17 +115,34 @@ pub enum ConversationItem {
         output: ToolOutputPayload,
     },
     /// Assistant reasoning chain returned by the Responses API when `include`
-    /// contains `reasoning.encrypted_content`. Aligned with Codex
-    /// `ResponseItem::Reasoning`. Carrying this across turns lets the model
-    /// resume its prior thought process instead of re-thinking from scratch,
-    /// which is essential for multi-turn tool loops with high reasoning effort.
+    /// contains `reasoning.encrypted_content`, or by the Anthropic Messages
+    /// API as a `thinking` / `redacted_thinking` content block. Aligned
+    /// with Codex `ResponseItem::Reasoning`. Carrying this across turns
+    /// lets the model resume its prior thought process instead of
+    /// re-thinking from scratch, which is essential for multi-turn tool
+    /// loops with high reasoning effort.
     Reasoning {
         /// Summary blocks echoed back verbatim to the server.
         #[serde(default)]
         summary: Vec<ReasoningSummary>,
         /// Opaque encrypted thinking chain — provider-specific blob.
+        /// On the Anthropic path this stores the `signature` for
+        /// regular `thinking` blocks, OR the `data` payload for
+        /// `redacted_thinking` blocks (depending on `redacted`). On the
+        /// OpenAI Responses path this is the `encrypted_content` field
+        /// surfaced via `include: ["reasoning.encrypted_content"]`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         encrypted_content: Option<String>,
+        /// Pi-mono parity: when true, the upstream returned this as a
+        /// `redacted_thinking` content block (encrypted reasoning that
+        /// was blocked from display by safety filters). The next-turn
+        /// replay must echo `{type:"redacted_thinking", data}` instead
+        /// of `{type:"thinking", thinking, signature}` — emitting a
+        /// regular thinking block with the redacted opaque payload as
+        /// `signature` would fail upstream signature verification. See
+        /// `pi-mono/packages/ai/src/providers/anthropic.ts:511,1015`.
+        #[serde(default, skip_serializing_if = "is_false")]
+        redacted: bool,
     },
     /// Compaction marker — replaces summarized older messages.
     /// Aligned with Codex `Compaction { encrypted_content }`.
@@ -137,6 +154,11 @@ pub enum ConversationItem {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ReasoningSummary {
     SummaryText { text: String },
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl ConversationItem {
@@ -209,6 +231,7 @@ impl ConversationItem {
             Self::Reasoning {
                 summary,
                 encrypted_content,
+                redacted: _,
             } => {
                 let summary_tokens: usize = summary
                     .iter()
@@ -397,6 +420,7 @@ pub(crate) fn reasoning_item_from_value(item: &Value) -> Option<ConversationItem
     Some(ConversationItem::Reasoning {
         summary,
         encrypted_content,
+        redacted: false,
     })
 }
 
@@ -560,6 +584,7 @@ fn item_to_responses_value(item: &ConversationItem) -> Value {
         ConversationItem::Reasoning {
             summary,
             encrypted_content,
+            redacted: _,
         } => {
             let mut val = json!({
                 "type": "reasoning",
@@ -672,6 +697,7 @@ pub(crate) fn items_to_chat_messages(
                     content: None,
                     tool_call_id: None,
                     tool_calls,
+                    reasoning_content: None,
                 });
             }
             ConversationItem::FunctionCallOutput { call_id, output } => {
@@ -680,6 +706,7 @@ pub(crate) fn items_to_chat_messages(
                     content: Some(json!(output.text)),
                     tool_call_id: Some(call_id.clone()),
                     tool_calls: Vec::new(),
+                    reasoning_content: None,
                 });
                 i += 1;
             }
@@ -711,6 +738,7 @@ fn chat_message(role: &str, content: &str) -> OpenAIChatMessage {
         content: Some(json!(content)),
         tool_call_id: None,
         tool_calls: Vec::new(),
+        reasoning_content: None,
     }
 }
 
@@ -793,9 +821,72 @@ pub(crate) fn items_to_anthropic_messages(items: &[ConversationItem]) -> Vec<Val
                 }
                 push_or_merge(&mut messages, "user", Value::Array(tool_results));
             }
-            ConversationItem::Reasoning { .. } => {
-                // Anthropic has its own thinking blocks; OpenAI reasoning
-                // items do not translate — drop when producing Anthropic wire.
+            ConversationItem::Reasoning {
+                summary,
+                encrypted_content,
+                redacted,
+            } => {
+                // On the Anthropic path, Reasoning items carry the
+                // upstream's thinking block: `summary` holds the prose
+                // and `encrypted_content` holds the `signature` token
+                // for normal thinking blocks, or the opaque `data`
+                // payload for redacted thinking. With a signature,
+                // emit a verifiable `thinking` block so providers like
+                // `kimi-coding/k2p5` accept the next-turn replay
+                // (otherwise they reject with "reasoning_content is
+                // missing in assistant tool call message"). Without a
+                // signature (aborted stream), fall back to a plain
+                // `text` block so the model still sees its prior
+                // reasoning. Pi-mono parity:
+                // `packages/ai/src/providers/anthropic.ts:1015`.
+                if *redacted {
+                    // Redacted reasoning: re-emit the opaque data
+                    // payload as `redacted_thinking`. The upstream
+                    // expects this exact shape — emitting the data as
+                    // a regular thinking signature would fail crypto
+                    // verification.
+                    let Some(data) = encrypted_content.as_deref() else {
+                        i += 1;
+                        continue;
+                    };
+                    let block = json!({
+                        "type": "redacted_thinking",
+                        "data": data,
+                    });
+                    push_or_merge(&mut messages, "assistant", Value::Array(vec![block]));
+                    i += 1;
+                    continue;
+                }
+                let thinking_text: String = summary
+                    .iter()
+                    .map(|s| match s {
+                        ReasoningSummary::SummaryText { text } => text.as_str(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let signature_present = encrypted_content
+                    .as_deref()
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false);
+                let block = if signature_present {
+                    json!({
+                        "type": "thinking",
+                        "thinking": thinking_text,
+                        "signature": encrypted_content.as_deref().unwrap(),
+                    })
+                } else if !thinking_text.trim().is_empty() {
+                    // Aborted thinking — preserve content as plain text
+                    // to avoid losing chain-of-thought. Anthropic accepts
+                    // text blocks unconditionally.
+                    json!({
+                        "type": "text",
+                        "text": thinking_text,
+                    })
+                } else {
+                    i += 1;
+                    continue;
+                };
+                push_or_merge(&mut messages, "assistant", Value::Array(vec![block]));
                 i += 1;
             }
             ConversationItem::Compaction { summary } => {
@@ -1525,6 +1616,7 @@ mod tests {
             input: r#"{"command":"ls"}"#.into(),
             output: "result".into(),
             success: true,
+            terminate: false,
         }];
         append_tool_results(&mut items, &invocations);
         assert_eq!(items.len(), 3);
@@ -1543,6 +1635,7 @@ mod tests {
             input: r#"{"command":"bad"}"#.into(),
             output: "command not found".into(),
             success: false,
+            terminate: false,
         }];
         append_tool_results(&mut items, &invocations);
         assert!(
@@ -2570,6 +2663,7 @@ mod tests {
         let ConversationItem::Reasoning {
             summary,
             encrypted_content,
+            redacted: _,
         } = &item
         else {
             panic!("expected Reasoning variant, got {item:?}");
@@ -2679,6 +2773,7 @@ mod tests {
                     text: "thinking step 1".to_string(),
                 }],
                 encrypted_content: Some("BLOB1".to_string()),
+                redacted: false,
             },
             ConversationItem::FunctionCall {
                 call_id: "c1".to_string(),
@@ -2694,6 +2789,7 @@ mod tests {
                     text: "thinking step 2".to_string(),
                 }],
                 encrypted_content: Some("BLOB2".to_string()),
+                redacted: false,
             },
         ];
         let wire = items_to_responses_input(&items);

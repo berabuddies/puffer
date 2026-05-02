@@ -135,6 +135,26 @@ where
                             on_event(TurnStreamEvent::ThinkingDelta(thinking.to_string()));
                         }
                     }
+                    "signature_delta" => {
+                        // Anthropic emits the thinking block's signature
+                        // separately from `thinking_delta`. The signature
+                        // is required to round-trip the thinking block on
+                        // multi-turn tool flows — without it providers
+                        // like `kimi-coding/k2p5` reject with
+                        // "reasoning_content is missing in assistant tool
+                        // call message".
+                        if let Some(signature) = delta.get("signature").and_then(Value::as_str) {
+                            if index < state.content_blocks.len() {
+                                let existing = state.content_blocks[index]
+                                    .get("signature")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string();
+                                state.content_blocks[index]["signature"] =
+                                    Value::String(existing + signature);
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -241,5 +261,46 @@ mod tests {
         assert_eq!(deltas, vec!["Hello", " world"]);
         assert_eq!(result["content"][0]["text"], "Hello world");
         assert_eq!(result["stop_reason"], "end_turn");
+    }
+
+    #[test]
+    fn parse_thinking_block_accumulates_text_and_signature() {
+        // Verifies the SSE parser preserves both the `thinking` text and
+        // the `signature` token on the reconstructed thinking block.
+        // Without `signature_delta` accumulation the round-trip into the
+        // next request would drop the thinking block (no signature →
+        // unverifiable replay) and trigger "reasoning_content is missing
+        // in assistant tool call message".
+        let stream = concat!(
+            "event:message_start\n",
+            "data:{\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+            "event:content_block_start\n",
+            "data:{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+            "event:content_block_delta\n",
+            "data:{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Step 1.\"}}\n\n",
+            "event:content_block_delta\n",
+            "data:{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" Step 2.\"}}\n\n",
+            "event:content_block_delta\n",
+            "data:{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig-part-A\"}}\n\n",
+            "event:content_block_delta\n",
+            "data:{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"-part-B\"}}\n\n",
+            "event:content_block_stop\n",
+            "data:{\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event:message_stop\n",
+            "data:{\"type\":\"message_stop\"}\n\n",
+        );
+
+        let mut thinking_deltas = Vec::new();
+        let result = parse_anthropic_sse(stream.as_bytes(), &mut |event| {
+            if let TurnStreamEvent::ThinkingDelta(d) = event {
+                thinking_deltas.push(d);
+            }
+        })
+        .unwrap();
+
+        assert_eq!(thinking_deltas, vec!["Step 1.", " Step 2."]);
+        assert_eq!(result["content"][0]["type"], "thinking");
+        assert_eq!(result["content"][0]["thinking"], "Step 1. Step 2.");
+        assert_eq!(result["content"][0]["signature"], "sig-part-A-part-B");
     }
 }
