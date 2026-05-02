@@ -110,6 +110,12 @@ pub(crate) struct PendingSubmit {
     pub(crate) thinking_active: bool,
     /// Transient status message (e.g. "Retrying (2/3)...").
     pub(crate) status_hint: Option<String>,
+    /// Cancel handle wired into the agent loop. Tripping it makes the
+    /// worker thread exit at the next turn boundary instead of running
+    /// to completion. Without this, ESC just drops the receiver and the
+    /// worker keeps running (burning tokens) until the LLM and tool
+    /// calls finish on their own.
+    pub(crate) cancel: puffer_core::CancelToken,
 }
 
 /// Stores the response channel for the currently visible permission prompt.

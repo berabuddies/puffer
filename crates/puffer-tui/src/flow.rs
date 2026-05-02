@@ -4,7 +4,8 @@ use anyhow::Result;
 use puffer_config::{save_user_config, ConfigPaths};
 use puffer_core::{
     command_surface, dispatch_command, execute_user_turn,
-    execute_user_turn_streaming_with_permissions, reload_runtime_resources, render_config_summary,
+    execute_user_turn_streaming_with_permissions_and_cancel, reload_runtime_resources,
+    render_config_summary,
     render_context_panel, render_copy_actions, render_doctor_report, render_hooks_actions,
     render_ide_actions, render_mcp_actions, render_permissions_panel, render_plugin_actions,
     render_sandbox_actions, render_skills_panel, run_resource_hooks, AppState, MessageRole,
@@ -281,16 +282,21 @@ pub(crate) fn handle_prompt_submit(
     let worker_prompt = submitted.clone();
     let mut worker_auth_store = auth_store.clone();
     let (sender, receiver) = mpsc::channel();
+    // Cancel handle: cloned into the worker thread, original kept on
+    // PendingSubmit so ESC can flip it from the main thread.
+    let cancel = puffer_core::CancelToken::new();
+    let worker_cancel = cancel.clone();
     thread::spawn(move || {
         let event_sender = sender.clone();
         let permission_sender = sender.clone();
-        let outcome = execute_user_turn_streaming_with_permissions(
+        let outcome = execute_user_turn_streaming_with_permissions_and_cancel(
             &mut worker_state,
             &worker_resources,
             &worker_providers,
             &mut worker_auth_store,
             &worker_prompt,
             None,
+            &worker_cancel,
             |event| match event {
                 TurnStreamEvent::ThinkingDelta(delta) => {
                     let _ = event_sender.send(PendingSubmitEvent::ThinkingDelta(delta));
@@ -351,19 +357,27 @@ pub(crate) fn handle_prompt_submit(
         started_at: std::time::Instant::now(),
         thinking_active: false,
         status_hint: None,
+        cancel,
     });
     Ok(())
 }
 
-/// Cancels the in-flight provider turn and discards future worker output.
+/// Cancels the in-flight provider turn. Flips the worker's
+/// `CancelToken` so the agent loop returns `Err("cancelled")` at the
+/// next turn boundary (between provider calls or tool batches), then
+/// drops the receiver so any straggling events are ignored. Without
+/// the token flip the worker would silently run to completion against
+/// a dropped channel — burning tokens and continuing to spawn tools.
 pub(crate) fn cancel_pending_submit(
     state: &mut AppState,
     session_store: &SessionStore,
     tui: &mut TuiState,
 ) -> Result<bool> {
-    if tui.pending_submit.take().is_none() {
+    let Some(pending) = tui.pending_submit.take() else {
         return Ok(false);
-    }
+    };
+    pending.cancel.cancel();
+    drop(pending);
     let message = "Interrupted by user.".to_string();
     state.push_message(MessageRole::System, message.clone());
     session_store.append_event(

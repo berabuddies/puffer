@@ -414,6 +414,45 @@ where
     })
 }
 
+/// Streaming + interactive permissions + cancellation. Same shape as
+/// `execute_user_prompt_streaming_with_permissions` plus a
+/// [`CancelToken`] reference. The TUI uses this so ESC during a turn
+/// flips the token and the agent loop returns
+/// `Err("cancelled")` at the next boundary instead of the worker
+/// thread silently running to completion against a dropped channel.
+pub fn execute_user_prompt_streaming_with_permissions_and_cancel<F, P>(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    providers: &ProviderRegistry,
+    auth_store: &mut AuthStore,
+    input: &str,
+    structured_output: Option<&StructuredOutputConfig>,
+    cancel: &CancelToken,
+    mut on_event: F,
+    on_permission: P,
+) -> Result<TurnExecution>
+where
+    F: FnMut(TurnStreamEvent),
+    P: FnMut(PermissionPromptRequest) -> PermissionPromptAction + 'static,
+{
+    with_permission_prompt_handler(on_permission, || {
+        execute_user_prompt_streaming_with_options(
+            state,
+            resources,
+            providers,
+            auth_store,
+            input,
+            TurnRequestOptions {
+                structured_output,
+                tool_filter: None,
+                reflection: None,
+                cancel: Some(cancel),
+            },
+            &mut on_event,
+        )
+    })
+}
+
 /// Executes one user prompt with a request-scoped structured output contract and streaming events.
 pub fn execute_user_prompt_streaming_with_structured_output<F>(
     state: &mut AppState,
