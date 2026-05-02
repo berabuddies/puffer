@@ -41,7 +41,19 @@ where
         // Ignore "event:" lines — we parse type from data payload
     }
 
-    // Stream ended without message_stop
+    // Stream ended without `message_stop`. Pi-mono parity
+    // (`pi-mono/packages/ai/src/providers/anthropic.ts` 83592bb2): when
+    // we saw `message_start` we know the upstream is a real Anthropic
+    // stream — a missing `message_stop` means it was truncated mid-flight
+    // (transport drop, gateway timeout, OOM at the relay). Returning the
+    // partial state silently would feed a half-built thinking block (no
+    // signature, possibly truncated mid-token) into the next turn's
+    // replay, where it would either fail upstream verification or drop
+    // its chain-of-thought silently. Bail loudly so retry / surfacing
+    // can decide what to do.
+    if state.response.is_some() {
+        bail!("Anthropic SSE stream ended before message_stop");
+    }
     if state.has_content() {
         Ok(state.into_response())
     } else {
@@ -302,5 +314,44 @@ mod tests {
         assert_eq!(result["content"][0]["type"], "thinking");
         assert_eq!(result["content"][0]["thinking"], "Step 1. Step 2.");
         assert_eq!(result["content"][0]["signature"], "sig-part-A-part-B");
+    }
+
+    /// Pi-mono parity (`pi-mono/.../anthropic.ts` 83592bb2):
+    /// truncated streams that started but never reached `message_stop`
+    /// must bail. Previously we silently returned the partial state,
+    /// feeding a half-built thinking block (no signature, possibly
+    /// truncated mid-token) into the next turn — caller would then
+    /// fail upstream signature verification or lose chain-of-thought.
+    #[test]
+    fn truncated_stream_after_message_start_bails() {
+        let stream = concat!(
+            "event:message_start\n",
+            "data:{\"type\":\"message_start\",\"message\":{\"id\":\"msg_t\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+            "event:content_block_start\n",
+            "data:{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event:content_block_delta\n",
+            "data:{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n",
+            // EOF here — gateway dropped the connection. No
+            // content_block_stop, no message_delta, no message_stop.
+        );
+
+        let result = parse_anthropic_sse(stream.as_bytes(), &mut |_| {});
+        let err = result.expect_err("truncated stream must bail");
+        assert!(
+            err.to_string().contains("ended before message_stop"),
+            "expected truncation error, got: {err}"
+        );
+    }
+
+    /// Streams that never started (no `message_start`) AND have no
+    /// content fall through the legacy "no message_stop" branch and
+    /// bail — same as before this change. Locks in that we did not
+    /// regress the empty-stream path.
+    #[test]
+    fn empty_stream_with_no_message_start_still_bails() {
+        let stream = "";
+        let result = parse_anthropic_sse(stream.as_bytes(), &mut |_| {});
+        let err = result.expect_err("empty stream must bail");
+        assert!(err.to_string().contains("without message_stop"), "got: {err}");
     }
 }
