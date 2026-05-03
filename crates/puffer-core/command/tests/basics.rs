@@ -104,6 +104,7 @@ fn app_state_defaults_expose_command_state() {
                 tmux_golden_mode: false,
                 status_line: None,
             },
+            remote_runner: None,
         },
         PathBuf::from("."),
         SessionMetadata {

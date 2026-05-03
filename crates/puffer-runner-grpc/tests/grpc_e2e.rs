@@ -371,6 +371,60 @@ fn execute_tool_streams_chunks_when_runner_emits_them() {
     drop(server);
 }
 
+/// Drives multiple concurrent `execute_tool` calls through a single
+/// `Arc<RemoteToolRunner>` to lock the trait's `Send + Sync` contract:
+/// a parallel tool batch must be able to share one runner instance
+/// without serializing or stomping on shared state. Each thread runs a
+/// distinct Bash command and asserts it sees its own output back.
+#[test]
+fn concurrent_execute_tool_calls() {
+    let workspace = tempdir().unwrap();
+    let server_runner: Arc<dyn ToolRunner> = Arc::new(LocalToolRunner::new());
+    let server = spawn_server(server_runner);
+    let remote: Arc<dyn ToolRunner> = Arc::new(
+        RemoteToolRunner::connect(&server.endpoint, Some(TEST_TOKEN)).expect("connect remote"),
+    );
+
+    let cwd = workspace.path().to_path_buf();
+    let commands = ["echo 1", "echo 2", "echo 3", "echo 4"];
+    let expected_markers = ["1", "2", "3", "4"];
+
+    let mut handles = Vec::with_capacity(commands.len());
+    for (idx, cmd) in commands.iter().enumerate() {
+        let runner = remote.clone();
+        let cwd = cwd.clone();
+        let cmd = cmd.to_string();
+        handles.push(std::thread::spawn(move || {
+            let result = runner
+                .execute_tool(
+                    make_request("Bash", &cwd, serde_json::json!({"command": cmd})),
+                    &mut NullChunkSink,
+                )
+                .expect("Bash");
+            (idx, result)
+        }));
+    }
+
+    let mut results: Vec<Option<ToolResult>> = (0..commands.len()).map(|_| None).collect();
+    for handle in handles {
+        let (idx, result) = handle.join().expect("worker join");
+        results[idx] = Some(result);
+    }
+
+    for (idx, (result, marker)) in results.into_iter().zip(expected_markers.iter()).enumerate() {
+        let result = result.unwrap_or_else(|| panic!("missing result for {idx}"));
+        assert!(result.success, "Bash {idx} failed");
+        assert!(
+            result.stdout.contains(marker),
+            "Bash {idx}: stdout {:?} does not contain marker {marker}",
+            result.stdout,
+        );
+    }
+
+    drop(remote);
+    drop(server);
+}
+
 #[test]
 fn missing_token_is_unauthenticated() {
     let server_runner: Arc<dyn ToolRunner> = Arc::new(LocalToolRunner::new());
