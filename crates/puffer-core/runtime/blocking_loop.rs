@@ -59,21 +59,16 @@ pub(crate) fn run_blocking_loop(
             span.set_str("puffer.parent.session_id", parent_sid);
             span.set_str("puffer.subagent.kind", "agent_tool");
         }
-        // Subagent runs gate trace input on both flags since the
-        // prompt may embed tool I/O (review v5 BLOCK #1).
-        let policy = handle.redaction();
-        let trace_input_allowed = if is_subagent {
-            policy.include_prompts() && policy.include_tool_io()
+        // Subagent runs may embed tool I/O in their input prompt; use
+        // `PromptWithEmbeddedToolIo` so redaction requires both flags.
+        // Always emit so the trace's Input pane shows a redacted
+        // summary instead of `null` when the flag is off.
+        let kind = if is_subagent {
+            puffer_observability::ContentKind::PromptWithEmbeddedToolIo
         } else {
-            policy.include_prompts()
+            puffer_observability::ContentKind::Prompt
         };
-        if trace_input_allowed {
-            span.set_content(
-                puffer_observability::LANGFUSE_TRACE_INPUT,
-                puffer_observability::ContentKind::Prompt,
-                inputs.input,
-            );
-        }
+        span.set_content(puffer_observability::LANGFUSE_TRACE_INPUT, kind, inputs.input);
         span
     } else {
         puffer_observability::SpanGuard::Disabled

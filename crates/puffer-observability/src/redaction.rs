@@ -24,6 +24,11 @@ pub enum ContentKind {
     Output,
     ToolInput { tool_id: String },
     ToolOutput { tool_id: String },
+    /// Prompt that embeds rendered tool I/O (e.g. the reflection
+    /// judge's input prompt or a spawned-agent root prompt). Requires
+    /// BOTH `include_prompts` AND `include_tool_io` to pass through;
+    /// otherwise emits the `[redacted: N bytes, sha256:...]` summary.
+    PromptWithEmbeddedToolIo,
 }
 
 /// Per-`ObservabilityHandle` redaction policy: three opt-in flags
@@ -102,6 +107,9 @@ impl RedactionPolicy {
         let included = match kind {
             ContentKind::Prompt => self.include_prompts,
             ContentKind::Output => self.include_outputs,
+            ContentKind::PromptWithEmbeddedToolIo => {
+                self.include_prompts && self.include_tool_io
+            }
             ContentKind::ToolInput { tool_id }
             | ContentKind::ToolOutput { tool_id } => {
                 if self
