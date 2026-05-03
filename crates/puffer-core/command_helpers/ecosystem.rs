@@ -273,13 +273,8 @@ pub(crate) fn handle_ide_command(
 pub(crate) fn reload_resources_from_disk(state: &AppState) -> Result<LoadedResources> {
     let paths = ConfigPaths::discover(&state.cwd);
     ensure_workspace_dirs(&paths)?;
-    reload_resources_from_paths(&paths)
-}
-
-#[allow(dead_code)]
-fn reload_resources_from_paths(paths: &ConfigPaths) -> Result<LoadedResources> {
-    let mut resources = load_resources(paths, &crate::runner_adapter::InProcessRunner::new())?;
-    apply_mcp_enablement_overrides(paths, &mut resources)?;
+    let mut resources = load_resources(&paths, state.tool_runner.as_ref())?;
+    apply_mcp_enablement_overrides(&paths, &mut resources)?;
     Ok(resources)
 }
 

@@ -7,7 +7,7 @@ fn bundled_resources() -> LoadedResources {
         user_config_dir: temp.path().join("user"),
         builtin_resources_dir: root.join("resources"),
     };
-    load_resources(&paths, &crate::runner_adapter::InProcessRunner::new()).unwrap()
+    load_resources(&paths, &crate::runner_adapter::LocalToolRunner::new()).unwrap()
 }
 
 fn workspace_root() -> PathBuf {

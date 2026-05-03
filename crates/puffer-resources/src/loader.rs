@@ -985,6 +985,7 @@ mod tests {
     /// Minimal `ToolRunner` backed by `std::fs` for loader tests; mirrors
     /// `puffer_runner_local::LocalToolRunner` so tests don't take a circular
     /// dependency on the runner crate.
+    #[derive(Debug)]
     struct FsTestRunner;
 
     impl ToolRunner for FsTestRunner {

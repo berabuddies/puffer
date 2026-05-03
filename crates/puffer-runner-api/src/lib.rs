@@ -355,7 +355,7 @@ impl<F: FnMut(ChunkKind, &[u8]) + Send> ChunkSink for FnChunkSink<F> {
 /// The unified tool runner trait. Instances are wrapped in `Arc<dyn ToolRunner>`
 /// at runtime startup; the rest of the codebase doesn't care whether the
 /// underlying implementation is local or remote.
-pub trait ToolRunner: Send + Sync {
+pub trait ToolRunner: Send + Sync + std::fmt::Debug {
     /// Returns the runner's self-reported capabilities.
     fn capabilities(&self) -> RunnerCapabilities;
 

@@ -394,7 +394,7 @@ fn try_runner_dispatch(
         input: input.clone(),
         session_id: Some(state.session.id.to_string()),
     };
-    let runner = runner_adapter::active_runner();
+    let runner = state.tool_runner.clone();
     let mut sink = NullChunkSink;
     let outcome = runner
         .execute_tool(request, &mut sink)

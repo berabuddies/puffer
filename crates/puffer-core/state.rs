@@ -1,11 +1,14 @@
+use crate::runner_adapter::LocalToolRunner;
 use crate::runtime::ReflectionConfig;
 use puffer_config::PufferConfig;
+use puffer_runner_api::ToolRunner;
 use puffer_session_store::{
     ClaudeReadSnapshotEvent, SessionMetadata, SessionRecord, TranscriptEvent, TranscriptRewrite,
 };
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Describes the role of a rendered transcript message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -127,6 +130,11 @@ pub struct AppState {
     session_input_total: u64,
     tasks: Vec<TaskRecord>,
     next_task_id: u64,
+    /// Tool runner used by the claude-parity dispatcher and any subsystem
+    /// that needs filesystem/process/MCP access through the trait surface.
+    /// Defaults to a `LocalToolRunner`; tests and remote backends override
+    /// it via [`AppState::with_tool_runner`].
+    pub tool_runner: Arc<dyn ToolRunner>,
 }
 
 impl AppState {
@@ -186,7 +194,16 @@ impl AppState {
             session_input_total: 0,
             tasks: Vec::new(),
             next_task_id: 1,
+            tool_runner: Arc::new(LocalToolRunner::new()),
         }
+    }
+
+    /// Replaces the active tool runner. Use this from tests or remote
+    /// backends; the default `AppState::new` already installs a local
+    /// in-process runner.
+    pub fn with_tool_runner(mut self, runner: Arc<dyn ToolRunner>) -> Self {
+        self.tool_runner = runner;
+        self
     }
 
     /// Restores application state from a persisted session record.

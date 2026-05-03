@@ -14,7 +14,7 @@ fn main() -> Result<()> {
     let auth_path = paths.user_config_dir.join("auth.json");
     let mut auth_store = puffer_provider_registry::AuthStore::load(&auth_path)?;
     let mut resources =
-        load_resources(&paths, &puffer_core::runner_adapter::InProcessRunner::new())?;
+        load_resources(&paths, &puffer_core::runner_adapter::LocalToolRunner::new())?;
 
     let mut providers = ProviderRegistry::new();
     for provider in &resources.providers {

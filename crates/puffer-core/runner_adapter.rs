@@ -264,54 +264,50 @@ fn result_with_updates(
     }
 }
 
-/// Process-global slot holding the active runner.
-///
-/// `puffer-core::runtime::tool_executor` consults this when dispatching one
-/// of the 10 claude-parity tools so the same machinery serves both the
-/// in-process default and a future remote runner. The binary may install a
-/// custom runner before the first tool call (e.g. a `LocalToolRunner` from
-/// `puffer-runner-local` or a `RemoteToolRunner` from a future gRPC crate);
-/// otherwise [`active_runner`] returns the bundled [`InProcessRunner`].
-static ACTIVE_RUNNER: std::sync::OnceLock<std::sync::Arc<dyn ToolRunner>> =
-    std::sync::OnceLock::new();
-
-/// Installs `runner` as the process-global tool runner. Returns `Err` when
-/// a runner has already been installed; callers should treat that as a
-/// programmer error and either install once at startup or accept the
-/// existing one.
-pub fn install_runner(
-    runner: std::sync::Arc<dyn ToolRunner>,
-) -> std::result::Result<(), std::sync::Arc<dyn ToolRunner>> {
-    ACTIVE_RUNNER.set(runner)
-}
-
-/// Returns the active runner, installing the in-process default the first
-/// time this is called.
-pub fn active_runner() -> std::sync::Arc<dyn ToolRunner> {
-    ACTIVE_RUNNER
-        .get_or_init(|| std::sync::Arc::new(InProcessRunner::new()))
-        .clone()
-}
-
-/// In-process [`ToolRunner`] used by the runtime when no explicit runner is
-/// supplied at startup.
-///
-/// Functionally identical to `puffer_runner_local::LocalToolRunner` but
-/// available without an upstream-crate dependency, so the runtime can
-/// always construct a working runner via [`AppState`].
+/// In-process [`ToolRunner`]. Lives in `puffer-core` so the runtime can
+/// instantiate one without depending on the higher-level
+/// `puffer-runner-local` crate (which itself re-exports this type as
+/// `LocalToolRunner` for external callers).
 #[derive(Debug, Clone, Default)]
-pub struct InProcessRunner;
+pub struct LocalToolRunner {
+    sandbox_roots: Vec<PathBuf>,
+}
 
-impl InProcessRunner {
+impl LocalToolRunner {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    pub fn with_sandbox_roots(roots: Vec<PathBuf>) -> Self {
+        Self {
+            sandbox_roots: roots,
+        }
+    }
+
+    fn check_sandbox(&self, path: &Path) -> Result<(), RunnerError> {
+        if self.sandbox_roots.is_empty() {
+            return Ok(());
+        }
+        let canonical = std::fs::canonicalize(path)
+            .map_err(|e| RunnerError::InvalidArgument(format!("canonicalize {path:?}: {e}")))?;
+        let allowed = self.sandbox_roots.iter().any(|root| {
+            std::fs::canonicalize(root)
+                .map(|root| canonical.starts_with(&root))
+                .unwrap_or(false)
+        });
+        if !allowed {
+            return Err(RunnerError::PermissionDenied(format!(
+                "path {path:?} escapes the configured sandbox roots"
+            )));
+        }
+        Ok(())
     }
 }
 
-impl ToolRunner for InProcessRunner {
+impl ToolRunner for LocalToolRunner {
     fn capabilities(&self) -> RunnerCapabilities {
         RunnerCapabilities {
-            backend: "in-process".into(),
+            backend: "local".into(),
             version: env!("CARGO_PKG_VERSION").into(),
             supported_tools: supported_runner_tools()
                 .iter()
@@ -329,7 +325,7 @@ impl ToolRunner for InProcessRunner {
     ) -> Result<ToolResult, RunnerError> {
         if !is_runner_supported(req.tool_id.as_str()) {
             return Err(RunnerError::Unsupported(format!(
-                "tool `{}` is not handled by the in-process runner",
+                "tool `{}` is not handled by the local runner",
                 req.tool_id
             )));
         }
@@ -337,6 +333,7 @@ impl ToolRunner for InProcessRunner {
     }
 
     fn read_file(&self, path: &Path) -> Result<Vec<u8>, RunnerError> {
+        self.check_sandbox(path)?;
         std::fs::read(path).map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => RunnerError::NotFound(path.display().to_string()),
             std::io::ErrorKind::PermissionDenied => {
@@ -347,6 +344,7 @@ impl ToolRunner for InProcessRunner {
     }
 
     fn list_dir(&self, path: &Path) -> Result<Vec<DirEntry>, RunnerError> {
+        self.check_sandbox(path)?;
         let read = std::fs::read_dir(path).map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => RunnerError::NotFound(path.display().to_string()),
             std::io::ErrorKind::PermissionDenied => {
@@ -373,6 +371,7 @@ impl ToolRunner for InProcessRunner {
     }
 
     fn glob(&self, root: &Path, pattern: &str) -> Result<Vec<PathBuf>, RunnerError> {
+        self.check_sandbox(root)?;
         let combined = root.join(pattern);
         let combined_str = combined
             .to_str()

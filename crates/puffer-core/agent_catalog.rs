@@ -1,4 +1,4 @@
-use crate::runner_adapter::InProcessRunner;
+use crate::runner_adapter::LocalToolRunner;
 use anyhow::Result;
 use puffer_config::{ensure_workspace_dirs, ConfigPaths};
 use puffer_resources::{load_resources, plugin_mcp_servers, LoadedResources, SourceKind};
@@ -85,7 +85,7 @@ pub(crate) fn load_agent_resources(
     if !workspace_manifest.exists() {
         fs::write(&workspace_manifest, default_agent_manifest(current_model))?;
     }
-    load_resources(&paths, &InProcessRunner::new())
+    load_resources(&paths, &LocalToolRunner::new())
 }
 
 pub(crate) fn workspace_agent_manifest_path(paths: &ConfigPaths) -> PathBuf {
