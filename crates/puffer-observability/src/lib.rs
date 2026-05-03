@@ -44,7 +44,8 @@ mod tests;
 pub use attributes::{
     AttributeBag, GenAiSystem, ObservationKind, GEN_AI_REQUEST_MODEL, GEN_AI_SYSTEM,
     LANGFUSE_OBSERVATION_INPUT, LANGFUSE_OBSERVATION_OUTPUT, LANGFUSE_TRACE_INPUT,
-    LANGFUSE_TRACE_OUTPUT, LANGFUSE_TRACE_TAGS, PUFFER_API, PUFFER_CWD, PUFFER_PROVIDER_ID,
+    LANGFUSE_TRACE_OUTPUT, LANGFUSE_TRACE_TAGS, LANGFUSE_USER_ID, PUFFER_API, PUFFER_CWD,
+    PUFFER_PROVIDER_ID,
     PUFFER_SESSION_ID, PUFFER_TOOL_CALL_ID, PUFFER_TOOL_PARALLEL,
 };
 pub use hooks::{
@@ -76,6 +77,12 @@ pub struct ObservabilityConfig {
     pub release: Option<String>,
     /// Free-form tags forwarded as `langfuse.tags`.
     pub tags: Vec<String>,
+    /// Per-trace user identity stamped on every root `agent_loop`
+    /// span as `langfuse.user.id`. Populates Langfuse's Users tab so
+    /// trace cost / activity can be sliced by operator. Discovered
+    /// from env in this order: `PUFFER_OBSERVABILITY_USER_ID` →
+    /// `LANGFUSE_USER_ID` → `USER`/`USERNAME` (fallback).
+    pub user_id: Option<String>,
     /// HTTP headers for the exporter. For Langfuse, supply
     /// `Authorization: Basic <base64(public_key:secret_key)>` plus
     /// `x-langfuse-ingestion-version=4` (added automatically by
@@ -108,6 +115,7 @@ impl Default for ObservabilityConfig {
             service_name: "puffer".to_string(),
             release: option_env!("CARGO_PKG_VERSION").map(str::to_string),
             tags: Vec::new(),
+            user_id: None,
             headers: Vec::new(),
             sample_rate: 1.0,
             include_prompts: false,
@@ -168,6 +176,10 @@ struct HandleInner {
     /// `langfuse.trace.tags` so Langfuse renders them in its tag
     /// filter / per-trace tag chips.
     tags: Vec<String>,
+    /// Per-trace user id surfaced on the root `agent_loop` span as
+    /// `langfuse.user.id` so Langfuse's Users tab populates and
+    /// per-user cost / activity slicing works.
+    user_id: Option<String>,
 }
 
 impl ObservabilityHandle {
@@ -247,6 +259,7 @@ impl ObservabilityHandle {
         );
         let shutdown_timeout = config.shutdown_timeout;
         let tags = config.tags;
+        let user_id = config.user_id;
 
         Ok(Self {
             inner: Arc::new(HandleInner {
@@ -254,6 +267,7 @@ impl ObservabilityHandle {
                 redaction,
                 shutdown_timeout,
                 tags,
+                user_id,
             }),
         })
     }
@@ -263,6 +277,13 @@ impl ObservabilityHandle {
     /// span so Langfuse renders them in its tag filter.
     pub fn tags(&self) -> &[String] {
         &self.inner.tags
+    }
+
+    /// Per-trace user id pulled from `ObservabilityConfig::user_id`.
+    /// Used by `start_agent_loop_span` to set `langfuse.user.id` on
+    /// the root span so Langfuse's Users tab populates.
+    pub fn user_id(&self) -> Option<&str> {
+        self.inner.user_id.as_deref()
     }
 
     /// Build an [`ObservabilityConfig`] from environment variables that
@@ -333,6 +354,16 @@ impl ObservabilityHandle {
                     .collect()
             })
             .unwrap_or_default();
+        // User id discovery — explicit puffer override beats Langfuse-
+        // standard env beats the OS user. Skipped entirely when none
+        // is set so Langfuse's Users tab remains empty rather than
+        // populated with a synthetic anonymous bucket.
+        let user_id = std::env::var("PUFFER_OBSERVABILITY_USER_ID")
+            .ok()
+            .or_else(|| std::env::var("LANGFUSE_USER_ID").ok())
+            .or_else(|| std::env::var("USER").ok())
+            .or_else(|| std::env::var("USERNAME").ok())
+            .filter(|s| !s.is_empty());
         let config = ObservabilityConfig {
             endpoint,
             service_name,
@@ -343,6 +374,7 @@ impl ObservabilityHandle {
             include_tool_io,
             release,
             tags,
+            user_id,
             ..ObservabilityConfig::default()
         };
         Ok(Some(Self::init(config)?))

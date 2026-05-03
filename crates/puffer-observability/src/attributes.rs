@@ -106,6 +106,7 @@ pub const LANGFUSE_SESSION_ID: &str = "langfuse.session.id";
 pub const LANGFUSE_TRACE_INPUT: &str = "langfuse.trace.input";
 pub const LANGFUSE_TRACE_OUTPUT: &str = "langfuse.trace.output";
 pub const LANGFUSE_TRACE_TAGS: &str = "langfuse.trace.tags";
+pub const LANGFUSE_USER_ID: &str = "langfuse.user.id";
 
 // gen_ai.* shortcuts
 pub const GEN_AI_SYSTEM: &str = "gen_ai.system";
