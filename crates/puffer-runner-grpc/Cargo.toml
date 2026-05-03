@@ -14,7 +14,7 @@ serde_json.workspace = true
 prost = "0.13"
 tonic = { version = "0.12", features = ["transport", "tls"] }
 tokio = { version = "1.51", features = ["rt-multi-thread", "sync", "macros", "time", "net"] }
-tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-stream = { version = "0.1", features = ["sync", "net"] }
 futures-core = "0.3"
 
 [build-dependencies]
