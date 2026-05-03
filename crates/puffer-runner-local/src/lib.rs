@@ -5,7 +5,65 @@
 //! exists as the canonical "use the local runner" entry point for binaries
 //! and tests.
 
+use std::path::PathBuf;
+
+use puffer_resources::{plugin_mcp_servers, LoadedResources, McpServerSpec};
+
 pub use puffer_core::runner_adapter::LocalToolRunner;
+
+/// Builds a `LocalToolRunner` configured with the MCP servers loaded into
+/// `resources` and rooted at `workspace_root` for the built-in filesystem
+/// transport.
+///
+/// `sandbox_roots` controls path-access policy:
+/// * `None` — no sandbox (the in-process / TUI flow keeps the sandbox wide
+///   open so resource loaders can still reach `~/.config/puffer` and other
+///   non-workspace paths).
+/// * `Some(roots)` — restrict file I/O to the listed roots (the standalone
+///   `puffer-tool-runner` binary uses this so its remote callers can't
+///   reach outside the working directory).
+///
+/// MCP servers are taken from `resources.mcp_servers` plus any
+/// plugin-embedded servers exposed via [`plugin_mcp_servers`], deduplicated
+/// by id (case-insensitive). The MCP workspace root is set to
+/// `workspace_root` so the built-in `filesystem` transport rolls onto the
+/// caller's `--cwd` rather than the first sandbox root.
+pub fn local_runner_from_resources(
+    resources: &LoadedResources,
+    workspace_root: PathBuf,
+    sandbox_roots: Option<Vec<PathBuf>>,
+) -> LocalToolRunner {
+    let servers = collect_mcp_servers(resources);
+    let runner = match sandbox_roots {
+        Some(roots) => LocalToolRunner::with_sandbox_roots(roots),
+        None => LocalToolRunner::new(),
+    };
+    runner
+        .with_mcp_servers(servers)
+        .with_mcp_workspace_root(workspace_root)
+}
+
+/// Merges MCP server specs discovered through resource loading with those
+/// embedded in plugin manifests. On id collision the resource-loaded entry
+/// wins (it already reflects workspace > user > builtin > embedded merge
+/// order from [`puffer_resources::load_resources`]).
+fn collect_mcp_servers(resources: &LoadedResources) -> Vec<McpServerSpec> {
+    let mut servers: Vec<McpServerSpec> = resources
+        .mcp_servers
+        .iter()
+        .map(|item| item.value.clone())
+        .collect();
+    for (_plugin, spec) in plugin_mcp_servers(resources) {
+        if servers
+            .iter()
+            .any(|existing| existing.id.eq_ignore_ascii_case(&spec.id))
+        {
+            continue;
+        }
+        servers.push(spec.clone());
+    }
+    servers
+}
 
 #[cfg(test)]
 mod tests {

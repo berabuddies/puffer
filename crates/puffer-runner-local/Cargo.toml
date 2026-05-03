@@ -6,11 +6,11 @@ license.workspace = true
 
 [dependencies]
 puffer-core = { path = "../puffer-core" }
+puffer-resources = { path = "../puffer-resources" }
 puffer-runner-api = { path = "../puffer-runner-api" }
 
 [dev-dependencies]
 anyhow.workspace = true
-puffer-resources = { path = "../puffer-resources" }
 serde_json.workspace = true
 tempfile.workspace = true
 uuid.workspace = true

@@ -4545,10 +4545,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "puffer-config",
+ "puffer-resources",
  "puffer-runner-api",
  "puffer-runner-grpc",
  "puffer-runner-local",
+ "tempfile",
  "tokio",
+ "tokio-stream",
  "tonic",
 ]
 

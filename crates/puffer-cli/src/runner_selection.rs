@@ -27,10 +27,10 @@ use std::thread;
 use std::time::Duration;
 
 use puffer_config::{PufferConfig, RemoteRunnerConfig};
-use puffer_resources::{plugin_mcp_servers, LoadedResources, McpServerSpec};
+use puffer_resources::LoadedResources;
 use puffer_runner_api::ToolRunner;
 use puffer_runner_grpc::RemoteToolRunner;
-use puffer_runner_local::LocalToolRunner;
+use puffer_runner_local::local_runner_from_resources;
 
 const DEFAULT_INITIAL_BACKOFF_MS: u64 = 1_000;
 const DEFAULT_MAX_BACKOFF_MS: u64 = 10_000;
@@ -47,7 +47,11 @@ pub fn select_tool_runner(
     if let Some(remote) = config.remote_runner.as_ref() {
         return wait_for_remote_runner(remote);
     }
-    Arc::new(local_runner_from_resources(resources, workspace_root))
+    // The TUI / in-process flow leaves the sandbox wide open so resource
+    // loaders can still reach `~/.config/puffer` and other non-workspace
+    // paths. The standalone `puffer-tool-runner` binary, by contrast, opts
+    // into a sandbox by passing `Some(vec![cwd])`.
+    Arc::new(local_runner_from_resources(resources, workspace_root, None))
 }
 
 /// Builds a `RemoteToolRunner` against `config.endpoint` and pings it in a
@@ -112,38 +116,6 @@ fn next_backoff(current: Duration, cap: Duration) -> Duration {
     } else {
         cap
     }
-}
-
-/// Builds a `LocalToolRunner` configured with the MCP servers loaded into
-/// `resources` and rooted at `workspace_root` for the built-in filesystem
-/// transport. The sandbox is left wide open so resource loaders can still
-/// reach `~/.config/puffer` and other non-workspace paths.
-pub fn local_runner_from_resources(
-    resources: &LoadedResources,
-    workspace_root: PathBuf,
-) -> LocalToolRunner {
-    let servers = collect_mcp_servers(resources);
-    LocalToolRunner::new()
-        .with_mcp_servers(servers)
-        .with_mcp_workspace_root(workspace_root)
-}
-
-fn collect_mcp_servers(resources: &LoadedResources) -> Vec<McpServerSpec> {
-    let mut servers: Vec<McpServerSpec> = resources
-        .mcp_servers
-        .iter()
-        .map(|item| item.value.clone())
-        .collect();
-    for (_plugin, spec) in plugin_mcp_servers(resources) {
-        if servers
-            .iter()
-            .any(|existing| existing.id.eq_ignore_ascii_case(&spec.id))
-        {
-            continue;
-        }
-        servers.push(spec.clone());
-    }
-    servers
 }
 
 #[cfg(test)]

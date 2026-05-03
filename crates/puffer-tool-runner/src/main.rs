@@ -5,14 +5,11 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use puffer_runner_api::ToolRunner;
 use puffer_runner_grpc::server::ToolRunnerServer;
-use puffer_runner_grpc::ToolRunnerService;
-use puffer_runner_local::LocalToolRunner;
+use puffer_tool_runner::{build_service_from_cwd, resolve_cwd};
 use tonic::transport::Server;
 
 #[derive(Debug, Parser)]
@@ -38,18 +35,25 @@ async fn main() -> Result<()> {
         .token
         .or_else(|| std::env::var("PUFFER_RUNNER_TOKEN").ok());
 
-    let cwd = match args.cwd {
-        Some(p) => p,
-        None => std::env::current_dir().context("cwd")?,
-    };
-    if !cwd.is_dir() {
-        anyhow::bail!("--cwd {:?} is not a directory", cwd);
+    let cwd = resolve_cwd(args.cwd)?;
+
+    let (service, mcp_count) = build_service_from_cwd(&cwd, token.clone())
+        .with_context(|| format!("build tool runner service for {}", cwd.display()))?;
+
+    if mcp_count == 0 {
+        eprintln!(
+            "puffer-tool-runner: warning — discovered 0 MCP servers from {}; \
+             MCP RPCs will return empty results until a server manifest is added \
+             to .puffer/resources/mcp_servers/",
+            cwd.display()
+        );
+    } else {
+        eprintln!(
+            "puffer-tool-runner: loaded {mcp_count} MCP server{plural} from {}",
+            cwd.display(),
+            plural = if mcp_count == 1 { "" } else { "s" },
+        );
     }
-
-    let runner: Arc<dyn ToolRunner> =
-        Arc::new(LocalToolRunner::with_sandbox_roots(vec![cwd.clone()]));
-
-    let service = ToolRunnerService::new(runner).with_auth_token(token.clone());
 
     eprintln!(
         "puffer-tool-runner: listening on {} (cwd={}, auth={})",

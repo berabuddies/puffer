@@ -4,11 +4,17 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "puffer_tool_runner"
+path = "src/lib.rs"
+
 [[bin]]
 name = "puffer-tool-runner"
 path = "src/main.rs"
 
 [dependencies]
+puffer-config = { path = "../puffer-config" }
+puffer-resources = { path = "../puffer-resources" }
 puffer-runner-api = { path = "../puffer-runner-api" }
 puffer-runner-grpc = { path = "../puffer-runner-grpc" }
 puffer-runner-local = { path = "../puffer-runner-local" }
@@ -17,3 +23,8 @@ anyhow.workspace = true
 clap.workspace = true
 tokio = { version = "1.51", features = ["rt-multi-thread", "signal", "macros", "net", "sync"] }
 tonic = { version = "0.12", features = ["transport"] }
+
+[dev-dependencies]
+puffer-runner-grpc = { path = "../puffer-runner-grpc" }
+tempfile.workspace = true
+tokio-stream = { version = "0.1", features = ["net"] }
