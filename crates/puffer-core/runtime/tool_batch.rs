@@ -29,6 +29,16 @@ use super::{
 };
 use crate::workspace_paths;
 
+/// Execute the tool batch produced by one provider round. Splits into
+/// the parallel path (multiple parallel-safe tools spawn into a
+/// `std::thread::scope` with explicit OtelContext propagation) or
+/// the serial fallback. Returns the per-tool `ToolInvocation` results
+/// in submission order, ready to feed back as `FunctionCallOutput`
+/// items in the next turn.
+///
+/// `parent_span_ctx` is the per-turn OtelContext; each tool span uses
+/// it as its parent so the trace tree shows
+/// `turn → tool.<id>` regardless of which path runs.
 pub(super) fn execute_tool_batch(
     inputs: &mut LoopInputs<'_>,
     session: &mut dyn TurnSession,
