@@ -200,5 +200,12 @@ constraints:
   directory.
 - Keep the workspace green with `cargo test --workspace`.
 - When adding new features, wire tests in the same step where practical.
+- When updating a component, write a new update spec in that component's
+  `specs/<component>/` folder. Do not overwrite prior numbered specs; use the
+  next unused two-digit Markdown file such as `03.md` when `00.md`, `01.md`,
+  and `02.md` already exist.
+- Component update specs must be concise, up-to-date, and exhaustive about the
+  design, architecture, logic, contracts, and compatibility implications of the
+  change.
 - If there is a conflict between fidelity and maintainability, document the
   gap in code comments or commit messages rather than silently diverging.
