@@ -349,7 +349,23 @@ pub(crate) fn run_streaming_loop(
                                     })
                                     .collect::<Vec<_>>()
                                     .join("\n");
-                                serde_json::json!({ "role": role, "content": text })
+                                // Compaction stores its summary as a
+                                // user `Message` prefixed with the
+                                // marker below. The summary can carry
+                                // prior tool I/O verbatim, so redact
+                                // when `include_tool_io=false` — review
+                                // v6 BLOCK #2.
+                                let body = if !include_tool_io
+                                    && text.starts_with("[Conversation compacted —")
+                                {
+                                    format!(
+                                        "[redacted: {} bytes compaction summary message]",
+                                        text.len()
+                                    )
+                                } else {
+                                    text
+                                };
+                                serde_json::json!({ "role": role, "content": body })
                             }
                             ConversationItem::FunctionCall { name, arguments, .. } => {
                                 let args = if include_tool_io {
@@ -417,12 +433,13 @@ pub(crate) fn run_streaming_loop(
                 );
             }
         }
-        // We need to capture token usage from the streaming Usage
-        // event without breaking the existing on_event signature for
-        // other consumers. Wrap it.
+        // Capture token usage from the streaming Usage event for the
+        // provider span. Only wrap when observability is on so the
+        // disabled path doesn't clone every Usage report
+        // (review v6 BLOCK #3).
         let observability_handle = inputs.observability.clone();
         let captured_usage = std::cell::RefCell::new(None::<TurnUsageReport>);
-        let result = {
+        let result = if observability_handle.is_some() {
             let captured_usage_ref = &captured_usage;
             let mut wrapped = |event: TurnStreamEvent| {
                 if let TurnStreamEvent::Usage(u) = &event {
@@ -435,6 +452,13 @@ pub(crate) fn run_streaming_loop(
                 inputs.auth_store,
                 &mut items,
                 &mut wrapped,
+            )
+        } else {
+            session.one_turn_streaming(
+                inputs.state,
+                inputs.auth_store,
+                &mut items,
+                on_event,
             )
         };
         // Surface usage on the provider span before propagating any
