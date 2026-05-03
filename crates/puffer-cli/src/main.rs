@@ -412,8 +412,13 @@ fn main() -> Result<()> {
                 ),
                 ResumeLaunchResolution::Picker { query, .. } if cli.resume.is_some() => {
                     let session = session_store.create_session(cwd.clone())?;
-                    let mut state = AppState::new(config.clone(), cwd, session)
-                        .with_tool_runner(crate::runner_selection::select_tool_runner(&config));
+                    let runner = crate::runner_selection::select_tool_runner(
+                        &config,
+                        &resources,
+                        cwd.clone(),
+                    );
+                    let mut state =
+                        AppState::new(config.clone(), cwd, session).with_tool_runner(runner);
                     if let Some(prompt) = cli.prompt {
                         state.queue_pending_query_prompt(prompt);
                     }
@@ -439,8 +444,13 @@ fn main() -> Result<()> {
                 }
                 _ => {
                     let session = session_store.create_session(cwd.clone())?;
-                    let mut state = AppState::new(config.clone(), cwd, session)
-                        .with_tool_runner(crate::runner_selection::select_tool_runner(&config));
+                    let runner = crate::runner_selection::select_tool_runner(
+                        &config,
+                        &resources,
+                        cwd.clone(),
+                    );
+                    let mut state =
+                        AppState::new(config.clone(), cwd, session).with_tool_runner(runner);
                     puffer_tui::run_app(
                         &mut state,
                         &mut resources,
@@ -494,6 +504,9 @@ fn run_existing_session_tui(
         state.cwd = cwd.to_path_buf();
         state.session.cwd = cwd.to_path_buf();
     }
+    let runner =
+        crate::runner_selection::select_tool_runner(config, resources, state.cwd.clone());
+    state = state.with_tool_runner(runner);
     puffer_tui::run_app(
         &mut state,
         resources,

@@ -1992,7 +1992,13 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
             None
         };
         let cfg_for_turn = setup_state.config.lock().unwrap().clone();
-        let mut app_state = AppState::from_session_record(cfg_for_turn, record);
+        let mut app_state = AppState::from_session_record(cfg_for_turn.clone(), record);
+        let runner = crate::runner_selection::select_tool_runner(
+            &cfg_for_turn,
+            &inputs.resources,
+            app_state.cwd.clone(),
+        );
+        app_state = app_state.with_tool_runner(runner);
         if let Some(title) = auto_title {
             if inputs
                 .session_store
