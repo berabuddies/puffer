@@ -3,19 +3,15 @@ mod sleep;
 
 use crate::workspace_paths;
 use crate::AppState;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Result};
 use glob::Pattern;
-use puffer_resources::{plugin_mcp_servers, LoadedResources};
+use puffer_resources::LoadedResources;
+use puffer_runner_api::{McpResourceContentPart, McpResourceRecord, RunnerError, ToolRunner};
 use puffer_tools::{ToolDefinition, ToolRegistry};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
-
-use super::local_mcp_resources::{
-    is_live_resource_server, list_live_mcp_resources, live_resource_server_names,
-    read_live_mcp_resource,
-};
 
 #[derive(Debug, Deserialize)]
 struct GlobInput {
@@ -34,16 +30,6 @@ struct ListMcpInput {
 struct ReadMcpInput {
     server: String,
     uri: String,
-}
-
-#[derive(Debug, Clone)]
-struct McpResourceRecord {
-    uri: String,
-    server: String,
-    name: String,
-    description: String,
-    mime_type: String,
-    text: String,
 }
 
 pub(super) fn is_runtime_local_tool(definition: &ToolDefinition) -> bool {
@@ -78,8 +64,12 @@ pub(super) fn execute_runtime_local_tool(
             input,
         ),
         "runtime:sleep" => sleep::execute_sleep(input),
-        "runtime:list_mcp_resources" => execute_list_mcp_resources(resources, cwd, input),
-        "runtime:read_mcp_resource" => execute_read_mcp_resource(resources, cwd, input),
+        "runtime:list_mcp_resources" => {
+            execute_list_mcp_resources(state.tool_runner.as_ref(), input)
+        }
+        "runtime:read_mcp_resource" => {
+            execute_read_mcp_resource(state.tool_runner.as_ref(), input)
+        }
         other => Err(anyhow!("unsupported runtime-local tool handler {other}")),
     }
 }
@@ -125,171 +115,155 @@ fn execute_glob_tool(
     Ok(serde_json::to_string_pretty(&matches)?)
 }
 
-fn execute_list_mcp_resources(
-    resources: &LoadedResources,
-    cwd: &Path,
-    input: Value,
-) -> Result<String> {
+fn execute_list_mcp_resources(runner: &dyn ToolRunner, input: Value) -> Result<String> {
     let input: ListMcpInput = serde_json::from_value(input)?;
-    if let Some(server) = input
+    let server_filter = input
         .server
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        let available = available_resource_servers(resources, cwd);
-        if !available
-            .iter()
-            .any(|candidate| candidate.eq_ignore_ascii_case(server))
-        {
-            bail!(
-                "Server \"{server}\" not found. Available servers: {}",
-                available.join(", ")
-            );
-        }
-    }
-    let mut filtered = if live_resource_server_names(resources)
-        .iter()
-        .any(|candidate| matches_server_filter_name(candidate, input.server.as_deref()))
-    {
-        serde_json::from_str::<Vec<Value>>(&list_live_mcp_resources(
-            resources,
-            cwd,
-            input.server.as_deref(),
-        )?)
-        .context("failed to decode live MCP resources")?
-    } else {
-        Vec::new()
-    };
-    filtered.extend(
-        collect_mcp_resource_records(resources)
-            .into_iter()
-            .filter(|record| matches_server_filter(record, input.server.as_deref()))
-            .map(|record| {
-                json!({
-                    "uri": record.uri,
-                    "name": record.name,
-                    "mimeType": record.mime_type,
-                    "description": record.description,
-                    "server": record.server,
-                })
-            })
-            .collect::<Vec<_>>(),
-    );
-    filtered.sort_by(|left, right| {
+        .filter(|value| !value.is_empty());
+    let records = runner
+        .list_mcp_resources(server_filter)
+        .map_err(map_runner_error)?;
+    let mut payload = records
+        .into_iter()
+        .map(record_to_legacy_json)
+        .collect::<Vec<_>>();
+    payload.sort_by(|left, right| {
         left["server"]
             .as_str()
             .cmp(&right["server"].as_str())
             .then_with(|| left["uri"].as_str().cmp(&right["uri"].as_str()))
     });
-    Ok(serde_json::to_string_pretty(&filtered)?)
+    Ok(serde_json::to_string_pretty(&payload)?)
 }
 
-fn execute_read_mcp_resource(
-    resources: &LoadedResources,
-    cwd: &Path,
-    input: Value,
-) -> Result<String> {
+fn execute_read_mcp_resource(runner: &dyn ToolRunner, input: Value) -> Result<String> {
     let input: ReadMcpInput = serde_json::from_value(input)?;
-    let available = available_resource_servers(resources, cwd);
-    if !available
-        .iter()
-        .any(|candidate| candidate.eq_ignore_ascii_case(input.server.trim()))
-    {
-        bail!(
-            "Server \"{}\" not found. Available servers: {}",
-            input.server,
-            available.join(", ")
-        );
-    }
-    if is_live_resource_server(resources, input.server.trim()) {
-        let output = read_live_mcp_resource(resources, cwd, input.server.trim(), &input.uri)?;
-        return Ok(serde_json::to_string_pretty(&decorate_live_read_output(
-            output,
-            input.server.trim(),
-            &input.uri,
-        ))?);
-    }
-    let record = collect_mcp_resource_records(resources)
-        .into_iter()
-        .find(|record| {
-            record.uri == input.uri && record.server.eq_ignore_ascii_case(input.server.trim())
-        })
-        .ok_or_else(|| {
-            anyhow!(
-                "MCP resource `{}` for server `{}` not found",
-                input.uri,
-                input.server
-            )
-        })?;
-    Ok(serde_json::to_string_pretty(&json!({
-        "contents": [
-            {
-                "uri": record.uri,
-                "mimeType": record.mime_type,
-                "name": record.name,
-                "description": record.description,
-                "server": record.server,
-                "text": record.text,
-            }
-        ]
-    }))?)
-}
-
-fn matches_server_filter(record: &McpResourceRecord, server: Option<&str>) -> bool {
-    server
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_none_or(|value| record.server.eq_ignore_ascii_case(value))
-}
-
-fn matches_server_filter_name(server_name: &str, server: Option<&str>) -> bool {
-    server
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_none_or(|value| server_name.eq_ignore_ascii_case(value))
-}
-
-fn available_resource_servers(resources: &LoadedResources, _cwd: &Path) -> Vec<String> {
-    let mut servers = collect_mcp_resource_records(resources)
-        .into_iter()
-        .map(|record| record.server)
-        .collect::<Vec<_>>();
-    servers.extend(live_resource_server_names(resources));
-    servers.sort_by_key(|value| value.to_ascii_lowercase());
-    servers.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
-    servers
-}
-
-fn decorate_live_read_output(
-    output: crate::runtime::claude_tools::mcp_resources::ReadMcpResourceToolOutput,
-    server: &str,
-    uri: &str,
-) -> Value {
-    let name = filesystem_resource_name(uri);
+    let content = runner
+        .read_mcp_resource(input.server.trim(), &input.uri)
+        .map_err(map_runner_error)?;
+    let server = content.server.clone();
+    let display_name = filesystem_resource_name(&input.uri);
     let description = if server.eq_ignore_ascii_case("filesystem") {
-        Some("Live filesystem resource")
+        Some("Live filesystem resource".to_string())
     } else {
         None
     };
-    let contents = output
-        .contents
+    let contents: Vec<Value> = content
+        .parts
         .into_iter()
-        .map(|content| {
-            let mut value = serde_json::to_value(content).unwrap_or_else(|_| json!({}));
-            if let Some(object) = value.as_object_mut() {
-                object.insert("server".to_string(), json!(server));
-                if let Some(name) = name.as_deref() {
-                    object.insert("name".to_string(), json!(name));
-                }
-                if let Some(description) = description {
-                    object.insert("description".to_string(), json!(description));
-                }
+        .map(|part| part_to_legacy_json(part, &server, display_name.as_deref(), description.as_deref()))
+        .collect();
+    Ok(serde_json::to_string_pretty(&json!({ "contents": contents }))?)
+}
+
+fn record_to_legacy_json(record: McpResourceRecord) -> Value {
+    json!({
+        "uri": record.uri,
+        "name": record.name,
+        "mimeType": record.mime_type.unwrap_or_default(),
+        "description": record.description.unwrap_or_default(),
+        "server": record.server,
+    })
+}
+
+fn part_to_legacy_json(
+    part: McpResourceContentPart,
+    server: &str,
+    name_override: Option<&str>,
+    description_override: Option<&str>,
+) -> Value {
+    let mut value = match part {
+        McpResourceContentPart::Text { uri, mime_type, text } => json!({
+            "uri": uri,
+            "mimeType": mime_type,
+            "text": text,
+        }),
+        McpResourceContentPart::Blob { uri, mime_type, bytes } => {
+            let saved = persist_blob_to_workspace(server, &uri, mime_type.as_deref(), &bytes);
+            let mut text_message = format!(
+                "[Resource from {server} at {uri}] Binary content saved",
+            );
+            if let Some(path) = saved.as_deref() {
+                text_message.push_str(&format!(" to {} ({} bytes", path.display(), bytes.len()));
+            } else {
+                text_message.push_str(&format!(" ({} bytes", bytes.len()));
             }
-            value
-        })
-        .collect::<Vec<_>>();
-    json!({ "contents": contents })
+            if let Some(mime) = mime_type.as_deref().filter(|m| !m.trim().is_empty()) {
+                text_message.push_str(&format!(", mime type {mime})."));
+            } else {
+                text_message.push_str(").");
+            }
+            let mut payload = json!({
+                "uri": uri,
+                "mimeType": mime_type,
+                "text": text_message,
+            });
+            if let Some(path) = saved.as_deref() {
+                payload["blobSavedTo"] = json!(path.display().to_string());
+            }
+            payload
+        }
+    };
+    if let Some(object) = value.as_object_mut() {
+        object.insert("server".to_string(), json!(server));
+        if let Some(name) = name_override {
+            object.insert("name".to_string(), json!(name));
+        }
+        if let Some(description) = description_override {
+            object.insert("description".to_string(), json!(description));
+        }
+    }
+    value
+}
+
+fn persist_blob_to_workspace(
+    server: &str,
+    _uri: &str,
+    mime_type: Option<&str>,
+    bytes: &[u8],
+) -> Option<PathBuf> {
+    let workspace_root = std::env::current_dir().ok()?;
+    let dir = workspace_root.join(".puffer").join("mcp-blobs");
+    fs::create_dir_all(&dir).ok()?;
+    let extension = match mime_type.unwrap_or("").to_ascii_lowercase().as_str() {
+        "application/json" => "json",
+        "application/yaml" | "text/yaml" | "application/x-yaml" => "yaml",
+        "application/pdf" => "pdf",
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "text/plain" => "txt",
+        "text/markdown" => "md",
+        _ => "bin",
+    };
+    let server_fragment = sanitize_fragment(server);
+    let file_name = format!(
+        "mcp-resource-{server_fragment}-{}.{extension}",
+        uuid::Uuid::new_v4()
+    );
+    let path = dir.join(file_name);
+    fs::write(&path, bytes).ok()?;
+    Some(path)
+}
+
+fn sanitize_fragment(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    for character in input.chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+            result.push(character);
+        } else {
+            result.push('-');
+        }
+    }
+    let compact = result.trim_matches('-').to_string();
+    if compact.is_empty() {
+        "server".to_string()
+    } else {
+        compact
+    }
 }
 
 fn filesystem_resource_name(uri: &str) -> Option<String> {
@@ -298,53 +272,11 @@ fn filesystem_resource_name(uri: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn collect_mcp_resource_records(resources: &LoadedResources) -> Vec<McpResourceRecord> {
-    let mut records = Vec::new();
-
-    for server in &resources.mcp_servers {
-        if is_live_resource_server(resources, server.value.id.as_str()) {
-            continue;
-        }
-        let text = if server.source_info.path.exists() {
-            fs::read_to_string(&server.source_info.path)
-                .unwrap_or_else(|_| serde_json::to_string_pretty(&server.value).unwrap_or_default())
-        } else {
-            serde_json::to_string_pretty(&server.value).unwrap_or_default()
-        };
-        records.push(McpResourceRecord {
-            uri: format!("mcp://manifest/{}", server.value.id),
-            server: server.value.id.clone(),
-            name: server.value.display_name.clone(),
-            description: if server.value.description.is_empty() {
-                "Configured MCP server manifest".to_string()
-            } else {
-                server.value.description.clone()
-            },
-            mime_type: "application/yaml".to_string(),
-            text,
-        });
+fn map_runner_error(err: RunnerError) -> anyhow::Error {
+    match err {
+        RunnerError::NotFound(message) => anyhow!(message),
+        other => anyhow!(other.to_string()),
     }
-
-    for (plugin, server) in plugin_mcp_servers(resources) {
-        if is_live_resource_server(resources, server.id.as_str()) {
-            continue;
-        }
-        let text = serde_json::to_string_pretty(&json!({
-            "plugin": plugin.id,
-            "server": server,
-        }))
-        .unwrap_or_default();
-        records.push(McpResourceRecord {
-            uri: format!("mcp://plugin/{}/{}", plugin.id, server.id),
-            server: server.id.clone(),
-            name: server.display_name.clone(),
-            description: format!("MCP server manifest embedded in plugin {}", plugin.id),
-            mime_type: "application/json".to_string(),
-            text,
-        });
-    }
-
-    records
 }
 
 fn collect_glob_matches(
@@ -375,9 +307,32 @@ fn collect_glob_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runner_adapter::LocalToolRunner;
     use puffer_resources::{
         LoadedItem, McpServerSpec, SkillSpec, SourceInfo, SourceKind, ToolSpec,
     };
+
+    fn docs_spec() -> McpServerSpec {
+        McpServerSpec {
+            id: "docs".to_string(),
+            display_name: "Docs".to_string(),
+            transport: "stdio".to_string(),
+            endpoint: String::new(),
+            target: "docs-server".to_string(),
+            description: "Docs server".to_string(),
+        }
+    }
+
+    fn filesystem_spec() -> McpServerSpec {
+        McpServerSpec {
+            id: "filesystem".to_string(),
+            display_name: "Filesystem".to_string(),
+            transport: "stdio".to_string(),
+            endpoint: String::new(),
+            target: "builtin:filesystem".to_string(),
+            description: "Filesystem server".to_string(),
+        }
+    }
 
     fn sample_registry() -> ToolRegistry {
         ToolRegistry::from_resources(&LoadedResources {
@@ -450,146 +405,52 @@ mod tests {
 
     #[test]
     fn list_mcp_resources_returns_manifest_entries() {
-        let resources = LoadedResources {
-            mcp_servers: vec![LoadedItem {
-                value: McpServerSpec {
-                    id: "docs".to_string(),
-                    display_name: "Docs".to_string(),
-                    transport: "stdio".to_string(),
-                    endpoint: String::new(),
-                    target: "docs-server".to_string(),
-                    description: "Docs server".to_string(),
-                },
-                source_info: SourceInfo {
-                    path: "resources/mcp_servers/docs.yaml".into(),
-                    kind: SourceKind::Builtin,
-                },
-            }],
-            ..LoadedResources::default()
-        };
-        let output =
-            execute_list_mcp_resources(&resources, std::env::temp_dir().as_path(), json!({}))
-                .unwrap();
+        let runner = LocalToolRunner::new().with_mcp_servers(vec![docs_spec()]);
+        let output = execute_list_mcp_resources(&runner, json!({})).unwrap();
         assert!(output.contains("\"server\": \"docs\""));
         assert!(output.contains("mcp://manifest/docs"));
     }
 
     #[test]
     fn list_mcp_resources_filters_server_case_insensitively() {
-        let resources = LoadedResources {
-            mcp_servers: vec![LoadedItem {
-                value: McpServerSpec {
-                    id: "docs".to_string(),
-                    display_name: "Docs".to_string(),
-                    transport: "stdio".to_string(),
-                    endpoint: String::new(),
-                    target: "docs-server".to_string(),
-                    description: "Docs server".to_string(),
-                },
-                source_info: SourceInfo {
-                    path: "resources/mcp_servers/docs.yaml".into(),
-                    kind: SourceKind::Builtin,
-                },
-            }],
-            ..LoadedResources::default()
-        };
-        let output = execute_list_mcp_resources(
-            &resources,
-            std::env::temp_dir().as_path(),
-            json!({"server": "DOCS"}),
-        )
-        .unwrap();
+        let runner = LocalToolRunner::new().with_mcp_servers(vec![docs_spec()]);
+        let output = execute_list_mcp_resources(&runner, json!({"server": "DOCS"})).unwrap();
         assert!(output.contains("mcp://manifest/docs"));
     }
 
     #[test]
     fn list_mcp_resources_errors_for_unknown_server() {
-        let resources = LoadedResources {
-            mcp_servers: vec![LoadedItem {
-                value: McpServerSpec {
-                    id: "docs".to_string(),
-                    display_name: "Docs".to_string(),
-                    transport: "stdio".to_string(),
-                    endpoint: String::new(),
-                    target: "docs-server".to_string(),
-                    description: "Docs server".to_string(),
-                },
-                source_info: SourceInfo {
-                    path: "resources/mcp_servers/docs.yaml".into(),
-                    kind: SourceKind::Builtin,
-                },
-            }],
-            ..LoadedResources::default()
-        };
-        let error = execute_list_mcp_resources(
-            &resources,
-            std::env::temp_dir().as_path(),
-            json!({"server": "missing"}),
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("Server \"missing\" not found"));
+        let runner = LocalToolRunner::new().with_mcp_servers(vec![docs_spec()]);
+        let error = execute_list_mcp_resources(&runner, json!({"server": "missing"}))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("MCP server `missing` not found"));
         assert!(error.contains("docs"));
     }
 
     #[test]
     fn read_mcp_resource_returns_contents() {
-        let resources = LoadedResources {
-            mcp_servers: vec![LoadedItem {
-                value: McpServerSpec {
-                    id: "docs".to_string(),
-                    display_name: "Docs".to_string(),
-                    transport: "stdio".to_string(),
-                    endpoint: String::new(),
-                    target: "docs-server".to_string(),
-                    description: "Docs server".to_string(),
-                },
-                source_info: SourceInfo {
-                    path: "resources/mcp_servers/docs.yaml".into(),
-                    kind: SourceKind::Builtin,
-                },
-            }],
-            ..LoadedResources::default()
-        };
+        let runner = LocalToolRunner::new().with_mcp_servers(vec![docs_spec()]);
         let output = execute_read_mcp_resource(
-            &resources,
-            std::env::temp_dir().as_path(),
+            &runner,
             json!({"server": "docs", "uri": "mcp://manifest/docs"}),
         )
         .unwrap();
         assert!(output.contains("\"contents\""));
         assert!(output.contains("mcp://manifest/docs"));
         assert!(output.contains("\"server\": \"docs\""));
-        assert!(output.contains("\"name\": \"Docs\""));
     }
 
     #[test]
     fn read_mcp_resource_errors_for_unknown_server() {
-        let resources = LoadedResources {
-            mcp_servers: vec![LoadedItem {
-                value: McpServerSpec {
-                    id: "docs".to_string(),
-                    display_name: "Docs".to_string(),
-                    transport: "stdio".to_string(),
-                    endpoint: String::new(),
-                    target: "docs-server".to_string(),
-                    description: "Docs server".to_string(),
-                },
-                source_info: SourceInfo {
-                    path: "resources/mcp_servers/docs.yaml".into(),
-                    kind: SourceKind::Builtin,
-                },
-            }],
-            ..LoadedResources::default()
-        };
+        let runner = LocalToolRunner::new().with_mcp_servers(vec![docs_spec()]);
         let error = execute_read_mcp_resource(
-            &resources,
-            std::env::temp_dir().as_path(),
+            &runner,
             json!({"server": "missing", "uri": "mcp://manifest/docs"}),
         )
         .unwrap_err()
         .to_string();
-        assert!(error.contains("Server \"missing\" not found"));
+        assert!(error.contains("MCP server `missing` not found"));
         assert!(error.contains("docs"));
     }
 
@@ -599,34 +460,18 @@ mod tests {
         std::fs::create_dir_all(temp.path().join("notes")).unwrap();
         std::fs::write(temp.path().join("notes/guide.md"), "# Guide\n").unwrap();
         std::fs::write(temp.path().join("notes/data.bin"), [0xff, 0x00, 0x01]).unwrap();
-        let resources = LoadedResources {
-            mcp_servers: vec![LoadedItem {
-                value: McpServerSpec {
-                    id: "filesystem".to_string(),
-                    display_name: "Filesystem".to_string(),
-                    transport: "stdio".to_string(),
-                    endpoint: String::new(),
-                    target: "builtin:filesystem".to_string(),
-                    description: "Filesystem server".to_string(),
-                },
-                source_info: SourceInfo {
-                    path: "resources/mcp_servers/filesystem.yaml".into(),
-                    kind: SourceKind::Builtin,
-                },
-            }],
-            ..LoadedResources::default()
-        };
+        let runner = LocalToolRunner::new()
+            .with_mcp_servers(vec![filesystem_spec()])
+            .with_mcp_workspace_root(temp.path().to_path_buf());
 
         let listed =
-            execute_list_mcp_resources(&resources, temp.path(), json!({"server": "filesystem"}))
-                .unwrap();
+            execute_list_mcp_resources(&runner, json!({"server": "filesystem"})).unwrap();
         assert!(listed.contains("\"server\": \"filesystem\""));
         assert!(listed.contains("mcp://filesystem/notes/guide.md"));
         assert!(listed.contains("mcp://filesystem/notes/data.bin"));
 
         let read = execute_read_mcp_resource(
-            &resources,
-            temp.path(),
+            &runner,
             json!({"server": "filesystem", "uri": "mcp://filesystem/notes/guide.md"}),
         )
         .unwrap();
@@ -635,8 +480,7 @@ mod tests {
         assert!(read.contains("# Guide"));
 
         let binary = execute_read_mcp_resource(
-            &resources,
-            temp.path(),
+            &runner,
             json!({"server": "filesystem", "uri": "mcp://filesystem/notes/data.bin"}),
         )
         .unwrap();

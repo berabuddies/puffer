@@ -28,7 +28,6 @@ pub mod background_tasks;
 pub mod claude_tools;
 mod context_usage;
 mod hook_support;
-mod local_mcp_resources;
 mod local_tools;
 mod openai;
 mod openai_sse;
