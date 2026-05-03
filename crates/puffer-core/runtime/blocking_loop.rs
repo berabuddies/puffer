@@ -96,7 +96,7 @@ pub(crate) fn run_blocking_loop(
             if let Some(ref text) = result {
                 gen_span.set_content(
                     puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
-                    puffer_observability::ContentKind::Output,
+                    puffer_observability::ContentKind::OutputWithEmbeddedToolIo,
                     text,
                 );
             } else {
@@ -290,10 +290,10 @@ pub(crate) fn run_blocking_loop(
                 let result = session.generate_summary(old, mid);
                 if let Some(ref text) = result {
                     gen_span.set_content(
-                        puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
-                        puffer_observability::ContentKind::Output,
-                        text,
-                    );
+                    puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
+                    puffer_observability::ContentKind::OutputWithEmbeddedToolIo,
+                    text,
+                );
                 } else {
                     gen_span.mark_error("summary_returned_none".to_string());
                 }

@@ -29,6 +29,10 @@ pub enum ContentKind {
     /// BOTH `include_prompts` AND `include_tool_io` to pass through;
     /// otherwise emits the `[redacted: N bytes, sha256:...]` summary.
     PromptWithEmbeddedToolIo,
+    /// Output that may carry tool I/O verbatim (e.g. a compaction
+    /// summary that condenses prior tool calls + outputs). Requires
+    /// BOTH `include_outputs` AND `include_tool_io` to pass through.
+    OutputWithEmbeddedToolIo,
 }
 
 /// Per-`ObservabilityHandle` redaction policy: three opt-in flags
@@ -109,6 +113,9 @@ impl RedactionPolicy {
             ContentKind::Output => self.include_outputs,
             ContentKind::PromptWithEmbeddedToolIo => {
                 self.include_prompts && self.include_tool_io
+            }
+            ContentKind::OutputWithEmbeddedToolIo => {
+                self.include_outputs && self.include_tool_io
             }
             ContentKind::ToolInput { tool_id }
             | ContentKind::ToolOutput { tool_id } => {
