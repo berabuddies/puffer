@@ -186,31 +186,22 @@ pub(crate) fn run_streaming_loop(
             span.set_str("puffer.parent.session_id", parent_sid);
             span.set_str("puffer.subagent.kind", "agent_tool");
         }
-        // Subagent runs (reflection judge, spawned agents) build their
-        // input prompt by rendering the parent transcript including
-        // tool calls + outputs. Gate on `include_tool_io` in addition
-        // to `include_prompts` so a viewer with `INCLUDE_PROMPTS=1,
-        // INCLUDE_TOOL_IO=0` does not see embedded tool I/O on those
-        // traces (review v5 BLOCK #1). Top-level user prompts go
-        // through the `include_prompts` gate alone.
-        let policy = handle.redaction();
-        let trace_input_allowed = if is_subagent {
-            policy.include_prompts() && policy.include_tool_io()
+        // Subagent runs (reflection judge, spawned agents) build
+        // their input prompt by rendering the parent transcript
+        // including tool calls + outputs. Use `PromptWithEmbeddedToolIo`
+        // so the redaction layer requires BOTH `include_prompts` AND
+        // `include_tool_io` for those traces; top-level user prompts
+        // use plain `Prompt` (review v5 BLOCK #1). Either way the
+        // attribute is always emitted so the trace's Input pane
+        // shows the `[redacted: N bytes]` summary instead of `null`
+        // when the flag is off.
+        let kind = if is_subagent {
+            puffer_observability::ContentKind::PromptWithEmbeddedToolIo
         } else {
-            policy.include_prompts()
+            puffer_observability::ContentKind::Prompt
         };
-        if trace_input_allowed {
-            span.set_content(
-                puffer_observability::LANGFUSE_TRACE_INPUT,
-                puffer_observability::ContentKind::Prompt,
-                inputs.input,
-            );
-            span.set_content(
-                "puffer.input",
-                puffer_observability::ContentKind::Prompt,
-                inputs.input,
-            );
-        }
+        span.set_content(puffer_observability::LANGFUSE_TRACE_INPUT, kind.clone(), inputs.input);
+        span.set_content("puffer.input", kind, inputs.input);
         span
     } else {
         puffer_observability::SpanGuard::Disabled
