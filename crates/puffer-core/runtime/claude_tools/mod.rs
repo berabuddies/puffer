@@ -732,6 +732,9 @@ mod tests {
     }
 
     impl ToolRunner for RecordingRunner {
+        fn ping(&self) -> Result<puffer_runner_api::RunnerPing, RunnerError> {
+            self.inner.ping()
+        }
         fn capabilities(&self) -> RunnerCapabilities {
             self.inner.capabilities()
         }

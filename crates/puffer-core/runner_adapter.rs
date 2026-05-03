@@ -11,12 +11,12 @@ use anyhow::{anyhow, bail, Context, Result};
 use puffer_runner_api::{
     ChunkSink, DirEntry, McpPrompt, McpPromptContent, McpResourceContent, McpResourceRecord,
     McpResult, McpServerInfo, McpTool, ReadStateUpdate, RunnerCapabilities, RunnerError,
-    ToolRequest, ToolResult, ToolRunner,
+    RunnerPing, ToolRequest, ToolResult, ToolRunner,
 };
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{Instant, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::runner_mcp::McpHost;
@@ -270,10 +270,21 @@ fn result_with_updates(
 /// instantiate one without depending on the higher-level
 /// `puffer-runner-local` crate (which itself re-exports this type as
 /// `LocalToolRunner` for external callers).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct LocalToolRunner {
     sandbox_roots: Vec<PathBuf>,
     mcp_host: McpHost,
+    started: Instant,
+}
+
+impl Default for LocalToolRunner {
+    fn default() -> Self {
+        Self {
+            sandbox_roots: Vec::new(),
+            mcp_host: McpHost::default(),
+            started: Instant::now(),
+        }
+    }
 }
 
 impl LocalToolRunner {
@@ -286,6 +297,7 @@ impl LocalToolRunner {
         Self {
             sandbox_roots: roots,
             mcp_host: McpHost::new(Vec::new(), workspace),
+            started: Instant::now(),
         }
     }
 
@@ -338,6 +350,13 @@ impl LocalToolRunner {
 }
 
 impl ToolRunner for LocalToolRunner {
+    fn ping(&self) -> Result<RunnerPing, RunnerError> {
+        Ok(RunnerPing {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            uptime: self.started.elapsed(),
+        })
+    }
+
     fn capabilities(&self) -> RunnerCapabilities {
         RunnerCapabilities {
             backend: "local".into(),

@@ -3,6 +3,11 @@ syntax = "proto3";
 package puffer.runner.v1;
 
 service ToolRunner {
+  // Liveness probe: cheap RPC that always returns immediately when the
+  // server is up. Used by clients (and orchestrators) to gate startup on
+  // a confirmed-live runner instead of relying on TCP connect alone.
+  rpc Ping(Empty) returns (PingResponse);
+
   // Capability + tool execution.
   rpc Capabilities(Empty) returns (RunnerCapabilities);
   rpc ExecuteTool(ToolRequest) returns (stream ToolEvent);
@@ -23,6 +28,13 @@ service ToolRunner {
 }
 
 message Empty {}
+
+message PingResponse {
+  // Server's CARGO_PKG_VERSION at build time.
+  string version = 1;
+  // Seconds since the service was constructed.
+  uint64 uptime_seconds = 2;
+}
 
 message RunnerCapabilities {
   string backend = 1;

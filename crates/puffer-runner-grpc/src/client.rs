@@ -13,6 +13,14 @@
 //!   chunks with forwarding them to the user-supplied `ChunkSink`, which is
 //!   easiest to express as a single `block_on` over an async loop.
 //!
+//! ## Connection model
+//!
+//! The channel is built with [`Endpoint::connect_lazy`]: construction is
+//! infallible and does not touch the network. The first RPC opens the
+//! connection on demand, and subsequent transient failures are reconnected
+//! transparently by the underlying tower stack. See [`retry_unavailable`]
+//! for the per-call resilience layer that wraps each unary RPC.
+//!
 //! The runtime is owned by the runner; on `Drop` it is shut down with a short
 //! grace period.
 
@@ -22,8 +30,8 @@ use std::time::Duration;
 
 use puffer_runner_api::{
     ChunkSink, DirEntry, McpPrompt, McpPromptContent, McpResourceContent, McpResourceRecord,
-    McpResult, McpServerInfo, McpTool, RunnerCapabilities, RunnerError, ToolRequest, ToolResult,
-    ToolRunner,
+    McpResult, McpServerInfo, McpTool, RunnerCapabilities, RunnerError, RunnerPing, ToolRequest,
+    ToolResult, ToolRunner,
 };
 use tokio::runtime::Runtime;
 use tonic::metadata::MetadataValue;
@@ -71,7 +79,12 @@ impl std::fmt::Debug for RemoteToolRunner {
 }
 
 impl RemoteToolRunner {
-    /// Connects to a `puffer-tool-runner` server.
+    /// Builds a runner pointing at `endpoint`. This call performs **no
+    /// network I/O**: the underlying tonic channel is constructed with
+    /// [`Endpoint::connect_lazy`], so the first real RPC opens the
+    /// connection and subsequent transport failures trigger a transparent
+    /// reconnect. Use [`ToolRunner::ping`] to actively wait until the
+    /// remote is reachable.
     pub fn connect(endpoint: &str, auth_token: Option<&str>) -> Result<Self, RunnerError> {
         let runtime = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
@@ -82,7 +95,6 @@ impl RemoteToolRunner {
                 .map_err(|e| RunnerError::Transport(format!("tokio runtime: {e}")))?,
         );
 
-        let endpoint_owned = endpoint.to_string();
         let token_meta = match auth_token {
             None => None,
             Some(t) => {
@@ -93,16 +105,11 @@ impl RemoteToolRunner {
             }
         };
 
-        let channel = runtime
-            .block_on(async {
-                Endpoint::from_shared(endpoint_owned.clone())
-                    .map_err(|e| RunnerError::InvalidArgument(format!("endpoint: {e}")))?
-                    .connect_timeout(Duration::from_secs(5))
-                    .timeout(Duration::from_secs(60))
-                    .connect()
-                    .await
-                    .map_err(|e| RunnerError::Transport(format!("connect {endpoint_owned}: {e}")))
-            })?;
+        let channel = Endpoint::from_shared(endpoint.to_string())
+            .map_err(|e| RunnerError::InvalidArgument(format!("endpoint: {e}")))?
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(60))
+            .connect_lazy();
 
         let interceptor = AuthInterceptor { token: token_meta };
         let client = proto::tool_runner_client::ToolRunnerClient::with_interceptor(
@@ -117,6 +124,12 @@ impl RemoteToolRunner {
         })
     }
 
+    /// The endpoint this runner was constructed with. Useful for logs and
+    /// orchestrator-side health probes.
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
     fn run<F, T>(&self, fut: F) -> T
     where
         F: std::future::Future<Output = T>,
@@ -125,10 +138,50 @@ impl RemoteToolRunner {
     }
 }
 
+/// Retries `f` once when it fails with [`tonic::Code::Unavailable`]. All
+/// other status codes propagate immediately. The double-call is the entire
+/// retry budget per RPC — long bounded retry loops belong at the call site
+/// (e.g. the startup `Ping` gate in `select_tool_runner`).
+async fn retry_unavailable<T, F, Fut>(mut f: F) -> Result<T, Status>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, Status>>,
+{
+    match f().await {
+        Err(s) if s.code() == tonic::Code::Unavailable => f().await,
+        other => other,
+    }
+}
+
 impl ToolRunner for RemoteToolRunner {
+    fn ping(&self) -> Result<RunnerPing, RunnerError> {
+        let client = self.client.clone();
+        let resp = self
+            .run(async move {
+                retry_unavailable(|| {
+                    let mut client = client.clone();
+                    async move { client.ping(proto::Empty {}).await }
+                })
+                .await
+            })
+            .map_err(status_to_runner_error)?;
+        let inner = resp.into_inner();
+        Ok(RunnerPing {
+            version: inner.version,
+            uptime: Duration::from_secs(inner.uptime_seconds),
+        })
+    }
+
     fn capabilities(&self) -> RunnerCapabilities {
-        let mut client = self.client.clone();
-        match self.run(async move { client.capabilities(proto::Empty {}).await }) {
+        let client = self.client.clone();
+        let result = self.run(async move {
+            retry_unavailable(|| {
+                let mut client = client.clone();
+                async move { client.capabilities(proto::Empty {}).await }
+            })
+            .await
+        });
+        match result {
             Ok(resp) => from_proto_capabilities(resp.into_inner()),
             Err(_) => RunnerCapabilities::default(),
         }
@@ -140,12 +193,17 @@ impl ToolRunner for RemoteToolRunner {
         sink: &mut dyn ChunkSink,
     ) -> Result<ToolResult, RunnerError> {
         let proto_req = to_proto_tool_request(&req);
-        let mut client = self.client.clone();
+        let client = self.client.clone();
         self.run(async move {
-            let stream = client
-                .execute_tool(proto_req)
-                .await
-                .map_err(status_to_runner_error)?;
+            // Only retry the initial open of the server-streaming call;
+            // once chunks are flowing we propagate any mid-stream error.
+            let stream = retry_unavailable(|| {
+                let mut client = client.clone();
+                let proto_req = proto_req.clone();
+                async move { client.execute_tool(proto_req).await }
+            })
+            .await
+            .map_err(status_to_runner_error)?;
             let mut stream = stream.into_inner();
             let mut completed: Option<ToolResult> = None;
             while let Some(event) = stream
@@ -172,22 +230,36 @@ impl ToolRunner for RemoteToolRunner {
     }
 
     fn read_file(&self, path: &Path) -> Result<Vec<u8>, RunnerError> {
-        let mut client = self.client.clone();
+        let client = self.client.clone();
         let req = proto::ReadFileRequest {
             path: path.display().to_string(),
         };
-        self.run(async move { client.read_file(req).await })
-            .map(|resp| resp.into_inner().data)
-            .map_err(status_to_runner_error)
+        self.run(async move {
+            retry_unavailable(|| {
+                let mut client = client.clone();
+                let req = req.clone();
+                async move { client.read_file(req).await }
+            })
+            .await
+        })
+        .map(|resp| resp.into_inner().data)
+        .map_err(status_to_runner_error)
     }
 
     fn list_dir(&self, path: &Path) -> Result<Vec<DirEntry>, RunnerError> {
-        let mut client = self.client.clone();
+        let client = self.client.clone();
         let req = proto::ListDirRequest {
             path: path.display().to_string(),
         };
         let resp = self
-            .run(async move { client.list_dir(req).await })
+            .run(async move {
+                retry_unavailable(|| {
+                    let mut client = client.clone();
+                    let req = req.clone();
+                    async move { client.list_dir(req).await }
+                })
+                .await
+            })
             .map_err(status_to_runner_error)?;
         Ok(resp
             .into_inner()
@@ -198,21 +270,34 @@ impl ToolRunner for RemoteToolRunner {
     }
 
     fn glob(&self, root: &Path, pattern: &str) -> Result<Vec<PathBuf>, RunnerError> {
-        let mut client = self.client.clone();
+        let client = self.client.clone();
         let req = proto::GlobRequest {
             root: root.display().to_string(),
             pattern: pattern.to_string(),
         };
         let resp = self
-            .run(async move { client.glob(req).await })
+            .run(async move {
+                retry_unavailable(|| {
+                    let mut client = client.clone();
+                    let req = req.clone();
+                    async move { client.glob(req).await }
+                })
+                .await
+            })
             .map_err(status_to_runner_error)?;
         Ok(resp.into_inner().paths.into_iter().map(PathBuf::from).collect())
     }
 
     fn list_mcp_servers(&self) -> Result<Vec<McpServerInfo>, RunnerError> {
-        let mut client = self.client.clone();
+        let client = self.client.clone();
         let resp = self
-            .run(async move { client.list_mcp_servers(proto::Empty {}).await })
+            .run(async move {
+                retry_unavailable(|| {
+                    let mut client = client.clone();
+                    async move { client.list_mcp_servers(proto::Empty {}).await }
+                })
+                .await
+            })
             .map_err(status_to_runner_error)?;
         Ok(resp
             .into_inner()
@@ -223,12 +308,19 @@ impl ToolRunner for RemoteToolRunner {
     }
 
     fn list_mcp_tools(&self, server: &str) -> Result<Vec<McpTool>, RunnerError> {
-        let mut client = self.client.clone();
+        let client = self.client.clone();
         let req = proto::McpServerRef {
             server: server.to_string(),
         };
         let resp = self
-            .run(async move { client.list_mcp_tools(req).await })
+            .run(async move {
+                retry_unavailable(|| {
+                    let mut client = client.clone();
+                    let req = req.clone();
+                    async move { client.list_mcp_tools(req).await }
+                })
+                .await
+            })
             .map_err(status_to_runner_error)?;
         let mut out = Vec::new();
         for t in resp.into_inner().tools {
@@ -244,14 +336,20 @@ impl ToolRunner for RemoteToolRunner {
         args: serde_json::Value,
         sink: &mut dyn ChunkSink,
     ) -> Result<McpResult, RunnerError> {
-        let mut client = self.client.clone();
+        let client = self.client.clone();
         let req = proto::McpToolCall {
             server: server.to_string(),
             tool: tool.to_string(),
             args_json: args.to_string(),
         };
         self.run(async move {
-            let stream = client.call_mcp_tool(req).await.map_err(status_to_runner_error)?;
+            let stream = retry_unavailable(|| {
+                let mut client = client.clone();
+                let req = req.clone();
+                async move { client.call_mcp_tool(req).await }
+            })
+            .await
+            .map_err(status_to_runner_error)?;
             let mut stream = stream.into_inner();
             let mut result: Option<McpResult> = None;
             while let Some(event) = stream
@@ -279,12 +377,19 @@ impl ToolRunner for RemoteToolRunner {
         &self,
         server: Option<&str>,
     ) -> Result<Vec<McpResourceRecord>, RunnerError> {
-        let mut client = self.client.clone();
+        let client = self.client.clone();
         let req = proto::McpResourceQuery {
             server: server.map(|s| s.to_string()),
         };
         let resp = self
-            .run(async move { client.list_mcp_resources(req).await })
+            .run(async move {
+                retry_unavailable(|| {
+                    let mut client = client.clone();
+                    let req = req.clone();
+                    async move { client.list_mcp_resources(req).await }
+                })
+                .await
+            })
             .map_err(status_to_runner_error)?;
         Ok(resp
             .into_inner()
@@ -299,24 +404,38 @@ impl ToolRunner for RemoteToolRunner {
         server: &str,
         uri: &str,
     ) -> Result<McpResourceContent, RunnerError> {
-        let mut client = self.client.clone();
+        let client = self.client.clone();
         let req = proto::McpResourceRef {
             server: server.to_string(),
             uri: uri.to_string(),
         };
         let resp = self
-            .run(async move { client.read_mcp_resource(req).await })
+            .run(async move {
+                retry_unavailable(|| {
+                    let mut client = client.clone();
+                    let req = req.clone();
+                    async move { client.read_mcp_resource(req).await }
+                })
+                .await
+            })
             .map_err(status_to_runner_error)?;
         crate::convert::from_proto_mcp_resource_content(resp.into_inner())
     }
 
     fn list_mcp_prompts(&self, server: &str) -> Result<Vec<McpPrompt>, RunnerError> {
-        let mut client = self.client.clone();
+        let client = self.client.clone();
         let req = proto::McpServerRef {
             server: server.to_string(),
         };
         let resp = self
-            .run(async move { client.list_mcp_prompts(req).await })
+            .run(async move {
+                retry_unavailable(|| {
+                    let mut client = client.clone();
+                    let req = req.clone();
+                    async move { client.list_mcp_prompts(req).await }
+                })
+                .await
+            })
             .map_err(status_to_runner_error)?;
         Ok(resp
             .into_inner()
@@ -332,14 +451,21 @@ impl ToolRunner for RemoteToolRunner {
         name: &str,
         args: serde_json::Value,
     ) -> Result<McpPromptContent, RunnerError> {
-        let mut client = self.client.clone();
+        let client = self.client.clone();
         let req = proto::McpPromptRequest {
             server: server.to_string(),
             name: name.to_string(),
             args_json: args.to_string(),
         };
         let resp = self
-            .run(async move { client.get_mcp_prompt(req).await })
+            .run(async move {
+                retry_unavailable(|| {
+                    let mut client = client.clone();
+                    let req = req.clone();
+                    async move { client.get_mcp_prompt(req).await }
+                })
+                .await
+            })
             .map_err(status_to_runner_error)?;
         Ok(crate::convert::from_proto_mcp_prompt_content(
             resp.into_inner(),
@@ -364,10 +490,10 @@ fn runner_error_from_code(code: &str, message: String) -> RunnerError {
     }
 }
 
-/// Convenience: connect a [`RemoteToolRunner`] and return it as a trait
+/// Convenience: build a [`RemoteToolRunner`] and return it as a trait
 /// object suitable for `AppState::with_tool_runner(...)`. Construction is
-/// fallible (the gRPC handshake happens immediately); callers should fall
-/// back to a `LocalToolRunner` if the remote is unreachable.
+/// infallible w.r.t. the network — the channel is lazy. Callers that need
+/// a confirmed-live runner should follow up with [`ToolRunner::ping`].
 pub fn connect_runner(
     endpoint: &str,
     auth_token: Option<&str>,

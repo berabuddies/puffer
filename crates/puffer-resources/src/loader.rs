@@ -988,6 +988,12 @@ mod tests {
     struct FsTestRunner;
 
     impl ToolRunner for FsTestRunner {
+        fn ping(&self) -> std::result::Result<puffer_runner_api::RunnerPing, RunnerError> {
+            Ok(puffer_runner_api::RunnerPing {
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                uptime: std::time::Duration::from_secs(0),
+            })
+        }
         fn capabilities(&self) -> RunnerCapabilities {
             RunnerCapabilities::default()
         }

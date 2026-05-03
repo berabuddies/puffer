@@ -9,6 +9,7 @@
 //! it to `tonic::transport::Server`. Integration tests do the same in-process.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use puffer_runner_api::{
     ChunkKind, ChunkSink, FnChunkSink, NullChunkSink, RunnerError, ToolRunner,
@@ -35,6 +36,7 @@ pub use proto::tool_runner_server::ToolRunnerServer;
 pub struct ToolRunnerService {
     runner: Arc<dyn ToolRunner>,
     auth_token: Option<Arc<String>>,
+    started: Instant,
 }
 
 impl ToolRunnerService {
@@ -43,6 +45,7 @@ impl ToolRunnerService {
         Self {
             runner,
             auth_token: None,
+            started: Instant::now(),
         }
     }
 
@@ -77,6 +80,17 @@ impl ToolRunnerService {
 impl proto::tool_runner_server::ToolRunner for ToolRunnerService {
     type ExecuteToolStream = ReceiverStream<Result<proto::ToolEvent, Status>>;
     type CallMcpToolStream = ReceiverStream<Result<proto::McpToolEvent, Status>>;
+
+    async fn ping(
+        &self,
+        req: Request<proto::Empty>,
+    ) -> Result<Response<proto::PingResponse>, Status> {
+        self.check_auth(&req)?;
+        Ok(Response::new(proto::PingResponse {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            uptime_seconds: self.started.elapsed().as_secs(),
+        }))
+    }
 
     async fn capabilities(
         &self,

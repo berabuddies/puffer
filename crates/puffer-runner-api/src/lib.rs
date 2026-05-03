@@ -19,7 +19,18 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use thiserror::Error;
+
+/// Liveness reply from [`ToolRunner::ping`]. Returned after a successful
+/// round-trip to the runner backend (in-process or remote).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerPing {
+    /// `CARGO_PKG_VERSION` reported by the runner.
+    pub version: String,
+    /// Time since the runner instance was constructed.
+    pub uptime: Duration,
+}
 
 /// Coarse capability flags reported by a runner so the client can adapt.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -334,6 +345,11 @@ impl<F: FnMut(ChunkKind, &[u8]) + Send> ChunkSink for FnChunkSink<F> {
 /// at runtime startup; the rest of the codebase doesn't care whether the
 /// underlying implementation is local or remote.
 pub trait ToolRunner: Send + Sync + std::fmt::Debug {
+    /// Cheap liveness probe. For the local backend this is purely
+    /// in-memory; for the gRPC backend it issues a `Ping` RPC. Used by
+    /// startup gates that wait for a runner to become reachable.
+    fn ping(&self) -> Result<RunnerPing, RunnerError>;
+
     /// Returns the runner's self-reported capabilities.
     fn capabilities(&self) -> RunnerCapabilities;
 
