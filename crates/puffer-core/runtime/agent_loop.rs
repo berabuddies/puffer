@@ -181,9 +181,9 @@ pub(crate) fn run_streaming_loop(
             puffer_observability::PUFFER_PROVIDER_ID,
             inputs.provider.id.clone(),
         );
-        let is_subagent = inputs.state.parent_session_id.is_some();
-        if let Some(parent_sid) = inputs.state.parent_session_id.clone() {
-            span.set_str("puffer.parent.session_id", parent_sid);
+        let is_subagent = inputs.state.session.parent_session_id.is_some();
+        if let Some(parent_sid) = inputs.state.session.parent_session_id {
+            span.set_str("puffer.parent.session_id", parent_sid.to_string());
             span.set_str("puffer.subagent.kind", "agent_tool");
         }
         // Subagent runs (reflection judge, spawned agents) build

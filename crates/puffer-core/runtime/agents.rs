@@ -296,11 +296,15 @@ fn prepare_agent_execution(
         &agent.value.disallowed_tools,
     );
     let mut nested_state = state.clone();
-    // Carry the parent session id so the teammate's root span can
-    // emit a `puffer.parent.session_id` link attribute. Langfuse
-    // pivots from a parent trace to spawned subagent traces via this
-    // field; mirrors Codex's `parent_task_id`.
-    nested_state.parent_session_id = Some(state.session.id.to_string());
+    // Mint a fresh session id for the subagent and link back to the
+    // parent via the canonical `SessionMetadata::parent_session_id`
+    // field. The trace pipeline reads this to emit
+    // `puffer.parent.session_id` + `puffer.subagent.kind=agent_tool`
+    // on the subagent's root agent_loop span; Langfuse can then pivot
+    // parent → spawned subagent traces via the link. Mirrors Codex's
+    // `parent_task_id` model.
+    nested_state.session.parent_session_id = Some(state.session.id);
+    nested_state.session.id = Uuid::new_v4();
     let mut nested_cwd = nested_cwd;
     let mut worktree = None;
     let effective_isolation = input
