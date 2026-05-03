@@ -5,9 +5,11 @@
 //! the runtime will use it once the trait is wired into
 //! `runtime::tool_executor`.
 
+use puffer_resources::McpServerSpec;
 use puffer_runner_api::{
-    check_read_freshness, ChunkKind, ChunkSink, FnChunkSink, NullChunkSink, ReadStateSnapshot,
-    ReadStateUpdate, StalenessRejection, ToolRequest, ToolResult, ToolRunner,
+    check_read_freshness, ChunkKind, ChunkSink, FnChunkSink, McpResourceContentPart, NullChunkSink,
+    ReadStateSnapshot, ReadStateUpdate, RunnerError, StalenessRejection, ToolRequest, ToolResult,
+    ToolRunner,
 };
 use puffer_runner_local::LocalToolRunner;
 use std::collections::HashMap;
@@ -229,6 +231,102 @@ fn dispatcher_rejects_edit_when_file_changed_after_read() {
     let rejection = check_read_freshness(snapshot.as_ref(), file_mtime_ms(&target))
         .expect_err("Edit must be rejected after external mutation");
     assert_eq!(rejection, StalenessRejection::StaleRead);
+}
+
+fn fixture_manifest() -> Vec<McpServerSpec> {
+    vec![
+        McpServerSpec {
+            id: "filesystem".into(),
+            display_name: "Filesystem".into(),
+            transport: "stdio".into(),
+            endpoint: String::new(),
+            target: "builtin:filesystem".into(),
+            description: "Workspace filesystem stub".into(),
+        },
+        McpServerSpec {
+            id: "docs".into(),
+            display_name: "Docs".into(),
+            transport: "stdio".into(),
+            endpoint: String::new(),
+            target: "docs-server".into(),
+            description: "Static manifest entry".into(),
+        },
+    ]
+}
+
+#[test]
+fn list_mcp_servers_returns_configured_manifest() {
+    let runner = LocalToolRunner::new().with_mcp_servers(fixture_manifest());
+    let servers = runner.list_mcp_servers().unwrap();
+    let ids: Vec<_> = servers.iter().map(|s| s.id.clone()).collect();
+    assert_eq!(ids, vec!["filesystem".to_string(), "docs".to_string()]);
+}
+
+#[test]
+fn list_mcp_tools_is_unsupported_until_real_client_lands() {
+    let runner = LocalToolRunner::new().with_mcp_servers(fixture_manifest());
+    let err = runner.list_mcp_tools("filesystem").unwrap_err();
+    assert!(matches!(err, RunnerError::Unsupported(_)));
+}
+
+#[test]
+fn call_mcp_tool_is_unsupported_until_real_client_lands() {
+    let runner = LocalToolRunner::new().with_mcp_servers(fixture_manifest());
+    let mut sink = NullChunkSink;
+    let err = runner
+        .call_mcp_tool("filesystem", "noop", serde_json::json!({}), &mut sink)
+        .unwrap_err();
+    assert!(matches!(err, RunnerError::Unsupported(_)));
+}
+
+#[test]
+fn list_mcp_resources_walks_filesystem_and_includes_manifest() {
+    let temp = tempdir().unwrap();
+    fs::write(temp.path().join("guide.md"), "# Guide\n").unwrap();
+    fs::create_dir_all(temp.path().join("nested")).unwrap();
+    fs::write(temp.path().join("nested/hello.txt"), "hi").unwrap();
+    let runner = LocalToolRunner::new()
+        .with_mcp_servers(fixture_manifest())
+        .with_mcp_workspace_root(temp.path().to_path_buf());
+    let records = runner.list_mcp_resources(None).unwrap();
+    assert!(records
+        .iter()
+        .any(|r| r.uri == "mcp://filesystem/guide.md" && r.server == "filesystem"));
+    assert!(records
+        .iter()
+        .any(|r| r.uri == "mcp://filesystem/nested/hello.txt"));
+    assert!(records
+        .iter()
+        .any(|r| r.uri == "mcp://manifest/docs" && r.server == "docs"));
+}
+
+#[test]
+fn read_mcp_resource_returns_text_for_workspace_files() {
+    let temp = tempdir().unwrap();
+    fs::write(temp.path().join("guide.md"), "# Guide\n").unwrap();
+    let runner = LocalToolRunner::new()
+        .with_mcp_servers(fixture_manifest())
+        .with_mcp_workspace_root(temp.path().to_path_buf());
+    let content = runner
+        .read_mcp_resource("filesystem", "mcp://filesystem/guide.md")
+        .unwrap();
+    assert_eq!(content.parts.len(), 1);
+    match &content.parts[0] {
+        McpResourceContentPart::Text { text, mime_type, .. } => {
+            assert_eq!(text, "# Guide\n");
+            assert_eq!(mime_type.as_deref(), Some("text/markdown"));
+        }
+        other => panic!("expected text part, got {other:?}"),
+    }
+}
+
+#[test]
+fn read_mcp_resource_unknown_server_is_not_found() {
+    let runner = LocalToolRunner::new().with_mcp_servers(fixture_manifest());
+    let err = runner
+        .read_mcp_resource("missing", "mcp://manifest/docs")
+        .unwrap_err();
+    assert!(matches!(err, RunnerError::NotFound(_)));
 }
 
 fn apply_updates(state: &mut HashMap<PathBuf, ReadStateSnapshot>, result: &ToolResult) {

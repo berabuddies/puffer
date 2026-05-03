@@ -160,7 +160,7 @@ impl ToolRunner for RemoteToolRunner {
                         completed = Some(from_proto_tool_completed(c)?);
                     }
                     Some(proto::tool_event::Payload::Failed(f)) => {
-                        return Err(RunnerError::Execution(format!("{}: {}", f.code, f.message)));
+                        return Err(runner_error_from_code(&f.code, f.message));
                     }
                     None => {}
                 }
@@ -266,7 +266,7 @@ impl ToolRunner for RemoteToolRunner {
                         result = Some(crate::convert::from_proto_mcp_result(c)?);
                     }
                     Some(proto::mcp_tool_event::Payload::Failed(f)) => {
-                        return Err(RunnerError::Mcp(format!("{}: {}", f.code, f.message)));
+                        return Err(runner_error_from_code(&f.code, f.message));
                     }
                     None => {}
                 }
@@ -344,6 +344,23 @@ impl ToolRunner for RemoteToolRunner {
         Ok(crate::convert::from_proto_mcp_prompt_content(
             resp.into_inner(),
         ))
+    }
+}
+
+/// Reconstructs a typed [`RunnerError`] from the `code` string emitted by
+/// the server in a `Failed` envelope. Mirrors `runner_error_code` on the
+/// server side so an `Unsupported` MCP call round-trips with the right
+/// variant on the client.
+fn runner_error_from_code(code: &str, message: String) -> RunnerError {
+    match code {
+        "not_found" => RunnerError::NotFound(message),
+        "permission_denied" => RunnerError::PermissionDenied(message),
+        "unsupported" => RunnerError::Unsupported(message),
+        "invalid_argument" => RunnerError::InvalidArgument(message),
+        "transport" => RunnerError::Transport(message),
+        "mcp" => RunnerError::Mcp(message),
+        "execution" => RunnerError::Execution(message),
+        _ => RunnerError::Other(message),
     }
 }
 

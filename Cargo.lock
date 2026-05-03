@@ -4422,6 +4422,7 @@ dependencies = [
  "futures-core",
  "prost",
  "puffer-core",
+ "puffer-resources",
  "puffer-runner-api",
  "puffer-runner-local",
  "serde_json",
@@ -4439,6 +4440,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "puffer-core",
+ "puffer-resources",
  "puffer-runner-api",
  "serde_json",
  "tempfile",

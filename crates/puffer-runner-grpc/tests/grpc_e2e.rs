@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use puffer_runner_api::{
-    ChunkKind, ChunkSink, FnChunkSink, NullChunkSink, RunnerError, ToolRequest, ToolResult,
-    ToolRunner,
+    ChunkKind, ChunkSink, FnChunkSink, McpResourceContentPart, NullChunkSink, RunnerError,
+    ToolRequest, ToolResult, ToolRunner,
 };
 use puffer_runner_grpc::server::ToolRunnerServer;
 use puffer_runner_grpc::{RemoteToolRunner, ToolRunnerService};
@@ -300,22 +300,181 @@ fn cross_backend_equivalence() {
     let remote_glob = remote.glob(remote_workspace.path(), "*.txt").unwrap();
     assert_eq!(local_glob.len(), remote_glob.len(), "glob length");
 
-    // 8. MCP stubs return Unsupported on both backends.
-    let local_mcp = local_runner.list_mcp_servers().unwrap_err();
-    let remote_mcp = remote.list_mcp_servers().unwrap_err();
-    assert!(
-        matches!(local_mcp, RunnerError::Unsupported(_)),
-        "local list_mcp_servers"
-    );
-    assert!(
-        matches!(remote_mcp, RunnerError::Unsupported(_)),
-        "remote list_mcp_servers"
-    );
-
     // Capabilities should both advertise the local backend (since the gRPC
     // server is itself wrapping a LocalToolRunner).
     assert_eq!(local_runner.capabilities().backend, "local");
     assert_eq!(remote.capabilities().backend, "local");
+
+    drop(remote);
+    drop(server);
+}
+
+/// Drives the seven MCP RPCs through both backends. Each runner is
+/// configured with the same MCP manifest (one filesystem stub + one
+/// manifest server) and the test asserts the local and remote outputs
+/// stay structurally equivalent — list_servers / list_resources /
+/// read_resource for both manifest and live transports, plus the
+/// uniform Unsupported reply for tool / prompt RPCs that the runner
+/// hasn't grown yet.
+#[test]
+fn cross_backend_mcp_equivalence() {
+    use puffer_resources::McpServerSpec;
+
+    let local_workspace = tempdir().unwrap();
+    let remote_workspace = tempdir().unwrap();
+    std::fs::write(local_workspace.path().join("hello.md"), "# Hello\n").unwrap();
+    std::fs::write(remote_workspace.path().join("hello.md"), "# Hello\n").unwrap();
+    std::fs::write(local_workspace.path().join("data.bin"), [0xfe_u8, 0xed]).unwrap();
+    std::fs::write(remote_workspace.path().join("data.bin"), [0xfe_u8, 0xed]).unwrap();
+
+    let manifest = || -> Vec<McpServerSpec> {
+        vec![
+            McpServerSpec {
+                id: "filesystem".into(),
+                display_name: "Filesystem".into(),
+                transport: "stdio".into(),
+                endpoint: String::new(),
+                target: "builtin:filesystem".into(),
+                description: "Workspace filesystem stub".into(),
+            },
+            McpServerSpec {
+                id: "docs".into(),
+                display_name: "Docs".into(),
+                transport: "stdio".into(),
+                endpoint: String::new(),
+                target: "docs-server".into(),
+                description: "Static manifest entry".into(),
+            },
+        ]
+    };
+
+    let local_runner = LocalToolRunner::new()
+        .with_mcp_servers(manifest())
+        .with_mcp_workspace_root(local_workspace.path().to_path_buf());
+
+    let server_runner: Arc<dyn ToolRunner> = Arc::new(
+        LocalToolRunner::new()
+            .with_mcp_servers(manifest())
+            .with_mcp_workspace_root(remote_workspace.path().to_path_buf()),
+    );
+    let server = spawn_server(server_runner);
+    let remote = RemoteToolRunner::connect(&server.endpoint, Some(TEST_TOKEN))
+        .expect("connect remote runner");
+
+    // 1. list_mcp_servers — equal modulo ordering.
+    let local_servers = local_runner.list_mcp_servers().expect("local servers");
+    let remote_servers = remote.list_mcp_servers().expect("remote servers");
+    assert_eq!(local_servers.len(), 2);
+    assert_eq!(local_servers.len(), remote_servers.len());
+    let local_ids: Vec<_> = local_servers.iter().map(|s| s.id.clone()).collect();
+    let remote_ids: Vec<_> = remote_servers.iter().map(|s| s.id.clone()).collect();
+    assert_eq!(local_ids, remote_ids);
+
+    // 2. list_mcp_resources — workspace walk for filesystem + manifest URI for docs.
+    let local_resources = local_runner.list_mcp_resources(None).expect("local resources");
+    let remote_resources = remote.list_mcp_resources(None).expect("remote resources");
+    assert_eq!(local_resources.len(), remote_resources.len());
+    assert!(local_resources.iter().any(|r| r.uri == "mcp://filesystem/hello.md"));
+    assert!(remote_resources.iter().any(|r| r.uri == "mcp://filesystem/hello.md"));
+    assert!(local_resources.iter().any(|r| r.uri == "mcp://manifest/docs"));
+    assert!(remote_resources.iter().any(|r| r.uri == "mcp://manifest/docs"));
+
+    // 3. list_mcp_resources filtered by server.
+    let local_filtered = local_runner
+        .list_mcp_resources(Some("filesystem"))
+        .expect("local filtered");
+    let remote_filtered = remote
+        .list_mcp_resources(Some("filesystem"))
+        .expect("remote filtered");
+    assert_eq!(local_filtered.len(), remote_filtered.len());
+    assert!(local_filtered.iter().all(|r| r.server == "filesystem"));
+    assert!(remote_filtered.iter().all(|r| r.server == "filesystem"));
+
+    // 4. read_mcp_resource — text via filesystem.
+    let local_text = local_runner
+        .read_mcp_resource("filesystem", "mcp://filesystem/hello.md")
+        .expect("local read");
+    let remote_text = remote
+        .read_mcp_resource("filesystem", "mcp://filesystem/hello.md")
+        .expect("remote read");
+    assert_eq!(local_text.parts.len(), remote_text.parts.len());
+    match (&local_text.parts[0], &remote_text.parts[0]) {
+        (
+            McpResourceContentPart::Text { text: l, .. },
+            McpResourceContentPart::Text { text: r, .. },
+        ) => assert_eq!(l, r),
+        other => panic!("expected text/text, got {other:?}"),
+    }
+
+    // 5. read_mcp_resource — blob via filesystem (binary).
+    let local_blob = local_runner
+        .read_mcp_resource("filesystem", "mcp://filesystem/data.bin")
+        .expect("local blob");
+    let remote_blob = remote
+        .read_mcp_resource("filesystem", "mcp://filesystem/data.bin")
+        .expect("remote blob");
+    match (&local_blob.parts[0], &remote_blob.parts[0]) {
+        (
+            McpResourceContentPart::Blob { bytes: l, .. },
+            McpResourceContentPart::Blob { bytes: r, .. },
+        ) => assert_eq!(l, r),
+        other => panic!("expected blob/blob, got {other:?}"),
+    }
+
+    // 6. read_mcp_resource — manifest server returns YAML payload.
+    let local_manifest = local_runner
+        .read_mcp_resource("docs", "mcp://manifest/docs")
+        .expect("local manifest");
+    let remote_manifest = remote
+        .read_mcp_resource("docs", "mcp://manifest/docs")
+        .expect("remote manifest");
+    assert_eq!(local_manifest.parts.len(), remote_manifest.parts.len());
+
+    // 7. tools / prompts surface a deterministic Unsupported on both
+    //    backends until a real subprocess MCP client lands.
+    let local_tools = local_runner.list_mcp_tools("filesystem").unwrap_err();
+    let remote_tools = remote.list_mcp_tools("filesystem").unwrap_err();
+    assert!(matches!(local_tools, RunnerError::Unsupported(_)));
+    assert!(matches!(remote_tools, RunnerError::Unsupported(_)));
+
+    let local_call = local_runner
+        .call_mcp_tool(
+            "filesystem",
+            "noop",
+            serde_json::json!({}),
+            &mut NullChunkSink,
+        )
+        .unwrap_err();
+    let remote_call = remote
+        .call_mcp_tool(
+            "filesystem",
+            "noop",
+            serde_json::json!({}),
+            &mut NullChunkSink,
+        )
+        .unwrap_err();
+    assert!(matches!(local_call, RunnerError::Unsupported(_)));
+    assert!(matches!(remote_call, RunnerError::Unsupported(_)));
+
+    let local_prompts = local_runner.list_mcp_prompts("filesystem").unwrap_err();
+    let remote_prompts = remote.list_mcp_prompts("filesystem").unwrap_err();
+    assert!(matches!(local_prompts, RunnerError::Unsupported(_)));
+    assert!(matches!(remote_prompts, RunnerError::Unsupported(_)));
+
+    let local_get = local_runner
+        .get_mcp_prompt("filesystem", "noop", serde_json::json!({}))
+        .unwrap_err();
+    let remote_get = remote
+        .get_mcp_prompt("filesystem", "noop", serde_json::json!({}))
+        .unwrap_err();
+    assert!(matches!(local_get, RunnerError::Unsupported(_)));
+    assert!(matches!(remote_get, RunnerError::Unsupported(_)));
+
+    // 8. Unknown server is reported as NotFound, not Unsupported.
+    let unknown_local = local_runner.list_mcp_tools("missing").unwrap_err();
+    let unknown_remote = remote.list_mcp_tools("missing").unwrap_err();
+    assert!(matches!(unknown_local, RunnerError::NotFound(_)));
+    assert!(matches!(unknown_remote, RunnerError::NotFound(_)));
 
     drop(remote);
     drop(server);
