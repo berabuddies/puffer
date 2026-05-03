@@ -329,6 +329,24 @@ pub fn shutdown_runtime_services() -> Result<()> {
     std::thread::sleep(std::time::Duration::from_millis(500));
     // Clear the registry.
     teammate_loop::teammate_registry().lock().unwrap().clear();
+    // Wait for detached background-agent threads (spawned by the
+    // `Agent` tool with `run_in_background=true`) to reach a terminal
+    // status. Without this, a `puffer benchmark-run` that fires
+    // background subagents would exit immediately after the parent
+    // response, killing the spawned threads mid-LLM-call and losing
+    // their OTel spans before they could flush. Bounded so a stuck
+    // upstream can't block CLI exit indefinitely; tasks still active
+    // at the deadline are abandoned (their threads are killed by
+    // process exit but the wait at least gives short subagent runs a
+    // chance to land in Langfuse).
+    let still_active = background_tasks::task_manager()
+        .wait_for_drain(std::time::Duration::from_secs(30));
+    if still_active > 0 {
+        eprintln!(
+            "shutdown: {still_active} background agent(s) still running after 30s — \
+             their traces may be incomplete in the observability backend"
+        );
+    }
     // Flush any buffered observability spans before exit. Codex review
     // note: bounded by `ObservabilityConfig::shutdown_timeout` so a
     // hung Langfuse can't block CLI exit.

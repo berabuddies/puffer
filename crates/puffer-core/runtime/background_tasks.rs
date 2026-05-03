@@ -386,6 +386,26 @@ impl BackgroundTaskManager {
     pub fn has_capacity(&self) -> bool {
         self.active_count() < MAX_CONCURRENT_TASKS
     }
+
+    /// Block until every active task has reached a terminal status, or
+    /// the timeout elapses. Used at process-exit so detached
+    /// background-agent threads (`launch_background_agent`) get a
+    /// chance to finish their LLM round-trip and flush OTel spans
+    /// before `shutdown_runtime_services` closes the exporter.
+    /// Returns the number of tasks still active when the wait ended.
+    pub fn wait_for_drain(&self, timeout: Duration) -> usize {
+        let start = std::time::Instant::now();
+        loop {
+            let active = self.active_count();
+            if active == 0 {
+                return 0;
+            }
+            if start.elapsed() >= timeout {
+                return active;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
 }
 
 /// Global singleton for the background task manager.
