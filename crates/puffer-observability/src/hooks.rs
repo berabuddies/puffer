@@ -220,6 +220,9 @@ pub fn start_agent_loop_span(
     if let Some(uid) = handle.user_id() {
         bag = bag.str(crate::attributes::LANGFUSE_USER_ID, uid);
     }
+    if let Some(env) = handle.environment() {
+        bag = bag.str(crate::attributes::LANGFUSE_ENVIRONMENT, env);
+    }
     builder.attributes = Some(bag.build());
     let span = tracer.build_with_context(builder, &parent);
     SpanGuard::active(span, parent, handle.clone())

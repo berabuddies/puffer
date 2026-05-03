@@ -142,6 +142,27 @@ pub(crate) fn run_blocking_loop(
             &inputs.provider.default_api,
             inputs.model_id,
         );
+        if inputs.observability.is_some() {
+            if let Some(model_info) = inputs
+                .provider
+                .models
+                .iter()
+                .find(|m| m.id == inputs.model_id)
+            {
+                if model_info.max_output_tokens > 0 {
+                    provider_span.set_str(
+                        puffer_observability::GEN_AI_REQUEST_MAX_TOKENS,
+                        model_info.max_output_tokens.to_string(),
+                    );
+                }
+            }
+            if !inputs.state.effort_level.is_empty() {
+                provider_span.set_str(
+                    "gen_ai.request.reasoning_effort",
+                    inputs.state.effort_level.clone(),
+                );
+            }
+        }
         let turn = match session.one_turn_blocking(inputs.state, inputs.auth_store, &mut items) {
             Ok(t) => t,
             Err(error) => {
