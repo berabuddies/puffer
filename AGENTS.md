@@ -15,14 +15,31 @@ Match Claude Code behavior where it matters for coding workflows, while:
 
 ## Current Workspace
 
-The repo is a Cargo workspace with these main crates:
+The repo is a Cargo workspace with these main crates and component crates:
 
 - `puffer-cli`
   Top-level CLI, auth commands, session commands, and interactive entrypoint.
 - `puffer-config`
   Config discovery and layered config loading.
+- `puffer-connector-core`
+  Shared connector runtime, conversation/session mapping, commands, splitting,
+  and retry helpers.
+- `puffer-connector-discord`
+  Discord bot gateway connector.
+- `puffer-connector-email`
+  IMAP/SMTP email connector.
+- `puffer-connector-matrix`
+  Matrix room connector.
+- `puffer-connector-slack`
+  Slack Socket Mode connector.
+- `puffer-connector-telegram`
+  Telegram bot connector.
+- `puffer-connector-webhook`
+  HTTP webhook connector.
 - `puffer-core`
   Command registry, app state, slash-command dispatch, and provider execution.
+- `puffer-observability`
+  Optional OTLP/HTTP tracing with conservative redaction defaults.
 - `puffer-provider-openai`
   OpenAI auth and request helpers.
 - `puffer-provider-registry`
@@ -31,12 +48,25 @@ The repo is a Cargo workspace with these main crates:
   Bundled/user/workspace resources: prompts, tools, skills, plugins, MCP, IDE, mascot metadata.
 - `puffer-session-store`
   Session metadata, transcript events, listing, load, and fork support.
+- `puffer-subscriber-email`
+  Out-of-process email subscriber.
+- `puffer-subscriber-runtime`
+  Subscriber manifest, process supervision, command, and event bus runtime.
+- `puffer-subscriber-telegram-user`
+  Out-of-process Telegram personal-account subscriber.
+- `puffer-subscriptions`
+  Subscription specs, event routing, classifiers, and action dispatch.
 - `puffer-test-support`
   Test helpers for commands, terminal output, temp workspaces, and tmux probing.
+- `puffer-tools`
+  Tool schemas, registry, built-in tools, and execution backends.
 - `puffer-transport-anthropic`
   Anthropic auth, fingerprinting, attribution block generation, and request building.
 - `puffer-tui`
   Ratatui/Crossterm interactive UI.
+- `puffer-workflow`
+  Native workflow definitions, validation, cron scheduling, DAG execution, and
+  run storage.
 
 ## Hard Repo Constraints
 
