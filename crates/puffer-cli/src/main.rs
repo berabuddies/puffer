@@ -17,6 +17,7 @@ mod daemon_ui_state;
 mod desktop_api;
 mod desktop_api_types;
 mod resource_fs;
+mod runner_selection;
 mod subscriptions;
 mod workflow_runtime;
 mod workflows;
@@ -411,7 +412,8 @@ fn main() -> Result<()> {
                 ),
                 ResumeLaunchResolution::Picker { query, .. } if cli.resume.is_some() => {
                     let session = session_store.create_session(cwd.clone())?;
-                    let mut state = AppState::new(config.clone(), cwd, session);
+                    let mut state = AppState::new(config.clone(), cwd, session)
+                        .with_tool_runner(crate::runner_selection::select_tool_runner(&config));
                     if let Some(prompt) = cli.prompt {
                         state.queue_pending_query_prompt(prompt);
                     }
@@ -437,7 +439,8 @@ fn main() -> Result<()> {
                 }
                 _ => {
                     let session = session_store.create_session(cwd.clone())?;
-                    let mut state = AppState::new(config.clone(), cwd, session);
+                    let mut state = AppState::new(config.clone(), cwd, session)
+                        .with_tool_runner(crate::runner_selection::select_tool_runner(&config));
                     puffer_tui::run_app(
                         &mut state,
                         &mut resources,

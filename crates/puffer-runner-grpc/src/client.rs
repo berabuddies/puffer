@@ -395,6 +395,18 @@ impl ToolRunner for RemoteToolRunner {
     }
 }
 
+/// Convenience: connect a [`RemoteToolRunner`] and return it as a trait
+/// object suitable for `AppState::with_tool_runner(...)`. Construction is
+/// fallible (the gRPC handshake happens immediately); callers should fall
+/// back to a `LocalToolRunner` if the remote is unreachable.
+pub fn connect_runner(
+    endpoint: &str,
+    auth_token: Option<&str>,
+) -> Result<std::sync::Arc<dyn ToolRunner>, RunnerError> {
+    let runner = RemoteToolRunner::connect(endpoint, auth_token)?;
+    Ok(std::sync::Arc::new(runner))
+}
+
 fn rand_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()

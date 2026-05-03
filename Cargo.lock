@@ -4126,6 +4126,8 @@ dependencies = [
  "puffer-provider-openai",
  "puffer-provider-registry",
  "puffer-resources",
+ "puffer-runner-api",
+ "puffer-runner-grpc",
  "puffer-runner-local",
  "puffer-session-store",
  "puffer-subscriber-email",
