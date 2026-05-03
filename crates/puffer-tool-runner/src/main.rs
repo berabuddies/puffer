@@ -10,7 +10,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Parser;
 use puffer_runner_api::ToolRunner;
-use puffer_runner_grpc::server::{PermissionMode, ToolRunnerServer};
+use puffer_runner_grpc::server::ToolRunnerServer;
 use puffer_runner_grpc::ToolRunnerService;
 use puffer_runner_local::LocalToolRunner;
 use tonic::transport::Server;
@@ -29,10 +29,6 @@ struct Args {
     /// Working directory for tool execution. Also added to the sandbox roots.
     #[arg(long)]
     cwd: Option<PathBuf>,
-
-    /// Auto-approve every permission prompt. Intended for tests / dev use only.
-    #[arg(long, default_value_t = false)]
-    auto_approve: bool,
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
@@ -53,15 +49,7 @@ async fn main() -> Result<()> {
     let runner: Arc<dyn ToolRunner> =
         Arc::new(LocalToolRunner::with_sandbox_roots(vec![cwd.clone()]));
 
-    let permission_mode = if args.auto_approve {
-        PermissionMode::AutoApprove
-    } else {
-        PermissionMode::Unsupported
-    };
-
-    let service = ToolRunnerService::new(runner)
-        .with_auth_token(token.clone())
-        .with_permission_mode(permission_mode);
+    let service = ToolRunnerService::new(runner).with_auth_token(token.clone());
 
     eprintln!(
         "puffer-tool-runner: listening on {} (cwd={}, auth={})",

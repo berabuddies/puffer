@@ -33,9 +33,6 @@ pub struct RunnerCapabilities {
     pub supported_tools: Vec<String>,
     /// True when the runner brokers MCP server lifecycle.
     pub mcp_supported: bool,
-    /// True when the runner can forward permission prompts back to the
-    /// caller via `request_permission`.
-    pub permission_relay_supported: bool,
 }
 
 /// Identifies one tool execution attempt for transport / logging.
@@ -188,25 +185,6 @@ pub struct McpResult {
     pub stdout: String,
     pub stderr: String,
     pub metadata: serde_json::Value,
-}
-
-/// Permission-prompt request sent from the runner back to the client.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PermissionRequest {
-    pub tool_id: String,
-    pub cwd: PathBuf,
-    pub input: serde_json::Value,
-    pub reason: Option<String>,
-}
-
-/// Outcome the client returns to the runner for a permission prompt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PermissionDecision {
-    AllowOnce,
-    AllowSession,
-    AllowAllSession,
-    Deny,
 }
 
 /// Typed errors returned from runner methods. Designed to round-trip cleanly
@@ -362,7 +340,7 @@ pub trait ToolRunner: Send + Sync + std::fmt::Debug {
     // --- Tool execution (model-facing) -------------------------------------
 
     /// Executes one tool call. Permission gating is the caller's
-    /// responsibility unless `permission_relay_supported` is set.
+    /// responsibility — the runner has no permission concept.
     fn execute_tool(
         &self,
         req: ToolRequest,
@@ -408,17 +386,6 @@ pub trait ToolRunner: Send + Sync + std::fmt::Debug {
         name: &str,
         args: serde_json::Value,
     ) -> Result<McpPromptContent, RunnerError>;
-
-    // --- Permission relay -------------------------------------------------
-
-    /// Asks the upstream caller (UI / TUI / human operator) to approve a
-    /// pending tool call. Local runners may delegate to an in-process
-    /// permission decider; remote runners proxy this over the bidirectional
-    /// `PermissionChannel` stream.
-    fn request_permission(
-        &self,
-        req: PermissionRequest,
-    ) -> Result<PermissionDecision, RunnerError>;
 }
 
 /// Bytes serializer that round-trips through both bincode-style and JSON

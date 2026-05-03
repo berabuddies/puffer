@@ -976,8 +976,7 @@ mod tests {
     use crate::hooks_for_event;
     use puffer_runner_api::{
         ChunkSink, DirEntry, McpPrompt, McpPromptContent, McpResourceContent, McpResourceRecord,
-        McpResult, McpServerInfo, McpTool, PermissionDecision, PermissionRequest,
-        RunnerCapabilities, ToolRequest, ToolResult,
+        McpResult, McpServerInfo, McpTool, RunnerCapabilities, ToolRequest, ToolResult,
     };
     use std::fs;
     use tempfile::tempdir;
@@ -1077,12 +1076,6 @@ mod tests {
             _args: serde_json::Value,
         ) -> std::result::Result<McpPromptContent, RunnerError> {
             Err(RunnerError::Unsupported("mcp".into()))
-        }
-        fn request_permission(
-            &self,
-            _req: PermissionRequest,
-        ) -> std::result::Result<PermissionDecision, RunnerError> {
-            Err(RunnerError::Unsupported("permission".into()))
         }
     }
 

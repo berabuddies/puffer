@@ -695,8 +695,8 @@ mod tests {
     use super::*;
     use puffer_runner_api::{
         ChunkSink, DirEntry, McpPrompt, McpPromptContent, McpResourceContent, McpResourceRecord,
-        McpResult, McpServerInfo, McpTool, PermissionDecision, PermissionRequest,
-        RunnerCapabilities, RunnerError, ToolRequest, ToolResult, ToolRunner,
+        McpResult, McpServerInfo, McpTool, RunnerCapabilities, RunnerError, ToolRequest,
+        ToolResult, ToolRunner,
     };
     use puffer_resources::LoadedResources;
     use puffer_tools::{
@@ -794,12 +794,6 @@ mod tests {
             args: serde_json::Value,
         ) -> Result<McpPromptContent, RunnerError> {
             self.inner.get_mcp_prompt(server, name, args)
-        }
-        fn request_permission(
-            &self,
-            req: PermissionRequest,
-        ) -> Result<PermissionDecision, RunnerError> {
-            self.inner.request_permission(req)
         }
     }
 

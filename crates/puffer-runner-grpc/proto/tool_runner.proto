@@ -20,10 +20,6 @@ service ToolRunner {
   rpc ReadMcpResource(McpResourceRef) returns (McpResourceContent);
   rpc ListMcpPrompts(McpServerRef) returns (McpPromptList);
   rpc GetMcpPrompt(McpPromptRequest) returns (McpPromptContent);
-
-  // Permission relay — Phase 2 stubs respond Unsupported (or auto-approve
-  // when --auto-approve is set). Phase 3 wires the UI.
-  rpc PermissionChannel(stream PermissionMessage) returns (stream PermissionMessage);
 }
 
 message Empty {}
@@ -33,7 +29,6 @@ message RunnerCapabilities {
   string version = 2;
   repeated string supported_tools = 3;
   bool mcp_supported = 4;
-  bool permission_relay_supported = 5;
 }
 
 message ToolRequest {
@@ -230,30 +225,3 @@ message McpPromptContent {
   repeated McpPromptMessage messages = 3;
 }
 
-message PermissionRequest {
-  string tool_id = 1;
-  string cwd = 2;
-  string input_json = 3;
-  optional string reason = 4;
-  // Correlator so the client can match decisions to requests.
-  string id = 5;
-}
-
-message PermissionDecision {
-  string id = 1;
-  // "allow_once" | "allow_session" | "allow_all_session" | "deny"
-  string decision = 2;
-}
-
-message PermissionUnsupported {
-  string id = 1;
-  string message = 2;
-}
-
-message PermissionMessage {
-  oneof payload {
-    PermissionRequest request = 1;
-    PermissionDecision decision = 2;
-    PermissionUnsupported unsupported = 3;
-  }
-}

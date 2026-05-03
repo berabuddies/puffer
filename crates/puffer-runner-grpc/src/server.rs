@@ -9,41 +9,24 @@
 //! it to `tonic::transport::Server`. Integration tests do the same in-process.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use puffer_runner_api::{
     ChunkKind, ChunkSink, FnChunkSink, NullChunkSink, RunnerError, ToolRunner,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::{Request, Response, Status, Streaming};
+use tonic::{Request, Response, Status};
 
 use crate::convert::{
-    from_proto_tool_request, permission_decision_to_str, runner_error_to_status,
-    to_proto_capabilities, to_proto_dir_entry, to_proto_mcp_prompt, to_proto_mcp_prompt_content,
-    to_proto_mcp_resource_content, to_proto_mcp_resource_record, to_proto_mcp_result,
-    to_proto_mcp_server, to_proto_mcp_tool, to_proto_tool_completed,
+    from_proto_tool_request, runner_error_to_status, to_proto_capabilities, to_proto_dir_entry,
+    to_proto_mcp_prompt, to_proto_mcp_prompt_content, to_proto_mcp_resource_content,
+    to_proto_mcp_resource_record, to_proto_mcp_result, to_proto_mcp_server, to_proto_mcp_tool,
+    to_proto_tool_completed,
 };
 use crate::proto;
 use crate::AUTH_METADATA_KEY;
 
 pub use proto::tool_runner_server::ToolRunnerServer;
-
-/// Behaviour of the server's `permission_channel` RPC.
-#[derive(Debug, Clone, Copy)]
-pub enum PermissionMode {
-    /// Reply `Unsupported` to every incoming `PermissionRequest`. Default.
-    Unsupported,
-    /// Reply `AllowOnce` to every incoming `PermissionRequest`. Used for
-    /// integration tests and `puffer-tool-runner --auto-approve`.
-    AutoApprove,
-}
-
-impl Default for PermissionMode {
-    fn default() -> Self {
-        PermissionMode::Unsupported
-    }
-}
 
 /// Adapter from a synchronous `Arc<dyn ToolRunner>` to the generated tonic
 /// service trait. All RPCs forward to the runner; blocking work runs on a
@@ -52,17 +35,14 @@ impl Default for PermissionMode {
 pub struct ToolRunnerService {
     runner: Arc<dyn ToolRunner>,
     auth_token: Option<Arc<String>>,
-    permission_mode: PermissionMode,
 }
 
 impl ToolRunnerService {
-    /// Wraps `runner` in a tonic-ready service. No auth token, default
-    /// permission mode.
+    /// Wraps `runner` in a tonic-ready service. No auth token.
     pub fn new(runner: Arc<dyn ToolRunner>) -> Self {
         Self {
             runner,
             auth_token: None,
-            permission_mode: PermissionMode::default(),
         }
     }
 
@@ -71,13 +51,6 @@ impl ToolRunnerService {
     /// `Unauthenticated`.
     pub fn with_auth_token(mut self, token: Option<String>) -> Self {
         self.auth_token = token.map(Arc::new);
-        self
-    }
-
-    /// Overrides the default `PermissionMode` (used by the
-    /// `permission_channel` RPC).
-    pub fn with_permission_mode(mut self, mode: PermissionMode) -> Self {
-        self.permission_mode = mode;
         self
     }
 
@@ -104,7 +77,6 @@ impl ToolRunnerService {
 impl proto::tool_runner_server::ToolRunner for ToolRunnerService {
     type ExecuteToolStream = ReceiverStream<Result<proto::ToolEvent, Status>>;
     type CallMcpToolStream = ReceiverStream<Result<proto::McpToolEvent, Status>>;
-    type PermissionChannelStream = ReceiverStream<Result<proto::PermissionMessage, Status>>;
 
     async fn capabilities(
         &self,
@@ -347,58 +319,6 @@ impl proto::tool_runner_server::ToolRunner for ToolRunnerService {
         Ok(Response::new(to_proto_mcp_prompt_content(&content)))
     }
 
-    async fn permission_channel(
-        &self,
-        req: Request<Streaming<proto::PermissionMessage>>,
-    ) -> Result<Response<Self::PermissionChannelStream>, Status> {
-        self.check_auth(&req)?;
-        let mut inbound = req.into_inner();
-        let mode = self.permission_mode;
-        let (tx, rx) = mpsc::channel::<Result<proto::PermissionMessage, Status>>(8);
-
-        tokio::spawn(async move {
-            // We loop a short while collecting inbound requests. The stream
-            // ends when the client disconnects; in tests we short-circuit
-            // after the first request so the `request_permission` blocking
-            // call returns promptly.
-            loop {
-                let next =
-                    match tokio::time::timeout(Duration::from_secs(30), inbound.message()).await {
-                        Ok(Ok(Some(msg))) => msg,
-                        _ => break,
-                    };
-                let Some(payload) = next.payload else { continue };
-                if let proto::permission_message::Payload::Request(req) = payload {
-                    let response = match mode {
-                        PermissionMode::Unsupported => proto::PermissionMessage {
-                            payload: Some(proto::permission_message::Payload::Unsupported(
-                                proto::PermissionUnsupported {
-                                    id: req.id.clone(),
-                                    message: "permission relay is Phase 3".into(),
-                                },
-                            )),
-                        },
-                        PermissionMode::AutoApprove => proto::PermissionMessage {
-                            payload: Some(proto::permission_message::Payload::Decision(
-                                proto::PermissionDecision {
-                                    id: req.id.clone(),
-                                    decision: permission_decision_to_str(
-                                        puffer_runner_api::PermissionDecision::AllowOnce,
-                                    )
-                                    .to_string(),
-                                },
-                            )),
-                        },
-                    };
-                    if tx.send(Ok(response)).await.is_err() {
-                        break;
-                    }
-                }
-            }
-        });
-
-        Ok(Response::new(ReceiverStream::new(rx)))
-    }
 }
 
 fn internal_join_error(e: tokio::task::JoinError) -> Status {

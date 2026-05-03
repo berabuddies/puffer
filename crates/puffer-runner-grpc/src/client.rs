@@ -22,8 +22,8 @@ use std::time::Duration;
 
 use puffer_runner_api::{
     ChunkSink, DirEntry, McpPrompt, McpPromptContent, McpResourceContent, McpResourceRecord,
-    McpResult, McpServerInfo, McpTool, PermissionDecision, PermissionRequest, RunnerCapabilities,
-    RunnerError, ToolRequest, ToolResult, ToolRunner,
+    McpResult, McpServerInfo, McpTool, RunnerCapabilities, RunnerError, ToolRequest, ToolResult,
+    ToolRunner,
 };
 use tokio::runtime::Runtime;
 use tonic::metadata::MetadataValue;
@@ -345,54 +345,6 @@ impl ToolRunner for RemoteToolRunner {
             resp.into_inner(),
         ))
     }
-
-    fn request_permission(
-        &self,
-        req: PermissionRequest,
-    ) -> Result<PermissionDecision, RunnerError> {
-        // Phase 2 stub: open the bidi stream, send one PermissionRequest,
-        // and return whichever decision (or Unsupported) the server replies
-        // with. Phase 3 will replace this with a true relay loop.
-        let mut client = self.client.clone();
-        let id = format!("p-{}", rand_id());
-        let proto_req =
-            proto::PermissionMessage {
-                payload: Some(proto::permission_message::Payload::Request(
-                    crate::convert::to_proto_permission_request(&req, &id),
-                )),
-            };
-        self.run(async move {
-            let (tx, rx) = tokio::sync::mpsc::channel::<proto::PermissionMessage>(4);
-            tx.send(proto_req)
-                .await
-                .map_err(|e| RunnerError::Transport(format!("permission send: {e}")))?;
-            let outbound = tokio_stream::wrappers::ReceiverStream::new(rx);
-            let resp = client
-                .permission_channel(outbound)
-                .await
-                .map_err(status_to_runner_error)?;
-            drop(tx);
-            let mut stream = resp.into_inner();
-            while let Some(msg) = stream
-                .message()
-                .await
-                .map_err(status_to_runner_error)?
-            {
-                match msg.payload {
-                    Some(proto::permission_message::Payload::Decision(d)) if d.id == id => {
-                        return crate::convert::permission_decision_from_str(&d.decision);
-                    }
-                    Some(proto::permission_message::Payload::Unsupported(u)) => {
-                        return Err(RunnerError::Unsupported(u.message));
-                    }
-                    _ => continue,
-                }
-            }
-            Err(RunnerError::Other(
-                "permission_channel closed without a decision".into(),
-            ))
-        })
-    }
 }
 
 /// Convenience: connect a [`RemoteToolRunner`] and return it as a trait
@@ -405,13 +357,4 @@ pub fn connect_runner(
 ) -> Result<std::sync::Arc<dyn ToolRunner>, RunnerError> {
     let runner = RemoteToolRunner::connect(endpoint, auth_token)?;
     Ok(std::sync::Arc::new(runner))
-}
-
-fn rand_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{nanos:x}")
 }

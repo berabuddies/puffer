@@ -10,8 +10,8 @@
 use anyhow::{anyhow, bail, Context, Result};
 use puffer_runner_api::{
     ChunkSink, DirEntry, McpPrompt, McpPromptContent, McpResourceContent, McpResourceRecord,
-    McpResult, McpServerInfo, McpTool, PermissionDecision, PermissionRequest, ReadStateUpdate,
-    RunnerCapabilities, RunnerError, ToolRequest, ToolResult, ToolRunner,
+    McpResult, McpServerInfo, McpTool, ReadStateUpdate, RunnerCapabilities, RunnerError,
+    ToolRequest, ToolResult, ToolRunner,
 };
 use serde_json::Value;
 use std::fs;
@@ -314,7 +314,6 @@ impl ToolRunner for LocalToolRunner {
                 .map(|tool| (*tool).to_string())
                 .collect(),
             mcp_supported: false,
-            permission_relay_supported: false,
         }
     }
 
@@ -427,11 +426,5 @@ impl ToolRunner for LocalToolRunner {
         _args: serde_json::Value,
     ) -> Result<McpPromptContent, RunnerError> {
         Err(RunnerError::Unsupported("MCP centralization is Phase 1".into()))
-    }
-    fn request_permission(
-        &self,
-        _req: PermissionRequest,
-    ) -> Result<PermissionDecision, RunnerError> {
-        Err(RunnerError::Unsupported("permission relay is Phase 3".into()))
     }
 }

@@ -6,9 +6,8 @@ use std::path::PathBuf;
 
 use puffer_runner_api::{
     DirEntry, McpPrompt, McpPromptArgument, McpPromptContent, McpPromptMessage, McpResourceContent,
-    McpResourceContentPart, McpResourceRecord, McpResult, McpServerInfo, McpTool,
-    PermissionDecision, PermissionRequest, ReadStateUpdate, RunnerCapabilities, RunnerError,
-    ToolRequest, ToolResult,
+    McpResourceContentPart, McpResourceRecord, McpResult, McpServerInfo, McpTool, ReadStateUpdate,
+    RunnerCapabilities, RunnerError, ToolRequest, ToolResult,
 };
 
 use crate::proto;
@@ -115,7 +114,6 @@ pub(crate) fn to_proto_capabilities(c: &RunnerCapabilities) -> proto::RunnerCapa
         version: c.version.clone(),
         supported_tools: c.supported_tools.clone(),
         mcp_supported: c.mcp_supported,
-        permission_relay_supported: c.permission_relay_supported,
     }
 }
 
@@ -125,7 +123,6 @@ pub(crate) fn from_proto_capabilities(c: proto::RunnerCapabilities) -> RunnerCap
         version: c.version,
         supported_tools: c.supported_tools,
         mcp_supported: c.mcp_supported,
-        permission_relay_supported: c.permission_relay_supported,
     }
 }
 
@@ -370,59 +367,6 @@ pub(crate) fn from_proto_mcp_prompt_content(c: proto::McpPromptContent) -> McpPr
                 text: m.text,
             })
             .collect(),
-    }
-}
-
-// --- Permission --------------------------------------------------------
-
-pub(crate) fn to_proto_permission_request(req: &PermissionRequest, id: &str) -> proto::PermissionRequest {
-    proto::PermissionRequest {
-        tool_id: req.tool_id.clone(),
-        cwd: req.cwd.display().to_string(),
-        input_json: req.input.to_string(),
-        reason: req.reason.clone(),
-        id: id.to_string(),
-    }
-}
-
-pub(crate) fn from_proto_permission_request(
-    req: proto::PermissionRequest,
-) -> Result<(String, PermissionRequest), RunnerError> {
-    let input = if req.input_json.is_empty() {
-        serde_json::Value::Null
-    } else {
-        serde_json::from_str(&req.input_json)
-            .map_err(|e| RunnerError::InvalidArgument(format!("permission input_json: {e}")))?
-    };
-    Ok((
-        req.id,
-        PermissionRequest {
-            tool_id: req.tool_id,
-            cwd: PathBuf::from(req.cwd),
-            input,
-            reason: req.reason,
-        },
-    ))
-}
-
-pub(crate) fn permission_decision_to_str(d: PermissionDecision) -> &'static str {
-    match d {
-        PermissionDecision::AllowOnce => "allow_once",
-        PermissionDecision::AllowSession => "allow_session",
-        PermissionDecision::AllowAllSession => "allow_all_session",
-        PermissionDecision::Deny => "deny",
-    }
-}
-
-pub(crate) fn permission_decision_from_str(s: &str) -> Result<PermissionDecision, RunnerError> {
-    match s {
-        "allow_once" => Ok(PermissionDecision::AllowOnce),
-        "allow_session" => Ok(PermissionDecision::AllowSession),
-        "allow_all_session" => Ok(PermissionDecision::AllowAllSession),
-        "deny" => Ok(PermissionDecision::Deny),
-        other => Err(RunnerError::Other(format!(
-            "unknown permission decision `{other}`"
-        ))),
     }
 }
 

@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -300,7 +300,7 @@ fn cross_backend_equivalence() {
     let remote_glob = remote.glob(remote_workspace.path(), "*.txt").unwrap();
     assert_eq!(local_glob.len(), remote_glob.len(), "glob length");
 
-    // 8. MCP and permission stubs return Unsupported on both backends.
+    // 8. MCP stubs return Unsupported on both backends.
     let local_mcp = local_runner.list_mcp_servers().unwrap_err();
     let remote_mcp = remote.list_mcp_servers().unwrap_err();
     assert!(
@@ -311,25 +311,6 @@ fn cross_backend_equivalence() {
         matches!(remote_mcp, RunnerError::Unsupported(_)),
         "remote list_mcp_servers"
     );
-
-    let local_perm = local_runner
-        .request_permission(puffer_runner_api::PermissionRequest {
-            tool_id: "Bash".into(),
-            cwd: PathBuf::from("/"),
-            input: serde_json::json!({}),
-            reason: None,
-        })
-        .unwrap_err();
-    let remote_perm = remote
-        .request_permission(puffer_runner_api::PermissionRequest {
-            tool_id: "Bash".into(),
-            cwd: PathBuf::from("/"),
-            input: serde_json::json!({}),
-            reason: None,
-        })
-        .unwrap_err();
-    assert!(matches!(local_perm, RunnerError::Unsupported(_)));
-    assert!(matches!(remote_perm, RunnerError::Unsupported(_)));
 
     // Capabilities should both advertise the local backend (since the gRPC
     // server is itself wrapping a LocalToolRunner).
