@@ -23,11 +23,13 @@ pub(crate) fn build_codex_openai_request_body(
     stream: bool,
 ) -> Value {
     let reasoning = codex_reasoning_config(state, supports_reasoning);
-    let include = if reasoning.is_some() {
-        vec![json!("reasoning.encrypted_content")]
-    } else {
-        Vec::new()
-    };
+    let mut include: Vec<Value> = Vec::new();
+    if reasoning.is_some() {
+        include.push(json!("reasoning.encrypted_content"));
+    }
+    if tools.iter().any(|tool| tool.kind == "web_search") {
+        include.push(json!("web_search_call.action.sources"));
+    }
     let store = std::env::var("PUFFER_OPENAI_STORE_RESPONSES")
         .ok()
         .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
@@ -562,6 +564,53 @@ mod tests {
         );
 
         assert_eq!(body["prompt_cache_key"], json!("benchmark-cache-key"));
+    }
+
+    #[test]
+    fn request_body_includes_web_search_sources_when_native_tool_present() {
+        use puffer_provider_openai::OpenAIResponsesTool;
+        let state = state();
+        let tools = vec![OpenAIResponsesTool {
+            kind: "web_search".to_string(),
+            name: String::new(),
+            description: String::new(),
+            strict: false,
+            parameters: Value::Null,
+            filters: None,
+            user_location: None,
+            external_web_access: None,
+        }];
+
+        let body = build_codex_openai_request_body(
+            &state,
+            "gpt-5",
+            "instructions",
+            Value::String("hello".to_string()),
+            &tools,
+            false,
+            None,
+            true,
+        );
+
+        let include = body["include"].as_array().expect("include array");
+        assert!(include.contains(&json!("web_search_call.action.sources")));
+    }
+
+    #[test]
+    fn request_body_omits_web_search_sources_when_no_native_tool() {
+        let state = state();
+        let body = build_codex_openai_request_body(
+            &state,
+            "gpt-5",
+            "instructions",
+            Value::String("hello".to_string()),
+            &Vec::new(),
+            false,
+            None,
+            true,
+        );
+        let include = body["include"].as_array().expect("include array");
+        assert!(!include.contains(&json!("web_search_call.action.sources")));
     }
 
     #[test]

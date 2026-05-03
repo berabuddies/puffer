@@ -134,17 +134,53 @@ pub(super) fn openai_tool_definitions_for_request(
         .filter(|definition| {
             tool_visible_to_model(permission_context, request_tool_filter, definition)
         })
-        .map(|definition| OpenAIResponsesTool {
-            kind: "function".to_string(),
-            name: definition.id.clone(),
-            description: rendered_openai_tool_description(&definition),
-            strict: false,
-            parameters: openai_compatible_schema(definition.input_schema.as_json_schema()),
-            filters: None,
-            user_location: None,
-            external_web_access: None,
+        .map(|definition| {
+            if is_native_openai_web_search(&definition) {
+                native_openai_web_search_tool()
+            } else {
+                OpenAIResponsesTool {
+                    kind: "function".to_string(),
+                    name: definition.id.clone(),
+                    description: rendered_openai_tool_description(&definition),
+                    strict: false,
+                    parameters: openai_compatible_schema(definition.input_schema.as_json_schema()),
+                    filters: None,
+                    user_location: None,
+                    external_web_access: None,
+                }
+            }
         })
         .collect())
+}
+
+fn is_native_openai_web_search(definition: &ToolDefinition) -> bool {
+    if definition.id != WEB_SEARCH_TOOL_ID {
+        return false;
+    }
+    if std::env::var("PUFFER_OPENAI_NATIVE_WEB_SEARCH")
+        .ok()
+        .is_some_and(|value| value == "0" || value.eq_ignore_ascii_case("false"))
+    {
+        return false;
+    }
+    definition.handler == "provider:web_search"
+}
+
+/// Builds the minimal native OpenAI Responses `web_search` tool entry.
+/// Mirrors codex's `ToolSpec::WebSearch` minimal form — only `type` is
+/// emitted; filters / user_location / external_web_access stay unset
+/// so the platform applies its defaults.
+fn native_openai_web_search_tool() -> OpenAIResponsesTool {
+    OpenAIResponsesTool {
+        kind: "web_search".to_string(),
+        name: String::new(),
+        description: String::new(),
+        strict: false,
+        parameters: Value::Null,
+        filters: None,
+        user_location: None,
+        external_web_access: None,
+    }
 }
 
 pub(super) fn openai_chat_completion_tools(
@@ -553,6 +589,84 @@ mod tests {
         let config = StructuredOutputConfig::new("shape", json!({ "type": "object" }));
         let tools = openai_tool_definitions(&registry, Some(&config), true).unwrap();
         assert!(tools.is_empty());
+    }
+
+    fn web_search_tool_definition(handler: &str) -> ToolDefinition {
+        ToolDefinition {
+            id: WEB_SEARCH_TOOL_ID.to_string(),
+            name: WEB_SEARCH_TOOL_ID.to_string(),
+            description: "Search the web.".to_string(),
+            handler: handler.to_string(),
+            aliases: Vec::new(),
+            handler_args: Vec::new(),
+            kind: ToolKind::Custom,
+            input_schema: ToolInputSchema::default(),
+            metadata: ToolMetadata::default(),
+            policy: ToolPolicyHints::default(),
+            shared_lib: None,
+            enabled_if: None,
+            display: ToolDisplayHints::default(),
+        }
+    }
+
+    #[test]
+    fn provider_web_search_handler_emits_native_responses_tool() {
+        let _guard = crate::test_locks::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let prev = std::env::var_os("PUFFER_OPENAI_NATIVE_WEB_SEARCH");
+        std::env::remove_var("PUFFER_OPENAI_NATIVE_WEB_SEARCH");
+        let registry =
+            ToolRegistry::from_definitions(vec![web_search_tool_definition("provider:web_search")]);
+        let tools = openai_tool_definitions(&registry, None, false).unwrap();
+        if let Some(value) = prev {
+            std::env::set_var("PUFFER_OPENAI_NATIVE_WEB_SEARCH", value);
+        }
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].kind, "web_search");
+        assert!(tools[0].name.is_empty());
+        assert!(tools[0].description.is_empty());
+        assert!(tools[0].parameters.is_null());
+        let serialized = serde_json::to_value(&tools[0]).unwrap();
+        assert_eq!(serialized, json!({ "type": "web_search" }));
+    }
+
+    #[test]
+    fn non_provider_web_search_handler_stays_function_tool() {
+        let _guard = crate::test_locks::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let prev = std::env::var_os("PUFFER_OPENAI_NATIVE_WEB_SEARCH");
+        std::env::remove_var("PUFFER_OPENAI_NATIVE_WEB_SEARCH");
+        let registry = ToolRegistry::from_definitions(vec![web_search_tool_definition(
+            "runtime:workflow:web_search",
+        )]);
+        let tools = openai_tool_definitions(&registry, None, false).unwrap();
+        if let Some(value) = prev {
+            std::env::set_var("PUFFER_OPENAI_NATIVE_WEB_SEARCH", value);
+        }
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].kind, "function");
+        assert_eq!(tools[0].name, WEB_SEARCH_TOOL_ID);
+    }
+
+    #[test]
+    fn env_opt_out_disables_native_web_search() {
+        let _guard = crate::test_locks::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let registry =
+            ToolRegistry::from_definitions(vec![web_search_tool_definition("provider:web_search")]);
+        let prev = std::env::var_os("PUFFER_OPENAI_NATIVE_WEB_SEARCH");
+        std::env::set_var("PUFFER_OPENAI_NATIVE_WEB_SEARCH", "0");
+        let tools = openai_tool_definitions(&registry, None, false).unwrap();
+        match prev {
+            Some(value) => std::env::set_var("PUFFER_OPENAI_NATIVE_WEB_SEARCH", value),
+            None => std::env::remove_var("PUFFER_OPENAI_NATIVE_WEB_SEARCH"),
+        }
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].kind, "function");
+        assert_eq!(tools[0].name, WEB_SEARCH_TOOL_ID);
     }
 
     #[test]

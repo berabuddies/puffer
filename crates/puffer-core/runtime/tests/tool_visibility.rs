@@ -344,15 +344,22 @@ fn web_search_tool_prompt_matches_claude_reference_for_anthropic_and_openai() {
         .expect("WebSearch anthropic tool definition");
     assert_eq!(anthropic_definition["description"], json!(expected.clone()));
 
+    // OpenAI now serializes WebSearch as a native server-side tool
+    // (`{"type": "web_search"}`) rather than a function-shaped tool with a
+    // description. The function-shaped fallback can still be opted into via
+    // PUFFER_OPENAI_NATIVE_WEB_SEARCH=0.
     let openai = openai_tool_definitions(&registry, None, false).unwrap();
-    let openai_definition = openai
+    let native = openai
         .iter()
-        .find(|definition| definition.name == "WebSearch")
-        .expect("WebSearch openai tool definition");
+        .find(|definition| definition.kind == "web_search")
+        .expect("WebSearch openai native tool definition");
+    assert!(native.name.is_empty());
+    assert!(native.description.is_empty());
     assert_eq!(
-        openai_definition.description,
-        expected_openai_tool_description("WebSearch", "WebSearch", &expected)
+        serde_json::to_value(native).unwrap(),
+        json!({ "type": "web_search" })
     );
+    let _ = expected;
 }
 
 #[test]
