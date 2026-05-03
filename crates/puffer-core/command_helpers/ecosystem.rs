@@ -278,7 +278,7 @@ pub(crate) fn reload_resources_from_disk(state: &AppState) -> Result<LoadedResou
 
 #[allow(dead_code)]
 fn reload_resources_from_paths(paths: &ConfigPaths) -> Result<LoadedResources> {
-    let mut resources = load_resources(paths)?;
+    let mut resources = load_resources(paths, &crate::runner_adapter::InProcessRunner::new())?;
     apply_mcp_enablement_overrides(paths, &mut resources)?;
     Ok(resources)
 }

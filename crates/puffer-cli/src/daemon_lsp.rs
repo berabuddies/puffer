@@ -30,7 +30,10 @@ pub(crate) fn handle_lsp_inspect(state: &DaemonState, params: &Value) -> Result<
     let line = params.get("line").and_then(Value::as_u64).unwrap_or(0) as usize;
     let character = params.get("character").and_then(Value::as_u64).unwrap_or(0) as usize;
 
-    let resources = load_resources(state.config_paths())?;
+    let resources = load_resources(
+        state.config_paths(),
+        &puffer_runner_local::LocalToolRunner::new(),
+    )?;
     let mut operations = serde_json::Map::new();
     for operation in LSP_OPERATIONS {
         let output = puffer_core::execute_lsp_query(

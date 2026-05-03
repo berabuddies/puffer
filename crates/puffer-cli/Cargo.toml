@@ -25,6 +25,7 @@ puffer-observability = { path = "../puffer-observability" }
 puffer-provider-openai = { path = "../puffer-provider-openai" }
 puffer-provider-registry = { path = "../puffer-provider-registry" }
 puffer-resources = { path = "../puffer-resources" }
+puffer-runner-local = { path = "../puffer-runner-local" }
 puffer-session-store = { path = "../puffer-session-store" }
 puffer-subscriber-email = { path = "../puffer-subscriber-email" }
 puffer-subscriber-runtime = { path = "../puffer-subscriber-runtime" }

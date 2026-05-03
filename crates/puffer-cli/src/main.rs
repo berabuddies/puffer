@@ -82,7 +82,7 @@ fn main() -> Result<()> {
     let config = load_config(&paths)?;
     let auth_path = paths.user_config_dir.join("auth.json");
     let mut auth_store = AuthStore::load(&auth_path)?;
-    let mut resources = load_resources(&paths)?;
+    let mut resources = load_resources(&paths, &puffer_runner_local::LocalToolRunner::new())?;
 
     // Observability: opt-in via OTEL_EXPORTER_OTLP_ENDPOINT (+ optional
     // LANGFUSE_PUBLIC_KEY/SECRET_KEY for Basic auth). When unset,

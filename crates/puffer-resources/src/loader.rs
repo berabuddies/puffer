@@ -7,12 +7,12 @@ use anyhow::{anyhow, Context, Result};
 use include_dir::{include_dir, Dir};
 use indexmap::IndexMap;
 use puffer_config::ConfigPaths;
+use puffer_runner_api::{RunnerError, ToolRunner};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_yaml::{Mapping, Value as YamlValue};
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Built-in `<repo>/resources/` baked into the binary at compile time.
@@ -36,62 +36,62 @@ static BUILTIN_RESOURCES: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../reso
 /// 3. **User** — `~/.puffer/resources/`. Lets users override individual
 ///    files (e.g. add a custom provider) without touching the install.
 /// 4. **Workspace** — `<cwd>/.puffer/resources/`. Project-level overrides.
-pub fn load_resources(paths: &ConfigPaths) -> Result<LoadedResources> {
+pub fn load_resources(paths: &ConfigPaths, runner: &dyn ToolRunner) -> Result<LoadedResources> {
     let mut loaded = LoadedResources::default();
     apply_embedded_resources(&mut loaded)?;
     for (root, kind) in resource_roots(paths) {
         // Filesystem layers are optional. Without this guard the misleading
         // "no providers are registered" error used to fire whenever the
         // user ran puffer from a directory with no sibling `resources/`.
-        if !root.exists() {
+        if !runner_path_exists(runner, &root) {
             continue;
         }
-        let plugins = load_yaml_dir::<PluginSpec>(&root.join("plugins"), kind)?;
+        let plugins = load_yaml_dir::<PluginSpec>(runner, &root.join("plugins"), kind)?;
         merge_by_id(
             &mut loaded.providers,
-            load_yaml_dir::<ProviderPack>(&root.join("providers"), kind)?,
+            load_yaml_dir::<ProviderPack>(runner, &root.join("providers"), kind)?,
             |item| MergeKey::simple(item.value.id.clone()),
             "provider",
             &mut loaded.diagnostics,
         );
         merge_by_id(
             &mut loaded.tools,
-            load_yaml_dir::<ToolSpec>(&root.join("tools"), kind)?,
+            load_yaml_dir::<ToolSpec>(runner, &root.join("tools"), kind)?,
             |item| MergeKey::simple(item.value.id.clone()),
             "tool",
             &mut loaded.diagnostics,
         );
         merge_by_id(
             &mut loaded.agents,
-            load_yaml_dir::<AgentSpec>(&root.join("agents"), kind)?,
+            load_yaml_dir::<AgentSpec>(runner, &root.join("agents"), kind)?,
             |item| MergeKey::simple(item.value.id.clone()),
             "agent",
             &mut loaded.diagnostics,
         );
         merge_by_id(
             &mut loaded.prompts,
-            load_yaml_dir::<PromptTemplate>(&root.join("prompts"), kind)?,
+            load_yaml_dir::<PromptTemplate>(runner, &root.join("prompts"), kind)?,
             |item| prompt_variant_key(&item.value),
             "prompt",
             &mut loaded.diagnostics,
         );
         merge_by_id(
             &mut loaded.hooks,
-            load_yaml_dir::<HookSpec>(&root.join("hooks"), kind)?,
+            load_yaml_dir::<HookSpec>(runner, &root.join("hooks"), kind)?,
             |item| MergeKey::simple(item.value.id.clone()),
             "hook",
             &mut loaded.diagnostics,
         );
         merge_by_id(
             &mut loaded.skills,
-            load_skill_dir(&root.join("skills"), kind)?,
+            load_skill_dir(runner, &root.join("skills"), kind)?,
             |item| MergeKey::simple(item.value.name.clone()),
             "skill",
             &mut loaded.diagnostics,
         );
         merge_by_id(
             &mut loaded.mascots,
-            load_yaml_dir::<MascotSpec>(&root.join("mascots"), kind)?,
+            load_yaml_dir::<MascotSpec>(runner, &root.join("mascots"), kind)?,
             |item| MergeKey::simple(item.value.id.clone()),
             "mascot",
             &mut loaded.diagnostics,
@@ -112,20 +112,31 @@ pub fn load_resources(paths: &ConfigPaths) -> Result<LoadedResources> {
         );
         merge_by_id(
             &mut loaded.mcp_servers,
-            load_mcp_server_manifests(&root, kind)?,
+            load_mcp_server_manifests(runner, &root, kind)?,
             |item| MergeKey::simple(item.value.id.clone()),
             "mcp_server",
             &mut loaded.diagnostics,
         );
         merge_by_id(
             &mut loaded.ides,
-            load_yaml_dir::<IdeSpec>(&root.join("ides"), kind)?,
+            load_yaml_dir::<IdeSpec>(runner, &root.join("ides"), kind)?,
             |item| MergeKey::simple(item.value.id.clone()),
             "ide",
             &mut loaded.diagnostics,
         );
     }
     Ok(loaded)
+}
+
+/// Probe directory presence via the runner. Treats `NotFound` as absent and
+/// any other error (e.g. permission denied) as also absent — same as the
+/// previous `Path::exists` semantics, which silently swallowed io errors.
+fn runner_path_exists(runner: &dyn ToolRunner, path: &Path) -> bool {
+    match runner.list_dir(path) {
+        Ok(_) => true,
+        Err(RunnerError::NotFound(_)) => false,
+        Err(_) => false,
+    }
 }
 
 /// Looks up the base (no-variant) prompt template by id.
@@ -547,16 +558,17 @@ fn default_mcp_enabled() -> bool {
 }
 
 fn load_mcp_server_manifests(
+    runner: &dyn ToolRunner,
     root: &Path,
     kind: SourceKind,
 ) -> Result<Vec<LoadedItem<McpServerSpec>>> {
-    let canonical = load_mcp_manifest_dir(&root.join("mcp_servers"), kind)?;
+    let canonical = load_mcp_manifest_dir(runner, &root.join("mcp_servers"), kind)?;
     let canonical_ids = canonical
         .iter()
         .map(|item| item.value.id.clone())
         .collect::<std::collections::BTreeSet<_>>();
 
-    let legacy = load_mcp_manifest_dir(&root.join("mcp"), kind)?
+    let legacy = load_mcp_manifest_dir(runner, &root.join("mcp"), kind)?
         .into_iter()
         .filter(|item| !canonical_ids.contains(&item.value.id))
         .collect::<Vec<_>>();
@@ -566,8 +578,12 @@ fn load_mcp_server_manifests(
     Ok(merged)
 }
 
-fn load_mcp_manifest_dir(dir: &Path, kind: SourceKind) -> Result<Vec<LoadedItem<McpServerSpec>>> {
-    Ok(load_yaml_dir::<McpManifestFile>(dir, kind)?
+fn load_mcp_manifest_dir(
+    runner: &dyn ToolRunner,
+    dir: &Path,
+    kind: SourceKind,
+) -> Result<Vec<LoadedItem<McpServerSpec>>> {
+    Ok(load_yaml_dir::<McpManifestFile>(runner, dir, kind)?
         .into_iter()
         .filter_map(|item| {
             item.value.enabled.then_some(LoadedItem {
@@ -578,25 +594,37 @@ fn load_mcp_manifest_dir(dir: &Path, kind: SourceKind) -> Result<Vec<LoadedItem<
         .collect())
 }
 
-fn load_yaml_dir<T>(dir: &Path, kind: SourceKind) -> Result<Vec<LoadedItem<T>>>
+fn load_yaml_dir<T>(
+    runner: &dyn ToolRunner,
+    dir: &Path,
+    kind: SourceKind,
+) -> Result<Vec<LoadedItem<T>>>
 where
     T: DeserializeOwned,
 {
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
+    let entries = match sorted_dir_entries(runner, dir) {
+        Ok(entries) => entries,
+        Err(RunnerError::NotFound(_)) => return Ok(Vec::new()),
+        Err(err) => {
+            return Err(anyhow!(err))
+                .with_context(|| format!("failed to list resource dir {}", dir.display()))
+        }
+    };
 
     let mut items = Vec::new();
-    for entry in sorted_dir_entries(dir)? {
-        let path = entry.path();
+    for path in entries {
         if !matches!(
             path.extension().and_then(|ext| ext.to_str()),
             Some("yaml" | "yml")
         ) {
             continue;
         }
-        let raw = fs::read_to_string(&path)
+        let raw_bytes = runner
+            .read_file(&path)
+            .map_err(|err| anyhow!(err))
             .with_context(|| format!("failed to read resource file {}", path.display()))?;
+        let raw = String::from_utf8(raw_bytes)
+            .with_context(|| format!("resource file {} is not UTF-8", path.display()))?;
         let value = serde_yaml::from_str::<T>(&raw)
             .with_context(|| format!("failed to parse resource file {}", path.display()))?;
         items.push(LoadedItem {
@@ -607,24 +635,41 @@ where
     Ok(items)
 }
 
-fn load_skill_dir(dir: &Path, kind: SourceKind) -> Result<Vec<LoadedItem<SkillSpec>>> {
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
+fn load_skill_dir(
+    runner: &dyn ToolRunner,
+    dir: &Path,
+    kind: SourceKind,
+) -> Result<Vec<LoadedItem<SkillSpec>>> {
+    let entries = match runner.list_dir(dir) {
+        Ok(mut entries) => {
+            entries.sort_by(|left, right| left.path.cmp(&right.path));
+            entries
+        }
+        Err(RunnerError::NotFound(_)) => return Ok(Vec::new()),
+        Err(err) => {
+            return Err(anyhow!(err))
+                .with_context(|| format!("failed to list resource dir {}", dir.display()))
+        }
+    };
 
     let mut items = Vec::new();
-    for entry in sorted_dir_entries(dir)? {
-        let path = entry.path();
-        if !path.is_dir() {
+    for entry in entries {
+        if !entry.is_dir {
             continue;
         }
+        let path = entry.path;
 
         let skill_path = path.join("SKILL.md");
-        if !skill_path.exists() {
-            continue;
-        }
-        let raw = fs::read_to_string(&skill_path)
-            .with_context(|| format!("failed to read skill file {}", skill_path.display()))?;
+        let raw_bytes = match runner.read_file(&skill_path) {
+            Ok(bytes) => bytes,
+            Err(RunnerError::NotFound(_)) => continue,
+            Err(err) => {
+                return Err(anyhow!(err))
+                    .with_context(|| format!("failed to read skill file {}", skill_path.display()))
+            }
+        };
+        let raw = String::from_utf8(raw_bytes)
+            .with_context(|| format!("skill file {} is not UTF-8", skill_path.display()))?;
         let (frontmatter, body) = split_frontmatter(&raw).with_context(|| {
             format!("failed to parse skill frontmatter {}", skill_path.display())
         })?;
@@ -692,13 +737,13 @@ fn normalize_skill_name(raw: &str) -> String {
     }
 }
 
-fn sorted_dir_entries(dir: &Path) -> Result<Vec<fs::DirEntry>> {
-    let mut entries = fs::read_dir(dir)
-        .with_context(|| format!("failed to read resource dir {}", dir.display()))?
-        .collect::<std::io::Result<Vec<_>>>()
-        .with_context(|| format!("failed to list resource dir {}", dir.display()))?;
-    entries.sort_by(|left, right| left.path().cmp(&right.path()));
-    Ok(entries)
+fn sorted_dir_entries(
+    runner: &dyn ToolRunner,
+    dir: &Path,
+) -> std::result::Result<Vec<PathBuf>, RunnerError> {
+    let mut entries = runner.list_dir(dir)?;
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(entries.into_iter().map(|entry| entry.path).collect())
 }
 
 fn split_frontmatter(raw: &str) -> Result<(Mapping, String)> {
@@ -929,8 +974,116 @@ fn source_kind_label(kind: SourceKind) -> &'static str {
 mod tests {
     use super::*;
     use crate::hooks_for_event;
+    use puffer_runner_api::{
+        ChunkSink, DirEntry, McpPrompt, McpPromptContent, McpResourceContent, McpResourceRecord,
+        McpResult, McpServerInfo, McpTool, PermissionDecision, PermissionRequest,
+        RunnerCapabilities, ToolRequest, ToolResult,
+    };
     use std::fs;
     use tempfile::tempdir;
+
+    /// Minimal `ToolRunner` backed by `std::fs` for loader tests; mirrors
+    /// `puffer_runner_local::LocalToolRunner` so tests don't take a circular
+    /// dependency on the runner crate.
+    struct FsTestRunner;
+
+    impl ToolRunner for FsTestRunner {
+        fn capabilities(&self) -> RunnerCapabilities {
+            RunnerCapabilities::default()
+        }
+        fn execute_tool(
+            &self,
+            _req: ToolRequest,
+            _sink: &mut dyn ChunkSink,
+        ) -> std::result::Result<ToolResult, RunnerError> {
+            Err(RunnerError::Unsupported("test runner".into()))
+        }
+        fn read_file(&self, path: &Path) -> std::result::Result<Vec<u8>, RunnerError> {
+            std::fs::read(path).map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => RunnerError::NotFound(path.display().to_string()),
+                _ => RunnerError::Other(format!("read {path:?}: {e}")),
+            })
+        }
+        fn list_dir(&self, path: &Path) -> std::result::Result<Vec<DirEntry>, RunnerError> {
+            let read = std::fs::read_dir(path).map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => RunnerError::NotFound(path.display().to_string()),
+                _ => RunnerError::Other(format!("read_dir {path:?}: {e}")),
+            })?;
+            let mut entries = Vec::new();
+            for entry in read {
+                let entry =
+                    entry.map_err(|e| RunnerError::Other(format!("dir entry {path:?}: {e}")))?;
+                let file_type = entry
+                    .file_type()
+                    .map_err(|e| RunnerError::Other(format!("file_type for {entry:?}: {e}")))?;
+                entries.push(DirEntry {
+                    path: entry.path(),
+                    is_dir: file_type.is_dir(),
+                    is_file: file_type.is_file(),
+                    is_symlink: file_type.is_symlink(),
+                });
+            }
+            Ok(entries)
+        }
+        fn glob(
+            &self,
+            _root: &Path,
+            _pattern: &str,
+        ) -> std::result::Result<Vec<PathBuf>, RunnerError> {
+            Err(RunnerError::Unsupported("glob".into()))
+        }
+        fn list_mcp_servers(&self) -> std::result::Result<Vec<McpServerInfo>, RunnerError> {
+            Err(RunnerError::Unsupported("mcp".into()))
+        }
+        fn list_mcp_tools(
+            &self,
+            _server: &str,
+        ) -> std::result::Result<Vec<McpTool>, RunnerError> {
+            Err(RunnerError::Unsupported("mcp".into()))
+        }
+        fn call_mcp_tool(
+            &self,
+            _server: &str,
+            _tool: &str,
+            _args: serde_json::Value,
+            _sink: &mut dyn ChunkSink,
+        ) -> std::result::Result<McpResult, RunnerError> {
+            Err(RunnerError::Unsupported("mcp".into()))
+        }
+        fn list_mcp_resources(
+            &self,
+            _server: Option<&str>,
+        ) -> std::result::Result<Vec<McpResourceRecord>, RunnerError> {
+            Err(RunnerError::Unsupported("mcp".into()))
+        }
+        fn read_mcp_resource(
+            &self,
+            _server: &str,
+            _uri: &str,
+        ) -> std::result::Result<McpResourceContent, RunnerError> {
+            Err(RunnerError::Unsupported("mcp".into()))
+        }
+        fn list_mcp_prompts(
+            &self,
+            _server: &str,
+        ) -> std::result::Result<Vec<McpPrompt>, RunnerError> {
+            Err(RunnerError::Unsupported("mcp".into()))
+        }
+        fn get_mcp_prompt(
+            &self,
+            _server: &str,
+            _name: &str,
+            _args: serde_json::Value,
+        ) -> std::result::Result<McpPromptContent, RunnerError> {
+            Err(RunnerError::Unsupported("mcp".into()))
+        }
+        fn request_permission(
+            &self,
+            _req: PermissionRequest,
+        ) -> std::result::Result<PermissionDecision, RunnerError> {
+            Err(RunnerError::Unsupported("permission".into()))
+        }
+    }
 
     #[test]
     fn load_resources_reads_skill_markdown_and_plugin_yaml() {
@@ -969,7 +1122,7 @@ mod tests {
         .unwrap();
 
         let paths = ConfigPaths::discover(&root);
-        let loaded = load_resources(&paths).unwrap();
+        let loaded = load_resources(&paths, &FsTestRunner).unwrap();
         assert_eq!(loaded.agents.len(), 1);
         assert_eq!(loaded.prompts.len(), 1);
         assert_eq!(loaded.hooks.len(), 1);
@@ -993,7 +1146,7 @@ mod tests {
         .unwrap();
 
         let paths = ConfigPaths::discover(&root);
-        let loaded = load_resources(&paths).unwrap();
+        let loaded = load_resources(&paths, &FsTestRunner).unwrap();
         assert_eq!(loaded.plugins.len(), 1);
         assert!(loaded
             .agents
@@ -1023,7 +1176,7 @@ mod tests {
             user_config_dir: root.join(".home/.puffer"),
             builtin_resources_dir: root.join("resources"),
         };
-        let loaded = load_resources(&paths).unwrap();
+        let loaded = load_resources(&paths, &FsTestRunner).unwrap();
         assert_eq!(loaded.skills.len(), 1);
         assert_eq!(loaded.skills[0].value.name, "review-helper");
         assert!(skill_by_name(&loaded, "Review Helper ++").is_some());
@@ -1049,7 +1202,7 @@ mod tests {
             user_config_dir: root.join(".home/.puffer"),
             builtin_resources_dir: root.join("resources"),
         };
-        let loaded = load_resources(&paths).unwrap();
+        let loaded = load_resources(&paths, &FsTestRunner).unwrap();
         let skill = &loaded.skills[0].value;
         assert_eq!(skill.name, "review-helper");
         assert_eq!(skill.description, "Review changes");
@@ -1095,7 +1248,7 @@ mod tests {
             user_config_dir: root.join(".home/.puffer"),
             builtin_resources_dir: root.join("resources"),
         };
-        let loaded = load_resources(&paths).unwrap();
+        let loaded = load_resources(&paths, &FsTestRunner).unwrap();
         assert_eq!(loaded.prompts.len(), 1);
         assert_eq!(loaded.prompts[0].value.description, "Workspace");
         assert!(loaded.prompts[0]
@@ -1136,7 +1289,7 @@ mod tests {
             user_config_dir: root.join(".home/.puffer"),
             builtin_resources_dir: root.join("resources"),
         };
-        let loaded = load_resources(&paths).unwrap();
+        let loaded = load_resources(&paths, &FsTestRunner).unwrap();
         assert_eq!(loaded.prompts.len(), 1);
         assert_eq!(loaded.prompts[0].value.description, "Second");
         assert!(loaded.diagnostics.iter().any(|item| {
@@ -1176,7 +1329,7 @@ mod tests {
             user_config_dir: root.join(".home/.puffer"),
             builtin_resources_dir: root.join("resources"),
         };
-        let loaded = load_resources(&paths).unwrap();
+        let loaded = load_resources(&paths, &FsTestRunner).unwrap();
         assert_eq!(loaded.hooks.len(), 2);
         assert_eq!(
             hook_by_id(&loaded, "tool-end").unwrap().value.command,
@@ -1220,7 +1373,7 @@ mod tests {
             user_config_dir: root.join(".home/.puffer"),
             builtin_resources_dir: root.join("resources"),
         };
-        let loaded = load_resources(&paths).unwrap();
+        let loaded = load_resources(&paths, &FsTestRunner).unwrap();
         assert_eq!(loaded.prompts.len(), 3);
         assert_eq!(
             prompt_for(&loaded, "system-base", None, Some("claude-opus-4-6"))
@@ -1279,7 +1432,7 @@ mod tests {
             user_config_dir: root.join(".home/.puffer"),
             builtin_resources_dir: root.join("resources"),
         };
-        let loaded = load_resources(&paths).unwrap();
+        let loaded = load_resources(&paths, &FsTestRunner).unwrap();
         assert_eq!(loaded.prompts.len(), 2);
         assert_eq!(
             prompt_for(&loaded, "system-base", None, Some("claude-opus-4-6"))
@@ -1315,7 +1468,7 @@ mod tests {
             user_config_dir: root.join(".home/.puffer"),
             builtin_resources_dir: root.join("resources"),
         };
-        let loaded = load_resources(&paths).unwrap();
+        let loaded = load_resources(&paths, &FsTestRunner).unwrap();
         assert_eq!(loaded.mcp_servers.len(), 1);
         assert_eq!(loaded.mcp_servers[0].value.id, "legacy");
         assert!(loaded.mcp_servers[0]
@@ -1350,7 +1503,7 @@ mod tests {
             user_config_dir: root.join(".home/.puffer"),
             builtin_resources_dir: root.join("resources"),
         };
-        let loaded = load_resources(&paths).unwrap();
+        let loaded = load_resources(&paths, &FsTestRunner).unwrap();
         assert_eq!(loaded.mcp_servers.len(), 1);
         assert_eq!(loaded.mcp_servers[0].value.id, "docs");
         assert_eq!(loaded.mcp_servers[0].value.display_name, "Canonical Docs");
@@ -1388,7 +1541,7 @@ mod tests {
             user_config_dir: root.join(".home/.puffer"),
             builtin_resources_dir: root.join("resources"),
         };
-        let loaded = load_resources(&paths).unwrap();
+        let loaded = load_resources(&paths, &FsTestRunner).unwrap();
         assert_eq!(loaded.mcp_servers.len(), 1);
         assert_eq!(loaded.mcp_servers[0].value.id, "enabled");
     }

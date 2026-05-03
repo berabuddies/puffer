@@ -19,6 +19,7 @@ puffer-core = { path = "../../../crates/puffer-core" }
 puffer-provider-openai = { path = "../../../crates/puffer-provider-openai" }
 puffer-provider-registry = { path = "../../../crates/puffer-provider-registry" }
 puffer-resources = { path = "../../../crates/puffer-resources" }
+puffer-runner-local = { path = "../../../crates/puffer-runner-local" }
 puffer-session-store = { path = "../../../crates/puffer-session-store" }
 puffer-tools = { path = "../../../crates/puffer-tools" }
 puffer-transport-anthropic = { path = "../../../crates/puffer-transport-anthropic" }

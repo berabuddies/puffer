@@ -300,7 +300,7 @@ fn load_auth_context() -> Result<DesktopAuthContext> {
     ensure_workspace_dirs(&paths)?;
     let auth_path = paths.user_config_dir.join("auth.json");
     let auth_store = AuthStore::load(&auth_path)?;
-    let resources = load_resources(&paths)?;
+    let resources = load_resources(&paths, &puffer_runner_local::LocalToolRunner::new())?;
     let mut providers = ProviderRegistry::new();
     for provider in &resources.providers {
         providers.register_with_source(
