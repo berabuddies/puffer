@@ -9,6 +9,7 @@ mod permissions;
 mod plan_mode;
 mod plans;
 pub mod runner_adapter;
+pub mod runner_mcp;
 mod runtime;
 mod skill_support;
 mod state;

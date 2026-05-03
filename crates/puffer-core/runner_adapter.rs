@@ -19,7 +19,9 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use uuid::Uuid;
 
+use crate::runner_mcp::McpHost;
 use crate::runtime::claude_tools::{bash, edit, glob, grep, notebook_edit, read, web_fetch};
+use puffer_resources::McpServerSpec;
 
 /// Tools the local runner is willing to execute through the
 /// [`puffer_runner_api::ToolRunner::execute_tool`] surface.
@@ -271,6 +273,7 @@ fn result_with_updates(
 #[derive(Debug, Clone, Default)]
 pub struct LocalToolRunner {
     sandbox_roots: Vec<PathBuf>,
+    mcp_host: McpHost,
 }
 
 impl LocalToolRunner {
@@ -279,9 +282,39 @@ impl LocalToolRunner {
     }
 
     pub fn with_sandbox_roots(roots: Vec<PathBuf>) -> Self {
+        let workspace = roots.first().cloned();
         Self {
             sandbox_roots: roots,
+            mcp_host: McpHost::new(Vec::new(), workspace),
         }
+    }
+
+    /// Configures the runner with an MCP manifest. The first sandbox root
+    /// (or the explicit override passed via `with_workspace_root`) is used
+    /// by the built-in `filesystem` server when present.
+    pub fn with_mcp_servers(mut self, servers: Vec<McpServerSpec>) -> Self {
+        let workspace = self
+            .mcp_host
+            .workspace_root()
+            .map(Path::to_path_buf)
+            .or_else(|| self.sandbox_roots.first().cloned());
+        self.mcp_host = McpHost::new(servers, workspace);
+        self
+    }
+
+    /// Overrides the workspace root used by built-in MCP transports (today
+    /// only the filesystem stub). Mostly useful when the sandbox roots are
+    /// disjoint from the MCP workspace.
+    pub fn with_mcp_workspace_root(mut self, workspace: PathBuf) -> Self {
+        let servers = self.mcp_host.into_servers();
+        self.mcp_host = McpHost::new(servers, Some(workspace));
+        self
+    }
+
+    /// Read-only view of the configured MCP servers (used by the runtime's
+    /// permissions / display surfaces).
+    pub fn mcp_host(&self) -> &McpHost {
+        &self.mcp_host
     }
 
     fn check_sandbox(&self, path: &Path) -> Result<(), RunnerError> {
@@ -313,7 +346,7 @@ impl ToolRunner for LocalToolRunner {
                 .iter()
                 .map(|tool| (*tool).to_string())
                 .collect(),
-            mcp_supported: false,
+            mcp_supported: true,
         }
     }
 
@@ -389,42 +422,47 @@ impl ToolRunner for LocalToolRunner {
     }
 
     fn list_mcp_servers(&self) -> Result<Vec<McpServerInfo>, RunnerError> {
-        Err(RunnerError::Unsupported("MCP centralization is Phase 1".into()))
+        Ok(self.mcp_host.list_servers())
     }
-    fn list_mcp_tools(&self, _server: &str) -> Result<Vec<McpTool>, RunnerError> {
-        Err(RunnerError::Unsupported("MCP centralization is Phase 1".into()))
+    fn list_mcp_tools(&self, server: &str) -> Result<Vec<McpTool>, RunnerError> {
+        self.mcp_host.list_tools(server)
     }
     fn call_mcp_tool(
         &self,
-        _server: &str,
-        _tool: &str,
-        _args: serde_json::Value,
+        server: &str,
+        tool: &str,
+        args: serde_json::Value,
         _sink: &mut dyn ChunkSink,
     ) -> Result<McpResult, RunnerError> {
-        Err(RunnerError::Unsupported("MCP centralization is Phase 1".into()))
+        // Today's `McpHost` returns the final `McpResult` synchronously
+        // because the only built-in transport is the filesystem stub, which
+        // has no incremental output. Streaming partial chunks via `sink` is
+        // wired through to the trait so a real subprocess client can grow
+        // here without touching the gRPC contract.
+        self.mcp_host.call_tool(server, tool, args)
     }
     fn list_mcp_resources(
         &self,
-        _server: Option<&str>,
+        server: Option<&str>,
     ) -> Result<Vec<McpResourceRecord>, RunnerError> {
-        Err(RunnerError::Unsupported("MCP centralization is Phase 1".into()))
+        self.mcp_host.list_resources(server)
     }
     fn read_mcp_resource(
         &self,
-        _server: &str,
-        _uri: &str,
+        server: &str,
+        uri: &str,
     ) -> Result<McpResourceContent, RunnerError> {
-        Err(RunnerError::Unsupported("MCP centralization is Phase 1".into()))
+        self.mcp_host.read_resource(server, uri)
     }
-    fn list_mcp_prompts(&self, _server: &str) -> Result<Vec<McpPrompt>, RunnerError> {
-        Err(RunnerError::Unsupported("MCP centralization is Phase 1".into()))
+    fn list_mcp_prompts(&self, server: &str) -> Result<Vec<McpPrompt>, RunnerError> {
+        self.mcp_host.list_prompts(server)
     }
     fn get_mcp_prompt(
         &self,
-        _server: &str,
-        _name: &str,
-        _args: serde_json::Value,
+        server: &str,
+        name: &str,
+        args: serde_json::Value,
     ) -> Result<McpPromptContent, RunnerError> {
-        Err(RunnerError::Unsupported("MCP centralization is Phase 1".into()))
+        self.mcp_host.get_prompt(server, name, args)
     }
 }
