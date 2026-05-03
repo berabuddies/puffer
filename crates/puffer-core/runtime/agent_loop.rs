@@ -436,14 +436,33 @@ pub(crate) fn run_streaming_loop(
         // Capture token usage from the streaming Usage event for the
         // provider span. Only wrap when observability is on so the
         // disabled path doesn't clone every Usage report
-        // (review v6 BLOCK #3).
+        // (review v6 BLOCK #3). The same wrapper also captures the
+        // monotonic timestamp of the first non-usage stream event
+        // (TextDelta / ThinkingDelta / ToolCallStart), which we
+        // surface as TTFT (`gen_ai.response.first_token_ms`) — a
+        // production-grade signal for diagnosing slow streams that
+        // OTel's GenAI semconv standardizes but most agents miss.
         let observability_handle = inputs.observability.clone();
         let captured_usage = std::cell::RefCell::new(None::<TurnUsageReport>);
+        let captured_first_token = std::cell::RefCell::new(None::<std::time::Instant>);
+        let request_started = std::time::Instant::now();
         let result = if observability_handle.is_some() {
             let captured_usage_ref = &captured_usage;
+            let captured_first_token_ref = &captured_first_token;
             let mut wrapped = |event: TurnStreamEvent| {
-                if let TurnStreamEvent::Usage(u) = &event {
-                    *captured_usage_ref.borrow_mut() = Some(u.clone());
+                match &event {
+                    TurnStreamEvent::Usage(u) => {
+                        *captured_usage_ref.borrow_mut() = Some(u.clone());
+                    }
+                    TurnStreamEvent::TextDelta(_)
+                    | TurnStreamEvent::ThinkingDelta(_)
+                    | TurnStreamEvent::ToolCallsRequested(_) => {
+                        if captured_first_token_ref.borrow().is_none() {
+                            *captured_first_token_ref.borrow_mut() =
+                                Some(std::time::Instant::now());
+                        }
+                    }
+                    _ => {}
                 }
                 on_event(event);
             };
@@ -469,6 +488,12 @@ pub(crate) fn run_streaming_loop(
                 Some(u.output_tokens),
                 Some(u.cache_read_tokens),
             );
+            if u.cache_creation_tokens > 0 {
+                provider_span.set_str(
+                    "gen_ai.usage.cache_creation_input_tokens",
+                    u.cache_creation_tokens.to_string(),
+                );
+            }
             // Cache hit ratio = cache_read / input. Surfaces a single
             // top-line metric in Langfuse without making the viewer do
             // the arithmetic.
@@ -476,6 +501,13 @@ pub(crate) fn run_streaming_loop(
                 let ratio = u.cache_read_tokens as f64 / u.input_tokens as f64;
                 provider_span.set_f64("puffer.cache.hit_ratio", ratio);
             }
+        }
+        // Time-to-first-token: monotonic ms from request start to the
+        // first stream event that carries content. Numeric so Langfuse
+        // can chart latency percentiles.
+        if let Some(first) = captured_first_token.into_inner() {
+            let ttft_ms = first.duration_since(request_started).as_secs_f64() * 1000.0;
+            provider_span.set_f64("gen_ai.response.first_token_ms", ttft_ms);
         }
         let turn = match result {
             Ok(turn) => turn,
