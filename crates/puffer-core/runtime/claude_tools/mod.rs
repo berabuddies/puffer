@@ -1,3 +1,4 @@
+use crate::runner_adapter;
 use crate::runtime::structured_output_support::StructuredOutputConfig;
 use crate::state::ClaudeReadState;
 use crate::workspace_paths;
@@ -5,6 +6,10 @@ use crate::AppState;
 use anyhow::{bail, Context, Result};
 use puffer_provider_openai::OpenAIRequestConfig;
 use puffer_resources::LoadedResources;
+use puffer_runner_api::{
+    check_read_freshness, NullChunkSink, ReadStateSnapshot, ReadStateUpdate, StalenessRejection,
+    ToolRequest as RunnerToolRequest,
+};
 use puffer_tools::{ToolDefinition, ToolExecutionResult, ToolOutput, ToolRegistry};
 use puffer_transport_anthropic::AnthropicRequestConfig;
 use serde_json::Value;
@@ -89,6 +94,12 @@ pub(crate) fn execute_tool(
     provider_context: ProviderToolContext<'_>,
 ) -> Result<ToolExecutionResult> {
     let allow_all_paths = workspace_paths::sandbox_allows_all_paths(&state.sandbox_mode);
+    if runner_adapter::is_runner_supported(definition.id.as_str()) {
+        if let Some(result) = try_runner_dispatch(state, definition, cwd, &input, allow_all_paths)?
+        {
+            return Ok(result);
+        }
+    }
     match definition.id.as_str() {
         "Bash" => {
             let execution = bash::execute_from_value(cwd, &state.session.id, input)?;
@@ -316,6 +327,116 @@ pub(crate) fn execute_parallel_tool(
             skill::execute_claude_skill_tool(resources, input)?,
         )),
         other => bail!("tool {other} is not parallel-safe"),
+    }
+}
+
+/// Tries dispatching the call through the active [`puffer_runner_api::ToolRunner`].
+///
+/// Returns `Ok(Some(result))` when the runner handled the call (success or
+/// pre-flight rejection), `Ok(None)` when the tool needs the legacy in-place
+/// path (e.g. WebSearch's provider context, or Read's "file unchanged"
+/// short-circuit), and `Err` when the underlying execution fails.
+fn try_runner_dispatch(
+    state: &mut AppState,
+    definition: &ToolDefinition,
+    cwd: &Path,
+    input: &Value,
+    allow_all_paths: bool,
+) -> Result<Option<ToolExecutionResult>> {
+    let tool_id = definition.id.as_str();
+
+    // Read keeps its "file_unchanged" short-circuit on the legacy path —
+    // the runner DTO doesn't model that bookkeeping yet.
+    if tool_id == "Read" && is_full_read_request(input) {
+        if let Some(path) = input_file_path(input, "file_path")? {
+            if let Some(snapshot) = state.claude_read_state.get(&path) {
+                let timestamp_ms = file_timestamp_ms(&path)?;
+                if !snapshot.is_partial_view && timestamp_ms == snapshot.timestamp_ms {
+                    return Ok(None);
+                }
+            }
+        }
+    }
+
+    // Pre-flight staleness gate, hoisted out of the per-tool implementations.
+    let needs_freshness_check = matches!(tool_id, "Write" | "NotebookEdit")
+        || (tool_id == "Edit" && edit::requires_prior_read(input));
+    if needs_freshness_check {
+        let path_field = if tool_id == "NotebookEdit" {
+            "notebook_path"
+        } else {
+            "file_path"
+        };
+        if let Some(path) = input_file_path(input, path_field)? {
+            let snapshot = state
+                .claude_read_state
+                .get(&path)
+                .map(|snap| ReadStateSnapshot {
+                    timestamp_ms: snap.timestamp_ms,
+                    is_partial_view: snap.is_partial_view,
+                });
+            // Only enforce when the file already exists; Write/Edit on a
+            // brand-new path are allowed without a prior Read.
+            if path.exists() {
+                let current_mtime = file_timestamp_ms(&path)?;
+                if let Err(rejection) = check_read_freshness(snapshot.as_ref(), current_mtime) {
+                    return Ok(Some(staleness_failure(definition, &rejection)));
+                }
+            }
+        }
+    }
+
+    let request = RunnerToolRequest {
+        tool_id: tool_id.to_string(),
+        cwd: cwd.to_path_buf(),
+        working_dirs: state.working_dirs.clone(),
+        allow_all_paths,
+        input: input.clone(),
+        session_id: Some(state.session.id.to_string()),
+    };
+    let runner = runner_adapter::active_runner();
+    let mut sink = NullChunkSink;
+    let outcome = runner
+        .execute_tool(request, &mut sink)
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    apply_read_state_updates(state, &outcome.read_state_updates);
+
+    Ok(Some(ToolExecutionResult {
+        tool_id: outcome.tool_id,
+        success: outcome.success,
+        output: ToolOutput {
+            stdout: outcome.stdout,
+            stderr: outcome.stderr,
+            metadata: outcome.metadata,
+        },
+    }))
+}
+
+fn apply_read_state_updates(state: &mut AppState, updates: &[ReadStateUpdate]) {
+    for update in updates {
+        state.claude_read_state.insert(
+            update.path.clone(),
+            ClaudeReadState {
+                timestamp_ms: update.timestamp_ms,
+                is_partial_view: update.is_partial_view,
+            },
+        );
+    }
+}
+
+fn staleness_failure(
+    definition: &ToolDefinition,
+    rejection: &StalenessRejection,
+) -> ToolExecutionResult {
+    ToolExecutionResult {
+        tool_id: definition.id.clone(),
+        success: false,
+        output: ToolOutput {
+            stdout: rejection.message().to_string(),
+            stderr: String::new(),
+            metadata: Value::Null,
+        },
     }
 }
 
