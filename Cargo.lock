@@ -4536,6 +4536,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "puffer-tool-runner"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "puffer-runner-api",
+ "puffer-runner-grpc",
+ "puffer-runner-local",
+ "tokio",
+ "tonic",
+]
+
+[[package]]
 name = "puffer-tools"
 version = "0.1.0"
 dependencies = [
