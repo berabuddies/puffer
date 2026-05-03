@@ -1,0 +1,259 @@
+syntax = "proto3";
+
+package puffer.runner.v1;
+
+service ToolRunner {
+  // Capability + tool execution.
+  rpc Capabilities(Empty) returns (RunnerCapabilities);
+  rpc ExecuteTool(ToolRequest) returns (stream ToolEvent);
+
+  // Raw filesystem (runtime-internal, no model formatting).
+  rpc ReadFile(ReadFileRequest) returns (FileContent);
+  rpc ListDir(ListDirRequest) returns (DirListing);
+  rpc Glob(GlobRequest) returns (GlobResponse);
+
+  // MCP — Phase 2 stubs return UNIMPLEMENTED. Phase 1 fills these in.
+  rpc ListMcpServers(Empty) returns (McpServerList);
+  rpc ListMcpTools(McpServerRef) returns (McpToolList);
+  rpc CallMcpTool(McpToolCall) returns (stream McpToolEvent);
+  rpc ListMcpResources(McpResourceQuery) returns (McpResourceList);
+  rpc ReadMcpResource(McpResourceRef) returns (McpResourceContent);
+  rpc ListMcpPrompts(McpServerRef) returns (McpPromptList);
+  rpc GetMcpPrompt(McpPromptRequest) returns (McpPromptContent);
+
+  // Permission relay — Phase 2 stubs respond Unsupported (or auto-approve
+  // when --auto-approve is set). Phase 3 wires the UI.
+  rpc PermissionChannel(stream PermissionMessage) returns (stream PermissionMessage);
+}
+
+message Empty {}
+
+message RunnerCapabilities {
+  string backend = 1;
+  string version = 2;
+  repeated string supported_tools = 3;
+  bool mcp_supported = 4;
+  bool permission_relay_supported = 5;
+}
+
+message ToolRequest {
+  string tool_id = 1;
+  string cwd = 2;
+  repeated string working_dirs = 3;
+  bool allow_all_paths = 4;
+  // JSON-encoded tool input (matches the tool's input schema).
+  string input_json = 5;
+  optional string session_id = 6;
+}
+
+message StreamChunk {
+  bytes data = 1;
+}
+
+message ToolCompleted {
+  string tool_id = 1;
+  bool success = 2;
+  string stdout = 3;
+  string stderr = 4;
+  string metadata_json = 5;
+  repeated ReadStateUpdate read_state_updates = 6;
+}
+
+message ToolFailed {
+  string code = 1;
+  string message = 2;
+}
+
+message ReadStateUpdate {
+  string path = 1;
+  // u128 ms is non-trivial in proto; transmit as decimal string.
+  string timestamp_ms = 2;
+  bool is_partial_view = 3;
+}
+
+message ToolEvent {
+  oneof payload {
+    StreamChunk stdout = 1;
+    StreamChunk stderr = 2;
+    ToolCompleted completed = 3;
+    ToolFailed failed = 4;
+  }
+}
+
+message ReadFileRequest {
+  string path = 1;
+}
+
+message FileContent {
+  bytes data = 1;
+}
+
+message ListDirRequest {
+  string path = 1;
+}
+
+message DirEntry {
+  string path = 1;
+  bool is_dir = 2;
+  bool is_file = 3;
+  bool is_symlink = 4;
+}
+
+message DirListing {
+  repeated DirEntry entries = 1;
+}
+
+message GlobRequest {
+  string root = 1;
+  string pattern = 2;
+}
+
+message GlobResponse {
+  repeated string paths = 1;
+}
+
+message McpServerInfo {
+  string id = 1;
+  string display_name = 2;
+  string transport = 3;
+  string target = 4;
+  string description = 5;
+}
+
+message McpServerList {
+  repeated McpServerInfo servers = 1;
+}
+
+message McpServerRef {
+  string server = 1;
+}
+
+message McpTool {
+  string name = 1;
+  optional string description = 2;
+  optional string input_schema_json = 3;
+}
+
+message McpToolList {
+  repeated McpTool tools = 1;
+}
+
+message McpToolCall {
+  string server = 1;
+  string tool = 2;
+  string args_json = 3;
+}
+
+message McpToolEvent {
+  oneof payload {
+    StreamChunk stdout = 1;
+    StreamChunk stderr = 2;
+    McpToolResult completed = 3;
+    ToolFailed failed = 4;
+  }
+}
+
+message McpToolResult {
+  string server = 1;
+  string tool = 2;
+  bool success = 3;
+  string stdout = 4;
+  string stderr = 5;
+  string metadata_json = 6;
+}
+
+message McpResourceQuery {
+  optional string server = 1;
+}
+
+message McpResourceRecord {
+  string server = 1;
+  string uri = 2;
+  string name = 3;
+  optional string mime_type = 4;
+  optional string description = 5;
+}
+
+message McpResourceList {
+  repeated McpResourceRecord resources = 1;
+}
+
+message McpResourceRef {
+  string server = 1;
+  string uri = 2;
+}
+
+message McpResourceContentPart {
+  string kind = 1;       // "text" or "blob"
+  string uri = 2;
+  optional string mime_type = 3;
+  string text = 4;       // populated for kind="text"
+  bytes bytes = 5;       // populated for kind="blob"
+}
+
+message McpResourceContent {
+  string server = 1;
+  string uri = 2;
+  repeated McpResourceContentPart parts = 3;
+}
+
+message McpPromptArgument {
+  string name = 1;
+  optional string description = 2;
+  bool required = 3;
+}
+
+message McpPrompt {
+  string name = 1;
+  optional string description = 2;
+  repeated McpPromptArgument arguments = 3;
+}
+
+message McpPromptList {
+  repeated McpPrompt prompts = 1;
+}
+
+message McpPromptRequest {
+  string server = 1;
+  string name = 2;
+  string args_json = 3;
+}
+
+message McpPromptMessage {
+  string role = 1;
+  string text = 2;
+}
+
+message McpPromptContent {
+  string server = 1;
+  string name = 2;
+  repeated McpPromptMessage messages = 3;
+}
+
+message PermissionRequest {
+  string tool_id = 1;
+  string cwd = 2;
+  string input_json = 3;
+  optional string reason = 4;
+  // Correlator so the client can match decisions to requests.
+  string id = 5;
+}
+
+message PermissionDecision {
+  string id = 1;
+  // "allow_once" | "allow_session" | "allow_all_session" | "deny"
+  string decision = 2;
+}
+
+message PermissionUnsupported {
+  string id = 1;
+  string message = 2;
+}
+
+message PermissionMessage {
+  oneof payload {
+    PermissionRequest request = 1;
+    PermissionDecision decision = 2;
+    PermissionUnsupported unsupported = 3;
+  }
+}

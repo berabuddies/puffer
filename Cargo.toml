@@ -16,6 +16,7 @@ members = [
     "crates/puffer-resources",
     "crates/puffer-runner-api",
     "crates/puffer-runner-local",
+    "crates/puffer-runner-grpc",
     "crates/puffer-session-store",
     "crates/puffer-subscriber-email",
     "crates/puffer-subscriber-runtime",
