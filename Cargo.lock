@@ -4337,6 +4337,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "puffer-runner-api"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "puffer-runner-local"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "glob",
+ "puffer-runner-api",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "puffer-session-store"
 version = "0.1.0"
 dependencies = [

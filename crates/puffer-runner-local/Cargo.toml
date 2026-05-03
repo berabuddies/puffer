@@ -1,0 +1,14 @@
+[package]
+name = "puffer-runner-local"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+glob.workspace = true
+serde_json.workspace = true
+puffer-runner-api = { path = "../puffer-runner-api" }
+
+[dev-dependencies]
+tempfile.workspace = true

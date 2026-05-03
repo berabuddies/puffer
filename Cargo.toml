@@ -14,6 +14,8 @@ members = [
     "crates/puffer-provider-openai",
     "crates/puffer-provider-registry",
     "crates/puffer-resources",
+    "crates/puffer-runner-api",
+    "crates/puffer-runner-local",
     "crates/puffer-session-store",
     "crates/puffer-subscriber-email",
     "crates/puffer-subscriber-runtime",
