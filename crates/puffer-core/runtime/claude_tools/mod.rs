@@ -8,7 +8,7 @@ use puffer_provider_openai::OpenAIRequestConfig;
 use puffer_resources::LoadedResources;
 use puffer_runner_api::{
     check_read_freshness, NullChunkSink, ReadStateSnapshot, ReadStateUpdate, StalenessRejection,
-    ToolRequest as RunnerToolRequest,
+    ToolRequest as RunnerToolRequest, ToolRunner,
 };
 use puffer_tools::{ToolDefinition, ToolExecutionResult, ToolOutput, ToolRegistry};
 use puffer_transport_anthropic::AnthropicRequestConfig;
@@ -16,6 +16,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 use uuid::Uuid;
 
@@ -261,6 +262,14 @@ pub(crate) fn execute_tool(
 /// replicates the corresponding match arms from `execute_tool`. All data
 /// needed is passed by value/reference; no mutable application state is
 /// touched, enabling concurrent execution via `std::thread::scope`.
+///
+/// For tools in `runner_adapter::is_runner_supported(...)` (currently
+/// `Bash | Glob | Grep | WebFetch`), execution is routed through the supplied
+/// `Arc<dyn ToolRunner>` so a `RemoteToolRunner` can intercept parallel
+/// batches the same way it intercepts serial calls. The remaining
+/// parallel-safe tools (`WebSearch | ToolSearch | Skill`) intentionally stay
+/// on the in-process path: WebSearch needs provider context that isn't on
+/// the runner trait, and Skill / ToolSearch are local-only.
 pub(crate) fn execute_parallel_tool(
     definition: &ToolDefinition,
     cwd: &Path,
@@ -271,29 +280,40 @@ pub(crate) fn execute_parallel_tool(
     resources: &LoadedResources,
     registry: &ToolRegistry,
     provider_context: &ProviderToolContext<'_>,
+    runner: &Arc<dyn ToolRunner>,
 ) -> Result<ToolExecutionResult> {
+    if runner_adapter::is_runner_supported(definition.id.as_str()) {
+        let request = RunnerToolRequest {
+            tool_id: definition.id.clone(),
+            cwd: cwd.to_path_buf(),
+            working_dirs: working_dirs.to_vec(),
+            allow_all_paths,
+            input: input.clone(),
+            session_id: Some(session_id.to_string()),
+        };
+        let mut sink = NullChunkSink;
+        let outcome = runner
+            .execute_tool(request, &mut sink)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        // Parallel-safe tools never touch read-state (Read/Write/Edit/NotebookEdit
+        // are excluded by `is_parallel_safe_tool`), so any updates returned
+        // here would be a runner bug. Assert in debug, ignore in release.
+        debug_assert!(
+            outcome.read_state_updates.is_empty(),
+            "parallel-safe tool {} returned read_state_updates",
+            definition.id
+        );
+        return Ok(ToolExecutionResult {
+            tool_id: outcome.tool_id,
+            success: outcome.success,
+            output: ToolOutput {
+                stdout: outcome.stdout,
+                stderr: outcome.stderr,
+                metadata: outcome.metadata,
+            },
+        });
+    }
     match definition.id.as_str() {
-        "Bash" => {
-            let execution = bash::execute_from_value(cwd, session_id, input)?;
-            let output = serde_json::to_string_pretty(&execution.output)
-                .context("failed to serialize Bash output")?;
-            Ok(tool_result(definition, execution.success, output))
-        }
-        "Glob" => Ok(tool_result(
-            definition,
-            true,
-            glob::execute_claude_glob(cwd, working_dirs, allow_all_paths, input)?,
-        )),
-        "Grep" => Ok(tool_result(
-            definition,
-            true,
-            grep::execute_claude_grep(cwd, working_dirs, allow_all_paths, input)?,
-        )),
-        "WebFetch" => {
-            let output = serde_json::to_string_pretty(&web_fetch::execute_claude_web_fetch(input)?)
-                .context("failed to serialize WebFetch output")?;
-            Ok(tool_result(definition, true, output))
-        }
         "WebSearch" => {
             let output = match provider_context {
                 ProviderToolContext::OpenAI {

@@ -459,6 +459,9 @@ pub(super) fn execute_openai_tool_calls(
         model_id,
         structured_output,
     };
+    // Cloned before `thread::scope` so each worker can route through the
+    // active `ToolRunner` (e.g. `RemoteToolRunner`) without touching `state`.
+    let runner = state.tool_runner.clone();
 
     // Pre-allocate results array; each slot filled by either parallel or serial exec.
     let mut results: Vec<Option<(String, bool)>> = vec![None; tool_calls.len()];
@@ -487,6 +490,7 @@ pub(super) fn execute_openai_tool_calls(
             let wd = &working_dirs;
             let pc = &provider_context;
             let sid = &state.session.id;
+            let runner_clone = runner.clone();
             handles.push((
                 i,
                 s.spawn(move || {
@@ -500,6 +504,7 @@ pub(super) fn execute_openai_tool_calls(
                         resources,
                         registry,
                         pc,
+                        &runner_clone,
                     ) {
                         Ok(exec) => {
                             let output = if exec.output.stderr.is_empty() {

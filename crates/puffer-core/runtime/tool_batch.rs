@@ -66,6 +66,10 @@ pub(super) fn execute_tool_batch(
         session.tool_execution_backend(),
         inputs.model_id,
     );
+    // Cloned once before `thread::scope` because the worker closures cannot
+    // touch `inputs.state` (no `&mut AppState` across spawn boundaries).
+    // `Arc<dyn ToolRunner>` is `Send + Sync` and clones cheaply.
+    let runner = inputs.state.tool_runner.clone();
 
     let mut results: Vec<Option<(String, bool, bool)>> = vec![None; tool_calls.len()];
 
@@ -98,6 +102,7 @@ pub(super) fn execute_tool_batch(
             let registry = inputs.registry;
             let working_dirs_ref = &working_dirs;
             let provider_context_ref = &provider_context;
+            let runner_clone = runner.clone();
             // Observability-only clones are gated on a live handle so
             // the disabled path does no per-tool string allocations
             // (review v4 BLOCK #1).
@@ -143,6 +148,7 @@ pub(super) fn execute_tool_batch(
                         resources,
                         registry,
                         provider_context_ref,
+                        &runner_clone,
                     ) {
                         Ok(exec) => {
                             let terminate = extract_terminate(&exec.output.metadata);
