@@ -290,7 +290,10 @@ pub(crate) fn run_streaming_loop(
             turn_index,
         );
         turn_index += 1;
-        // Provider span (Langfuse "generation").
+        // Provider span (Langfuse "generation"). Stamp request
+        // parameters from gen_ai semconv so the Langfuse generation
+        // panel renders model invocation settings (review against
+        // Langfuse demo: max_tokens + reasoning_effort were missing).
         let mut provider_span = puffer_observability::start_provider_span(
             inputs.observability.as_ref(),
             turn_span.context(),
@@ -298,6 +301,27 @@ pub(crate) fn run_streaming_loop(
             &inputs.provider.default_api,
             inputs.model_id,
         );
+        if inputs.observability.is_some() {
+            if let Some(model_info) = inputs
+                .provider
+                .models
+                .iter()
+                .find(|m| m.id == inputs.model_id)
+            {
+                if model_info.max_output_tokens > 0 {
+                    provider_span.set_str(
+                        puffer_observability::GEN_AI_REQUEST_MAX_TOKENS,
+                        model_info.max_output_tokens.to_string(),
+                    );
+                }
+            }
+            if !inputs.state.effort_level.is_empty() {
+                provider_span.set_str(
+                    "gen_ai.request.reasoning_effort",
+                    inputs.state.effort_level.clone(),
+                );
+            }
+        }
         // Langfuse renders the generation Input pane from
         // `langfuse.observation.input`. Build the messages-array JSON
         // ONLY when observability is on AND the redaction policy
