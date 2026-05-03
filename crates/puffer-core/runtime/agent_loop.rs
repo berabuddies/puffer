@@ -904,15 +904,8 @@ pub(crate) fn run_streaming_loop(
 }
 
 
-/// Executes one batch of tool calls produced by a single assistant turn.
-///
-/// Mirrors the existing serial behavior of `execute_anthropic_tool_calls`
-/// (head-truncation per tool, aggregate budget). Parallel-safe batching
-/// Mirrors the OLD `execute_openai_tool_calls` parallel batching for ALL
-/// providers: parallel-safe tools run concurrently in a `thread::scope`,
-/// the rest fall back to serial execution with full `&mut state` access.
-/// Permission resolution always runs serially up front because
-/// `AllowSession` mutates `state`.
+// `execute_tool_batch` lives in `runtime/tool_batch.rs`; the streaming
+// loop above and `blocking_loop::run_blocking_loop` call into it.
 
 #[cfg(test)]
 mod cancel_token_tests {
