@@ -45,11 +45,31 @@ pub struct ToolRequest {
     pub tool_id: String,
     /// Working directory for the call.
     pub cwd: PathBuf,
+    /// Additional roots that the sandbox treats as in-bounds for path
+    /// resolution (the session's `working_dirs` list).
+    #[serde(default)]
+    pub working_dirs: Vec<PathBuf>,
+    /// When true, path-sandbox checks are bypassed (`danger-full-access`).
+    #[serde(default)]
+    pub allow_all_paths: bool,
     /// Tool input as a JSON value (matches the tool's input schema).
     pub input: serde_json::Value,
     /// Optional opaque session token used for tying related calls together
     /// (e.g. background bash processes share a session id).
     pub session_id: Option<String>,
+}
+
+/// One read-state-relevant fact reported by `ToolRunner::execute_tool`.
+///
+/// The runner is a pure function of (request, filesystem) → result and does
+/// not own per-session staleness tracking. After a successful call the
+/// dispatcher applies these updates to whatever in-memory map it keeps for
+/// the running session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReadStateUpdate {
+    pub path: PathBuf,
+    pub timestamp_ms: u128,
+    pub is_partial_view: bool,
 }
 
 /// Final, non-streaming summary returned by a tool execution.
@@ -60,6 +80,10 @@ pub struct ToolResult {
     pub stdout: String,
     pub stderr: String,
     pub metadata: serde_json::Value,
+    /// Read-state-relevant facts the dispatcher should apply after a
+    /// successful call. Empty for tools that don't touch tracked files.
+    #[serde(default)]
+    pub read_state_updates: Vec<ReadStateUpdate>,
 }
 
 /// One entry returned by `ToolRunner::list_dir`.
@@ -226,6 +250,59 @@ impl RunnerError {
     pub fn mcp<E: std::fmt::Display>(error: E) -> Self {
         RunnerError::Mcp(error.to_string())
     }
+}
+
+/// Per-session snapshot used by the dispatcher's pre-flight staleness check.
+///
+/// Mirrors the runtime's `ClaudeReadState` exactly so the dispatcher can
+/// hand its in-memory map to the helper without copying.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadStateSnapshot {
+    pub timestamp_ms: u128,
+    pub is_partial_view: bool,
+}
+
+/// Reasons the dispatcher's pre-flight staleness gate may reject a call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StalenessRejection {
+    /// The path was never (fully) read in this session.
+    NotRead,
+    /// The path was read, but the on-disk mtime has advanced since.
+    StaleRead,
+}
+
+impl StalenessRejection {
+    pub const NOT_READ_MESSAGE: &'static str =
+        "File has not been read yet. Read it first before writing to it.";
+    pub const STALE_READ_MESSAGE: &'static str = "File has been modified since read, either by the user or by a linter. Read it again before attempting to write it.";
+
+    pub fn message(&self) -> &'static str {
+        match self {
+            StalenessRejection::NotRead => Self::NOT_READ_MESSAGE,
+            StalenessRejection::StaleRead => Self::STALE_READ_MESSAGE,
+        }
+    }
+}
+
+/// Validates that a tool requiring a prior full-file Read may proceed.
+///
+/// `current_mtime_ms` is the on-disk mtime of `path` at dispatch time;
+/// callers compute it from `std::fs::metadata` (or the runner's
+/// `read_file` future equivalent).
+pub fn check_read_freshness(
+    snapshot: Option<&ReadStateSnapshot>,
+    current_mtime_ms: u128,
+) -> Result<(), StalenessRejection> {
+    let Some(snapshot) = snapshot else {
+        return Err(StalenessRejection::NotRead);
+    };
+    if snapshot.is_partial_view {
+        return Err(StalenessRejection::NotRead);
+    }
+    if current_mtime_ms > snapshot.timestamp_ms {
+        return Err(StalenessRejection::StaleRead);
+    }
+    Ok(())
 }
 
 /// Streaming sink for partial output from long-running tools.

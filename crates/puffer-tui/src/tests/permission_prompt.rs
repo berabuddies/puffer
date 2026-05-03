@@ -39,6 +39,7 @@ fn poll_pending_submit_opens_permission_prompt_overlay() {
             started_at: std::time::Instant::now(),
             thinking_active: false,
             status_hint: None,
+            cancel: puffer_core::CancelToken::new(),
         }),
         ..TuiState::default()
     };

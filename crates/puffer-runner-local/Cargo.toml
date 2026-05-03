@@ -8,7 +8,10 @@ license.workspace = true
 anyhow.workspace = true
 glob.workspace = true
 serde_json.workspace = true
+uuid.workspace = true
+puffer-core = { path = "../puffer-core" }
 puffer-runner-api = { path = "../puffer-runner-api" }
 
 [dev-dependencies]
 tempfile.workspace = true
+uuid.workspace = true

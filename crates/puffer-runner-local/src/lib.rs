@@ -1,25 +1,11 @@
 //! In-process implementation of [`puffer_runner_api::ToolRunner`].
 //!
-//! This is the Phase 0 skeleton: it implements the filesystem methods
-//! (`read_file`, `list_dir`, `glob`) and ships stub MCP / `execute_tool` /
-//! `request_permission` methods that return `RunnerError::Unsupported`
-//! with a descriptive message.
-//!
-//! Subsequent phases will:
-//!
-//! * Phase 0 (call-site refactor): wire `puffer-resources::loader` to call
-//!   `LocalToolRunner::read_file` / `list_dir` / `glob` instead of using
-//!   `std::fs` directly.
-//! * Phase 0 (cont.): port `claude_tools::execute_tool` into
-//!   `LocalToolRunner::execute_tool`. This needs access to `AppState` for
-//!   the stateful tools (Read/Write/Edit/NotebookEdit), so the trait's
-//!   shape will likely grow a state handle (or that state will be exposed
-//!   through `ChunkSink::event` round-trips).
-//! * Phase 1: relocate MCP server lifecycle here from
-//!   `puffer-core::runtime::local_mcp_resources`.
-//! * Phase 3: wire `request_permission` to either an in-process callback
-//!   or the bidirectional gRPC stream.
+//! This wraps the existing `claude_tools::*` executors via the `runner_adapter`
+//! shim in `puffer-core`. Filesystem methods (`read_file` / `list_dir` /
+//! `glob`) are implemented directly on top of `std::fs` and `glob`. MCP and
+//! `request_permission` remain stubs (Phase 1 / Phase 3).
 
+use puffer_core::runner_adapter;
 use puffer_runner_api::{
     ChunkSink, DirEntry, McpPrompt, McpPromptContent, McpResourceContent, McpResourceRecord,
     McpResult, McpServerInfo, McpTool, PermissionDecision, PermissionRequest, RunnerCapabilities,
@@ -27,12 +13,10 @@ use puffer_runner_api::{
 };
 use std::path::{Path, PathBuf};
 
-/// In-process tool runner backed by `std::fs` and (eventually) the existing
-/// puffer-core executors.
+/// In-process tool runner backed by `std::fs` and the existing puffer-core
+/// claude-tool executors.
 #[derive(Debug, Clone, Default)]
 pub struct LocalToolRunner {
-    /// Optional sandbox: when set, all `read_file`/`list_dir`/`glob` paths
-    /// must canonicalize within one of these roots.
     sandbox_roots: Vec<PathBuf>,
 }
 
@@ -72,7 +56,10 @@ impl ToolRunner for LocalToolRunner {
         RunnerCapabilities {
             backend: "local".into(),
             version: env!("CARGO_PKG_VERSION").into(),
-            supported_tools: Vec::new(),
+            supported_tools: runner_adapter::supported_runner_tools()
+                .iter()
+                .map(|tool| (*tool).to_string())
+                .collect(),
             mcp_supported: false,
             permission_relay_supported: false,
         }
@@ -81,12 +68,15 @@ impl ToolRunner for LocalToolRunner {
     fn execute_tool(
         &self,
         req: ToolRequest,
-        _sink: &mut dyn ChunkSink,
+        sink: &mut dyn ChunkSink,
     ) -> Result<ToolResult, RunnerError> {
-        Err(RunnerError::Unsupported(format!(
-            "execute_tool({}) is not yet wired through LocalToolRunner; use puffer-core::runtime::tool_executor for now",
-            req.tool_id
-        )))
+        if !runner_adapter::is_runner_supported(req.tool_id.as_str()) {
+            return Err(RunnerError::Unsupported(format!(
+                "tool `{}` is not handled by the local runner",
+                req.tool_id
+            )));
+        }
+        runner_adapter::execute_runner_tool(&req, sink).map_err(RunnerError::execution)
     }
 
     fn read_file(&self, path: &Path) -> Result<Vec<u8>, RunnerError> {
@@ -269,11 +259,13 @@ mod tests {
     }
 
     #[test]
-    fn execute_tool_returns_unsupported() {
+    fn unknown_tool_id_is_unsupported() {
         let runner = LocalToolRunner::new();
         let req = ToolRequest {
-            tool_id: "Bash".into(),
+            tool_id: "DefinitelyUnknown".into(),
             cwd: PathBuf::from("/"),
+            working_dirs: Vec::new(),
+            allow_all_paths: false,
             input: serde_json::json!({}),
             session_id: None,
         };
@@ -287,6 +279,8 @@ mod tests {
         let runner = LocalToolRunner::new();
         let caps = runner.capabilities();
         assert_eq!(caps.backend, "local");
+        assert!(caps.supported_tools.iter().any(|name| name == "Bash"));
+        assert!(caps.supported_tools.iter().any(|name| name == "Sleep"));
     }
 
     #[test]

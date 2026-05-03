@@ -8,6 +8,7 @@ mod model_preferences;
 mod permissions;
 mod plan_mode;
 mod plans;
+pub mod runner_adapter;
 mod runtime;
 mod skill_support;
 mod state;

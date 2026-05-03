@@ -4250,6 +4250,7 @@ dependencies = [
  "puffer-provider-openai",
  "puffer-provider-registry",
  "puffer-resources",
+ "puffer-runner-api",
  "puffer-session-store",
  "puffer-subscriber-runtime",
  "puffer-subscriptions",
@@ -4351,9 +4352,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "glob",
+ "puffer-core",
  "puffer-runner-api",
  "serde_json",
  "tempfile",
+ "uuid",
 ]
 
 [[package]]

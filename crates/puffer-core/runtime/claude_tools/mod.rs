@@ -14,17 +14,17 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use uuid::Uuid;
 
-mod bash;
-mod edit;
-mod glob;
-mod grep;
+pub mod bash;
+pub mod edit;
+pub mod glob;
+pub mod grep;
 pub(super) mod mcp_resources;
-mod notebook_edit;
-mod read;
+pub mod notebook_edit;
+pub mod read;
 pub(crate) mod skill;
 pub(crate) mod tool_search;
-mod web_fetch;
-mod web_search;
+pub mod web_fetch;
+pub mod web_search;
 
 /// Retries a blocking HTTP send operation up to `max_attempts` times with 1s delay
 /// on transient connection/timeout errors.
@@ -56,7 +56,7 @@ fn is_retryable_send_error(error: &anyhow::Error) -> bool {
     })
 }
 pub(crate) mod workflow;
-mod write;
+pub mod write;
 
 /// Carries provider-specific execution context for runtime-backed tools.
 pub(crate) enum ProviderToolContext<'a> {
