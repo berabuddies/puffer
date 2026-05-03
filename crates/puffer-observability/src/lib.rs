@@ -49,7 +49,8 @@ pub use attributes::{
 };
 pub use hooks::{
     start_agent_loop_span, start_compaction_span, start_provider_span, start_reflection_span,
-    start_subagent_generation_span, start_tool_span, start_turn_span, SpanGuard,
+    start_subagent_generation_span, start_subagent_generation_span_at, start_tool_span,
+    start_turn_span, SpanGuard,
 };
 pub use opentelemetry::Context as OtelContext;
 pub use redaction::{redact, ContentKind, RedactionPolicy};

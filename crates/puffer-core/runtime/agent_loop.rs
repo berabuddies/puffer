@@ -181,20 +181,36 @@ pub(crate) fn run_streaming_loop(
             puffer_observability::PUFFER_PROVIDER_ID,
             inputs.provider.id.clone(),
         );
+        let is_subagent = inputs.state.parent_session_id.is_some();
         if let Some(parent_sid) = inputs.state.parent_session_id.clone() {
             span.set_str("puffer.parent.session_id", parent_sid);
             span.set_str("puffer.subagent.kind", "agent_tool");
         }
-        span.set_content(
-            puffer_observability::LANGFUSE_TRACE_INPUT,
-            puffer_observability::ContentKind::Prompt,
-            inputs.input,
-        );
-        span.set_content(
-            "puffer.input",
-            puffer_observability::ContentKind::Prompt,
-            inputs.input,
-        );
+        // Subagent runs (reflection judge, spawned agents) build their
+        // input prompt by rendering the parent transcript including
+        // tool calls + outputs. Gate on `include_tool_io` in addition
+        // to `include_prompts` so a viewer with `INCLUDE_PROMPTS=1,
+        // INCLUDE_TOOL_IO=0` does not see embedded tool I/O on those
+        // traces (review v5 BLOCK #1). Top-level user prompts go
+        // through the `include_prompts` gate alone.
+        let policy = handle.redaction();
+        let trace_input_allowed = if is_subagent {
+            policy.include_prompts() && policy.include_tool_io()
+        } else {
+            policy.include_prompts()
+        };
+        if trace_input_allowed {
+            span.set_content(
+                puffer_observability::LANGFUSE_TRACE_INPUT,
+                puffer_observability::ContentKind::Prompt,
+                inputs.input,
+            );
+            span.set_content(
+                "puffer.input",
+                puffer_observability::ContentKind::Prompt,
+                inputs.input,
+            );
+        }
         span
     } else {
         puffer_observability::SpanGuard::Disabled
@@ -357,9 +373,22 @@ pub(crate) fn run_streaming_loop(
                                 })
                             }
                             ConversationItem::Compaction { summary } => {
+                                // Compaction summaries can carry prior
+                                // tool I/O verbatim, so respect the
+                                // `include_tool_io` flag here too —
+                                // review v5 finding around
+                                // ConversationItem::Compaction leak.
+                                let body = if include_tool_io {
+                                    serde_json::Value::String(summary.clone())
+                                } else {
+                                    serde_json::Value::String(format!(
+                                        "[redacted: {} bytes compaction summary]",
+                                        summary.len()
+                                    ))
+                                };
                                 serde_json::json!({
                                     "role": "system",
-                                    "compaction_summary": summary
+                                    "compaction_summary": body
                                 })
                             }
                         })
@@ -546,14 +575,21 @@ pub(crate) fn run_streaming_loop(
         // onto attributes so a viewer can tell exactly what happened
         // (config-disabled / judge-skipped / code-judge-fired /
         // llm-judge-fired-with-decision-X / checkpoint-injected).
+        // Capture start_time before the observe call so the inner
+        // judge generation span (created post-hoc when we see the
+        // LlmJudgeRequest event) can backdate to the real LLM call
+        // start — review v5 BLOCK #3.
+        let reflection_start_time = std::time::SystemTime::now();
         let mut reflection_span = puffer_observability::start_reflection_span(
             inputs.observability.as_ref(),
             turn_span.context(),
         );
-        reflection_span.set_str(
-            "puffer.reflection.config.enabled",
-            inputs.reflection_config.is_some().to_string(),
-        );
+        if inputs.observability.is_some() {
+            reflection_span.set_str(
+                "puffer.reflection.config.enabled",
+                inputs.reflection_config.is_some().to_string(),
+            );
+        }
         // Inner subagent generation span — only created if the LLM
         // judge actually fires. Cached lazily so the reflection
         // wrapper stays a plain SPAN when nothing of substance happens.
@@ -568,9 +604,16 @@ pub(crate) fn run_streaming_loop(
                 inputs.auth_store,
             )
         }) {
-            reflection_span.set_str("puffer.reflection.observed", "true");
+            // Always emit ReflectionTrace events for the TUI / trajectory.
             for trace_event in &observation.trace_events {
                 on_event(TurnStreamEvent::ReflectionTrace(trace_event.clone()));
+            }
+            // Span attribute mutations are gated on a live handle so
+            // the disabled path skips all `to_string()` / `clone()`
+            // (review v5 BLOCK #2).
+            if inputs.observability.is_some() {
+                reflection_span.set_str("puffer.reflection.observed", "true");
+                for trace_event in &observation.trace_events {
                 match trace_event {
                     ReflectionTraceEvent::BatchObserved {
                         evaluation_score,
@@ -640,11 +683,14 @@ pub(crate) fn run_streaming_loop(
                         ..
                     } => {
                         // First evidence the judge actually fired:
-                        // create the inner subagent generation span.
-                        let mut span = puffer_observability::start_subagent_generation_span(
+                        // create the inner subagent generation span,
+                        // backdated to the start of `observe_batch_with_judge`
+                        // so the span bounds the real LLM latency.
+                        let mut span = puffer_observability::start_subagent_generation_span_at(
                             inputs.observability.as_ref(),
                             reflection_span.context(),
                             "reflection_judge",
+                            Some(reflection_start_time),
                         );
                         if let Some(p) = provider {
                             span.set_str(puffer_observability::GEN_AI_SYSTEM, p.clone());
@@ -749,6 +795,7 @@ pub(crate) fn run_streaming_loop(
                         );
                     }
                 }
+                }
             }
             reflection_traces.extend(observation.trace_events);
             if let Some(checkpoint) = observation.checkpoint {
@@ -757,7 +804,7 @@ pub(crate) fn run_streaming_loop(
                 ));
                 items.push(ConversationItem::user_message(checkpoint.prompt));
             }
-        } else {
+        } else if inputs.observability.is_some() {
             reflection_span.set_str("puffer.reflection.observed", "false");
         }
         if let Some(span) = judge_gen_span {
