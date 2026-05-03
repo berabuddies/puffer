@@ -177,6 +177,13 @@ pub(super) fn build_llm_judge_side_state(
     prompt: &str,
 ) -> AppState {
     let mut side_state = state.clone();
+    // The reflection judge is a subagent: mark the side state so its
+    // root agent_loop trace selects `PromptWithEmbeddedToolIo` for
+    // `langfuse.trace.input` (judge prompt embeds rendered tool
+    // calls/outputs). Without this the blocking-path judge would
+    // route through `ContentKind::Prompt` and leak tool I/O when only
+    // include_prompts is on. Review v6 BLOCK #1.
+    side_state.parent_session_id = Some(state.session.id.to_string());
     side_state.transcript.clear();
     side_state.plan_mode = false;
     side_state.plan_mode_attachment_turns = 0;
