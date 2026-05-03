@@ -15,7 +15,7 @@ use crate::proto;
 
 // --- ToolRequest -------------------------------------------------------
 
-pub fn to_proto_tool_request(req: &ToolRequest) -> proto::ToolRequest {
+pub(crate) fn to_proto_tool_request(req: &ToolRequest) -> proto::ToolRequest {
     proto::ToolRequest {
         tool_id: req.tool_id.clone(),
         cwd: req.cwd.display().to_string(),
@@ -30,7 +30,7 @@ pub fn to_proto_tool_request(req: &ToolRequest) -> proto::ToolRequest {
     }
 }
 
-pub fn from_proto_tool_request(req: proto::ToolRequest) -> Result<ToolRequest, RunnerError> {
+pub(crate) fn from_proto_tool_request(req: proto::ToolRequest) -> Result<ToolRequest, RunnerError> {
     let input = if req.input_json.is_empty() {
         serde_json::Value::Null
     } else {
@@ -49,7 +49,7 @@ pub fn from_proto_tool_request(req: proto::ToolRequest) -> Result<ToolRequest, R
 
 // --- ToolResult --------------------------------------------------------
 
-pub fn to_proto_tool_completed(result: &ToolResult) -> proto::ToolCompleted {
+pub(crate) fn to_proto_tool_completed(result: &ToolResult) -> proto::ToolCompleted {
     proto::ToolCompleted {
         tool_id: result.tool_id.clone(),
         success: result.success,
@@ -64,7 +64,7 @@ pub fn to_proto_tool_completed(result: &ToolResult) -> proto::ToolCompleted {
     }
 }
 
-pub fn from_proto_tool_completed(value: proto::ToolCompleted) -> Result<ToolResult, RunnerError> {
+pub(crate) fn from_proto_tool_completed(value: proto::ToolCompleted) -> Result<ToolResult, RunnerError> {
     let metadata = if value.metadata_json.is_empty() {
         serde_json::Value::Null
     } else {
@@ -85,7 +85,7 @@ pub fn from_proto_tool_completed(value: proto::ToolCompleted) -> Result<ToolResu
     })
 }
 
-pub fn to_proto_read_state_update(u: &ReadStateUpdate) -> proto::ReadStateUpdate {
+pub(crate) fn to_proto_read_state_update(u: &ReadStateUpdate) -> proto::ReadStateUpdate {
     proto::ReadStateUpdate {
         path: u.path.display().to_string(),
         timestamp_ms: u.timestamp_ms.to_string(),
@@ -93,7 +93,7 @@ pub fn to_proto_read_state_update(u: &ReadStateUpdate) -> proto::ReadStateUpdate
     }
 }
 
-pub fn from_proto_read_state_update(
+pub(crate) fn from_proto_read_state_update(
     u: proto::ReadStateUpdate,
 ) -> Result<ReadStateUpdate, RunnerError> {
     let timestamp_ms: u128 = u
@@ -109,7 +109,7 @@ pub fn from_proto_read_state_update(
 
 // --- Capabilities ------------------------------------------------------
 
-pub fn to_proto_capabilities(c: &RunnerCapabilities) -> proto::RunnerCapabilities {
+pub(crate) fn to_proto_capabilities(c: &RunnerCapabilities) -> proto::RunnerCapabilities {
     proto::RunnerCapabilities {
         backend: c.backend.clone(),
         version: c.version.clone(),
@@ -119,7 +119,7 @@ pub fn to_proto_capabilities(c: &RunnerCapabilities) -> proto::RunnerCapabilitie
     }
 }
 
-pub fn from_proto_capabilities(c: proto::RunnerCapabilities) -> RunnerCapabilities {
+pub(crate) fn from_proto_capabilities(c: proto::RunnerCapabilities) -> RunnerCapabilities {
     RunnerCapabilities {
         backend: c.backend,
         version: c.version,
@@ -131,7 +131,7 @@ pub fn from_proto_capabilities(c: proto::RunnerCapabilities) -> RunnerCapabiliti
 
 // --- DirEntry ----------------------------------------------------------
 
-pub fn to_proto_dir_entry(entry: &DirEntry) -> proto::DirEntry {
+pub(crate) fn to_proto_dir_entry(entry: &DirEntry) -> proto::DirEntry {
     proto::DirEntry {
         path: entry.path.display().to_string(),
         is_dir: entry.is_dir,
@@ -140,7 +140,7 @@ pub fn to_proto_dir_entry(entry: &DirEntry) -> proto::DirEntry {
     }
 }
 
-pub fn from_proto_dir_entry(entry: proto::DirEntry) -> DirEntry {
+pub(crate) fn from_proto_dir_entry(entry: proto::DirEntry) -> DirEntry {
     DirEntry {
         path: PathBuf::from(entry.path),
         is_dir: entry.is_dir,
@@ -151,7 +151,7 @@ pub fn from_proto_dir_entry(entry: proto::DirEntry) -> DirEntry {
 
 // --- MCP servers / tools ----------------------------------------------
 
-pub fn to_proto_mcp_server(info: &McpServerInfo) -> proto::McpServerInfo {
+pub(crate) fn to_proto_mcp_server(info: &McpServerInfo) -> proto::McpServerInfo {
     proto::McpServerInfo {
         id: info.id.clone(),
         display_name: info.display_name.clone(),
@@ -161,7 +161,7 @@ pub fn to_proto_mcp_server(info: &McpServerInfo) -> proto::McpServerInfo {
     }
 }
 
-pub fn from_proto_mcp_server(info: proto::McpServerInfo) -> McpServerInfo {
+pub(crate) fn from_proto_mcp_server(info: proto::McpServerInfo) -> McpServerInfo {
     McpServerInfo {
         id: info.id,
         display_name: info.display_name,
@@ -171,7 +171,7 @@ pub fn from_proto_mcp_server(info: proto::McpServerInfo) -> McpServerInfo {
     }
 }
 
-pub fn to_proto_mcp_tool(tool: &McpTool) -> proto::McpTool {
+pub(crate) fn to_proto_mcp_tool(tool: &McpTool) -> proto::McpTool {
     proto::McpTool {
         name: tool.name.clone(),
         description: tool.description.clone(),
@@ -179,7 +179,7 @@ pub fn to_proto_mcp_tool(tool: &McpTool) -> proto::McpTool {
     }
 }
 
-pub fn from_proto_mcp_tool(tool: proto::McpTool) -> Result<McpTool, RunnerError> {
+pub(crate) fn from_proto_mcp_tool(tool: proto::McpTool) -> Result<McpTool, RunnerError> {
     let input_schema = match tool.input_schema_json {
         Some(s) if !s.is_empty() => Some(
             serde_json::from_str(&s)
@@ -194,7 +194,7 @@ pub fn from_proto_mcp_tool(tool: proto::McpTool) -> Result<McpTool, RunnerError>
     })
 }
 
-pub fn to_proto_mcp_result(r: &McpResult) -> proto::McpToolResult {
+pub(crate) fn to_proto_mcp_result(r: &McpResult) -> proto::McpToolResult {
     proto::McpToolResult {
         server: r.server.clone(),
         tool: r.tool.clone(),
@@ -205,7 +205,7 @@ pub fn to_proto_mcp_result(r: &McpResult) -> proto::McpToolResult {
     }
 }
 
-pub fn from_proto_mcp_result(r: proto::McpToolResult) -> Result<McpResult, RunnerError> {
+pub(crate) fn from_proto_mcp_result(r: proto::McpToolResult) -> Result<McpResult, RunnerError> {
     let metadata = if r.metadata_json.is_empty() {
         serde_json::Value::Null
     } else {
@@ -222,7 +222,7 @@ pub fn from_proto_mcp_result(r: proto::McpToolResult) -> Result<McpResult, Runne
     })
 }
 
-pub fn to_proto_mcp_resource_record(r: &McpResourceRecord) -> proto::McpResourceRecord {
+pub(crate) fn to_proto_mcp_resource_record(r: &McpResourceRecord) -> proto::McpResourceRecord {
     proto::McpResourceRecord {
         server: r.server.clone(),
         uri: r.uri.clone(),
@@ -232,7 +232,7 @@ pub fn to_proto_mcp_resource_record(r: &McpResourceRecord) -> proto::McpResource
     }
 }
 
-pub fn from_proto_mcp_resource_record(r: proto::McpResourceRecord) -> McpResourceRecord {
+pub(crate) fn from_proto_mcp_resource_record(r: proto::McpResourceRecord) -> McpResourceRecord {
     McpResourceRecord {
         server: r.server,
         uri: r.uri,
@@ -242,7 +242,7 @@ pub fn from_proto_mcp_resource_record(r: proto::McpResourceRecord) -> McpResourc
     }
 }
 
-pub fn to_proto_mcp_resource_content(c: &McpResourceContent) -> proto::McpResourceContent {
+pub(crate) fn to_proto_mcp_resource_content(c: &McpResourceContent) -> proto::McpResourceContent {
     proto::McpResourceContent {
         server: c.server.clone(),
         uri: c.uri.clone(),
@@ -250,7 +250,7 @@ pub fn to_proto_mcp_resource_content(c: &McpResourceContent) -> proto::McpResour
     }
 }
 
-pub fn from_proto_mcp_resource_content(
+pub(crate) fn from_proto_mcp_resource_content(
     c: proto::McpResourceContent,
 ) -> Result<McpResourceContent, RunnerError> {
     let mut parts = Vec::with_capacity(c.parts.len());
@@ -264,7 +264,7 @@ pub fn from_proto_mcp_resource_content(
     })
 }
 
-pub fn to_proto_mcp_resource_part(p: &McpResourceContentPart) -> proto::McpResourceContentPart {
+pub(crate) fn to_proto_mcp_resource_part(p: &McpResourceContentPart) -> proto::McpResourceContentPart {
     match p {
         McpResourceContentPart::Text {
             uri,
@@ -291,7 +291,7 @@ pub fn to_proto_mcp_resource_part(p: &McpResourceContentPart) -> proto::McpResou
     }
 }
 
-pub fn from_proto_mcp_resource_part(
+pub(crate) fn from_proto_mcp_resource_part(
     p: proto::McpResourceContentPart,
 ) -> Result<McpResourceContentPart, RunnerError> {
     match p.kind.as_str() {
@@ -311,7 +311,7 @@ pub fn from_proto_mcp_resource_part(
     }
 }
 
-pub fn to_proto_mcp_prompt(p: &McpPrompt) -> proto::McpPrompt {
+pub(crate) fn to_proto_mcp_prompt(p: &McpPrompt) -> proto::McpPrompt {
     proto::McpPrompt {
         name: p.name.clone(),
         description: p.description.clone(),
@@ -327,7 +327,7 @@ pub fn to_proto_mcp_prompt(p: &McpPrompt) -> proto::McpPrompt {
     }
 }
 
-pub fn from_proto_mcp_prompt(p: proto::McpPrompt) -> McpPrompt {
+pub(crate) fn from_proto_mcp_prompt(p: proto::McpPrompt) -> McpPrompt {
     McpPrompt {
         name: p.name,
         description: p.description,
@@ -343,7 +343,7 @@ pub fn from_proto_mcp_prompt(p: proto::McpPrompt) -> McpPrompt {
     }
 }
 
-pub fn to_proto_mcp_prompt_content(c: &McpPromptContent) -> proto::McpPromptContent {
+pub(crate) fn to_proto_mcp_prompt_content(c: &McpPromptContent) -> proto::McpPromptContent {
     proto::McpPromptContent {
         server: c.server.clone(),
         name: c.name.clone(),
@@ -358,7 +358,7 @@ pub fn to_proto_mcp_prompt_content(c: &McpPromptContent) -> proto::McpPromptCont
     }
 }
 
-pub fn from_proto_mcp_prompt_content(c: proto::McpPromptContent) -> McpPromptContent {
+pub(crate) fn from_proto_mcp_prompt_content(c: proto::McpPromptContent) -> McpPromptContent {
     McpPromptContent {
         server: c.server,
         name: c.name,
@@ -375,7 +375,7 @@ pub fn from_proto_mcp_prompt_content(c: proto::McpPromptContent) -> McpPromptCon
 
 // --- Permission --------------------------------------------------------
 
-pub fn to_proto_permission_request(req: &PermissionRequest, id: &str) -> proto::PermissionRequest {
+pub(crate) fn to_proto_permission_request(req: &PermissionRequest, id: &str) -> proto::PermissionRequest {
     proto::PermissionRequest {
         tool_id: req.tool_id.clone(),
         cwd: req.cwd.display().to_string(),
@@ -385,7 +385,7 @@ pub fn to_proto_permission_request(req: &PermissionRequest, id: &str) -> proto::
     }
 }
 
-pub fn from_proto_permission_request(
+pub(crate) fn from_proto_permission_request(
     req: proto::PermissionRequest,
 ) -> Result<(String, PermissionRequest), RunnerError> {
     let input = if req.input_json.is_empty() {
@@ -405,7 +405,7 @@ pub fn from_proto_permission_request(
     ))
 }
 
-pub fn permission_decision_to_str(d: PermissionDecision) -> &'static str {
+pub(crate) fn permission_decision_to_str(d: PermissionDecision) -> &'static str {
     match d {
         PermissionDecision::AllowOnce => "allow_once",
         PermissionDecision::AllowSession => "allow_session",
@@ -414,7 +414,7 @@ pub fn permission_decision_to_str(d: PermissionDecision) -> &'static str {
     }
 }
 
-pub fn permission_decision_from_str(s: &str) -> Result<PermissionDecision, RunnerError> {
+pub(crate) fn permission_decision_from_str(s: &str) -> Result<PermissionDecision, RunnerError> {
     match s {
         "allow_once" => Ok(PermissionDecision::AllowOnce),
         "allow_session" => Ok(PermissionDecision::AllowSession),
@@ -428,7 +428,7 @@ pub fn permission_decision_from_str(s: &str) -> Result<PermissionDecision, Runne
 
 // --- RunnerError ↔ tonic::Status --------------------------------------
 
-pub fn runner_error_to_status(err: &RunnerError) -> tonic::Status {
+pub(crate) fn runner_error_to_status(err: &RunnerError) -> tonic::Status {
     use tonic::Code;
     let code = match err {
         RunnerError::NotFound(_) => Code::NotFound,
@@ -443,7 +443,7 @@ pub fn runner_error_to_status(err: &RunnerError) -> tonic::Status {
     tonic::Status::new(code, err.to_string())
 }
 
-pub fn status_to_runner_error(status: tonic::Status) -> RunnerError {
+pub(crate) fn status_to_runner_error(status: tonic::Status) -> RunnerError {
     use tonic::Code;
     let msg = status.message().to_string();
     match status.code() {

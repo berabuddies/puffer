@@ -13,6 +13,10 @@ use puffer_runner_api::ToolRunner;
 use puffer_runner_grpc::RemoteToolRunner;
 use puffer_runner_local::LocalToolRunner;
 
+/// Returns the `ToolRunner` instance that `AppState` should use for this
+/// process: a remote gRPC runner when `config.remote_runner` is set, or a
+/// local in-process runner otherwise. Falls back to local on connect
+/// failure so a stale config doesn't brick the binary.
 pub fn select_tool_runner(config: &PufferConfig) -> Arc<dyn ToolRunner> {
     let Some(remote) = config.remote_runner.as_ref() else {
         return Arc::new(LocalToolRunner::new());

@@ -56,6 +56,8 @@ pub struct ToolRunnerService {
 }
 
 impl ToolRunnerService {
+    /// Wraps `runner` in a tonic-ready service. No auth token, default
+    /// permission mode.
     pub fn new(runner: Arc<dyn ToolRunner>) -> Self {
         Self {
             runner,
@@ -64,11 +66,16 @@ impl ToolRunnerService {
         }
     }
 
+    /// Requires every RPC to carry `authorization: Bearer <token>` metadata
+    /// matching `token`. Calls without the header are rejected with
+    /// `Unauthenticated`.
     pub fn with_auth_token(mut self, token: Option<String>) -> Self {
         self.auth_token = token.map(Arc::new);
         self
     }
 
+    /// Overrides the default `PermissionMode` (used by the
+    /// `permission_channel` RPC).
     pub fn with_permission_mode(mut self, mode: PermissionMode) -> Self {
         self.permission_mode = mode;
         self
