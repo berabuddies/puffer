@@ -222,6 +222,78 @@ fn for_langfuse_strips_trailing_slash() {
     assert_eq!(cfg.endpoint, "http://localhost:3000/api/public/otel");
 }
 
+/// Concurrent subagent emission. Three threads each open a fresh
+/// agent_loop span (= a separate "subagent" trace), set attributes,
+/// and drop. The mock OTLP collector should receive all of them
+/// without losing or corrupting any. Reproduces the runtime path
+/// where multiple `Agent` background tools or teammates run in
+/// parallel and emit traces concurrently.
+#[test]
+fn concurrent_subagent_spans_all_arrive() {
+    let _guard = global_test_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let server = spawn_mock();
+    let handle = ObservabilityHandle::init(config_for(&server.addr))
+        .expect("init handle");
+
+    let workers = (0..3)
+        .map(|i| {
+            let handle = handle.clone();
+            thread::spawn(move || {
+                let tracer = handle.tracer();
+                let mut span = tracer.start(format!("agent_loop_{i}"));
+                span.set_attribute(KeyValue::new(
+                    "puffer.session.id",
+                    format!("sub-session-{i}"),
+                ));
+                span.set_attribute(KeyValue::new(
+                    "puffer.parent.session_id",
+                    "shared-parent-session",
+                ));
+                span.set_attribute(KeyValue::new("puffer.subagent.kind", "agent_tool"));
+                drop(span);
+            })
+        })
+        .collect::<Vec<_>>();
+    for w in workers {
+        w.join().expect("worker join");
+    }
+    handle.shutdown();
+
+    let started = std::time::Instant::now();
+    while started.elapsed() < Duration::from_secs(5) {
+        if server.requests.lock().unwrap().len() >= 3 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let reqs = server.requests.lock().unwrap();
+    let combined: String = reqs
+        .iter()
+        .flat_map(|r| r.iter())
+        .map(|&b| b as char)
+        .collect();
+    for i in 0..3 {
+        assert!(
+            combined.contains(&format!("agent_loop_{i}")),
+            "missing concurrent span agent_loop_{i}: receive count = {}",
+            reqs.len()
+        );
+        assert!(
+            combined.contains(&format!("sub-session-{i}")),
+            "missing per-subagent session_id sub-session-{i}"
+        );
+    }
+    assert!(
+        combined.matches("shared-parent-session").count() >= 3,
+        "every concurrent subagent should carry the parent link; got {} occurrences",
+        combined.matches("shared-parent-session").count()
+    );
+    assert!(
+        combined.matches("puffer.subagent.kind").count() >= 3,
+        "every concurrent subagent should carry the subagent.kind marker"
+    );
+}
+
 #[test]
 fn parse_headers_recognizes_common_shapes() {
     let kvs = crate::parse_headers_for_tests("Authorization=Bearer abc, X-Trace=on");
