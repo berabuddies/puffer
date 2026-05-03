@@ -58,6 +58,14 @@ pub struct RemoteRunnerConfig {
     /// file stay free of secrets.
     #[serde(default)]
     pub auth_token_env: Option<String>,
+    /// Initial delay (ms) between startup `Ping` retries. Defaults to
+    /// 1000 ms when unset.
+    #[serde(default)]
+    pub initial_backoff_ms: Option<u64>,
+    /// Cap on the per-attempt backoff (ms). Defaults to 10_000 ms when
+    /// unset.
+    #[serde(default)]
+    pub max_backoff_ms: Option<u64>,
 }
 
 impl RemoteRunnerConfig {
