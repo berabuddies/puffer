@@ -26,6 +26,9 @@ pub enum ContentKind {
     ToolOutput { tool_id: String },
 }
 
+/// Per-`ObservabilityHandle` redaction policy: three opt-in flags
+/// (default off) plus a denylist of tool ids whose I/O is always
+/// redacted regardless of `include_tool_io`.
 #[derive(Debug, Clone)]
 pub struct RedactionPolicy {
     include_prompts: bool,

@@ -54,11 +54,20 @@ pub(crate) fn run_blocking_loop(
             puffer_observability::PUFFER_PROVIDER_ID,
             inputs.provider.id.clone(),
         );
+        let is_subagent = inputs.state.parent_session_id.is_some();
         if let Some(parent_sid) = inputs.state.parent_session_id.clone() {
             span.set_str("puffer.parent.session_id", parent_sid);
             span.set_str("puffer.subagent.kind", "agent_tool");
         }
-        if handle.redaction().include_prompts() {
+        // Subagent runs gate trace input on both flags since the
+        // prompt may embed tool I/O (review v5 BLOCK #1).
+        let policy = handle.redaction();
+        let trace_input_allowed = if is_subagent {
+            policy.include_prompts() && policy.include_tool_io()
+        } else {
+            policy.include_prompts()
+        };
+        if trace_input_allowed {
             span.set_content(
                 puffer_observability::LANGFUSE_TRACE_INPUT,
                 puffer_observability::ContentKind::Prompt,
