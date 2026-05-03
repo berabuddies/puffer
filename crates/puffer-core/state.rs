@@ -108,13 +108,6 @@ pub struct AppState {
     /// Last API-reported input token count (from `usage.input_tokens`).
     /// Updated after each Responses API call for accurate context-window display.
     pub last_input_tokens: Option<u32>,
-    /// Parent session id when this `AppState` was forked off another
-    /// session — set by the Agent / teammate spawn path so the
-    /// teammate's root `agent_loop` span can carry a
-    /// `puffer.parent.session_id` link attribute. Langfuse uses the
-    /// link to pivot from a parent session to its spawned subagent
-    /// traces (Codex-style `parent_task_id`).
-    pub parent_session_id: Option<String>,
     /// Cache hit ratio for the most recent provider request (0.0–1.0).
     pub last_cache_hit_ratio: Option<f64>,
     /// Running session-average cache hit ratio (0.0–1.0).
@@ -178,7 +171,6 @@ impl AppState {
             status_line_signature: None,
             pending_query_prompt: None,
             last_input_tokens: None,
-            parent_session_id: None,
             last_cache_hit_ratio: None,
             session_cache_hit_ratio: None,
             session_cache_turn_count: 0,
