@@ -51,6 +51,10 @@ fn pick_free_port() -> u16 {
 
 fn spawn_server(runner: Arc<dyn ToolRunner>) -> ServerHandle {
     let port = pick_free_port();
+    spawn_server_on_port(runner, port)
+}
+
+fn spawn_server_on_port(runner: Arc<dyn ToolRunner>, port: u16) -> ServerHandle {
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let endpoint = format!("http://{addr}");
 
@@ -592,4 +596,132 @@ fn normalize_workspace_paths(
             (*k, clone)
         })
         .collect()
+}
+
+/// Mirrors the backoff sequence baked into `select_tool_runner`. Kept
+/// inline here so the resilience tests don't reach across crates.
+fn ping_until_alive(runner: &dyn ToolRunner, deadline: Duration) -> bool {
+    let start = std::time::Instant::now();
+    let mut delay = Duration::from_millis(50);
+    while start.elapsed() < deadline {
+        if runner.ping().is_ok() {
+            return true;
+        }
+        std::thread::sleep(delay);
+        delay = std::cmp::min(delay * 2, Duration::from_millis(500));
+    }
+    false
+}
+
+#[test]
+fn ping_returns_version() {
+    let server_runner: Arc<dyn ToolRunner> = Arc::new(LocalToolRunner::new());
+    let server = spawn_server(server_runner);
+    let remote = RemoteToolRunner::connect(&server.endpoint, Some(TEST_TOKEN)).expect("connect");
+
+    let ping = remote.ping().expect("ping ok");
+    assert!(!ping.version.is_empty(), "version should be non-empty");
+    // The server has just started; uptime is bounded by the test runtime.
+    assert!(ping.uptime < Duration::from_secs(60), "uptime sanity");
+
+    drop(remote);
+    drop(server);
+}
+
+#[test]
+fn connect_retries_until_runner_ready() {
+    // Pick a port up front, build the runner against an offline endpoint,
+    // and spawn the server only after a delay. The lazy channel + Ping
+    // retry loop must reach the runner once it comes up.
+    let port = pick_free_port();
+    let endpoint = format!("http://127.0.0.1:{port}");
+
+    let server_slot: Arc<Mutex<Option<ServerHandle>>> = Arc::new(Mutex::new(None));
+    let slot = server_slot.clone();
+    let starter = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        let server_runner: Arc<dyn ToolRunner> = Arc::new(LocalToolRunner::new());
+        let handle = spawn_server_on_port(server_runner, port);
+        *slot.lock().unwrap() = Some(handle);
+    });
+
+    let remote = RemoteToolRunner::connect(&endpoint, Some(TEST_TOKEN))
+        .expect("connect (lazy) returns immediately");
+    assert!(
+        ping_until_alive(&remote, Duration::from_secs(3)),
+        "ping never succeeded within 3s"
+    );
+
+    starter.join().expect("starter thread");
+    drop(remote);
+    drop(server_slot);
+}
+
+#[test]
+fn survives_runner_restart_mid_session() {
+    // First boot.
+    let port = pick_free_port();
+    let server_runner: Arc<dyn ToolRunner> = Arc::new(LocalToolRunner::new());
+    let server = spawn_server_on_port(server_runner, port);
+    let endpoint = server.endpoint.clone();
+    let remote = RemoteToolRunner::connect(&endpoint, Some(TEST_TOKEN)).expect("connect");
+    let workspace = tempdir().unwrap();
+
+    let first = remote
+        .execute_tool(
+            make_request(
+                "Bash",
+                workspace.path(),
+                serde_json::json!({"command": "echo hello"}),
+            ),
+            &mut NullChunkSink,
+        )
+        .expect("first Bash");
+    assert!(first.success);
+    assert!(first.stdout.contains("hello"));
+
+    // Tear the server down and wait for the port to free up.
+    drop(server);
+    // Give the OS a moment to release the bound port.
+    std::thread::sleep(Duration::from_millis(200));
+
+    // Re-bind on the same port. If this fails because of TIME_WAIT, the
+    // test exits cleanly with an explanation rather than flaking.
+    let restart_runner: Arc<dyn ToolRunner> = Arc::new(LocalToolRunner::new());
+    let server2 = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        spawn_server_on_port(restart_runner, port)
+    })) {
+        Ok(handle) => handle,
+        Err(_) => {
+            eprintln!(
+                "survives_runner_restart_mid_session: could not rebind port {port} \
+                 immediately after shutdown; treating as flake-skip"
+            );
+            return;
+        }
+    };
+
+    // Wait for the new server to answer Ping. The lazy channel will
+    // reconnect under the hood, and the per-call `Unavailable` retry
+    // covers the brief window where the connection is half-open.
+    assert!(
+        ping_until_alive(&remote, Duration::from_secs(3)),
+        "remote runner never became reachable after restart"
+    );
+
+    let second = remote
+        .execute_tool(
+            make_request(
+                "Bash",
+                workspace.path(),
+                serde_json::json!({"command": "echo world"}),
+            ),
+            &mut NullChunkSink,
+        )
+        .expect("second Bash after restart");
+    assert!(second.success);
+    assert!(second.stdout.contains("world"));
+
+    drop(remote);
+    drop(server2);
 }

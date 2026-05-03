@@ -105,11 +105,20 @@ impl RemoteToolRunner {
             }
         };
 
-        let channel = Endpoint::from_shared(endpoint.to_string())
-            .map_err(|e| RunnerError::InvalidArgument(format!("endpoint: {e}")))?
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(60))
-            .connect_lazy();
+        // `connect_lazy` constructs a hyper connector that registers with
+        // the ambient tokio reactor at build time, so we run it inside the
+        // worker runtime. The call still does no network I/O — the lazy
+        // channel only opens the connection on first RPC.
+        let endpoint_owned = endpoint.to_string();
+        let channel = runtime.block_on(async move {
+            Endpoint::from_shared(endpoint_owned)
+                .map_err(|e| RunnerError::InvalidArgument(format!("endpoint: {e}")))
+                .map(|ep| {
+                    ep.connect_timeout(Duration::from_secs(5))
+                        .timeout(Duration::from_secs(60))
+                        .connect_lazy()
+                })
+        })?;
 
         let interceptor = AuthInterceptor { token: token_meta };
         let client = proto::tool_runner_client::ToolRunnerClient::with_interceptor(
