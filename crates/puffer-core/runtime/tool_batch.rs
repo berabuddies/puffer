@@ -29,6 +29,16 @@ use super::{
 };
 use crate::workspace_paths;
 
+/// Execute the tool batch produced by one provider round. Splits into
+/// the parallel path (multiple parallel-safe tools spawn into a
+/// `std::thread::scope` with explicit OtelContext propagation) or
+/// the serial fallback. Returns the per-tool `ToolInvocation` results
+/// in submission order, ready to feed back as `FunctionCallOutput`
+/// items in the next turn.
+///
+/// `parent_span_ctx` is the per-turn OtelContext; each tool span uses
+/// it as its parent so the trace tree shows
+/// `turn → tool.<id>` regardless of which path runs.
 pub(super) fn execute_tool_batch(
     inputs: &mut LoopInputs<'_>,
     session: &mut dyn TurnSession,
@@ -128,7 +138,7 @@ pub(super) fn execute_tool_batch(
                                 true,
                             );
                             span.set_content(
-                                "puffer.tool.input",
+                                puffer_observability::LANGFUSE_OBSERVATION_INPUT,
                                 puffer_observability::ContentKind::ToolInput {
                                     tool_id: tool_id.clone(),
                                 },
@@ -165,7 +175,7 @@ pub(super) fn execute_tool_batch(
                     };
                     if let Some((_, _, tool_id, _, _)) = span_meta.as_ref() {
                         tool_span.set_content(
-                            "puffer.tool.output",
+                            puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
                             puffer_observability::ContentKind::ToolOutput {
                                 tool_id: tool_id.clone(),
                             },
@@ -213,7 +223,7 @@ pub(super) fn execute_tool_batch(
                 false,
             );
             span.set_content(
-                "puffer.tool.input",
+                puffer_observability::LANGFUSE_OBSERVATION_INPUT,
                 puffer_observability::ContentKind::ToolInput {
                     tool_id: tc.tool_id.clone(),
                 },
@@ -253,7 +263,7 @@ pub(super) fn execute_tool_batch(
         };
         if inputs.observability.is_some() {
             tool_span.set_content(
-                "puffer.tool.output",
+                puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
                 puffer_observability::ContentKind::ToolOutput {
                     tool_id: tc.tool_id.clone(),
                 },
@@ -311,7 +321,7 @@ fn execute_tool_batch_serial(
                 false,
             );
             span.set_content(
-                "puffer.tool.input",
+                puffer_observability::LANGFUSE_OBSERVATION_INPUT,
                 puffer_observability::ContentKind::ToolInput {
                     tool_id: call.tool_id.clone(),
                 },
@@ -361,7 +371,7 @@ fn execute_tool_batch_serial(
         );
         if inputs.observability.is_some() {
             tool_span.set_content(
-                "puffer.tool.output",
+                puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
                 puffer_observability::ContentKind::ToolOutput {
                     tool_id: call.tool_id.clone(),
                 },

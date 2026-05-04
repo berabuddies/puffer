@@ -419,6 +419,15 @@ fn openai_tool_definitions_use_registry_schema() {
 
 #[test]
 fn openai_tool_definitions_fill_missing_array_items() {
+    // The production WebSearch resource uses the `provider:web_search`
+    // handler, which now serializes as a native server-side tool with no
+    // function-shaped parameters. Force the function-form path so the
+    // schema-normalization assertions still apply.
+    let _guard = crate::test_locks::env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let prev = std::env::var_os("PUFFER_OPENAI_NATIVE_WEB_SEARCH");
+    std::env::set_var("PUFFER_OPENAI_NATIVE_WEB_SEARCH", "0");
     let mut web_search = loaded_tool("WebSearch", "Search the web", "provider:web_search");
     web_search.value.input_schema = Some(json!({
         "type": "object",
@@ -444,6 +453,10 @@ fn openai_tool_definitions_fill_missing_array_items() {
     };
     let registry = ToolRegistry::from_resources(&resources);
     let tools = openai_tool_definitions(&registry, None, false).unwrap();
+    match prev {
+        Some(value) => std::env::set_var("PUFFER_OPENAI_NATIVE_WEB_SEARCH", value),
+        None => std::env::remove_var("PUFFER_OPENAI_NATIVE_WEB_SEARCH"),
+    }
     assert_eq!(tools[0].name, "WebSearch");
     assert_eq!(
         tools[0].parameters["properties"]["allowed_domains"]["items"]["type"].as_str(),
@@ -457,6 +470,13 @@ fn openai_tool_definitions_fill_missing_array_items() {
 
 #[test]
 fn openai_web_search_description_mentions_current_month_year() {
+    // Description rendering only applies on the function-form fallback; the
+    // native server-side tool has no description.
+    let _guard = crate::test_locks::env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let prev = std::env::var_os("PUFFER_OPENAI_NATIVE_WEB_SEARCH");
+    std::env::set_var("PUFFER_OPENAI_NATIVE_WEB_SEARCH", "0");
     let description = "\
 - Allows Claude to search the web and use the results to inform responses
 
@@ -468,6 +488,10 @@ IMPORTANT - Use the correct year in search queries:
     };
     let registry = ToolRegistry::from_resources(&resources);
     let tools = openai_tool_definitions(&registry, None, false).unwrap();
+    match prev {
+        Some(value) => std::env::set_var("PUFFER_OPENAI_NATIVE_WEB_SEARCH", value),
+        None => std::env::remove_var("PUFFER_OPENAI_NATIVE_WEB_SEARCH"),
+    }
     assert!(tools[0].description.contains("The current month is"));
     assert!(!tools[0]
         .description

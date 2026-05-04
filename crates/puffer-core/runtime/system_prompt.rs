@@ -25,11 +25,11 @@ IMPORTANT: You must NEVER generate or guess URLs for the user unless you are con
  - In general, do not propose changes to code you haven't read. If a user asks about or wants you to modify a file, read it first. Understand existing code before suggesting modifications.
  - Do not create files unless they're absolutely necessary for achieving your goal. Generally prefer editing an existing file to creating a new one, as this prevents file bloat and builds on existing work more effectively.
  - Avoid giving time estimates or predictions for how long tasks will take, whether for your own work or for users planning projects. Focus on what needs to be done, not how long it might take.
- - If an approach fails, diagnose why before switching tactics - read the error, check your assumptions, try a focused fix. Don't retry the identical action blindly, but don't abandon a viable approach after a single failure either. Escalate to the user with AskUserQuestion only when you're genuinely stuck after investigation, not as a first response to friction.
+ - If an approach fails, diagnose why before switching tactics—read the error, check your assumptions, try a focused fix. Don't retry the identical action blindly, but don't abandon a viable approach after a single failure either. Escalate to the user with AskUserQuestion only when you're genuinely stuck after investigation, not as a first response to friction.
  - Be careful not to introduce security vulnerabilities such as command injection, XSS, SQL injection, and other OWASP top 10 vulnerabilities. If you notice that you wrote insecure code, immediately fix it. Prioritize writing safe, secure, and correct code.
  - Don't add features, refactor code, or make "improvements" beyond what was asked. A bug fix doesn't need surrounding code cleaned up. A simple feature doesn't need extra configurability. Don't add docstrings, comments, or type annotations to code you didn't change. Only add comments where the logic isn't self-evident.
  - Don't add error handling, fallbacks, or validation for scenarios that can't happen. Trust internal code and framework guarantees. Only validate at system boundaries (user input, external APIs). Don't use feature flags or backwards-compatibility shims when you can just change the code.
- - Don't create helpers, utilities, or abstractions for one-time operations. Don't design for hypothetical future requirements. The right amount of complexity is what the task actually requires-no speculative abstractions, but no half-finished implementations either. Three similar lines of code is better than a premature abstraction.
+ - Don't create helpers, utilities, or abstractions for one-time operations. Don't design for hypothetical future requirements. The right amount of complexity is what the task actually requires—no speculative abstractions, but no half-finished implementations either. Three similar lines of code is better than a premature abstraction.
  - Avoid backwards-compatibility hacks like renaming unused _vars, re-exporting types, adding // removed comments for removed code, etc. If you are certain that something is unused, you can delete it completely.
 
 # Executing actions with care
@@ -104,18 +104,27 @@ pub(super) fn render_runtime_system_prompt(
     )
     .unwrap_or_else(|| render_fallback_prompt(&variables));
     let mut prompt = normalize_prompt_whitespace(&rendered);
-    // Inject CLAUDE.md / memory contents if present (matches CC's memory section).
-    if let Some(mut memory) = load_memory_prompt(&state.cwd) {
-        // CC limits memory to 40K characters to avoid bloating the system prompt.
-        const MAX_MEMORY_CHARS: usize = 40_000;
-        if memory.chars().count() > MAX_MEMORY_CHARS {
-            memory = memory.chars().take(MAX_MEMORY_CHARS).collect();
-            memory.push_str("\n\n[CLAUDE.md truncated — 40K char limit reached]");
-        }
-        prompt.push_str("\n\n# Project Context (CLAUDE.md)\n");
+    if let Some(memory) = load_memory_prompt(&state.cwd, provider_id) {
+        prompt.push_str("\n\n");
         prompt.push_str(&memory);
     }
     Ok(prompt)
+}
+
+const MEMORY_INSTRUCTION_PROMPT: &str = "Codebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.";
+
+enum MemorySource {
+    Project,
+    UserGlobal,
+}
+
+impl MemorySource {
+    fn description(&self) -> &'static str {
+        match self {
+            MemorySource::Project => "(project instructions, checked into the codebase)",
+            MemorySource::UserGlobal => "(user's private global instructions for all projects)",
+        }
+    }
 }
 
 fn render_fallback_prompt(variables: &BTreeMap<String, String>) -> String {
@@ -318,33 +327,58 @@ fn prepend_bullets(items: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-/// Loads CLAUDE.md from the working directory and user home, concatenating both if present.
-fn load_memory_prompt(cwd: &Path) -> Option<String> {
-    let mut parts = Vec::new();
-    // Project-level CLAUDE.md
-    let project_path = cwd.join("CLAUDE.md");
-    if let Ok(content) = std::fs::read_to_string(&project_path) {
-        let trimmed = content.trim();
-        if !trimmed.is_empty() {
-            parts.push(trimmed.to_string());
+/// Loads project-doc / memory files for the system prompt. The OpenAI path
+/// favors AGENTS.md (Codex's convention) and falls back to CLAUDE.md only if
+/// no AGENTS.md is found anywhere; all other providers use CLAUDE.md.
+/// Output is formatted to match Claude Code's user-context memory injection
+/// (MEMORY_INSTRUCTION_PROMPT + per-file "Contents of <path> (<description>):"
+/// blocks).
+fn load_memory_prompt(cwd: &Path, provider_id: Option<&str>) -> Option<String> {
+    if provider_id == Some("openai") {
+        if let Some(prompt) = load_memory_prompt_for_filename(cwd, "AGENTS.md") {
+            return Some(prompt);
         }
     }
-    // User-level CLAUDE.md (in ~/.claude/ or ~/.puffer/)
+    load_memory_prompt_for_filename(cwd, "CLAUDE.md")
+}
+
+fn load_memory_prompt_for_filename(cwd: &Path, filename: &str) -> Option<String> {
+    let mut sources: Vec<(PathBuf, MemorySource)> = Vec::new();
+    sources.push((cwd.join(filename), MemorySource::Project));
     if let Some(home) = env::var_os("HOME") {
         for dir in &[".claude", ".puffer"] {
-            let user_path = Path::new(&home).join(dir).join("CLAUDE.md");
-            if let Ok(content) = std::fs::read_to_string(&user_path) {
-                let trimmed = content.trim();
-                if !trimmed.is_empty() {
-                    parts.push(trimmed.to_string());
-                }
-            }
+            sources.push((
+                Path::new(&home).join(dir).join(filename),
+                MemorySource::UserGlobal,
+            ));
         }
     }
-    if parts.is_empty() {
+
+    let mut blocks = Vec::new();
+    for (path, source) in &sources {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        blocks.push(format!(
+            "Contents of {} {}:\n\n{}",
+            path.display(),
+            source.description(),
+            trimmed
+        ));
+    }
+
+    if blocks.is_empty() {
         None
     } else {
-        Some(parts.join("\n\n"))
+        Some(format!(
+            "{}\n\n{}",
+            MEMORY_INSTRUCTION_PROMPT,
+            blocks.join("\n\n")
+        ))
     }
 }
 
@@ -408,7 +442,7 @@ fn os_version() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::render_runtime_system_prompt;
+    use super::{load_memory_prompt, render_runtime_system_prompt};
     use crate::runtime::tests::state;
     use puffer_resources::{LoadedItem, LoadedResources, PromptTemplate, SourceInfo, SourceKind};
     use std::collections::BTreeSet;
@@ -485,5 +519,37 @@ mod tests {
         assert!(prompt.contains("AskUserQuestion"));
         assert!(prompt.contains("# Environment"));
         assert!(prompt.contains("Primary working directory:"));
+    }
+
+    #[test]
+    fn load_memory_prompt_prefers_agents_md_for_openai_with_claude_md_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("AGENTS.md"), "agent rules here").unwrap();
+        std::fs::write(tmp.path().join("CLAUDE.md"), "claude rules here").unwrap();
+
+        // OpenAI: AGENTS.md wins; CLAUDE.md is not loaded.
+        let openai = load_memory_prompt(tmp.path(), Some("openai")).unwrap();
+        assert!(openai.contains("AGENTS.md"));
+        assert!(openai.contains("agent rules here"));
+        assert!(!openai.contains("claude rules here"));
+
+        // Non-OpenAI providers ignore AGENTS.md.
+        let anthropic = load_memory_prompt(tmp.path(), Some("anthropic")).unwrap();
+        assert!(anthropic.contains("CLAUDE.md"));
+        assert!(anthropic.contains("claude rules here"));
+        assert!(!anthropic.contains("agent rules here"));
+
+        // OpenAI with no AGENTS.md falls back to CLAUDE.md.
+        std::fs::remove_file(tmp.path().join("AGENTS.md")).unwrap();
+        let fallback = load_memory_prompt(tmp.path(), Some("openai")).unwrap();
+        assert!(fallback.contains("CLAUDE.md"));
+        assert!(fallback.contains("claude rules here"));
+
+        // Neither file: nothing injected (assuming no global files contain these markers).
+        std::fs::remove_file(tmp.path().join("CLAUDE.md")).unwrap();
+        let none = load_memory_prompt(tmp.path(), Some("openai"));
+        if let Some(text) = &none {
+            assert!(!text.contains(tmp.path().to_str().unwrap()));
+        }
     }
 }

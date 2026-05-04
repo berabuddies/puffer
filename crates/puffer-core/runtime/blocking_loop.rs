@@ -54,17 +54,21 @@ pub(crate) fn run_blocking_loop(
             puffer_observability::PUFFER_PROVIDER_ID,
             inputs.provider.id.clone(),
         );
-        if let Some(parent_sid) = inputs.state.parent_session_id.clone() {
-            span.set_str("puffer.parent.session_id", parent_sid);
+        let is_subagent = inputs.state.session.parent_session_id.is_some();
+        if let Some(parent_sid) = inputs.state.session.parent_session_id {
+            span.set_str("puffer.parent.session_id", parent_sid.to_string());
             span.set_str("puffer.subagent.kind", "agent_tool");
         }
-        if handle.redaction().include_prompts() {
-            span.set_content(
-                puffer_observability::LANGFUSE_TRACE_INPUT,
-                puffer_observability::ContentKind::Prompt,
-                inputs.input,
-            );
-        }
+        // Subagent runs may embed tool I/O in their input prompt; use
+        // `PromptWithEmbeddedToolIo` so redaction requires both flags.
+        // Always emit so the trace's Input pane shows a redacted
+        // summary instead of `null` when the flag is off.
+        let kind = if is_subagent {
+            puffer_observability::ContentKind::PromptWithEmbeddedToolIo
+        } else {
+            puffer_observability::ContentKind::Prompt
+        };
+        span.set_content(puffer_observability::LANGFUSE_TRACE_INPUT, kind, inputs.input);
         span
     } else {
         puffer_observability::SpanGuard::Disabled
@@ -92,7 +96,7 @@ pub(crate) fn run_blocking_loop(
             if let Some(ref text) = result {
                 gen_span.set_content(
                     puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
-                    puffer_observability::ContentKind::Output,
+                    puffer_observability::ContentKind::OutputWithEmbeddedToolIo,
                     text,
                 );
             } else {
@@ -138,6 +142,27 @@ pub(crate) fn run_blocking_loop(
             &inputs.provider.default_api,
             inputs.model_id,
         );
+        if inputs.observability.is_some() {
+            if let Some(model_info) = inputs
+                .provider
+                .models
+                .iter()
+                .find(|m| m.id == inputs.model_id)
+            {
+                if model_info.max_output_tokens > 0 {
+                    provider_span.set_str(
+                        puffer_observability::GEN_AI_REQUEST_MAX_TOKENS,
+                        model_info.max_output_tokens.to_string(),
+                    );
+                }
+            }
+            if !inputs.state.effort_level.is_empty() {
+                provider_span.set_str(
+                    "gen_ai.request.reasoning_effort",
+                    inputs.state.effort_level.clone(),
+                );
+            }
+        }
         let turn = match session.one_turn_blocking(inputs.state, inputs.auth_store, &mut items) {
             Ok(t) => t,
             Err(error) => {
@@ -265,10 +290,10 @@ pub(crate) fn run_blocking_loop(
                 let result = session.generate_summary(old, mid);
                 if let Some(ref text) = result {
                     gen_span.set_content(
-                        puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
-                        puffer_observability::ContentKind::Output,
-                        text,
-                    );
+                    puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
+                    puffer_observability::ContentKind::OutputWithEmbeddedToolIo,
+                    text,
+                );
                 } else {
                     gen_span.mark_error("summary_returned_none".to_string());
                 }

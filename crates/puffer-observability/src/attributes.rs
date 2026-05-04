@@ -102,10 +102,25 @@ pub const PUFFER_TOOL_PARALLEL: &str = "puffer.tool.parallel";
 pub const LANGFUSE_OBSERVATION_TYPE: &str = "langfuse.observation.type";
 pub const LANGFUSE_OBSERVATION_INPUT: &str = "langfuse.observation.input";
 pub const LANGFUSE_OBSERVATION_OUTPUT: &str = "langfuse.observation.output";
+/// Severity per Langfuse: DEBUG / DEFAULT / WARNING / ERROR. Used on
+/// observations to surface error/warn rows in the Tracing UI.
+pub const LANGFUSE_OBSERVATION_LEVEL: &str = "langfuse.observation.level";
+pub const LANGFUSE_OBSERVATION_STATUS_MESSAGE: &str = "langfuse.observation.status_message";
 pub const LANGFUSE_SESSION_ID: &str = "langfuse.session.id";
 pub const LANGFUSE_TRACE_INPUT: &str = "langfuse.trace.input";
 pub const LANGFUSE_TRACE_OUTPUT: &str = "langfuse.trace.output";
 pub const LANGFUSE_TRACE_TAGS: &str = "langfuse.trace.tags";
+pub const LANGFUSE_USER_ID: &str = "langfuse.user.id";
+/// Per-trace deployment environment (e.g. "dev", "prod"). Maps to
+/// the Langfuse Environment column in the Tracing list.
+pub const LANGFUSE_ENVIRONMENT: &str = "langfuse.environment";
+
+/// gen_ai request parameters per OTel GenAI semconv. Surface model
+/// invocation settings on the provider_call generation observation.
+pub const GEN_AI_REQUEST_MAX_TOKENS: &str = "gen_ai.request.max_tokens";
+pub const GEN_AI_REQUEST_TEMPERATURE: &str = "gen_ai.request.temperature";
+pub const GEN_AI_REQUEST_TOP_P: &str = "gen_ai.request.top_p";
+pub const GEN_AI_RESPONSE_MODEL: &str = "gen_ai.response.model";
 
 // gen_ai.* shortcuts
 pub const GEN_AI_SYSTEM: &str = "gen_ai.system";

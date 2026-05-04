@@ -181,20 +181,27 @@ pub(crate) fn run_streaming_loop(
             puffer_observability::PUFFER_PROVIDER_ID,
             inputs.provider.id.clone(),
         );
-        if let Some(parent_sid) = inputs.state.parent_session_id.clone() {
-            span.set_str("puffer.parent.session_id", parent_sid);
+        let is_subagent = inputs.state.session.parent_session_id.is_some();
+        if let Some(parent_sid) = inputs.state.session.parent_session_id {
+            span.set_str("puffer.parent.session_id", parent_sid.to_string());
             span.set_str("puffer.subagent.kind", "agent_tool");
         }
-        span.set_content(
-            puffer_observability::LANGFUSE_TRACE_INPUT,
-            puffer_observability::ContentKind::Prompt,
-            inputs.input,
-        );
-        span.set_content(
-            "puffer.input",
-            puffer_observability::ContentKind::Prompt,
-            inputs.input,
-        );
+        // Subagent runs (reflection judge, spawned agents) build
+        // their input prompt by rendering the parent transcript
+        // including tool calls + outputs. Use `PromptWithEmbeddedToolIo`
+        // so the redaction layer requires BOTH `include_prompts` AND
+        // `include_tool_io` for those traces; top-level user prompts
+        // use plain `Prompt` (review v5 BLOCK #1). Either way the
+        // attribute is always emitted so the trace's Input pane
+        // shows the `[redacted: N bytes]` summary instead of `null`
+        // when the flag is off.
+        let kind = if is_subagent {
+            puffer_observability::ContentKind::PromptWithEmbeddedToolIo
+        } else {
+            puffer_observability::ContentKind::Prompt
+        };
+        span.set_content(puffer_observability::LANGFUSE_TRACE_INPUT, kind.clone(), inputs.input);
+        span.set_content("puffer.input", kind, inputs.input);
         span
     } else {
         puffer_observability::SpanGuard::Disabled
@@ -223,7 +230,7 @@ pub(crate) fn run_streaming_loop(
             if let Some(ref text) = result {
                 gen_span.set_content(
                     puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
-                    puffer_observability::ContentKind::Output,
+                    puffer_observability::ContentKind::OutputWithEmbeddedToolIo,
                     text,
                 );
             } else {
@@ -283,7 +290,10 @@ pub(crate) fn run_streaming_loop(
             turn_index,
         );
         turn_index += 1;
-        // Provider span (Langfuse "generation").
+        // Provider span (Langfuse "generation"). Stamp request
+        // parameters from gen_ai semconv so the Langfuse generation
+        // panel renders model invocation settings (review against
+        // Langfuse demo: max_tokens + reasoning_effort were missing).
         let mut provider_span = puffer_observability::start_provider_span(
             inputs.observability.as_ref(),
             turn_span.context(),
@@ -291,6 +301,27 @@ pub(crate) fn run_streaming_loop(
             &inputs.provider.default_api,
             inputs.model_id,
         );
+        if inputs.observability.is_some() {
+            if let Some(model_info) = inputs
+                .provider
+                .models
+                .iter()
+                .find(|m| m.id == inputs.model_id)
+            {
+                if model_info.max_output_tokens > 0 {
+                    provider_span.set_str(
+                        puffer_observability::GEN_AI_REQUEST_MAX_TOKENS,
+                        model_info.max_output_tokens.to_string(),
+                    );
+                }
+            }
+            if !inputs.state.effort_level.is_empty() {
+                provider_span.set_str(
+                    "gen_ai.request.reasoning_effort",
+                    inputs.state.effort_level.clone(),
+                );
+            }
+        }
         // Langfuse renders the generation Input pane from
         // `langfuse.observation.input`. Build the messages-array JSON
         // ONLY when observability is on AND the redaction policy
@@ -318,7 +349,23 @@ pub(crate) fn run_streaming_loop(
                                     })
                                     .collect::<Vec<_>>()
                                     .join("\n");
-                                serde_json::json!({ "role": role, "content": text })
+                                // Compaction stores its summary as a
+                                // user `Message` prefixed with the
+                                // marker below. The summary can carry
+                                // prior tool I/O verbatim, so redact
+                                // when `include_tool_io=false` — review
+                                // v6 BLOCK #2.
+                                let body = if !include_tool_io
+                                    && text.starts_with("[Conversation compacted —")
+                                {
+                                    format!(
+                                        "[redacted: {} bytes compaction summary message]",
+                                        text.len()
+                                    )
+                                } else {
+                                    text
+                                };
+                                serde_json::json!({ "role": role, "content": body })
                             }
                             ConversationItem::FunctionCall { name, arguments, .. } => {
                                 let args = if include_tool_io {
@@ -357,9 +404,22 @@ pub(crate) fn run_streaming_loop(
                                 })
                             }
                             ConversationItem::Compaction { summary } => {
+                                // Compaction summaries can carry prior
+                                // tool I/O verbatim, so respect the
+                                // `include_tool_io` flag here too —
+                                // review v5 finding around
+                                // ConversationItem::Compaction leak.
+                                let body = if include_tool_io {
+                                    serde_json::Value::String(summary.clone())
+                                } else {
+                                    serde_json::Value::String(format!(
+                                        "[redacted: {} bytes compaction summary]",
+                                        summary.len()
+                                    ))
+                                };
                                 serde_json::json!({
                                     "role": "system",
-                                    "compaction_summary": summary
+                                    "compaction_summary": body
                                 })
                             }
                         })
@@ -373,16 +433,36 @@ pub(crate) fn run_streaming_loop(
                 );
             }
         }
-        // We need to capture token usage from the streaming Usage
-        // event without breaking the existing on_event signature for
-        // other consumers. Wrap it.
+        // Capture token usage from the streaming Usage event for the
+        // provider span. Only wrap when observability is on so the
+        // disabled path doesn't clone every Usage report
+        // (review v6 BLOCK #3). The same wrapper also captures the
+        // monotonic timestamp of the first non-usage stream event
+        // (TextDelta / ThinkingDelta / ToolCallStart), which we
+        // surface as TTFT (`gen_ai.response.first_token_ms`) — a
+        // production-grade signal for diagnosing slow streams that
+        // OTel's GenAI semconv standardizes but most agents miss.
         let observability_handle = inputs.observability.clone();
         let captured_usage = std::cell::RefCell::new(None::<TurnUsageReport>);
-        let result = {
+        let captured_first_token = std::cell::RefCell::new(None::<std::time::Instant>);
+        let request_started = std::time::Instant::now();
+        let result = if observability_handle.is_some() {
             let captured_usage_ref = &captured_usage;
+            let captured_first_token_ref = &captured_first_token;
             let mut wrapped = |event: TurnStreamEvent| {
-                if let TurnStreamEvent::Usage(u) = &event {
-                    *captured_usage_ref.borrow_mut() = Some(u.clone());
+                match &event {
+                    TurnStreamEvent::Usage(u) => {
+                        *captured_usage_ref.borrow_mut() = Some(u.clone());
+                    }
+                    TurnStreamEvent::TextDelta(_)
+                    | TurnStreamEvent::ThinkingDelta(_)
+                    | TurnStreamEvent::ToolCallsRequested(_) => {
+                        if captured_first_token_ref.borrow().is_none() {
+                            *captured_first_token_ref.borrow_mut() =
+                                Some(std::time::Instant::now());
+                        }
+                    }
+                    _ => {}
                 }
                 on_event(event);
             };
@@ -391,6 +471,13 @@ pub(crate) fn run_streaming_loop(
                 inputs.auth_store,
                 &mut items,
                 &mut wrapped,
+            )
+        } else {
+            session.one_turn_streaming(
+                inputs.state,
+                inputs.auth_store,
+                &mut items,
+                on_event,
             )
         };
         // Surface usage on the provider span before propagating any
@@ -401,6 +488,12 @@ pub(crate) fn run_streaming_loop(
                 Some(u.output_tokens),
                 Some(u.cache_read_tokens),
             );
+            if u.cache_creation_tokens > 0 {
+                provider_span.set_str(
+                    "gen_ai.usage.cache_creation_input_tokens",
+                    u.cache_creation_tokens.to_string(),
+                );
+            }
             // Cache hit ratio = cache_read / input. Surfaces a single
             // top-line metric in Langfuse without making the viewer do
             // the arithmetic.
@@ -408,6 +501,13 @@ pub(crate) fn run_streaming_loop(
                 let ratio = u.cache_read_tokens as f64 / u.input_tokens as f64;
                 provider_span.set_f64("puffer.cache.hit_ratio", ratio);
             }
+        }
+        // Time-to-first-token: monotonic ms from request start to the
+        // first stream event that carries content. Numeric so Langfuse
+        // can chart latency percentiles.
+        if let Some(first) = captured_first_token.into_inner() {
+            let ttft_ms = first.duration_since(request_started).as_secs_f64() * 1000.0;
+            provider_span.set_f64("gen_ai.response.first_token_ms", ttft_ms);
         }
         let turn = match result {
             Ok(turn) => turn,
@@ -546,14 +646,21 @@ pub(crate) fn run_streaming_loop(
         // onto attributes so a viewer can tell exactly what happened
         // (config-disabled / judge-skipped / code-judge-fired /
         // llm-judge-fired-with-decision-X / checkpoint-injected).
+        // Capture start_time before the observe call so the inner
+        // judge generation span (created post-hoc when we see the
+        // LlmJudgeRequest event) can backdate to the real LLM call
+        // start — review v5 BLOCK #3.
+        let reflection_start_time = std::time::SystemTime::now();
         let mut reflection_span = puffer_observability::start_reflection_span(
             inputs.observability.as_ref(),
             turn_span.context(),
         );
-        reflection_span.set_str(
-            "puffer.reflection.config.enabled",
-            inputs.reflection_config.is_some().to_string(),
-        );
+        if inputs.observability.is_some() {
+            reflection_span.set_str(
+                "puffer.reflection.config.enabled",
+                inputs.reflection_config.is_some().to_string(),
+            );
+        }
         // Inner subagent generation span — only created if the LLM
         // judge actually fires. Cached lazily so the reflection
         // wrapper stays a plain SPAN when nothing of substance happens.
@@ -568,9 +675,16 @@ pub(crate) fn run_streaming_loop(
                 inputs.auth_store,
             )
         }) {
-            reflection_span.set_str("puffer.reflection.observed", "true");
+            // Always emit ReflectionTrace events for the TUI / trajectory.
             for trace_event in &observation.trace_events {
                 on_event(TurnStreamEvent::ReflectionTrace(trace_event.clone()));
+            }
+            // Span attribute mutations are gated on a live handle so
+            // the disabled path skips all `to_string()` / `clone()`
+            // (review v5 BLOCK #2).
+            if inputs.observability.is_some() {
+                reflection_span.set_str("puffer.reflection.observed", "true");
+                for trace_event in &observation.trace_events {
                 match trace_event {
                     ReflectionTraceEvent::BatchObserved {
                         evaluation_score,
@@ -640,11 +754,14 @@ pub(crate) fn run_streaming_loop(
                         ..
                     } => {
                         // First evidence the judge actually fired:
-                        // create the inner subagent generation span.
-                        let mut span = puffer_observability::start_subagent_generation_span(
+                        // create the inner subagent generation span,
+                        // backdated to the start of `observe_batch_with_judge`
+                        // so the span bounds the real LLM latency.
+                        let mut span = puffer_observability::start_subagent_generation_span_at(
                             inputs.observability.as_ref(),
                             reflection_span.context(),
                             "reflection_judge",
+                            Some(reflection_start_time),
                         );
                         if let Some(p) = provider {
                             span.set_str(puffer_observability::GEN_AI_SYSTEM, p.clone());
@@ -749,6 +866,7 @@ pub(crate) fn run_streaming_loop(
                         );
                     }
                 }
+                }
             }
             reflection_traces.extend(observation.trace_events);
             if let Some(checkpoint) = observation.checkpoint {
@@ -757,7 +875,7 @@ pub(crate) fn run_streaming_loop(
                 ));
                 items.push(ConversationItem::user_message(checkpoint.prompt));
             }
-        } else {
+        } else if inputs.observability.is_some() {
             reflection_span.set_str("puffer.reflection.observed", "false");
         }
         if let Some(span) = judge_gen_span {
@@ -789,10 +907,10 @@ pub(crate) fn run_streaming_loop(
                 let result = session.generate_summary(old, mid);
                 if let Some(ref text) = result {
                     gen_span.set_content(
-                        puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
-                        puffer_observability::ContentKind::Output,
-                        text,
-                    );
+                    puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
+                    puffer_observability::ContentKind::OutputWithEmbeddedToolIo,
+                    text,
+                );
                 } else {
                     gen_span.mark_error("summary_returned_none".to_string());
                 }
@@ -818,15 +936,8 @@ pub(crate) fn run_streaming_loop(
 }
 
 
-/// Executes one batch of tool calls produced by a single assistant turn.
-///
-/// Mirrors the existing serial behavior of `execute_anthropic_tool_calls`
-/// (head-truncation per tool, aggregate budget). Parallel-safe batching
-/// Mirrors the OLD `execute_openai_tool_calls` parallel batching for ALL
-/// providers: parallel-safe tools run concurrently in a `thread::scope`,
-/// the rest fall back to serial execution with full `&mut state` access.
-/// Permission resolution always runs serially up front because
-/// `AllowSession` mutates `state`.
+// `execute_tool_batch` lives in `runtime/tool_batch.rs`; the streaming
+// loop above and `blocking_loop::run_blocking_loop` call into it.
 
 #[cfg(test)]
 mod cancel_token_tests {

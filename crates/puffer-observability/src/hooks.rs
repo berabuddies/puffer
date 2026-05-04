@@ -217,6 +217,12 @@ pub fn start_agent_loop_span(
         );
         bag = bag.kv(kv);
     }
+    if let Some(uid) = handle.user_id() {
+        bag = bag.str(crate::attributes::LANGFUSE_USER_ID, uid);
+    }
+    if let Some(env) = handle.environment() {
+        bag = bag.str(crate::attributes::LANGFUSE_ENVIRONMENT, env);
+    }
     builder.attributes = Some(bag.build());
     let span = tracer.build_with_context(builder, &parent);
     SpanGuard::active(span, parent, handle.clone())
@@ -368,6 +374,21 @@ pub fn start_subagent_generation_span(
     parent: Option<&OtelContext>,
     kind: &'static str,
 ) -> SpanGuard {
+    start_subagent_generation_span_at(handle, parent, kind, None)
+}
+
+/// Variant that backdates the span's start time. Use when the wrapped
+/// LLM call has already completed by the time you can confirm it
+/// fired (e.g. reflection judge events arrive after `run_llm_judge`
+/// returns) — pass the `SystemTime` captured before the call and
+/// the span will reflect the actual latency rather than the post-hoc
+/// emission point.
+pub fn start_subagent_generation_span_at(
+    handle: Option<&ObservabilityHandle>,
+    parent: Option<&OtelContext>,
+    kind: &'static str,
+    start_time: Option<std::time::SystemTime>,
+) -> SpanGuard {
     let Some(handle) = handle else {
         return SpanGuard::Disabled;
     };
@@ -376,6 +397,9 @@ pub fn start_subagent_generation_span(
     let mut builder = tracer
         .span_builder(format!("subagent.{kind}"))
         .with_kind(SpanKind::Internal);
+    if let Some(start) = start_time {
+        builder = builder.with_start_time(start);
+    }
     builder.attributes = Some(
         AttributeBag::new()
             .str(LANGFUSE_OBSERVATION_TYPE, "generation")

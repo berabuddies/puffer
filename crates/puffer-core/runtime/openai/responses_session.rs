@@ -406,15 +406,15 @@ pub(super) fn setup_responses_session(
         Some(&permission_context),
         options.tool_filter,
     )?;
-    let system_prompt = render_runtime_system_prompt(
-        state,
-        resources,
-        &model_id,
-        &tools
-            .iter()
-            .map(|tool| tool.name.clone())
-            .collect::<std::collections::BTreeSet<_>>(),
-    )?;
+    // Native server-side tools (e.g. `web_search`) serialize without a name,
+    // so filter empty entries out of the system-prompt tool set.
+    let enabled_tool_names = tools
+        .iter()
+        .map(|tool| tool.name.clone())
+        .filter(|name| !name.is_empty())
+        .collect::<std::collections::BTreeSet<_>>();
+    let system_prompt =
+        render_runtime_system_prompt(state, resources, &model_id, &enabled_tool_names)?;
     let instructions =
         super::openai_request_instructions(state, resources, Some(&system_prompt))?;
     let model = provider.models.iter().find(|m| m.id == model_id);

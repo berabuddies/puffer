@@ -177,6 +177,17 @@ pub(super) fn build_llm_judge_side_state(
     prompt: &str,
 ) -> AppState {
     let mut side_state = state.clone();
+    // Reflection judge is a subagent. Mint a fresh session id so its
+    // trace lives in its own Langfuse Session view, and link back to
+    // the parent via `SessionMetadata::parent_session_id` so the root
+    // agent_loop span emits `puffer.parent.session_id` +
+    // `puffer.subagent.kind=agent_tool`. The trace pipeline uses the
+    // same field to select `PromptWithEmbeddedToolIo` for the rendered
+    // judge prompt (which embeds tool calls / outputs), so under
+    // INCLUDE_PROMPTS=1, INCLUDE_TOOL_IO=0 the prompt is redacted.
+    // Review v6 BLOCK #1.
+    side_state.session.parent_session_id = Some(state.session.id);
+    side_state.session.id = uuid::Uuid::new_v4();
     side_state.transcript.clear();
     side_state.plan_mode = false;
     side_state.plan_mode_attachment_turns = 0;
