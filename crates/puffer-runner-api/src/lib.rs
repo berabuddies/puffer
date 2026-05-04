@@ -294,6 +294,99 @@ pub fn check_read_freshness(
     Ok(())
 }
 
+/// One server-initiated elicitation request, surfaced to the runner so the
+/// configured [`ElicitationHandler`] can collect a user response.
+///
+/// `schema` is the JSON Schema (per MCP) describing the expected shape of the
+/// `Accept` payload. `mode` distinguishes the two MCP elicitation styles
+/// (form vs. URL); URL-mode requests carry the URL the user should visit and
+/// an opaque `elicitation_id` minted by the server for correlation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ElicitationRequest {
+    /// MCP server id (matches `McpServerInfo::id`).
+    pub server: String,
+    /// Tool that triggered the elicitation, when known. Empty when the
+    /// originating call is not a `tools/call` (today never observed; kept
+    /// for forward compatibility).
+    pub tool: String,
+    /// Server's prompt to the user.
+    pub message: String,
+    /// Form vs. URL elicitation style.
+    #[serde(default)]
+    pub mode: ElicitationMode,
+    /// JSON Schema describing the expected Accept payload (form mode only).
+    /// `Value::Null` for URL-mode requests.
+    pub schema: serde_json::Value,
+    /// URL the user is asked to visit (URL mode only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Server-minted correlation id for URL elicitations. `None` for form mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elicitation_id: Option<String>,
+}
+
+/// MCP elicitation style — see [`ElicitationRequest`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ElicitationMode {
+    /// Server expects a structured response matching `schema`.
+    #[default]
+    Form,
+    /// Server is directing the user to a URL; the response only conveys
+    /// accept/decline/cancel without any payload.
+    Url,
+}
+
+/// User's reply to an [`ElicitationRequest`]. The runner relays this back
+/// to the MCP server through rmcp.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "lowercase")]
+pub enum ElicitationResponse {
+    /// User provided the requested value (must conform to `schema`).
+    Accept { content: serde_json::Value },
+    /// User refused but allows the operation to continue.
+    Decline,
+    /// User asked to cancel the entire operation.
+    Cancel,
+}
+
+impl ElicitationResponse {
+    /// Convenience constructor for `Accept` with the given JSON payload.
+    pub fn accept(content: serde_json::Value) -> Self {
+        ElicitationResponse::Accept { content }
+    }
+}
+
+/// Strategy for fielding [`ElicitationRequest`]s. Runners hold an
+/// `Arc<dyn ElicitationHandler>` configured at construction (default
+/// [`DeclineAllElicitations`]); the connection manager invokes
+/// [`ElicitationHandler::elicit`] whenever an MCP server sends an
+/// `elicitation/create` mid-call.
+///
+/// The handler is **synchronous on purpose**. The rmcp adapter calls it from
+/// `tokio::task::spawn_blocking`, which lets puffer's UI plumbing relay the
+/// request to the user (TUI / web / etc.) without forcing every UI surface
+/// to expose an async API. Implementations that need to block on a tokio
+/// future should construct a fresh `current_thread` runtime; do **not** call
+/// `block_on` on the manager's runtime.
+pub trait ElicitationHandler: Send + Sync + std::fmt::Debug {
+    /// Handles one elicitation request. The runner has already serialized
+    /// the rmcp payload into the puffer-shaped DTO; the implementation only
+    /// has to produce a response.
+    fn elicit(&self, request: ElicitationRequest) -> ElicitationResponse;
+}
+
+/// Default `ElicitationHandler` that responds `Decline` to every request.
+/// Mirrors rmcp's default `ClientHandler::create_elicitation` behavior.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DeclineAllElicitations;
+
+impl ElicitationHandler for DeclineAllElicitations {
+    fn elicit(&self, _request: ElicitationRequest) -> ElicitationResponse {
+        ElicitationResponse::Decline
+    }
+}
+
 /// Streaming sink for partial output from long-running tools.
 ///
 /// Implemented in-process by an adapter wrapping a closure; remotely by the
@@ -508,6 +601,39 @@ mod tests {
     fn runner_error_roundtrip_messages() {
         let err = RunnerError::execution("boom");
         assert_eq!(err.to_string(), "tool execution failed: boom");
+    }
+
+    #[test]
+    fn decline_all_handler_returns_decline() {
+        let handler = DeclineAllElicitations;
+        let response = handler.elicit(ElicitationRequest {
+            server: "stub".into(),
+            tool: "ask".into(),
+            message: "ok?".into(),
+            mode: ElicitationMode::Form,
+            schema: serde_json::json!({ "type": "object" }),
+            url: None,
+            elicitation_id: None,
+        });
+        assert!(matches!(response, ElicitationResponse::Decline));
+    }
+
+    #[test]
+    fn elicitation_response_roundtrips_through_json() {
+        let cases = [
+            ElicitationResponse::Accept {
+                content: serde_json::json!({ "x": 1 }),
+            },
+            ElicitationResponse::Decline,
+            ElicitationResponse::Cancel,
+        ];
+        for resp in cases {
+            let json = serde_json::to_value(&resp).unwrap();
+            let back: ElicitationResponse = serde_json::from_value(json).unwrap();
+            // Prove round-trip preserves the variant — use Debug since the
+            // type is not Eq.
+            assert_eq!(format!("{resp:?}"), format!("{back:?}"));
+        }
     }
 
     #[test]
