@@ -155,7 +155,8 @@ where
 
     let structured_output = options.structured_output;
     let mut execution = resolve_openai_execution_config(state, auth_store, provider)?;
-    let registry = ToolRegistry::from_resources(resources);
+    let registry =
+        super::mcp_discovery::registry_with_mcp_tools(resources, state.tool_runner.as_ref());
     let permission_context = load_runtime_permission_context(&state.cwd, resources, state)?;
     let text = openai_responses_text_config(structured_output, use_native);
     let tools = openai_tool_definitions_for_request(
@@ -1256,7 +1257,8 @@ fn run_responses_attempt(
     use_native: bool,
     on_event: Option<&mut dyn FnMut(super::TurnStreamEvent)>,
 ) -> Result<super::TurnExecution> {
-    let registry = ToolRegistry::from_resources(resources);
+    let registry =
+        super::mcp_discovery::registry_with_mcp_tools(resources, state.tool_runner.as_ref());
     let mut session = self::responses_session::setup_responses_session(
         state,
         resources,
@@ -1418,7 +1420,8 @@ fn run_completions_attempt(
     use_native: bool,
     on_event: Option<&mut dyn FnMut(super::TurnStreamEvent)>,
 ) -> Result<super::TurnExecution> {
-    let registry = ToolRegistry::from_resources(resources);
+    let registry =
+        super::mcp_discovery::registry_with_mcp_tools(resources, state.tool_runner.as_ref());
     let mut session = self::completions_session::setup_completions_session(
         state,
         resources,

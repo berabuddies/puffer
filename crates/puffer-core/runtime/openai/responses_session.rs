@@ -396,7 +396,10 @@ pub(super) fn setup_responses_session(
     use_native: bool,
 ) -> Result<OpenAIResponsesTurnSession> {
     let execution = resolve_openai_execution_config(state, auth_store, provider)?;
-    let registry = ToolRegistry::from_resources(resources);
+    let registry = super::super::mcp_discovery::registry_with_mcp_tools(
+        resources,
+        state.tool_runner.as_ref(),
+    );
     let permission_context = load_runtime_permission_context(&state.cwd, resources, state)?;
     let text = openai_responses_text_config(options.structured_output, use_native);
     let tools = openai_tool_definitions_for_request(

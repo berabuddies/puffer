@@ -4544,6 +4544,7 @@ dependencies = [
  "puffer-resources",
  "puffer-runner-api",
  "puffer-runner-local",
+ "puffer-tools",
  "rmcp",
  "serde_json",
  "tempfile",
@@ -4688,6 +4689,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2 0.10.9",
  "tempfile",
  "time",
 ]

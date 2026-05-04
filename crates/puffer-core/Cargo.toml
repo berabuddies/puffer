@@ -24,6 +24,10 @@ path = "tests/runner_mcp_http.rs"
 name = "runner_mcp_oauth"
 path = "tests/runner_mcp_oauth.rs"
 
+[[test]]
+name = "runner_mcp_tool_advertising"
+path = "tests/runner_mcp_tool_advertising.rs"
+
 [dependencies]
 anyhow.workspace = true
 arboard.workspace = true

@@ -79,7 +79,8 @@ fn setup_anthropic_session(
     input: &str,
 ) -> Result<AnthropicTurnSession> {
     let auth = anthropic_auth_for_provider(auth_store, provider)?;
-    let registry = ToolRegistry::from_resources(resources);
+    let registry =
+        super::mcp_discovery::registry_with_mcp_tools(resources, state.tool_runner.as_ref());
     let permission_context = load_runtime_permission_context(&state.cwd, resources, state)?;
     let plan_mode_context = crate::plan_mode::take_plan_mode_context_message(state, resources)?;
 
@@ -729,7 +730,8 @@ impl super::provider_adapter::ProviderAdapter for AnthropicAdapter {
         input: &str,
         options: TurnRequestOptions<'_>,
     ) -> Result<TurnExecution> {
-        let registry = ToolRegistry::from_resources(resources);
+        let registry =
+            super::mcp_discovery::registry_with_mcp_tools(resources, state.tool_runner.as_ref());
         let mut session = setup_anthropic_session(
             state, resources, provider, model_id, auth_store, &options, input,
         )?;
@@ -762,7 +764,8 @@ impl super::provider_adapter::ProviderAdapter for AnthropicAdapter {
         options: TurnRequestOptions<'_>,
         on_event: &mut dyn FnMut(TurnStreamEvent),
     ) -> Result<TurnExecution> {
-        let registry = ToolRegistry::from_resources(resources);
+        let registry =
+            super::mcp_discovery::registry_with_mcp_tools(resources, state.tool_runner.as_ref());
         let mut session = setup_anthropic_session(
             state, resources, provider, model_id, auth_store, &options, input,
         )?;

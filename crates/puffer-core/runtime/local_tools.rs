@@ -6,7 +6,9 @@ use crate::AppState;
 use anyhow::{anyhow, Result};
 use glob::Pattern;
 use puffer_resources::LoadedResources;
-use puffer_runner_api::{McpResourceContentPart, McpResourceRecord, RunnerError, ToolRunner};
+use puffer_runner_api::{
+    McpResourceContentPart, McpResourceRecord, NullChunkSink, RunnerError, ToolRunner,
+};
 use puffer_tools::{ToolDefinition, ToolRegistry};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -42,6 +44,7 @@ pub(super) fn is_runtime_local_tool(definition: &ToolDefinition) -> bool {
             | "runtime:sleep"
             | "runtime:list_mcp_resources"
             | "runtime:read_mcp_resource"
+            | "runtime:mcp_call"
     )
 }
 
@@ -70,9 +73,46 @@ pub(super) fn execute_runtime_local_tool(
         "runtime:read_mcp_resource" => {
             execute_read_mcp_resource(state.tool_runner.as_ref(), input)
         }
+        "runtime:mcp_call" => execute_mcp_call(state.tool_runner.as_ref(), definition, input),
         other => Err(anyhow!("unsupported runtime-local tool handler {other}")),
     }
 }
+
+/// Routes one model-issued `mcp__<server>__<tool>` call back through the
+/// tool runner. The qualified tool id is opaque to dispatch — we read the
+/// original `(server, tool)` strings from `handler_args`, which the
+/// registry stamped on at registration time.
+fn execute_mcp_call(runner: &dyn ToolRunner, definition: &ToolDefinition, input: Value) -> Result<String> {
+    let server = definition
+        .handler_args
+        .first()
+        .ok_or_else(|| anyhow!("runtime:mcp_call missing server in handler_args"))?;
+    let tool = definition
+        .handler_args
+        .get(1)
+        .ok_or_else(|| anyhow!("runtime:mcp_call missing tool in handler_args"))?;
+    let mut sink = NullChunkSink;
+    let result = runner
+        .call_mcp_tool(server, tool, input, &mut sink)
+        .map_err(map_runner_error)?;
+    if !result.success {
+        let mut error = format!("MCP tool {server}/{tool} reported failure");
+        if !result.stderr.is_empty() {
+            error.push_str(&format!(": {}", result.stderr));
+        } else if !result.stdout.is_empty() {
+            error.push_str(&format!(": {}", result.stdout));
+        }
+        return Err(anyhow!(error));
+    }
+    if !result.metadata.is_null() {
+        Ok(serde_json::to_string_pretty(&result.metadata)?)
+    } else if !result.stdout.is_empty() {
+        Ok(result.stdout)
+    } else {
+        Ok(String::new())
+    }
+}
+
 
 fn execute_skill_tool(resources: &LoadedResources, input: Value) -> Result<String> {
     super::claude_tools::skill::execute_claude_skill_tool(resources, input)

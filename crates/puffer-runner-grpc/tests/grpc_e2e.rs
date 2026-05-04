@@ -1556,3 +1556,70 @@ fn cross_backend_oauth_token_push_round_trip() {
     drop(remote);
     drop(server);
 }
+
+/// Pass 1.5g cross-backend: the MCP tool advertising bridge must produce
+/// the same qualified registry whether discovery walks an in-process
+/// `LocalToolRunner` or a `RemoteToolRunner` over gRPC. Without this the
+/// model would only see `mcp__*` entries on one of the two backends.
+#[test]
+fn cross_backend_mcp_tool_advertising() {
+    use puffer_core::mcp_discovery::registry_with_mcp_tools;
+    use puffer_resources::{LoadedResources, McpServerSpec};
+
+    let stub_bin = locate_stub_binary();
+    let manifest = || -> Vec<McpServerSpec> {
+        vec![McpServerSpec {
+            id: "stub".into(),
+            display_name: "Stub".into(),
+            transport: "stdio".into(),
+            endpoint: String::new(),
+            target: format!(
+                "'{}' --marker puffer-mcp-grpc-tool-advertising",
+                stub_bin.display()
+            ),
+            description: "Integration-test stub MCP server".into(),
+            headers: Default::default(),
+            oauth: None,
+        }]
+    };
+
+    let local_runner = LocalToolRunner::new().with_mcp_servers(manifest());
+    let server_runner: Arc<dyn ToolRunner> =
+        Arc::new(LocalToolRunner::new().with_mcp_servers(manifest()));
+    let server = spawn_server(server_runner);
+    let remote = RemoteToolRunner::connect(&server.endpoint, Some(TEST_TOKEN))
+        .expect("connect remote runner");
+
+    let resources = LoadedResources::default();
+    let local_registry = registry_with_mcp_tools(&resources, &local_runner);
+    let remote_registry = registry_with_mcp_tools(&resources, &remote);
+
+    let qualified_ids = |registry: &puffer_tools::ToolRegistry| -> Vec<String> {
+        let mut ids: Vec<String> = registry
+            .definitions()
+            .filter(|definition| definition.id.starts_with("mcp__"))
+            .map(|definition| definition.id.clone())
+            .collect();
+        ids.sort();
+        ids
+    };
+
+    let local_ids = qualified_ids(&local_registry);
+    let remote_ids = qualified_ids(&remote_registry);
+    assert_eq!(local_ids, remote_ids, "qualified ids must match across backends");
+    assert!(local_ids.contains(&"mcp__stub__echo".to_string()));
+    assert!(local_ids.contains(&"mcp__stub__slow_echo".to_string()));
+
+    // handler_args is what the runtime executor reads to recover the raw
+    // (server, tool) pair; verify both backends agree on it.
+    for id in &local_ids {
+        let local_def = local_registry.definition(id).expect("local definition");
+        let remote_def = remote_registry.definition(id).expect("remote definition");
+        assert_eq!(local_def.handler, "runtime:mcp_call");
+        assert_eq!(remote_def.handler, "runtime:mcp_call");
+        assert_eq!(local_def.handler_args, remote_def.handler_args);
+    }
+
+    drop(remote);
+    drop(server);
+}

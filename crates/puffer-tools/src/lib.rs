@@ -2,6 +2,7 @@ mod agent_prompt;
 mod builtins;
 mod config_prompt;
 mod external;
+pub mod mcp_qualify;
 mod model;
 #[cfg(test)]
 mod model_tests;
@@ -37,5 +38,6 @@ pub use model::ToolPropertySchema;
 pub use model::ToolSchemaType;
 pub use model::TypedToolInput;
 pub use model::WriteFileToolInput;
+pub use registry::McpToolEntry;
 pub use registry::RegisteredTool;
 pub use registry::ToolRegistry;

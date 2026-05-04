@@ -3,6 +3,7 @@ use crate::config_prompt::render_config_tool_description;
 use crate::external::{
     builtin_handler_name, execute_runtime, runtime_from_definition, ToolRuntime,
 };
+use crate::mcp_qualify::{qualify_tools, McpToolKey};
 use crate::{
     builtin_tool_definition_by_handler, ToolDefinition, ToolDisplayHints, ToolExecutionResult,
     ToolInput, ToolInputSchema, ToolKind, ToolMetadata, ToolPolicyHints, ToolPropertySchema,
@@ -13,6 +14,19 @@ use puffer_resources::{plugin_mcp_servers, LoadedResources, ToolSpec};
 use std::collections::BTreeMap;
 use std::path::Path;
 use time::{Month, OffsetDateTime};
+
+/// One MCP-discovered tool ready for `ToolRegistry::register_mcp_tools`.
+///
+/// Mirrors the subset of `puffer_runner_api::McpTool` the registry needs,
+/// kept independent so `puffer-tools` doesn't have to depend on the runner
+/// API crate.
+#[derive(Debug, Clone)]
+pub struct McpToolEntry {
+    pub server: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub input_schema: Option<serde_json::Value>,
+}
 
 /// One registered tool with its declarative metadata and runtime kind.
 pub struct RegisteredTool {
@@ -62,6 +76,52 @@ impl ToolRegistry {
             tool.spec.description = render_config_tool_description(resources);
         }
         registry
+    }
+
+    /// Registers one MCP-discovered tool per `(server, name, schema)` row.
+    ///
+    /// Each entry is added under its qualified `mcp__<server>__<tool>` id
+    /// with handler `runtime:mcp_call` and `handler_args = [server, tool]`,
+    /// so the runtime executor can dispatch back to the runner without
+    /// having to undo sanitization. Collisions are resolved via the same
+    /// hash-suffix strategy codex uses (see `mcp_qualify::qualify_tools`).
+    pub fn register_mcp_tools(
+        &mut self,
+        rows: impl IntoIterator<Item = McpToolEntry>,
+    ) -> Result<()> {
+        let entries: Vec<McpToolEntry> = rows.into_iter().collect();
+        let qualified = qualify_tools(
+            entries
+                .iter()
+                .map(|entry| McpToolKey {
+                    server: entry.server.clone(),
+                    tool: entry.name.clone(),
+                })
+                .collect(),
+        );
+        for (entry, qualified) in entries.into_iter().zip(qualified.into_iter()) {
+            let input_schema = parse_mcp_input_schema(entry.input_schema.as_ref());
+            let definition = ToolDefinition {
+                id: qualified.qualified_name.clone(),
+                name: qualified.qualified_name.clone(),
+                description: entry.description.unwrap_or_default(),
+                handler: "runtime:mcp_call".to_string(),
+                aliases: Vec::new(),
+                handler_args: vec![entry.server.clone(), entry.name.clone()],
+                kind: ToolKind::Custom,
+                input_schema,
+                metadata: ToolMetadata::default(),
+                policy: ToolPolicyHints {
+                    approval_policy: Some("auto".to_string()),
+                    sandbox_policy: Some("read-only".to_string()),
+                },
+                shared_lib: None,
+                enabled_if: None,
+                display: ToolDisplayHints::default(),
+            };
+            self.register(definition)?;
+        }
+        Ok(())
     }
 
     /// Registers one declarative tool definition when it maps to a supported runtime.
@@ -200,6 +260,16 @@ fn definition_from_spec(spec: &ToolSpec) -> Option<ToolDefinition> {
         show_in_status: spec.display.show_in_status,
     };
     Some(definition)
+}
+
+fn parse_mcp_input_schema(schema: Option<&serde_json::Value>) -> ToolInputSchema {
+    match schema {
+        Some(value) => parse_input_schema(value).unwrap_or_else(|_| ToolInputSchema {
+            properties: BTreeMap::new(),
+            raw_json_schema: serde_json::to_string(value).ok(),
+        }),
+        None => ToolInputSchema::default(),
+    }
 }
 
 fn parse_input_schema(input_schema: &serde_json::Value) -> Result<ToolInputSchema> {
@@ -808,6 +878,79 @@ mod tests {
 
         assert_eq!(definition.id, "SendUserMessage");
         assert_eq!(definition.aliases, vec!["Brief".to_string()]);
+    }
+
+    #[test]
+    fn register_mcp_tools_exposes_qualified_ids_with_handler_args() {
+        let mut registry = ToolRegistry::default();
+        registry
+            .register_mcp_tools(vec![
+                McpToolEntry {
+                    server: "playwright".to_string(),
+                    name: "browser_navigate".to_string(),
+                    description: Some("Open a URL".to_string()),
+                    input_schema: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "url": { "type": "string", "description": "Target URL" }
+                        },
+                        "required": ["url"]
+                    })),
+                },
+                McpToolEntry {
+                    server: "playwright".to_string(),
+                    name: "browser_close".to_string(),
+                    description: None,
+                    input_schema: None,
+                },
+            ])
+            .unwrap();
+        let definition = registry
+            .definition("mcp__playwright__browser_navigate")
+            .expect("qualified definition registered");
+        assert_eq!(definition.handler, "runtime:mcp_call");
+        assert_eq!(
+            definition.handler_args,
+            vec!["playwright".to_string(), "browser_navigate".to_string()]
+        );
+        assert_eq!(definition.description, "Open a URL");
+        assert_eq!(
+            definition.input_schema.properties["url"].value_type,
+            crate::ToolSchemaType::String
+        );
+
+        let close = registry
+            .definition("mcp__playwright__browser_close")
+            .expect("second qualified definition registered");
+        assert_eq!(close.description, "");
+        assert!(close.input_schema.properties.is_empty());
+    }
+
+    #[test]
+    fn register_mcp_tools_handles_collisions_with_hash_suffix() {
+        let mut registry = ToolRegistry::default();
+        registry
+            .register_mcp_tools(vec![
+                McpToolEntry {
+                    server: "a".to_string(),
+                    name: "x".to_string(),
+                    description: None,
+                    input_schema: None,
+                },
+                McpToolEntry {
+                    server: "a".to_string(),
+                    name: "x".to_string(),
+                    description: None,
+                    input_schema: None,
+                },
+            ])
+            .unwrap();
+        let qualified_ids: Vec<String> = registry
+            .definitions()
+            .map(|definition| definition.id.clone())
+            .collect();
+        assert!(qualified_ids.iter().any(|id| id == "mcp__a__x"));
+        assert!(qualified_ids.iter().any(|id| id.starts_with("mcp__a__x__")));
     }
 
     #[test]

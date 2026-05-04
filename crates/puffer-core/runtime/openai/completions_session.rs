@@ -264,7 +264,10 @@ pub(super) fn setup_completions_session(
     use_native: bool,
 ) -> Result<OpenAICompletionsTurnSession> {
     let execution = super::resolve_openai_execution_config(state, auth_store, provider)?;
-    let registry = ToolRegistry::from_resources(resources);
+    let registry = super::super::mcp_discovery::registry_with_mcp_tools(
+        resources,
+        state.tool_runner.as_ref(),
+    );
     let permission_context = load_runtime_permission_context(&state.cwd, resources, state)?;
     let response_format = openai_chat_response_format(options.structured_output, use_native);
     let tools = openai_chat_completion_tools_for_request(

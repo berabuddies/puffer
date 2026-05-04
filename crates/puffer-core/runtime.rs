@@ -29,6 +29,7 @@ pub mod claude_tools;
 mod context_usage;
 mod hook_support;
 mod local_tools;
+pub mod mcp_discovery;
 mod openai;
 mod openai_sse;
 mod openai_ws;
