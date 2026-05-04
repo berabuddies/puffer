@@ -418,6 +418,7 @@ mod tests {
             endpoint: String::new(),
             target: "builtin:filesystem".into(),
             description: "Filesystem server".into(),
+            headers: Default::default(),
         }
     }
 
@@ -429,6 +430,7 @@ mod tests {
             endpoint: String::new(),
             target: format!("{id}-target"),
             description: format!("{id} description"),
+            headers: Default::default(),
         }
     }
 

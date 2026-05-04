@@ -46,8 +46,9 @@ use serde_json::{Map, Value};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc::UnboundedSender;
 
+use super::http_launcher::build_streamable_http_transport;
 use super::launcher::spawn_stdio_child;
-use super::transport::{StdioTransportSpec, TransportRecipe};
+use super::transport::{expand_env, HttpTransportSpec, StdioTransportSpec, TransportRecipe};
 
 /// Bounded-retry policy: at most `MAX_RETRIES` failed launches inside the
 /// rolling `RETRY_WINDOW`. After that, calls fail fast until the window
@@ -634,6 +635,7 @@ async fn spawn_client(
 ) -> Result<RunningService<RoleClient, McpClientHandler>, RunnerError> {
     match recipe {
         TransportRecipe::Stdio(spec) => spawn_stdio_client(server, spec, handler).await,
+        TransportRecipe::Http(spec) => spawn_http_client(server, spec, handler).await,
     }
 }
 
@@ -644,6 +646,25 @@ async fn spawn_stdio_client(
 ) -> Result<RunningService<RoleClient, McpClientHandler>, RunnerError> {
     let transport: TokioChildProcess = spawn_stdio_child(server, &spec)
         .map_err(|e| RunnerError::Mcp(format!("spawn `{}`: {e}", spec.program)))?;
+    handler
+        .serve(transport)
+        .await
+        .map_err(|e| RunnerError::Mcp(format!("MCP handshake with `{server}` failed: {e}")))
+}
+
+/// Build the rmcp streamable-HTTP transport and run the initialize
+/// handshake. The bounded-retry budget in [`ServerSlot`] applies just like
+/// the stdio path: if the handshake fails we return an `Mcp` error and
+/// the caller records a failure attempt. Mid-session reconnect is handled
+/// inside rmcp's own SSE auto-reconnect loop until the transport is
+/// declared closed by `peer().is_transport_closed()`, at which point the
+/// connection manager's lazy-respawn kicks in for the *next* request.
+async fn spawn_http_client(
+    server: &str,
+    spec: HttpTransportSpec,
+    handler: McpClientHandler,
+) -> Result<RunningService<RoleClient, McpClientHandler>, RunnerError> {
+    let transport = build_streamable_http_transport(server, &spec)?;
     handler
         .serve(transport)
         .await
@@ -858,14 +879,37 @@ fn result_to_dto(server: String, tool: &str, result: rmcp::model::CallToolResult
 /// stub or any malformed spec — the caller falls back to the existing
 /// in-process behavior in that case.
 ///
-/// `target` parsing follows the documented convention: split on whitespace
-/// (shell-words style), the first token is the binary, the rest are argv.
-/// Manifests that need richer argv handling can pre-quote with `'...'` or
-/// `"..."` per shell-words rules.
+/// Transport dispatch:
+///
+/// * `transport: stdio` (default / blank) — `target` is shell-words split
+///   into a binary + argv. Manifests that need richer argv handling can
+///   pre-quote with `'...'` or `"..."` per shell-words rules.
+/// * `transport: http` / `streamable-http` — the URL comes from `endpoint`
+///   when set (legacy field used by `puffer mcp add` for SSE/HTTP) or
+///   `target` otherwise. Header values are env-expanded so `${VAR}`
+///   placeholders resolve at construction time.
 pub fn entry_from_spec(spec: &puffer_resources::McpServerSpec) -> Option<ConnectionEntry> {
     if super::host::is_live_filesystem_server(&spec.id, &spec.target) {
         return None;
     }
+    let transport = spec.transport.trim().to_ascii_lowercase();
+    match transport.as_str() {
+        "" | "stdio" => stdio_entry_from_spec(spec),
+        "http" | "streamable-http" | "streamable_http" => http_entry_from_spec(spec),
+        other => {
+            tracing::warn!(
+                target = "puffer::mcp",
+                "MCP server `{id}`: unknown transport `{other}`; ignoring",
+                id = spec.id
+            );
+            None
+        }
+    }
+}
+
+fn stdio_entry_from_spec(
+    spec: &puffer_resources::McpServerSpec,
+) -> Option<ConnectionEntry> {
     let target = spec.target.trim();
     if target.is_empty() {
         return None;
@@ -883,5 +927,33 @@ pub fn entry_from_spec(spec: &puffer_resources::McpServerSpec) -> Option<Connect
         env: BTreeMap::new(),
         cwd: None,
     });
+    Some(ConnectionEntry::new(spec.id.clone(), recipe))
+}
+
+fn http_entry_from_spec(
+    spec: &puffer_resources::McpServerSpec,
+) -> Option<ConnectionEntry> {
+    // `endpoint` is the historical field set by `puffer mcp add` for
+    // HTTP/SSE entries; fall back to `target` so manifests that follow
+    // the pass-1.5d convention (URL in `target`, `headers` map alongside)
+    // also parse cleanly.
+    let url_raw = if !spec.endpoint.trim().is_empty() {
+        spec.endpoint.trim()
+    } else {
+        spec.target.trim()
+    };
+    if url_raw.is_empty() {
+        return None;
+    }
+    let url = expand_env(url_raw);
+    if url.is_empty() {
+        return None;
+    }
+    let headers: Vec<(String, String)> = spec
+        .headers
+        .iter()
+        .map(|(k, v)| (k.clone(), expand_env(v)))
+        .collect();
+    let recipe = TransportRecipe::Http(HttpTransportSpec { url, headers });
     Some(ConnectionEntry::new(spec.id.clone(), recipe))
 }

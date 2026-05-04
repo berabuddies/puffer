@@ -833,6 +833,7 @@ mod tests {
                 endpoint: String::new(),
                 target: "docs".to_string(),
                 description: String::new(),
+                headers: Default::default(),
             },
             source_info: SourceInfo {
                 path: root.join("resources/mcp_servers/docs.yaml"),
@@ -854,6 +855,7 @@ mod tests {
                     endpoint: String::new(),
                     target: "logs".to_string(),
                     description: String::new(),
+                    headers: Default::default(),
                 }],
                 lsp_servers: Vec::new(),
             },

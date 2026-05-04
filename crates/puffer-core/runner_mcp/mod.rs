@@ -22,6 +22,7 @@
 
 pub mod connection_manager;
 pub mod host;
+pub mod http_launcher;
 pub mod launcher;
 pub mod transport;
 

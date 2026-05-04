@@ -268,6 +268,16 @@ pub struct PluginCommandSpec {
 }
 
 /// Declares an MCP server manifest or plugin MCP reference.
+///
+/// `transport` selects the wire protocol used to reach the server:
+///
+/// * `stdio` (default) — `target` is a shell-words command line, executed
+///   as a subprocess; the runner pipes JSON-RPC over stdin/stdout.
+/// * `http` (alias `streamable-http`) — `target` is the absolute URL of an
+///   rmcp streamable-HTTP endpoint. Optional `headers` are sent on every
+///   request; values support `${VAR}` / `$VAR` env-var expansion so users
+///   can put `Authorization: "Bearer ${GITHUB_TOKEN}"` in YAML without
+///   committing the token itself.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct McpServerSpec {
     pub id: String,
@@ -280,6 +290,11 @@ pub struct McpServerSpec {
     pub target: String,
     #[serde(default)]
     pub description: String,
+    /// Extra HTTP headers attached to every request when
+    /// `transport == "http"` / `"streamable-http"`. Ignored for other
+    /// transports. Values support `${VAR}` env-var expansion.
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
 }
 
 /// Declares a declarative LSP server integration entry.

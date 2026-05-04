@@ -320,6 +320,7 @@ mod tests {
             endpoint: String::new(),
             target: "docs-server".to_string(),
             description: "Docs server".to_string(),
+            headers: Default::default(),
         }
     }
 
@@ -331,6 +332,7 @@ mod tests {
             endpoint: String::new(),
             target: "builtin:filesystem".to_string(),
             description: "Filesystem server".to_string(),
+            headers: Default::default(),
         }
     }
 

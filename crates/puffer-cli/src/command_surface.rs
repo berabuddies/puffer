@@ -402,6 +402,7 @@ fn add_mcp_server(
             endpoint: String::new(),
             target: stdio_target(command_or_url, args),
             description: format!("Workspace MCP server `{name}`"),
+            headers: Default::default(),
         },
         McpTransport::Sse | McpTransport::Http => {
             if !args.is_empty() {
@@ -419,6 +420,7 @@ fn add_mcp_server(
                 endpoint: command_or_url.to_string(),
                 target: String::new(),
                 description: format!("Workspace MCP server `{name}`"),
+                headers: Default::default(),
             }
         }
     };
@@ -448,6 +450,7 @@ fn add_mcp_server_from_json(
         endpoint: input.endpoint.unwrap_or_default(),
         target: input.target.unwrap_or_default(),
         description: input.description.unwrap_or_default(),
+        headers: input.headers.unwrap_or_default(),
     };
     let dir = resource_dir(paths, scope, "mcp_servers");
     fs::create_dir_all(&dir)?;
@@ -926,6 +929,8 @@ struct McpServerJsonInput {
     target: Option<String>,
     #[serde(default)]
     description: Option<String>,
+    #[serde(default)]
+    headers: Option<std::collections::BTreeMap<String, String>>,
 }
 
 fn default_sandbox_mode() -> String {
