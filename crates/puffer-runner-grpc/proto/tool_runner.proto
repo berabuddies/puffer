@@ -20,7 +20,22 @@ service ToolRunner {
   // MCP — Phase 2 stubs return UNIMPLEMENTED. Phase 1 fills these in.
   rpc ListMcpServers(Empty) returns (McpServerList);
   rpc ListMcpTools(McpServerRef) returns (McpToolList);
-  rpc CallMcpTool(McpToolCall) returns (stream McpToolEvent);
+  // Bidirectional stream so MCP server-initiated `elicitation/create`
+  // requests can flow client-ward mid-call and the user's response can
+  // flow server-ward without spinning up a second RPC.
+  //
+  // Protocol:
+  //   * Client's FIRST message MUST be `McpToolMessage.call` carrying the
+  //     `McpToolCall` payload. Sending anything else first is an
+  //     INVALID_ARGUMENT.
+  //   * Subsequent client messages are `McpToolMessage.elicitation_response`
+  //     keyed by `request_id` (the matching `elicitation_request.request_id`
+  //     the server emitted earlier on this stream). The server may also
+  //     send completion / failure events at any point.
+  //   * Server messages reuse the same `McpToolMessage` envelope; the
+  //     `stdout`, `stderr`, `event_json`, `elicitation_request`,
+  //     `completed`, and `failed` variants are server-to-client.
+  rpc CallMcpTool(stream McpToolMessage) returns (stream McpToolMessage);
   rpc ListMcpResources(McpResourceQuery) returns (McpResourceList);
   rpc ReadMcpResource(McpResourceRef) returns (McpResourceContent);
   rpc ListMcpPrompts(McpServerRef) returns (McpPromptList);
@@ -164,6 +179,63 @@ message McpToolEvent {
     // may share this channel as long as they fit a single JSON value.
     string event_json = 5;
   }
+}
+
+// Single envelope used by both directions of the `CallMcpTool` bidi
+// stream. Only one variant is populated per message.
+message McpToolMessage {
+  oneof payload {
+    // Client-to-server: opens the call. MUST be the first message.
+    McpToolCall call = 1;
+    // Server-to-client: forwarded `ChunkSink::stdout`.
+    StreamChunk stdout = 2;
+    // Server-to-client: forwarded `ChunkSink::stderr`.
+    StreamChunk stderr = 3;
+    // Server-to-client: terminal success.
+    McpToolResult completed = 4;
+    // Server-to-client: terminal failure (typed via `code`).
+    ToolFailed failed = 5;
+    // Server-to-client: JSON-encoded `ChunkSink::event` payload (today
+    // an `{kind: "mcp/progress", ...}` envelope from the connection
+    // manager's progress wiring).
+    string event_json = 6;
+    // Server-to-client: server-initiated `elicitation/create` request.
+    McpElicitationRequest elicitation_request = 7;
+    // Client-to-server: user's response to `elicitation_request`,
+    // correlated by `request_id`.
+    McpElicitationResponse elicitation_response = 8;
+  }
+}
+
+message McpElicitationRequest {
+  // Stream-local correlation id minted by the server. Echoed back in
+  // the matching `McpElicitationResponse`.
+  string request_id = 1;
+  // MCP server id (matches `McpServerInfo.id`).
+  string server = 2;
+  // Tool that triggered the elicitation; empty when not known.
+  string tool = 3;
+  // Server's prompt for the user.
+  string message = 4;
+  // "form" or "url".
+  string mode = 5;
+  // JSON-encoded JSON Schema describing the expected response (form
+  // mode only). Empty for url mode.
+  string schema_json = 6;
+  // Optional URL the user is asked to visit (url mode only).
+  optional string url = 7;
+  // Optional server-minted correlation id (url mode only — distinct from
+  // the stream-local `request_id`).
+  optional string elicitation_id = 8;
+}
+
+message McpElicitationResponse {
+  // Matches the `request_id` of the originating `McpElicitationRequest`.
+  string request_id = 1;
+  // "accept" / "decline" / "cancel".
+  string action = 2;
+  // JSON-encoded payload for `accept`; empty for the other actions.
+  string content_json = 3;
 }
 
 message McpToolResult {

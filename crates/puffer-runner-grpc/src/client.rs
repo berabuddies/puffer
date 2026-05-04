@@ -29,11 +29,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use puffer_runner_api::{
-    ChunkSink, DirEntry, McpPrompt, McpPromptContent, McpResourceContent, McpResourceRecord,
-    McpResult, McpServerInfo, McpTool, RunnerCapabilities, RunnerError, RunnerPing, ToolRequest,
-    ToolResult, ToolRunner,
+    ChunkSink, DeclineAllElicitations, DirEntry, ElicitationHandler, ElicitationMode,
+    ElicitationRequest, ElicitationResponse, McpPrompt, McpPromptContent, McpResourceContent,
+    McpResourceRecord, McpResult, McpServerInfo, McpTool, RunnerCapabilities, RunnerError,
+    RunnerPing, ToolRequest, ToolResult, ToolRunner,
 };
 use tokio::runtime::Runtime;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataValue;
 use tonic::service::Interceptor;
 use tonic::transport::{Channel, Endpoint};
@@ -68,12 +71,14 @@ pub struct RemoteToolRunner {
     endpoint: String,
     runtime: Arc<Runtime>,
     client: RunnerClient,
+    elicitation: Arc<dyn ElicitationHandler>,
 }
 
 impl std::fmt::Debug for RemoteToolRunner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RemoteToolRunner")
             .field("endpoint", &self.endpoint)
+            .field("elicitation", &self.elicitation)
             .finish()
     }
 }
@@ -130,7 +135,20 @@ impl RemoteToolRunner {
             endpoint: endpoint.to_string(),
             runtime,
             client,
+            elicitation: Arc::new(DeclineAllElicitations),
         })
+    }
+
+    /// Installs the elicitation handler invoked when the remote runner
+    /// forwards a server-initiated `elicitation/create` request through a
+    /// `CallMcpTool` bidi stream. Defaults to
+    /// [`puffer_runner_api::DeclineAllElicitations`].
+    pub fn with_elicitation_handler(
+        mut self,
+        handler: Arc<dyn ElicitationHandler>,
+    ) -> Self {
+        self.elicitation = handler;
+        self
     }
 
     /// The endpoint this runner was constructed with. Useful for logs and
@@ -346,41 +364,97 @@ impl ToolRunner for RemoteToolRunner {
         sink: &mut dyn ChunkSink,
     ) -> Result<McpResult, RunnerError> {
         let client = self.client.clone();
-        let req = proto::McpToolCall {
+        let elicitation = Arc::clone(&self.elicitation);
+        let call = proto::McpToolCall {
             server: server.to_string(),
             tool: tool.to_string(),
             args_json: args.to_string(),
         };
         self.run(async move {
-            let stream = retry_unavailable(|| {
-                let mut client = client.clone();
-                let req = req.clone();
-                async move { client.call_mcp_tool(req).await }
-            })
-            .await
-            .map_err(status_to_runner_error)?;
-            let mut stream = stream.into_inner();
+            // Outbound channel for client→server messages. We send the
+            // initial `Call` envelope and any subsequent
+            // `ElicitationResponse` envelopes through this. Buffer of 8
+            // is plenty: at most one response per outstanding elicitation
+            // plus the initial Call.
+            let (out_tx, out_rx) = mpsc::channel::<proto::McpToolMessage>(8);
+            // Seed the stream with the Call envelope.
+            out_tx
+                .send(proto::McpToolMessage {
+                    payload: Some(proto::mcp_tool_message::Payload::Call(call)),
+                })
+                .await
+                .map_err(|_| RunnerError::Transport("CallMcpTool send dropped".into()))?;
+            let outbound = ReceiverStream::new(out_rx);
+
+            // Open the bidi stream. Note: tonic's bidi RPCs return a
+            // `Streaming<Response>` directly; we don't use the unary
+            // retry_unavailable wrapper because it would require restarting
+            // the stream from scratch.
+            let mut client_for_call = client.clone();
+            let inbound = client_for_call
+                .call_mcp_tool(outbound)
+                .await
+                .map_err(status_to_runner_error)?;
+            let mut inbound = inbound.into_inner();
+
             let mut result: Option<McpResult> = None;
-            while let Some(event) = stream
+            while let Some(msg) = inbound
                 .message()
                 .await
                 .map_err(status_to_runner_error)?
             {
-                match event.payload {
-                    Some(proto::mcp_tool_event::Payload::Stdout(c)) => sink.stdout(&c.data),
-                    Some(proto::mcp_tool_event::Payload::Stderr(c)) => sink.stderr(&c.data),
-                    Some(proto::mcp_tool_event::Payload::Completed(c)) => {
+                match msg.payload {
+                    Some(proto::mcp_tool_message::Payload::Stdout(c)) => sink.stdout(&c.data),
+                    Some(proto::mcp_tool_message::Payload::Stderr(c)) => sink.stderr(&c.data),
+                    Some(proto::mcp_tool_message::Payload::Completed(c)) => {
                         result = Some(crate::convert::from_proto_mcp_result(c)?);
                     }
-                    Some(proto::mcp_tool_event::Payload::Failed(f)) => {
+                    Some(proto::mcp_tool_message::Payload::Failed(f)) => {
                         return Err(runner_error_from_code(&f.code, f.message));
                     }
-                    Some(proto::mcp_tool_event::Payload::EventJson(json)) => {
+                    Some(proto::mcp_tool_message::Payload::EventJson(json)) => {
                         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) {
                             sink.event(value);
                         }
                     }
-                    None => {}
+                    Some(proto::mcp_tool_message::Payload::ElicitationRequest(req)) => {
+                        // Run the (sync) handler off the tokio worker so
+                        // it can block waiting on the user without
+                        // stalling the gRPC reader.
+                        let handler = Arc::clone(&elicitation);
+                        let dto = ElicitationRequest {
+                            server: req.server,
+                            tool: req.tool,
+                            message: req.message,
+                            mode: match req.mode.as_str() {
+                                "url" => ElicitationMode::Url,
+                                _ => ElicitationMode::Form,
+                            },
+                            schema: if req.schema_json.is_empty() {
+                                serde_json::Value::Null
+                            } else {
+                                serde_json::from_str(&req.schema_json)
+                                    .unwrap_or(serde_json::Value::Null)
+                            },
+                            url: req.url,
+                            elicitation_id: req.elicitation_id,
+                        };
+                        let response = tokio::task::spawn_blocking(move || handler.elicit(dto))
+                            .await
+                            .map_err(|e| {
+                                RunnerError::Other(format!("elicitation handler join: {e}"))
+                            })?;
+                        let envelope = encode_elicitation_response(&req.request_id, response);
+                        if out_tx.send(envelope).await.is_err() {
+                            // Stream dropped — nothing more we can do; the
+                            // server will see `Cancel` semantics by virtue
+                            // of the closed receive side.
+                            break;
+                        }
+                    }
+                    Some(proto::mcp_tool_message::Payload::ElicitationResponse(_))
+                    | Some(proto::mcp_tool_message::Payload::Call(_))
+                    | None => {}
                 }
             }
             result.ok_or_else(|| RunnerError::Mcp("call_mcp_tool stream ended early".into()))
@@ -514,4 +588,27 @@ pub fn connect_runner(
 ) -> Result<std::sync::Arc<dyn ToolRunner>, RunnerError> {
     let runner = RemoteToolRunner::connect(endpoint, auth_token)?;
     Ok(std::sync::Arc::new(runner))
+}
+
+/// Serializes an [`ElicitationResponse`] into the bidi `McpToolMessage`
+/// envelope expected by the server (`request_id` correlates with the
+/// originating `McpElicitationRequest`).
+fn encode_elicitation_response(
+    request_id: &str,
+    response: ElicitationResponse,
+) -> proto::McpToolMessage {
+    let (action, content_json) = match response {
+        ElicitationResponse::Accept { content } => ("accept".to_string(), content.to_string()),
+        ElicitationResponse::Decline => ("decline".to_string(), String::new()),
+        ElicitationResponse::Cancel => ("cancel".to_string(), String::new()),
+    };
+    proto::McpToolMessage {
+        payload: Some(proto::mcp_tool_message::Payload::ElicitationResponse(
+            proto::McpElicitationResponse {
+                request_id: request_id.to_string(),
+                action,
+                content_json,
+            },
+        )),
+    }
 }

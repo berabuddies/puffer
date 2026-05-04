@@ -8,13 +8,17 @@
 //! [`puffer_runner_api::ToolRunner`] (typically `LocalToolRunner`) and hands
 //! it to `tonic::transport::Server`. Integration tests do the same in-process.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use puffer_runner_api::{ChunkKind, ChunkSink, FnChunkSink, RunnerError, ToolRunner};
-use tokio::sync::mpsc;
+use puffer_runner_api::{
+    ChunkKind, ChunkSink, ElicitationHandler, ElicitationMode, ElicitationRequest,
+    ElicitationResponse, FnChunkSink, RunnerError, ToolRunner,
+};
+use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::{Request, Response, Status};
+use tonic::{Request, Response, Status, Streaming};
 
 use crate::convert::{
     from_proto_tool_request, runner_error_to_status, to_proto_capabilities, to_proto_dir_entry,
@@ -30,21 +34,53 @@ pub use proto::tool_runner_server::ToolRunnerServer;
 /// Adapter from a synchronous `Arc<dyn ToolRunner>` to the generated tonic
 /// service trait. All RPCs forward to the runner; blocking work runs on a
 /// `spawn_blocking` thread to avoid stalling the tonic worker pool.
+///
+/// ## Elicitation routing
+///
+/// `BidiElicitationRouter` is installed at construction so server-initiated
+/// MCP `elicitation/create` requests can be forwarded to whichever
+/// `CallMcpTool` bidi stream triggered them. The router keys active calls
+/// by `(server, call_id)` and matches incoming `elicit()` invocations by
+/// MCP server label, picking the most recent registration. This is correct
+/// for the common case (one `CallMcpTool` per gRPC stream) and degrades
+/// gracefully under concurrency: simultaneous calls to the same MCP server
+/// will see elicitations routed to whichever call registered most recently;
+/// the older call's elicitations would be dropped. We accept that trade-off
+/// for Pass 1.5c — concurrent calls to the same MCP server are rare in
+/// practice, and the alternative (per-call rmcp respawn) is far too costly.
 #[derive(Clone)]
 pub struct ToolRunnerService {
     runner: Arc<dyn ToolRunner>,
     auth_token: Option<Arc<String>>,
     started: Instant,
+    elicitation_router: Arc<BidiElicitationRouter>,
 }
 
 impl ToolRunnerService {
     /// Wraps `runner` in a tonic-ready service. No auth token.
+    ///
+    /// The caller MUST construct `runner` with the returned service's
+    /// elicitation router installed via [`puffer_runner_api::ElicitationHandler`]
+    /// — fetch it with [`ToolRunnerService::elicitation_router`] before you
+    /// build the runner. If the runner is built without this hook, server-
+    /// initiated MCP elicitations from this service's `CallMcpTool` streams
+    /// will fall back to whatever default the runner has (typically
+    /// `DeclineAllElicitations`).
     pub fn new(runner: Arc<dyn ToolRunner>) -> Self {
         Self {
             runner,
             auth_token: None,
             started: Instant::now(),
+            elicitation_router: Arc::new(BidiElicitationRouter::default()),
         }
+    }
+
+    /// Returns the elicitation router that matches this service's
+    /// `CallMcpTool` bidi streams. Install it on the underlying runner so
+    /// MCP server-initiated `elicitation/create` requests get forwarded to
+    /// the matching gRPC client.
+    pub fn elicitation_router(&self) -> Arc<dyn ElicitationHandler> {
+        Arc::clone(&self.elicitation_router) as Arc<dyn ElicitationHandler>
     }
 
     /// Requires every RPC to carry `authorization: Bearer <token>` metadata
@@ -77,7 +113,7 @@ impl ToolRunnerService {
 #[tonic::async_trait]
 impl proto::tool_runner_server::ToolRunner for ToolRunnerService {
     type ExecuteToolStream = ReceiverStream<Result<proto::ToolEvent, Status>>;
-    type CallMcpToolStream = ReceiverStream<Result<proto::McpToolEvent, Status>>;
+    type CallMcpToolStream = ReceiverStream<Result<proto::McpToolMessage, Status>>;
 
     async fn ping(
         &self,
@@ -220,45 +256,121 @@ impl proto::tool_runner_server::ToolRunner for ToolRunnerService {
 
     async fn call_mcp_tool(
         &self,
-        req: Request<proto::McpToolCall>,
+        req: Request<Streaming<proto::McpToolMessage>>,
     ) -> Result<Response<Self::CallMcpToolStream>, Status> {
         self.check_auth(&req)?;
-        let inner = req.into_inner();
-        let args: serde_json::Value = if inner.args_json.is_empty() {
+        let mut inbound = req.into_inner();
+
+        // Pull the first message — must be the `Call` envelope.
+        let first = inbound
+            .message()
+            .await?
+            .ok_or_else(|| Status::invalid_argument("CallMcpTool stream closed before Call"))?;
+        let call = match first.payload {
+            Some(proto::mcp_tool_message::Payload::Call(call)) => call,
+            other => {
+                return Err(Status::invalid_argument(format!(
+                    "first CallMcpTool message must be Call, got {other:?}"
+                )))
+            }
+        };
+        let args: serde_json::Value = if call.args_json.is_empty() {
             serde_json::Value::Null
         } else {
-            serde_json::from_str(&inner.args_json)
+            serde_json::from_str(&call.args_json)
                 .map_err(|e| Status::invalid_argument(format!("args_json: {e}")))?
         };
 
-        let (tx, rx) = mpsc::channel::<Result<proto::McpToolEvent, Status>>(32);
+        // Outbound channel. Sender is cloned into the blocking worker
+        // (events + completion) and into the route registered with the
+        // elicitation router (for elicitation_request envelopes the router
+        // emits when the MCP server triggers a `create_elicitation`).
+        let (tx, rx) = mpsc::channel::<Result<proto::McpToolMessage, Status>>(32);
+
+        // Per-call pending-elicitations map. The router pushes new entries
+        // here when it emits an elicitation_request; the inbound loop
+        // removes them when the client's response arrives.
+        let pending: PendingElicitations = Arc::new(Mutex::new(HashMap::new()));
+        let counter = Arc::new(std::sync::atomic::AtomicU64::new(1));
+        let route = Arc::new(BidiRoute {
+            outbound: tx.clone(),
+            pending: Arc::clone(&pending),
+            counter: Arc::clone(&counter),
+        });
+
+        // Register with the service-wide router so this stream's MCP
+        // server-initiated elicitations route back to us. Held by a guard
+        // that auto-deregisters when the call completes (success or panic).
+        let _route_guard = self
+            .elicitation_router
+            .register(call.server.clone(), Arc::clone(&route));
+
+        // Inbound message loop: drains elicitation responses from the
+        // client and routes them to the matching oneshot.
+        let pending_for_inbound = Arc::clone(&pending);
+        let inbound_task = tokio::spawn(async move {
+            while let Ok(Some(msg)) = inbound.message().await {
+                if let Some(proto::mcp_tool_message::Payload::ElicitationResponse(resp)) =
+                    msg.payload
+                {
+                    let parsed = parse_elicitation_response(&resp);
+                    if let Some(sender) = pending_for_inbound
+                        .lock()
+                        .ok()
+                        .and_then(|mut map| map.remove(&resp.request_id))
+                    {
+                        let _ = sender.send(parsed);
+                    }
+                }
+            }
+            // Stream closed: drop pending oneshots so any blocked sync
+            // handler unwedges with a default Decline.
+            if let Ok(mut map) = pending_for_inbound.lock() {
+                map.clear();
+            }
+        });
+
         let runner = self.runner.clone();
         let tx_blocking = tx.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut sink = McpChannelChunkSink::new(tx_blocking.clone());
-            // The connection manager streams `notifications/progress`
-            // events through `sink.event(...)`; stdout/stderr aren't used
-            // by today's stdio MCP servers but the bridge forwards them
-            // for free if a future server starts emitting them.
-            match runner.call_mcp_tool(&inner.server, &inner.tool, args, &mut sink) {
+        let call_for_blocking = call.clone();
+        let blocking_handle = tokio::task::spawn_blocking(move || {
+            let mut sink = McpChannelMessageSink::new(tx_blocking.clone());
+            match runner.call_mcp_tool(
+                &call_for_blocking.server,
+                &call_for_blocking.tool,
+                args,
+                &mut sink,
+            ) {
                 Ok(result) => {
-                    let _ = tx_blocking.blocking_send(Ok(proto::McpToolEvent {
-                        payload: Some(proto::mcp_tool_event::Payload::Completed(
+                    let _ = tx_blocking.blocking_send(Ok(proto::McpToolMessage {
+                        payload: Some(proto::mcp_tool_message::Payload::Completed(
                             to_proto_mcp_result(&result),
                         )),
                     }));
                 }
                 Err(err) => {
-                    let _ = tx_blocking.blocking_send(Ok(proto::McpToolEvent {
-                        payload: Some(proto::mcp_tool_event::Payload::Failed(proto::ToolFailed {
-                            code: runner_error_code(&err).to_string(),
-                            message: err.to_string(),
-                        })),
+                    let _ = tx_blocking.blocking_send(Ok(proto::McpToolMessage {
+                        payload: Some(proto::mcp_tool_message::Payload::Failed(
+                            proto::ToolFailed {
+                                code: runner_error_code(&err).to_string(),
+                                message: err.to_string(),
+                            },
+                        )),
                     }));
                 }
             }
         });
         drop(tx);
+
+        // Coordinator task: keeps the inbound loop and the elicitation
+        // route registered for the lifetime of the call. When the blocking
+        // worker finishes, the route is dropped (auto-deregisters) and we
+        // abort the inbound loop so the gRPC stream can terminate cleanly.
+        tokio::spawn(async move {
+            let _ = blocking_handle.await;
+            inbound_task.abort();
+            drop(_route_guard);
+        });
 
         Ok(Response::new(ReceiverStream::new(rx)))
     }
@@ -386,39 +498,193 @@ impl ChunkSink for ChannelChunkSink {
     }
 }
 
-/// Bridge from `ChunkSink` to the gRPC `McpToolEvent` stream. Forwards
-/// stdout/stderr writes as `StreamChunk` payloads and `ChunkSink::event`
-/// JSON values as `event_json` payloads (today the only producer is the
-/// connection manager's progress wiring).
-struct McpChannelChunkSink {
-    tx: mpsc::Sender<Result<proto::McpToolEvent, Status>>,
+/// Bridge from `ChunkSink` to the gRPC `McpToolMessage` bidi stream.
+/// Forwards stdout/stderr writes as `StreamChunk` payloads and
+/// `ChunkSink::event` JSON values as `event_json` payloads (today the only
+/// producer is the connection manager's progress wiring).
+struct McpChannelMessageSink {
+    tx: mpsc::Sender<Result<proto::McpToolMessage, Status>>,
 }
 
-impl McpChannelChunkSink {
-    fn new(tx: mpsc::Sender<Result<proto::McpToolEvent, Status>>) -> Self {
+impl McpChannelMessageSink {
+    fn new(tx: mpsc::Sender<Result<proto::McpToolMessage, Status>>) -> Self {
         Self { tx }
     }
 }
 
-impl ChunkSink for McpChannelChunkSink {
+impl ChunkSink for McpChannelMessageSink {
     fn stdout(&mut self, chunk: &[u8]) {
-        let _ = self.tx.blocking_send(Ok(proto::McpToolEvent {
-            payload: Some(proto::mcp_tool_event::Payload::Stdout(proto::StreamChunk {
+        let _ = self.tx.blocking_send(Ok(proto::McpToolMessage {
+            payload: Some(proto::mcp_tool_message::Payload::Stdout(proto::StreamChunk {
                 data: chunk.to_vec(),
             })),
         }));
     }
     fn stderr(&mut self, chunk: &[u8]) {
-        let _ = self.tx.blocking_send(Ok(proto::McpToolEvent {
-            payload: Some(proto::mcp_tool_event::Payload::Stderr(proto::StreamChunk {
+        let _ = self.tx.blocking_send(Ok(proto::McpToolMessage {
+            payload: Some(proto::mcp_tool_message::Payload::Stderr(proto::StreamChunk {
                 data: chunk.to_vec(),
             })),
         }));
     }
     fn event(&mut self, event: serde_json::Value) {
-        let _ = self.tx.blocking_send(Ok(proto::McpToolEvent {
-            payload: Some(proto::mcp_tool_event::Payload::EventJson(event.to_string())),
+        let _ = self.tx.blocking_send(Ok(proto::McpToolMessage {
+            payload: Some(proto::mcp_tool_message::Payload::EventJson(event.to_string())),
         }));
+    }
+}
+
+/// Pending-elicitations map keyed by stream-local request id (decimal
+/// string). Each in-flight request parks a `oneshot::Sender` here that the
+/// inbound loop pops when the matching response arrives.
+type PendingElicitations =
+    Arc<Mutex<HashMap<String, oneshot::Sender<ElicitationResponse>>>>;
+
+/// One per-call routing record held by [`BidiElicitationRouter`].
+struct BidiRoute {
+    outbound: mpsc::Sender<Result<proto::McpToolMessage, Status>>,
+    pending: PendingElicitations,
+    counter: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// Service-wide registry that maps an MCP server label to the currently
+/// active gRPC bidi call routing for that server. See
+/// [`ToolRunnerService`] for the rationale.
+#[derive(Default)]
+pub(crate) struct BidiElicitationRouter {
+    routes: Mutex<HashMap<String, Vec<Arc<BidiRoute>>>>,
+}
+
+/// RAII guard returned by [`BidiElicitationRouter::register`]. Drops the
+/// route when the call finishes (or panics) so subsequent elicitations no
+/// longer flow to a closed stream.
+pub(crate) struct RouteGuard {
+    router: Arc<BidiElicitationRouter>,
+    server: String,
+    route_ptr: *const BidiRoute,
+}
+
+// Safety: `route_ptr` is only used as an identity comparison key inside the
+// router's mutex; we never deref it.
+unsafe impl Send for RouteGuard {}
+unsafe impl Sync for RouteGuard {}
+
+impl Drop for RouteGuard {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.router.routes.lock() {
+            if let Some(list) = map.get_mut(&self.server) {
+                list.retain(|r| (Arc::as_ptr(r) as *const _) != self.route_ptr);
+                if list.is_empty() {
+                    map.remove(&self.server);
+                }
+            }
+        }
+    }
+}
+
+impl BidiElicitationRouter {
+    fn register(self: &Arc<Self>, server: String, route: Arc<BidiRoute>) -> RouteGuard {
+        let key = server.to_ascii_lowercase();
+        let route_ptr = Arc::as_ptr(&route) as *const _;
+        if let Ok(mut map) = self.routes.lock() {
+            map.entry(key.clone()).or_default().push(route);
+        }
+        RouteGuard {
+            router: Arc::clone(self),
+            server: key,
+            route_ptr,
+        }
+    }
+}
+
+impl std::fmt::Debug for BidiElicitationRouter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let depth = self
+            .routes
+            .lock()
+            .map(|m| m.values().map(Vec::len).sum::<usize>())
+            .unwrap_or(0);
+        f.debug_struct("BidiElicitationRouter")
+            .field("active_routes", &depth)
+            .finish()
+    }
+}
+
+impl ElicitationHandler for BidiElicitationRouter {
+    fn elicit(&self, request: ElicitationRequest) -> ElicitationResponse {
+        let key = request.server.to_ascii_lowercase();
+        // Pick the most recent registration for this server. Cloning the
+        // `Arc` keeps the route alive while we use it even if it gets
+        // unregistered concurrently.
+        let route = match self.routes.lock() {
+            Ok(map) => map.get(&key).and_then(|list| list.last().cloned()),
+            Err(_) => None,
+        };
+        let Some(route) = route else {
+            // No active gRPC stream for this server — fall back to the
+            // safest default.
+            return ElicitationResponse::Decline;
+        };
+        let request_id = route
+            .counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let request_id = request_id.to_string();
+        let (tx, rx) = oneshot::channel();
+        if let Ok(mut map) = route.pending.lock() {
+            map.insert(request_id.clone(), tx);
+        }
+        let envelope = proto::McpToolMessage {
+            payload: Some(proto::mcp_tool_message::Payload::ElicitationRequest(
+                proto::McpElicitationRequest {
+                    request_id: request_id.clone(),
+                    server: request.server,
+                    tool: request.tool,
+                    message: request.message,
+                    mode: match request.mode {
+                        ElicitationMode::Form => "form".into(),
+                        ElicitationMode::Url => "url".into(),
+                    },
+                    schema_json: if request.schema.is_null() {
+                        String::new()
+                    } else {
+                        request.schema.to_string()
+                    },
+                    url: request.url,
+                    elicitation_id: request.elicitation_id,
+                },
+            )),
+        };
+        if route.outbound.blocking_send(Ok(envelope)).is_err() {
+            // Stream closed before we could ship the request.
+            if let Ok(mut map) = route.pending.lock() {
+                map.remove(&request_id);
+            }
+            return ElicitationResponse::Decline;
+        }
+        match rx.blocking_recv() {
+            Ok(response) => response,
+            Err(_) => {
+                // Stream closed mid-flight, or inbound loop dropped the
+                // sender. Treat as a decline so the MCP server gets a
+                // typed reply rather than hanging.
+                ElicitationResponse::Decline
+            }
+        }
+    }
+}
+
+fn parse_elicitation_response(resp: &proto::McpElicitationResponse) -> ElicitationResponse {
+    match resp.action.as_str() {
+        "accept" => {
+            let content = if resp.content_json.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::from_str(&resp.content_json).unwrap_or(serde_json::Value::Null)
+            };
+            ElicitationResponse::accept(content)
+        }
+        "cancel" => ElicitationResponse::Cancel,
+        _ => ElicitationResponse::Decline,
     }
 }
 
