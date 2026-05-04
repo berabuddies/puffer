@@ -62,6 +62,7 @@ rmcp = { version = "0.15.0", default-features = false, features = [
     "macros",
     "schemars",
     "base64",
+    "elicitation",
     "transport-child-process",
     "transport-io",
 ] }

@@ -24,10 +24,12 @@ use rmcp::{
     ErrorData,
     handler::server::ServerHandler,
     model::{
-        CallToolRequestParams, CallToolResult, Content, GetPromptRequestParams, GetPromptResult,
-        Implementation, InitializeResult, ListPromptsResult, ListResourcesResult, ListToolsResult,
-        PaginatedRequestParams, ProgressNotificationParam, Prompt, PromptArgument,
-        PromptMessage, PromptMessageRole, ProtocolVersion, RawResource, ReadResourceRequestParams,
+        BooleanSchema, CallToolRequestParams, CallToolResult, Content,
+        CreateElicitationRequestParams, ElicitationAction, ElicitationSchema,
+        GetPromptRequestParams, GetPromptResult, Implementation, InitializeResult,
+        ListPromptsResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
+        PrimitiveSchema, ProgressNotificationParam, Prompt, PromptArgument, PromptMessage,
+        PromptMessageRole, ProtocolVersion, RawResource, ReadResourceRequestParams,
         ReadResourceResult, Resource, ResourceContents, ServerCapabilities, Tool,
     },
     serve_server,
@@ -85,6 +87,11 @@ impl ServerHandler for StubServer {
                     "slow_with_progress",
                     "Emit two `notifications/progress` then echo back `text`",
                     slow_echo_schema(),
+                ),
+                Tool::new(
+                    "request_user_input",
+                    "Issue an `elicitation/create` mid-call and echo back the response",
+                    empty_object_schema(),
                 ),
             ],
             next_cursor: None,
@@ -158,6 +165,43 @@ impl ServerHandler for StubServer {
                 }
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
+            "request_user_input" => {
+                let schema = ElicitationSchema::builder()
+                    .required_property(
+                        "confirmed",
+                        PrimitiveSchema::Boolean(BooleanSchema::new()),
+                    )
+                    .build()
+                    .map_err(|e| {
+                        ErrorData::internal_error(format!("schema build: {e}"), None)
+                    })?;
+                let response = context
+                    .peer
+                    .create_elicitation(CreateElicitationRequestParams::FormElicitationParams {
+                        meta: None,
+                        message: "Confirm the destructive action?".to_string(),
+                        requested_schema: schema,
+                    })
+                    .await
+                    .map_err(|e| {
+                        ErrorData::internal_error(format!("elicitation failed: {e}"), None)
+                    })?;
+                let body = match response.action {
+                    ElicitationAction::Accept => json!({
+                        "action": "accept",
+                        "content": response.content.unwrap_or(Value::Null),
+                    }),
+                    ElicitationAction::Decline => json!({
+                        "action": "decline",
+                        "content": Value::Null,
+                    }),
+                    ElicitationAction::Cancel => json!({
+                        "action": "cancel",
+                        "content": Value::Null,
+                    }),
+                };
+                Ok(CallToolResult::success(vec![Content::text(body.to_string())]))
             }
             other => Err(ErrorData::invalid_params(
                 format!("unknown tool `{other}`"),

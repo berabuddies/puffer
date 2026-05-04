@@ -8,7 +8,10 @@ use std::time::Duration;
 
 use puffer_core::runner_adapter::LocalToolRunner;
 use puffer_resources::McpServerSpec;
-use puffer_runner_api::{ChunkSink, McpResourceContentPart, NullChunkSink, RunnerError, ToolRunner};
+use puffer_runner_api::{
+    ChunkSink, ElicitationHandler, ElicitationRequest, ElicitationResponse, McpResourceContentPart,
+    NullChunkSink, RunnerError, ToolRunner,
+};
 use serde_json::json;
 
 const STUB_BIN: &str = env!("CARGO_BIN_EXE_puffer-mcp-stub-server");
@@ -270,6 +273,73 @@ impl ChunkSink for RecordingSink {
     fn event(&mut self, event: serde_json::Value) {
         self.events.lock().unwrap().push(event);
     }
+}
+
+/// `ElicitationHandler` that records every incoming request and replies
+/// with a fixed response. Lets tests assert both that the request reached
+/// the handler and that the response round-tripped back to the server.
+#[derive(Debug, Clone)]
+struct RecordingElicitationHandler {
+    response: ElicitationResponse,
+    requests: Arc<Mutex<Vec<ElicitationRequest>>>,
+}
+
+impl RecordingElicitationHandler {
+    fn new(response: ElicitationResponse) -> Self {
+        Self {
+            response,
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+impl ElicitationHandler for RecordingElicitationHandler {
+    fn elicit(&self, request: ElicitationRequest) -> ElicitationResponse {
+        self.requests.lock().unwrap().push(request);
+        self.response.clone()
+    }
+}
+
+#[test]
+fn elicit_with_decline_handler_returns_decline() {
+    // Default handler is `DeclineAllElicitations` — no override needed.
+    let runner = LocalToolRunner::new()
+        .with_mcp_servers(manifest_with_marker("stub", "puffer-mcp-stub-elicit-decline"));
+    let mut sink = NullChunkSink;
+    let result = runner
+        .call_mcp_tool("stub", "request_user_input", json!({}), &mut sink)
+        .expect("call request_user_input");
+    assert!(result.success, "elicit decline should still produce a tool result");
+    let body: serde_json::Value =
+        serde_json::from_str(&result.stdout).expect("stub returns JSON body");
+    assert_eq!(body.get("action").and_then(|v| v.as_str()), Some("decline"));
+}
+
+#[test]
+fn elicit_with_accept_handler_returns_value() {
+    let handler = RecordingElicitationHandler::new(ElicitationResponse::accept(json!({
+        "confirmed": true
+    })));
+    let requests_handle = handler.requests.clone();
+    let runner = LocalToolRunner::new()
+        .with_mcp_servers(manifest_with_marker("stub", "puffer-mcp-stub-elicit-accept"))
+        .with_elicitation_handler(Arc::new(handler));
+    let mut sink = NullChunkSink;
+    let result = runner
+        .call_mcp_tool("stub", "request_user_input", json!({}), &mut sink)
+        .expect("call request_user_input");
+    assert!(result.success);
+    let body: serde_json::Value =
+        serde_json::from_str(&result.stdout).expect("stub returns JSON body");
+    assert_eq!(body.get("action").and_then(|v| v.as_str()), Some("accept"));
+    assert_eq!(
+        body.get("content").and_then(|c| c.get("confirmed")),
+        Some(&serde_json::Value::Bool(true))
+    );
+    let captured = requests_handle.lock().unwrap();
+    assert_eq!(captured.len(), 1, "handler should see exactly one request");
+    assert_eq!(captured[0].server, "stub");
+    assert_eq!(captured[0].message, "Confirm the destructive action?");
 }
 
 #[test]
