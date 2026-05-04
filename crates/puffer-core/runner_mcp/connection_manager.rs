@@ -219,6 +219,11 @@ struct ServerSlot {
     /// so the connection manager can route progress notifications back to
     /// in-flight `tools/call` invocations on this server.
     progress: ProgressRegistry,
+    /// Per-server async mutex serializing OAuth refresh attempts so two
+    /// concurrent calls observing an expired token don't both hit the
+    /// refresh endpoint. Mirrors codex's per-server `OAuthPersistor` lock
+    /// (see `references/codex/.../oauth.rs::refresh_if_needed`).
+    refresh_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl ServerSlot {
@@ -228,6 +233,7 @@ impl ServerSlot {
             client: None,
             failure_history: Vec::new(),
             progress: Arc::new(Mutex::new(HashMap::new())),
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -337,11 +343,27 @@ impl McpConnectionManager {
     /// Public, synchronous surface invoked by `McpHost::list_tools`.
     pub fn list_tools(&self, server: &str) -> Result<Vec<McpTool>, RunnerError> {
         let runtime = self.runtime();
-        let (client, _progress) = self.connect(server, &runtime)?;
-        let tools = runtime
-            .block_on(async move { client.peer().list_all_tools().await })
-            .map_err(|e| RunnerError::Mcp(format!("tools/list on `{server}` failed: {e}")))?;
-        Ok(tools.into_iter().map(rmcp_tool_to_dto).collect())
+        let mut attempt = 0;
+        loop {
+            let (client, _progress) = self.connect(server, &runtime)?;
+            let result = runtime.block_on(async {
+                let client = Arc::clone(&client);
+                client.peer().list_all_tools().await
+            });
+            match result {
+                Ok(tools) => return Ok(tools.into_iter().map(rmcp_tool_to_dto).collect()),
+                Err(e) if attempt == 0 && is_auth_required_service_error(&e) => {
+                    self.drop_client_and_refresh_oauth(server, &runtime)?;
+                    attempt += 1;
+                    continue;
+                }
+                Err(e) => {
+                    return Err(RunnerError::Mcp(format!(
+                        "tools/list on `{server}` failed: {e}"
+                    )))
+                }
+            }
+        }
     }
 
     /// Public, synchronous surface invoked by `McpHost::call_tool`.
@@ -369,7 +391,33 @@ impl McpConnectionManager {
             }
         };
         let runtime = self.runtime();
-        let (client, progress_registry) = self.connect(server, &runtime)?;
+        let mut attempt = 0;
+        loop {
+            match self.call_tool_once(server, tool, arguments.clone(), sink, &runtime) {
+                Ok(result) => return Ok(result),
+                Err(RunnerError::Mcp(msg))
+                    if attempt == 0 && msg_indicates_auth_required(&msg) =>
+                {
+                    self.drop_client_and_refresh_oauth(server, &runtime)?;
+                    attempt += 1;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// One attempt at `tools/call`. Caller wraps in a 1-shot retry loop
+    /// that detects 401 / `AuthRequired` and triggers an OAuth refresh.
+    fn call_tool_once(
+        &self,
+        server: &str,
+        tool: &str,
+        arguments: Option<serde_json::Map<String, Value>>,
+        sink: &mut dyn ChunkSink,
+        runtime: &Runtime,
+    ) -> Result<McpResult, RunnerError> {
+        let (client, progress_registry) = self.connect(server, runtime)?;
         let tool_name = tool.to_string();
         let server_label = server.to_string();
 
@@ -446,16 +494,29 @@ impl McpConnectionManager {
         server: &str,
     ) -> Result<Vec<McpResourceRecord>, RunnerError> {
         let runtime = self.runtime();
-        let (client, _progress) = self.connect(server, &runtime)?;
-        let resources = runtime
-            .block_on(async move { client.peer().list_all_resources().await })
-            .map_err(|e| {
-                RunnerError::Mcp(format!("resources/list on `{server}` failed: {e}"))
-            })?;
-        Ok(resources
-            .into_iter()
-            .map(|r| rmcp_resource_to_dto(server, r))
-            .collect())
+        let mut attempt = 0;
+        loop {
+            let (client, _progress) = self.connect(server, &runtime)?;
+            let result = runtime.block_on(async move { client.peer().list_all_resources().await });
+            match result {
+                Ok(resources) => {
+                    return Ok(resources
+                        .into_iter()
+                        .map(|r| rmcp_resource_to_dto(server, r))
+                        .collect())
+                }
+                Err(e) if attempt == 0 && is_auth_required_service_error(&e) => {
+                    self.drop_client_and_refresh_oauth(server, &runtime)?;
+                    attempt += 1;
+                    continue;
+                }
+                Err(e) => {
+                    return Err(RunnerError::Mcp(format!(
+                        "resources/list on `{server}` failed: {e}"
+                    )))
+                }
+            }
+        }
     }
 
     /// Public, synchronous surface invoked by `McpHost::read_resource`.
@@ -465,10 +526,11 @@ impl McpConnectionManager {
         uri: &str,
     ) -> Result<McpResourceContent, RunnerError> {
         let runtime = self.runtime();
-        let (client, _progress) = self.connect(server, &runtime)?;
-        let uri_owned = uri.to_string();
-        let result = runtime
-            .block_on(async move {
+        let mut attempt = 0;
+        loop {
+            let (client, _progress) = self.connect(server, &runtime)?;
+            let uri_owned = uri.to_string();
+            let result = runtime.block_on(async move {
                 client
                     .peer()
                     .read_resource(ReadResourceRequestParams {
@@ -476,25 +538,46 @@ impl McpConnectionManager {
                         meta: None,
                     })
                     .await
-            })
-            .map_err(|e| {
-                RunnerError::Mcp(format!(
-                    "resources/read `{uri}` on `{server}` failed: {e}"
-                ))
-            })?;
-        Ok(read_resource_result_to_dto(server, uri, result))
+            });
+            match result {
+                Ok(r) => return Ok(read_resource_result_to_dto(server, uri, r)),
+                Err(e) if attempt == 0 && is_auth_required_service_error(&e) => {
+                    self.drop_client_and_refresh_oauth(server, &runtime)?;
+                    attempt += 1;
+                    continue;
+                }
+                Err(e) => {
+                    return Err(RunnerError::Mcp(format!(
+                        "resources/read `{uri}` on `{server}` failed: {e}"
+                    )))
+                }
+            }
+        }
     }
 
     /// Public, synchronous surface invoked by `McpHost::list_prompts`.
     pub fn list_prompts(&self, server: &str) -> Result<Vec<McpPrompt>, RunnerError> {
         let runtime = self.runtime();
-        let (client, _progress) = self.connect(server, &runtime)?;
-        let prompts = runtime
-            .block_on(async move { client.peer().list_all_prompts().await })
-            .map_err(|e| {
-                RunnerError::Mcp(format!("prompts/list on `{server}` failed: {e}"))
-            })?;
-        Ok(prompts.into_iter().map(rmcp_prompt_to_dto).collect())
+        let mut attempt = 0;
+        loop {
+            let (client, _progress) = self.connect(server, &runtime)?;
+            let result = runtime.block_on(async move { client.peer().list_all_prompts().await });
+            match result {
+                Ok(prompts) => {
+                    return Ok(prompts.into_iter().map(rmcp_prompt_to_dto).collect())
+                }
+                Err(e) if attempt == 0 && is_auth_required_service_error(&e) => {
+                    self.drop_client_and_refresh_oauth(server, &runtime)?;
+                    attempt += 1;
+                    continue;
+                }
+                Err(e) => {
+                    return Err(RunnerError::Mcp(format!(
+                        "prompts/list on `{server}` failed: {e}"
+                    )))
+                }
+            }
+        }
     }
 
     /// Public, synchronous surface invoked by `McpHost::get_prompt`.
@@ -514,10 +597,12 @@ impl McpConnectionManager {
             }
         };
         let runtime = self.runtime();
-        let (client, _progress) = self.connect(server, &runtime)?;
-        let name_owned = name.to_string();
-        let result = runtime
-            .block_on(async move {
+        let mut attempt = 0;
+        loop {
+            let (client, _progress) = self.connect(server, &runtime)?;
+            let name_owned = name.to_string();
+            let arguments = arguments.clone();
+            let result = runtime.block_on(async move {
                 client
                     .peer()
                     .get_prompt(GetPromptRequestParams {
@@ -526,13 +611,21 @@ impl McpConnectionManager {
                         meta: None,
                     })
                     .await
-            })
-            .map_err(|e| {
-                RunnerError::Mcp(format!(
-                    "prompts/get `{name}` on `{server}` failed: {e}"
-                ))
-            })?;
-        Ok(get_prompt_result_to_dto(server, name, result))
+            });
+            match result {
+                Ok(r) => return Ok(get_prompt_result_to_dto(server, name, r)),
+                Err(e) if attempt == 0 && is_auth_required_service_error(&e) => {
+                    self.drop_client_and_refresh_oauth(server, &runtime)?;
+                    attempt += 1;
+                    continue;
+                }
+                Err(e) => {
+                    return Err(RunnerError::Mcp(format!(
+                        "prompts/get `{name}` on `{server}` failed: {e}"
+                    )))
+                }
+            }
+        }
     }
 
     /// Looks the server up, lazily (re)spawning the underlying child as
@@ -602,6 +695,64 @@ impl McpConnectionManager {
                 Err(error)
             }
         }
+    }
+
+    /// Drop the cached client for `server` (so the next `connect` re-builds
+    /// the transport from scratch) and force the OAuth service to refresh
+    /// tokens. Returns the per-server refresh lock so callers can serialize
+    /// concurrent attempts.
+    ///
+    /// This is the puffer mirror of codex's `refresh_oauth_if_needed` —
+    /// triggered reactively when an MCP request returns 401 (rmcp surfaces
+    /// `StreamableHttpError::AuthRequired`) so the user doesn't have to
+    /// re-run `puffer mcp login` for every transient token expiry.
+    fn drop_client_and_refresh_oauth(
+        &self,
+        server: &str,
+        runtime: &Runtime,
+    ) -> Result<(), RunnerError> {
+        let key = server.to_ascii_lowercase();
+        let slot = self
+            .servers
+            .get(&key)
+            .ok_or_else(|| RunnerError::NotFound(format!("MCP server `{server}` not registered")))?;
+        let (recipe, refresh_lock) = {
+            let mut guard = slot.lock().map_err(|_| {
+                RunnerError::Mcp(format!("MCP server `{server}` connection mutex poisoned"))
+            })?;
+            // Drop the live client so the next connect re-uses fresh tokens.
+            guard.client = None;
+            (guard.recipe.clone(), Arc::clone(&guard.refresh_lock))
+        };
+        // Only HTTP+OAuth recipes have anything to refresh.
+        let TransportRecipe::Http(http) = recipe else {
+            return Ok(());
+        };
+        let Some(oauth_spec) = http.oauth.clone() else {
+            return Ok(());
+        };
+        let token_dir = self
+            .oauth_token_dir
+            .clone()
+            .unwrap_or_else(default_token_dir);
+        let service = build_oauth_service(server, &http.url, &oauth_spec, token_dir);
+        let server_label = server.to_string();
+        runtime.block_on(async move {
+            // Serialize per-server so concurrent 401s from different
+            // in-flight requests collapse to a single token refresh.
+            let _g = refresh_lock.lock().await;
+            // force_refresh ignores the local clock-based skew check —
+            // we got here because the *server* rejected the token, so
+            // even a not-yet-expired access token needs to be re-minted.
+            // If the refresh attempt fails (or there are no stored
+            // tokens / no refresh token), we propagate
+            // RunnerError::OAuthRequired so the caller can prompt the
+            // user to re-run `puffer mcp login`.
+            match service.force_refresh().await {
+                Ok(()) => Ok(()),
+                Err(e) => Err(oauth_error_to_runner(&server_label, e)),
+            }
+        })
     }
 
     fn runtime(&self) -> Arc<Runtime> {
@@ -729,6 +880,32 @@ fn build_oauth_service(
         },
         token_dir,
     })
+}
+
+/// True when an rmcp `ServiceError` was caused by a 401 / `WWW-Authenticate`
+/// response from an HTTP MCP server.
+///
+/// rmcp's `StreamableHttpError::AuthRequired` variant displays as
+/// "Auth required" via its `#[error]` derive. The error gets wrapped in
+/// `DynamicTransportError` (which displays as
+/// `Transport [name] error: <inner>`) and then in
+/// `ServiceError::TransportSend` (which displays as
+/// `Transport send error: <inner>`). We check the resulting display
+/// chain for "Auth required" to decide whether to retry with a refreshed
+/// token.
+///
+/// Codex does this with a typed `error.downcast_ref::<StreamableHttpError<...>>`
+/// because they use a custom `StreamableHttpClientAdapter` whose `Error`
+/// type they own. We use rmcp's stock reqwest transport whose
+/// `<StreamableHttpClient>::Error = reqwest::Error`, making the downcast
+/// dance more involved — string match keeps the change minimal and tracks
+/// rmcp's `#[error("Auth required")]` literal.
+fn is_auth_required_service_error(err: &rmcp::service::ServiceError) -> bool {
+    msg_indicates_auth_required(&err.to_string())
+}
+
+fn msg_indicates_auth_required(msg: &str) -> bool {
+    msg.contains("Auth required")
 }
 
 fn oauth_error_to_runner(server: &str, err: OAuthError) -> RunnerError {

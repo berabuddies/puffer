@@ -150,6 +150,60 @@ impl OAuthService {
         Ok(manager)
     }
 
+    /// Force a token refresh ignoring the expiry skew window. Used by
+    /// the connection manager's reactive 401 path: when an MCP server
+    /// returns 401 even though our local clock thinks the access token
+    /// is still valid (server invalidated it early, e.g. revocation,
+    /// clock skew, or scope change), we force a refresh and respawn the
+    /// transport with the new token.
+    ///
+    /// Returns `OAuthRequired` when there's nothing on disk to refresh
+    /// from (or when the refresh attempt itself fails) — the caller
+    /// surfaces that as `RunnerError::OAuthRequired` so `puffer-cli` can
+    /// drive a fresh interactive login.
+    pub async fn force_refresh(&self) -> Result<(), OAuthError> {
+        let store = Arc::new(self.build_store());
+        let mut manager = self.build_manager(Arc::clone(&store)).await?;
+        let stored = store.read_persisted();
+        let Some(persisted) = stored else {
+            return Err(OAuthError::OAuthRequired {
+                server_id: self.config.server_id.clone(),
+                authorization_url: None,
+            });
+        };
+        let metadata = manager.discover_metadata().await.map_err(|e| {
+            OAuthError::Discovery {
+                server_id: self.config.server_id.clone(),
+                source: e,
+            }
+        })?;
+        manager.set_metadata(metadata);
+        let client_secret = store.cached_client_secret().await;
+        manager
+            .configure_client(OAuthClientConfig {
+                client_id: persisted.client_id.clone(),
+                client_secret,
+                scopes: self.config.scopes.clone(),
+                redirect_uri: format!("http://127.0.0.1:0/callback"),
+            })
+            .map_err(|e| OAuthError::Registration {
+                server_id: self.config.server_id.clone(),
+                source: e,
+            })?;
+        if let Err(e) = manager.refresh_token().await {
+            tracing::warn!(
+                target = "puffer::mcp::oauth",
+                "force_refresh failed for {}: {e}",
+                self.config.server_id
+            );
+            return Err(OAuthError::OAuthRequired {
+                server_id: self.config.server_id.clone(),
+                authorization_url: None,
+            });
+        }
+        Ok(())
+    }
+
     /// Silent path. Returns an `AuthClient` ready to drop into the
     /// streamable-HTTP transport, refreshing the token first if it's
     /// within the expiry skew window. Returns `OAuthRequired` when no
