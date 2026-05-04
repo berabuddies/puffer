@@ -584,6 +584,12 @@ pub(crate) enum McpCommand {
         /// Stable MCP server id (must match a configured server with
         /// `transport: http` and `oauth: true`).
         name: String,
+        /// Skip the `webbrowser::open` attempt and just print the URL.
+        /// Useful for headless environments (SSH, container, CI). The
+        /// callback receiver still binds locally — pair this with a
+        /// reverse-tunnel or a manual paste-back of the redirect URL.
+        #[arg(long = "no-browser")]
+        no_browser: bool,
     },
     /// Print whether OAuth tokens exist on disk for an MCP server, and
     /// where they live.

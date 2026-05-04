@@ -6,12 +6,15 @@ use crate::resource_fs::{
 use anyhow::{Context, Result};
 use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
 use puffer_core::load_agent_catalog;
+use puffer_mcp_oauth::PersistedTokens;
 use puffer_provider_registry::{AuthMode, AuthStore, ProviderRegistry};
 use puffer_resources::{LoadedResources, McpServerSpec, PluginSpec, SourceKind};
+use puffer_runner_api::{OAuthStatus, OAuthTokensPayload, ToolRunner};
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 const DISABLED_PLUGIN_PLACEHOLDER_PREFIX: &str =
     "Disabled plugin placeholder created by `puffer plugin disable`.";
@@ -104,10 +107,18 @@ pub(crate) fn run_doctor_command(
 }
 
 /// Handles top-level MCP management commands.
+///
+/// Login / login-status / logout drive the configured tool runner so that
+/// in remote-runner deployments tokens land on the runner's machine, not
+/// the puffer-cli host. Local-mode is unchanged: the local runner writes
+/// to `<config>/puffer/mcp-tokens/...` exactly as `puffer mcp login` did
+/// before pass 1.5f.
 pub(crate) fn run_mcp_command(
     command: Option<McpCommand>,
     paths: &ConfigPaths,
+    config: &PufferConfig,
     resources: &LoadedResources,
+    cwd: &Path,
 ) -> Result<()> {
     match command.unwrap_or(McpCommand::List) {
         McpCommand::List => print_mcp_list(resources),
@@ -135,17 +146,39 @@ pub(crate) fn run_mcp_command(
             println!("Puffer does not expose an MCP server bridge yet.");
             Ok(())
         }
-        McpCommand::Login { name } => run_mcp_login(resources, &name),
-        McpCommand::LoginStatus { name } => print_mcp_login_status(resources, &name),
-        McpCommand::Logout { name } => run_mcp_logout(resources, &name),
+        McpCommand::Login { name, no_browser } => {
+            let runner =
+                crate::runner_selection::select_tool_runner(config, resources, cwd.to_path_buf());
+            run_mcp_login(resources, &name, no_browser, runner)
+        }
+        McpCommand::LoginStatus { name } => {
+            let runner =
+                crate::runner_selection::select_tool_runner(config, resources, cwd.to_path_buf());
+            print_mcp_login_status(&name, runner)
+        }
+        McpCommand::Logout { name } => {
+            let runner =
+                crate::runner_selection::select_tool_runner(config, resources, cwd.to_path_buf());
+            run_mcp_logout(&name, runner)
+        }
     }
 }
 
 /// Drive the OAuth interactive login for `name`. Resolves the server
-/// spec, runs discovery + DCR + browser-redirect + token-exchange, and
-/// persists the resulting tokens under
-/// `<config>/puffer/mcp-tokens/<server>.json`.
-fn run_mcp_login(resources: &LoadedResources, name: &str) -> Result<()> {
+/// spec, runs discovery + DCR + browser-redirect + token-exchange on the
+/// puffer-cli host, then ships the resulting bundle to `runner` over the
+/// `ToolRunner::push_oauth_tokens` trait method.
+///
+/// The browser flow always runs locally — opening browsers belongs on the
+/// user's puffer machine, not on the (possibly headless / multi-tenant)
+/// runner. Pass `--no-browser` to skip the `webbrowser::open` attempt
+/// entirely (still binds the local callback receiver).
+fn run_mcp_login(
+    resources: &LoadedResources,
+    name: &str,
+    no_browser: bool,
+    runner: Arc<dyn ToolRunner>,
+) -> Result<()> {
     let spec = find_oauth_server(resources, name)?;
     let url = http_url_from_spec(&spec)?;
     let oauth_spec = spec
@@ -154,17 +187,24 @@ fn run_mcp_login(resources: &LoadedResources, name: &str) -> Result<()> {
         .filter(|o| o.enabled())
         .ok_or_else(|| anyhow::anyhow!("MCP server `{}` is not opted into OAuth", spec.id))?;
 
-    let token_dir = puffer_mcp_oauth::default_token_dir();
-    let config = puffer_mcp_oauth::OAuthConfig {
+    // The CLI uses a CLI-local token dir to host the discovery + DCR + token
+    // exchange via puffer-mcp-oauth. After the flow completes we read the
+    // resulting bundle off disk and ship it to the runner via the trait;
+    // the runner persists it through its own credential store. For
+    // local-mode (`LocalToolRunner` over the same process / config) this
+    // round-trip is a no-op in practice — both directories resolve to the
+    // same `<config>/puffer/mcp-tokens` path.
+    let cli_token_dir = puffer_mcp_oauth::default_token_dir();
+    let oauth_config = puffer_mcp_oauth::OAuthConfig {
         server_id: spec.id.clone(),
-        server_url: url,
+        server_url: url.clone(),
         scopes: oauth_spec.scopes(),
         client_name: oauth_spec
             .client_name()
             .unwrap_or_else(|| format!("puffer-{}", spec.id)),
-        token_dir,
+        token_dir: cli_token_dir.clone(),
     };
-    let service = puffer_mcp_oauth::OAuthService::new(config);
+    let service = puffer_mcp_oauth::OAuthService::new(oauth_config);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -173,10 +213,19 @@ fn run_mcp_login(resources: &LoadedResources, name: &str) -> Result<()> {
         .context("build login runtime")?;
     rt.block_on(async {
         service
-            .interactive_login(None, |url| {
+            .interactive_login(None, move |url| {
+                eprintln!("Authorization URL: {url}");
+                if no_browser {
+                    eprintln!(
+                        "(--no-browser set; open the URL above in any browser to continue)"
+                    );
+                    return Ok::<(), std::io::Error>(());
+                }
                 eprintln!("Opening browser to: {url}");
                 webbrowser::open(url).map(|_| ()).or_else(|_| {
-                    eprintln!("(could not auto-open browser; please copy the URL above)");
+                    eprintln!(
+                        "(could not auto-open browser; please copy the URL above into any browser)"
+                    );
                     Ok::<(), std::io::Error>(())
                 })
             })
@@ -184,54 +233,89 @@ fn run_mcp_login(resources: &LoadedResources, name: &str) -> Result<()> {
     })
     .map_err(|e| anyhow::anyhow!("OAuth login failed: {e}"))?;
 
-    println!("OAuth login complete for `{name}`. Tokens persisted.");
+    // Read the freshly-minted bundle off the CLI-local store, then push
+    // it to the runner. For local-mode this is a no-op (the runner store
+    // is the same path); for remote-mode the gRPC RPC carries the token
+    // bundle to the runner host, where it lands in the runner's
+    // mcp-tokens directory.
+    let persisted = PersistedTokens::read_from(&cli_token_dir, &spec.id, &url)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "OAuth flow completed but token file is unreadable: {e}; \
+                 expected at {}",
+                cli_token_dir.display()
+            )
+        })?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "OAuth flow completed but no token file was written under {}",
+                cli_token_dir.display()
+            )
+        })?;
+    let payload = persisted_to_payload(&persisted);
+    runner
+        .push_oauth_tokens(name, payload)
+        .map_err(|e| anyhow::anyhow!("failed to push OAuth tokens to runner: {e}"))?;
+
+    println!("OAuth login complete for `{name}`. Tokens persisted on the runner.");
     Ok(())
 }
 
-fn print_mcp_login_status(resources: &LoadedResources, name: &str) -> Result<()> {
-    let spec = find_oauth_server(resources, name)?;
-    let url = http_url_from_spec(&spec)?;
-    let token_dir = puffer_mcp_oauth::default_token_dir();
-    let store = puffer_mcp_oauth::FileCredentialStore::new(token_dir.clone(), &spec.id, &url);
-    let path = store.token_path();
-    if let Some(persisted) = store.read_persisted() {
-        println!("logged in as client_id `{}` (server={})", persisted.client_id, spec.id);
-        println!("  token file: {}", path.display());
-        if let Some(expires_at_ms) = persisted.expires_at_ms {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-            if expires_at_ms > now_ms {
-                let remaining = (expires_at_ms - now_ms) / 1000;
-                println!("  access token expires in {remaining}s");
-            } else {
-                println!("  access token EXPIRED — will refresh on next call");
+fn print_mcp_login_status(name: &str, runner: Arc<dyn ToolRunner>) -> Result<()> {
+    let status = runner
+        .oauth_status(name)
+        .map_err(|e| anyhow::anyhow!("failed to query OAuth status: {e}"))?;
+    match status {
+        OAuthStatus::Absent => println!("not logged in (no tokens stored on the runner)"),
+        OAuthStatus::Present {
+            expires_at_ms,
+            has_refresh,
+            scopes,
+        } => {
+            println!("logged in (server={name})");
+            if let Some(expires_at_ms) = expires_at_ms {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                if expires_at_ms > now_ms {
+                    let remaining = (expires_at_ms - now_ms) / 1000;
+                    println!("  access token expires in {remaining}s");
+                } else {
+                    println!("  access token EXPIRED — will refresh on next call");
+                }
+            }
+            if has_refresh {
+                println!("  refresh token present");
+            }
+            if !scopes.is_empty() {
+                println!("  scopes: {}", scopes.join(", "));
             }
         }
-        if persisted.refresh_token.is_some() {
-            println!("  refresh token present");
-        }
-    } else {
-        println!("not logged in (no token file at {})", path.display());
     }
     Ok(())
 }
 
-fn run_mcp_logout(resources: &LoadedResources, name: &str) -> Result<()> {
-    let spec = find_oauth_server(resources, name)?;
-    let url = http_url_from_spec(&spec)?;
-    let token_dir = puffer_mcp_oauth::default_token_dir();
-    let store = puffer_mcp_oauth::FileCredentialStore::new(token_dir, &spec.id, &url);
-    let path = store.token_path();
-    match std::fs::remove_file(&path) {
-        Ok(()) => println!("removed {}", path.display()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            println!("no token file at {} (nothing to remove)", path.display())
-        }
-        Err(e) => return Err(anyhow::anyhow!("failed to remove {}: {e}", path.display())),
-    }
+fn run_mcp_logout(name: &str, runner: Arc<dyn ToolRunner>) -> Result<()> {
+    runner
+        .clear_oauth_tokens(name)
+        .map_err(|e| anyhow::anyhow!("failed to clear OAuth tokens: {e}"))?;
+    println!("OAuth tokens cleared for `{name}`.");
     Ok(())
+}
+
+fn persisted_to_payload(p: &PersistedTokens) -> OAuthTokensPayload {
+    OAuthTokensPayload {
+        server_id: p.server_id.clone(),
+        server_url: p.server_url.clone(),
+        client_id: p.client_id.clone(),
+        client_secret: p.client_secret.clone(),
+        access_token: p.access_token.clone(),
+        token_type: p.token_type.clone(),
+        refresh_token: p.refresh_token.clone(),
+        scopes: p.scopes.clone(),
+        expires_at_ms: p.expires_at_ms,
+    }
 }
 
 fn find_oauth_server(

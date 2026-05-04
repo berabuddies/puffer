@@ -176,7 +176,9 @@ fn main() -> Result<()> {
         Some(Command::Install { target, force }) => {
             run_install_command(target.as_deref(), force, &cwd)
         }
-        Some(Command::Mcp { command }) => run_mcp_command(command, &paths, &resources),
+        Some(Command::Mcp { command }) => {
+            run_mcp_command(command, &paths, &config, &resources, &cwd)
+        }
         Some(Command::Plugin { command }) => run_plugin_command(command, &paths, &resources),
         Some(Command::Workflow { command }) => workflows::run_workflow_command(command, &paths),
         Some(Command::SetupToken {
