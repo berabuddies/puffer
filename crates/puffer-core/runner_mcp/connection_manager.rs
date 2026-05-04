@@ -1,12 +1,13 @@
 //! Long-lived MCP client multiplexer.
 //!
 //! Conceptually mirrors `references/codex/codex-rs/codex-mcp/src/connection_manager.rs`,
-//! cut down to the pass-1.5a scope:
+//! cut down to the pass-1.5b scope:
 //!
 //! * Stdio transport only.
-//! * `tools/list` + `tools/call` only — no resources, prompts, sampling, or
-//!   progress streaming through this surface (built-in resources/prompts
-//!   continue to flow through [`McpHost`](super::host::McpHost) directly).
+//! * `tools/list`, `tools/call`, `resources/list`, `resources/read`,
+//!   `prompts/list`, `prompts/get`. The built-in `filesystem` server keeps
+//!   its in-process walker via [`McpHost`](super::host::McpHost); every
+//!   other server routes through this manager.
 //! * Lazy connect: the child process is spawned on the first call to a
 //!   given server id. Subsequent calls reuse the connection.
 //! * Crash recovery: a respawn is attempted on the next call after the
@@ -24,8 +25,14 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use puffer_runner_api::{McpResult, McpTool, RunnerError};
-use rmcp::model::{CallToolRequestParams, JsonObject, RawContent};
+use puffer_runner_api::{
+    McpPrompt, McpPromptArgument, McpPromptContent, McpPromptMessage, McpResourceContent,
+    McpResourceContentPart, McpResourceRecord, McpResult, McpTool, RunnerError,
+};
+use rmcp::model::{
+    CallToolRequestParams, GetPromptRequestParams, JsonObject, PromptMessage, PromptMessageContent,
+    PromptMessageRole, RawContent, ReadResourceRequestParams, ResourceContents,
+};
 use rmcp::service::{RoleClient, RunningService, ServiceExt};
 use rmcp::transport::child_process::TokioChildProcess;
 use serde_json::{Map, Value};
@@ -194,6 +201,101 @@ impl McpConnectionManager {
         Ok(result_to_dto(server_label, tool, result))
     }
 
+    /// Public, synchronous surface invoked by `McpHost::list_resources`.
+    pub fn list_resources(
+        &self,
+        server: &str,
+    ) -> Result<Vec<McpResourceRecord>, RunnerError> {
+        let runtime = self.runtime();
+        let client = self.connect(server, &runtime)?;
+        let resources = runtime
+            .block_on(async move { client.peer().list_all_resources().await })
+            .map_err(|e| {
+                RunnerError::Mcp(format!("resources/list on `{server}` failed: {e}"))
+            })?;
+        Ok(resources
+            .into_iter()
+            .map(|r| rmcp_resource_to_dto(server, r))
+            .collect())
+    }
+
+    /// Public, synchronous surface invoked by `McpHost::read_resource`.
+    pub fn read_resource(
+        &self,
+        server: &str,
+        uri: &str,
+    ) -> Result<McpResourceContent, RunnerError> {
+        let runtime = self.runtime();
+        let client = self.connect(server, &runtime)?;
+        let uri_owned = uri.to_string();
+        let result = runtime
+            .block_on(async move {
+                client
+                    .peer()
+                    .read_resource(ReadResourceRequestParams {
+                        uri: uri_owned,
+                        meta: None,
+                    })
+                    .await
+            })
+            .map_err(|e| {
+                RunnerError::Mcp(format!(
+                    "resources/read `{uri}` on `{server}` failed: {e}"
+                ))
+            })?;
+        Ok(read_resource_result_to_dto(server, uri, result))
+    }
+
+    /// Public, synchronous surface invoked by `McpHost::list_prompts`.
+    pub fn list_prompts(&self, server: &str) -> Result<Vec<McpPrompt>, RunnerError> {
+        let runtime = self.runtime();
+        let client = self.connect(server, &runtime)?;
+        let prompts = runtime
+            .block_on(async move { client.peer().list_all_prompts().await })
+            .map_err(|e| {
+                RunnerError::Mcp(format!("prompts/list on `{server}` failed: {e}"))
+            })?;
+        Ok(prompts.into_iter().map(rmcp_prompt_to_dto).collect())
+    }
+
+    /// Public, synchronous surface invoked by `McpHost::get_prompt`.
+    pub fn get_prompt(
+        &self,
+        server: &str,
+        name: &str,
+        args: Value,
+    ) -> Result<McpPromptContent, RunnerError> {
+        let arguments = match args {
+            Value::Null => None,
+            Value::Object(map) => Some(map.into_iter().collect::<JsonObject>()),
+            other => {
+                return Err(RunnerError::InvalidArgument(format!(
+                    "MCP prompt arguments must be a JSON object or null, got {other}",
+                )))
+            }
+        };
+        let runtime = self.runtime();
+        let client = self.connect(server, &runtime)?;
+        let name_owned = name.to_string();
+        let result = runtime
+            .block_on(async move {
+                client
+                    .peer()
+                    .get_prompt(GetPromptRequestParams {
+                        name: name_owned,
+                        arguments,
+                        meta: None,
+                    })
+                    .await
+            })
+            .map_err(|e| {
+                RunnerError::Mcp(format!(
+                    "prompts/get `{name}` on `{server}` failed: {e}"
+                ))
+            })?;
+        Ok(get_prompt_result_to_dto(server, name, result))
+    }
+
     /// Looks the server up, lazily (re)spawning the underlying child as
     /// needed. If the previous client dropped because the child exited, a
     /// fresh connection is attempted within the bounded-retry budget.
@@ -326,6 +428,139 @@ fn rmcp_tool_to_dto(tool: rmcp::model::Tool) -> McpTool {
         description: tool.description.map(|c| c.into_owned()),
         input_schema,
     }
+}
+
+fn rmcp_resource_to_dto(server: &str, resource: rmcp::model::Resource) -> McpResourceRecord {
+    let raw = resource.raw;
+    McpResourceRecord {
+        server: server.to_string(),
+        uri: raw.uri,
+        name: raw.name,
+        mime_type: raw.mime_type,
+        description: raw.description,
+    }
+}
+
+fn read_resource_result_to_dto(
+    server: &str,
+    uri: &str,
+    result: rmcp::model::ReadResourceResult,
+) -> McpResourceContent {
+    let parts = result
+        .contents
+        .into_iter()
+        .map(|content| match content {
+            ResourceContents::TextResourceContents {
+                uri,
+                mime_type,
+                text,
+                ..
+            } => McpResourceContentPart::Text {
+                uri,
+                mime_type,
+                text,
+            },
+            ResourceContents::BlobResourceContents {
+                uri,
+                mime_type,
+                blob,
+                ..
+            } => McpResourceContentPart::Blob {
+                uri,
+                mime_type,
+                bytes: decode_blob_base64(&blob),
+            },
+        })
+        .collect();
+    McpResourceContent {
+        server: server.to_string(),
+        uri: uri.to_string(),
+        parts,
+    }
+}
+
+fn rmcp_prompt_to_dto(prompt: rmcp::model::Prompt) -> McpPrompt {
+    McpPrompt {
+        name: prompt.name,
+        description: prompt.description,
+        arguments: prompt
+            .arguments
+            .unwrap_or_default()
+            .into_iter()
+            .map(|arg| McpPromptArgument {
+                name: arg.name,
+                description: arg.description,
+                required: arg.required.unwrap_or(false),
+            })
+            .collect(),
+    }
+}
+
+fn get_prompt_result_to_dto(
+    server: &str,
+    name: &str,
+    result: rmcp::model::GetPromptResult,
+) -> McpPromptContent {
+    let messages = result
+        .messages
+        .into_iter()
+        .map(prompt_message_to_dto)
+        .collect();
+    McpPromptContent {
+        server: server.to_string(),
+        name: name.to_string(),
+        messages,
+    }
+}
+
+fn prompt_message_to_dto(message: PromptMessage) -> McpPromptMessage {
+    let role = match message.role {
+        PromptMessageRole::User => "user",
+        PromptMessageRole::Assistant => "assistant",
+    }
+    .to_string();
+    let text = match message.content {
+        PromptMessageContent::Text { text } => text,
+        PromptMessageContent::Image { .. } => "[image content]".to_string(),
+        PromptMessageContent::Resource { resource } => match resource.raw.resource {
+            ResourceContents::TextResourceContents { text, .. } => text,
+            ResourceContents::BlobResourceContents { uri, .. } => {
+                format!("[binary resource {uri}]")
+            }
+        },
+        PromptMessageContent::ResourceLink { link } => {
+            format!("[resource link {}]", link.raw.uri)
+        }
+    };
+    McpPromptMessage { role, text }
+}
+
+/// Best-effort base64 decoder mirroring the inline encoder used by puffer's
+/// `McpResourceContentPart::Blob` JSON serializer. rmcp returns blobs as the
+/// raw base64 string the server sent, so we decode it back to bytes here.
+fn decode_blob_base64(input: &str) -> Vec<u8> {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let trimmed = input.trim().trim_end_matches('=');
+    let mut out: Vec<u8> = Vec::with_capacity(trimmed.len() * 3 / 4);
+    let mut buffer: u32 = 0;
+    let mut bits: u8 = 0;
+    for ch in trimmed.bytes() {
+        let Some(value) = ALPHABET.iter().position(|c| *c == ch) else {
+            // Skip stray whitespace / newlines that some encoders emit.
+            if ch.is_ascii_whitespace() {
+                continue;
+            }
+            return Vec::new();
+        };
+        buffer = (buffer << 6) | value as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buffer >> bits) as u8 & 0xff);
+        }
+    }
+    out
 }
 
 fn result_to_dto(server: String, tool: &str, result: rmcp::model::CallToolResult) -> McpResult {

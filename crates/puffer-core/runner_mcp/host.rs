@@ -108,8 +108,8 @@ impl McpHost {
     }
 
     /// Lists resources across one or all servers. The built-in `filesystem`
-    /// transport walks `workspace_root`; every other server contributes its
-    /// manifest as a single `mcp://manifest/<id>` record.
+    /// transport walks `workspace_root`; every other server is queried over
+    /// stdio through the connection manager.
     pub fn list_resources(
         &self,
         server: Option<&str>,
@@ -127,14 +127,15 @@ impl McpHost {
             if is_live_filesystem_server(&spec.id, &spec.target) {
                 out.extend(self.list_filesystem_resources(&spec.id)?);
             } else {
-                out.push(manifest_resource_record(spec));
+                out.extend(self.connections.list_resources(&spec.id)?);
             }
         }
         Ok(out)
     }
 
     /// Reads one resource from a server. Resolves filesystem URIs against
-    /// `workspace_root` and returns manifest YAML for non-live servers.
+    /// `workspace_root`; every other server is queried over stdio through
+    /// the connection manager.
     pub fn read_resource(
         &self,
         server: &str,
@@ -144,42 +145,32 @@ impl McpHost {
         if is_live_filesystem_server(&spec.id, &spec.target) {
             return self.read_filesystem_resource(&spec.id, uri);
         }
-        let expected = format!("mcp://manifest/{}", spec.id);
-        if !uri.eq_ignore_ascii_case(&expected) {
-            return Err(RunnerError::NotFound(format!(
-                "MCP resource `{uri}` not found on server `{server}`"
-            )));
-        }
-        let text = serde_json::to_string_pretty(&spec)
-            .map_err(|e| RunnerError::Other(format!("serialize manifest: {e}")))?;
-        Ok(McpResourceContent {
-            server: spec.id.clone(),
-            uri: uri.to_string(),
-            parts: vec![McpResourceContentPart::Text {
-                uri: uri.to_string(),
-                mime_type: Some("application/yaml".to_string()),
-                text,
-            }],
-        })
+        self.connections.read_resource(&spec.id, uri)
     }
 
     pub fn list_prompts(&self, server: &str) -> Result<Vec<McpPrompt>, RunnerError> {
-        self.lookup_server(server)?;
-        Err(RunnerError::Unsupported(format!(
-            "MCP `prompts/list` is not implemented for server `{server}`",
-        )))
+        let spec = self.lookup_server(server)?;
+        if is_live_filesystem_server(&spec.id, &spec.target) {
+            return Err(RunnerError::Unsupported(format!(
+                "MCP `prompts/list` is not implemented for built-in server `{server}`",
+            )));
+        }
+        self.connections.list_prompts(&spec.id)
     }
 
     pub fn get_prompt(
         &self,
         server: &str,
         name: &str,
-        _args: Value,
+        args: Value,
     ) -> Result<McpPromptContent, RunnerError> {
-        self.lookup_server(server)?;
-        Err(RunnerError::Unsupported(format!(
-            "MCP `prompts/get` for `{name}` on server `{server}` is not implemented",
-        )))
+        let spec = self.lookup_server(server)?;
+        if is_live_filesystem_server(&spec.id, &spec.target) {
+            return Err(RunnerError::Unsupported(format!(
+                "MCP `prompts/get` for `{name}` on built-in server `{server}` is not implemented",
+            )));
+        }
+        self.connections.get_prompt(&spec.id, name, args)
     }
 
     fn lookup_server(&self, server: &str) -> Result<&McpServerSpec, RunnerError> {
@@ -275,25 +266,6 @@ fn spec_to_info(spec: &McpServerSpec) -> McpServerInfo {
         transport: spec.transport.clone(),
         target: spec.target.clone(),
         description: spec.description.clone(),
-    }
-}
-
-fn manifest_resource_record(spec: &McpServerSpec) -> McpResourceRecord {
-    let description = if spec.description.is_empty() {
-        Some("Configured MCP server manifest".to_string())
-    } else {
-        Some(spec.description.clone())
-    };
-    McpResourceRecord {
-        server: spec.id.clone(),
-        uri: format!("mcp://manifest/{}", spec.id),
-        name: if spec.display_name.is_empty() {
-            spec.id.clone()
-        } else {
-            spec.display_name.clone()
-        },
-        mime_type: Some("application/yaml".to_string()),
-        description,
     }
 }
 
@@ -428,14 +400,6 @@ mod tests {
     }
 
     #[test]
-    fn list_resources_filters_by_server_case_insensitive() {
-        let host = McpHost::new(vec![manifest_spec("docs")], None);
-        let records = host.list_resources(Some("DOCS")).unwrap();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].uri, "mcp://manifest/docs");
-    }
-
-    #[test]
     fn list_resources_unknown_server_errors() {
         let host = McpHost::new(vec![manifest_spec("docs")], None);
         let err = host.list_resources(Some("missing")).unwrap_err();
@@ -443,16 +407,28 @@ mod tests {
     }
 
     #[test]
-    fn read_resource_returns_manifest_for_non_live_server() {
+    fn list_resources_for_subprocess_server_routes_through_connection_manager() {
+        // The `docs` manifest points at a binary that does not exist, so the
+        // connection manager fails to spawn — the host should bubble that up
+        // as an `Mcp` error instead of returning a synthetic manifest record.
         let host = McpHost::new(vec![manifest_spec("docs")], None);
-        let content = host
-            .read_resource("docs", "mcp://manifest/docs")
-            .unwrap();
-        assert_eq!(content.server, "docs");
-        assert!(matches!(
-            content.parts[0],
-            McpResourceContentPart::Text { .. }
-        ));
+        let err = host.list_resources(Some("docs")).unwrap_err();
+        assert!(
+            matches!(err, RunnerError::Mcp(_)),
+            "expected Mcp error from failed spawn, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn read_resource_for_subprocess_server_routes_through_connection_manager() {
+        let host = McpHost::new(vec![manifest_spec("docs")], None);
+        let err = host
+            .read_resource("docs", "mcp://example/anything")
+            .unwrap_err();
+        assert!(
+            matches!(err, RunnerError::Mcp(_)),
+            "expected Mcp error from failed spawn, got {err:?}"
+        );
     }
 
     #[test]
