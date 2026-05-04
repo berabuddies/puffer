@@ -104,7 +104,7 @@ pub(super) fn render_runtime_system_prompt(
     )
     .unwrap_or_else(|| render_fallback_prompt(&variables));
     let mut prompt = normalize_prompt_whitespace(&rendered);
-    if let Some(memory) = load_memory_prompt(&state.cwd) {
+    if let Some(memory) = load_memory_prompt(&state.cwd, provider_id) {
         prompt.push_str("\n\n");
         prompt.push_str(&memory);
     }
@@ -327,16 +327,28 @@ fn prepend_bullets(items: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-/// Loads CLAUDE.md files from the working directory and user home, formatted to match
-/// Claude Code's user-context memory injection (MEMORY_INSTRUCTION_PROMPT + per-file
-/// "Contents of <path> (<description>):" blocks).
-fn load_memory_prompt(cwd: &Path) -> Option<String> {
+/// Loads project-doc / memory files for the system prompt. The OpenAI path
+/// favors AGENTS.md (Codex's convention) and falls back to CLAUDE.md only if
+/// no AGENTS.md is found anywhere; all other providers use CLAUDE.md.
+/// Output is formatted to match Claude Code's user-context memory injection
+/// (MEMORY_INSTRUCTION_PROMPT + per-file "Contents of <path> (<description>):"
+/// blocks).
+fn load_memory_prompt(cwd: &Path, provider_id: Option<&str>) -> Option<String> {
+    if provider_id == Some("openai") {
+        if let Some(prompt) = load_memory_prompt_for_filename(cwd, "AGENTS.md") {
+            return Some(prompt);
+        }
+    }
+    load_memory_prompt_for_filename(cwd, "CLAUDE.md")
+}
+
+fn load_memory_prompt_for_filename(cwd: &Path, filename: &str) -> Option<String> {
     let mut sources: Vec<(PathBuf, MemorySource)> = Vec::new();
-    sources.push((cwd.join("CLAUDE.md"), MemorySource::Project));
+    sources.push((cwd.join(filename), MemorySource::Project));
     if let Some(home) = env::var_os("HOME") {
         for dir in &[".claude", ".puffer"] {
             sources.push((
-                Path::new(&home).join(dir).join("CLAUDE.md"),
+                Path::new(&home).join(dir).join(filename),
                 MemorySource::UserGlobal,
             ));
         }
@@ -430,7 +442,7 @@ fn os_version() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::render_runtime_system_prompt;
+    use super::{load_memory_prompt, render_runtime_system_prompt};
     use crate::runtime::tests::state;
     use puffer_resources::{LoadedItem, LoadedResources, PromptTemplate, SourceInfo, SourceKind};
     use std::collections::BTreeSet;
@@ -507,5 +519,37 @@ mod tests {
         assert!(prompt.contains("AskUserQuestion"));
         assert!(prompt.contains("# Environment"));
         assert!(prompt.contains("Primary working directory:"));
+    }
+
+    #[test]
+    fn load_memory_prompt_prefers_agents_md_for_openai_with_claude_md_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("AGENTS.md"), "agent rules here").unwrap();
+        std::fs::write(tmp.path().join("CLAUDE.md"), "claude rules here").unwrap();
+
+        // OpenAI: AGENTS.md wins; CLAUDE.md is not loaded.
+        let openai = load_memory_prompt(tmp.path(), Some("openai")).unwrap();
+        assert!(openai.contains("AGENTS.md"));
+        assert!(openai.contains("agent rules here"));
+        assert!(!openai.contains("claude rules here"));
+
+        // Non-OpenAI providers ignore AGENTS.md.
+        let anthropic = load_memory_prompt(tmp.path(), Some("anthropic")).unwrap();
+        assert!(anthropic.contains("CLAUDE.md"));
+        assert!(anthropic.contains("claude rules here"));
+        assert!(!anthropic.contains("agent rules here"));
+
+        // OpenAI with no AGENTS.md falls back to CLAUDE.md.
+        std::fs::remove_file(tmp.path().join("AGENTS.md")).unwrap();
+        let fallback = load_memory_prompt(tmp.path(), Some("openai")).unwrap();
+        assert!(fallback.contains("CLAUDE.md"));
+        assert!(fallback.contains("claude rules here"));
+
+        // Neither file: nothing injected (assuming no global files contain these markers).
+        std::fs::remove_file(tmp.path().join("CLAUDE.md")).unwrap();
+        let none = load_memory_prompt(tmp.path(), Some("openai"));
+        if let Some(text) = &none {
+            assert!(!text.contains(tmp.path().to_str().unwrap()));
+        }
     }
 }
