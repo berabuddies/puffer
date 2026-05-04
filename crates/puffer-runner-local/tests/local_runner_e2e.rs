@@ -243,6 +243,7 @@ fn fixture_manifest() -> Vec<McpServerSpec> {
             target: "builtin:filesystem".into(),
             description: "Workspace filesystem stub".into(),
             headers: Default::default(),
+            oauth: None,
         },
         McpServerSpec {
             id: "docs".into(),
@@ -252,6 +253,7 @@ fn fixture_manifest() -> Vec<McpServerSpec> {
             target: "docs-server".into(),
             description: "Static manifest entry".into(),
             headers: Default::default(),
+            oauth: None,
         },
     ]
 }
@@ -299,6 +301,7 @@ fn list_mcp_resources_walks_filesystem_workspace() {
         target: "builtin:filesystem".into(),
         description: "Workspace filesystem stub".into(),
         headers: Default::default(),
+        oauth: None,
     }];
     let runner = LocalToolRunner::new()
         .with_mcp_servers(manifest)

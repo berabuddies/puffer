@@ -403,6 +403,7 @@ fn add_mcp_server(
             target: stdio_target(command_or_url, args),
             description: format!("Workspace MCP server `{name}`"),
             headers: Default::default(),
+            oauth: None,
         },
         McpTransport::Sse | McpTransport::Http => {
             if !args.is_empty() {
@@ -421,6 +422,7 @@ fn add_mcp_server(
                 target: String::new(),
                 description: format!("Workspace MCP server `{name}`"),
                 headers: Default::default(),
+                oauth: None,
             }
         }
     };
@@ -451,6 +453,7 @@ fn add_mcp_server_from_json(
         target: input.target.unwrap_or_default(),
         description: input.description.unwrap_or_default(),
         headers: input.headers.unwrap_or_default(),
+        oauth: None,
     };
     let dir = resource_dir(paths, scope, "mcp_servers");
     fs::create_dir_all(&dir)?;

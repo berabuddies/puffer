@@ -1,0 +1,29 @@
+[package]
+name = "puffer-mcp-oauth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-trait = "0.1"
+axum = "0.8"
+dirs.workspace = true
+oauth2 = { version = "5.0", default-features = false, features = ["reqwest"] }
+reqwest.workspace = true
+rmcp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "net", "rt", "rt-multi-thread", "macros", "time"] }
+tokio-util = "0.7"
+tracing = "0.1"
+url.workspace = true
+webbrowser = "1.0"
+
+[dev-dependencies]
+tempfile.workspace = true

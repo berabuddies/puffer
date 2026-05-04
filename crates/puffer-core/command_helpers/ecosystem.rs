@@ -834,6 +834,7 @@ mod tests {
                 target: "docs".to_string(),
                 description: String::new(),
                 headers: Default::default(),
+                oauth: None,
             },
             source_info: SourceInfo {
                 path: root.join("resources/mcp_servers/docs.yaml"),
@@ -856,6 +857,7 @@ mod tests {
                     target: "logs".to_string(),
                     description: String::new(),
                     headers: Default::default(),
+                    oauth: None,
                 }],
                 lsp_servers: Vec::new(),
             },

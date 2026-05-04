@@ -57,6 +57,7 @@ fn mcp_enable_and_disable_request_runtime_reload() {
                 target: "docs".to_string(),
                 description: String::new(),
                 headers: Default::default(),
+                oauth: None,
             },
             source_info: SourceInfo {
                 path: paths.builtin_resources_dir.join("mcp_servers/docs.yaml"),

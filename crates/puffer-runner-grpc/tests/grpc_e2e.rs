@@ -363,6 +363,7 @@ fn cross_backend_mcp_equivalence() {
             target: "builtin:filesystem".into(),
             description: "Workspace filesystem stub".into(),
             headers: Default::default(),
+            oauth: None,
         }]
     };
 
@@ -539,6 +540,7 @@ fn cross_backend_real_mcp_tools() {
             target: format!("'{}' --marker puffer-mcp-grpc-cross-backend", stub_bin.display()),
             description: "Integration-test stub MCP server".into(),
             headers: Default::default(),
+            oauth: None,
         }]
     };
 
@@ -614,6 +616,7 @@ fn cross_backend_real_mcp_resources_and_prompts() {
             ),
             description: "Integration-test stub MCP server".into(),
             headers: Default::default(),
+            oauth: None,
         }]
     };
 
@@ -726,6 +729,7 @@ fn cross_backend_progress_notifications_round_trip() {
             ),
             description: "Integration-test stub MCP server".into(),
             headers: Default::default(),
+            oauth: None,
         }]
     };
 
@@ -1047,6 +1051,7 @@ fn cross_backend_elicitation_round_trips() {
             ),
             description: "Integration-test stub MCP server".into(),
             headers: Default::default(),
+            oauth: None,
         }]
     };
 
@@ -1369,6 +1374,7 @@ fn cross_backend_http_mcp_round_trip() {
             target: stub.url.clone(),
             description: "Cross-backend HTTP MCP stub".into(),
             headers: Default::default(),
+            oauth: None,
         }]
     };
 

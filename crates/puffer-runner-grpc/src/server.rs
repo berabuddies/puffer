@@ -467,6 +467,7 @@ fn runner_error_code(err: &RunnerError) -> &'static str {
         RunnerError::InvalidArgument(_) => "invalid_argument",
         RunnerError::Transport(_) => "transport",
         RunnerError::Mcp(_) => "mcp",
+        RunnerError::OAuthRequired { .. } => "oauth_required",
         RunnerError::Execution(_) => "execution",
         RunnerError::Other(_) => "other",
     }

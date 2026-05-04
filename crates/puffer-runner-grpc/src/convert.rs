@@ -381,15 +381,53 @@ pub(crate) fn runner_error_to_status(err: &RunnerError) -> tonic::Status {
         RunnerError::InvalidArgument(_) => Code::InvalidArgument,
         RunnerError::Transport(_) => Code::Unavailable,
         RunnerError::Mcp(_) => Code::Internal,
+        RunnerError::OAuthRequired { .. } => Code::FailedPrecondition,
         RunnerError::Execution(_) => Code::Internal,
         RunnerError::Other(_) => Code::Internal,
     };
-    tonic::Status::new(code, err.to_string())
+    let mut status = tonic::Status::new(code, err.to_string());
+    if let RunnerError::OAuthRequired {
+        server_id,
+        authorization_url,
+    } = err
+    {
+        // Round-trip the typed shape via custom metadata keys so the
+        // client (`status_to_runner_error`) can rebuild the variant.
+        // ASCII-only values; URLs are guaranteed printable so the
+        // tonic header parser won't reject them.
+        if let Ok(v) = tonic::metadata::AsciiMetadataValue::try_from(server_id.as_str()) {
+            status.metadata_mut().insert("x-puffer-oauth-server", v);
+        }
+        if let Some(url) = authorization_url {
+            if let Ok(v) = tonic::metadata::AsciiMetadataValue::try_from(url.as_str()) {
+                status.metadata_mut().insert("x-puffer-oauth-url", v);
+            }
+        }
+    }
+    status
 }
 
 pub(crate) fn status_to_runner_error(status: tonic::Status) -> RunnerError {
     use tonic::Code;
     let msg = status.message().to_string();
+    if matches!(status.code(), Code::FailedPrecondition) {
+        if let Some(server_id) = status
+            .metadata()
+            .get("x-puffer-oauth-server")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+        {
+            let authorization_url = status
+                .metadata()
+                .get("x-puffer-oauth-url")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            return RunnerError::OAuthRequired {
+                server_id,
+                authorization_url,
+            };
+        }
+    }
     match status.code() {
         Code::NotFound => RunnerError::NotFound(msg),
         Code::PermissionDenied => RunnerError::PermissionDenied(msg),

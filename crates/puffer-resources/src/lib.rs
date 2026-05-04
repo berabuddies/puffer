@@ -9,9 +9,9 @@ pub use loader::{
 };
 pub use model::{
     AgentMcpServerSpec, AgentMemoryScope, AgentSpec, HookSpec, IdeSpec, LoadedItem,
-    LoadedResources, LspServerSpec, MascotSpec, McpServerSpec, PluginCommandSpec, PluginSpec,
-    PromptTemplate, PromptVariableSpec, ProviderPack, SkillSpec, SourceInfo, SourceKind,
-    ToolDisplaySpec, ToolMetadataSpec, ToolSpec,
+    LoadedResources, LspServerSpec, MascotSpec, McpOAuthDetail, McpOAuthSpec, McpServerSpec,
+    PluginCommandSpec, PluginSpec, PromptTemplate, PromptVariableSpec, ProviderPack, SkillSpec,
+    SourceInfo, SourceKind, ToolDisplaySpec, ToolMetadataSpec, ToolSpec,
 };
 
 /// Looks up a mascot by id.

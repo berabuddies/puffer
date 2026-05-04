@@ -1193,6 +1193,7 @@ fn handle_add_mcp_server(state: &DaemonState, params: &Value) -> Result<Value> {
             .map(|value| value.trim().to_string())
             .unwrap_or_default(),
         headers: Default::default(),
+        oauth: None,
     };
 
     let dir = match params.scope.as_deref().unwrap_or("local") {

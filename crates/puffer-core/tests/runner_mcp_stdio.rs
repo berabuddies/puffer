@@ -57,6 +57,7 @@ fn manifest_with_marker(server_id: &str, marker: &str) -> Vec<McpServerSpec> {
         target: format!("'{}' --marker {}", STUB_BIN, marker),
         description: "Integration-test stub MCP server".into(),
         headers: Default::default(),
+        oauth: None,
     }]
 }
 
@@ -169,6 +170,7 @@ fn bounded_retries_exhaust_for_dead_binary() {
         target: format!("'{}' --exit-immediately", STUB_BIN),
         description: "Always exits immediately".into(),
         headers: Default::default(),
+        oauth: None,
     }];
     let runner = LocalToolRunner::new().with_mcp_servers(manifest);
 

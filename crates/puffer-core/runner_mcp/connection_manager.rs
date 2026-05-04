@@ -46,9 +46,15 @@ use serde_json::{Map, Value};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::http_launcher::build_streamable_http_transport;
+use super::http_launcher::{
+    build_oauth_streamable_http_transport, build_streamable_http_transport,
+};
 use super::launcher::spawn_stdio_child;
-use super::transport::{expand_env, HttpTransportSpec, StdioTransportSpec, TransportRecipe};
+use super::transport::{
+    expand_env, HttpOAuthSpec, HttpTransportSpec, StdioTransportSpec, TransportRecipe,
+};
+use puffer_mcp_oauth::{default_token_dir, OAuthConfig, OAuthError, OAuthService};
+use std::path::PathBuf;
 
 /// Bounded-retry policy: at most `MAX_RETRIES` failed launches inside the
 /// rolling `RETRY_WINDOW`. After that, calls fail fast until the window
@@ -248,6 +254,11 @@ pub struct McpConnectionManager {
     /// [`DeclineAllElicitations`]; the runner sets a real handler via
     /// [`McpConnectionManager::with_elicitation_handler`].
     elicitation: Arc<dyn ElicitationHandler>,
+    /// Optional override for where OAuth token files live. When `None`
+    /// the default ([`puffer_mcp_oauth::default_token_dir`]) is used —
+    /// `<user-config>/puffer/mcp-tokens`. Tests pin this to a `TempDir`
+    /// so per-test runs don't interfere.
+    oauth_token_dir: Option<PathBuf>,
     /// Lazy tokio runtime that owns every running rmcp client. Reused across
     /// calls so each `block_on` is just a context switch, not a runtime
     /// spin-up. Held in an `Arc` so `Drop` can move it onto a background
@@ -270,6 +281,7 @@ impl Default for McpConnectionManager {
         Self {
             servers: HashMap::new(),
             elicitation: Arc::new(DeclineAllElicitations),
+            oauth_token_dir: None,
             runtime: OnceLock::new(),
         }
     }
@@ -293,8 +305,17 @@ impl McpConnectionManager {
         Self {
             servers,
             elicitation: Arc::new(DeclineAllElicitations),
+            oauth_token_dir: None,
             runtime: OnceLock::new(),
         }
+    }
+
+    /// Override the directory used for persisted OAuth tokens. Defaults
+    /// to [`puffer_mcp_oauth::default_token_dir`]; tests use this hook
+    /// to pin storage to a `TempDir`.
+    pub fn with_oauth_token_dir(mut self, dir: PathBuf) -> Self {
+        self.oauth_token_dir = Some(dir);
+        self
     }
 
     /// Replaces the elicitation handler used for every subsequent rmcp
@@ -566,7 +587,11 @@ impl McpConnectionManager {
             progress: Arc::clone(&guard.progress),
             elicitation: Arc::clone(&self.elicitation),
         };
-        match runtime.block_on(spawn_client(server, recipe, handler)) {
+        let token_dir = self
+            .oauth_token_dir
+            .clone()
+            .unwrap_or_else(default_token_dir);
+        match runtime.block_on(spawn_client(server, recipe, handler, token_dir)) {
             Ok(client) => {
                 let arc = Arc::new(client);
                 guard.client = Some(Arc::clone(&arc));
@@ -632,10 +657,13 @@ async fn spawn_client(
     server: &str,
     recipe: TransportRecipe,
     handler: McpClientHandler,
+    oauth_token_dir: PathBuf,
 ) -> Result<RunningService<RoleClient, McpClientHandler>, RunnerError> {
     match recipe {
         TransportRecipe::Stdio(spec) => spawn_stdio_client(server, spec, handler).await,
-        TransportRecipe::Http(spec) => spawn_http_client(server, spec, handler).await,
+        TransportRecipe::Http(spec) => {
+            spawn_http_client(server, spec, handler, oauth_token_dir).await
+        }
     }
 }
 
@@ -663,12 +691,59 @@ async fn spawn_http_client(
     server: &str,
     spec: HttpTransportSpec,
     handler: McpClientHandler,
+    oauth_token_dir: PathBuf,
 ) -> Result<RunningService<RoleClient, McpClientHandler>, RunnerError> {
+    if let Some(oauth_spec) = spec.oauth.clone() {
+        let oauth_service = build_oauth_service(server, &spec.url, &oauth_spec, oauth_token_dir);
+        let resolved = oauth_service
+            .resolve()
+            .await
+            .map_err(|e| oauth_error_to_runner(server, e))?;
+        let transport = build_oauth_streamable_http_transport(&spec, resolved.client.clone());
+        return handler
+            .serve(transport)
+            .await
+            .map_err(|e| RunnerError::Mcp(format!("MCP handshake with `{server}` failed: {e}")));
+    }
     let transport = build_streamable_http_transport(server, &spec)?;
     handler
         .serve(transport)
         .await
         .map_err(|e| RunnerError::Mcp(format!("MCP handshake with `{server}` failed: {e}")))
+}
+
+fn build_oauth_service(
+    server: &str,
+    url: &str,
+    spec: &HttpOAuthSpec,
+    token_dir: PathBuf,
+) -> OAuthService {
+    OAuthService::new(OAuthConfig {
+        server_id: server.to_string(),
+        server_url: url.to_string(),
+        scopes: spec.scopes.clone(),
+        client_name: if spec.client_name.is_empty() {
+            "puffer".to_string()
+        } else {
+            spec.client_name.clone()
+        },
+        token_dir,
+    })
+}
+
+fn oauth_error_to_runner(server: &str, err: OAuthError) -> RunnerError {
+    match err {
+        OAuthError::OAuthRequired {
+            server_id,
+            authorization_url,
+        } => RunnerError::OAuthRequired {
+            server_id,
+            authorization_url,
+        },
+        other => RunnerError::Mcp(format!(
+            "OAuth setup for MCP server `{server}` failed: {other}"
+        )),
+    }
 }
 
 fn rmcp_tool_to_dto(tool: rmcp::model::Tool) -> McpTool {
@@ -954,6 +1029,18 @@ fn http_entry_from_spec(
         .iter()
         .map(|(k, v)| (k.clone(), expand_env(v)))
         .collect();
-    let recipe = TransportRecipe::Http(HttpTransportSpec { url, headers });
+    let oauth = spec.oauth.as_ref().filter(|o| o.enabled()).map(|o| {
+        HttpOAuthSpec {
+            scopes: o.scopes(),
+            client_name: o
+                .client_name()
+                .unwrap_or_else(|| format!("puffer-{}", spec.id)),
+        }
+    });
+    let recipe = TransportRecipe::Http(HttpTransportSpec {
+        url,
+        headers,
+        oauth,
+    });
     Some(ConnectionEntry::new(spec.id.clone(), recipe))
 }

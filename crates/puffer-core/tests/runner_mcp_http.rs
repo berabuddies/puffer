@@ -58,6 +58,7 @@ fn http_manifest(server_id: &str, url: &str) -> Vec<McpServerSpec> {
         target: url.to_string(),
         description: "Streamable-HTTP integration-test stub".into(),
         headers: Default::default(),
+        oauth: None,
     }]
 }
 
@@ -78,6 +79,7 @@ fn http_manifest_with_headers(
         target: url.to_string(),
         description: "Streamable-HTTP integration-test stub".into(),
         headers: map,
+        oauth: None,
     }]
 }
 

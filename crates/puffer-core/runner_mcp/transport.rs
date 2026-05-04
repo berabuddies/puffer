@@ -78,6 +78,27 @@ pub struct HttpTransportSpec {
     /// Extra HTTP headers attached to every outbound request. Order is
     /// preserved so test fixtures can pin a deterministic header order.
     pub headers: Vec<(String, String)>,
+    /// OAuth 2.0 configuration for this server (pass 1.5e). When `Some`,
+    /// the runner wraps the reqwest client in rmcp's `AuthClient` and
+    /// drives discovery / DCR / token refresh on demand. The token
+    /// directory is supplied separately by the connection manager so
+    /// tests can pin it to a `TempDir` without round-tripping through
+    /// the manifest.
+    pub oauth: Option<HttpOAuthSpec>,
+}
+
+/// Per-server OAuth runtime state derived from the manifest.
+///
+/// Mirrors [`puffer_resources::McpOAuthSpec`] but in a transport-shaped
+/// form (no untagged enum, no serde) so the connection manager can hand
+/// it to the OAuth service without re-deriving the scope list at every
+/// reconnect.
+#[derive(Debug, Clone)]
+pub struct HttpOAuthSpec {
+    /// Scopes to request during the auth-code flow.
+    pub scopes: Vec<String>,
+    /// `client_name` to register with the auth server during DCR.
+    pub client_name: String,
 }
 
 /// All supported MCP transport recipes.

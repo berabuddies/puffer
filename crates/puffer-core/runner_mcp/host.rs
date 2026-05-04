@@ -419,6 +419,7 @@ mod tests {
             target: "builtin:filesystem".into(),
             description: "Filesystem server".into(),
             headers: Default::default(),
+            oauth: None,
         }
     }
 
@@ -431,6 +432,7 @@ mod tests {
             target: format!("{id}-target"),
             description: format!("{id} description"),
             headers: Default::default(),
+            oauth: None,
         }
     }
 

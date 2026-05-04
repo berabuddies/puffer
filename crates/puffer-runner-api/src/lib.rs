@@ -220,6 +220,20 @@ pub enum RunnerError {
     #[error("MCP error: {0}")]
     Mcp(String),
 
+    /// HTTP MCP server requires OAuth and no usable token is on disk.
+    ///
+    /// `authorization_url` is `Some` when discovery has run and the runner
+    /// can hand the orchestrator a URL to redirect the user at; it's
+    /// `None` for the silent-resolve path that surfaced this error
+    /// before discovery completed (the caller should kick off
+    /// `puffer mcp login <server_id>` to drive discovery + DCR + URL
+    /// minting in one shot).
+    #[error("OAuth required for MCP server `{server_id}`")]
+    OAuthRequired {
+        server_id: String,
+        authorization_url: Option<String>,
+    },
+
     #[error("tool execution failed: {0}")]
     Execution(String),
 
