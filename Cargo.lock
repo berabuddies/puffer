@@ -4540,6 +4540,7 @@ dependencies = [
  "futures-core",
  "prost",
  "puffer-core",
+ "puffer-mcp-oauth",
  "puffer-resources",
  "puffer-runner-api",
  "puffer-runner-local",

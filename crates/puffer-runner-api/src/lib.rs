@@ -737,6 +737,136 @@ mod tests {
     }
 
     #[test]
+    fn oauth_tokens_payload_roundtrips_through_json() {
+        let payload = OAuthTokensPayload {
+            server_id: "github".into(),
+            server_url: "https://mcp.example.com/v1".into(),
+            client_id: "client-123".into(),
+            client_secret: Some("secret".into()),
+            access_token: "at-1".into(),
+            token_type: "Bearer".into(),
+            refresh_token: Some("rt-1".into()),
+            scopes: vec!["read".into(), "write".into()],
+            expires_at_ms: Some(1_700_000_000_000),
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        let back: OAuthTokensPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(payload, back);
+    }
+
+    #[test]
+    fn oauth_status_present_roundtrips_through_json() {
+        let cases = [
+            OAuthStatus::Absent,
+            OAuthStatus::Present {
+                expires_at_ms: Some(1_700_000_000_000),
+                has_refresh: true,
+                scopes: vec!["repo".into()],
+            },
+        ];
+        for status in cases {
+            let json = serde_json::to_string(&status).unwrap();
+            let back: OAuthStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(status, back);
+        }
+    }
+
+    #[test]
+    fn default_runner_oauth_methods_return_unsupported() {
+        // Sanity-check that a runner that doesn't override the OAuth
+        // methods bubbles up `Unsupported` rather than panicking.
+        #[derive(Debug)]
+        struct Stub;
+        impl ToolRunner for Stub {
+            fn ping(&self) -> Result<RunnerPing, RunnerError> {
+                unimplemented!()
+            }
+            fn capabilities(&self) -> RunnerCapabilities {
+                Default::default()
+            }
+            fn execute_tool(
+                &self,
+                _: ToolRequest,
+                _: &mut dyn ChunkSink,
+            ) -> Result<ToolResult, RunnerError> {
+                unimplemented!()
+            }
+            fn read_file(&self, _: &Path) -> Result<Vec<u8>, RunnerError> {
+                unimplemented!()
+            }
+            fn list_dir(&self, _: &Path) -> Result<Vec<DirEntry>, RunnerError> {
+                unimplemented!()
+            }
+            fn glob(&self, _: &Path, _: &str) -> Result<Vec<PathBuf>, RunnerError> {
+                unimplemented!()
+            }
+            fn list_mcp_servers(&self) -> Result<Vec<McpServerInfo>, RunnerError> {
+                unimplemented!()
+            }
+            fn list_mcp_tools(&self, _: &str) -> Result<Vec<McpTool>, RunnerError> {
+                unimplemented!()
+            }
+            fn call_mcp_tool(
+                &self,
+                _: &str,
+                _: &str,
+                _: serde_json::Value,
+                _: &mut dyn ChunkSink,
+            ) -> Result<McpResult, RunnerError> {
+                unimplemented!()
+            }
+            fn list_mcp_resources(
+                &self,
+                _: Option<&str>,
+            ) -> Result<Vec<McpResourceRecord>, RunnerError> {
+                unimplemented!()
+            }
+            fn read_mcp_resource(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<McpResourceContent, RunnerError> {
+                unimplemented!()
+            }
+            fn list_mcp_prompts(&self, _: &str) -> Result<Vec<McpPrompt>, RunnerError> {
+                unimplemented!()
+            }
+            fn get_mcp_prompt(
+                &self,
+                _: &str,
+                _: &str,
+                _: serde_json::Value,
+            ) -> Result<McpPromptContent, RunnerError> {
+                unimplemented!()
+            }
+        }
+        let stub = Stub;
+        let payload = OAuthTokensPayload {
+            server_id: "x".into(),
+            server_url: "https://x".into(),
+            client_id: "c".into(),
+            client_secret: None,
+            access_token: "a".into(),
+            token_type: "Bearer".into(),
+            refresh_token: None,
+            scopes: vec![],
+            expires_at_ms: None,
+        };
+        assert!(matches!(
+            stub.push_oauth_tokens("x", payload).unwrap_err(),
+            RunnerError::Unsupported(_)
+        ));
+        assert!(matches!(
+            stub.oauth_status("x").unwrap_err(),
+            RunnerError::Unsupported(_)
+        ));
+        assert!(matches!(
+            stub.clear_oauth_tokens("x").unwrap_err(),
+            RunnerError::Unsupported(_)
+        ));
+    }
+
+    #[test]
     fn mcp_resource_content_blob_roundtrips_through_json() {
         let content = McpResourceContent {
             server: "filesystem".into(),

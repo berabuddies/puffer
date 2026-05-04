@@ -1221,3 +1221,21 @@ fn http_entry_from_spec(
     });
     Some(ConnectionEntry::new(spec.id.clone(), recipe))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_required_detection_matches_rmcp_display() {
+        // rmcp's StreamableHttpError::AuthRequired displays as
+        // "Auth required" via its `#[error]` derive. The full error
+        // chain we observe in `ServiceError::TransportSend` looks like:
+        //   Transport send error: Transport [streamable-http] error: Auth required
+        assert!(msg_indicates_auth_required("Auth required"));
+        assert!(msg_indicates_auth_required(
+            "Transport send error: Transport [streamable-http] error: Auth required"
+        ));
+        assert!(!msg_indicates_auth_required("Some other error"));
+    }
+}

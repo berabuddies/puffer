@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use puffer_runner_api::{
     ChunkKind, ChunkSink, ElicitationHandler, ElicitationRequest, ElicitationResponse,
-    FnChunkSink, McpResourceContentPart, NullChunkSink, RunnerError, ToolRequest, ToolResult,
-    ToolRunner,
+    FnChunkSink, McpResourceContentPart, NullChunkSink, OAuthStatus, OAuthTokensPayload,
+    RunnerError, ToolRequest, ToolResult, ToolRunner,
 };
 use puffer_runner_grpc::server::ToolRunnerServer;
 use puffer_runner_grpc::{BidiElicitationRouter, RemoteToolRunner, ToolRunnerService};
@@ -1449,4 +1449,110 @@ fn cross_backend_http_mcp_round_trip() {
     drop(server);
     drop(stub);
     drop(rt);
+}
+
+#[test]
+fn cross_backend_oauth_token_push_round_trip() {
+    // Verifies the new push_oauth_tokens / oauth_status / clear_oauth_tokens
+    // RPCs end-to-end. Builds a LocalToolRunner with one HTTP+OAuth MCP
+    // server registered and an isolated token dir, fronts it with a gRPC
+    // ToolRunnerService, and drives push -> status -> clear -> status from
+    // a RemoteToolRunner client.
+    use puffer_resources::{McpOAuthDetail, McpOAuthSpec, McpServerSpec};
+
+    let token_dir = tempdir().unwrap();
+    let manifest = || -> Vec<McpServerSpec> {
+        vec![McpServerSpec {
+            id: "stub".into(),
+            display_name: "Stub OAuth".into(),
+            transport: "http".into(),
+            endpoint: String::new(),
+            target: "https://mcp.example.com/v1".into(),
+            description: "OAuth-gated MCP stub".into(),
+            headers: Default::default(),
+            oauth: Some(McpOAuthSpec::Detailed(McpOAuthDetail {
+                enabled: true,
+                scope: String::new(),
+                client_name: "puffer-test".into(),
+            })),
+        }]
+    };
+
+    let server_runner: Arc<dyn ToolRunner> = Arc::new(
+        LocalToolRunner::new()
+            .with_mcp_servers(manifest())
+            .with_oauth_token_dir(token_dir.path().to_path_buf()),
+    );
+    let server = spawn_server(server_runner);
+    let remote =
+        RemoteToolRunner::connect(&server.endpoint, Some(TEST_TOKEN)).expect("connect remote");
+
+    // 1. Initially no tokens stored.
+    let status = remote.oauth_status("stub").expect("status absent");
+    assert!(matches!(status, OAuthStatus::Absent), "got {status:?}");
+
+    // 2. Push a synthetic token bundle.
+    let payload = OAuthTokensPayload {
+        server_id: "stub".into(),
+        server_url: "https://mcp.example.com/v1".into(),
+        client_id: "client-from-test".into(),
+        client_secret: None,
+        access_token: "stub-access-42".into(),
+        token_type: "Bearer".into(),
+        refresh_token: Some("stub-refresh-42".into()),
+        scopes: vec!["repo".into(), "user:email".into()],
+        expires_at_ms: Some(99_999_999_999_999),
+    };
+    remote
+        .push_oauth_tokens("stub", payload.clone())
+        .expect("push_oauth_tokens succeeds");
+
+    // 3. The runner now reports a Present status with the right metadata.
+    let status = remote.oauth_status("stub").expect("status present");
+    match status {
+        OAuthStatus::Present {
+            expires_at_ms,
+            has_refresh,
+            scopes,
+        } => {
+            assert_eq!(expires_at_ms, Some(99_999_999_999_999));
+            assert!(has_refresh);
+            assert_eq!(scopes, vec!["repo".to_string(), "user:email".to_string()]);
+        }
+        other => panic!("expected Present, got {other:?}"),
+    }
+
+    // 4. The on-disk file is exactly what `puffer mcp login` would have
+    //    written — readable as `PersistedTokens` with the same shape.
+    let on_disk = puffer_mcp_oauth::PersistedTokens::read_from(
+        token_dir.path(),
+        "stub",
+        "https://mcp.example.com/v1",
+    )
+    .expect("read on-disk tokens")
+    .expect("tokens persisted");
+    assert_eq!(on_disk.access_token, payload.access_token);
+    assert_eq!(on_disk.refresh_token, payload.refresh_token);
+    assert_eq!(on_disk.client_id, payload.client_id);
+
+    // 5. Clear via remote — status flips back to Absent and the file is
+    //    gone.
+    remote.clear_oauth_tokens("stub").expect("clear succeeds");
+    let status = remote.oauth_status("stub").expect("status after clear");
+    assert!(matches!(status, OAuthStatus::Absent), "got {status:?}");
+    let on_disk = puffer_mcp_oauth::PersistedTokens::read_from(
+        token_dir.path(),
+        "stub",
+        "https://mcp.example.com/v1",
+    )
+    .expect("read after clear");
+    assert!(on_disk.is_none(), "file should be removed");
+
+    // 6. Clearing again is a no-op (idempotent).
+    remote
+        .clear_oauth_tokens("stub")
+        .expect("second clear is idempotent");
+
+    drop(remote);
+    drop(server);
 }
