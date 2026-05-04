@@ -334,6 +334,15 @@ impl LocalToolRunner {
         self
     }
 
+    /// Pin the directory where MCP OAuth tokens are persisted. Tests use
+    /// this to scope per-test runs to a `TempDir`; production callers
+    /// rely on the [`puffer_mcp_oauth::default_token_dir`] default
+    /// (`<config>/puffer/mcp-tokens`).
+    pub fn with_oauth_token_dir(mut self, dir: PathBuf) -> Self {
+        self.mcp_host = self.mcp_host.with_oauth_token_dir(dir);
+        self
+    }
+
     /// Read-only view of the configured MCP servers (used by the runtime's
     /// permissions / display surfaces).
     pub fn mcp_host(&self) -> &McpHost {

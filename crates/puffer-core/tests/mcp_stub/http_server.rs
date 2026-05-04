@@ -139,3 +139,60 @@ async fn require_auth_header(
         _ => Err(StatusCode::UNAUTHORIZED),
     }
 }
+
+/// Variant of [`spawn_http_stub`] that accepts every `Authorization:
+/// Bearer <token>` value matching `prefix`, used by the OAuth e2e test
+/// to whitelist any access token issued by the in-tree OAuth stub
+/// (which mints `stub-access-N`).
+pub async fn spawn_http_stub_accepting_bearer_prefix(
+    prefix: &'static str,
+) -> anyhow::Result<HttpStubHandle> {
+    let cancel = CancellationToken::new();
+    let service: StreamableHttpService<StubServer, LocalSessionManager> =
+        StreamableHttpService::new(
+            || Ok(StubServer),
+            Default::default(),
+            StreamableHttpServerConfig {
+                stateful_mode: true,
+                sse_keep_alive: Some(Duration::from_secs(5)),
+                cancellation_token: cancel.child_token(),
+                ..Default::default()
+            },
+        );
+
+    let router = Router::new().nest_service("/mcp", service).layer(
+        middleware::from_fn_with_state(prefix, require_bearer_prefix),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+
+    let cancel_for_shutdown = cancel.clone();
+    let join = tokio::spawn(async move {
+        let _ = axum::serve(listener, router)
+            .with_graceful_shutdown(async move { cancel_for_shutdown.cancelled_owned().await })
+            .await;
+    });
+    Ok(HttpStubHandle {
+        addr,
+        cancel,
+        join: Some(join),
+    })
+}
+
+async fn require_bearer_prefix(
+    State(prefix): State<&'static str>,
+    request: Request<Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let header = request
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|h| h.to_str().ok());
+    match header {
+        Some(value) if value.starts_with("Bearer ") && value[7..].starts_with(prefix) => {
+            Ok(next.run(request).await)
+        }
+        _ => Err(StatusCode::UNAUTHORIZED),
+    }
+}

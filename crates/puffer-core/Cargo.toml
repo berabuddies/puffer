@@ -20,6 +20,10 @@ path = "tests/runner_mcp_stdio.rs"
 name = "runner_mcp_http"
 path = "tests/runner_mcp_http.rs"
 
+[[test]]
+name = "runner_mcp_oauth"
+path = "tests/runner_mcp_oauth.rs"
+
 [dependencies]
 anyhow.workspace = true
 arboard.workspace = true
@@ -59,6 +63,7 @@ puffer-workflow = { path = "../puffer-workflow" }
 [dev-dependencies]
 axum = "0.8"
 base64.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 tokio-util = "0.7"
 uuid.workspace = true

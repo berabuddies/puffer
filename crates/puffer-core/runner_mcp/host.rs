@@ -41,6 +41,10 @@ pub struct McpHost {
     /// here so callers can swap it via [`McpHost::with_elicitation_handler`]
     /// without losing the configured server roster.
     elicitation: Arc<dyn ElicitationHandler>,
+    /// Optional override for OAuth token storage location. Tests pin this
+    /// to a `TempDir`; production picks the default
+    /// (`<config>/puffer/mcp-tokens`).
+    oauth_token_dir: Option<PathBuf>,
 }
 
 impl Default for McpHost {
@@ -50,6 +54,7 @@ impl Default for McpHost {
             workspace_root: None,
             connections: Arc::new(McpConnectionManager::default()),
             elicitation: Arc::new(DeclineAllElicitations),
+            oauth_token_dir: None,
         }
     }
 }
@@ -68,17 +73,43 @@ impl McpHost {
         workspace_root: Option<PathBuf>,
         elicitation: Arc<dyn ElicitationHandler>,
     ) -> Self {
+        Self::with_elicitation_and_oauth_dir(servers, workspace_root, elicitation, None)
+    }
+
+    /// All-args constructor that also pins the OAuth token storage dir.
+    pub fn with_elicitation_and_oauth_dir(
+        servers: Vec<McpServerSpec>,
+        workspace_root: Option<PathBuf>,
+        elicitation: Arc<dyn ElicitationHandler>,
+        oauth_token_dir: Option<PathBuf>,
+    ) -> Self {
         let entries = servers.iter().filter_map(entry_from_spec);
-        let connections = Arc::new(
-            McpConnectionManager::with_servers(entries)
-                .with_elicitation_handler(Arc::clone(&elicitation)),
-        );
+        let mut manager = McpConnectionManager::with_servers(entries)
+            .with_elicitation_handler(Arc::clone(&elicitation));
+        if let Some(dir) = oauth_token_dir.clone() {
+            manager = manager.with_oauth_token_dir(dir);
+        }
+        let connections = Arc::new(manager);
         Self {
             servers,
             workspace_root,
             connections,
             elicitation,
+            oauth_token_dir,
         }
+    }
+
+    /// Pin the OAuth token storage dir. Re-builds the underlying connection
+    /// manager so future connects pick up the new location.
+    pub fn with_oauth_token_dir(mut self, dir: PathBuf) -> Self {
+        self.oauth_token_dir = Some(dir.clone());
+        let entries = self.servers.iter().filter_map(entry_from_spec);
+        self.connections = Arc::new(
+            McpConnectionManager::with_servers(entries)
+                .with_elicitation_handler(Arc::clone(&self.elicitation))
+                .with_oauth_token_dir(dir),
+        );
+        self
     }
 
     /// Returns the elicitation handler currently associated with this host.
