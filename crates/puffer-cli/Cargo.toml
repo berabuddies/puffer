@@ -21,6 +21,7 @@ uuid.workspace = true
 url = "2.5.7"
 puffer-config = { path = "../puffer-config" }
 puffer-core = { path = "../puffer-core" }
+puffer-mcp-oauth = { path = "../puffer-mcp-oauth" }
 puffer-observability = { path = "../puffer-observability" }
 puffer-provider-openai = { path = "../puffer-provider-openai" }
 puffer-provider-registry = { path = "../puffer-provider-registry" }
@@ -40,6 +41,7 @@ puffer-workflow = { path = "../puffer-workflow" }
 reqwest.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net"] }
 tungstenite.workspace = true
+webbrowser = "1.0"
 
 # Daemon subcommand dependencies — WebSocket server + tower-layered HTTP
 axum = { version = "0.7", features = ["ws"] }

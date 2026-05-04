@@ -135,7 +135,134 @@ pub(crate) fn run_mcp_command(
             println!("Puffer does not expose an MCP server bridge yet.");
             Ok(())
         }
+        McpCommand::Login { name } => run_mcp_login(resources, &name),
+        McpCommand::LoginStatus { name } => print_mcp_login_status(resources, &name),
+        McpCommand::Logout { name } => run_mcp_logout(resources, &name),
     }
+}
+
+/// Drive the OAuth interactive login for `name`. Resolves the server
+/// spec, runs discovery + DCR + browser-redirect + token-exchange, and
+/// persists the resulting tokens under
+/// `<config>/puffer/mcp-tokens/<server>.json`.
+fn run_mcp_login(resources: &LoadedResources, name: &str) -> Result<()> {
+    let spec = find_oauth_server(resources, name)?;
+    let url = http_url_from_spec(&spec)?;
+    let oauth_spec = spec
+        .oauth
+        .as_ref()
+        .filter(|o| o.enabled())
+        .ok_or_else(|| anyhow::anyhow!("MCP server `{}` is not opted into OAuth", spec.id))?;
+
+    let token_dir = puffer_mcp_oauth::default_token_dir();
+    let config = puffer_mcp_oauth::OAuthConfig {
+        server_id: spec.id.clone(),
+        server_url: url,
+        scopes: oauth_spec.scopes(),
+        client_name: oauth_spec
+            .client_name()
+            .unwrap_or_else(|| format!("puffer-{}", spec.id)),
+        token_dir,
+    };
+    let service = puffer_mcp_oauth::OAuthService::new(config);
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(2)
+        .build()
+        .context("build login runtime")?;
+    rt.block_on(async {
+        service
+            .interactive_login(None, |url| {
+                eprintln!("Opening browser to: {url}");
+                webbrowser::open(url).map(|_| ()).or_else(|_| {
+                    eprintln!("(could not auto-open browser; please copy the URL above)");
+                    Ok::<(), std::io::Error>(())
+                })
+            })
+            .await
+    })
+    .map_err(|e| anyhow::anyhow!("OAuth login failed: {e}"))?;
+
+    println!("OAuth login complete for `{name}`. Tokens persisted.");
+    Ok(())
+}
+
+fn print_mcp_login_status(resources: &LoadedResources, name: &str) -> Result<()> {
+    let spec = find_oauth_server(resources, name)?;
+    let url = http_url_from_spec(&spec)?;
+    let token_dir = puffer_mcp_oauth::default_token_dir();
+    let store = puffer_mcp_oauth::FileCredentialStore::new(token_dir.clone(), &spec.id, &url);
+    let path = store.token_path();
+    if let Some(persisted) = store.read_persisted() {
+        println!("logged in as client_id `{}` (server={})", persisted.client_id, spec.id);
+        println!("  token file: {}", path.display());
+        if let Some(expires_at_ms) = persisted.expires_at_ms {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            if expires_at_ms > now_ms {
+                let remaining = (expires_at_ms - now_ms) / 1000;
+                println!("  access token expires in {remaining}s");
+            } else {
+                println!("  access token EXPIRED — will refresh on next call");
+            }
+        }
+        if persisted.refresh_token.is_some() {
+            println!("  refresh token present");
+        }
+    } else {
+        println!("not logged in (no token file at {})", path.display());
+    }
+    Ok(())
+}
+
+fn run_mcp_logout(resources: &LoadedResources, name: &str) -> Result<()> {
+    let spec = find_oauth_server(resources, name)?;
+    let url = http_url_from_spec(&spec)?;
+    let token_dir = puffer_mcp_oauth::default_token_dir();
+    let store = puffer_mcp_oauth::FileCredentialStore::new(token_dir, &spec.id, &url);
+    let path = store.token_path();
+    match std::fs::remove_file(&path) {
+        Ok(()) => println!("removed {}", path.display()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            println!("no token file at {} (nothing to remove)", path.display())
+        }
+        Err(e) => return Err(anyhow::anyhow!("failed to remove {}: {e}", path.display())),
+    }
+    Ok(())
+}
+
+fn find_oauth_server(
+    resources: &LoadedResources,
+    name: &str,
+) -> Result<McpServerSpec> {
+    if let Some(server) = resources
+        .mcp_servers
+        .iter()
+        .find(|s| s.value.id == name)
+    {
+        return Ok(server.value.clone());
+    }
+    for plugin in &resources.plugins {
+        if let Some(server) = plugin.value.mcp_servers.iter().find(|s| s.id == name) {
+            return Ok(server.clone());
+        }
+    }
+    anyhow::bail!("no MCP server named `{name}` is configured")
+}
+
+fn http_url_from_spec(spec: &McpServerSpec) -> Result<String> {
+    let raw = if !spec.endpoint.trim().is_empty() {
+        spec.endpoint.trim()
+    } else {
+        spec.target.trim()
+    };
+    if raw.is_empty() {
+        anyhow::bail!("MCP server `{}` has no HTTP target/endpoint", spec.id);
+    }
+    Ok(raw.to_string())
 }
 
 /// Handles top-level plugin management commands.

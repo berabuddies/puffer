@@ -4207,6 +4207,7 @@ dependencies = [
  "puffer-connector-telegram",
  "puffer-connector-webhook",
  "puffer-core",
+ "puffer-mcp-oauth",
  "puffer-observability",
  "puffer-provider-openai",
  "puffer-provider-registry",
@@ -4237,6 +4238,7 @@ dependencies = [
  "tungstenite 0.24.0",
  "url",
  "uuid",
+ "webbrowser",
 ]
 
 [[package]]
