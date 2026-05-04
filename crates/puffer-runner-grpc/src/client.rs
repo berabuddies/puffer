@@ -31,8 +31,8 @@ use std::time::Duration;
 use puffer_runner_api::{
     ChunkSink, DeclineAllElicitations, DirEntry, ElicitationHandler, ElicitationMode,
     ElicitationRequest, ElicitationResponse, McpPrompt, McpPromptContent, McpResourceContent,
-    McpResourceRecord, McpResult, McpServerInfo, McpTool, RunnerCapabilities, RunnerError,
-    RunnerPing, ToolRequest, ToolResult, ToolRunner,
+    McpResourceRecord, McpResult, McpServerInfo, McpTool, OAuthStatus, OAuthTokensPayload,
+    RunnerCapabilities, RunnerError, RunnerPing, ToolRequest, ToolResult, ToolRunner,
 };
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
@@ -531,6 +531,63 @@ impl ToolRunner for RemoteToolRunner {
             .into_iter()
             .map(crate::convert::from_proto_mcp_prompt)
             .collect())
+    }
+
+    fn push_oauth_tokens(
+        &self,
+        server: &str,
+        tokens: OAuthTokensPayload,
+    ) -> Result<(), RunnerError> {
+        let client = self.client.clone();
+        let req = proto::PushOAuthTokensRequest {
+            server: server.to_string(),
+            tokens: Some(crate::convert::oauth_payload_to_proto(&tokens)),
+        };
+        self.run(async move {
+            retry_unavailable(|| {
+                let mut client = client.clone();
+                let req = req.clone();
+                async move { client.push_o_auth_tokens(req).await }
+            })
+            .await
+        })
+        .map(|_| ())
+        .map_err(status_to_runner_error)
+    }
+
+    fn oauth_status(&self, server: &str) -> Result<OAuthStatus, RunnerError> {
+        let client = self.client.clone();
+        let req = proto::OAuthServerRef {
+            server_id: server.to_string(),
+        };
+        let resp = self
+            .run(async move {
+                retry_unavailable(|| {
+                    let mut client = client.clone();
+                    let req = req.clone();
+                    async move { client.query_o_auth_status(req).await }
+                })
+                .await
+            })
+            .map_err(status_to_runner_error)?;
+        Ok(crate::convert::oauth_status_from_proto(resp.into_inner()))
+    }
+
+    fn clear_oauth_tokens(&self, server: &str) -> Result<(), RunnerError> {
+        let client = self.client.clone();
+        let req = proto::OAuthServerRef {
+            server_id: server.to_string(),
+        };
+        self.run(async move {
+            retry_unavailable(|| {
+                let mut client = client.clone();
+                let req = req.clone();
+                async move { client.clear_o_auth_tokens(req).await }
+            })
+            .await
+        })
+        .map(|_| ())
+        .map_err(status_to_runner_error)
     }
 
     fn get_mcp_prompt(

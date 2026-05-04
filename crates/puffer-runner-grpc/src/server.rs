@@ -21,10 +21,10 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::convert::{
-    from_proto_tool_request, runner_error_to_status, to_proto_capabilities, to_proto_dir_entry,
-    to_proto_mcp_prompt, to_proto_mcp_prompt_content, to_proto_mcp_resource_content,
-    to_proto_mcp_resource_record, to_proto_mcp_result, to_proto_mcp_server, to_proto_mcp_tool,
-    to_proto_tool_completed,
+    from_proto_tool_request, oauth_payload_from_proto, oauth_status_to_proto,
+    runner_error_to_status, to_proto_capabilities, to_proto_dir_entry, to_proto_mcp_prompt,
+    to_proto_mcp_prompt_content, to_proto_mcp_resource_content, to_proto_mcp_resource_record,
+    to_proto_mcp_result, to_proto_mcp_server, to_proto_mcp_tool, to_proto_tool_completed,
 };
 use crate::proto;
 use crate::AUTH_METADATA_KEY;
@@ -429,6 +429,53 @@ impl proto::tool_runner_server::ToolRunner for ToolRunnerService {
         Ok(Response::new(proto::McpPromptList {
             prompts: prompts.iter().map(to_proto_mcp_prompt).collect(),
         }))
+    }
+
+    async fn push_o_auth_tokens(
+        &self,
+        req: Request<proto::PushOAuthTokensRequest>,
+    ) -> Result<Response<proto::Empty>, Status> {
+        self.check_auth(&req)?;
+        let inner = req.into_inner();
+        let server = inner.server;
+        let payload = inner
+            .tokens
+            .ok_or_else(|| Status::invalid_argument("PushOAuthTokens missing tokens payload"))?;
+        let tokens = oauth_payload_from_proto(payload);
+        let runner = self.runner.clone();
+        tokio::task::spawn_blocking(move || runner.push_oauth_tokens(&server, tokens))
+            .await
+            .map_err(internal_join_error)?
+            .map_err(|e| runner_error_to_status(&e))?;
+        Ok(Response::new(proto::Empty {}))
+    }
+
+    async fn query_o_auth_status(
+        &self,
+        req: Request<proto::OAuthServerRef>,
+    ) -> Result<Response<proto::OAuthStatusResponse>, Status> {
+        self.check_auth(&req)?;
+        let server = req.into_inner().server_id;
+        let runner = self.runner.clone();
+        let status = tokio::task::spawn_blocking(move || runner.oauth_status(&server))
+            .await
+            .map_err(internal_join_error)?
+            .map_err(|e| runner_error_to_status(&e))?;
+        Ok(Response::new(oauth_status_to_proto(status)))
+    }
+
+    async fn clear_o_auth_tokens(
+        &self,
+        req: Request<proto::OAuthServerRef>,
+    ) -> Result<Response<proto::Empty>, Status> {
+        self.check_auth(&req)?;
+        let server = req.into_inner().server_id;
+        let runner = self.runner.clone();
+        tokio::task::spawn_blocking(move || runner.clear_oauth_tokens(&server))
+            .await
+            .map_err(internal_join_error)?
+            .map_err(|e| runner_error_to_status(&e))?;
+        Ok(Response::new(proto::Empty {}))
     }
 
     async fn get_mcp_prompt(

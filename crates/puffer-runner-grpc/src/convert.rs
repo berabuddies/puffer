@@ -6,8 +6,8 @@ use std::path::PathBuf;
 
 use puffer_runner_api::{
     DirEntry, McpPrompt, McpPromptArgument, McpPromptContent, McpPromptMessage, McpResourceContent,
-    McpResourceContentPart, McpResourceRecord, McpResult, McpServerInfo, McpTool, ReadStateUpdate,
-    RunnerCapabilities, RunnerError, ToolRequest, ToolResult,
+    McpResourceContentPart, McpResourceRecord, McpResult, McpServerInfo, McpTool, OAuthStatus,
+    OAuthTokensPayload, ReadStateUpdate, RunnerCapabilities, RunnerError, ToolRequest, ToolResult,
 };
 
 use crate::proto;
@@ -367,6 +367,64 @@ pub(crate) fn from_proto_mcp_prompt_content(c: proto::McpPromptContent) -> McpPr
                 text: m.text,
             })
             .collect(),
+    }
+}
+
+// --- OAuth ------------------------------------------------------------
+
+pub(crate) fn oauth_payload_to_proto(p: &OAuthTokensPayload) -> proto::OAuthTokensPayload {
+    proto::OAuthTokensPayload {
+        server_id: p.server_id.clone(),
+        server_url: p.server_url.clone(),
+        client_id: p.client_id.clone(),
+        client_secret: p.client_secret.clone(),
+        access_token: p.access_token.clone(),
+        token_type: p.token_type.clone(),
+        refresh_token: p.refresh_token.clone(),
+        scopes: p.scopes.clone(),
+        expires_at_ms: p.expires_at_ms,
+    }
+}
+
+pub(crate) fn oauth_payload_from_proto(p: proto::OAuthTokensPayload) -> OAuthTokensPayload {
+    OAuthTokensPayload {
+        server_id: p.server_id,
+        server_url: p.server_url,
+        client_id: p.client_id,
+        client_secret: p.client_secret,
+        access_token: p.access_token,
+        token_type: p.token_type,
+        refresh_token: p.refresh_token,
+        scopes: p.scopes,
+        expires_at_ms: p.expires_at_ms,
+    }
+}
+
+pub(crate) fn oauth_status_to_proto(status: OAuthStatus) -> proto::OAuthStatusResponse {
+    let state = match status {
+        OAuthStatus::Absent => proto::o_auth_status_response::State::Absent(proto::Empty {}),
+        OAuthStatus::Present {
+            expires_at_ms,
+            has_refresh,
+            scopes,
+        } => proto::o_auth_status_response::State::Present(proto::OAuthStatusPresent {
+            expires_at_ms,
+            has_refresh,
+            scopes,
+        }),
+    };
+    proto::OAuthStatusResponse { state: Some(state) }
+}
+
+pub(crate) fn oauth_status_from_proto(resp: proto::OAuthStatusResponse) -> OAuthStatus {
+    match resp.state {
+        Some(proto::o_auth_status_response::State::Present(p)) => OAuthStatus::Present {
+            expires_at_ms: p.expires_at_ms,
+            has_refresh: p.has_refresh,
+            scopes: p.scopes,
+        },
+        // Absent or empty: treat as Absent (the safest default).
+        _ => OAuthStatus::Absent,
     }
 }
 

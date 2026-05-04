@@ -40,6 +40,14 @@ service ToolRunner {
   rpc ReadMcpResource(McpResourceRef) returns (McpResourceContent);
   rpc ListMcpPrompts(McpServerRef) returns (McpPromptList);
   rpc GetMcpPrompt(McpPromptRequest) returns (McpPromptContent);
+
+  // OAuth credential push (puffer-cli drives the browser flow). The
+  // runner is a credential storage + use surface; it never opens a
+  // browser. See `puffer mcp login` in `puffer-cli` for the matching
+  // call site.
+  rpc PushOAuthTokens(PushOAuthTokensRequest) returns (Empty);
+  rpc QueryOAuthStatus(OAuthServerRef) returns (OAuthStatusResponse);
+  rpc ClearOAuthTokens(OAuthServerRef) returns (Empty);
 }
 
 message Empty {}
@@ -313,5 +321,52 @@ message McpPromptContent {
   string server = 1;
   string name = 2;
   repeated McpPromptMessage messages = 3;
+}
+
+// --- OAuth ----------------------------------------------------------------
+
+// Wire form of `puffer_runner_api::OAuthTokensPayload`. Mirrors
+// `PersistedTokens` 1:1 so the runner can persist the bundle through
+// the existing file-backed credential store without lossy translation.
+message OAuthTokensPayload {
+  string server_id = 1;
+  string server_url = 2;
+  string client_id = 3;
+  optional string client_secret = 4;
+  string access_token = 5;
+  string token_type = 6;
+  optional string refresh_token = 7;
+  repeated string scopes = 8;
+  // Wall-clock expiry in epoch milliseconds. `0` is a sentinel for "no
+  // expiry recorded" (proto3 `optional` cannot be empty for numerics in
+  // older clients; we round-trip None as 0 here and treat 0 specially
+  // on the server side).
+  optional uint64 expires_at_ms = 9;
+}
+
+message PushOAuthTokensRequest {
+  string server = 1;
+  OAuthTokensPayload tokens = 2;
+}
+
+// Used by both Query and Clear — the server is the only handle the
+// runner needs to find a stored bundle (it consults its own server
+// roster for the server_url).
+message OAuthServerRef {
+  string server_id = 1;
+}
+
+message OAuthStatusPresent {
+  optional uint64 expires_at_ms = 1;
+  bool has_refresh = 2;
+  repeated string scopes = 3;
+}
+
+message OAuthStatusResponse {
+  // Exactly one of these is populated; both empty == Absent.
+  oneof state {
+    Empty absent = 1;
+    OAuthStatusPresent present = 2;
+  }
 }
 
