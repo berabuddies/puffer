@@ -3,9 +3,18 @@ name = "puffer-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# Disable test auto-discovery so the stub MCP server source under
+# `tests/mcp_stub/main.rs` (declared as a `[[bin]]` below) isn't also
+# picked up as an integration test. Real integration tests are listed
+# explicitly via `[[test]]` blocks.
+autotests = false
 
 [lib]
 path = "lib.rs"
+
+[[test]]
+name = "runner_mcp_stdio"
+path = "tests/runner_mcp_stdio.rs"
 
 [dependencies]
 anyhow.workspace = true
