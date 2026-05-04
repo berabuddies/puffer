@@ -52,6 +52,28 @@ insta = "1.44.1"
 jsonschema = { version = "0.45.1", default-features = false }
 libloading = "0.8.9"
 ratatui = "0.29.0"
+# Anthropic's official Rust SDK for the Model Context Protocol. Pinned to the
+# same major version codex uses (0.15) and opted into the client + server +
+# child-process transport so the runner can drive subprocess MCP servers and
+# ship a tiny in-tree stub server for tests.
+rmcp = { version = "0.15.0", default-features = false, features = [
+    "client",
+    "server",
+    "macros",
+    "schemars",
+    "base64",
+    "transport-child-process",
+    "transport-io",
+] }
+tokio = { version = "1.51", features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "io-util",
+    "io-std",
+    "process",
+    "time",
+] }
 reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.145", features = ["preserve_order"] }

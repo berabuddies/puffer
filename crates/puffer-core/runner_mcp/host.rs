@@ -9,10 +9,11 @@
 //! `LocalToolRunner` so MCP flows through the [`puffer_runner_api::ToolRunner`]
 //! trait and works identically over the gRPC backend.
 //!
-//! `McpHost` is intentionally thin: it eagerly captures the
-//! [`McpServerSpec`] list at construction (no hidden lazy spawn) and serves
-//! resource lookups synchronously. Real subprocess MCP clients can grow on
-//! top of this struct without touching the trait surface.
+//! `McpHost` keeps the [`McpServerSpec`] roster eagerly (the resource walker
+//! and manifest fallback need it for synchronous lookup) and lazily owns an
+//! [`McpConnectionManager`] that drives real subprocess MCP servers via
+//! `rmcp`. The connection manager is shared (`Arc`) so cloning the host is
+//! cheap and clones see the same live connections.
 
 use anyhow::Context;
 use puffer_resources::McpServerSpec;
@@ -23,6 +24,9 @@ use puffer_runner_api::{
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use super::connection_manager::{entry_from_spec, McpConnectionManager};
 
 /// Owns the MCP server roster and any live transports the runner needs to
 /// satisfy `ToolRunner`'s 7 MCP methods.
@@ -30,15 +34,19 @@ use std::path::{Path, PathBuf};
 pub struct McpHost {
     servers: Vec<McpServerSpec>,
     workspace_root: Option<PathBuf>,
+    connections: Arc<McpConnectionManager>,
 }
 
 impl McpHost {
     /// Builds a host from a list of MCP manifests plus the optional workspace
     /// root used by the built-in `filesystem` server.
     pub fn new(servers: Vec<McpServerSpec>, workspace_root: Option<PathBuf>) -> Self {
+        let entries = servers.iter().filter_map(entry_from_spec);
+        let connections = Arc::new(McpConnectionManager::with_servers(entries));
         Self {
             servers,
             workspace_root,
+            connections,
         }
     }
 
@@ -63,27 +71,40 @@ impl McpHost {
         &self.servers
     }
 
-    /// Returns `Unsupported` until a real MCP client is wired up: today's
-    /// runner only implements filesystem-style resource discovery, not tool
-    /// calls.
+    /// Lists the tools advertised by `server`.
+    ///
+    /// For the built-in filesystem stub there are no callable tools (it only
+    /// serves resources), so we keep the historical `Unsupported` reply.
+    /// Every other configured server is dispatched to the connection
+    /// manager, which lazily spawns the underlying subprocess on first use.
     pub fn list_tools(&self, server: &str) -> Result<Vec<McpTool>, RunnerError> {
-        self.lookup_server(server)?;
-        Err(RunnerError::Unsupported(format!(
-            "MCP `tools/list` is not implemented for server `{server}`",
-        )))
+        let spec = self.lookup_server(server)?;
+        if is_live_filesystem_server(&spec.id, &spec.target) {
+            return Err(RunnerError::Unsupported(format!(
+                "MCP `tools/list` is not implemented for built-in server `{server}`",
+            )));
+        }
+        self.connections.list_tools(&spec.id)
     }
 
-    /// Same story as `list_tools` — kept for protocol completeness.
+    /// Calls `tool` on `server` with the supplied JSON arguments.
+    ///
+    /// The built-in filesystem server has no callable tools, so it keeps
+    /// returning `Unsupported`. Configured subprocess servers route
+    /// through the connection manager.
     pub fn call_tool(
         &self,
         server: &str,
         tool: &str,
-        _args: Value,
+        args: Value,
     ) -> Result<McpResult, RunnerError> {
-        self.lookup_server(server)?;
-        Err(RunnerError::Unsupported(format!(
-            "MCP `tools/call` for `{tool}` on server `{server}` is not implemented",
-        )))
+        let spec = self.lookup_server(server)?;
+        if is_live_filesystem_server(&spec.id, &spec.target) {
+            return Err(RunnerError::Unsupported(format!(
+                "MCP `tools/call` for `{tool}` on built-in server `{server}` is not implemented",
+            )));
+        }
+        self.connections.call_tool(&spec.id, tool, args)
     }
 
     /// Lists resources across one or all servers. The built-in `filesystem`
@@ -465,10 +486,25 @@ mod tests {
     }
 
     #[test]
-    fn list_tools_unsupported_for_known_server() {
+    fn list_tools_unsupported_for_filesystem_stub() {
+        // The built-in filesystem server has no callable tools; it is
+        // expected to keep returning `Unsupported` for `tools/list`.
+        let host = McpHost::new(vec![fs_spec()], None);
+        let err = host.list_tools("filesystem").unwrap_err();
+        assert!(matches!(err, RunnerError::Unsupported(_)));
+    }
+
+    #[test]
+    fn list_tools_for_subprocess_server_routes_through_connection_manager() {
+        // The `docs` manifest points at a binary that does not exist, so
+        // the launcher fails to spawn — the host should surface that as an
+        // `Mcp` error rather than the historical `Unsupported`.
         let host = McpHost::new(vec![manifest_spec("docs")], None);
         let err = host.list_tools("docs").unwrap_err();
-        assert!(matches!(err, RunnerError::Unsupported(_)));
+        assert!(
+            matches!(err, RunnerError::Mcp(_)),
+            "expected Mcp error from failed spawn, got {err:?}"
+        );
     }
 
     #[test]
