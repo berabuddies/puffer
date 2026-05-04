@@ -59,19 +59,27 @@ pub struct ToolRunnerService {
 impl ToolRunnerService {
     /// Wraps `runner` in a tonic-ready service. No auth token.
     ///
-    /// The caller MUST construct `runner` with the returned service's
-    /// elicitation router installed via [`puffer_runner_api::ElicitationHandler`]
-    /// — fetch it with [`ToolRunnerService::elicitation_router`] before you
-    /// build the runner. If the runner is built without this hook, server-
-    /// initiated MCP elicitations from this service's `CallMcpTool` streams
-    /// will fall back to whatever default the runner has (typically
+    /// MCP server-initiated `elicitation/create` requests from this
+    /// service's `CallMcpTool` streams will be honored only if the
+    /// `runner` was built with the matching router from
+    /// [`build_runner_router`] installed via
+    /// [`puffer_runner_api::ElicitationHandler`]. Without that hook, they
+    /// fall back to whatever default the runner has (typically
     /// `DeclineAllElicitations`).
     pub fn new(runner: Arc<dyn ToolRunner>) -> Self {
+        Self::with_router(runner, Arc::new(BidiElicitationRouter::default()))
+    }
+
+    /// Like [`ToolRunnerService::new`] but takes an externally-built router
+    /// so the caller can install it on the underlying runner before
+    /// constructing the service. Pair with [`build_router`] (returns a
+    /// fresh router) when you need to wire both sides together.
+    pub fn with_router(runner: Arc<dyn ToolRunner>, router: Arc<BidiElicitationRouter>) -> Self {
         Self {
             runner,
             auth_token: None,
             started: Instant::now(),
-            elicitation_router: Arc::new(BidiElicitationRouter::default()),
+            elicitation_router: router,
         }
     }
 
@@ -550,8 +558,14 @@ struct BidiRoute {
 /// Service-wide registry that maps an MCP server label to the currently
 /// active gRPC bidi call routing for that server. See
 /// [`ToolRunnerService`] for the rationale.
+///
+/// Implements [`ElicitationHandler`]; the gRPC server installs an instance
+/// at construction time and the same instance is provided to the runner
+/// (typically via `LocalToolRunner::with_elicitation_handler(...)`) so
+/// MCP server elicitations route to the matching `CallMcpTool` bidi
+/// stream.
 #[derive(Default)]
-pub(crate) struct BidiElicitationRouter {
+pub struct BidiElicitationRouter {
     routes: Mutex<HashMap<String, Vec<Arc<BidiRoute>>>>,
 }
 

@@ -10,11 +10,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use puffer_runner_api::{
-    ChunkKind, ChunkSink, FnChunkSink, McpResourceContentPart, NullChunkSink, RunnerError,
-    ToolRequest, ToolResult, ToolRunner,
+    ChunkKind, ChunkSink, ElicitationHandler, ElicitationRequest, ElicitationResponse,
+    FnChunkSink, McpResourceContentPart, NullChunkSink, RunnerError, ToolRequest, ToolResult,
+    ToolRunner,
 };
 use puffer_runner_grpc::server::ToolRunnerServer;
-use puffer_runner_grpc::{RemoteToolRunner, ToolRunnerService};
+use puffer_runner_grpc::{BidiElicitationRouter, RemoteToolRunner, ToolRunnerService};
 use puffer_runner_local::LocalToolRunner;
 use tempfile::tempdir;
 use tokio::sync::oneshot;
@@ -54,7 +55,26 @@ fn spawn_server(runner: Arc<dyn ToolRunner>) -> ServerHandle {
     spawn_server_on_port(runner, port)
 }
 
+/// Like [`spawn_server`] but installs a custom `BidiElicitationRouter` on
+/// the service so the caller can pre-install it on the underlying runner
+/// (server-side MCP elicitations route through this instance).
+fn spawn_server_with_router(
+    runner: Arc<dyn ToolRunner>,
+    router: Arc<BidiElicitationRouter>,
+) -> ServerHandle {
+    let port = pick_free_port();
+    spawn_server_on_port_with_router(runner, port, Some(router))
+}
+
 fn spawn_server_on_port(runner: Arc<dyn ToolRunner>, port: u16) -> ServerHandle {
+    spawn_server_on_port_with_router(runner, port, None)
+}
+
+fn spawn_server_on_port_with_router(
+    runner: Arc<dyn ToolRunner>,
+    port: u16,
+    router: Option<Arc<BidiElicitationRouter>>,
+) -> ServerHandle {
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let endpoint = format!("http://{addr}");
 
@@ -65,7 +85,11 @@ fn spawn_server_on_port(runner: Arc<dyn ToolRunner>, port: u16) -> ServerHandle 
         .build()
         .expect("server runtime");
 
-    let service = ToolRunnerService::new(runner).with_auth_token(Some(TEST_TOKEN.to_string()));
+    let service = match router {
+        Some(router) => ToolRunnerService::with_router(runner, router),
+        None => ToolRunnerService::new(runner),
+    }
+    .with_auth_token(Some(TEST_TOKEN.to_string()));
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let (ready_tx, ready_rx) = oneshot::channel::<()>();
 
@@ -972,4 +996,116 @@ fn survives_runner_restart_mid_session() {
 
     drop(remote);
     drop(server2);
+}
+
+/// `ElicitationHandler` that records every received request and replies
+/// with a fixed response. Mirrors the recording handler in the puffer-core
+/// stdio tests so the cross-backend test asserts end-to-end equivalence.
+#[derive(Debug, Clone)]
+struct CrossBackendRecordingHandler {
+    response: ElicitationResponse,
+    requests: Arc<Mutex<Vec<ElicitationRequest>>>,
+}
+
+impl CrossBackendRecordingHandler {
+    fn new(response: ElicitationResponse) -> Self {
+        Self {
+            response,
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+impl ElicitationHandler for CrossBackendRecordingHandler {
+    fn elicit(&self, request: ElicitationRequest) -> ElicitationResponse {
+        self.requests.lock().unwrap().push(request);
+        self.response.clone()
+    }
+}
+
+/// End-to-end elicitation round-trip: the local runner and the gRPC stack
+/// both invoke `request_user_input` with matching handlers, and the
+/// resulting `McpResult` payloads must be byte-identical.
+#[test]
+fn cross_backend_elicitation_round_trips() {
+    use puffer_resources::McpServerSpec;
+
+    let stub_bin = locate_stub_binary();
+    let manifest = || -> Vec<McpServerSpec> {
+        vec![McpServerSpec {
+            id: "stub".into(),
+            display_name: "Stub".into(),
+            transport: "stdio".into(),
+            endpoint: String::new(),
+            target: format!(
+                "'{}' --marker puffer-mcp-grpc-cross-backend-elicit",
+                stub_bin.display()
+            ),
+            description: "Integration-test stub MCP server".into(),
+        }]
+    };
+
+    let accept_payload = serde_json::json!({ "confirmed": true });
+
+    // Local side: install the recording handler directly on
+    // LocalToolRunner. The handler is invoked synchronously by the
+    // connection manager via spawn_blocking.
+    let local_handler = CrossBackendRecordingHandler::new(ElicitationResponse::accept(
+        accept_payload.clone(),
+    ));
+    let local_requests = local_handler.requests.clone();
+    let local_runner = LocalToolRunner::new()
+        .with_mcp_servers(manifest())
+        .with_elicitation_handler(Arc::new(local_handler));
+
+    // Remote side: install the bidi router on the SERVER's runner so
+    // server-initiated MCP elicitations route into the bidi stream, and
+    // install the matching recording handler on the CLIENT
+    // (RemoteToolRunner) so the response flows back through gRPC.
+    let router = Arc::new(BidiElicitationRouter::default());
+    let server_runner_inner = LocalToolRunner::new()
+        .with_mcp_servers(manifest())
+        .with_elicitation_handler(Arc::clone(&router) as Arc<dyn ElicitationHandler>);
+    let server_runner: Arc<dyn ToolRunner> = Arc::new(server_runner_inner);
+    let server = spawn_server_with_router(server_runner, router);
+
+    let remote_handler = CrossBackendRecordingHandler::new(ElicitationResponse::accept(
+        accept_payload.clone(),
+    ));
+    let remote_requests = remote_handler.requests.clone();
+    let remote = RemoteToolRunner::connect(&server.endpoint, Some(TEST_TOKEN))
+        .expect("connect remote runner")
+        .with_elicitation_handler(Arc::new(remote_handler));
+
+    // Drive the eliciting tool through both backends.
+    let mut sink = NullChunkSink;
+    let local_result = local_runner
+        .call_mcp_tool("stub", "request_user_input", serde_json::json!({}), &mut sink)
+        .expect("local request_user_input");
+    let remote_result = remote
+        .call_mcp_tool("stub", "request_user_input", serde_json::json!({}), &mut sink)
+        .expect("remote request_user_input");
+
+    assert!(local_result.success);
+    assert!(remote_result.success);
+    // Byte-equal stdout — the stub serializes the resolved action +
+    // content as JSON, so equivalence here proves the elicitation
+    // payload survived both hops untouched.
+    assert_eq!(local_result.stdout, remote_result.stdout);
+    let body: serde_json::Value =
+        serde_json::from_str(&local_result.stdout).expect("stub returns JSON body");
+    assert_eq!(body.get("action").and_then(|v| v.as_str()), Some("accept"));
+    assert_eq!(body.get("content").cloned(), Some(accept_payload));
+
+    // Both handlers actually saw exactly one request.
+    assert_eq!(local_requests.lock().unwrap().len(), 1);
+    assert_eq!(remote_requests.lock().unwrap().len(), 1);
+    let local_req = local_requests.lock().unwrap()[0].clone();
+    let remote_req = remote_requests.lock().unwrap()[0].clone();
+    assert_eq!(local_req.message, "Confirm the destructive action?");
+    assert_eq!(remote_req.message, local_req.message);
+    assert_eq!(remote_req.server, local_req.server);
+
+    drop(remote);
+    drop(server);
 }

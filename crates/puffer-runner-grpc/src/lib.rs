@@ -20,7 +20,7 @@ pub mod proto;
 pub mod server;
 
 pub use client::RemoteToolRunner;
-pub use server::ToolRunnerService;
+pub use server::{BidiElicitationRouter, ToolRunnerService};
 
 /// Bearer-token metadata key. Exposed so callers can attach the same key
 /// when wiring custom interceptors.
