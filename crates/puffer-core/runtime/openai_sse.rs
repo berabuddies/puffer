@@ -206,6 +206,55 @@ where
         "response.output_item.done" => {
             if let Some(item) = event.get("item") {
                 upsert_output_item(&mut state.output, item.clone());
+                // Native server-side tools (`web_search`, etc.) never round-trip
+                // through puffer's tool dispatcher — OpenAI executes them
+                // internally and emits the call/result as a `web_search_call`
+                // output item. Synthesize a `ToolInvocation` so the trajectory
+                // recorder, TUI, and observability stack treat it the same as a
+                // local tool call. Mirrors codex's `event_mapping.rs` mapping
+                // of `ResponseItem::WebSearchCall` to `TurnItem::WebSearch`.
+                if item.get("type").and_then(Value::as_str) == Some("web_search_call") {
+                    let call_id = item
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    if call_id.is_empty()
+                        || state.emitted_tool_call_ids.insert(call_id.clone())
+                    {
+                        let action = item.get("action").cloned().unwrap_or(Value::Null);
+                        let query = action
+                            .get("query")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .unwrap_or_default();
+                        let input_payload = if query.is_empty() {
+                            serde_json::to_string(&action).unwrap_or_default()
+                        } else {
+                            json!({ "query": query }).to_string()
+                        };
+                        let output_payload = serde_json::to_string(&json!({
+                            "action": action,
+                            "status": item.get("status").cloned().unwrap_or(Value::Null),
+                        }))
+                        .unwrap_or_default();
+                        let success = item
+                            .get("status")
+                            .and_then(Value::as_str)
+                            .map(|status| status == "completed")
+                            .unwrap_or(true);
+                        on_event(TurnStreamEvent::ToolInvocations(vec![
+                            super::ToolInvocation {
+                                call_id,
+                                tool_id: "web_search".to_string(),
+                                input: input_payload,
+                                output: output_payload,
+                                success,
+                                terminate: false,
+                            },
+                        ]));
+                    }
+                }
                 // Eagerly emit tool call as soon as each function_call item completes,
                 // so the TUI can display pending tool calls without waiting for the
                 // full response to finish.
@@ -580,6 +629,73 @@ mod tests {
             parsed.raw_response["output"][0]["call_id"],
             json!("call_123")
         );
+    }
+
+    #[test]
+    fn web_search_call_emits_synthetic_tool_invocation() {
+        // Native server-side web_search never round-trips through puffer's
+        // dispatcher — the model just sees the call land as a
+        // `web_search_call` output item. The trajectory recorder relies on
+        // `TurnStreamEvent::ToolInvocations`, so the streaming parser has to
+        // synthesize one. Without it the trajectory would silently miss
+        // every native search.
+        let stream = concat!(
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"rust async tokio\"}}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ws\",\"status\":\"completed\"}}\n\n"
+        );
+        let mut invocations = Vec::new();
+
+        let parsed = super::parse_openai_sse_reader_typed(
+            BufReader::new(stream.as_bytes()),
+            &mut |event| {
+                if let super::TurnStreamEvent::ToolInvocations(items) = event {
+                    invocations.extend(items);
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(invocations.len(), 1, "one synthesized invocation per call");
+        let invocation = &invocations[0];
+        assert_eq!(invocation.tool_id, "web_search");
+        assert_eq!(invocation.call_id, "ws_1");
+        assert!(invocation.success);
+        assert!(
+            invocation.input.contains("rust async tokio"),
+            "input carries the search query: {}",
+            invocation.input
+        );
+        assert!(invocation.output.contains("\"status\""));
+        assert!(parsed.emitted_tool_call_ids.contains("ws_1"));
+    }
+
+    #[test]
+    fn web_search_call_dedupes_repeated_done_events() {
+        // OpenAI may emit `output_item.added` and `output_item.done` for the
+        // same item; only the `done` path runs through the synthesis branch
+        // here, but if upstream emits the done event twice (proxy retry, etc.)
+        // we still must emit exactly one synthetic invocation per call_id.
+        let stream = concat!(
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"web_search_call\",\"id\":\"ws_dup\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"q\"}}}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"web_search_call\",\"id\":\"ws_dup\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"q\"}}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_dup\",\"status\":\"completed\"}}\n\n"
+        );
+        let mut invocations = Vec::new();
+        super::parse_openai_sse_reader_typed(
+            BufReader::new(stream.as_bytes()),
+            &mut |event| {
+                if let super::TurnStreamEvent::ToolInvocations(items) = event {
+                    invocations.extend(items);
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(invocations.len(), 1, "deduped on call_id");
     }
 
     #[test]
