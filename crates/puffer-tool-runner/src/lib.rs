@@ -11,8 +11,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
 use puffer_resources::load_resources;
-use puffer_runner_api::ToolRunner;
-use puffer_runner_grpc::ToolRunnerService;
+use puffer_runner_api::{ElicitationHandler, ToolRunner};
+use puffer_runner_grpc::{BidiElicitationRouter, ToolRunnerService};
 use puffer_runner_local::{local_runner_from_resources, LocalToolRunner};
 
 /// Discovers MCP server specs from `cwd`'s resource roots and returns a
@@ -42,18 +42,20 @@ pub fn build_service_from_cwd(
     let resources = load_resources(&paths, &probe_runner)
         .with_context(|| format!("load resources from {}", cwd.display()))?;
 
+    let router = Arc::new(BidiElicitationRouter::default());
     let local = local_runner_from_resources(
         &resources,
         cwd.to_path_buf(),
         Some(vec![cwd.to_path_buf()]),
-    );
+    )
+    .with_elicitation_handler(Arc::clone(&router) as Arc<dyn ElicitationHandler>);
     // The MCP host owns the post-dedup, post-plugin-merge view of the
     // manifest, so query it for the count we surface to logs and tests
     // rather than relying on `resources.mcp_servers.len()` (which is the
     // pre-merge length).
     let mcp_count = local.mcp_host().servers().len();
     let runner: Arc<dyn ToolRunner> = Arc::new(local);
-    let service = ToolRunnerService::new(runner).with_auth_token(auth_token);
+    let service = ToolRunnerService::with_router(runner, router).with_auth_token(auth_token);
     Ok((service, mcp_count))
 }
 
