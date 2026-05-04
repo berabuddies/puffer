@@ -198,6 +198,49 @@ pub struct McpResult {
     pub metadata: serde_json::Value,
 }
 
+/// SDK-free DTO mirroring the on-disk `PersistedTokens` payload from
+/// `puffer-mcp-oauth`. This lets `puffer-cli` push a freshly minted token
+/// bundle to a runner over `ToolRunner::push_oauth_tokens` without dragging
+/// rmcp / oauth2 types across the trait boundary.
+///
+/// The fields are 1:1 with `puffer_mcp_oauth::PersistedTokens`; the
+/// runner's `LocalToolRunner` impl reconstructs that type and writes it
+/// through the existing file-backed credential store, so the on-disk shape
+/// is identical to what `puffer mcp login` used to write directly.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OAuthTokensPayload {
+    pub server_id: String,
+    pub server_url: String,
+    pub client_id: String,
+    pub client_secret: Option<String>,
+    pub access_token: String,
+    pub token_type: String,
+    pub refresh_token: Option<String>,
+    pub scopes: Vec<String>,
+    /// Wall-clock expiry as `SystemTime` epoch milliseconds. Optional —
+    /// some auth servers omit `expires_in` entirely (treated as
+    /// "long-lived; refresh on demand from a 401" by the manager).
+    pub expires_at_ms: Option<u64>,
+}
+
+/// Read-only summary of the runner's stored OAuth state for a server,
+/// returned from [`ToolRunner::oauth_status`]. The CLI uses this to render
+/// `puffer mcp login-status` without hitting the underlying token file
+/// directly (which is the runner's concern, not the CLI's).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum OAuthStatus {
+    /// The runner has no stored credentials for this server.
+    Absent,
+    /// The runner has a stored bundle. The full secret material is never
+    /// returned over the trait — only the metadata callers need to render
+    /// human-friendly status output.
+    Present {
+        expires_at_ms: Option<u64>,
+        has_refresh: bool,
+        scopes: Vec<String>,
+    },
+}
+
 /// Typed errors returned from runner methods. Designed to round-trip cleanly
 /// over a gRPC status code.
 #[derive(Debug, Error)]
@@ -509,6 +552,49 @@ pub trait ToolRunner: Send + Sync + std::fmt::Debug {
         name: &str,
         args: serde_json::Value,
     ) -> Result<McpPromptContent, RunnerError>;
+
+    // --- OAuth credential push (puffer-cli drives the browser flow) -------
+    //
+    // These are no-ops by default so existing runners that don't care about
+    // OAuth (test fakes, etc.) don't have to implement them. The local +
+    // gRPC runners override them to write through to the file-backed
+    // credential store / forward to the gRPC server respectively.
+
+    /// Persist a freshly-minted OAuth token bundle for `server`. Called by
+    /// `puffer-cli`'s `mcp login` command after the local interactive
+    /// authorization-code flow completes. The runner persists the bundle
+    /// to its on-disk credential store; subsequent MCP calls authenticated
+    /// against `server` will use these tokens transparently.
+    ///
+    /// Default impl returns `Unsupported` so impls that don't speak OAuth
+    /// can opt out.
+    fn push_oauth_tokens(
+        &self,
+        _server: &str,
+        _tokens: OAuthTokensPayload,
+    ) -> Result<(), RunnerError> {
+        Err(RunnerError::Unsupported(
+            "push_oauth_tokens is not implemented for this runner".into(),
+        ))
+    }
+
+    /// Returns whether the runner has stored credentials for `server`,
+    /// plus enough non-secret metadata for the CLI to render
+    /// `puffer mcp login-status` (expiry timestamp, presence of refresh
+    /// token, granted scopes). Never returns the access token itself.
+    fn oauth_status(&self, _server: &str) -> Result<OAuthStatus, RunnerError> {
+        Err(RunnerError::Unsupported(
+            "oauth_status is not implemented for this runner".into(),
+        ))
+    }
+
+    /// Forget any stored OAuth credentials for `server`. Idempotent: when
+    /// no credentials exist, returns `Ok(())`.
+    fn clear_oauth_tokens(&self, _server: &str) -> Result<(), RunnerError> {
+        Err(RunnerError::Unsupported(
+            "clear_oauth_tokens is not implemented for this runner".into(),
+        ))
+    }
 }
 
 /// Bytes serializer that round-trips through both bincode-style and JSON

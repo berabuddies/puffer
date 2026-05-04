@@ -10,8 +10,9 @@
 use anyhow::{anyhow, bail, Context, Result};
 use puffer_runner_api::{
     ChunkSink, DirEntry, ElicitationHandler, McpPrompt, McpPromptContent, McpResourceContent,
-    McpResourceRecord, McpResult, McpServerInfo, McpTool, ReadStateUpdate, RunnerCapabilities,
-    RunnerError, RunnerPing, ToolRequest, ToolResult, ToolRunner,
+    McpResourceRecord, McpResult, McpServerInfo, McpTool, OAuthStatus, OAuthTokensPayload,
+    ReadStateUpdate, RunnerCapabilities, RunnerError, RunnerPing, ToolRequest, ToolResult,
+    ToolRunner,
 };
 use serde_json::Value;
 use std::fs;
@@ -501,5 +502,21 @@ impl ToolRunner for LocalToolRunner {
         args: serde_json::Value,
     ) -> Result<McpPromptContent, RunnerError> {
         self.mcp_host.get_prompt(server, name, args)
+    }
+
+    fn push_oauth_tokens(
+        &self,
+        server: &str,
+        tokens: OAuthTokensPayload,
+    ) -> Result<(), RunnerError> {
+        self.mcp_host.push_oauth_tokens(server, tokens)
+    }
+
+    fn oauth_status(&self, server: &str) -> Result<OAuthStatus, RunnerError> {
+        self.mcp_host.oauth_status(server)
+    }
+
+    fn clear_oauth_tokens(&self, server: &str) -> Result<(), RunnerError> {
+        self.mcp_host.clear_oauth_tokens(server)
     }
 }

@@ -16,11 +16,12 @@
 //! cheap and clones see the same live connections.
 
 use anyhow::Context;
+use puffer_mcp_oauth::{default_token_dir, PersistedTokens};
 use puffer_resources::McpServerSpec;
 use puffer_runner_api::{
     ChunkSink, DeclineAllElicitations, ElicitationHandler, McpPrompt, McpPromptContent,
     McpResourceContent, McpResourceContentPart, McpResourceRecord, McpResult, McpServerInfo,
-    McpTool, RunnerError,
+    McpTool, OAuthStatus, OAuthTokensPayload, RunnerError,
 };
 use serde_json::Value;
 use std::fs;
@@ -258,6 +259,86 @@ impl McpHost {
         self.connections.get_prompt(&spec.id, name, args)
     }
 
+    /// Persist a token bundle minted by `puffer-cli`'s interactive OAuth
+    /// flow to the on-disk credential store. The caller (the local runner's
+    /// `push_oauth_tokens` impl) has already verified the server is
+    /// configured; this method only handles the persistence + URL-resolution
+    /// step. No network IO.
+    pub fn push_oauth_tokens(
+        &self,
+        server: &str,
+        tokens: OAuthTokensPayload,
+    ) -> Result<(), RunnerError> {
+        let spec = self.lookup_server(server)?;
+        // Trust the server_url the caller provided when it differs from the
+        // configured one (some manifests put the auth issuer on a separate
+        // host from the MCP endpoint); fall back to the manifest URL when
+        // the caller didn't set it.
+        let server_url = if tokens.server_url.trim().is_empty() {
+            http_url_for_server(spec)?
+        } else {
+            tokens.server_url.clone()
+        };
+        let server_id = if tokens.server_id.trim().is_empty() {
+            spec.id.clone()
+        } else {
+            tokens.server_id.clone()
+        };
+        let payload = PersistedTokens {
+            server_id,
+            server_url,
+            client_id: tokens.client_id,
+            client_secret: tokens.client_secret,
+            access_token: tokens.access_token,
+            token_type: tokens.token_type,
+            refresh_token: tokens.refresh_token,
+            scopes: tokens.scopes,
+            expires_at_ms: tokens.expires_at_ms,
+        };
+        let token_dir = self
+            .oauth_token_dir
+            .clone()
+            .unwrap_or_else(default_token_dir);
+        payload
+            .write_to(&token_dir)
+            .map_err(|e| RunnerError::Other(format!("write OAuth tokens for `{server}`: {e}")))
+    }
+
+    /// Returns the OAuth status for `server`. Used by `puffer mcp
+    /// login-status`. No secret material is returned.
+    pub fn oauth_status(&self, server: &str) -> Result<OAuthStatus, RunnerError> {
+        let spec = self.lookup_server(server)?;
+        let server_url = http_url_for_server(spec)?;
+        let token_dir = self
+            .oauth_token_dir
+            .clone()
+            .unwrap_or_else(default_token_dir);
+        let persisted = PersistedTokens::read_from(&token_dir, &spec.id, &server_url)
+            .map_err(|e| RunnerError::Other(format!("read OAuth tokens for `{server}`: {e}")))?;
+        Ok(match persisted {
+            None => OAuthStatus::Absent,
+            Some(p) => OAuthStatus::Present {
+                expires_at_ms: p.expires_at_ms,
+                has_refresh: p.refresh_token.is_some(),
+                scopes: p.scopes,
+            },
+        })
+    }
+
+    /// Drops any persisted OAuth tokens for `server`. Idempotent: if no
+    /// tokens are stored, returns `Ok(())`.
+    pub fn clear_oauth_tokens(&self, server: &str) -> Result<(), RunnerError> {
+        let spec = self.lookup_server(server)?;
+        let server_url = http_url_for_server(spec)?;
+        let token_dir = self
+            .oauth_token_dir
+            .clone()
+            .unwrap_or_else(default_token_dir);
+        PersistedTokens::delete_from(&token_dir, &spec.id, &server_url)
+            .map(|_| ())
+            .map_err(|e| RunnerError::Other(format!("remove OAuth tokens for `{server}`: {e}")))
+    }
+
     fn lookup_server(&self, server: &str) -> Result<&McpServerSpec, RunnerError> {
         let trimmed = server.trim();
         self.servers
@@ -352,6 +433,26 @@ fn spec_to_info(spec: &McpServerSpec) -> McpServerInfo {
         target: spec.target.clone(),
         description: spec.description.clone(),
     }
+}
+
+/// Resolve the HTTP URL associated with an MCP server spec, mirroring the
+/// `puffer-cli` resolver. The `endpoint` field is the historical home for
+/// HTTP/SSE entries (used by `puffer mcp add`); the `target` field is what
+/// pass-1.5d manifests use. Stdio servers don't have a URL — those are
+/// rejected as `InvalidArgument` because OAuth doesn't apply.
+pub fn http_url_for_server(spec: &McpServerSpec) -> Result<String, RunnerError> {
+    let raw = if !spec.endpoint.trim().is_empty() {
+        spec.endpoint.trim()
+    } else {
+        spec.target.trim()
+    };
+    if raw.is_empty() {
+        return Err(RunnerError::InvalidArgument(format!(
+            "MCP server `{}` has no HTTP target/endpoint",
+            spec.id
+        )));
+    }
+    Ok(raw.to_string())
 }
 
 /// Returns true when `spec` describes the built-in filesystem stub.

@@ -26,4 +26,4 @@ pub mod http_launcher;
 pub mod launcher;
 pub mod transport;
 
-pub use host::{is_live_filesystem_server, McpHost};
+pub use host::{http_url_for_server, is_live_filesystem_server, McpHost};

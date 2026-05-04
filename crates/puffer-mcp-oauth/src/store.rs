@@ -124,6 +124,60 @@ impl PersistedTokens {
     }
 }
 
+impl PersistedTokens {
+    /// Persist this bundle to `<token_dir>/<store_key>.json` with `0600`
+    /// perms (Unix). Used by `LocalToolRunner::push_oauth_tokens` so the
+    /// CLI's `mcp login` can hand a freshly-minted token bundle to the
+    /// runner without the runner having to re-implement the on-disk
+    /// schema. Idempotent: overwrites any existing file for this server.
+    pub fn write_to(&self, token_dir: &Path) -> std::io::Result<()> {
+        let key = store_key(&self.server_id, &self.server_url);
+        let path = token_dir.join(format!("{key}.json"));
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let bytes = serde_json::to_vec_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        write_secret_file(&path, &bytes)
+    }
+
+    /// Read a previously-persisted bundle from disk. Returns `Ok(None)` if
+    /// no file is present for the (server_id, server_url) pair.
+    pub fn read_from(
+        token_dir: &Path,
+        server_id: &str,
+        server_url: &str,
+    ) -> std::io::Result<Option<PersistedTokens>> {
+        let key = store_key(server_id, server_url);
+        let path = token_dir.join(format!("{key}.json"));
+        match fs::read(&path) {
+            Ok(bytes) => match serde_json::from_slice::<PersistedTokens>(&bytes) {
+                Ok(t) => Ok(Some(t)),
+                Err(e) => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Delete any persisted bundle for the (server_id, server_url) pair.
+    /// Returns `Ok(true)` when a file was removed, `Ok(false)` when no file
+    /// existed.
+    pub fn delete_from(
+        token_dir: &Path,
+        server_id: &str,
+        server_url: &str,
+    ) -> std::io::Result<bool> {
+        let key = store_key(server_id, server_url);
+        let path = token_dir.join(format!("{key}.json"));
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+}
+
 /// Compute a deterministic on-disk filename for the (server_id, server_url)
 /// pair so two servers sharing an id but pointing at different URLs don't
 /// stomp each other's tokens.
