@@ -4325,6 +4325,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arboard",
+ "axum 0.8.9",
  "base64",
  "dirs",
  "fslock",
@@ -4353,6 +4354,7 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
+ "tokio-util",
  "toml",
  "tracing",
  "tungstenite 0.24.0",
