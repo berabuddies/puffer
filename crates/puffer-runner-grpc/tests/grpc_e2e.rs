@@ -1114,3 +1114,333 @@ fn cross_backend_elicitation_round_trips() {
     drop(remote);
     drop(server);
 }
+
+/// Same shape as `cross_backend_real_mcp_tools`, but the underlying MCP
+/// transport is HTTP rather than stdio. Both backends point at the same
+/// in-process axum-mounted `StreamableHttpService`; results must be
+/// byte-equal across local and gRPC paths.
+///
+/// The stub server here is a small inline copy — it would be nice to
+/// share `puffer-core/tests/mcp_stub/stub_server.rs`, but cargo test
+/// helpers can't easily reach into another crate's `tests/` tree. The
+/// puffer-core HTTP integration test exercises the same StubServer
+/// via the same wire format, so any drift between the two would show
+/// up there first.
+mod http_stub {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use axum::Router;
+    use rmcp::handler::server::ServerHandler;
+    use rmcp::model::{
+        CallToolRequestParams, CallToolResult, Content, GetPromptRequestParams,
+        GetPromptResult, Implementation, InitializeResult, ListPromptsResult,
+        ListResourcesResult, ListToolsResult, PaginatedRequestParams, Prompt,
+        PromptArgument, PromptMessage, PromptMessageRole, ProtocolVersion,
+        RawResource, ReadResourceRequestParams, ReadResourceResult, Resource,
+        ResourceContents, ServerCapabilities, Tool,
+    };
+    use rmcp::service::{NotificationContext, RequestContext, RoleServer};
+    use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+    use rmcp::transport::streamable_http_server::tower::StreamableHttpService;
+    use rmcp::transport::streamable_http_server::StreamableHttpServerConfig;
+    use rmcp::ErrorData;
+    use serde_json::{json, Map, Value};
+    use tokio_util::sync::CancellationToken;
+
+    #[derive(Clone, Default)]
+    pub struct StubServer;
+
+    impl ServerHandler for StubServer {
+        fn get_info(&self) -> InitializeResult {
+            InitializeResult {
+                protocol_version: ProtocolVersion::default(),
+                capabilities: ServerCapabilities::builder()
+                    .enable_tools()
+                    .enable_prompts()
+                    .enable_resources()
+                    .build(),
+                server_info: Implementation {
+                    name: "puffer-mcp-grpc-http-stub".into(),
+                    title: None,
+                    version: env!("CARGO_PKG_VERSION").into(),
+                    description: None,
+                    icons: None,
+                    website_url: None,
+                },
+                instructions: None,
+            }
+        }
+
+        async fn list_tools(
+            &self,
+            _request: Option<PaginatedRequestParams>,
+            _ctx: RequestContext<RoleServer>,
+        ) -> Result<ListToolsResult, ErrorData> {
+            Ok(ListToolsResult {
+                tools: vec![Tool::new("echo", "Echo `text` back", echo_schema())],
+                next_cursor: None,
+                meta: None,
+            })
+        }
+
+        async fn call_tool(
+            &self,
+            request: CallToolRequestParams,
+            _ctx: RequestContext<RoleServer>,
+        ) -> Result<CallToolResult, ErrorData> {
+            if request.name.as_ref() != "echo" {
+                return Err(ErrorData::invalid_params("only `echo` is supported", None));
+            }
+            let args = request.arguments.unwrap_or_default();
+            let text = args
+                .get("text")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ErrorData::invalid_params("missing `text`", None))?;
+            Ok(CallToolResult::success(vec![Content::text(text)]))
+        }
+
+        async fn list_resources(
+            &self,
+            _request: Option<PaginatedRequestParams>,
+            _ctx: RequestContext<RoleServer>,
+        ) -> Result<ListResourcesResult, ErrorData> {
+            Ok(ListResourcesResult {
+                resources: vec![Resource::new(
+                    RawResource {
+                        uri: "stub://hello.txt".into(),
+                        name: "hello".into(),
+                        title: None,
+                        description: Some("hello stub".into()),
+                        mime_type: Some("text/plain".into()),
+                        size: None,
+                        icons: None,
+                        meta: None,
+                    },
+                    None,
+                )],
+                next_cursor: None,
+                meta: None,
+            })
+        }
+
+        async fn read_resource(
+            &self,
+            request: ReadResourceRequestParams,
+            _ctx: RequestContext<RoleServer>,
+        ) -> Result<ReadResourceResult, ErrorData> {
+            if request.uri == "stub://hello.txt" {
+                Ok(ReadResourceResult {
+                    contents: vec![ResourceContents::TextResourceContents {
+                        uri: request.uri,
+                        mime_type: Some("text/plain".into()),
+                        text: "hello from grpc http stub".into(),
+                        meta: None,
+                    }],
+                })
+            } else {
+                Err(ErrorData::invalid_params("unknown resource", None))
+            }
+        }
+
+        async fn list_prompts(
+            &self,
+            _request: Option<PaginatedRequestParams>,
+            _ctx: RequestContext<RoleServer>,
+        ) -> Result<ListPromptsResult, ErrorData> {
+            Ok(ListPromptsResult {
+                prompts: vec![Prompt::new(
+                    "greet",
+                    Some("Greet the named caller"),
+                    Some(vec![PromptArgument {
+                        name: "name".into(),
+                        title: None,
+                        description: None,
+                        required: Some(true),
+                    }]),
+                )],
+                next_cursor: None,
+                meta: None,
+            })
+        }
+
+        async fn get_prompt(
+            &self,
+            request: GetPromptRequestParams,
+            _ctx: RequestContext<RoleServer>,
+        ) -> Result<GetPromptResult, ErrorData> {
+            let name = request
+                .arguments
+                .as_ref()
+                .and_then(|m| m.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("world");
+            Ok(GetPromptResult {
+                description: None,
+                messages: vec![PromptMessage::new_text(
+                    PromptMessageRole::User,
+                    format!("Hello, {name}!"),
+                )],
+            })
+        }
+
+        async fn on_initialized(&self, _ctx: NotificationContext<RoleServer>) {}
+    }
+
+    fn echo_schema() -> Arc<Map<String, Value>> {
+        let v = json!({
+            "type": "object",
+            "properties": { "text": { "type": "string" } },
+            "required": ["text"],
+        });
+        match v {
+            Value::Object(m) => Arc::new(m),
+            _ => Arc::new(Map::new()),
+        }
+    }
+
+    pub struct Stub {
+        pub url: String,
+        cancel: CancellationToken,
+    }
+
+    impl Drop for Stub {
+        fn drop(&mut self) {
+            self.cancel.cancel();
+        }
+    }
+
+    pub async fn spawn() -> anyhow::Result<Stub> {
+        let cancel = CancellationToken::new();
+        let service: StreamableHttpService<StubServer, LocalSessionManager> =
+            StreamableHttpService::new(
+                || Ok(StubServer),
+                Default::default(),
+                StreamableHttpServerConfig {
+                    stateful_mode: true,
+                    sse_keep_alive: Some(Duration::from_secs(5)),
+                    cancellation_token: cancel.child_token(),
+                    ..Default::default()
+                },
+            );
+        let router = Router::new().nest_service("/mcp", service);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let cancel_for_shutdown = cancel.clone();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router)
+                .with_graceful_shutdown(async move { cancel_for_shutdown.cancelled_owned().await })
+                .await;
+        });
+        Ok(Stub {
+            url: format!("http://{addr}/mcp"),
+            cancel,
+        })
+    }
+}
+
+/// Drives `tools/list`, `tools/call`, `resources/list`, `resources/read`,
+/// `prompts/list`, and `prompts/get` over an HTTP MCP transport against
+/// both backends. The results must round-trip byte-equal between the
+/// in-process LocalToolRunner and the gRPC RemoteToolRunner.
+///
+/// This proves the HTTP transport plugs into the *same* `ToolRunner`
+/// trait surface that stdio uses — the gRPC layer sees no difference
+/// between a stdio child and an HTTPS endpoint.
+#[test]
+fn cross_backend_http_mcp_round_trip() {
+    use puffer_resources::McpServerSpec;
+
+    // Build a multi-thread runtime so the axum stub runs alongside the
+    // sync test thread. The server stays up as long as `_stub` does.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(2)
+        .build()
+        .expect("test runtime");
+    let stub = rt.block_on(http_stub::spawn()).expect("spawn http stub");
+
+    let manifest = || -> Vec<McpServerSpec> {
+        vec![McpServerSpec {
+            id: "stub".into(),
+            display_name: "Stub HTTP".into(),
+            transport: "http".into(),
+            endpoint: String::new(),
+            target: stub.url.clone(),
+            description: "Cross-backend HTTP MCP stub".into(),
+            headers: Default::default(),
+        }]
+    };
+
+    let local_runner = LocalToolRunner::new().with_mcp_servers(manifest());
+    let server_runner: Arc<dyn ToolRunner> =
+        Arc::new(LocalToolRunner::new().with_mcp_servers(manifest()));
+    let server = spawn_server(server_runner);
+    let remote = RemoteToolRunner::connect(&server.endpoint, Some(TEST_TOKEN))
+        .expect("connect remote");
+
+    // tools/list — both backends agree.
+    let local_tools = local_runner.list_mcp_tools("stub").expect("local tools");
+    let remote_tools = remote.list_mcp_tools("stub").expect("remote tools");
+    let local_names: Vec<_> = local_tools.iter().map(|t| t.name.clone()).collect();
+    let remote_names: Vec<_> = remote_tools.iter().map(|t| t.name.clone()).collect();
+    assert_eq!(local_names, remote_names);
+    assert_eq!(local_names, vec!["echo".to_string()]);
+
+    // tools/call echo — payloads round-trip byte-equal.
+    let mut sink = NullChunkSink;
+    let local_echo = local_runner
+        .call_mcp_tool("stub", "echo", serde_json::json!({"text": "ping"}), &mut sink)
+        .expect("local echo");
+    let remote_echo = remote
+        .call_mcp_tool("stub", "echo", serde_json::json!({"text": "ping"}), &mut sink)
+        .expect("remote echo");
+    assert_eq!(local_echo.success, remote_echo.success);
+    assert_eq!(local_echo.stdout, remote_echo.stdout);
+    assert_eq!(local_echo.stdout, "ping");
+
+    // resources/list — same URIs.
+    let local_res = local_runner
+        .list_mcp_resources(Some("stub"))
+        .expect("local list_resources");
+    let remote_res = remote
+        .list_mcp_resources(Some("stub"))
+        .expect("remote list_resources");
+    let local_uris: Vec<_> = local_res.iter().map(|r| r.uri.clone()).collect();
+    let remote_uris: Vec<_> = remote_res.iter().map(|r| r.uri.clone()).collect();
+    assert_eq!(local_uris, remote_uris);
+
+    // resources/read — text byte-equal.
+    let local_text = local_runner
+        .read_mcp_resource("stub", "stub://hello.txt")
+        .expect("local read_resource");
+    let remote_text = remote
+        .read_mcp_resource("stub", "stub://hello.txt")
+        .expect("remote read_resource");
+    match (local_text.parts.first(), remote_text.parts.first()) {
+        (
+            Some(McpResourceContentPart::Text { text: l, .. }),
+            Some(McpResourceContentPart::Text { text: r, .. }),
+        ) => {
+            assert_eq!(l, r);
+            assert_eq!(l, "hello from grpc http stub");
+        }
+        other => panic!("expected text/text parts, got {other:?}"),
+    }
+
+    // prompts/get — rendered text byte-equal.
+    let local_get = local_runner
+        .get_mcp_prompt("stub", "greet", serde_json::json!({"name": "remote"}))
+        .expect("local get_prompt");
+    let remote_get = remote
+        .get_mcp_prompt("stub", "greet", serde_json::json!({"name": "remote"}))
+        .expect("remote get_prompt");
+    assert_eq!(local_get.messages.len(), remote_get.messages.len());
+    assert_eq!(local_get.messages[0].text, remote_get.messages[0].text);
+    assert_eq!(local_get.messages[0].text, "Hello, remote!");
+
+    drop(remote);
+    drop(server);
+    drop(stub);
+    drop(rt);
+}

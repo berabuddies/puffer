@@ -26,3 +26,8 @@ puffer-core = { path = "../puffer-core" }
 puffer-resources = { path = "../puffer-resources" }
 tempfile.workspace = true
 serde_json.workspace = true
+# Used by `cross_backend_http_mcp_round_trip` to spin up an axum-mounted
+# rmcp `StreamableHttpService` shared with the puffer-core HTTP test.
+axum = "0.8"
+rmcp.workspace = true
+tokio-util = "0.7"

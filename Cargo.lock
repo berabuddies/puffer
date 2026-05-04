@@ -4444,17 +4444,20 @@ name = "puffer-runner-grpc"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum 0.8.9",
  "futures-core",
  "prost",
  "puffer-core",
  "puffer-resources",
  "puffer-runner-api",
  "puffer-runner-local",
+ "rmcp",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tonic",
  "tonic-build",
 ]
