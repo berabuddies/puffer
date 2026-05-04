@@ -3,14 +3,19 @@
 //!
 //! Keeps things deliberately minimal:
 //!
-//! * `tools/list` returns three tools: `echo`, `slow_echo`, `crash`.
+//! * `tools/list` returns four tools: `echo`, `slow_echo`, `crash`,
+//!   `slow_with_progress`.
 //! * `tools/call` dispatches: `echo` round-trips its `text` arg, `slow_echo`
 //!   sleeps `delay_ms` then returns the text, `crash` exits the process so
-//!   the connection manager has something to recover from.
-//! * Everything else falls through to the rmcp `ServerHandler` defaults.
-//!
-//! Progress notifications are intentionally NOT emitted — pass 1.5b will
-//! wire that through `ChunkSink` once the client side surfaces it.
+//!   the connection manager has something to recover from,
+//!   `slow_with_progress` emits two `notifications/progress` between sleeps.
+//! * `resources/list` returns two stub resources (`stub://hello.txt`,
+//!   `stub://binary.bin`).
+//! * `resources/read` returns text for `hello.txt` and a blob for
+//!   `binary.bin`.
+//! * `prompts/list` returns one prompt (`greet`).
+//! * `prompts/get` returns a single user message that interpolates the
+//!   `name` argument.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,8 +24,11 @@ use rmcp::{
     ErrorData,
     handler::server::ServerHandler,
     model::{
-        CallToolRequestParams, CallToolResult, Content, Implementation, InitializeResult,
-        ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, Tool,
+        CallToolRequestParams, CallToolResult, Content, GetPromptRequestParams, GetPromptResult,
+        Implementation, InitializeResult, ListPromptsResult, ListResourcesResult, ListToolsResult,
+        PaginatedRequestParams, ProgressNotificationParam, Prompt, PromptArgument,
+        PromptMessage, PromptMessageRole, ProtocolVersion, RawResource, ReadResourceRequestParams,
+        ReadResourceResult, Resource, ResourceContents, ServerCapabilities, Tool,
     },
     serve_server,
     service::{NotificationContext, RequestContext, RoleServer},
@@ -31,11 +39,18 @@ use serde_json::{json, Map, Value};
 #[derive(Clone, Default)]
 struct StubServer;
 
+const HELLO_URI: &str = "stub://hello.txt";
+const BINARY_URI: &str = "stub://binary.bin";
+
 impl ServerHandler for StubServer {
     fn get_info(&self) -> InitializeResult {
         InitializeResult {
             protocol_version: ProtocolVersion::default(),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            capabilities: ServerCapabilities::builder()
+                .enable_tools()
+                .enable_prompts()
+                .enable_resources()
+                .build(),
             server_info: Implementation {
                 name: "puffer-mcp-stub-server".into(),
                 title: None,
@@ -66,6 +81,11 @@ impl ServerHandler for StubServer {
                     "Exit the stub server process immediately",
                     empty_object_schema(),
                 ),
+                Tool::new(
+                    "slow_with_progress",
+                    "Emit two `notifications/progress` then echo back `text`",
+                    slow_echo_schema(),
+                ),
             ],
             next_cursor: None,
             meta: None,
@@ -75,7 +95,7 @@ impl ServerHandler for StubServer {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let args = request.arguments.unwrap_or_default();
         match request.name.as_ref() {
@@ -105,11 +125,161 @@ impl ServerHandler for StubServer {
                 });
                 Ok(CallToolResult::success(vec![Content::text("crashing")]))
             }
+            "slow_with_progress" => {
+                let text = args
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let delay_ms = args.get("delay_ms").and_then(Value::as_u64).unwrap_or(20);
+                let progress_token = context.meta.get_progress_token();
+                if let Some(token) = progress_token.clone() {
+                    let _ = context
+                        .peer
+                        .notify_progress(ProgressNotificationParam {
+                            progress_token: token,
+                            progress: 1.0,
+                            total: Some(2.0),
+                            message: Some("halfway".into()),
+                        })
+                        .await;
+                }
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                if let Some(token) = progress_token {
+                    let _ = context
+                        .peer
+                        .notify_progress(ProgressNotificationParam {
+                            progress_token: token,
+                            progress: 2.0,
+                            total: Some(2.0),
+                            message: Some("done".into()),
+                        })
+                        .await;
+                }
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
             other => Err(ErrorData::invalid_params(
                 format!("unknown tool `{other}`"),
                 None,
             )),
         }
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, ErrorData> {
+        Ok(ListResourcesResult {
+            resources: vec![
+                Resource::new(
+                    RawResource {
+                        uri: HELLO_URI.into(),
+                        name: "hello".into(),
+                        title: None,
+                        description: Some("Plain-text stub resource".into()),
+                        mime_type: Some("text/plain".into()),
+                        size: None,
+                        icons: None,
+                        meta: None,
+                    },
+                    None,
+                ),
+                Resource::new(
+                    RawResource {
+                        uri: BINARY_URI.into(),
+                        name: "binary".into(),
+                        title: None,
+                        description: Some("Three-byte binary stub".into()),
+                        mime_type: Some("application/octet-stream".into()),
+                        size: Some(3),
+                        icons: None,
+                        meta: None,
+                    },
+                    None,
+                ),
+            ],
+            next_cursor: None,
+            meta: None,
+        })
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, ErrorData> {
+        match request.uri.as_str() {
+            HELLO_URI => Ok(ReadResourceResult {
+                contents: vec![ResourceContents::TextResourceContents {
+                    uri: HELLO_URI.into(),
+                    mime_type: Some("text/plain".into()),
+                    text: "hello from stub".into(),
+                    meta: None,
+                }],
+            }),
+            BINARY_URI => Ok(ReadResourceResult {
+                contents: vec![ResourceContents::BlobResourceContents {
+                    uri: BINARY_URI.into(),
+                    mime_type: Some("application/octet-stream".into()),
+                    // base64("\xde\xad\xbe") = "3q2+"
+                    blob: encode_base64(&[0xde, 0xad, 0xbe]),
+                    meta: None,
+                }],
+            }),
+            other => Err(ErrorData::invalid_params(
+                format!("unknown resource `{other}`"),
+                None,
+            )),
+        }
+    }
+
+    async fn list_prompts(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListPromptsResult, ErrorData> {
+        Ok(ListPromptsResult {
+            prompts: vec![Prompt::new(
+                "greet",
+                Some("Greet the named caller"),
+                Some(vec![PromptArgument {
+                    name: "name".into(),
+                    title: None,
+                    description: Some("Who to greet".into()),
+                    required: Some(true),
+                }]),
+            )],
+            next_cursor: None,
+            meta: None,
+        })
+    }
+
+    async fn get_prompt(
+        &self,
+        request: GetPromptRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResult, ErrorData> {
+        if request.name != "greet" {
+            return Err(ErrorData::invalid_params(
+                format!("unknown prompt `{}`", request.name),
+                None,
+            ));
+        }
+        let name = request
+            .arguments
+            .as_ref()
+            .and_then(|m| m.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or("world");
+        Ok(GetPromptResult {
+            description: Some("Stub greeting prompt".into()),
+            messages: vec![PromptMessage::new_text(
+                PromptMessageRole::User,
+                format!("Hello, {name}!"),
+            )],
+        })
     }
 
     async fn on_initialized(&self, _context: NotificationContext<RoleServer>) {}
@@ -147,6 +317,30 @@ fn object_schema(value: Value) -> Arc<Map<String, Value>> {
     }
 }
 
+fn encode_base64(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        out.push(ALPHABET[(b0 >> 2) as usize] as char);
+        out.push(ALPHABET[(((b0 & 0b11) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(ALPHABET[(((b1 & 0b1111) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(ALPHABET[(b2 & 0b111111) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -159,4 +353,14 @@ async fn main() -> anyhow::Result<()> {
     let service = serve_server(StubServer, transport).await?;
     service.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_base64;
+
+    #[test]
+    fn base64_roundtrip_matches_known_value() {
+        assert_eq!(encode_base64(&[0xde, 0xad, 0xbe]), "3q2+");
+    }
 }

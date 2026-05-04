@@ -18,8 +18,8 @@
 use anyhow::Context;
 use puffer_resources::McpServerSpec;
 use puffer_runner_api::{
-    McpPrompt, McpPromptContent, McpResourceContent, McpResourceContentPart, McpResourceRecord,
-    McpResult, McpServerInfo, McpTool, RunnerError,
+    ChunkSink, McpPrompt, McpPromptContent, McpResourceContent, McpResourceContentPart,
+    McpResourceRecord, McpResult, McpServerInfo, McpTool, RunnerError,
 };
 use serde_json::Value;
 use std::fs;
@@ -91,12 +91,14 @@ impl McpHost {
     ///
     /// The built-in filesystem server has no callable tools, so it keeps
     /// returning `Unsupported`. Configured subprocess servers route
-    /// through the connection manager.
+    /// through the connection manager — `sink` receives any
+    /// `notifications/progress` events the server emits during the call.
     pub fn call_tool(
         &self,
         server: &str,
         tool: &str,
         args: Value,
+        sink: &mut dyn ChunkSink,
     ) -> Result<McpResult, RunnerError> {
         let spec = self.lookup_server(server)?;
         if is_live_filesystem_server(&spec.id, &spec.target) {
@@ -104,7 +106,7 @@ impl McpHost {
                 "MCP `tools/call` for `{tool}` on built-in server `{server}` is not implemented",
             )));
         }
-        self.connections.call_tool(&spec.id, tool, args)
+        self.connections.call_tool(&spec.id, tool, args, sink)
     }
 
     /// Lists resources across one or all servers. The built-in `filesystem`

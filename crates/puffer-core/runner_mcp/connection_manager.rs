@@ -26,17 +26,22 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use puffer_runner_api::{
-    McpPrompt, McpPromptArgument, McpPromptContent, McpPromptMessage, McpResourceContent,
+    ChunkSink, McpPrompt, McpPromptArgument, McpPromptContent, McpPromptMessage, McpResourceContent,
     McpResourceContentPart, McpResourceRecord, McpResult, McpTool, RunnerError,
 };
+use rmcp::handler::client::ClientHandler;
 use rmcp::model::{
-    CallToolRequestParams, GetPromptRequestParams, JsonObject, PromptMessage, PromptMessageContent,
-    PromptMessageRole, RawContent, ReadResourceRequestParams, ResourceContents,
+    CallToolRequest, CallToolRequestParams, ClientRequest, GetPromptRequestParams, JsonObject,
+    NumberOrString, ProgressNotificationParam, ProgressToken, PromptMessage, PromptMessageContent,
+    PromptMessageRole, RawContent, ReadResourceRequestParams, ResourceContents, ServerResult,
 };
-use rmcp::service::{RoleClient, RunningService, ServiceExt};
+use rmcp::service::{
+    NotificationContext, PeerRequestOptions, RoleClient, RunningService, ServiceExt,
+};
 use rmcp::transport::child_process::TokioChildProcess;
 use serde_json::{Map, Value};
 use tokio::runtime::Runtime;
+use tokio::sync::mpsc::UnboundedSender;
 
 use super::launcher::spawn_stdio_child;
 use super::transport::{StdioTransportSpec, TransportRecipe};
@@ -63,14 +68,57 @@ impl ConnectionEntry {
     }
 }
 
+/// In-flight `tools/call` invocations indexed by their `progressToken` so
+/// the global [`ProgressClient`] handler can route incoming
+/// `notifications/progress` events back to the right call's sink.
+type ProgressRegistry = Arc<Mutex<HashMap<String, UnboundedSender<ProgressNotificationParam>>>>;
+
+/// Custom rmcp client handler that owns a progress-token registry. The
+/// connection manager registers an `mpsc::Sender` for each in-flight
+/// `tools/call`; this handler delivers matching `notifications/progress`
+/// events to the call's sink without coupling rmcp's transport layer to
+/// puffer's `ChunkSink` trait.
+#[derive(Clone, Default, Debug)]
+struct ProgressClient {
+    progress: ProgressRegistry,
+}
+
+impl ClientHandler for ProgressClient {
+    async fn on_progress(
+        &self,
+        params: ProgressNotificationParam,
+        _context: NotificationContext<RoleClient>,
+    ) {
+        let key = progress_token_key(&params.progress_token);
+        let sender = match self.progress.lock() {
+            Ok(map) => map.get(&key).cloned(),
+            Err(_) => None,
+        };
+        if let Some(sender) = sender {
+            let _ = sender.send(params);
+        }
+    }
+}
+
+fn progress_token_key(token: &ProgressToken) -> String {
+    match &token.0 {
+        NumberOrString::String(s) => format!("s:{s}"),
+        NumberOrString::Number(n) => format!("n:{n}"),
+    }
+}
+
 /// Per-server connection state. Lives behind a `Mutex` inside the manager.
 struct ServerSlot {
     recipe: TransportRecipe,
     /// Currently live rmcp client, if any. Stored as a fresh handle each
     /// time we (re)connect; `Drop` of the client triggers child shutdown.
-    client: Option<Arc<RunningService<RoleClient, ()>>>,
+    client: Option<Arc<RunningService<RoleClient, ProgressClient>>>,
     /// Recent launch attempts, used for the bounded-retry budget.
     failure_history: Vec<Instant>,
+    /// Shared progress registry, cloned into each [`ProgressClient`] handler
+    /// so the connection manager can route progress notifications back to
+    /// in-flight `tools/call` invocations on this server.
+    progress: ProgressRegistry,
 }
 
 impl ServerSlot {
@@ -79,6 +127,7 @@ impl ServerSlot {
             recipe,
             client: None,
             failure_history: Vec::new(),
+            progress: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -156,7 +205,7 @@ impl McpConnectionManager {
     /// Public, synchronous surface invoked by `McpHost::list_tools`.
     pub fn list_tools(&self, server: &str) -> Result<Vec<McpTool>, RunnerError> {
         let runtime = self.runtime();
-        let client = self.connect(server, &runtime)?;
+        let (client, _progress) = self.connect(server, &runtime)?;
         let tools = runtime
             .block_on(async move { client.peer().list_all_tools().await })
             .map_err(|e| RunnerError::Mcp(format!("tools/list on `{server}` failed: {e}")))?;
@@ -164,11 +213,19 @@ impl McpConnectionManager {
     }
 
     /// Public, synchronous surface invoked by `McpHost::call_tool`.
+    ///
+    /// `sink` receives any `notifications/progress` events the server emits
+    /// for this call as JSON via [`ChunkSink::event`]. rmcp itself mints a
+    /// fresh `progressToken` for every cancellable request; the connection
+    /// manager registers a matching sender on the per-server progress
+    /// registry under that token, awaits the response, drains any pending
+    /// notifications, and tears the registration down (success or failure).
     pub fn call_tool(
         &self,
         server: &str,
         tool: &str,
         args: Value,
+        sink: &mut dyn ChunkSink,
     ) -> Result<McpResult, RunnerError> {
         let arguments = match args {
             Value::Null => None,
@@ -180,23 +237,73 @@ impl McpConnectionManager {
             }
         };
         let runtime = self.runtime();
-        let client = self.connect(server, &runtime)?;
+        let (client, progress_registry) = self.connect(server, &runtime)?;
         let tool_name = tool.to_string();
         let server_label = server.to_string();
-        let result = runtime
-            .block_on(async move {
-                let arguments: Option<JsonObject> = arguments.map(|m| m.into_iter().collect::<Map<_, _>>());
-                client
-                    .peer()
-                    .call_tool(CallToolRequestParams {
-                        name: tool_name.into(),
-                        arguments,
-                        meta: None,
-                        task: None,
-                    })
-                    .await
-            })
+
+        // Run the call inside the manager's tokio runtime. Use rmcp's
+        // `send_cancellable_request` so we can read the auto-generated
+        // `progressToken` off the returned `RequestHandle` and wire a
+        // matching subscriber into the per-server registry before awaiting
+        // the response.
+        let outcome_with_events = runtime.block_on(async move {
+            let arguments: Option<JsonObject> =
+                arguments.map(|m| m.into_iter().collect::<Map<_, _>>());
+            let request = CallToolRequest {
+                method: Default::default(),
+                params: CallToolRequestParams {
+                    name: tool_name.into(),
+                    arguments,
+                    meta: None,
+                    task: None,
+                },
+                extensions: Default::default(),
+            };
+            let handle = match client
+                .peer()
+                .send_cancellable_request(
+                    ClientRequest::CallToolRequest(request),
+                    PeerRequestOptions::no_options(),
+                )
+                .await
+            {
+                Ok(handle) => handle,
+                Err(e) => return Err(e),
+            };
+            let registry_key = progress_token_key(&handle.progress_token);
+            let (progress_tx, mut progress_rx) =
+                tokio::sync::mpsc::unbounded_channel::<ProgressNotificationParam>();
+            if let Ok(mut map) = progress_registry.lock() {
+                map.insert(registry_key.clone(), progress_tx);
+            }
+            let response = handle.await_response().await;
+            if let Ok(mut map) = progress_registry.lock() {
+                map.remove(&registry_key);
+            }
+            let mut events: Vec<ProgressNotificationParam> = Vec::new();
+            while let Ok(evt) = progress_rx.try_recv() {
+                events.push(evt);
+            }
+            Ok((response, events))
+        });
+
+        let (response, events) = outcome_with_events
+            .map_err(|e: rmcp::service::ServiceError| {
+                RunnerError::Mcp(format!("tools/call `{tool}` on `{server}` failed: {e}"))
+            })?;
+        for evt in events {
+            sink.event(progress_event_to_json(&evt));
+        }
+        let response = response
             .map_err(|e| RunnerError::Mcp(format!("tools/call `{tool}` on `{server}` failed: {e}")))?;
+        let result = match response {
+            ServerResult::CallToolResult(r) => r,
+            other => {
+                return Err(RunnerError::Mcp(format!(
+                    "tools/call `{tool}` on `{server}` returned unexpected response: {other:?}"
+                )))
+            }
+        };
 
         Ok(result_to_dto(server_label, tool, result))
     }
@@ -207,7 +314,7 @@ impl McpConnectionManager {
         server: &str,
     ) -> Result<Vec<McpResourceRecord>, RunnerError> {
         let runtime = self.runtime();
-        let client = self.connect(server, &runtime)?;
+        let (client, _progress) = self.connect(server, &runtime)?;
         let resources = runtime
             .block_on(async move { client.peer().list_all_resources().await })
             .map_err(|e| {
@@ -226,7 +333,7 @@ impl McpConnectionManager {
         uri: &str,
     ) -> Result<McpResourceContent, RunnerError> {
         let runtime = self.runtime();
-        let client = self.connect(server, &runtime)?;
+        let (client, _progress) = self.connect(server, &runtime)?;
         let uri_owned = uri.to_string();
         let result = runtime
             .block_on(async move {
@@ -249,7 +356,7 @@ impl McpConnectionManager {
     /// Public, synchronous surface invoked by `McpHost::list_prompts`.
     pub fn list_prompts(&self, server: &str) -> Result<Vec<McpPrompt>, RunnerError> {
         let runtime = self.runtime();
-        let client = self.connect(server, &runtime)?;
+        let (client, _progress) = self.connect(server, &runtime)?;
         let prompts = runtime
             .block_on(async move { client.peer().list_all_prompts().await })
             .map_err(|e| {
@@ -275,7 +382,7 @@ impl McpConnectionManager {
             }
         };
         let runtime = self.runtime();
-        let client = self.connect(server, &runtime)?;
+        let (client, _progress) = self.connect(server, &runtime)?;
         let name_owned = name.to_string();
         let result = runtime
             .block_on(async move {
@@ -299,11 +406,18 @@ impl McpConnectionManager {
     /// Looks the server up, lazily (re)spawning the underlying child as
     /// needed. If the previous client dropped because the child exited, a
     /// fresh connection is attempted within the bounded-retry budget.
+    /// Returns the live rmcp client plus the per-server progress registry.
     fn connect(
         &self,
         server: &str,
         runtime: &Runtime,
-    ) -> Result<Arc<RunningService<RoleClient, ()>>, RunnerError> {
+    ) -> Result<
+        (
+            Arc<RunningService<RoleClient, ProgressClient>>,
+            ProgressRegistry,
+        ),
+        RunnerError,
+    > {
         let key = server.to_ascii_lowercase();
         let slot = self
             .servers
@@ -321,7 +435,7 @@ impl McpConnectionManager {
             // Detect a transport that has dropped without us noticing —
             // peer().is_transport_closed() reports the rmcp-side flag.
             if !client.peer().is_transport_closed() {
-                return Ok(Arc::clone(client));
+                return Ok((Arc::clone(client), Arc::clone(&guard.progress)));
             }
             // Stale client: drop it before retrying.
             guard.client = None;
@@ -336,11 +450,14 @@ impl McpConnectionManager {
         }
 
         let recipe = guard.recipe.clone();
-        match runtime.block_on(spawn_client(server, recipe)) {
+        let handler = ProgressClient {
+            progress: Arc::clone(&guard.progress),
+        };
+        match runtime.block_on(spawn_client(server, recipe, handler)) {
             Ok(client) => {
                 let arc = Arc::new(client);
                 guard.client = Some(Arc::clone(&arc));
-                Ok(arc)
+                Ok((arc, Arc::clone(&guard.progress)))
             }
             Err(error) => {
                 guard.record_failure();
@@ -372,7 +489,7 @@ impl Drop for McpConnectionManager {
         let Some(runtime) = self.runtime.take() else {
             return;
         };
-        let mut clients: Vec<Arc<RunningService<RoleClient, ()>>> = Vec::new();
+        let mut clients: Vec<Arc<RunningService<RoleClient, ProgressClient>>> = Vec::new();
         for (_id, slot) in self.servers.drain() {
             if let Ok(mut slot) = slot.into_inner() {
                 if let Some(client) = slot.client.take() {
@@ -401,19 +518,22 @@ impl Drop for McpConnectionManager {
 async fn spawn_client(
     server: &str,
     recipe: TransportRecipe,
-) -> Result<RunningService<RoleClient, ()>, RunnerError> {
+    handler: ProgressClient,
+) -> Result<RunningService<RoleClient, ProgressClient>, RunnerError> {
     match recipe {
-        TransportRecipe::Stdio(spec) => spawn_stdio_client(server, spec).await,
+        TransportRecipe::Stdio(spec) => spawn_stdio_client(server, spec, handler).await,
     }
 }
 
 async fn spawn_stdio_client(
     server: &str,
     spec: StdioTransportSpec,
-) -> Result<RunningService<RoleClient, ()>, RunnerError> {
+    handler: ProgressClient,
+) -> Result<RunningService<RoleClient, ProgressClient>, RunnerError> {
     let transport: TokioChildProcess = spawn_stdio_child(server, &spec)
         .map_err(|e| RunnerError::Mcp(format!("spawn `{}`: {e}", spec.program)))?;
-    ().serve(transport)
+    handler
+        .serve(transport)
         .await
         .map_err(|e| RunnerError::Mcp(format!("MCP handshake with `{server}` failed: {e}")))
 }
@@ -428,6 +548,31 @@ fn rmcp_tool_to_dto(tool: rmcp::model::Tool) -> McpTool {
         description: tool.description.map(|c| c.into_owned()),
         input_schema,
     }
+}
+
+fn progress_event_to_json(params: &ProgressNotificationParam) -> Value {
+    let token = match &params.progress_token.0 {
+        NumberOrString::String(s) => Value::String(s.to_string()),
+        NumberOrString::Number(n) => Value::Number((*n).into()),
+    };
+    let mut obj = Map::new();
+    obj.insert("kind".into(), Value::String("mcp/progress".into()));
+    obj.insert("progressToken".into(), token);
+    obj.insert(
+        "progress".into(),
+        serde_json::Number::from_f64(params.progress)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+    );
+    if let Some(total) = params.total {
+        if let Some(n) = serde_json::Number::from_f64(total) {
+            obj.insert("total".into(), Value::Number(n));
+        }
+    }
+    if let Some(message) = params.message.as_ref() {
+        obj.insert("message".into(), Value::String(message.clone()));
+    }
+    Value::Object(obj)
 }
 
 fn rmcp_resource_to_dto(server: &str, resource: rmcp::model::Resource) -> McpResourceRecord {

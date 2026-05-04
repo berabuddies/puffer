@@ -451,14 +451,12 @@ impl ToolRunner for LocalToolRunner {
         server: &str,
         tool: &str,
         args: serde_json::Value,
-        _sink: &mut dyn ChunkSink,
+        sink: &mut dyn ChunkSink,
     ) -> Result<McpResult, RunnerError> {
-        // Today's `McpHost` returns the final `McpResult` synchronously
-        // because the only built-in transport is the filesystem stub, which
-        // has no incremental output. Streaming partial chunks via `sink` is
-        // wired through to the trait so a real subprocess client can grow
-        // here without touching the gRPC contract.
-        self.mcp_host.call_tool(server, tool, args)
+        // The connection manager routes any `notifications/progress` events
+        // emitted by the underlying MCP server into `sink.event(...)` so
+        // long-running tools can stream partial state to the model.
+        self.mcp_host.call_tool(server, tool, args, sink)
     }
     fn list_mcp_resources(
         &self,

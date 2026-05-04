@@ -3,11 +3,12 @@
 //! `tools/call` round-trips, crash recovery via the bounded-retry budget,
 //! and the fast-fail path when the configured binary cannot start.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use puffer_core::runner_adapter::LocalToolRunner;
 use puffer_resources::McpServerSpec;
-use puffer_runner_api::{NullChunkSink, RunnerError, ToolRunner};
+use puffer_runner_api::{ChunkSink, McpResourceContentPart, NullChunkSink, RunnerError, ToolRunner};
 use serde_json::json;
 
 const STUB_BIN: &str = env!("CARGO_BIN_EXE_puffer-mcp-stub-server");
@@ -186,4 +187,114 @@ fn is_pid_alive(pid: u32) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+#[test]
+fn list_resources_returns_stub_resources() {
+    let runner = LocalToolRunner::new()
+        .with_mcp_servers(manifest_with_marker("stub", "puffer-mcp-stub-resources-list"));
+    let records = runner
+        .list_mcp_resources(Some("stub"))
+        .expect("list resources");
+    let uris: Vec<_> = records.iter().map(|r| r.uri.as_str()).collect();
+    assert!(uris.contains(&"stub://hello.txt"), "got {uris:?}");
+    assert!(uris.contains(&"stub://binary.bin"), "got {uris:?}");
+    for record in &records {
+        assert_eq!(record.server, "stub");
+    }
+}
+
+#[test]
+fn read_resource_returns_text_and_blob() {
+    let runner = LocalToolRunner::new()
+        .with_mcp_servers(manifest_with_marker("stub", "puffer-mcp-stub-resources-read"));
+    let text = runner
+        .read_mcp_resource("stub", "stub://hello.txt")
+        .expect("read text");
+    match text.parts.first() {
+        Some(McpResourceContentPart::Text { text, mime_type, .. }) => {
+            assert_eq!(text, "hello from stub");
+            assert_eq!(mime_type.as_deref(), Some("text/plain"));
+        }
+        other => panic!("expected text content, got {other:?}"),
+    }
+
+    let blob = runner
+        .read_mcp_resource("stub", "stub://binary.bin")
+        .expect("read blob");
+    match blob.parts.first() {
+        Some(McpResourceContentPart::Blob { bytes, mime_type, .. }) => {
+            assert_eq!(bytes, &vec![0xde, 0xad, 0xbe]);
+            assert_eq!(mime_type.as_deref(), Some("application/octet-stream"));
+        }
+        other => panic!("expected blob content, got {other:?}"),
+    }
+}
+
+#[test]
+fn list_prompts_returns_stub_prompt() {
+    let runner = LocalToolRunner::new()
+        .with_mcp_servers(manifest_with_marker("stub", "puffer-mcp-stub-prompts-list"));
+    let prompts = runner.list_mcp_prompts("stub").expect("list prompts");
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts[0].name, "greet");
+    assert_eq!(prompts[0].arguments.len(), 1);
+    assert_eq!(prompts[0].arguments[0].name, "name");
+    assert!(prompts[0].arguments[0].required);
+}
+
+#[test]
+fn get_prompt_returns_message() {
+    let runner = LocalToolRunner::new()
+        .with_mcp_servers(manifest_with_marker("stub", "puffer-mcp-stub-prompts-get"));
+    let content = runner
+        .get_mcp_prompt("stub", "greet", json!({ "name": "puffer" }))
+        .expect("get prompt");
+    assert_eq!(content.server, "stub");
+    assert_eq!(content.name, "greet");
+    assert_eq!(content.messages.len(), 1);
+    assert_eq!(content.messages[0].role, "user");
+    assert_eq!(content.messages[0].text, "Hello, puffer!");
+}
+
+/// `ChunkSink` that records every `event` call so the test can assert at
+/// least one `notifications/progress` made it through to the sink.
+#[derive(Default, Clone)]
+struct RecordingSink {
+    events: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+
+impl ChunkSink for RecordingSink {
+    fn stdout(&mut self, _chunk: &[u8]) {}
+    fn stderr(&mut self, _chunk: &[u8]) {}
+    fn event(&mut self, event: serde_json::Value) {
+        self.events.lock().unwrap().push(event);
+    }
+}
+
+#[test]
+fn tools_call_emits_progress_through_sink() {
+    let runner = LocalToolRunner::new()
+        .with_mcp_servers(manifest_with_marker("stub", "puffer-mcp-stub-progress"));
+    let sink = RecordingSink::default();
+    let events_handle = sink.events.clone();
+    let mut sink = sink;
+    let result = runner
+        .call_mcp_tool(
+            "stub",
+            "slow_with_progress",
+            json!({ "text": "progress payload", "delay_ms": 30 }),
+            &mut sink,
+        )
+        .expect("slow_with_progress");
+    assert!(result.success);
+    assert_eq!(result.stdout, "progress payload");
+    let events = events_handle.lock().unwrap();
+    assert!(
+        !events.is_empty(),
+        "expected at least one progress event, got none"
+    );
+    for event in events.iter() {
+        assert_eq!(event.get("kind").and_then(|v| v.as_str()), Some("mcp/progress"));
+    }
 }
