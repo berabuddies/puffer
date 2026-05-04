@@ -26,17 +26,20 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use puffer_runner_api::{
-    ChunkSink, McpPrompt, McpPromptArgument, McpPromptContent, McpPromptMessage, McpResourceContent,
-    McpResourceContentPart, McpResourceRecord, McpResult, McpTool, RunnerError,
+    ChunkSink, DeclineAllElicitations, ElicitationHandler, ElicitationMode, ElicitationRequest,
+    ElicitationResponse, McpPrompt, McpPromptArgument, McpPromptContent, McpPromptMessage,
+    McpResourceContent, McpResourceContentPart, McpResourceRecord, McpResult, McpTool, RunnerError,
 };
 use rmcp::handler::client::ClientHandler;
 use rmcp::model::{
-    CallToolRequest, CallToolRequestParams, ClientRequest, GetPromptRequestParams, JsonObject,
-    NumberOrString, ProgressNotificationParam, ProgressToken, PromptMessage, PromptMessageContent,
-    PromptMessageRole, RawContent, ReadResourceRequestParams, ResourceContents, ServerResult,
+    CallToolRequest, CallToolRequestParams, ClientRequest, CreateElicitationRequestParams,
+    CreateElicitationResult, ElicitationAction, ErrorData as McpError, GetPromptRequestParams,
+    JsonObject, NumberOrString, ProgressNotificationParam, ProgressToken, PromptMessage,
+    PromptMessageContent, PromptMessageRole, RawContent, ReadResourceRequestParams,
+    ResourceContents, ServerResult,
 };
 use rmcp::service::{
-    NotificationContext, PeerRequestOptions, RoleClient, RunningService, ServiceExt,
+    NotificationContext, PeerRequestOptions, RequestContext, RoleClient, RunningService, ServiceExt,
 };
 use rmcp::transport::child_process::TokioChildProcess;
 use serde_json::{Map, Value};
@@ -69,21 +72,43 @@ impl ConnectionEntry {
 }
 
 /// In-flight `tools/call` invocations indexed by their `progressToken` so
-/// the global [`ProgressClient`] handler can route incoming
+/// the global [`McpClientHandler`] handler can route incoming
 /// `notifications/progress` events back to the right call's sink.
 type ProgressRegistry = Arc<Mutex<HashMap<String, UnboundedSender<ProgressNotificationParam>>>>;
 
-/// Custom rmcp client handler that owns a progress-token registry. The
-/// connection manager registers an `mpsc::Sender` for each in-flight
-/// `tools/call`; this handler delivers matching `notifications/progress`
-/// events to the call's sink without coupling rmcp's transport layer to
-/// puffer's `ChunkSink` trait.
-#[derive(Clone, Default, Debug)]
-struct ProgressClient {
+/// Server identifier captured at handshake-time so client-handler callbacks
+/// (which only see the rmcp `Peer`) can attribute incoming server requests
+/// back to the originating MCP server.
+type ServerLabel = Arc<str>;
+
+/// Custom rmcp client handler that owns a progress-token registry plus an
+/// elicitation responder. The connection manager registers an
+/// `mpsc::Sender` for each in-flight `tools/call`; this handler delivers
+/// matching `notifications/progress` events to the call's sink without
+/// coupling rmcp's transport layer to puffer's `ChunkSink` trait, and
+/// fields server-initiated `elicitation/create` requests by delegating to
+/// the configured [`ElicitationHandler`].
+#[derive(Clone, Debug)]
+struct McpClientHandler {
+    /// MCP server label, set when the handler is built for a specific
+    /// connection. Empty for the default constructor (used only when no
+    /// server context is available — e.g. in unit tests).
+    server: ServerLabel,
     progress: ProgressRegistry,
+    elicitation: Arc<dyn ElicitationHandler>,
 }
 
-impl ClientHandler for ProgressClient {
+impl Default for McpClientHandler {
+    fn default() -> Self {
+        Self {
+            server: Arc::from(""),
+            progress: Arc::new(Mutex::new(HashMap::new())),
+            elicitation: Arc::new(DeclineAllElicitations),
+        }
+    }
+}
+
+impl ClientHandler for McpClientHandler {
     async fn on_progress(
         &self,
         params: ProgressNotificationParam,
@@ -97,6 +122,74 @@ impl ClientHandler for ProgressClient {
         if let Some(sender) = sender {
             let _ = sender.send(params);
         }
+    }
+
+    async fn create_elicitation(
+        &self,
+        request: CreateElicitationRequestParams,
+        _context: RequestContext<RoleClient>,
+    ) -> Result<CreateElicitationResult, McpError> {
+        let dto = elicitation_request_to_dto(&self.server, request);
+        let handler = Arc::clone(&self.elicitation);
+        // The handler is sync and may block (UI prompt, channel wait, etc.)
+        // — run it on the blocking pool so we don't stall the rmcp tokio
+        // worker for the duration of the user's response.
+        let response = tokio::task::spawn_blocking(move || handler.elicit(dto))
+            .await
+            .map_err(|e| McpError::internal_error(format!("elicitation handler join: {e}"), None))?;
+        Ok(elicitation_response_to_rmcp(response))
+    }
+}
+
+fn elicitation_request_to_dto(
+    server: &str,
+    params: CreateElicitationRequestParams,
+) -> ElicitationRequest {
+    match params {
+        CreateElicitationRequestParams::FormElicitationParams {
+            message,
+            requested_schema,
+            ..
+        } => ElicitationRequest {
+            server: server.to_string(),
+            tool: String::new(),
+            message,
+            mode: ElicitationMode::Form,
+            schema: serde_json::to_value(&requested_schema).unwrap_or(Value::Null),
+            url: None,
+            elicitation_id: None,
+        },
+        CreateElicitationRequestParams::UrlElicitationParams {
+            message,
+            url,
+            elicitation_id,
+            ..
+        } => ElicitationRequest {
+            server: server.to_string(),
+            tool: String::new(),
+            message,
+            mode: ElicitationMode::Url,
+            schema: Value::Null,
+            url: Some(url),
+            elicitation_id: Some(elicitation_id),
+        },
+    }
+}
+
+fn elicitation_response_to_rmcp(response: ElicitationResponse) -> CreateElicitationResult {
+    match response {
+        ElicitationResponse::Accept { content } => CreateElicitationResult {
+            action: ElicitationAction::Accept,
+            content: Some(content),
+        },
+        ElicitationResponse::Decline => CreateElicitationResult {
+            action: ElicitationAction::Decline,
+            content: None,
+        },
+        ElicitationResponse::Cancel => CreateElicitationResult {
+            action: ElicitationAction::Cancel,
+            content: None,
+        },
     }
 }
 
@@ -112,10 +205,10 @@ struct ServerSlot {
     recipe: TransportRecipe,
     /// Currently live rmcp client, if any. Stored as a fresh handle each
     /// time we (re)connect; `Drop` of the client triggers child shutdown.
-    client: Option<Arc<RunningService<RoleClient, ProgressClient>>>,
+    client: Option<Arc<RunningService<RoleClient, McpClientHandler>>>,
     /// Recent launch attempts, used for the bounded-retry budget.
     failure_history: Vec<Instant>,
-    /// Shared progress registry, cloned into each [`ProgressClient`] handler
+    /// Shared progress registry, cloned into each [`McpClientHandler`] handler
     /// so the connection manager can route progress notifications back to
     /// in-flight `tools/call` invocations on this server.
     progress: ProgressRegistry,
@@ -149,6 +242,11 @@ pub struct McpConnectionManager {
     /// Configured servers. Cloned once at construction; subsequent edits go
     /// through `with_servers` (used only by tests).
     servers: HashMap<String, Mutex<ServerSlot>>,
+    /// Strategy for fielding server-initiated `elicitation/create` requests
+    /// (shared across all configured MCP servers). Defaults to
+    /// [`DeclineAllElicitations`]; the runner sets a real handler via
+    /// [`McpConnectionManager::with_elicitation_handler`].
+    elicitation: Arc<dyn ElicitationHandler>,
     /// Lazy tokio runtime that owns every running rmcp client. Reused across
     /// calls so each `block_on` is just a context switch, not a runtime
     /// spin-up. Held in an `Arc` so `Drop` can move it onto a background
@@ -161,6 +259,7 @@ impl std::fmt::Debug for McpConnectionManager {
         let ids: Vec<&String> = self.servers.keys().collect();
         f.debug_struct("McpConnectionManager")
             .field("servers", &ids)
+            .field("elicitation", &self.elicitation)
             .finish()
     }
 }
@@ -169,6 +268,7 @@ impl Default for McpConnectionManager {
     fn default() -> Self {
         Self {
             servers: HashMap::new(),
+            elicitation: Arc::new(DeclineAllElicitations),
             runtime: OnceLock::new(),
         }
     }
@@ -191,8 +291,18 @@ impl McpConnectionManager {
         }
         Self {
             servers,
+            elicitation: Arc::new(DeclineAllElicitations),
             runtime: OnceLock::new(),
         }
+    }
+
+    /// Replaces the elicitation handler used for every subsequent rmcp
+    /// connection. Existing live connections keep the handler that was
+    /// active when they were spawned — callers that need to swap mid-flight
+    /// should drop the manager and rebuild it.
+    pub fn with_elicitation_handler(mut self, handler: Arc<dyn ElicitationHandler>) -> Self {
+        self.elicitation = handler;
+        self
     }
 
     /// Returns true when the manager has any subprocess-style MCP server
@@ -413,7 +523,7 @@ impl McpConnectionManager {
         runtime: &Runtime,
     ) -> Result<
         (
-            Arc<RunningService<RoleClient, ProgressClient>>,
+            Arc<RunningService<RoleClient, McpClientHandler>>,
             ProgressRegistry,
         ),
         RunnerError,
@@ -450,8 +560,10 @@ impl McpConnectionManager {
         }
 
         let recipe = guard.recipe.clone();
-        let handler = ProgressClient {
+        let handler = McpClientHandler {
+            server: Arc::from(server.to_string().as_str()),
             progress: Arc::clone(&guard.progress),
+            elicitation: Arc::clone(&self.elicitation),
         };
         match runtime.block_on(spawn_client(server, recipe, handler)) {
             Ok(client) => {
@@ -489,7 +601,7 @@ impl Drop for McpConnectionManager {
         let Some(runtime) = self.runtime.take() else {
             return;
         };
-        let mut clients: Vec<Arc<RunningService<RoleClient, ProgressClient>>> = Vec::new();
+        let mut clients: Vec<Arc<RunningService<RoleClient, McpClientHandler>>> = Vec::new();
         for (_id, slot) in self.servers.drain() {
             if let Ok(mut slot) = slot.into_inner() {
                 if let Some(client) = slot.client.take() {
@@ -518,8 +630,8 @@ impl Drop for McpConnectionManager {
 async fn spawn_client(
     server: &str,
     recipe: TransportRecipe,
-    handler: ProgressClient,
-) -> Result<RunningService<RoleClient, ProgressClient>, RunnerError> {
+    handler: McpClientHandler,
+) -> Result<RunningService<RoleClient, McpClientHandler>, RunnerError> {
     match recipe {
         TransportRecipe::Stdio(spec) => spawn_stdio_client(server, spec, handler).await,
     }
@@ -528,8 +640,8 @@ async fn spawn_client(
 async fn spawn_stdio_client(
     server: &str,
     spec: StdioTransportSpec,
-    handler: ProgressClient,
-) -> Result<RunningService<RoleClient, ProgressClient>, RunnerError> {
+    handler: McpClientHandler,
+) -> Result<RunningService<RoleClient, McpClientHandler>, RunnerError> {
     let transport: TokioChildProcess = spawn_stdio_child(server, &spec)
         .map_err(|e| RunnerError::Mcp(format!("spawn `{}`: {e}", spec.program)))?;
     handler

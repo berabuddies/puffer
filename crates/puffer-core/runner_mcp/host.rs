@@ -18,8 +18,9 @@
 use anyhow::Context;
 use puffer_resources::McpServerSpec;
 use puffer_runner_api::{
-    ChunkSink, McpPrompt, McpPromptContent, McpResourceContent, McpResourceContentPart,
-    McpResourceRecord, McpResult, McpServerInfo, McpTool, RunnerError,
+    ChunkSink, DeclineAllElicitations, ElicitationHandler, McpPrompt, McpPromptContent,
+    McpResourceContent, McpResourceContentPart, McpResourceRecord, McpResult, McpServerInfo,
+    McpTool, RunnerError,
 };
 use serde_json::Value;
 use std::fs;
@@ -30,24 +31,75 @@ use super::connection_manager::{entry_from_spec, McpConnectionManager};
 
 /// Owns the MCP server roster and any live transports the runner needs to
 /// satisfy `ToolRunner`'s 7 MCP methods.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct McpHost {
     servers: Vec<McpServerSpec>,
     workspace_root: Option<PathBuf>,
     connections: Arc<McpConnectionManager>,
+    /// Strategy for fielding server-initiated `elicitation/create` requests.
+    /// Cloned into the connection manager when the host (re)builds it; kept
+    /// here so callers can swap it via [`McpHost::with_elicitation_handler`]
+    /// without losing the configured server roster.
+    elicitation: Arc<dyn ElicitationHandler>,
+}
+
+impl Default for McpHost {
+    fn default() -> Self {
+        Self {
+            servers: Vec::new(),
+            workspace_root: None,
+            connections: Arc::new(McpConnectionManager::default()),
+            elicitation: Arc::new(DeclineAllElicitations),
+        }
+    }
 }
 
 impl McpHost {
     /// Builds a host from a list of MCP manifests plus the optional workspace
     /// root used by the built-in `filesystem` server.
     pub fn new(servers: Vec<McpServerSpec>, workspace_root: Option<PathBuf>) -> Self {
+        Self::with_elicitation(servers, workspace_root, Arc::new(DeclineAllElicitations))
+    }
+
+    /// Like [`McpHost::new`] but installs a custom elicitation handler on
+    /// the underlying connection manager.
+    pub fn with_elicitation(
+        servers: Vec<McpServerSpec>,
+        workspace_root: Option<PathBuf>,
+        elicitation: Arc<dyn ElicitationHandler>,
+    ) -> Self {
         let entries = servers.iter().filter_map(entry_from_spec);
-        let connections = Arc::new(McpConnectionManager::with_servers(entries));
+        let connections = Arc::new(
+            McpConnectionManager::with_servers(entries)
+                .with_elicitation_handler(Arc::clone(&elicitation)),
+        );
         Self {
             servers,
             workspace_root,
             connections,
+            elicitation,
         }
+    }
+
+    /// Returns the elicitation handler currently associated with this host.
+    /// Used by `LocalToolRunner` when it needs to rebuild the host with a
+    /// different workspace root or server roster while keeping the same
+    /// handler.
+    pub fn elicitation_handler(&self) -> Arc<dyn ElicitationHandler> {
+        Arc::clone(&self.elicitation)
+    }
+
+    /// Replaces the elicitation handler. Re-builds the underlying connection
+    /// manager so future connections pick up the new handler; existing live
+    /// connections keep the old one (drop the host to reset them).
+    pub fn with_elicitation_handler(mut self, handler: Arc<dyn ElicitationHandler>) -> Self {
+        let entries = self.servers.iter().filter_map(entry_from_spec);
+        self.connections = Arc::new(
+            McpConnectionManager::with_servers(entries)
+                .with_elicitation_handler(Arc::clone(&handler)),
+        );
+        self.elicitation = handler;
+        self
     }
 
     /// Returns the configured MCP servers as runner-shaped DTOs.

@@ -9,13 +9,14 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use puffer_runner_api::{
-    ChunkSink, DirEntry, McpPrompt, McpPromptContent, McpResourceContent, McpResourceRecord,
-    McpResult, McpServerInfo, McpTool, ReadStateUpdate, RunnerCapabilities, RunnerError,
-    RunnerPing, ToolRequest, ToolResult, ToolRunner,
+    ChunkSink, DirEntry, ElicitationHandler, McpPrompt, McpPromptContent, McpResourceContent,
+    McpResourceRecord, McpResult, McpServerInfo, McpTool, ReadStateUpdate, RunnerCapabilities,
+    RunnerError, RunnerPing, ToolRequest, ToolResult, ToolRunner,
 };
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Instant, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -310,7 +311,8 @@ impl LocalToolRunner {
             .workspace_root()
             .map(Path::to_path_buf)
             .or_else(|| self.sandbox_roots.first().cloned());
-        self.mcp_host = McpHost::new(servers, workspace);
+        let handler = self.mcp_host.elicitation_handler();
+        self.mcp_host = McpHost::with_elicitation(servers, workspace, handler);
         self
     }
 
@@ -318,8 +320,17 @@ impl LocalToolRunner {
     /// only the filesystem stub). Mostly useful when the sandbox roots are
     /// disjoint from the MCP workspace.
     pub fn with_mcp_workspace_root(mut self, workspace: PathBuf) -> Self {
+        let handler = self.mcp_host.elicitation_handler();
         let servers = self.mcp_host.into_servers();
-        self.mcp_host = McpHost::new(servers, Some(workspace));
+        self.mcp_host = McpHost::with_elicitation(servers, Some(workspace), handler);
+        self
+    }
+
+    /// Installs an elicitation handler that the connection manager will
+    /// invoke whenever an MCP server sends `elicitation/create` mid-tool-call.
+    /// Defaults to [`puffer_runner_api::DeclineAllElicitations`].
+    pub fn with_elicitation_handler(mut self, handler: Arc<dyn ElicitationHandler>) -> Self {
+        self.mcp_host = self.mcp_host.with_elicitation_handler(handler);
         self
     }
 
