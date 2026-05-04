@@ -19,6 +19,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::benchmark_reflection::benchmark_reflection_config;
+use crate::runner_selection::select_tool_runner;
 
 const APP_NAME: &str = "puffer-code";
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -40,7 +41,9 @@ When a file's contents look unexpected, inspect it with a low-level tool before 
 $USING_YOUR_TOOLS
 
 $ENVIRONMENT"#;
-const BENCHMARK_ALLOWED_TOOL_IDS: &[&str] = &["Bash", "Edit", "Glob", "Grep", "Read", "Write"];
+const BENCHMARK_ALLOWED_TOOL_IDS: &[&str] = &[
+    "Bash", "Edit", "Glob", "Grep", "Read", "Write", "WebSearch", "WebFetch",
+];
 
 /// Carries CLI inputs for one unattended benchmark execution.
 #[derive(Debug, Clone)]
@@ -152,6 +155,13 @@ pub(crate) fn run_benchmark_command(
     state.fast_mode = args.fast;
     state.sandbox_mode = "danger-full-access".to_string();
     state.working_dirs = benchmark_working_dirs(&state.cwd);
+
+    // Hydrate the runner from `config.remote_runner` (if set) or from a
+    // local `LocalToolRunner` populated with the workspace's MCP server
+    // manifest. Without this the agent loop runs against the empty
+    // default `LocalToolRunner::new()` and never sees `mcp__*` tools.
+    let runner = select_tool_runner(config, &benchmark_resources, cwd.to_path_buf());
+    state = state.with_tool_runner(runner);
 
     // Create a session store under ~/.puffer/sessions (not project dir).
     let home_puffer = std::env::var("HOME")
