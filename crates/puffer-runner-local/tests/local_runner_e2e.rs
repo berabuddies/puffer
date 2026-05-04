@@ -280,13 +280,25 @@ fn call_mcp_tool_is_unsupported_until_real_client_lands() {
 }
 
 #[test]
-fn list_mcp_resources_walks_filesystem_and_includes_manifest() {
+fn list_mcp_resources_walks_filesystem_workspace() {
+    // Subprocess MCP servers now route through the connection manager and
+    // answer their own resources, so this test scope is just the built-in
+    // filesystem walker. The cross-backend tests in `puffer-runner-grpc`
+    // exercise the real subprocess path against `puffer-mcp-stub-server`.
     let temp = tempdir().unwrap();
     fs::write(temp.path().join("guide.md"), "# Guide\n").unwrap();
     fs::create_dir_all(temp.path().join("nested")).unwrap();
     fs::write(temp.path().join("nested/hello.txt"), "hi").unwrap();
+    let manifest = vec![McpServerSpec {
+        id: "filesystem".into(),
+        display_name: "Filesystem".into(),
+        transport: "stdio".into(),
+        endpoint: String::new(),
+        target: "builtin:filesystem".into(),
+        description: "Workspace filesystem stub".into(),
+    }];
     let runner = LocalToolRunner::new()
-        .with_mcp_servers(fixture_manifest())
+        .with_mcp_servers(manifest)
         .with_mcp_workspace_root(temp.path().to_path_buf());
     let records = runner.list_mcp_resources(None).unwrap();
     assert!(records
@@ -295,9 +307,6 @@ fn list_mcp_resources_walks_filesystem_and_includes_manifest() {
     assert!(records
         .iter()
         .any(|r| r.uri == "mcp://filesystem/nested/hello.txt"));
-    assert!(records
-        .iter()
-        .any(|r| r.uri == "mcp://manifest/docs" && r.server == "docs"));
 }
 
 #[test]

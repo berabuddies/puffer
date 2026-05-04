@@ -313,13 +313,12 @@ fn cross_backend_equivalence() {
     drop(server);
 }
 
-/// Drives the seven MCP RPCs through both backends. Each runner is
-/// configured with the same MCP manifest (one filesystem stub + one
-/// manifest server) and the test asserts the local and remote outputs
-/// stay structurally equivalent — list_servers / list_resources /
-/// read_resource for both manifest and live transports, plus the
-/// uniform Unsupported reply for tool / prompt RPCs that the runner
-/// hasn't grown yet.
+/// Drives the MCP RPCs that target the built-in `filesystem` transport
+/// through both backends. The filesystem stub still walks the workspace
+/// root in-process, so its outputs must stay structurally equivalent
+/// across `LocalToolRunner` and `RemoteToolRunner`. Tools / prompts
+/// remain `Unsupported` for the filesystem stub itself; subprocess MCP
+/// servers are exercised separately by `cross_backend_real_mcp_*`.
 #[test]
 fn cross_backend_mcp_equivalence() {
     use puffer_resources::McpServerSpec;
@@ -332,24 +331,14 @@ fn cross_backend_mcp_equivalence() {
     std::fs::write(remote_workspace.path().join("data.bin"), [0xfe_u8, 0xed]).unwrap();
 
     let manifest = || -> Vec<McpServerSpec> {
-        vec![
-            McpServerSpec {
-                id: "filesystem".into(),
-                display_name: "Filesystem".into(),
-                transport: "stdio".into(),
-                endpoint: String::new(),
-                target: "builtin:filesystem".into(),
-                description: "Workspace filesystem stub".into(),
-            },
-            McpServerSpec {
-                id: "docs".into(),
-                display_name: "Docs".into(),
-                transport: "stdio".into(),
-                endpoint: String::new(),
-                target: "docs-server".into(),
-                description: "Static manifest entry".into(),
-            },
-        ]
+        vec![McpServerSpec {
+            id: "filesystem".into(),
+            display_name: "Filesystem".into(),
+            transport: "stdio".into(),
+            endpoint: String::new(),
+            target: "builtin:filesystem".into(),
+            description: "Workspace filesystem stub".into(),
+        }]
     };
 
     let local_runner = LocalToolRunner::new()
@@ -368,20 +357,18 @@ fn cross_backend_mcp_equivalence() {
     // 1. list_mcp_servers — equal modulo ordering.
     let local_servers = local_runner.list_mcp_servers().expect("local servers");
     let remote_servers = remote.list_mcp_servers().expect("remote servers");
-    assert_eq!(local_servers.len(), 2);
+    assert_eq!(local_servers.len(), 1);
     assert_eq!(local_servers.len(), remote_servers.len());
     let local_ids: Vec<_> = local_servers.iter().map(|s| s.id.clone()).collect();
     let remote_ids: Vec<_> = remote_servers.iter().map(|s| s.id.clone()).collect();
     assert_eq!(local_ids, remote_ids);
 
-    // 2. list_mcp_resources — workspace walk for filesystem + manifest URI for docs.
+    // 2. list_mcp_resources walks the filesystem stub's workspace root.
     let local_resources = local_runner.list_mcp_resources(None).expect("local resources");
     let remote_resources = remote.list_mcp_resources(None).expect("remote resources");
     assert_eq!(local_resources.len(), remote_resources.len());
     assert!(local_resources.iter().any(|r| r.uri == "mcp://filesystem/hello.md"));
     assert!(remote_resources.iter().any(|r| r.uri == "mcp://filesystem/hello.md"));
-    assert!(local_resources.iter().any(|r| r.uri == "mcp://manifest/docs"));
-    assert!(remote_resources.iter().any(|r| r.uri == "mcp://manifest/docs"));
 
     // 3. list_mcp_resources filtered by server.
     let local_filtered = local_runner
@@ -425,17 +412,8 @@ fn cross_backend_mcp_equivalence() {
         other => panic!("expected blob/blob, got {other:?}"),
     }
 
-    // 6. read_mcp_resource — manifest server returns YAML payload.
-    let local_manifest = local_runner
-        .read_mcp_resource("docs", "mcp://manifest/docs")
-        .expect("local manifest");
-    let remote_manifest = remote
-        .read_mcp_resource("docs", "mcp://manifest/docs")
-        .expect("remote manifest");
-    assert_eq!(local_manifest.parts.len(), remote_manifest.parts.len());
-
-    // 7. tools / prompts surface a deterministic Unsupported on both
-    //    backends until a real subprocess MCP client lands.
+    // 6. tools / prompts on the built-in filesystem stub still surface a
+    //    deterministic Unsupported on both backends.
     let local_tools = local_runner.list_mcp_tools("filesystem").unwrap_err();
     let remote_tools = remote.list_mcp_tools("filesystem").unwrap_err();
     assert!(matches!(local_tools, RunnerError::Unsupported(_)));
@@ -474,7 +452,7 @@ fn cross_backend_mcp_equivalence() {
     assert!(matches!(local_get, RunnerError::Unsupported(_)));
     assert!(matches!(remote_get, RunnerError::Unsupported(_)));
 
-    // 8. Unknown server is reported as NotFound, not Unsupported.
+    // 7. Unknown server is reported as NotFound, not Unsupported.
     let unknown_local = local_runner.list_mcp_tools("missing").unwrap_err();
     let unknown_remote = remote.list_mcp_tools("missing").unwrap_err();
     assert!(matches!(unknown_local, RunnerError::NotFound(_)));
@@ -584,6 +562,171 @@ fn cross_backend_real_mcp_tools() {
         .expect("remote slow_echo");
     assert_eq!(local_slow.stdout, remote_slow.stdout);
     assert_eq!(local_slow.stdout, "delayed");
+
+    drop(remote);
+    drop(server);
+}
+
+/// Drives `resources/list`, `resources/read` (text + blob),
+/// `prompts/list`, and `prompts/get` through both backends against the
+/// real `puffer-mcp-stub-server`. Asserts byte-equal results between the
+/// in-process and gRPC paths.
+#[test]
+fn cross_backend_real_mcp_resources_and_prompts() {
+    use puffer_resources::McpServerSpec;
+
+    let stub_bin = locate_stub_binary();
+    let manifest = || -> Vec<McpServerSpec> {
+        vec![McpServerSpec {
+            id: "stub".into(),
+            display_name: "Stub".into(),
+            transport: "stdio".into(),
+            endpoint: String::new(),
+            target: format!(
+                "'{}' --marker puffer-mcp-grpc-cross-backend-resources",
+                stub_bin.display()
+            ),
+            description: "Integration-test stub MCP server".into(),
+        }]
+    };
+
+    let local_runner = LocalToolRunner::new().with_mcp_servers(manifest());
+    let server_runner: Arc<dyn ToolRunner> = Arc::new(LocalToolRunner::new().with_mcp_servers(manifest()));
+    let server = spawn_server(server_runner);
+    let remote = RemoteToolRunner::connect(&server.endpoint, Some(TEST_TOKEN))
+        .expect("connect remote runner");
+
+    // resources/list — same URIs, names, mime types in the same order.
+    let local_resources = local_runner.list_mcp_resources(Some("stub")).expect("local list_resources");
+    let remote_resources = remote.list_mcp_resources(Some("stub")).expect("remote list_resources");
+    let local_uris: Vec<_> = local_resources.iter().map(|r| r.uri.clone()).collect();
+    let remote_uris: Vec<_> = remote_resources.iter().map(|r| r.uri.clone()).collect();
+    assert_eq!(local_uris, remote_uris);
+    assert!(local_uris.contains(&"stub://hello.txt".to_string()));
+    assert!(local_uris.contains(&"stub://binary.bin".to_string()));
+
+    // resources/read text — payload byte-equal across backends.
+    let local_text = local_runner
+        .read_mcp_resource("stub", "stub://hello.txt")
+        .expect("local read text");
+    let remote_text = remote
+        .read_mcp_resource("stub", "stub://hello.txt")
+        .expect("remote read text");
+    match (local_text.parts.first(), remote_text.parts.first()) {
+        (
+            Some(McpResourceContentPart::Text { text: l, .. }),
+            Some(McpResourceContentPart::Text { text: r, .. }),
+        ) => {
+            assert_eq!(l, r);
+            assert_eq!(l, "hello from stub");
+        }
+        other => panic!("expected text/text parts, got {other:?}"),
+    }
+
+    // resources/read blob — bytes byte-equal across backends.
+    let local_blob = local_runner
+        .read_mcp_resource("stub", "stub://binary.bin")
+        .expect("local read blob");
+    let remote_blob = remote
+        .read_mcp_resource("stub", "stub://binary.bin")
+        .expect("remote read blob");
+    match (local_blob.parts.first(), remote_blob.parts.first()) {
+        (
+            Some(McpResourceContentPart::Blob { bytes: l, .. }),
+            Some(McpResourceContentPart::Blob { bytes: r, .. }),
+        ) => {
+            assert_eq!(l, r);
+            assert_eq!(l, &vec![0xde, 0xad, 0xbe]);
+        }
+        other => panic!("expected blob/blob parts, got {other:?}"),
+    }
+
+    // prompts/list — same prompt names + arguments.
+    let local_prompts = local_runner.list_mcp_prompts("stub").expect("local list_prompts");
+    let remote_prompts = remote.list_mcp_prompts("stub").expect("remote list_prompts");
+    let local_names: Vec<_> = local_prompts.iter().map(|p| p.name.clone()).collect();
+    let remote_names: Vec<_> = remote_prompts.iter().map(|p| p.name.clone()).collect();
+    assert_eq!(local_names, remote_names);
+    assert_eq!(local_names, vec!["greet".to_string()]);
+
+    // prompts/get — rendered text identical across backends.
+    let local_get = local_runner
+        .get_mcp_prompt("stub", "greet", serde_json::json!({"name": "remote"}))
+        .expect("local get_prompt");
+    let remote_get = remote
+        .get_mcp_prompt("stub", "greet", serde_json::json!({"name": "remote"}))
+        .expect("remote get_prompt");
+    assert_eq!(local_get.messages.len(), remote_get.messages.len());
+    assert_eq!(local_get.messages[0].text, remote_get.messages[0].text);
+    assert_eq!(local_get.messages[0].text, "Hello, remote!");
+    assert_eq!(local_get.messages[0].role, remote_get.messages[0].role);
+
+    drop(remote);
+    drop(server);
+}
+
+/// Recording sink used by the cross-backend progress test below. Keeps
+/// every `event` call so the assertion can confirm the gRPC server-side
+/// bridge forwarded `notifications/progress` envelopes through the
+/// streaming response.
+#[derive(Default, Clone)]
+struct GrpcRecordingSink {
+    events: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+
+impl ChunkSink for GrpcRecordingSink {
+    fn stdout(&mut self, _chunk: &[u8]) {}
+    fn stderr(&mut self, _chunk: &[u8]) {}
+    fn event(&mut self, event: serde_json::Value) {
+        self.events.lock().unwrap().push(event);
+    }
+}
+
+#[test]
+fn cross_backend_progress_notifications_round_trip() {
+    use puffer_resources::McpServerSpec;
+
+    let stub_bin = locate_stub_binary();
+    let manifest = || -> Vec<McpServerSpec> {
+        vec![McpServerSpec {
+            id: "stub".into(),
+            display_name: "Stub".into(),
+            transport: "stdio".into(),
+            endpoint: String::new(),
+            target: format!(
+                "'{}' --marker puffer-mcp-grpc-cross-backend-progress",
+                stub_bin.display()
+            ),
+            description: "Integration-test stub MCP server".into(),
+        }]
+    };
+
+    let server_runner: Arc<dyn ToolRunner> = Arc::new(LocalToolRunner::new().with_mcp_servers(manifest()));
+    let server = spawn_server(server_runner);
+    let remote = RemoteToolRunner::connect(&server.endpoint, Some(TEST_TOKEN))
+        .expect("connect remote runner");
+
+    let sink = GrpcRecordingSink::default();
+    let events_handle = sink.events.clone();
+    let mut sink = sink;
+    let result = remote
+        .call_mcp_tool(
+            "stub",
+            "slow_with_progress",
+            serde_json::json!({"text": "remote-progress", "delay_ms": 25}),
+            &mut sink,
+        )
+        .expect("slow_with_progress");
+    assert!(result.success);
+    assert_eq!(result.stdout, "remote-progress");
+    let events = events_handle.lock().unwrap();
+    assert!(
+        !events.is_empty(),
+        "expected at least one progress event over gRPC, got none"
+    );
+    for event in events.iter() {
+        assert_eq!(event.get("kind").and_then(|v| v.as_str()), Some("mcp/progress"));
+    }
 
     drop(remote);
     drop(server);

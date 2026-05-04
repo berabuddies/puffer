@@ -375,6 +375,11 @@ impl ToolRunner for RemoteToolRunner {
                     Some(proto::mcp_tool_event::Payload::Failed(f)) => {
                         return Err(runner_error_from_code(&f.code, f.message));
                     }
+                    Some(proto::mcp_tool_event::Payload::EventJson(json)) => {
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) {
+                            sink.event(value);
+                        }
+                    }
                     None => {}
                 }
             }

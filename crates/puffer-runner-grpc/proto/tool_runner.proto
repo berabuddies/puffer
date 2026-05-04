@@ -157,6 +157,12 @@ message McpToolEvent {
     StreamChunk stderr = 2;
     McpToolResult completed = 3;
     ToolFailed failed = 4;
+    // JSON-encoded event from `ChunkSink::event` — e.g. an MCP
+    // `notifications/progress` envelope minted by the connection
+    // manager. The shape is `{kind: "mcp/progress", progressToken,
+    // progress, total?, message?}` for progress; future event kinds
+    // may share this channel as long as they fit a single JSON value.
+    string event_json = 5;
   }
 }
 

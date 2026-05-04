@@ -11,9 +11,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use puffer_runner_api::{
-    ChunkKind, ChunkSink, FnChunkSink, NullChunkSink, RunnerError, ToolRunner,
-};
+use puffer_runner_api::{ChunkKind, ChunkSink, FnChunkSink, RunnerError, ToolRunner};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -237,9 +235,11 @@ impl proto::tool_runner_server::ToolRunner for ToolRunnerService {
         let runner = self.runner.clone();
         let tx_blocking = tx.clone();
         tokio::task::spawn_blocking(move || {
-            let mut sink = NullChunkSink;
-            // We don't yet stream stdout/stderr from MCP through the wire; the
-            // server-side runner provides it inside the final `McpResult`.
+            let mut sink = McpChannelChunkSink::new(tx_blocking.clone());
+            // The connection manager streams `notifications/progress`
+            // events through `sink.event(...)`; stdout/stderr aren't used
+            // by today's stdio MCP servers but the bridge forwards them
+            // for free if a future server starts emitting them.
             match runner.call_mcp_tool(&inner.server, &inner.tool, args, &mut sink) {
                 Ok(result) => {
                     let _ = tx_blocking.blocking_send(Ok(proto::McpToolEvent {
@@ -383,6 +383,42 @@ impl ChunkSink for ChannelChunkSink {
     }
     fn stderr(&mut self, chunk: &[u8]) {
         self.send_chunk(ChunkKind::Stderr, chunk);
+    }
+}
+
+/// Bridge from `ChunkSink` to the gRPC `McpToolEvent` stream. Forwards
+/// stdout/stderr writes as `StreamChunk` payloads and `ChunkSink::event`
+/// JSON values as `event_json` payloads (today the only producer is the
+/// connection manager's progress wiring).
+struct McpChannelChunkSink {
+    tx: mpsc::Sender<Result<proto::McpToolEvent, Status>>,
+}
+
+impl McpChannelChunkSink {
+    fn new(tx: mpsc::Sender<Result<proto::McpToolEvent, Status>>) -> Self {
+        Self { tx }
+    }
+}
+
+impl ChunkSink for McpChannelChunkSink {
+    fn stdout(&mut self, chunk: &[u8]) {
+        let _ = self.tx.blocking_send(Ok(proto::McpToolEvent {
+            payload: Some(proto::mcp_tool_event::Payload::Stdout(proto::StreamChunk {
+                data: chunk.to_vec(),
+            })),
+        }));
+    }
+    fn stderr(&mut self, chunk: &[u8]) {
+        let _ = self.tx.blocking_send(Ok(proto::McpToolEvent {
+            payload: Some(proto::mcp_tool_event::Payload::Stderr(proto::StreamChunk {
+                data: chunk.to_vec(),
+            })),
+        }));
+    }
+    fn event(&mut self, event: serde_json::Value) {
+        let _ = self.tx.blocking_send(Ok(proto::McpToolEvent {
+            payload: Some(proto::mcp_tool_event::Payload::EventJson(event.to_string())),
+        }));
     }
 }
 
