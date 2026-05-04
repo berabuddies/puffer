@@ -484,6 +484,111 @@ fn cross_backend_mcp_equivalence() {
     drop(server);
 }
 
+/// Locates `puffer-mcp-stub-server` next to the running test binary. Cargo
+/// only exposes `CARGO_BIN_EXE_*` to integration tests inside the package
+/// that owns the bin (i.e. `puffer-core`), so this peer crate has to walk
+/// `current_exe` up to the build dir manually — and invoke cargo to build
+/// the bin if it doesn't already exist (typical on a clean checkout).
+fn locate_stub_binary() -> std::path::PathBuf {
+    let exe = std::env::current_exe().expect("current_exe");
+    let mut dir = exe.parent().expect("test bin parent").to_path_buf();
+    let bin_name = if cfg!(windows) {
+        "puffer-mcp-stub-server.exe"
+    } else {
+        "puffer-mcp-stub-server"
+    };
+    // `current_exe` is `<target>/<profile>/deps/grpc_e2e-XXX`; the stub
+    // lives one directory up at `<target>/<profile>/puffer-mcp-stub-server`.
+    if dir.file_name().and_then(|s| s.to_str()) == Some("deps") {
+        dir.pop();
+    }
+    let candidate = dir.join(bin_name);
+    if !candidate.exists() {
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        let status = std::process::Command::new(cargo)
+            .args(["build", "-p", "puffer-core", "--bin", "puffer-mcp-stub-server"])
+            .status()
+            .expect("build puffer-mcp-stub-server");
+        assert!(status.success(), "cargo build of stub bin failed");
+    }
+    assert!(
+        candidate.exists(),
+        "stub binary missing at {} after build attempt",
+        candidate.display()
+    );
+    candidate
+}
+
+/// Drives `tools/list` and `tools/call` through both backends against the
+/// real `puffer-mcp-stub-server` binary and asserts the results round-trip
+/// byte-equal between local and remote.
+#[test]
+fn cross_backend_real_mcp_tools() {
+    use puffer_resources::McpServerSpec;
+
+    let stub_bin = locate_stub_binary();
+    let manifest = || -> Vec<McpServerSpec> {
+        vec![McpServerSpec {
+            id: "stub".into(),
+            display_name: "Stub".into(),
+            transport: "stdio".into(),
+            endpoint: String::new(),
+            target: format!("'{}' --marker puffer-mcp-grpc-cross-backend", stub_bin.display()),
+            description: "Integration-test stub MCP server".into(),
+        }]
+    };
+
+    let local_runner = LocalToolRunner::new().with_mcp_servers(manifest());
+    let server_runner: Arc<dyn ToolRunner> = Arc::new(LocalToolRunner::new().with_mcp_servers(manifest()));
+    let server = spawn_server(server_runner);
+    let remote = RemoteToolRunner::connect(&server.endpoint, Some(TEST_TOKEN))
+        .expect("connect remote runner");
+
+    // tools/list — both backends agree on names and order.
+    let local_tools = local_runner.list_mcp_tools("stub").expect("local tools");
+    let remote_tools = remote.list_mcp_tools("stub").expect("remote tools");
+    let local_names: Vec<_> = local_tools.iter().map(|t| t.name.clone()).collect();
+    let remote_names: Vec<_> = remote_tools.iter().map(|t| t.name.clone()).collect();
+    assert_eq!(local_names, remote_names);
+    assert!(local_names.contains(&"echo".to_string()));
+    assert!(local_names.contains(&"slow_echo".to_string()));
+
+    // tools/call echo — byte-equal payloads.
+    let mut sink = NullChunkSink;
+    let local_echo = local_runner
+        .call_mcp_tool("stub", "echo", serde_json::json!({"text": "ping"}), &mut sink)
+        .expect("local echo");
+    let remote_echo = remote
+        .call_mcp_tool("stub", "echo", serde_json::json!({"text": "ping"}), &mut sink)
+        .expect("remote echo");
+    assert_eq!(local_echo.success, remote_echo.success);
+    assert_eq!(local_echo.stdout, remote_echo.stdout);
+    assert_eq!(local_echo.stdout, "ping");
+
+    // tools/call slow_echo — same equivalence with a small delay.
+    let local_slow = local_runner
+        .call_mcp_tool(
+            "stub",
+            "slow_echo",
+            serde_json::json!({"text": "delayed", "delay_ms": 30}),
+            &mut sink,
+        )
+        .expect("local slow_echo");
+    let remote_slow = remote
+        .call_mcp_tool(
+            "stub",
+            "slow_echo",
+            serde_json::json!({"text": "delayed", "delay_ms": 30}),
+            &mut sink,
+        )
+        .expect("remote slow_echo");
+    assert_eq!(local_slow.stdout, remote_slow.stdout);
+    assert_eq!(local_slow.stdout, "delayed");
+
+    drop(remote);
+    drop(server);
+}
+
 #[test]
 fn execute_tool_streams_chunks_when_runner_emits_them() {
     // Smoke: even if the underlying LocalToolRunner doesn't currently push
