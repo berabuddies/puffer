@@ -166,11 +166,26 @@ fn is_native_openai_web_search(definition: &ToolDefinition) -> bool {
     definition.handler == "provider:web_search"
 }
 
-/// Builds the minimal native OpenAI Responses `web_search` tool entry.
-/// Mirrors codex's `ToolSpec::WebSearch` minimal form — only `type` is
-/// emitted; filters / user_location / external_web_access stay unset
-/// so the platform applies its defaults.
+/// Builds the native OpenAI Responses `web_search` tool entry.
+///
+/// Mirrors codex's `create_web_search_tool` shape: `external_web_access`
+/// must be set to a boolean (`true` for live, `false` for cached). The
+/// bare `{"type": "web_search"}` form documented by OpenAI is not actually
+/// accepted by the Responses API — codex carries a long-standing TODO
+/// about this in `tools/src/tool_spec.rs`. Default to live access so
+/// gpt-5/4-mini and friends actually invoke the tool; flip to cached via
+/// `PUFFER_OPENAI_WEB_SEARCH_MODE=cached`.
 fn native_openai_web_search_tool() -> OpenAIResponsesTool {
+    let external_web_access = match std::env::var("PUFFER_OPENAI_WEB_SEARCH_MODE")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("cached") => Some(false),
+        _ => Some(true),
+    };
     OpenAIResponsesTool {
         kind: "web_search".to_string(),
         name: String::new(),
@@ -179,7 +194,7 @@ fn native_openai_web_search_tool() -> OpenAIResponsesTool {
         parameters: Value::Null,
         filters: None,
         user_location: None,
-        external_web_access: None,
+        external_web_access,
     }
 }
 
@@ -614,13 +629,18 @@ mod tests {
         let _guard = crate::test_locks::env_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let prev = std::env::var_os("PUFFER_OPENAI_NATIVE_WEB_SEARCH");
+        let prev_native = std::env::var_os("PUFFER_OPENAI_NATIVE_WEB_SEARCH");
+        let prev_mode = std::env::var_os("PUFFER_OPENAI_WEB_SEARCH_MODE");
         std::env::remove_var("PUFFER_OPENAI_NATIVE_WEB_SEARCH");
+        std::env::remove_var("PUFFER_OPENAI_WEB_SEARCH_MODE");
         let registry =
             ToolRegistry::from_definitions(vec![web_search_tool_definition("provider:web_search")]);
         let tools = openai_tool_definitions(&registry, None, false).unwrap();
-        if let Some(value) = prev {
+        if let Some(value) = prev_native {
             std::env::set_var("PUFFER_OPENAI_NATIVE_WEB_SEARCH", value);
+        }
+        if let Some(value) = prev_mode {
+            std::env::set_var("PUFFER_OPENAI_WEB_SEARCH_MODE", value);
         }
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].kind, "web_search");
@@ -628,7 +648,36 @@ mod tests {
         assert!(tools[0].description.is_empty());
         assert!(tools[0].parameters.is_null());
         let serialized = serde_json::to_value(&tools[0]).unwrap();
-        assert_eq!(serialized, json!({ "type": "web_search" }));
+        assert_eq!(
+            serialized,
+            json!({ "type": "web_search", "external_web_access": true })
+        );
+    }
+
+    #[test]
+    fn web_search_mode_env_switches_external_access() {
+        let _guard = crate::test_locks::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let prev_native = std::env::var_os("PUFFER_OPENAI_NATIVE_WEB_SEARCH");
+        let prev_mode = std::env::var_os("PUFFER_OPENAI_WEB_SEARCH_MODE");
+        std::env::remove_var("PUFFER_OPENAI_NATIVE_WEB_SEARCH");
+        std::env::set_var("PUFFER_OPENAI_WEB_SEARCH_MODE", "cached");
+        let registry =
+            ToolRegistry::from_definitions(vec![web_search_tool_definition("provider:web_search")]);
+        let tools = openai_tool_definitions(&registry, None, false).unwrap();
+        if let Some(value) = prev_native {
+            std::env::set_var("PUFFER_OPENAI_NATIVE_WEB_SEARCH", value);
+        }
+        match prev_mode {
+            Some(value) => std::env::set_var("PUFFER_OPENAI_WEB_SEARCH_MODE", value),
+            None => std::env::remove_var("PUFFER_OPENAI_WEB_SEARCH_MODE"),
+        }
+        let serialized = serde_json::to_value(&tools[0]).unwrap();
+        assert_eq!(
+            serialized,
+            json!({ "type": "web_search", "external_web_access": false })
+        );
     }
 
     #[test]
