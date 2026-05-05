@@ -11,15 +11,32 @@ use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
 const MAX_INLINE_DROPDOWN_ROWS: usize = 8;
+/// Hard cap on how tall the input prompt is allowed to grow when the user
+/// inserts newlines or pastes are inserted verbatim. Beyond this the prompt
+/// is rendered with an internal scroll so the rest of the UI stays visible.
+const MAX_PROMPT_LINES: u16 = 6;
+
+/// Returns the number of display rows the prompt needs to show `input` —
+/// one per `\n`-delimited line, capped at [`MAX_PROMPT_LINES`].
+pub(super) fn prompt_line_count(input: &str) -> u16 {
+    let logical_lines = input.matches('\n').count().saturating_add(1) as u16;
+    logical_lines.clamp(1, MAX_PROMPT_LINES)
+}
 
 /// Returns the footer height required for the composer and any attached dropdown.
-pub(super) fn composer_area_height(help_active: bool, dropdown_height: u16) -> u16 {
+pub(super) fn composer_area_height(
+    help_active: bool,
+    dropdown_height: u16,
+    prompt_lines: u16,
+) -> u16 {
+    let prompt_lines = prompt_lines.max(1);
+    // 1 row of separator + the prompt lines + (dropdown rows OR a hint row).
     if dropdown_height > 0 {
-        2 + dropdown_height
+        1 + prompt_lines + dropdown_height
     } else if help_active {
-        2
+        1 + prompt_lines
     } else {
-        3
+        1 + prompt_lines + 1
     }
 }
 

@@ -70,6 +70,21 @@ pub(crate) struct TuiState {
     pub(crate) last_ctrl_c: Option<std::time::Instant>,
     /// Transient hint shown in the status bar (auto-clears after 2s).
     pub(crate) status_hint: Option<(String, std::time::Instant)>,
+    /// Pasted-text placeholders displayed in `input`, paired with their full
+    /// content. Expanded back into the prompt when the user submits.
+    pub(crate) pending_pastes: Vec<(String, String)>,
+    /// Counter used to generate `[Pasted text #N ...]` placeholder ids.
+    pub(crate) next_paste_id: usize,
+    /// Recently submitted or cleared prompts, oldest first. Recalled with
+    /// the Up/Down arrow keys when the input is empty or currently being
+    /// navigated.
+    pub(crate) history: VecDeque<String>,
+    /// Index into `history` while the user is navigating it. `None` means
+    /// the user is editing fresh input and not browsing history.
+    pub(crate) history_cursor: Option<usize>,
+    /// Snapshot of the user's in-progress input at the moment they started
+    /// navigating history, restored when they move past the newest entry.
+    pub(crate) history_draft: Option<String>,
 }
 
 /// Carries one completed background provider turn back to the UI thread.
@@ -140,9 +155,22 @@ impl Default for TuiState {
             active_loop: None,
             last_ctrl_c: None,
             status_hint: None,
+            pending_pastes: Vec::new(),
+            next_paste_id: 1,
+            history: VecDeque::new(),
+            history_cursor: None,
+            history_draft: None,
         }
     }
 }
+
+/// Threshold above which a paste is replaced with a `[Pasted text #N ...]`
+/// placeholder instead of being inserted directly. Multi-line pastes are
+/// always replaced regardless of length.
+pub(crate) const PASTE_PLACEHOLDER_CHAR_THRESHOLD: usize = 200;
+
+/// Maximum number of prompts retained for Up/Down recall.
+pub(crate) const MAX_INPUT_HISTORY: usize = 200;
 
 impl TuiState {
     /// Returns true if this Ctrl+C should exit (second press within 2s).
@@ -180,6 +208,7 @@ impl TuiState {
         self.input.clear();
         self.cursor = 0;
         self.slash_selection = 0;
+        self.pending_pastes.clear();
         self.sync(commands);
     }
 
@@ -205,14 +234,83 @@ impl TuiState {
 
     /// Inserts one character into the prompt and refreshes slash suggestions.
     pub(crate) fn insert_char(&mut self, ch: char, commands: &[CommandSpec]) {
+        self.exit_history_navigation();
         self.input.insert(self.cursor, ch);
         self.cursor += ch.len_utf8();
         self.sync(commands);
     }
 
-    /// Removes the character immediately before the cursor.
+    /// Inserts a literal newline at the cursor (Shift+Enter / Alt+Enter / Ctrl+J).
+    pub(crate) fn insert_newline(&mut self, commands: &[CommandSpec]) {
+        self.insert_char('\n', commands);
+    }
+
+    /// Inserts a verbatim string (typically from a non-placeholder paste).
+    pub(crate) fn insert_str(&mut self, text: &str, commands: &[CommandSpec]) {
+        self.exit_history_navigation();
+        self.input.insert_str(self.cursor, text);
+        self.cursor += text.len();
+        self.sync(commands);
+    }
+
+    /// Handles a bracketed paste: inserts a placeholder for multi-line or
+    /// long pastes and stashes the original for expansion at submit time.
+    /// Short single-line pastes are inserted verbatim.
+    pub(crate) fn handle_paste(&mut self, raw: &str, commands: &[CommandSpec]) {
+        // Many terminals deliver paste newlines as `\r` or `\r\n`; normalize.
+        let pasted = raw.replace("\r\n", "\n").replace('\r', "\n");
+        let multiline = pasted.contains('\n');
+        let char_count = pasted.chars().count();
+        if !multiline && char_count <= PASTE_PLACEHOLDER_CHAR_THRESHOLD {
+            self.insert_str(&pasted, commands);
+            return;
+        }
+        let line_count = pasted.matches('\n').count() + 1;
+        let placeholder = self.allocate_paste_placeholder(line_count);
+        self.pending_pastes
+            .push((placeholder.clone(), pasted.clone()));
+        self.insert_str(&placeholder, commands);
+    }
+
+    fn allocate_paste_placeholder(&mut self, line_count: usize) -> String {
+        let id = self.next_paste_id;
+        self.next_paste_id = self.next_paste_id.saturating_add(1);
+        if line_count > 1 {
+            format!("[Pasted text #{id} +{line_count} lines]")
+        } else {
+            format!("[Pasted text #{id}]")
+        }
+    }
+
+    /// Replaces every `[Pasted text #N ...]` placeholder in `text` with its
+    /// stored content, returning the expanded prompt.
+    pub(crate) fn expand_paste_placeholders(&self, text: &str) -> String {
+        if self.pending_pastes.is_empty() || text.is_empty() {
+            return text.to_string();
+        }
+        let mut expanded = text.to_string();
+        for (placeholder, content) in &self.pending_pastes {
+            if expanded.contains(placeholder) {
+                expanded = expanded.replace(placeholder, content);
+            }
+        }
+        expanded
+    }
+
+    /// Removes the character immediately before the cursor. If the cursor is
+    /// at the end of a `[Pasted text #N ...]` placeholder, removes the entire
+    /// placeholder and drops its stored content.
     pub(crate) fn backspace(&mut self, commands: &[CommandSpec]) {
         if self.cursor == 0 {
+            return;
+        }
+        self.exit_history_navigation();
+        if let Some((start, placeholder)) = self.paste_placeholder_ending_at(self.cursor) {
+            self.input.drain(start..self.cursor);
+            self.cursor = start;
+            self.pending_pastes
+                .retain(|(name, _)| *name != placeholder);
+            self.sync(commands);
             return;
         }
         let start = previous_boundary(&self.input, self.cursor);
@@ -221,11 +319,25 @@ impl TuiState {
         self.sync(commands);
     }
 
+    /// Returns `(start_byte, placeholder)` when `end_byte` is the closing
+    /// boundary of a tracked paste placeholder.
+    fn paste_placeholder_ending_at(&self, end: usize) -> Option<(usize, String)> {
+        let prefix = self.input.get(..end)?;
+        for (placeholder, _) in &self.pending_pastes {
+            if prefix.ends_with(placeholder) {
+                let start = end - placeholder.len();
+                return Some((start, placeholder.clone()));
+            }
+        }
+        None
+    }
+
     /// Removes the character immediately after the cursor.
     pub(crate) fn delete(&mut self, commands: &[CommandSpec]) {
         if self.cursor >= self.input.len() {
             return;
         }
+        self.exit_history_navigation();
         let end = next_boundary(&self.input, self.cursor);
         self.input.drain(self.cursor..end);
         self.sync(commands);
@@ -283,11 +395,109 @@ impl TuiState {
         self.apply_selected_command(commands)
     }
 
-    /// Takes the current input and resets the prompt buffer.
+    /// Takes the current input, expanding any `[Pasted text #N]` placeholders
+    /// back to their full content, and resets the prompt buffer. The expanded
+    /// prompt is also recorded in the recall history so the user can press
+    /// Up to bring it back later.
     pub(crate) fn take_input(&mut self) -> String {
         self.cursor = 0;
         self.slash_selection = 0;
-        std::mem::take(&mut self.input)
+        self.exit_history_navigation();
+        let raw = std::mem::take(&mut self.input);
+        let expanded = self.expand_paste_placeholders(&raw);
+        self.pending_pastes.clear();
+        self.push_history(&expanded);
+        expanded
+    }
+
+    /// Clears the current input and stores it in history so the user can
+    /// press Up to recall it. Returns `true` when something was cleared, so
+    /// callers (e.g., the Ctrl+C handler) can suppress the secondary
+    /// "press again to exit" behavior on this keystroke.
+    pub(crate) fn clear_input_to_history(&mut self, commands: &[CommandSpec]) -> bool {
+        if self.input.is_empty() && self.pending_pastes.is_empty() {
+            return false;
+        }
+        let raw = std::mem::take(&mut self.input);
+        let expanded = self.expand_paste_placeholders(&raw);
+        self.pending_pastes.clear();
+        self.cursor = 0;
+        self.slash_selection = 0;
+        self.exit_history_navigation();
+        self.push_history(&expanded);
+        self.sync(commands);
+        true
+    }
+
+    /// Pushes one entry onto the recall history, deduplicating against the
+    /// most recent entry and trimming the queue to [`MAX_INPUT_HISTORY`].
+    pub(crate) fn push_history(&mut self, entry: &str) {
+        if entry.trim().is_empty() {
+            return;
+        }
+        if self.history.back().map(String::as_str) == Some(entry) {
+            return;
+        }
+        self.history.push_back(entry.to_string());
+        while self.history.len() > MAX_INPUT_HISTORY {
+            self.history.pop_front();
+        }
+    }
+
+    /// Returns true when the user is currently navigating recall history.
+    pub(crate) fn is_navigating_history(&self) -> bool {
+        self.history_cursor.is_some()
+    }
+
+    /// Loads the previous (older) history entry into the input. Returns
+    /// `false` when there is nothing to recall.
+    pub(crate) fn history_recall_prev(&mut self, commands: &[CommandSpec]) -> bool {
+        if self.history.is_empty() {
+            return false;
+        }
+        let next_index = match self.history_cursor {
+            None => {
+                self.history_draft = Some(self.input.clone());
+                self.history.len() - 1
+            }
+            Some(0) => return true,
+            Some(idx) => idx - 1,
+        };
+        self.history_cursor = Some(next_index);
+        self.input = self.history[next_index].clone();
+        self.cursor = self.input.len();
+        self.pending_pastes.clear();
+        self.sync(commands);
+        true
+    }
+
+    /// Loads the next (newer) history entry. Past the newest entry, the
+    /// pre-history draft is restored and history navigation ends. Returns
+    /// `false` when not currently navigating.
+    pub(crate) fn history_recall_next(&mut self, commands: &[CommandSpec]) -> bool {
+        let Some(idx) = self.history_cursor else {
+            return false;
+        };
+        if idx + 1 >= self.history.len() {
+            self.input = self.history_draft.take().unwrap_or_default();
+            self.cursor = self.input.len();
+            self.history_cursor = None;
+            self.pending_pastes.clear();
+            self.sync(commands);
+            return true;
+        }
+        let next = idx + 1;
+        self.history_cursor = Some(next);
+        self.input = self.history[next].clone();
+        self.cursor = self.input.len();
+        self.pending_pastes.clear();
+        self.sync(commands);
+        true
+    }
+
+    fn exit_history_navigation(&mut self) {
+        self.history_cursor = None;
+        self.history_draft = None;
     }
 
     /// Stores a prompt to submit after onboarding finishes.
@@ -1091,5 +1301,112 @@ mod tests {
         tui.scroll_down(1, 20, 5);
         assert!(tui.follow_output);
         assert_eq!(tui.scroll_offset, 15);
+    }
+
+    #[test]
+    fn handle_paste_replaces_multiline_with_placeholder() {
+        let mut tui = TuiState::default();
+        tui.handle_paste("line one\nline two\nline three", &[]);
+        assert_eq!(tui.input, "[Pasted text #1 +3 lines]");
+        assert_eq!(tui.pending_pastes.len(), 1);
+        let submitted = tui.take_input();
+        assert_eq!(submitted, "line one\nline two\nline three");
+        assert!(tui.input.is_empty());
+        assert!(tui.pending_pastes.is_empty());
+    }
+
+    #[test]
+    fn handle_paste_inserts_short_single_line_verbatim() {
+        let mut tui = TuiState::default();
+        tui.handle_paste("hello world", &[]);
+        assert_eq!(tui.input, "hello world");
+        assert!(tui.pending_pastes.is_empty());
+    }
+
+    #[test]
+    fn handle_paste_normalizes_carriage_returns() {
+        let mut tui = TuiState::default();
+        tui.handle_paste("a\r\nb\rc", &[]);
+        // \r\n -> \n, lone \r -> \n => "a\nb\nc" => 3 lines
+        let placeholder = tui.input.clone();
+        assert!(placeholder.starts_with("[Pasted text #1 +3 lines"));
+        assert_eq!(tui.expand_paste_placeholders(&placeholder), "a\nb\nc");
+    }
+
+    #[test]
+    fn backspace_at_end_of_placeholder_removes_whole_paste() {
+        let mut tui = TuiState::default();
+        tui.handle_paste("one\ntwo", &[]);
+        let len = tui.input.len();
+        tui.cursor = len;
+        tui.backspace(&[]);
+        assert!(tui.input.is_empty());
+        assert!(tui.pending_pastes.is_empty());
+    }
+
+    #[test]
+    fn insert_newline_grows_input() {
+        let mut tui = TuiState::default();
+        tui.insert_char('a', &[]);
+        tui.insert_newline(&[]);
+        tui.insert_char('b', &[]);
+        assert_eq!(tui.input, "a\nb");
+        assert_eq!(tui.cursor, 3);
+    }
+
+    #[test]
+    fn clear_input_to_history_records_and_recalls() {
+        let mut tui = TuiState::default();
+        tui.insert_char('h', &[]);
+        tui.insert_char('i', &[]);
+        assert!(tui.clear_input_to_history(&[]));
+        assert!(tui.input.is_empty());
+
+        // First Up press loads the most recent entry.
+        assert!(tui.history_recall_prev(&[]));
+        assert_eq!(tui.input, "hi");
+        assert_eq!(tui.cursor, 2);
+
+        // Down past the end restores the empty draft.
+        assert!(tui.history_recall_next(&[]));
+        assert!(tui.input.is_empty());
+        assert!(!tui.is_navigating_history());
+    }
+
+    #[test]
+    fn take_input_records_submission_in_history() {
+        let mut tui = TuiState::default();
+        tui.insert_char('y', &[]);
+        tui.insert_char('o', &[]);
+        let _ = tui.take_input();
+        assert_eq!(tui.history.back().map(String::as_str), Some("yo"));
+    }
+
+    #[test]
+    fn history_dedupes_consecutive_duplicates() {
+        let mut tui = TuiState::default();
+        tui.push_history("same");
+        tui.push_history("same");
+        tui.push_history("same");
+        assert_eq!(tui.history.len(), 1);
+    }
+
+    #[test]
+    fn editing_input_exits_history_navigation() {
+        let mut tui = TuiState::default();
+        tui.push_history("alpha");
+        tui.push_history("beta");
+        assert!(tui.history_recall_prev(&[]));
+        assert_eq!(tui.input, "beta");
+        tui.insert_char('!', &[]);
+        assert!(!tui.is_navigating_history());
+        assert_eq!(tui.input, "beta!");
+    }
+
+    #[test]
+    fn clear_input_skips_when_empty() {
+        let mut tui = TuiState::default();
+        assert!(!tui.clear_input_to_history(&[]));
+        assert!(tui.history.is_empty());
     }
 }

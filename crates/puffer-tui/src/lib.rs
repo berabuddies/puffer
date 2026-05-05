@@ -35,7 +35,9 @@ use app_helpers::{
     should_use_inline_viewport,
 };
 use crossterm::cursor::MoveTo;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, size as terminal_size, BeginSynchronizedUpdate, Clear,
@@ -105,6 +107,11 @@ pub fn run_app(
     } else {
         execute!(io::stdout(), EnterAlternateScreen)?;
     }
+    // Many terminals deliver multi-line pastes as a stream of typed chars
+    // (one Enter per newline) unless bracketed paste is enabled. Without this
+    // every line of the paste would submit on its own; with it we receive a
+    // single Event::Paste(String).
+    let _ = execute!(io::stdout(), EnableBracketedPaste);
     let mut tui = TuiState::default();
     initialize_top_panel_image_state();
     tui.defer_prompt(
@@ -301,6 +308,9 @@ pub fn run_app(
                         break;
                     }
                 }
+                Event::Paste(text) => {
+                    handle_paste_event(&text, &mut tui, &commands);
+                }
                 Event::Resize(_, _) => {}
                 _ => {}
             }
@@ -308,6 +318,7 @@ pub fn run_app(
     }
 
     let _ = shutdown_runtime_services();
+    let _ = execute!(terminal.backend_mut(), DisableBracketedPaste);
     disable_raw_mode()?;
     if !no_alt_screen {
         execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -372,6 +383,25 @@ fn sync_render_state(tui: &TuiState) {
     render::set_status_hint(tui.status_hint.clone());
 }
 
+/// Routes a bracketed-paste event into the active input. Multi-line or long
+/// pastes become `[Pasted text #N ...]` placeholders in the composer; short
+/// single-line pastes are inserted verbatim. Pastes that arrive while an
+/// overlay is collecting text (e.g. the API-key prompt) bypass placeholder
+/// logic and append the cleaned text to the overlay's own buffer. Pastes
+/// arriving while a picker overlay is open are dropped to avoid corrupting
+/// its filter state with multi-line content.
+fn handle_paste_event(text: &str, tui: &mut TuiState, commands: &[CommandSpec]) {
+    if let Some(overlay) = tui.overlay.as_mut() {
+        if overlay.accepts_text_input() {
+            for ch in text.chars().filter(|c| !c.is_control()) {
+                overlay.insert_char(ch);
+            }
+        }
+        return;
+    }
+    tui.handle_paste(text, commands);
+}
+
 fn handle_key(
     key: KeyEvent,
     state: &mut AppState,
@@ -415,6 +445,16 @@ fn handle_key(
                     std::time::Instant::now(),
                 ));
                 tui.last_ctrl_c = Some(std::time::Instant::now());
+            } else if tui.clear_input_to_history(commands) {
+                // Cleared a non-empty input. Record the keystroke as a
+                // recent Ctrl+C only enough to enable a follow-up press to
+                // exit, but reset the timer so a single Ctrl+C against
+                // text doesn't half-arm the exit.
+                tui.last_ctrl_c = None;
+                tui.status_hint = Some((
+                    "Cleared input · ↑ to recall".into(),
+                    std::time::Instant::now(),
+                ));
             } else if tui.should_exit_on_ctrl_c() {
                 state.should_exit = true;
                 return Ok(true);
@@ -455,6 +495,21 @@ fn handle_key(
         KeyCode::Up => {
             if tui.input.starts_with('/') {
                 tui.select_previous(commands)
+            } else if tui.input.is_empty() || tui.is_navigating_history() {
+                if !tui.history_recall_prev(commands) {
+                    let viewport = render::current_transcript_viewport();
+                    tui.scroll_up(
+                        1,
+                        render::transcript_line_count(
+                            state,
+                            resources,
+                            providers,
+                            auth_store,
+                            tui.has_pending_submit(),
+                        ),
+                        viewport.height,
+                    );
+                }
             } else {
                 let viewport = render::current_transcript_viewport();
                 tui.scroll_up(
@@ -473,6 +528,8 @@ fn handle_key(
         KeyCode::Down => {
             if tui.input.starts_with('/') {
                 tui.select_next(commands)
+            } else if tui.is_navigating_history() {
+                tui.history_recall_next(commands);
             } else {
                 let viewport = render::current_transcript_viewport();
                 tui.scroll_down(
@@ -532,6 +589,19 @@ fn handle_key(
         KeyCode::Delete => tui.delete(commands),
         KeyCode::Tab => {
             let _ = tui.apply_selected_command(commands);
+        }
+        // Insert a literal newline instead of submitting. Supports the three
+        // common terminal conventions: Shift+Enter (kitty/iTerm/etc.),
+        // Alt+Enter (most cross-platform), and Ctrl+J (which terminals send
+        // as a raw line feed).
+        KeyCode::Enter
+            if key.modifiers.contains(KeyModifiers::SHIFT)
+                || key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            tui.insert_newline(commands);
+        }
+        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            tui.insert_newline(commands);
         }
         KeyCode::Enter => {
             if tui.complete_on_enter(commands) {

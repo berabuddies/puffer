@@ -9,7 +9,8 @@ mod tool_messages;
 mod top_panel;
 use self::composer::{
     composer_area_height, inline_dropdown_height, overlay_prompt_cursor, overlay_prompt_input,
-    overlay_prompt_placeholder, overlay_renders_inline_dropdown, render_inline_dropdown,
+    overlay_prompt_placeholder, overlay_renders_inline_dropdown, prompt_line_count,
+    render_inline_dropdown,
 };
 use self::helpers::{help_pane_active, separator_line};
 #[cfg(test)]
@@ -136,7 +137,8 @@ pub(crate) fn desired_height(
         .is_some_and(|overlay| !overlay_renders_inline_dropdown(overlay));
     let dropdown_height =
         inline_dropdown_height(active_overlay.as_ref(), input, 0, commands, width);
-    let footer_height = composer_area_height(help_active, dropdown_height);
+    let prompt_lines = prompt_line_count(input);
+    let footer_height = composer_area_height(help_active, dropdown_height, prompt_lines);
     let loop_box_height =
         ACTIVE_LOOP_STATE.with(|value| loop_status::loop_status_height(&value.borrow()));
     let tool_registry = ToolRegistry::from_resources(resources);
@@ -219,7 +221,8 @@ pub(crate) fn render(
             format!("{padding}{text}{padding}")
         })
     });
-    let footer_height = composer_area_height(help_active, dropdown_height);
+    let prompt_lines = prompt_line_count(input);
+    let footer_height = composer_area_height(help_active, dropdown_height, prompt_lines);
     let body_min_height = 1;
     let loop_box_height =
         ACTIVE_LOOP_STATE.with(|value| loop_status::loop_status_height(&value.borrow()));
@@ -301,7 +304,7 @@ pub(crate) fn render(
         );
     }
 
-    let mut footer_constraints = vec![Constraint::Length(1), Constraint::Length(1)];
+    let mut footer_constraints = vec![Constraint::Length(1), Constraint::Length(prompt_lines)];
     if dropdown_height > 0 {
         footer_constraints.push(Constraint::Length(dropdown_height));
     } else if !help_active {
@@ -377,16 +380,22 @@ pub(crate) fn render(
             );
         }
     } else {
-        let prompt = if help_active && input.is_empty() {
-            Line::from("❯ /help")
+        let (prompt_text, cursor_row, cursor_col) = if help_active && input.is_empty() {
+            (Text::from(Line::from("❯ /help")), 0u16, "❯ /help".len() as u16)
         } else {
-            prompt_line(input)
+            multiline_prompt_text(input, cursor)
         };
-        frame.render_widget(Paragraph::new(prompt), prompt_row);
-        let display_cursor = input.get(..cursor).map_or(0, UnicodeWidthStr::width);
-        let max_cursor = usize::from(prompt_row.width.saturating_sub(3));
-        let cursor_x = prompt_row.x + 2 + display_cursor.min(max_cursor) as u16;
-        let cursor_y = prompt_row.y;
+        // When the input is taller than the prompt area, scroll so the cursor
+        // line stays visible.
+        let scroll = cursor_row.saturating_sub(prompt_lines.saturating_sub(1));
+        frame.render_widget(
+            Paragraph::new(prompt_text).scroll((scroll, 0)),
+            prompt_row,
+        );
+        let max_cursor = usize::from(prompt_row.width.saturating_sub(1));
+        let display_cursor = usize::from(cursor_col).min(max_cursor);
+        let cursor_x = prompt_row.x + display_cursor as u16;
+        let cursor_y = prompt_row.y + cursor_row.saturating_sub(scroll);
         let buf = frame.area();
         if cursor_x < buf.width && cursor_y < buf.height {
             frame.set_cursor_position((cursor_x, cursor_y));
@@ -668,18 +677,40 @@ fn pending_submit_lines(pending_submit: &PendingSubmitRenderState) -> Vec<Line<'
     lines
 }
 
-fn prompt_line(input: &str) -> Line<'static> {
+/// Renders the composer input as a possibly multi-line `Text`, and returns
+/// the cursor's row and column inside that rendered block. The first line is
+/// prefixed with `"❯ "`; continuation lines are indented two spaces so the
+/// text aligns under the prompt arrow.
+fn multiline_prompt_text(input: &str, cursor: usize) -> (Text<'static>, u16, u16) {
     if input.is_empty() {
-        Line::from(vec![
+        let line = Line::from(vec![
             Span::raw("❯ "),
             Span::styled(
                 "Review changes, ask a question, or type /",
                 Style::default().add_modifier(Modifier::DIM),
             ),
-        ])
-    } else {
-        Line::from(format!("❯ {input}"))
+        ]);
+        return (Text::from(line), 0, 2);
     }
+
+    let cursor = cursor.min(input.len());
+    let prefix = &input[..cursor];
+    let cursor_row = prefix.matches('\n').count() as u16;
+    let last_newline = prefix.rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+    let row_prefix = &prefix[last_newline..];
+    // Both the first line ("❯ ") and continuation lines ("  ") are 2 cols wide.
+    let cursor_col = (UnicodeWidthStr::width(row_prefix) + 2) as u16;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (idx, segment) in input.split('\n').enumerate() {
+        let body = segment.to_string();
+        if idx == 0 {
+            lines.push(Line::from(format!("❯ {body}")));
+        } else {
+            lines.push(Line::from(format!("  {body}")));
+        }
+    }
+    (Text::from(lines), cursor_row, cursor_col)
 }
 
 fn overlay_prompt_line(input: &str, placeholder: &str) -> Line<'static> {
