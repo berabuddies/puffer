@@ -124,7 +124,12 @@ fn main() -> Result<()> {
                 .collect::<indexmap::IndexMap<_, _>>(),
         );
     }
-    let _ = providers.discover_and_merge_all(&auth_store);
+    // Discovery: synchronously apply whatever the cache already knows, then
+    // probe stale providers on a detached thread so an unreachable endpoint
+    // (e.g. a slow custom `openai_base_url`) cannot delay startup. Newly
+    // discovered models become available on the next launch.
+    let stale_provider_ids = providers.apply_discovery_cache();
+    let _discovery_handle = providers.start_background_discovery(stale_provider_ids, &auth_store);
 
     // Boot background automation only for long-lived processes. Short CLI
     // commands like `workflow register` and `workflow ls` must not fire cron

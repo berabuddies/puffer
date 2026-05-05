@@ -119,76 +119,34 @@ impl ProviderRegistry {
             .find(|model| model.id == model_id)
     }
 
-    /// Discovers and merges runtime models for every provider that exposes discovery config.
+    /// Discovers and merges runtime models for every provider that exposes
+    /// discovery config.
     ///
-    /// Uses a disk cache (`~/.puffer/model_discovery_cache.json`) to avoid
-    /// redundant HTTP requests within a 1-hour window.  When the cache is stale
-    /// or missing, providers are discovered in parallel using thread::scope.
+    /// Uses the on-disk cache at `~/.puffer/model_discovery_cache.json` to
+    /// avoid redundant HTTP requests within [`CACHE_TTL_MS`]. Cached entries
+    /// are applied per-provider, so a single stale entry no longer forces a
+    /// fresh probe for everyone. Stale providers are discovered in parallel.
     pub fn discover_and_merge_all(&mut self, auth_store: &AuthStore) -> Result<()> {
-        let cache_path = discovery_cache_path();
-
-        // --- Try loading from cache first ---
-        if let Some(cache) = load_discovery_cache(&cache_path) {
-            let now_ms = current_time_ms();
-            let all_fresh = self.providers.values().all(|entry| {
-                let id = &entry.descriptor.id;
-                entry.descriptor.discovery.is_none()
-                    || cache
-                        .entries
-                        .get(id.as_str())
-                        .is_some_and(|e| now_ms.saturating_sub(e.cached_at_ms) < CACHE_TTL_MS)
-            });
-            if all_fresh {
-                for entry in self.providers.values_mut() {
-                    if let Some(cached) = cache.entries.get(entry.descriptor.id.as_str()) {
-                        merge_discovered_models(
-                            &mut entry.descriptor.models,
-                            cached.models.clone(),
-                        );
-                    }
-                }
-                return Ok(());
-            }
+        let stale_ids = self.apply_discovery_cache();
+        if stale_ids.is_empty() {
+            return Ok(());
         }
 
-        // --- Parallel discovery ---
-        let eligible: Vec<_> = self
-            .providers
-            .values()
-            .filter(|entry| entry.descriptor.discovery.is_some())
-            .filter(|entry| {
-                auth_store.get(entry.descriptor.id.as_str()).is_some()
-                    || is_local_url(&entry.descriptor.base_url)
-            })
-            .map(|entry| entry.descriptor.clone())
-            .collect();
+        let eligible = self.discovery_eligible(&stale_ids, auth_store);
+        if eligible.is_empty() {
+            return Ok(());
+        }
 
-        let results: Vec<(String, Result<Vec<ModelDescriptor>>)> = std::thread::scope(|s| {
-            let handles: Vec<_> = eligible
-                .iter()
-                .map(|provider| {
-                    let id = provider.id.clone();
-                    let client = ModelDiscoveryClient::new();
-                    s.spawn(move || {
-                        let models = client.discover_models(provider, auth_store);
-                        (id, models)
-                    })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .map(|h| h.join().expect("discovery thread panicked"))
-                .collect()
-        });
+        let results = run_parallel_discovery(&eligible, auth_store);
 
         let mut failures = Vec::new();
-        let mut cache_entries: HashMap<String, DiscoveryCacheEntry> = HashMap::new();
+        let mut cache_updates: HashMap<String, DiscoveryCacheEntry> = HashMap::new();
         let now_ms = current_time_ms();
 
         for (provider_id, result) in results {
             match result {
                 Ok(discovered) => {
-                    cache_entries.insert(
+                    cache_updates.insert(
                         provider_id.clone(),
                         DiscoveryCacheEntry {
                             models: discovered.clone(),
@@ -207,14 +165,8 @@ impl ProviderRegistry {
             }
         }
 
-        // --- Persist cache ---
-        if !cache_entries.is_empty() {
-            let _ = save_discovery_cache(
-                &cache_path,
-                &DiscoveryCache {
-                    entries: cache_entries,
-                },
-            );
+        if !cache_updates.is_empty() {
+            persist_cache_updates(&cache_updates);
         }
 
         if failures.is_empty() {
@@ -226,6 +178,91 @@ impl ProviderRegistry {
                 failures.join("; ")
             ))
         }
+    }
+
+    /// Applies any fresh entries from the on-disk discovery cache to the
+    /// registered providers and returns the ids of providers whose cache is
+    /// missing or stale. This is the synchronous, network-free piece of
+    /// discovery; combine with [`Self::start_background_discovery`] to keep
+    /// startup snappy.
+    pub fn apply_discovery_cache(&mut self) -> Vec<String> {
+        let cache = load_discovery_cache(&discovery_cache_path()).unwrap_or(DiscoveryCache {
+            entries: HashMap::new(),
+        });
+        let now_ms = current_time_ms();
+        let mut stale = Vec::new();
+        for entry in self.providers.values_mut() {
+            if entry.descriptor.discovery.is_none() {
+                continue;
+            }
+            let id = entry.descriptor.id.as_str();
+            match cache.entries.get(id) {
+                Some(cached) if now_ms.saturating_sub(cached.cached_at_ms) < CACHE_TTL_MS => {
+                    merge_discovered_models(
+                        &mut entry.descriptor.models,
+                        cached.models.clone(),
+                    );
+                }
+                _ => stale.push(entry.descriptor.id.clone()),
+            }
+        }
+        stale
+    }
+
+    /// Spawns a detached background thread that probes the listed providers
+    /// for fresh model lists and writes the results into the on-disk
+    /// discovery cache. The live registry is intentionally not mutated:
+    /// fresh models become visible on the next process launch (when
+    /// [`Self::apply_discovery_cache`] picks them up). Returns `None` when
+    /// there is nothing to refresh.
+    pub fn start_background_discovery(
+        &self,
+        provider_ids: Vec<String>,
+        auth_store: &AuthStore,
+    ) -> Option<std::thread::JoinHandle<()>> {
+        let eligible = self.discovery_eligible(&provider_ids, auth_store);
+        if eligible.is_empty() {
+            return None;
+        }
+        let auth = auth_store.clone();
+        Some(std::thread::spawn(move || {
+            let results = run_parallel_discovery(&eligible, &auth);
+            let now_ms = current_time_ms();
+            let mut cache_updates: HashMap<String, DiscoveryCacheEntry> = HashMap::new();
+            for (id, result) in results {
+                if let Ok(models) = result {
+                    cache_updates.insert(
+                        id,
+                        DiscoveryCacheEntry {
+                            models,
+                            cached_at_ms: now_ms,
+                        },
+                    );
+                }
+            }
+            if !cache_updates.is_empty() {
+                persist_cache_updates(&cache_updates);
+            }
+        }))
+    }
+
+    /// Filters `provider_ids` down to those that have discovery configured
+    /// and either credentials available or a localhost base URL.
+    fn discovery_eligible(
+        &self,
+        provider_ids: &[String],
+        auth_store: &AuthStore,
+    ) -> Vec<ProviderDescriptor> {
+        provider_ids
+            .iter()
+            .filter_map(|id| self.providers.get(id))
+            .filter(|entry| entry.descriptor.discovery.is_some())
+            .filter(|entry| {
+                auth_store.get(entry.descriptor.id.as_str()).is_some()
+                    || is_local_url(&entry.descriptor.base_url)
+            })
+            .map(|entry| entry.descriptor.clone())
+            .collect()
     }
 
     /// Discovers and merges runtime models for one provider when discovery is configured.
@@ -268,6 +305,45 @@ impl ProviderRegistry {
     }
 }
 
+/// Runs `discover_models` for every supplied provider in parallel and
+/// returns one entry per provider in input order.
+fn run_parallel_discovery(
+    eligible: &[ProviderDescriptor],
+    auth_store: &AuthStore,
+) -> Vec<(String, Result<Vec<ModelDescriptor>>)> {
+    std::thread::scope(|s| {
+        let handles: Vec<_> = eligible
+            .iter()
+            .map(|provider| {
+                let id = provider.id.clone();
+                let client = ModelDiscoveryClient::new();
+                s.spawn(move || {
+                    let models = client.discover_models(provider, auth_store);
+                    (id, models)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("discovery thread panicked"))
+            .collect()
+    })
+}
+
+/// Loads the on-disk cache, applies the supplied per-provider updates, and
+/// writes the merged result back. New keys are inserted, existing keys are
+/// replaced, and unrelated entries are preserved.
+fn persist_cache_updates(updates: &HashMap<String, DiscoveryCacheEntry>) {
+    let path = discovery_cache_path();
+    let mut cache = load_discovery_cache(&path).unwrap_or(DiscoveryCache {
+        entries: HashMap::new(),
+    });
+    for (id, entry) in updates {
+        cache.entries.insert(id.clone(), entry.clone());
+    }
+    let _ = save_discovery_cache(&path, &cache);
+}
+
 /// Cache TTL: 1 hour.
 const CACHE_TTL_MS: u64 = 3_600_000;
 
@@ -276,13 +352,20 @@ struct DiscoveryCache {
     entries: HashMap<String, DiscoveryCacheEntry>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct DiscoveryCacheEntry {
     models: Vec<ModelDescriptor>,
     cached_at_ms: u64,
 }
 
 fn discovery_cache_path() -> PathBuf {
+    // Tests (and tools that need an isolated cache) can override the
+    // location by setting `PUFFER_DISCOVERY_CACHE_PATH` to a writable file.
+    if let Ok(path) = std::env::var("PUFFER_DISCOVERY_CACHE_PATH") {
+        if !path.is_empty() {
+            return PathBuf::from(path);
+        }
+    }
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".puffer").join("model_discovery_cache.json")
 }
@@ -321,6 +404,39 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use tempfile::tempdir;
+
+    /// Process-global mutex serializing tests that mutate the
+    /// `PUFFER_DISCOVERY_CACHE_PATH` env var. Without this they race when
+    /// `cargo test` runs them on parallel threads.
+    fn cache_env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// RAII guard that holds the env-var lock for the test's lifetime and
+    /// unsets `PUFFER_DISCOVERY_CACHE_PATH` on drop so a panicking test does
+    /// not leak the override into other tests.
+    struct CacheEnvGuard {
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl CacheEnvGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let lock = cache_env_lock();
+            std::env::set_var("PUFFER_DISCOVERY_CACHE_PATH", path);
+            CacheEnvGuard { _lock: lock }
+        }
+    }
+
+    impl Drop for CacheEnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("PUFFER_DISCOVERY_CACHE_PATH");
+        }
+    }
 
     fn provider_descriptor() -> ProviderDescriptor {
         ProviderDescriptor {
@@ -516,6 +632,10 @@ mod tests {
 
     #[test]
     fn discover_and_merge_all_continues_after_provider_failure() {
+        let cache_dir = tempdir().expect("cache tempdir");
+        let cache_path = cache_dir.path().join("discovery.json");
+        let _cache_env = CacheEnvGuard::set(&cache_path);
+
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
         let address = listener.local_addr().expect("address");
         let server = thread::spawn(move || {
@@ -598,5 +718,108 @@ mod tests {
         assert!(openai.models.iter().any(|model| model.id == "gpt-5.4"));
 
         server.join().expect("server");
+    }
+
+    #[test]
+    fn apply_discovery_cache_serves_fresh_entries_and_marks_stale() {
+        let cache_dir = tempdir().expect("cache tempdir");
+        let cache_path = cache_dir.path().join("discovery.json");
+        let _cache_env = CacheEnvGuard::set(&cache_path);
+
+        // Pre-seed a fresh cache entry for "openai".
+        let now_ms = current_time_ms();
+        let cached_entry = DiscoveryCacheEntry {
+            models: vec![ModelDescriptor {
+                id: "gpt-cache-only".to_string(),
+                display_name: "Cached".to_string(),
+                provider: "openai".to_string(),
+                api: "openai-responses".to_string(),
+                context_window: 1,
+                max_output_tokens: 1,
+                supports_reasoning: false,
+                compat: None,
+                input: vec![crate::model::Modality::Text],
+                cost: None,
+            }],
+            cached_at_ms: now_ms,
+        };
+        let mut entries = HashMap::new();
+        entries.insert("openai".to_string(), cached_entry);
+        save_discovery_cache(&cache_path, &DiscoveryCache { entries }).expect("seed cache");
+
+        let mut openai = provider_descriptor();
+        openai.id = "openai".to_string();
+        openai.discovery = Some(ModelDiscoveryConfig {
+            path: "/v1/models".to_string(),
+            response: ModelDiscoveryFormat::OpenAiModels,
+            api: "openai-responses".to_string(),
+            context_window: 1,
+            max_output_tokens: 1,
+            supports_reasoning: false,
+            items_field: "data".to_string(),
+            id_field: "id".to_string(),
+            display_name_field: None,
+            headers: IndexMap::new(),
+        });
+        openai.models = Vec::new();
+        let mut anthropic = provider_descriptor();
+        anthropic.discovery = Some(ModelDiscoveryConfig {
+            path: "/v1/models".to_string(),
+            response: ModelDiscoveryFormat::AnthropicModels,
+            api: "anthropic-messages".to_string(),
+            context_window: 1,
+            max_output_tokens: 1,
+            supports_reasoning: false,
+            items_field: "data".to_string(),
+            id_field: "id".to_string(),
+            display_name_field: None,
+            headers: IndexMap::new(),
+        });
+
+        let mut registry = ProviderRegistry::new();
+        registry.register(openai);
+        registry.register(anthropic);
+
+        let stale = registry.apply_discovery_cache();
+        assert_eq!(stale, vec!["anthropic".to_string()]);
+        let openai = registry.provider("openai").expect("openai");
+        assert!(openai.models.iter().any(|m| m.id == "gpt-cache-only"));
+    }
+
+    #[test]
+    fn apply_discovery_cache_treats_expired_entries_as_stale() {
+        let cache_dir = tempdir().expect("cache tempdir");
+        let cache_path = cache_dir.path().join("discovery.json");
+        let _cache_env = CacheEnvGuard::set(&cache_path);
+
+        let stale_entry = DiscoveryCacheEntry {
+            models: Vec::new(),
+            cached_at_ms: current_time_ms().saturating_sub(CACHE_TTL_MS + 1),
+        };
+        let mut entries = HashMap::new();
+        entries.insert("openai".to_string(), stale_entry);
+        save_discovery_cache(&cache_path, &DiscoveryCache { entries }).expect("seed cache");
+
+        let mut openai = provider_descriptor();
+        openai.id = "openai".to_string();
+        openai.discovery = Some(ModelDiscoveryConfig {
+            path: "/v1/models".to_string(),
+            response: ModelDiscoveryFormat::OpenAiModels,
+            api: "openai-responses".to_string(),
+            context_window: 1,
+            max_output_tokens: 1,
+            supports_reasoning: false,
+            items_field: "data".to_string(),
+            id_field: "id".to_string(),
+            display_name_field: None,
+            headers: IndexMap::new(),
+        });
+
+        let mut registry = ProviderRegistry::new();
+        registry.register(openai);
+        assert_eq!(
+            registry.apply_discovery_cache(),
+            vec!["openai".to_string()]
+        );
     }
 }
