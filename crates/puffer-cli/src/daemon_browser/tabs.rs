@@ -1,13 +1,13 @@
 //! Session-scoped browser tab metadata for the desktop and agent APIs.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::BrowserState;
 
 /// Public metadata for one managed browser tab.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BrowserTabInfo {
     pub(crate) tab_id: String,
@@ -23,7 +23,7 @@ pub(crate) struct BrowserTabInfo {
 }
 
 /// Public tab list state for one Puffer agent session.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BrowserTabsState {
     pub(crate) active_tab_id: Option<String>,

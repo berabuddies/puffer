@@ -23,6 +23,7 @@ use crate::daemon::ServerEnvelope;
 
 mod agent;
 mod chrome;
+mod client;
 mod cursor;
 mod devtools;
 mod input;
@@ -39,16 +40,15 @@ use chrome::{
     create_page_target, read_devtools_ws_url, resolve_chrome_executable, safe_profile_name,
     terminate_profile_processes,
 };
+pub(crate) use client::{default_cli_session_id, ensure_daemon, send_daemon_request};
 use cursor::{cursor_eval_expression, parse_cursor_response};
 use devtools::emit_devtools_event;
 use input::send_input;
 use recording::BrowserRecordingRegistry;
 pub(crate) use rpc::*;
 use selection::{parse_copy_selection_response, selection_eval_expression};
-use tabs::{
-    backend_session_id, parse_backend_session_id, BrowserTabInfo, BrowserTabRegistry,
-    BrowserTabsState,
-};
+use tabs::{backend_session_id, parse_backend_session_id, BrowserTabRegistry};
+pub(crate) use tabs::{BrowserTabInfo, BrowserTabsState};
 pub(crate) use types::{
     BrowserCopySelection, BrowserCursor, BrowserEvaluation, BrowserHistoryDirection,
     BrowserInputEvent, BrowserState,
@@ -858,11 +858,33 @@ fn send_state_eval(socket: &mut WebSocket<MaybeTlsStream<TcpStream>>, next_id: &
 }
 
 fn parse_evaluation_response(value: &Value) -> Result<BrowserEvaluation> {
-    if let Some(exception) = value
-        .pointer("/result/exceptionDetails/text")
-        .and_then(Value::as_str)
-    {
-        bail!("browser evaluation failed: {exception}");
+    if let Some(details) = value.pointer("/result/exceptionDetails") {
+        let description = details
+            .pointer("/exception/description")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::trim)
+            .map(ToString::to_string);
+        let text = details
+            .get("text")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::trim)
+            .map(ToString::to_string);
+        let line_number = details.get("lineNumber").and_then(Value::as_u64);
+        let column_number = details.get("columnNumber").and_then(Value::as_u64);
+        let message = description
+            .or(text)
+            .unwrap_or_else(|| "unknown browser exception".to_string());
+        if let (Some(line), Some(column)) = (line_number, column_number) {
+            bail!(
+                "browser evaluation failed at line {}, column {}: {}",
+                line + 1,
+                column + 1,
+                message
+            );
+        }
+        bail!("browser evaluation failed: {message}");
     }
     let Some(result) = value.pointer("/result/result") else {
         bail!("browser evaluation returned no result");

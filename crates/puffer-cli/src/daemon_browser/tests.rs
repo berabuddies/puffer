@@ -157,3 +157,24 @@ fn parses_cursor_response() {
     .unwrap();
     assert_eq!(cursor.cursor, "pointer");
 }
+
+#[test]
+fn evaluation_errors_prefer_exception_description() {
+    let error = parse_evaluation_response(&json!({
+        "id": 9,
+        "result": {
+            "exceptionDetails": {
+                "text": "Uncaught",
+                "lineNumber": 4,
+                "columnNumber": 12,
+                "exception": {
+                    "description": "Error: Target is not editable"
+                }
+            }
+        }
+    }))
+    .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("line 5, column 13"));
+    assert!(message.contains("Target is not editable"));
+}

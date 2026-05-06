@@ -50,14 +50,7 @@ fn spawn_stderr_drain<R: std::io::Read + Send + 'static>(mut reader: BufReader<R
 
 /// Creates a new Chrome page target and returns its DevTools WebSocket URL.
 pub(super) fn create_page_target(browser_ws: &str, url: &str) -> Result<String> {
-    let parsed = Url::parse(browser_ws).context("parse Chrome DevTools URL")?;
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| anyhow!("Chrome DevTools URL missing host"))?;
-    let port = parsed
-        .port()
-        .ok_or_else(|| anyhow!("Chrome DevTools URL missing port"))?;
-    let endpoint = format!("http://{host}:{port}/json/new?{}", urlencoding(url));
+    let endpoint = format!("{}/json/new?{}", devtools_http_base(browser_ws)?, urlencoding(url));
     let client = Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
@@ -212,4 +205,15 @@ pub(super) fn safe_profile_name(session_id: &str) -> String {
 
 fn urlencoding(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
+}
+
+fn devtools_http_base(browser_ws: &str) -> Result<String> {
+    let parsed = Url::parse(browser_ws).context("parse Chrome DevTools URL")?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow!("Chrome DevTools URL missing host"))?;
+    let port = parsed
+        .port()
+        .ok_or_else(|| anyhow!("Chrome DevTools URL missing port"))?;
+    Ok(format!("http://{host}:{port}"))
 }

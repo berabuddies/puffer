@@ -40,6 +40,13 @@ struct BrowserSnapshot {
     elements: Vec<BrowserElementRef>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserCheckableState {
+    kind: String,
+    checked: bool,
+}
+
 /// Handles `browser_agent`, the agent-oriented browser action endpoint.
 pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> Result<Value> {
     let action = required_string(params, "action")?;
@@ -54,7 +61,13 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
             if let Some(tab_id) = optional_string(params, "tabId") {
                 arm_agent_recording(state, &root_session_id, &tab_id);
             }
-            let tab = open_agent_tab(state, &root_session_id, params, width, height)?;
+            let tab = open_agent_tab(state, &root_session_id, params, width, height, true)?;
+            state.browsers.arm_agent_recording(&tab.backend_session_id);
+            publish_tabs(state, &root_session_id);
+            Ok(serde_json::to_value(tab)?)
+        }
+        "new" => {
+            let tab = open_agent_tab(state, &root_session_id, params, width, height, false)?;
             state.browsers.arm_agent_recording(&tab.backend_session_id);
             publish_tabs(state, &root_session_id);
             Ok(serde_json::to_value(tab)?)
@@ -66,8 +79,18 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
             Ok(serde_json::to_value(tab)?)
         }
         "close" => {
-            let tab_id = required_string(params, "tabId")?;
+            let tab_id = optional_string(params, "tabId")
+                .or_else(|| {
+                    active_or_first(&state.browsers.list_tabs(&root_session_id))
+                        .map(|tab| tab.tab_id)
+                })
+                .with_context(|| format!("no browser tabs for session `{root_session_id}`"))?;
             let tabs = state.browsers.close_tab(&root_session_id, &tab_id)?;
+            publish_tabs(state, &root_session_id);
+            Ok(serde_json::to_value(tabs)?)
+        }
+        "quit" | "exit" => {
+            let tabs = close_all_tabs(state, &root_session_id)?;
             publish_tabs(state, &root_session_id);
             Ok(serde_json::to_value(tabs)?)
         }
@@ -116,6 +139,30 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
             state.browsers.agent_click(&backend_id, &target)?;
             Ok(json!({ "ok": true }))
         }
+        "dblclick" => {
+            let (_, backend_id) =
+                ensure_target_tab(state, &root_session_id, params, width, height)?;
+            state.browsers.arm_agent_recording(&backend_id);
+            let target = required_string(params, "ref")?;
+            state.browsers.agent_double_click(&backend_id, &target)?;
+            Ok(json!({ "ok": true }))
+        }
+        "hover" => {
+            let (_, backend_id) =
+                ensure_target_tab(state, &root_session_id, params, width, height)?;
+            state.browsers.arm_agent_recording(&backend_id);
+            let target = required_string(params, "ref")?;
+            state.browsers.agent_hover(&backend_id, &target)?;
+            Ok(json!({ "ok": true }))
+        }
+        "focus_ref" => {
+            let (_, backend_id) =
+                ensure_target_tab(state, &root_session_id, params, width, height)?;
+            state.browsers.arm_agent_recording(&backend_id);
+            let target = required_string(params, "ref")?;
+            state.browsers.agent_focus(&backend_id, &target)?;
+            Ok(json!({ "ok": true }))
+        }
         "type" => {
             let (_, backend_id) =
                 ensure_target_tab(state, &root_session_id, params, width, height)?;
@@ -124,6 +171,16 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
                 state.browsers.agent_click(&backend_id, &target)?;
                 thread::sleep(Duration::from_millis(40));
             }
+            let text = required_string(params, "text")?;
+            state
+                .browsers
+                .input(&backend_id, BrowserInputEvent::Text { text })?;
+            Ok(json!({ "ok": true }))
+        }
+        "insertText" => {
+            let (_, backend_id) =
+                ensure_target_tab(state, &root_session_id, params, width, height)?;
+            state.browsers.arm_agent_recording(&backend_id);
             let text = required_string(params, "text")?;
             state
                 .browsers
@@ -139,6 +196,31 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
             state.browsers.agent_fill(&backend_id, &target, &text)?;
             Ok(json!({ "ok": true }))
         }
+        "select" => {
+            let (_, backend_id) =
+                ensure_target_tab(state, &root_session_id, params, width, height)?;
+            state.browsers.arm_agent_recording(&backend_id);
+            let target = required_string(params, "ref")?;
+            let value = required_string(params, "value")?;
+            state.browsers.agent_select(&backend_id, &target, &value)?;
+            Ok(json!({ "ok": true }))
+        }
+        "check" => {
+            let (_, backend_id) =
+                ensure_target_tab(state, &root_session_id, params, width, height)?;
+            state.browsers.arm_agent_recording(&backend_id);
+            let target = required_string(params, "ref")?;
+            state.browsers.agent_check(&backend_id, &target)?;
+            Ok(json!({ "ok": true }))
+        }
+        "uncheck" => {
+            let (_, backend_id) =
+                ensure_target_tab(state, &root_session_id, params, width, height)?;
+            state.browsers.arm_agent_recording(&backend_id);
+            let target = required_string(params, "ref")?;
+            state.browsers.agent_uncheck(&backend_id, &target)?;
+            Ok(json!({ "ok": true }))
+        }
         "press" => {
             let (_, backend_id) =
                 ensure_target_tab(state, &root_session_id, params, width, height)?;
@@ -147,7 +229,42 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
             state.browsers.agent_press(&backend_id, &key)?;
             Ok(json!({ "ok": true }))
         }
-        "evaluate" => {
+        "keydown" => {
+            let (_, backend_id) =
+                ensure_target_tab(state, &root_session_id, params, width, height)?;
+            state.browsers.arm_agent_recording(&backend_id);
+            let key = required_string(params, "key")?;
+            state.browsers.agent_key_down(&backend_id, &key)?;
+            Ok(json!({ "ok": true }))
+        }
+        "keyup" => {
+            let (_, backend_id) =
+                ensure_target_tab(state, &root_session_id, params, width, height)?;
+            state.browsers.arm_agent_recording(&backend_id);
+            let key = required_string(params, "key")?;
+            state.browsers.agent_key_up(&backend_id, &key)?;
+            Ok(json!({ "ok": true }))
+        }
+        "scroll" => {
+            let (_, backend_id) =
+                ensure_target_tab(state, &root_session_id, params, width, height)?;
+            state.browsers.arm_agent_recording(&backend_id);
+            let direction = required_string(params, "direction")?;
+            let px = optional_u32(params, "px").unwrap_or(600);
+            state.browsers.agent_scroll(&backend_id, &direction, px)?;
+            Ok(json!({ "ok": true }))
+        }
+        "scrollIntoView" => {
+            let (_, backend_id) =
+                ensure_target_tab(state, &root_session_id, params, width, height)?;
+            state.browsers.arm_agent_recording(&backend_id);
+            let target = required_string(params, "ref")?;
+            state
+                .browsers
+                .agent_scroll_into_view(&backend_id, &target)?;
+            Ok(json!({ "ok": true }))
+        }
+        "evaluate" | "eval" => {
             let (_, backend_id) =
                 ensure_target_tab(state, &root_session_id, params, width, height)?;
             state.browsers.arm_agent_recording(&backend_id);
@@ -171,6 +288,7 @@ fn open_agent_tab(
     params: &Value,
     width: u32,
     height: u32,
+    reuse_existing: bool,
 ) -> Result<BrowserTabInfo> {
     if let Some(tab_id) = optional_string(params, "tabId") {
         return state.browsers.open_tab(
@@ -187,20 +305,22 @@ fn open_agent_tab(
                 .unwrap_or(true),
         );
     }
-    if let Some(tab) = active_or_first(&state.browsers.list_tabs(root_session_id)) {
-        return state.browsers.open_tab(
-            state.event_sender(),
-            root_session_id.to_string(),
-            Some(tab.tab_id),
-            optional_string(params, "label"),
-            optional_string(params, "url"),
-            width,
-            height,
-            params
-                .get("activate")
-                .and_then(Value::as_bool)
-                .unwrap_or(true),
-        );
+    if reuse_existing {
+        if let Some(tab) = active_or_first(&state.browsers.list_tabs(root_session_id)) {
+            return state.browsers.open_tab(
+                state.event_sender(),
+                root_session_id.to_string(),
+                Some(tab.tab_id),
+                optional_string(params, "label"),
+                optional_string(params, "url"),
+                width,
+                height,
+                params
+                    .get("activate")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+            );
+        }
     }
     state.browsers.open_tab(
         state.event_sender(),
@@ -212,6 +332,20 @@ fn open_agent_tab(
         height,
         true,
     )
+}
+
+fn close_all_tabs(state: &Arc<DaemonState>, root_session_id: &str) -> Result<BrowserTabsState> {
+    let tab_ids = state
+        .browsers
+        .list_tabs(root_session_id)
+        .tabs
+        .into_iter()
+        .map(|tab| tab.tab_id)
+        .collect::<Vec<_>>();
+    for tab_id in tab_ids {
+        let _ = state.browsers.close_tab(root_session_id, &tab_id)?;
+    }
+    Ok(state.browsers.list_tabs(root_session_id))
 }
 
 impl BrowserRegistry {
@@ -240,6 +374,7 @@ impl BrowserRegistry {
     pub(crate) fn agent_click(&self, backend_session_id: &str, ref_id: &str) -> Result<()> {
         let target = self.lookup_ref(backend_session_id, ref_id)?;
         let session = self.get(backend_session_id)?;
+        move_mouse(&session, target.x, target.y)?;
         session.input(BrowserInputEvent::Mouse {
             event_type: "mousePressed".to_string(),
             x: target.x,
@@ -259,6 +394,30 @@ impl BrowserRegistry {
         })
     }
 
+    /// Double-clicks an element ref from the last agent snapshot.
+    pub(crate) fn agent_double_click(&self, backend_session_id: &str, ref_id: &str) -> Result<()> {
+        let target = self.lookup_ref(backend_session_id, ref_id)?;
+        let session = self.get(backend_session_id)?;
+        move_mouse(&session, target.x, target.y)?;
+        dispatch_click(&session, target.x, target.y, 1)?;
+        thread::sleep(Duration::from_millis(30));
+        dispatch_click(&session, target.x, target.y, 2)
+    }
+
+    /// Moves the pointer over an element ref from the last agent snapshot.
+    pub(crate) fn agent_hover(&self, backend_session_id: &str, ref_id: &str) -> Result<()> {
+        let target = self.lookup_ref(backend_session_id, ref_id)?;
+        move_mouse(&self.get(backend_session_id)?, target.x, target.y)
+    }
+
+    /// Focuses an element ref from the last agent snapshot.
+    pub(crate) fn agent_focus(&self, backend_session_id: &str, ref_id: &str) -> Result<()> {
+        let target = self.lookup_ref(backend_session_id, ref_id)?;
+        let expression = focus_expression(target.x, target.y);
+        self.get(backend_session_id)?.evaluate(expression)?;
+        Ok(())
+    }
+
     /// Fills an input-like element ref from the last agent snapshot.
     pub(crate) fn agent_fill(
         &self,
@@ -272,24 +431,87 @@ impl BrowserRegistry {
         Ok(())
     }
 
+    /// Selects one option in a native `<select>` ref from the last agent snapshot.
+    pub(crate) fn agent_select(
+        &self,
+        backend_session_id: &str,
+        ref_id: &str,
+        value: &str,
+    ) -> Result<()> {
+        let target = self.lookup_ref(backend_session_id, ref_id)?;
+        let expression = select_expression(target.x, target.y, value)?;
+        self.get(backend_session_id)?.evaluate(expression)?;
+        Ok(())
+    }
+
+    /// Checks one checkbox-like ref from the last agent snapshot.
+    pub(crate) fn agent_check(&self, backend_session_id: &str, ref_id: &str) -> Result<()> {
+        self.set_checkable_state(backend_session_id, ref_id, true)
+    }
+
+    /// Unchecks one checkbox-like ref from the last agent snapshot.
+    pub(crate) fn agent_uncheck(&self, backend_session_id: &str, ref_id: &str) -> Result<()> {
+        self.set_checkable_state(backend_session_id, ref_id, false)
+    }
+
     /// Presses one keyboard key in the target browser tab.
     pub(crate) fn agent_press(&self, backend_session_id: &str, key: &str) -> Result<()> {
+        self.agent_key_down(backend_session_id, key)?;
+        self.agent_key_up(backend_session_id, key)
+    }
+
+    /// Holds one keyboard key down in the target browser tab.
+    pub(crate) fn agent_key_down(&self, backend_session_id: &str, key: &str) -> Result<()> {
         let code = key_code(key);
-        let session = self.get(backend_session_id)?;
-        session.input(BrowserInputEvent::Key {
+        self.get(backend_session_id)?.input(BrowserInputEvent::Key {
             event_type: "rawKeyDown".to_string(),
             key: key.to_string(),
-            code: code.clone(),
-            text: None,
+            code,
+            text: key_text(key),
             modifiers: 0,
-        })?;
-        session.input(BrowserInputEvent::Key {
+        })
+    }
+
+    /// Releases one keyboard key in the target browser tab.
+    pub(crate) fn agent_key_up(&self, backend_session_id: &str, key: &str) -> Result<()> {
+        let code = key_code(key);
+        self.get(backend_session_id)?.input(BrowserInputEvent::Key {
             event_type: "keyUp".to_string(),
             key: key.to_string(),
             code,
             text: None,
             modifiers: 0,
         })
+    }
+
+    /// Scrolls the target tab by a fixed amount in one direction.
+    pub(crate) fn agent_scroll(
+        &self,
+        backend_session_id: &str,
+        direction: &str,
+        px: u32,
+    ) -> Result<()> {
+        let (delta_x, delta_y) = scroll_delta(direction, px)?;
+        let session = self.get(backend_session_id)?;
+        let state = session.state();
+        session.input(BrowserInputEvent::Wheel {
+            x: f64::from(state.width.max(1)) / 2.0,
+            y: f64::from(state.height.max(1)) / 2.0,
+            delta_x,
+            delta_y,
+        })
+    }
+
+    /// Scrolls an element ref into view from the last agent snapshot.
+    pub(crate) fn agent_scroll_into_view(
+        &self,
+        backend_session_id: &str,
+        ref_id: &str,
+    ) -> Result<()> {
+        let target = self.lookup_ref(backend_session_id, ref_id)?;
+        let expression = scroll_into_view_expression(target.x, target.y);
+        self.get(backend_session_id)?.evaluate(expression)?;
+        Ok(())
     }
 
     fn lookup_ref(&self, backend_session_id: &str, ref_id: &str) -> Result<BrowserElementRef> {
@@ -299,6 +521,32 @@ impl BrowserRegistry {
             .get(backend_session_id)
             .and_then(|refs| refs.iter().find(|item| item.ref_id == ref_id).cloned())
             .with_context(|| format!("no browser ref `{ref_id}`; run snapshot again"))
+    }
+
+    fn set_checkable_state(
+        &self,
+        backend_session_id: &str,
+        ref_id: &str,
+        checked: bool,
+    ) -> Result<()> {
+        let target = self.lookup_ref(backend_session_id, ref_id)?;
+        let session = self.get(backend_session_id)?;
+        let current = checkable_state_at_point(&session, target.x, target.y)?;
+        if current.checked == checked {
+            return Ok(());
+        }
+        if !checked && current.kind == "radio" {
+            bail!("radio buttons cannot be unchecked directly with the current browser ref model");
+        }
+        move_mouse(&session, target.x, target.y)?;
+        dispatch_click(&session, target.x, target.y, 1)?;
+        thread::sleep(Duration::from_millis(40));
+        let updated = checkable_state_at_point(&session, target.x, target.y)?;
+        if updated.checked != checked {
+            let status = if checked { "checked" } else { "unchecked" };
+            bail!("target did not become {status}");
+        }
+        Ok(())
     }
 }
 
@@ -423,11 +671,26 @@ fn snapshot_expression() -> &'static str {
     if (tag === 'select') return 'combobox';
     return tag;
   };
-  const selector = 'a,button,input,textarea,select,summary,[role],[contenteditable="true"],[tabindex],label';
-  const elements = Array.from(document.querySelectorAll(selector)).filter(isVisible).slice(0, 120).map((el, index) => {
+  const interactiveSelector = 'a,button,input,textarea,select,summary,[contenteditable="true"],label,[role="button"],[role="link"],[role="checkbox"],[role="radio"],[role="tab"],[role="switch"],[role="combobox"],[role="textbox"],[role="menuitem"],[role="option"]';
+  const refableRoles = new Set(['link', 'button', 'checkbox', 'radio', 'tab', 'switch', 'combobox', 'textbox', 'searchbox', 'menuitem', 'option']);
+  let refIndex = 1;
+  const refs = [];
+  const shouldAssignRef = (el) => {
+    if (!(el.matches(interactiveSelector) || refableRoles.has(roleFor(el)))) return false;
+    const role = roleFor(el);
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'label' && !el.control && !el.querySelector('input, textarea, select, [contenteditable="true"]')) return false;
+    if (tag === 'form') return false;
+    return refableRoles.has(role) || tag === 'label';
+  };
+  const elements = Array.from(document.querySelectorAll(interactiveSelector))
+    .filter(isVisible)
+    .filter(shouldAssignRef)
+    .slice(0, 120)
+    .map((el) => {
     const rect = el.getBoundingClientRect();
     return {
-      ref: `@e${index + 1}`,
+      ref: `@e${refIndex++}`,
       role: roleFor(el),
       name: nameFor(el).slice(0, 160),
       tag: el.tagName.toLowerCase(),
@@ -436,11 +699,12 @@ fn snapshot_expression() -> &'static str {
       y: rect.top + rect.height / 2
     };
   });
+  refs.push(...elements);
   return {
     url: location.href,
     title: document.title,
     text: (document.body ? document.body.innerText : '').replace(/\n{3,}/g, '\n\n').slice(0, 6000),
-    elements
+    elements: refs
   };
 })()"#
 }
@@ -451,10 +715,32 @@ fn fill_expression(x: f64, y: f64, text: &str) -> Result<String> {
         r#"(() => {{
   const el = document.elementFromPoint({x}, {y});
   if (!el) throw new Error('No element at target ref');
-  const target = el.closest('input, textarea, [contenteditable="true"]') || el;
+  const editableSelector = 'input, textarea, [contenteditable="true"]';
+  const resolveEditable = (node) => {{
+    if (!node) return null;
+    const direct = node.closest(editableSelector);
+    if (direct) return direct;
+    const label = node.closest('label');
+    if (label) {{
+      if (label.control) return label.control;
+      const nested = label.querySelector(editableSelector);
+      if (nested) return nested;
+    }}
+    return node.querySelector?.(editableSelector) || null;
+  }};
+  const target = resolveEditable(el);
+  if (!target) throw new Error('Target is not editable');
   target.focus();
   if ('value' in target) {{
-    target.value = {text};
+    const prototype = target instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement.prototype
+      : HTMLInputElement.prototype;
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
+    if (descriptor && descriptor.set) {{
+      descriptor.set.call(target, {text});
+    }} else {{
+      target.value = {text};
+    }}
     target.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }}));
     target.dispatchEvent(new Event('change', {{ bubbles: true }}));
   }} else if (target.isContentEditable) {{
@@ -466,6 +752,174 @@ fn fill_expression(x: f64, y: f64, text: &str) -> Result<String> {
   return true;
 }})()"#
     ))
+}
+
+fn focus_expression(x: f64, y: f64) -> String {
+    format!(
+        r#"(() => {{
+  const el = document.elementFromPoint({x}, {y});
+  if (!el) throw new Error('No element at target ref');
+  const target = el.closest('input, textarea, select, button, a, [tabindex], [contenteditable="true"], [role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="switch"], [role="combobox"], [role="textbox"]') || el;
+  if (typeof target.focus !== 'function') throw new Error('Target is not focusable');
+  target.focus({{ preventScroll: false }});
+  return true;
+}})()"#
+    )
+}
+
+fn scroll_into_view_expression(x: f64, y: f64) -> String {
+    format!(
+        r#"(() => {{
+  const el = document.elementFromPoint({x}, {y});
+  if (!el) throw new Error('No element at target ref');
+  const target = el.closest('a, button, input, textarea, select, label, [contenteditable="true"], [role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="switch"], [role="combobox"], [role="textbox"], [role="option"]') || el;
+  target.scrollIntoView({{ block: 'center', inline: 'center', behavior: 'instant' }});
+  return true;
+}})()"#
+    )
+}
+
+fn select_expression(x: f64, y: f64, value: &str) -> Result<String> {
+    let value = serde_json::to_string(value)?;
+    Ok(format!(
+        r#"(() => {{
+  const el = document.elementFromPoint({x}, {y});
+  if (!el) throw new Error('No element at target ref');
+  const normalize = (value) => String(value ?? '').trim();
+  const requested = normalize({value});
+  const resolveSelect = (node) => {{
+    if (!node) return null;
+    const direct = node.closest('select');
+    if (direct) return direct;
+    const label = node.closest('label');
+    if (label) {{
+      if (label.control instanceof HTMLSelectElement) return label.control;
+      const nested = label.querySelector('select');
+      if (nested) return nested;
+    }}
+    return node.querySelector?.('select') || null;
+  }};
+  const target = resolveSelect(el);
+  if (!target) throw new Error('Target is not a native select control');
+  const options = Array.from(target.options || []);
+  const match = options.find((option) => {{
+    const optionValue = normalize(option.value);
+    const optionLabel = normalize(option.label || option.textContent || option.value);
+    return optionValue === requested || optionLabel === requested;
+  }});
+  if (!match) {{
+    const available = options
+      .slice(0, 12)
+      .map((option) => normalize(option.label || option.textContent || option.value))
+      .filter(Boolean)
+      .join(', ');
+    throw new Error(
+      available
+        ? `No option matched "${{requested}}". Match exact option value or label text. Available: ${{available}}`
+        : `No option matched "${{requested}}". Match exact option value or label text.`
+    );
+  }}
+  for (const option of options) option.selected = option === match;
+  target.value = match.value;
+  target.dispatchEvent(new Event('input', {{ bubbles: true }}));
+  target.dispatchEvent(new Event('change', {{ bubbles: true }}));
+  return {{ value: match.value, label: normalize(match.label || match.textContent || match.value) }};
+}})()"#
+    ))
+}
+
+fn checkable_state_expression(x: f64, y: f64) -> String {
+    format!(
+        r#"(() => {{
+  const el = document.elementFromPoint({x}, {y});
+  if (!el) throw new Error('No element at target ref');
+  const selector = 'input[type="checkbox"], input[type="radio"], [role="checkbox"], [role="radio"]';
+  const resolveCheckable = (node) => {{
+    if (!node) return null;
+    if (node instanceof HTMLInputElement && (node.type === 'checkbox' || node.type === 'radio')) {{
+      return node;
+    }}
+    const direct = node.closest(selector);
+    if (direct) return direct;
+    const label = node.closest('label');
+    if (label) {{
+      if (label.control instanceof HTMLInputElement &&
+          (label.control.type === 'checkbox' || label.control.type === 'radio')) {{
+        return label.control;
+      }}
+      const nested = label.querySelector(selector);
+      if (nested) return nested;
+    }}
+    return node.querySelector?.(selector) || null;
+  }};
+  const target = resolveCheckable(el);
+  if (!target) throw new Error('Target is not a checkbox or radio control');
+  if (target instanceof HTMLInputElement) {{
+    return {{
+      kind: target.type === 'radio' ? 'radio' : 'checkbox',
+      checked: !!target.checked
+    }};
+  }}
+  return {{
+    kind: target.getAttribute('role') === 'radio' ? 'radio' : 'checkbox',
+    checked: target.getAttribute('aria-checked') === 'true'
+  }};
+}})()"#
+    )
+}
+
+fn checkable_state_at_point(
+    session: &super::BrowserSession,
+    x: f64,
+    y: f64,
+) -> Result<BrowserCheckableState> {
+    let value = session.evaluate(checkable_state_expression(x, y))?.value;
+    serde_json::from_value(value).context("decode browser checkable state")
+}
+
+fn move_mouse(session: &super::BrowserSession, x: f64, y: f64) -> Result<()> {
+    session.input(BrowserInputEvent::Mouse {
+        event_type: "mouseMoved".to_string(),
+        x,
+        y,
+        button: "none".to_string(),
+        buttons: Some(0),
+        click_count: 0,
+    })
+}
+
+fn dispatch_click(session: &super::BrowserSession, x: f64, y: f64, click_count: u32) -> Result<()> {
+    session.input(BrowserInputEvent::Mouse {
+        event_type: "mousePressed".to_string(),
+        x,
+        y,
+        button: "left".to_string(),
+        buttons: Some(1),
+        click_count,
+    })?;
+    thread::sleep(Duration::from_millis(30));
+    session.input(BrowserInputEvent::Mouse {
+        event_type: "mouseReleased".to_string(),
+        x,
+        y,
+        button: "left".to_string(),
+        buttons: Some(0),
+        click_count,
+    })
+}
+
+fn key_text(key: &str) -> Option<String> {
+    (key.len() == 1).then(|| key.to_string())
+}
+
+fn scroll_delta(direction: &str, px: u32) -> Result<(f64, f64)> {
+    match direction {
+        "up" => Ok((0.0, -f64::from(px))),
+        "down" => Ok((0.0, f64::from(px))),
+        "left" => Ok((-f64::from(px), 0.0)),
+        "right" => Ok((f64::from(px), 0.0)),
+        other => bail!("unsupported scroll direction `{other}`; use up, down, left, or right"),
+    }
 }
 
 fn key_code(key: &str) -> String {
@@ -489,3 +943,6 @@ fn key_code(key: &str) -> String {
     }
     .to_string()
 }
+
+#[cfg(test)]
+mod tests;
