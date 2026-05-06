@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
 
-  import TitleBar, { type TitleTab } from "./lib/shell/TitleBar.svelte";
+  import TitleBar from "./lib/shell/TitleBar.svelte";
   import Sidebar, { type ActiveAgent, type UserChip } from "./lib/shell/Sidebar.svelte";
   import {
     applyTweaksToDocument,
@@ -15,6 +15,7 @@
 
   import Workspace from "./lib/screens/Workspace.svelte";
   import ProjectDetail from "./lib/screens/workspace/ProjectDetail.svelte";
+  import NewSessionModal from "./lib/screens/workspace/NewSessionModal.svelte";
   import WorkspacePicker from "./lib/screens/WorkspacePicker.svelte";
   import AgentDetail from "./lib/screens/agent/AgentDetail.svelte";
   import Pipelines from "./lib/screens/Pipelines.svelte";
@@ -48,7 +49,7 @@
     loadDefaultWorkspace,
     loadDesktopPins,
     setDesktopPin,
-    updateConfig
+    type AgentTurnOptions
   } from "./lib/api/desktop";
   import {
     subscribeSessionEvents,
@@ -103,6 +104,8 @@
     }, 4000);
   });
   let showWorkspacePicker = $state(false);
+  let newSessionCwd = $state<string | null>(null);
+  let newSessionBusy = $state(false);
 
   // Backend-backed state
   let groups = $state<FolderGroup[]>([]);
@@ -262,22 +265,6 @@
       : null
   );
 
-  let tabs = $derived<TitleTab[]>(
-    selectedSession
-      ? [
-          {
-            id: selectedSession.id,
-            title: sessionDisplayName(selectedSession),
-            state: tweaks.agentState
-          }
-        ]
-      : []
-  );
-  let activeTab = $state<string>("");
-  $effect(() => {
-    if (selectedSession) activeTab = selectedSession.id;
-  });
-
   // ─────────────────────────────────────────────────────────────
   // Init
   // ─────────────────────────────────────────────────────────────
@@ -390,22 +377,6 @@
       if (skipOnboarding) onboarding = false;
     } finally {
       settingsLoading = false;
-    }
-  }
-
-  /** Patches the workspace's default routing so the next agent turn uses
-   *  the picked (provider, model). The daemon's `update_config` reloads
-   *  its in-memory PufferConfig under lock so subsequent turns pick this
-   *  up without restarting. */
-  async function handleModelChange(providerId: string, modelId: string) {
-    try {
-      settingsSnapshot = await updateConfig({
-        defaultProvider: providerId,
-        defaultModel: modelId
-      });
-      statusMessage = `Switched to ${providerId} · ${modelId}.`;
-    } catch (error) {
-      statusMessage = `Failed to switch model: ${error}`;
     }
   }
 
@@ -591,9 +562,13 @@
   /** Creates a blank session via the daemon in the given cwd (or the daemon's
    *  default workspace if unset) and opens AgentDetail on it. The workspace
    *  list refreshes so the new session appears as an agent card. */
-  async function handleNewAgent(cwd: string) {
+  function requestNewAgent(cwd: string) {
+    newSessionCwd = cwd || defaultWorkspaceCwd || "";
+  }
+
+  async function handleNewAgent(cwd: string, providerId?: string): Promise<boolean> {
     try {
-      const created = await createSession(cwd || undefined);
+      const created = await createSession(cwd || undefined, providerId);
       await refreshGroups();
       const newSession =
         groups.flatMap((g) => g.sessions).find((s) => s.id === created.sessionId) ?? null;
@@ -615,15 +590,19 @@
           slug: null,
           tags: [],
           note: null,
-          parentSessionId: null
+          parentSessionId: null,
+          providerId: created.providerId ?? providerId ?? "codex",
+          modelId: created.modelId ?? null
         };
         await openSession(fallback);
       }
       openAgentSessionId = created.sessionId;
       tweaks = { ...tweaks, screen: "workspace" };
-      statusMessage = `New agent in ${cwd || defaultWorkspaceCwd || "default workspace"}.`;
+      statusMessage = `New ${created.providerId ?? providerId ?? "agent"} session in ${cwd || defaultWorkspaceCwd || "default workspace"}.`;
+      return true;
     } catch (error) {
       statusMessage = `Failed to create session: ${error}`;
+      return false;
     }
   }
 
@@ -642,7 +621,8 @@
       theme: defaultTweaks.theme,
       accent: defaultTweaks.accent,
       density: defaultTweaks.density,
-      fontMix: defaultTweaks.fontMix
+      fontMix: defaultTweaks.fontMix,
+      userName: defaultTweaks.userName
     };
     statusMessage = "Appearance reset.";
   }
@@ -707,10 +687,6 @@
     }
   }
 
-  function onSelectTab(id: string) {
-    activeTab = id;
-  }
-
   function onOpenAgent(id: string) {
     const realTarget = groups.flatMap((g) => g.sessions).find((s) => s.id === id);
     if (!realTarget) return;
@@ -748,7 +724,7 @@
     tweaks = { ...tweaks, screen: "workspace" };
   }
 
-  async function submitMessage(message: string) {
+  async function submitMessage(message: string, options: AgentTurnOptions = {}) {
     if (!selectedSession) {
       statusMessage = "Select a session to send a message.";
       return;
@@ -769,7 +745,7 @@
       }
     ];
     try {
-      const turnId = await runAgentTurn(selectedSession.id, message);
+      const turnId = await runAgentTurn(selectedSession.id, message, options);
       currentTurnId = turnId;
       statusMessage = `Agent turn ${turnId.slice(0, 8)} started.`;
     } catch (error) {
@@ -1126,12 +1102,7 @@
 </script>
 
 <div class="pf-mac">
-  <TitleBar
-    {tabs}
-    {activeTab}
-    onSelectTab={onSelectTab}
-    onOpenSettings={onboarding ? undefined : () => onSelectScreen("settings")}
-  />
+  <TitleBar />
   {#if onboarding}
     <div class="pf-app-body">
       <div class="pf-main">
@@ -1159,11 +1130,13 @@
       {#if tweaks.showSidebar}
         <Sidebar
           screen={tweaks.screen}
+          collapsed={tweaks.collapsedSidebar}
           onSelectScreen={onSelectScreen}
           agents={activeAgents}
           activeAgentId={selectedSession?.id ?? null}
           onOpenAgent={onOpenAgent}
           onToggleAgentPin={(id, pinned) => void toggleDesktopPin("agent", id, pinned)}
+          onToggleCollapse={() => updateTweak("collapsedSidebar", !tweaks.collapsedSidebar)}
           user={userChip}
         />
       {/if}
@@ -1183,14 +1156,13 @@
                 turnThinking={turnThinking}
                 turnStatusHint={turnStatusHint}
                 settingsSnapshot={settingsSnapshot}
+                userDisplayName={tweaks.userName}
                 onBack={onCloseAgent}
                 onSubmitMessage={submitMessage}
                 onResolvePermission={resolvePermission}
                 onResolveUserQuestion={resolveUserQuestion}
                 onCancelTurn={() => { if (currentTurnId) void cancelTurn(currentTurnId); }}
                 onRenameTitle={renameSelectedSession}
-                onModelChange={(providerId, modelId) =>
-                  void handleModelChange(providerId, modelId)}
               />
             {:else if openProjectId && sortedGroups.find((g) => g.id === openProjectId)}
               <ProjectDetail
@@ -1198,16 +1170,17 @@
                 pinnedAgentIds={desktopPins.pinnedAgentIds}
                 onBack={() => (openProjectId = null)}
                 onOpenAgent={(id) => onOpenAgent(id)}
-                onNewAgent={(cwd) => handleNewAgent(cwd)}
+                onNewAgent={(cwd) => requestNewAgent(cwd)}
               />
             {:else}
               <Workspace
                 groups={sortedGroups}
+                settingsSnapshot={settingsSnapshot}
                 defaultWorkspaceCwd={defaultWorkspaceCwd}
                 loading={groupsLoading}
                 onOpenAgent={(id) => onOpenAgent(id)}
                 onOpenBoard={onOpenProject}
-                onNewAgent={(cwd) => handleNewAgent(cwd)}
+                onNewAgent={(cwd) => requestNewAgent(cwd)}
                 onSessionReady={(sessionId) => handleSessionReady(sessionId)}
                 onOpenWorkspacePicker={() => (showWorkspacePicker = true)}
                 pinnedWorkspacePaths={desktopPins.pinnedWorkspacePaths}
@@ -1282,6 +1255,27 @@
   />
 {/if}
 
+{#if newSessionCwd}
+  <NewSessionModal
+    cwd={newSessionCwd}
+    snapshot={settingsSnapshot}
+    busy={newSessionBusy}
+    onClose={() => {
+      if (!newSessionBusy) newSessionCwd = null;
+    }}
+    onCreate={async (providerId) => {
+      if (!newSessionCwd) return;
+      newSessionBusy = true;
+      try {
+        const ok = await handleNewAgent(newSessionCwd, providerId);
+        if (ok) newSessionCwd = null;
+      } finally {
+        newSessionBusy = false;
+      }
+    }}
+  />
+{/if}
+
 {#if !skipOnboarding && !forceOnboarding && !onboarding && statusMessage && statusMessage !== "Desktop workspace ready." && statusMessage !== "Settings snapshot refreshed."}
   <div class="status-strip" aria-live="polite">{statusMessage}</div>
 {/if}
@@ -1290,10 +1284,10 @@
   <div class="connection-banner" role="status" aria-live="polite">
     {#if connectionState === "reconnecting"}
       <span class="dot"></span>
-      Lost connection to Puffer daemon. Reconnecting…
+      Lost connection to Corbina backend. Reconnecting…
     {:else}
       <span class="dot err"></span>
-      Puffer daemon disconnected.
+      Corbina backend disconnected.
       <button
         type="button"
         class="sc-btn"

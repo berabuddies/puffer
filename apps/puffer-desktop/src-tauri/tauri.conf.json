@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Puffer Desktop",
+  "productName": "Corbina",
   "version": "0.1.0",
-  "identifier": "com.berabuddies.puffer.desktop",
+  "identifier": "com.corbina.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Puffer",
+        "title": "Corbina",
         "width": 1440,
         "height": 900,
         "minWidth": 720,
@@ -28,6 +28,8 @@
     }
   },
   "bundle": {
-    "active": false
+    "active": true,
+    "targets": ["deb", "appimage"],
+    "icon": ["icons/icon.png", "icons/icon.ico"]
   }
 }

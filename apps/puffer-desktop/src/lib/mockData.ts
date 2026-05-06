@@ -27,7 +27,9 @@ const sessionA: SessionListItem = {
   slug: "claude-parity-sweep",
   tags: ["parity", "tools"],
   note: "Tight parity work against Claude Code",
-  parentSessionId: null
+  parentSessionId: null,
+  providerId: "claude",
+  modelId: "sonnet"
 };
 
 const sessionB: SessionListItem = {
@@ -43,7 +45,9 @@ const sessionB: SessionListItem = {
   slug: "desktop-shell",
   tags: ["desktop", "ui"],
   note: "Parallel Tauri 2 app exploration",
-  parentSessionId: null
+  parentSessionId: null,
+  providerId: "codex",
+  modelId: null
 };
 
 const sessionC: SessionListItem = {
@@ -59,7 +63,9 @@ const sessionC: SessionListItem = {
   slug: "python-lsp-validation",
   tags: ["lsp", "python"],
   note: "Real pyright end-to-end check",
-  parentSessionId: null
+  parentSessionId: null,
+  providerId: "puffer",
+  modelId: "default"
 };
 
 const sessionADiff: DiffSnapshot = {

@@ -93,31 +93,6 @@ pub(crate) fn repo_status(session_id: &str, cwd: &Path) -> RepoStatusDto {
     }
 }
 
-/// Returns a cheap placeholder for session detail loads before repo status is refreshed.
-pub(crate) fn deferred_repo_status(session_id: &str, cwd: &Path) -> RepoStatusDto {
-    RepoStatusDto {
-        session_id: session_id.to_string(),
-        cwd: cwd.display().to_string(),
-        repo_root: None,
-        branch: None,
-        head_sha: None,
-        is_clean: true,
-        status_lines: Vec::new(),
-        has_gh: false,
-        gh_authenticated: false,
-        can_create_pull_request: false,
-        can_merge_pull_request: false,
-        create_pull_request_reason: Some(
-            "Repository status has not been refreshed yet.".to_string(),
-        ),
-        merge_pull_request_reason: Some(
-            "Repository status has not been refreshed yet.".to_string(),
-        ),
-        open_pull_request: None,
-        warnings: Vec::new(),
-    }
-}
-
 /// Creates a pull request for the session repository with optional title and body overrides.
 pub(crate) fn create_pull_request(
     session_id: &str,

@@ -5,10 +5,21 @@
 
   type Props = {
     snapshot: SettingsSnapshot | null;
+    currentProvider?: string | null;
+    currentModel?: string | null;
+    allowProviderSwitch?: boolean;
+    disabled?: boolean;
     onChange: (providerId: string, modelId: string) => void;
   };
 
-  let { snapshot, onChange }: Props = $props();
+  let {
+    snapshot,
+    currentProvider: currentProviderOverride = null,
+    currentModel: currentModelOverride = null,
+    allowProviderSwitch = true,
+    disabled = false,
+    onChange
+  }: Props = $props();
 
   let open = $state(false);
   let busy = $state(false);
@@ -21,8 +32,12 @@
   let triggerEl: HTMLButtonElement | null = $state(null);
   let menuEl: HTMLDivElement | null = $state(null);
 
-  let currentProvider = $derived(snapshot?.config?.defaultProvider ?? "");
-  let currentModel = $derived(snapshot?.config?.defaultModel ?? "");
+  let currentProvider = $derived(
+    currentProviderOverride ?? snapshot?.config?.defaultProvider ?? ""
+  );
+  let currentModel = $derived(
+    currentModelOverride ?? snapshot?.config?.defaultModel ?? ""
+  );
   let authedProviderIds = $derived(
     new Set((snapshot?.auth ?? []).map((entry) => entry.providerId))
   );
@@ -33,23 +48,22 @@
     snapshot?.providers?.find((p) => p.id === currentProvider)?.displayName ?? currentProvider
   );
 
-  // Filter the (provider, model) pairs by the search query. Matches against
-  // model id, display name, and provider id so users can type "claude" or
-  // "haiku" or "openai" interchangeably.
+  let currentProviderModels = $derived(modelsByProvider[currentProvider] ?? []);
+
+  // Filter models only within the selected provider. Provider switching is
+  // explicit via the provider row above the model list.
   let filteredEntries = $derived.by(() => {
     const needle = query.trim().toLowerCase();
     const out: { provider: string; providerLabel: string; model: ModelDescriptorInfo }[] = [];
-    for (const provider of authedProviders) {
-      const models = modelsByProvider[provider.id] ?? [];
-      for (const model of models) {
-        if (
-          !needle ||
-          model.id.toLowerCase().includes(needle) ||
-          model.displayName.toLowerCase().includes(needle) ||
-          provider.id.toLowerCase().includes(needle)
-        ) {
-          out.push({ provider: provider.id, providerLabel: provider.displayName, model });
-        }
+    const provider = authedProviders.find((entry) => entry.id === currentProvider);
+    if (!provider) return out;
+    for (const model of currentProviderModels) {
+      if (
+        !needle ||
+        model.id.toLowerCase().includes(needle) ||
+        model.displayName.toLowerCase().includes(needle)
+      ) {
+        out.push({ provider: provider.id, providerLabel: provider.displayName, model });
       }
     }
     return out;
@@ -60,7 +74,10 @@
     loadError = null;
     try {
       const next: Record<string, ModelDescriptorInfo[]> = { ...modelsByProvider };
-      for (const provider of authedProviders) {
+      const providers = allowProviderSwitch
+        ? authedProviders
+        : authedProviders.filter((provider) => provider.id === currentProvider);
+      for (const provider of providers) {
         if (next[provider.id]) continue;
         try {
           next[provider.id] = await listProviderModels(provider.id);
@@ -75,7 +92,31 @@
     }
   }
 
+  async function selectProvider(providerId: string) {
+    if (!allowProviderSwitch || disabled) return;
+    if (providerId === currentProvider) return;
+    query = "";
+    let models = modelsByProvider[providerId] ?? [];
+    if (models.length === 0) {
+      busy = true;
+      loadError = null;
+      try {
+        models = await listProviderModels(providerId);
+        modelsByProvider = { ...modelsByProvider, [providerId]: models };
+      } catch (error) {
+        modelsByProvider = { ...modelsByProvider, [providerId]: [] };
+        loadError = `${providerId}: ${error}`;
+        models = [];
+      } finally {
+        busy = false;
+      }
+    }
+    const defaultModel = models.find((model) => model.isDefault) ?? models[0];
+    onChange(providerId, defaultModel?.id ?? "");
+  }
+
   function toggle() {
+    if (disabled) return;
     open = !open;
     if (open) {
       void loadModels();
@@ -83,6 +124,7 @@
   }
 
   function pick(providerId: string, modelId: string) {
+    if (disabled) return;
     open = false;
     query = "";
     onChange(providerId, modelId);
@@ -111,6 +153,7 @@
     class="trigger"
     class:open
     onclick={toggle}
+    disabled={disabled}
     title={currentModel ? `${providerLabel} · ${currentModel}` : "Pick a model"}
   >
     <Icon name="sparkles" size={11} color="var(--muted-foreground)" />
@@ -125,10 +168,23 @@
 
   {#if open}
     <div bind:this={menuEl} class="menu" role="listbox">
+      {#if allowProviderSwitch}
+        <div class="providers" aria-label="Provider">
+          {#each authedProviders as provider (provider.id)}
+            <button
+              type="button"
+              class:on={provider.id === currentProvider}
+              onclick={() => selectProvider(provider.id)}
+            >
+              {provider.displayName}
+            </button>
+          {/each}
+        </div>
+      {/if}
       <input
         type="search"
         class="search"
-        placeholder="Filter models"
+        placeholder={providerLabel ? `Filter ${providerLabel} models` : "Filter models"}
         bind:value={query}
         autocomplete="off"
         spellcheck="false"
@@ -139,10 +195,12 @@
         {:else if filteredEntries.length === 0}
           {#if authedProviders.length === 0}
             <div class="hint">Connect a provider first.</div>
+          {:else if !currentProvider}
+            <div class="hint">Pick a provider.</div>
           {:else if query}
             <div class="hint">No matches for "{query}".</div>
           {:else}
-            <div class="hint">No models available.</div>
+            <div class="hint">No {providerLabel} models available.</div>
           {/if}
         {:else}
           {#each filteredEntries as entry (entry.provider + "::" + entry.model.id)}
@@ -203,6 +261,10 @@
     background: color-mix(in oklab, var(--background) 92%, var(--muted));
     border-color: color-mix(in oklab, var(--accent) 35%, var(--border));
   }
+  .trigger:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
   .trigger .model {
     font-family: var(--font-mono);
     font-weight: 500;
@@ -227,7 +289,7 @@
 
   .menu {
     position: absolute;
-    top: calc(100% + 4px);
+    bottom: calc(100% + 4px);
     left: 0;
     z-index: 60;
     min-width: 320px;
@@ -240,6 +302,35 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
+  }
+
+  .providers {
+    display: flex;
+    gap: 4px;
+    padding: 2px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: color-mix(in oklab, var(--background) 94%, var(--muted));
+  }
+  .providers button {
+    flex: 1;
+    min-width: 0;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--muted-foreground);
+    cursor: pointer;
+    font: inherit;
+    font-size: 11.5px;
+    padding: 5px 8px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .providers button:hover,
+  .providers button.on {
+    background: var(--background);
+    color: var(--foreground);
   }
 
   .search {

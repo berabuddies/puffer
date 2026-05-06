@@ -8,6 +8,7 @@
     type DirEntry
   } from "../../api/desktop";
   import { canInvokeTauri } from "../../api/daemonClient";
+  import type { ProviderSummary, SettingsSnapshot } from "../../types";
 
   /** Native directory chooser — only works in Tauri. Silently becomes a
    *  no-op in the web preview so the modal can still be used for testing. */
@@ -33,9 +34,10 @@
     onConnected?: (sessionId: string) => void | Promise<void>;
     /** Shown as the placeholder for the local path field. */
     defaultLocalPath?: string;
+    snapshot?: SettingsSnapshot | null;
   };
 
-  let { onClose, onConnected, defaultLocalPath = "~/code" }: Props = $props();
+  let { onClose, onConnected, defaultLocalPath = "~/code", snapshot = null }: Props = $props();
 
   type Mode = "local" | "remote";
   let mode = $state<Mode>("local");
@@ -59,6 +61,60 @@
   let pickerEntries = $state<DirEntry[]>([]);
   let pickerLoading = $state(false);
   let pickerError = $state<string | null>(null);
+  let selectedProvider = $state("");
+
+  const fallbackProviders: ProviderSummary[] = [
+    {
+      id: "codex",
+      displayName: "Codex",
+      baseUrl: "local-cli://codex",
+      defaultApi: "cli",
+      modelCount: 1,
+      authModes: ["native"],
+      sourceKind: "builtin",
+      sourcePath: null
+    },
+    {
+      id: "claude",
+      displayName: "Claude",
+      baseUrl: "local-cli://claude",
+      defaultApi: "cli",
+      modelCount: 1,
+      authModes: ["native"],
+      sourceKind: "builtin",
+      sourcePath: null
+    },
+    {
+      id: "puffer",
+      displayName: "Puffer",
+      baseUrl: "local-cli://puffer",
+      defaultApi: "cli",
+      modelCount: 1,
+      authModes: ["native"],
+      sourceKind: "builtin",
+      sourcePath: null
+    }
+  ];
+
+  let providerOptions = $derived(
+    (snapshot?.providers?.length ? snapshot.providers : fallbackProviders).filter((provider) =>
+      ["codex", "claude", "puffer"].includes(provider.id)
+    )
+  );
+
+  function defaultProviderId(): string {
+    const configured = snapshot?.config.defaultProvider;
+    if (configured && providerOptions.some((provider) => provider.id === configured)) {
+      return configured;
+    }
+    return providerOptions[0]?.id ?? "codex";
+  }
+
+  $effect(() => {
+    if (!providerOptions.some((provider) => provider.id === selectedProvider)) {
+      selectedProvider = defaultProviderId();
+    }
+  });
 
   let canSubmit = $derived(() => {
     if (busy) return false;
@@ -123,7 +179,7 @@
     }
     // 2. Create a new session rooted at that directory.
     status = `Creating agent in ${targetCwd}…`;
-    const created = await createSession(targetCwd);
+    const created = await createSession(targetCwd, selectedProvider || defaultProviderId());
     status = `Ready — session ${created.sessionId.slice(0, 8)}`;
     await onConnected?.(created.sessionId);
     onClose();
@@ -152,7 +208,7 @@
 
     // 3. Create a session on the remote and open it in the UI.
     status = `Creating agent on ${sshTarget}…`;
-    const created = await createSession(targetCwd);
+    const created = await createSession(targetCwd, selectedProvider || defaultProviderId());
     status = `Ready — session ${created.sessionId.slice(0, 8)} on ${sshTarget}`;
     await onConnected?.(created.sessionId);
     onClose();
@@ -287,6 +343,25 @@
     </div>
 
     <div class="pf-modal-body">
+      <div class="pf-field">
+        <div class="pf-field-label">Provider</div>
+        <div class="pf-provider-seg" role="radiogroup" aria-label="Agent provider">
+          {#each providerOptions as provider (provider.id)}
+            <button
+              type="button"
+              class="pf-provider-seg-btn"
+              data-active={selectedProvider === provider.id}
+              role="radio"
+              aria-checked={selectedProvider === provider.id}
+              onclick={() => (selectedProvider = provider.id)}
+              disabled={busy}
+            >
+              {provider.displayName}
+            </button>
+          {/each}
+        </div>
+      </div>
+
       {#if mode === "local"}
         <div class="pf-field">
           <label class="pf-field-label" for="pf-local-dest">Directory</label>
@@ -311,7 +386,7 @@
             >Browse…</button>
           </div>
           <div class="pf-field-hint">
-            If this directory doesn't exist Puffer will create it. Must be empty if a git URL is set below.
+            If this directory doesn't exist Corbina will create it. Must be empty if a git URL is set below.
           </div>
         </div>
         <div class="pf-field">
@@ -346,7 +421,7 @@
             />
           </div>
           <div class="pf-field-hint">
-            Puffer will spawn <span class="pf-mono">puffer daemon</span> on the remote host over your existing SSH config and port-forward the WebSocket locally.
+            Corbina will connect over your existing SSH config and port-forward the workspace runtime locally.
           </div>
         </div>
         <div class="pf-field">
@@ -538,6 +613,30 @@
     background: color-mix(in oklab, oklch(0.7 0.18 25) 12%, var(--background));
     color: oklch(0.5 0.2 25);
     border: 1px solid color-mix(in oklab, oklch(0.7 0.18 25) 30%, var(--border));
+  }
+  .pf-provider-seg {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+  }
+  .pf-provider-seg-btn {
+    min-width: 0;
+    height: 32px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--background);
+    color: var(--foreground);
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .pf-provider-seg-btn:hover:not(:disabled) {
+    background: var(--accent);
+  }
+  .pf-provider-seg-btn[data-active="true"] {
+    border-color: var(--foreground);
+    box-shadow: 0 0 0 1px var(--foreground) inset;
   }
   .pf-modal-hint {
     font-size: 12px;

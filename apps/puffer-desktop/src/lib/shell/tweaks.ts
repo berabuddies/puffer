@@ -11,7 +11,9 @@ export type Tweaks = {
   accent: AccentKey;
   density: DensityKey;
   fontMix: FontMixKey;
+  userName: string;
   showSidebar: boolean;
+  collapsedSidebar: boolean;
   agentState: AgentState;
 };
 
@@ -21,7 +23,9 @@ export const defaultTweaks: Tweaks = {
   accent: "violet",
   density: "comfortable",
   fontMix: "sans-mono",
+  userName: "Otter",
   showSidebar: true,
+  collapsedSidebar: false,
   agentState: "running"
 };
 

@@ -86,11 +86,14 @@
   font: inherit;
   color: inherit;
 }
-.pf-run-row:hover { background: color-mix(in oklab, var(--accent) 50%, transparent); }
+.pf-run-row:hover {
+  background: var(--pf-selected-bg-hover);
+  font-weight: 700;
+}
 .pf-run-row[data-selected="true"] {
-  background: var(--background);
-  border-color: var(--border);
-  box-shadow: 0 2px 10px -4px rgb(0 0 0 / 0.08);
+  background: var(--pf-selected-bg);
+  border-color: transparent;
+  font-weight: 700;
 }
 
 .pf-run-head { display: flex; align-items: center; gap: 6px; font-size: 11px; }
@@ -357,7 +360,10 @@
   transition: background 100ms;
   min-height: 30px;
 }
-.pf-pipe-traj-row:hover { background: color-mix(in oklab, var(--accent) 50%, transparent); }
+.pf-pipe-traj-row:hover {
+  background: var(--pf-selected-bg-hover);
+  font-weight: 700;
+}
 .pf-pipe-traj-row[data-past="true"] { opacity: 0.65; }
 .pf-pipe-traj-row[data-current="true"] {
   background: color-mix(in oklab, var(--puffer-accent) 10%, var(--background));

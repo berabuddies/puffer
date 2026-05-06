@@ -6,7 +6,7 @@
   import ConnectProjectModal from "./workspace/ConnectProjectModal.svelte";
   import { sessionDisplayName, sessionDisplayTitle } from "../sessionDisplay";
   import type { MockAgent, MockProject } from "../data/mockProjects";
-  import type { FolderGroup, SessionListItem } from "../types";
+  import type { FolderGroup, SessionListItem, SettingsSnapshot } from "../types";
 
   type Props = {
     /** Real folder-groups loaded from the daemon. */
@@ -28,6 +28,7 @@
     onOpenWorkspacePicker?: () => void;
     pinnedWorkspacePaths?: string[];
     onToggleWorkspacePin?: (path: string, pinned: boolean) => void;
+    settingsSnapshot?: SettingsSnapshot | null;
   };
 
   let {
@@ -40,7 +41,8 @@
     onSessionReady,
     onOpenWorkspacePicker,
     pinnedWorkspacePaths = [],
-    onToggleWorkspacePin
+    onToggleWorkspacePin,
+    settingsSnapshot = null
   }: Props = $props();
 
   let showConnect = $state(false);
@@ -164,6 +166,7 @@
         await onSessionReady?.(sessionId);
       }}
       defaultLocalPath={defaultWorkspaceCwd || "~/code"}
+      snapshot={settingsSnapshot}
     />
   {/if}
 
@@ -175,7 +178,7 @@
           <p>
             Start a fresh agent in the default workspace
             {#if defaultWorkspaceCwd}<code>{defaultWorkspaceCwd}</code>{/if}
-            — you'll land in a blank chat wired straight to Puffer.
+            — you'll choose Codex, Claude, or Puffer before the chat opens.
           </p>
         </div>
       </div>

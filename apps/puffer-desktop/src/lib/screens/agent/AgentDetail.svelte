@@ -1,8 +1,8 @@
 <script lang="ts">
+  import { onMount, tick } from "svelte";
   import Puffer from "../../design/Puffer.svelte";
   import Icon, { type IconName } from "../../design/Icon.svelte";
   import AgentDetailContent from "./AgentDetailContent.svelte";
-  import ModelPicker from "./ModelPicker.svelte";
   import {
     AGENT_STATE_LABELS,
     agentPufferState,
@@ -18,6 +18,7 @@
     UserQuestionTimelineItem
   } from "../../types";
   import type { AgentState } from "../../shell/tweaks";
+  import type { AgentTurnOptions } from "../../api/desktop";
 
   type Props = {
     // Live session data from the backend.
@@ -32,8 +33,9 @@
     turnThinking?: boolean;
     turnStatusHint?: string | null;
     settingsSnapshot?: SettingsSnapshot | null;
+    userDisplayName?: string;
     onBack: () => void;
-    onSubmitMessage: (message: string) => void;
+    onSubmitMessage: (message: string, options?: AgentTurnOptions) => void;
     onResolvePermission: (permissionId: string, choice: string) => void;
     onResolveUserQuestion: (
       questionId: string,
@@ -42,7 +44,6 @@
     ) => void;
     onCancelTurn?: () => void;
     onRenameTitle?: (title: string) => void | Promise<void>;
-    onModelChange?: (providerId: string, modelId: string) => void;
   };
 
   let {
@@ -57,21 +58,28 @@
     turnThinking = false,
     turnStatusHint = null,
     settingsSnapshot = null,
+    userDisplayName = "Otter",
     onBack,
     onSubmitMessage,
     onResolvePermission,
     onResolveUserQuestion,
     onCancelTurn,
-    onRenameTitle,
-    onModelChange
+    onRenameTitle
   }: Props = $props();
 
-  type Tab = "chat" | "diff" | "terminal" | "files" | "browser" | "history";
+  type Tab = "chat" | "diff" | "terminal" | "files" | "browser";
   let tab = $state<Tab>("chat");
   let sideTab = $state<Tab | null>(null);
   let sideWidth = $state(420);
   let sideDragStart: { pointerId: number; startX: number; startWidth: number } | null = null;
-  let previousActionCount = $state(0);
+  let fileToOpen = $state<string | null>(null);
+  let rootEl = $state<HTMLElement | undefined>(undefined);
+  let searchInputEl = $state<HTMLInputElement | undefined>(undefined);
+  let searchOpen = $state(false);
+  let searchQuery = $state("");
+  let searchMatchCount = $state(0);
+  let searchIndex = $state(0);
+  let searchMarks: HTMLElement[] = [];
 
   // Header identity comes straight from the live session record. No
   // local board persona — the daemon is the source of truth.
@@ -116,33 +124,6 @@
       : AGENT_STATE_LABELS[status] ?? status
   );
   let diffCount = $derived(timeline.filter((t) => t.kind === "diff").length);
-  let actionCount = $derived(
-    timeline.filter((item) => {
-      if (item.kind !== "tool") return false;
-      const tool = item.toolName.toLowerCase();
-      return [
-        "write",
-        "write_file",
-        "edit",
-        "edit_file",
-        "replace",
-        "replace_in_file",
-        "multiedit",
-        "multi_edit",
-        "notebookedit",
-        "bash",
-        "shell",
-        "powershell",
-        "browser"
-      ].includes(tool);
-    }).length
-  );
-
-  $effect(() => {
-    if (actionCount > previousActionCount && sideTab === null) sideTab = "history";
-    previousActionCount = actionCount;
-  });
-
   function startTitleEdit() {
     if (!session || !onRenameTitle) return;
     titleDraft = displayName;
@@ -205,9 +186,16 @@
     if (event.metaKey || event.ctrlKey) {
       sideTab = nextTab;
       event.preventDefault();
+      if (searchOpen) void refreshSearch(false);
       return;
     }
     tab = nextTab;
+    if (searchOpen) void refreshSearch(false);
+  }
+
+  function openLinkedFile(path: string) {
+    fileToOpen = path;
+    tab = "files";
   }
 
   function tabLabel(value: Tab): string {
@@ -222,8 +210,6 @@
         return "Files";
       case "browser":
         return "Browser";
-      case "history":
-        return "History";
     }
   }
 
@@ -239,13 +225,171 @@
         return "folder";
       case "browser":
         return "globe";
-      case "history":
-        return "layers";
+    }
+  }
+
+  function isEditableTarget(target: EventTarget | null): boolean {
+    const element = target instanceof HTMLElement ? target : null;
+    if (!element) return false;
+    if (element.closest(".pf-agent-find")) return false;
+    return Boolean(element.closest("input, textarea, select, [contenteditable='true']"));
+  }
+
+  function handleGlobalKeydown(event: KeyboardEvent) {
+    const key = event.key.toLowerCase();
+    if ((event.metaKey || event.ctrlKey) && key === "f") {
+      event.preventDefault();
+      openSearch();
+      return;
+    }
+    if (!searchOpen) return;
+    if (isEditableTarget(event.target)) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeSearch();
+      return;
+    }
+    if ((event.metaKey || event.ctrlKey) && key === "g") {
+      event.preventDefault();
+      jumpSearch(event.shiftKey ? -1 : 1);
+    }
+  }
+
+  onMount(() => {
+    window.addEventListener("keydown", handleGlobalKeydown, true);
+    return () => {
+      window.removeEventListener("keydown", handleGlobalKeydown, true);
+      clearSearchMarks();
+    };
+  });
+
+  function openSearch() {
+    searchOpen = true;
+    void tick().then(() => {
+      searchInputEl?.focus();
+      searchInputEl?.select();
+      void refreshSearch(false);
+    });
+  }
+
+  function closeSearch() {
+    searchOpen = false;
+    searchQuery = "";
+    searchMatchCount = 0;
+    searchIndex = 0;
+    clearSearchMarks();
+  }
+
+  function clearSearchMarks() {
+    for (const mark of searchMarks) {
+      const parent = mark.parentNode;
+      if (!parent) continue;
+      parent.replaceChild(document.createTextNode(mark.textContent ?? ""), mark);
+      parent.normalize();
+    }
+    searchMarks = [];
+  }
+
+  function searchableScopes(): HTMLElement[] {
+    if (!rootEl) return [];
+    return Array.from(rootEl.querySelectorAll<HTMLElement>(".pf-agent-detail-content"));
+  }
+
+  function textNodeSearchable(node: Text): boolean {
+    const parent = node.parentElement;
+    if (!parent) return false;
+    if (!node.nodeValue?.trim()) return false;
+    if (parent.closest(".pf-agent-find, .pf-composer-wrap, input, textarea, select, script, style")) return false;
+    return true;
+  }
+
+  function collectTextNodes(scopes: HTMLElement[]): Text[] {
+    const nodes: Text[] = [];
+    for (const scope of scopes) {
+      const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
+      let current = walker.nextNode();
+      while (current) {
+        if (current instanceof Text && textNodeSearchable(current)) nodes.push(current);
+        current = walker.nextNode();
+      }
+    }
+    return nodes;
+  }
+
+  function markTextNode(node: Text, query: string) {
+    const source = node.nodeValue ?? "";
+    const lower = source.toLowerCase();
+    const needle = query.toLowerCase();
+    let cursor = 0;
+    let found = lower.indexOf(needle, cursor);
+    if (found === -1) return;
+
+    const fragment = document.createDocumentFragment();
+    while (found !== -1) {
+      if (found > cursor) fragment.append(document.createTextNode(source.slice(cursor, found)));
+      const mark = document.createElement("mark");
+      mark.className = "pf-search-mark";
+      mark.textContent = source.slice(found, found + query.length);
+      mark.dataset.searchIndex = String(searchMarks.length);
+      searchMarks.push(mark);
+      fragment.append(mark);
+      cursor = found + query.length;
+      found = lower.indexOf(needle, cursor);
+    }
+    if (cursor < source.length) fragment.append(document.createTextNode(source.slice(cursor)));
+    node.parentNode?.replaceChild(fragment, node);
+  }
+
+  async function refreshSearch(resetIndex: boolean) {
+    await tick();
+    clearSearchMarks();
+    const query = searchQuery.trim();
+    if (!query) {
+      searchMatchCount = 0;
+      searchIndex = 0;
+      return;
+    }
+    for (const node of collectTextNodes(searchableScopes())) {
+      markTextNode(node, query);
+    }
+    searchMatchCount = searchMarks.length;
+    if (searchMatchCount === 0) {
+      searchIndex = 0;
+      return;
+    }
+    searchIndex = resetIndex ? 0 : Math.min(searchIndex, searchMatchCount - 1);
+    activateSearchMatch();
+  }
+
+  function activateSearchMatch() {
+    searchMarks.forEach((mark, index) => {
+      mark.classList.toggle("active", index === searchIndex);
+      mark.classList.remove("pulse");
+    });
+    const active = searchMarks[searchIndex];
+    if (!active) return;
+    active.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+    window.requestAnimationFrame(() => active.classList.add("pulse"));
+  }
+
+  function jumpSearch(direction: 1 | -1) {
+    if (searchMatchCount === 0) return;
+    searchIndex = (searchIndex + direction + searchMatchCount) % searchMatchCount;
+    activateSearchMatch();
+  }
+
+  function handleSearchKeydown(event: KeyboardEvent) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      jumpSearch(event.shiftKey ? -1 : 1);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      closeSearch();
     }
   }
 </script>
 
-<div class="pf-agent-detail">
+<div class="pf-agent-detail" bind:this={rootEl}>
   <div class="pf-agent-detail-head">
     <button type="button" class="pf-agent-back" onclick={onBack} title="Back to workspace" aria-label="Back">
       <Icon name="chevL" size={13} />
@@ -316,12 +460,6 @@
         {/if}
       </div>
     </div>
-    {#if onModelChange}
-      <ModelPicker
-        snapshot={settingsSnapshot}
-        onChange={(providerId, modelId) => onModelChange?.(providerId, modelId)}
-      />
-    {/if}
     <span class="pf-agent-status-pill" data-status={status}>
       {#if pufferState === "running"}
         <span class="pip"></span>
@@ -355,16 +493,6 @@
       >
         <Icon name="globe" size={12} />Browser
       </button>
-      <button
-        class="pf-agent-tab"
-        class:on={tab === "history"}
-        onclick={(event) => handleTabClick(event, "history")}
-      >
-        <Icon name="layers" size={12} />History
-        {#if actionCount > 0}
-          <span class="pf-agent-tab-badge">{actionCount}</span>
-        {/if}
-      </button>
     </div>
   </div>
 
@@ -385,10 +513,14 @@
         {turnStartedAtMs}
         {turnThinking}
         {turnStatusHint}
+        {settingsSnapshot}
+        {userDisplayName}
         {onSubmitMessage}
         {onResolvePermission}
         {onResolveUserQuestion}
         {onCancelTurn}
+        onOpenFileLink={openLinkedFile}
+        {fileToOpen}
       />
     </div>
     {#if sideTab}
@@ -428,18 +560,53 @@
           {turnStartedAtMs}
           {turnThinking}
           {turnStatusHint}
+          {settingsSnapshot}
+          {userDisplayName}
           {onSubmitMessage}
           {onResolvePermission}
           {onResolveUserQuestion}
           {onCancelTurn}
+          onOpenFileLink={openLinkedFile}
+          {fileToOpen}
         />
       </div>
     {/if}
   </div>
+
+  {#if searchOpen}
+    <div class="pf-agent-find" role="search" aria-label="Find in agent view">
+      <div class="find-glow" aria-hidden="true"></div>
+      <Icon name="search" size={15} />
+      <input
+        bind:this={searchInputEl}
+        bind:value={searchQuery}
+        placeholder={tab === "diff" ? "Search diff…" : "Search chat…"}
+        oninput={() => void refreshSearch(true)}
+        onkeydown={handleSearchKeydown}
+      />
+      <span class="find-count" data-empty={searchQuery.trim() && searchMatchCount === 0}>
+        {#if searchQuery.trim()}
+          {searchMatchCount === 0 ? "0 results" : `${searchIndex + 1} / ${searchMatchCount}`}
+        {:else}
+          Chat + Diff
+        {/if}
+      </span>
+      <button type="button" class="find-btn" onclick={() => jumpSearch(-1)} disabled={searchMatchCount === 0} aria-label="Previous match">
+        <Icon name="arrowUp" size={13} />
+      </button>
+      <button type="button" class="find-btn" onclick={() => jumpSearch(1)} disabled={searchMatchCount === 0} aria-label="Next match">
+        <Icon name="chevD" size={14} />
+      </button>
+      <button type="button" class="find-btn" onclick={closeSearch} aria-label="Close find">
+        <Icon name="x" size={13} />
+      </button>
+    </div>
+  {/if}
 </div>
 
 <style>
   .pf-agent-detail {
+    position: relative;
     flex: 1;
     display: flex;
     flex-direction: column;
@@ -733,9 +900,142 @@
     min-height: 0;
   }
 
+  .pf-agent-find {
+    position: absolute;
+    z-index: 40;
+    left: 50%;
+    top: 76px;
+    transform: translateX(-50%);
+    width: min(560px, calc(100% - 44px));
+    min-height: 48px;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px 8px 12px;
+    border: 1px solid color-mix(in oklab, white 36%, var(--border));
+    border-radius: 18px;
+    background:
+      linear-gradient(
+        135deg,
+        color-mix(in oklab, var(--background) 72%, white) 0%,
+        color-mix(in oklab, var(--background) 50%, transparent) 100%
+      );
+    color: var(--foreground);
+    box-shadow:
+      0 18px 50px rgb(0 0 0 / 0.18),
+      inset 0 1px 0 rgb(255 255 255 / 0.36),
+      inset 0 -1px 0 rgb(255 255 255 / 0.14);
+    backdrop-filter: blur(22px) saturate(170%);
+  }
+
+  .find-glow {
+    position: absolute;
+    inset: -2px;
+    z-index: -1;
+    border-radius: 20px;
+    background:
+      radial-gradient(circle at 18% 0%, color-mix(in oklab, var(--puffer-accent) 34%, transparent), transparent 32%),
+      radial-gradient(circle at 86% 12%, color-mix(in oklab, oklch(0.78 0.16 210) 28%, transparent), transparent 36%);
+    filter: blur(8px);
+    opacity: 0.88;
+    pointer-events: none;
+  }
+
+  .pf-agent-find input {
+    min-width: 0;
+    height: 30px;
+    border: 0;
+    outline: none;
+    background: transparent;
+    color: var(--foreground);
+    font: inherit;
+    font-size: 13px;
+  }
+
+  .pf-agent-find input::placeholder {
+    color: var(--muted-foreground);
+  }
+
+  .find-count {
+    min-width: 72px;
+    text-align: right;
+    color: var(--muted-foreground);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+
+  .find-count[data-empty="true"] {
+    color: var(--destructive);
+  }
+
+  .find-btn {
+    width: 30px;
+    height: 30px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid color-mix(in oklab, var(--border) 76%, transparent);
+    border-radius: 999px;
+    background: color-mix(in oklab, var(--background) 58%, transparent);
+    color: var(--muted-foreground);
+    cursor: pointer;
+  }
+
+  .find-btn:hover:not(:disabled) {
+    color: var(--foreground);
+    background: color-mix(in oklab, var(--accent) 70%, transparent);
+  }
+
+  .find-btn:disabled {
+    opacity: 0.42;
+    cursor: default;
+  }
+
+  :global(.pf-search-mark) {
+    border-radius: 4px;
+    padding: 0 2px;
+    color: inherit;
+    background: color-mix(in oklab, oklch(0.86 0.15 90) 62%, transparent);
+    box-shadow: 0 0 0 1px color-mix(in oklab, oklch(0.78 0.16 90) 45%, transparent);
+  }
+
+  :global(.pf-search-mark.active) {
+    background: color-mix(in oklab, var(--puffer-accent) 42%, white);
+    box-shadow:
+      0 0 0 2px color-mix(in oklab, var(--puffer-accent) 54%, transparent),
+      0 0 18px color-mix(in oklab, var(--puffer-accent) 28%, transparent);
+  }
+
+  :global(.pf-search-mark.active.pulse) {
+    animation: pf-search-pulse 900ms ease-out;
+  }
+
+  @keyframes pf-search-pulse {
+    0% {
+      box-shadow:
+        0 0 0 2px color-mix(in oklab, var(--puffer-accent) 64%, transparent),
+        0 0 0 0 color-mix(in oklab, var(--puffer-accent) 34%, transparent);
+    }
+    100% {
+      box-shadow:
+        0 0 0 2px color-mix(in oklab, var(--puffer-accent) 54%, transparent),
+        0 0 0 12px transparent;
+    }
+  }
+
   @media (max-width: 720px) {
     .pf-agent-detail-head { flex-wrap: wrap; row-gap: 6px; padding: 8px 10px; }
     .pf-agent-tabs { order: 3; width: 100%; overflow-x: auto; }
     .pf-agent-status-pill { order: 2; margin-left: 0; }
+    .pf-agent-find {
+      top: 92px;
+      grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+      width: calc(100% - 20px);
+    }
+    .find-count {
+      display: none;
+    }
   }
 </style>

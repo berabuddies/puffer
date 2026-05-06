@@ -38,6 +38,8 @@ export type SessionListItem = {
   tags: string[];
   note: string | null;
   parentSessionId: string | null;
+  providerId: string;
+  modelId: string | null;
 };
 
 export type PullRequest = {
@@ -102,6 +104,7 @@ export type DiffSnapshot = {
 type TimelineBase = {
   id: string;
   kind: TimelineKind;
+  createdAtMs?: number | null;
   title: string;
   summary: string;
   body: string;

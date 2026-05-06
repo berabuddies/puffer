@@ -20,8 +20,8 @@
   } from "../../api/desktop";
   import { ensureLocalDaemonClient } from "../../api/daemonClient";
 
-  type Props = { cwd: string; sessionId?: string };
-  let { cwd, sessionId = "preview" }: Props = $props();
+  type Props = { cwd: string; sessionId?: string; openPath?: string | null };
+  let { cwd, sessionId = "preview", openPath = null }: Props = $props();
 
   type OpenFileTab = {
     path: string;
@@ -65,6 +65,7 @@
   let editorHighlightEl = $state<HTMLPreElement | null>(null);
   let fileTabsReady = $state(false);
   let fileTabsSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastOpenPath: string | null = null;
 
   // Root is derived from cwd — switching sessions resets everything.
   let root = $derived(cwd);
@@ -108,6 +109,13 @@
     activePath;
     if (!fileTabsReady || previewMode || sessionId === "preview") return;
     scheduleFileTabsSave();
+  });
+
+  $effect(() => {
+    const path = openPath;
+    if (!path || path === lastOpenPath || !root || previewMode) return;
+    lastOpenPath = path;
+    void revealAndOpenFile(path);
   });
 
   // Filesystem-watcher lifecycle. When `cwd` is set, ask the daemon to watch
@@ -446,6 +454,21 @@
       if (!cache.has(path)) void loadDir(path);
     }
     expanded = next;
+  }
+
+  async function revealAndOpenFile(path: string) {
+    const nextExpanded = new Set(expanded);
+    const relative = path.startsWith(`${root}/`) ? path.slice(root.length + 1) : "";
+    if (relative) {
+      let current = root;
+      for (const segment of relative.split("/").slice(0, -1)) {
+        current = joinPath(current, segment);
+        nextExpanded.add(current);
+        if (!cache.has(current)) void loadDir(current);
+      }
+      expanded = nextExpanded;
+    }
+    await openFile(path, 0, { pinned: true });
   }
 
   async function openFile(path: string, size: number, options: OpenFileOptions = {}) {
@@ -897,7 +920,7 @@
       {#if previewMode}
         <div class="tree-empty">
           <div class="msg">Files view is live in the desktop app</div>
-          <div class="sub">Launch Puffer locally to browse this session's working directory.</div>
+          <div class="sub">Launch Corbina locally to browse this session's working directory.</div>
         </div>
       {:else if errors.has(root) && !cache.has(root)}
         <div class="tree-empty">
@@ -969,7 +992,7 @@
       <div class="viewer-empty">
         <Icon name="file" size={20} color="var(--muted-foreground)" />
         <div class="title">File preview is live in the desktop app</div>
-        <div class="sub">Open Puffer locally to preview files from this session.</div>
+        <div class="sub">Open Corbina locally to preview files from this session.</div>
       </div>
     {:else if !activePath}
       <div class="viewer-empty">

@@ -56,6 +56,8 @@ type BackendSessionListItem = {
   tags: string[];
   note: string | null;
   parentSessionId: string | null;
+  providerId?: string | null;
+  modelId?: string | null;
 };
 
 type BackendDiff = {
@@ -107,13 +109,14 @@ type BackendRepoActionResult = {
 };
 
 type BackendTimelineItem =
-  | { kind: "user_message"; id: string; text: string }
-  | { kind: "assistant_message"; id: string; text: string }
-  | { kind: "system_message"; id: string; text: string }
-  | { kind: "command"; id: string; commandName: string; commandArgs: string }
+  | { kind: "user_message"; id: string; text: string; createdAtMs?: number | null }
+  | { kind: "assistant_message"; id: string; text: string; createdAtMs?: number | null }
+  | { kind: "system_message"; id: string; text: string; createdAtMs?: number | null }
+  | { kind: "command"; id: string; commandName: string; commandArgs: string; createdAtMs?: number | null }
   | {
       kind: "tool_call";
       id: string;
+      createdAtMs?: number | null;
       toolId?: string;
       tool_id?: string;
       status: string;
@@ -128,13 +131,14 @@ type BackendTimelineItem =
   | {
       kind: "permission_dialog";
       id: string;
+      createdAtMs?: number | null;
       toolId: string;
       state: string;
       summary: string | null;
       reason: string;
       inputText: string | null;
     }
-  | { kind: "diff_snapshot"; id: string; snapshot: BackendDiff };
+  | { kind: "diff_snapshot"; id: string; snapshot: BackendDiff; createdAtMs?: number | null };
 
 type BackendAgentDiffFile = {
   path: string;
@@ -332,6 +336,7 @@ function normalizeAskUserQuestionTool(
   return {
     id: value.id,
     kind: "question",
+    createdAtMs: value.createdAtMs ?? null,
     title: pending ? "Question" : "Answered question",
     summary: answerSummary || questions.map((question) => question.question).join("\n"),
     body: "",
@@ -356,7 +361,9 @@ function normalizeSessionListItem(value: BackendSessionListItem): SessionListIte
     slug: value.slug,
     tags: value.tags,
     note: value.note,
-    parentSessionId: value.parentSessionId
+    parentSessionId: value.parentSessionId,
+    providerId: value.providerId ?? "codex",
+    modelId: value.modelId ?? null
   };
 }
 
@@ -366,6 +373,7 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
       return {
         id: value.id,
         kind: "user",
+        createdAtMs: value.createdAtMs ?? null,
         title: "User message",
         summary: preview(value.text),
         body: value.text,
@@ -375,6 +383,7 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
       return {
         id: value.id,
         kind: "assistant",
+        createdAtMs: value.createdAtMs ?? null,
         title: "Assistant response",
         summary: preview(value.text),
         body: value.text,
@@ -384,6 +393,7 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
       return {
         id: value.id,
         kind: "system",
+        createdAtMs: value.createdAtMs ?? null,
         title: "System message",
         summary: preview(value.text),
         body: value.text,
@@ -393,6 +403,7 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
       return {
         id: value.id,
         kind: "command",
+        createdAtMs: value.createdAtMs ?? null,
         title: `/${value.commandName}`,
         summary: preview(value.commandArgs || `/${value.commandName}`),
         body: [value.commandName, value.commandArgs].filter(Boolean).join(" "),
@@ -416,6 +427,7 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
       return {
         id: value.id,
         kind: "tool",
+        createdAtMs: value.createdAtMs ?? null,
         title: `Tool call: ${toolName}`,
         summary: value.summary ?? preview(outputText || inputText),
         body: outputText || "Tool call completed without textual output.",
@@ -430,6 +442,7 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
       return {
         id: value.id,
         kind: "permission",
+        createdAtMs: value.createdAtMs ?? null,
         title: "Permission request",
         summary: value.summary ?? `${value.toolId} requires approval`,
         body: `Tool: ${value.toolId}\nReason: ${value.reason}`,
@@ -452,6 +465,7 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
       return {
         id: value.id,
         kind: "diff",
+        createdAtMs: value.createdAtMs ?? null,
         title: diff.title,
         summary: diff.status,
         body: diff.patch,
@@ -754,13 +768,24 @@ import {
 /** A blank session created on the fly. The daemon places it in the given
  *  `cwd` (defaults to the daemon's boot workspace). Returns the session id
  *  so the UI can open an `AgentDetail` immediately. */
-export async function createSession(cwd?: string): Promise<{
+export async function createSession(
+  cwd?: string,
+  providerId?: string,
+  modelId?: string
+): Promise<{
   sessionId: string;
   cwd: string;
   createdAtMs: number;
+  providerId?: string;
+  modelId?: string;
 }> {
   const client = await ensureLocalDaemonClient();
-  return client.request("create_session", cwd ? { cwd } : {});
+  return client.request(
+    "create_session",
+    Object.fromEntries(
+      Object.entries({ cwd, providerId, modelId }).filter(([, value]) => Boolean(value))
+    )
+  );
 }
 
 /** The daemon's boot workspace — useful for showing "new agent in <path>" in
@@ -995,23 +1020,36 @@ export async function showWorkflowRun(idx: number): Promise<WorkflowRun | null> 
 export type PermissionAction = "allow_once" | "allow_session" | "allow_all_session" | "deny";
 export type UserQuestionAnswers = Record<string, string | string[]>;
 export type UserQuestionAnnotations = Record<string, Record<string, string>>;
+export type AgentPermissionMode = "read-only" | "workspace-write" | "full-access";
+export type AgentTurnOptions = {
+  providerId?: string | null;
+  modelId?: string | null;
+  thinkingOptionId?: string | null;
+  fastMode?: boolean;
+  permissionMode?: AgentPermissionMode;
+};
 
 /** Starts a new agent turn on `sessionId` with `message`. Returns the turn id
  *  so the caller can correlate streamed events and reply to permission
  *  prompts. Subscribe to `subscribeSessionEvents(sessionId, handler)` to see
  *  events as the turn runs. */
-export async function runAgentTurn(sessionId: string, message: string): Promise<string> {
+export async function runAgentTurn(
+  sessionId: string,
+  message: string,
+  options: AgentTurnOptions = {}
+): Promise<string> {
   try {
     const client = await ensureLocalDaemonClient();
     const result = await client.request<{ turnId: string }>("run_agent_turn", {
       sessionId,
-      message
+      message,
+      ...options
     });
     return result.turnId;
   } catch (daemonError) {
     if (!canInvokeTauri()) throw daemonError;
     // Fallback: the in-process Tauri command (same behavior, just no daemon).
-    return invoke<string>("run_agent_turn", { sessionId, message });
+    return invoke<string>("run_agent_turn", { sessionId, message, ...options });
   }
 }
 
@@ -1586,11 +1624,20 @@ export type AddMcpServerInput = {
 export type ModelDescriptorInfo = {
   id: string;
   displayName: string;
+  description?: string;
   provider: string;
   api: string;
   contextWindow: number;
   maxOutputTokens: number;
   supportsReasoning: boolean;
+  isDefault?: boolean;
+  thinkingOptions?: {
+    id: string;
+    label: string;
+    description?: string;
+    isDefault?: boolean;
+  }[];
+  defaultThinkingOptionId?: string;
 };
 
 export type PermissionsSnapshot = {

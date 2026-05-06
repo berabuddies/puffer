@@ -23,8 +23,36 @@
     | { kind: "rule" };
 
   export let body = "";
+  export let onOpenFile: ((path: string, line?: number | null) => void) | undefined = undefined;
 
   const urlPattern = /^(https?:\/\/[^\s<]+|file:\/\/[^\s<]+|\/[^\s<]+)$/;
+
+  function fileTarget(href: string): { path: string; line: number | null } | null {
+    let value = href;
+    if (value.startsWith("file://")) {
+      try {
+        value = decodeURIComponent(new URL(value).pathname);
+      } catch {
+        value = value.slice("file://".length);
+      }
+    }
+    if (!value.startsWith("/")) return null;
+    const match = value.match(/^(.*?):(\d+)(?::\d+)?$/);
+    if (match) {
+      return {
+        path: match[1],
+        line: Number(match[2])
+      };
+    }
+    return { path: value, line: null };
+  }
+
+  function openFileLink(event: MouseEvent, href: string) {
+    const target = fileTarget(href);
+    if (!target) return;
+    event.preventDefault();
+    onOpenFile?.(target.path, target.line);
+  }
 
   function appendText(
     parts: InlineSegment[],
@@ -318,13 +346,16 @@
     {#if segment.kind === "code"}
       <code>{segment.text}</code>
     {:else if segment.href && urlPattern.test(segment.href)}
+      {@const localFile = fileTarget(segment.href)}
       <a
         href={segment.href}
-        target={segment.href.startsWith("/") ? undefined : "_blank"}
-        rel={segment.href.startsWith("/") ? undefined : "noreferrer"}
+        target={localFile ? undefined : "_blank"}
+        rel={localFile ? undefined : "noreferrer"}
+        class:local-file={Boolean(localFile)}
         class:strong={segment.strong}
         class:emphasis={segment.emphasis}
         class:strike={segment.strike}
+        onclick={(event) => openFileLink(event, segment.href!)}
       >
         {segment.text}
       </a>
@@ -498,6 +529,15 @@
     color: var(--accent);
     text-decoration: underline;
     text-underline-offset: 0.16em;
+  }
+  a.local-file {
+    color: var(--muted-foreground);
+    text-decoration-color: color-mix(in oklab, var(--muted-foreground) 35%, transparent);
+    text-decoration-thickness: 1px;
+  }
+  a.local-file:hover {
+    color: var(--foreground);
+    text-decoration-color: var(--muted-foreground);
   }
 
   .table-wrap {

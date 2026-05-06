@@ -271,8 +271,8 @@
   {#if previewMode}
     <div class="terminal-empty">
       <Icon name="terminal" size={20} color="var(--muted-foreground)" />
-      <div class="title">Terminal is available in the Puffer desktop app</div>
-      <div class="sub">Launch Puffer locally to get a live shell in this session's cwd.</div>
+      <div class="title">Terminal is available in the Corbina desktop app</div>
+      <div class="sub">Launch Corbina locally to get a live shell in this session's cwd.</div>
     </div>
   {:else}
     <div class="terminal-tabs" role="tablist" aria-label="Terminal sessions">

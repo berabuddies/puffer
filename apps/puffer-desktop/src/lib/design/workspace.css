@@ -361,11 +361,14 @@
 }
 .pf-fpb-tab:hover {
   color: var(--foreground);
+  background: var(--pf-selected-bg-hover);
+  font-weight: 700;
 }
 .pf-fpb-tab[data-active="true"] {
   color: var(--foreground);
-  border-bottom-color: var(--puffer-accent);
-  font-weight: 600;
+  background: var(--pf-selected-bg);
+  border-bottom-color: transparent;
+  font-weight: 700;
 }
 .pf-fpb-tab .n {
   font-family: var(--font-sans);
@@ -377,9 +380,9 @@
   color: var(--muted-foreground);
 }
 .pf-fpb-tab[data-active="true"] .n {
-  background: color-mix(in oklab, var(--puffer-accent) 15%, var(--background));
-  border-color: color-mix(in oklab, var(--puffer-accent) 35%, var(--border));
-  color: var(--puffer-accent);
+  background: color-mix(in oklab, var(--foreground) 8%, transparent);
+  border-color: transparent;
+  color: var(--foreground);
 }
 .pf-fpb-cols {
   flex: 1;
@@ -572,11 +575,13 @@
   transition: background 100ms, border-color 100ms;
 }
 .pf-pmem-file:hover {
-  background: color-mix(in oklab, var(--puffer-accent) 6%, transparent);
+  background: var(--pf-selected-bg-hover);
+  font-weight: 700;
 }
 .pf-pmem-file[data-active="true"] {
-  background: color-mix(in oklab, var(--puffer-accent) 10%, transparent);
-  border-left-color: var(--puffer-accent);
+  background: var(--pf-selected-bg);
+  border-left-color: transparent;
+  font-weight: 700;
 }
 .pf-pmem-file .dot {
   width: 7px;
@@ -827,13 +832,17 @@
   transition: border-color 120ms, background 120ms;
   font: inherit;
 }
-.pf-modal-seg-btn:hover { border-color: color-mix(in oklch, var(--foreground) 20%, var(--border) 80%); }
-.pf-modal-seg-btn[data-active="true"] {
-  border-color: var(--puffer-accent);
-  background: color-mix(in oklch, var(--puffer-accent) 7%, var(--card) 93%);
-  box-shadow: inset 0 0 0 1px var(--puffer-accent);
+.pf-modal-seg-btn:hover {
+  border-color: transparent;
+  background: var(--pf-selected-bg-hover);
+  font-weight: 700;
 }
-.pf-modal-seg-btn[data-active="true"] svg { color: var(--puffer-accent); }
+.pf-modal-seg-btn[data-active="true"] {
+  border-color: transparent;
+  background: var(--pf-selected-bg);
+  font-weight: 700;
+}
+.pf-modal-seg-btn[data-active="true"] svg { color: var(--foreground); }
 .pf-modal-seg-body { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; }
 .pf-modal-seg-title { font-size: 13px; font-weight: 600; }
 .pf-modal-seg-sub { font-size: 11px; color: var(--muted-foreground); font-family: var(--font-sans); }
@@ -917,11 +926,15 @@
   transition: background 120ms, color 120ms;
   font: inherit;
 }
-.pf-tab-btn:hover { color: var(--foreground); }
-.pf-tab-btn[data-active="true"] {
-  background: var(--background);
+.pf-tab-btn:hover {
+  background: var(--pf-selected-bg-hover);
   color: var(--foreground);
-  box-shadow: 0 1px 2px oklch(0 0 0 / 0.08);
+  font-weight: 700;
+}
+.pf-tab-btn[data-active="true"] {
+  background: var(--pf-selected-bg);
+  color: var(--foreground);
+  font-weight: 700;
 }
 
 .pf-host-list {
@@ -950,10 +963,13 @@
   margin: 0;
   width: 13px; height: 13px;
 }
-.pf-host-row:hover { background: var(--muted); }
+.pf-host-row:hover {
+  background: var(--pf-selected-bg-hover);
+  font-weight: 700;
+}
 .pf-host-row[data-active="true"] {
-  background: color-mix(in oklch, var(--puffer-accent) 8%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--puffer-accent) 40%, transparent);
+  background: var(--pf-selected-bg);
+  font-weight: 700;
 }
 .pf-host-row[data-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
 .pf-host-pip {

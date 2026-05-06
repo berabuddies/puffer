@@ -82,7 +82,7 @@
   <div class="pf-onboard-main">
     {#if signedIn}
       <h2>Choose the repos Puffer can see</h2>
-      <p class="lead">You can change this any time. Puffer will only read what you grant.</p>
+      <p class="lead">You can change this any time. Corbina will only read what you grant.</p>
       <div class="pf-onboard-grid">
         {#each repos as r (r.name)}
           {@const sel = selected.has(r.name)}

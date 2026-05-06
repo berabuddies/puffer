@@ -1,6 +1,13 @@
 /* Chat primitives — pf-msg, pf-composer, pf-tool, pf-chip — shared by
    Ask Puffer pane and future AgentDetail chat. Ported from puffer.css. */
 
+:root {
+  --pf-chat-text-size: 13px;
+  --pf-chat-detail-size: 12.5px;
+  --pf-chat-meta-size: 11px;
+  --pf-chat-code-size: 11.5px;
+}
+
 .pf-msg {
   display: grid;
   grid-template-columns: 36px 1fr;
@@ -43,23 +50,49 @@
   display: flex; align-items: baseline; gap: 8px;
   margin-bottom: 6px;
 }
-.pf-msg-meta .name { font-size: 13px; font-weight: 600; }
+.pf-msg-meta .name { font-size: var(--pf-chat-detail-size); font-weight: 600; }
 .pf-msg-meta .time {
-  font-size: 11px; color: var(--muted-foreground); font-family: var(--font-mono);
+  font-size: var(--pf-chat-meta-size); color: var(--muted-foreground); font-family: var(--font-sans);
 }
 .pf-msg-text {
-  font-size: 14.5px;
-  line-height: 1.62;
+  font-family: var(--font-sans);
+  font-size: var(--pf-chat-text-size);
+  line-height: 1.5;
   color: var(--foreground);
   text-wrap: pretty;
 }
+.pf-chat .pf-msg-text .message-body {
+  gap: 6px;
+  font-family: inherit;
+  font-size: inherit;
+}
+.pf-chat .pf-msg-text .message-body p,
+.pf-chat .pf-msg-text .message-body li,
+.pf-chat .pf-msg-text .message-body blockquote,
+.pf-chat .pf-msg-text .message-body td,
+.pf-chat .pf-msg-text .message-body th {
+  line-height: 1.5;
+}
+.pf-chat .pf-msg-text .message-body code {
+  font-size: var(--pf-chat-code-size);
+}
+.pf-chat .pf-msg-text .message-body pre {
+  font-size: var(--pf-chat-code-size);
+  line-height: 1.45;
+}
+.pf-chat .pf-msg-text .message-body h1.heading { font-size: 1.12em; }
+.pf-chat .pf-msg-text .message-body h2.heading { font-size: 1.06em; }
+.pf-chat .pf-msg-text .message-body h3.heading,
+.pf-chat .pf-msg-text .message-body h4.heading,
+.pf-chat .pf-msg-text .message-body h5.heading,
+.pf-chat .pf-msg-text .message-body h6.heading { font-size: 1em; }
 .pf-msg-text p { margin: 0 0 8px; }
 .pf-msg-text p:last-child { margin-bottom: 0; }
 .pf-msg-text code {
   background: var(--muted);
   padding: 1px 5px;
   border-radius: 4px;
-  font-size: 0.86em;
+  font-size: var(--pf-chat-code-size);
   border: 1px solid var(--border);
   font-family: var(--font-mono);
 }
@@ -79,7 +112,7 @@
 .pf-composer textarea {
   width: 100%; border: 0; outline: 0; background: transparent;
   resize: none; min-height: 26px; max-height: 200px;
-  font-size: 14.5px; font-family: inherit; line-height: 1.5;
+  font-size: var(--pf-chat-text-size); font-family: var(--font-sans); line-height: 1.5;
   color: var(--foreground);
   padding: 4px 4px 6px;
 }
@@ -117,15 +150,16 @@
   background: var(--background);
   overflow: hidden;
   box-shadow: var(--shadow-xs);
-  font-size: 13px;
+  font-family: var(--font-sans);
+  font-size: var(--pf-chat-detail-size);
 }
 .pf-tool-head {
   display: flex; align-items: center; gap: 10px;
   padding: 8px 12px;
   background: color-mix(in oklab, var(--muted) 50%, var(--background));
   border-bottom: 1px solid var(--border);
-  font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-family: var(--font-sans);
+  font-size: var(--pf-chat-detail-size);
 }
 .pf-tool-icon {
   width: 22px; height: 22px;
@@ -144,9 +178,9 @@
 }
 .pf-tool-status {
   display: inline-flex; align-items: center; gap: 6px;
-  font-size: 11px;
+  font-size: var(--pf-chat-meta-size);
   color: var(--muted-foreground);
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
 }
 .pf-tool-status .dot {
   width: 6px; height: 6px; border-radius: 50%;
@@ -154,17 +188,18 @@
 }
 .pf-tool-body {
   padding: 0;
-  font-family: var(--font-mono);
-  font-size: 12px;
+  font-family: var(--font-sans);
+  font-size: var(--pf-chat-detail-size);
   background: var(--background);
   max-height: 280px;
   overflow: auto;
 }
 .pf-tool-body .terminal {
+  font-family: var(--font-mono);
   background: oklch(0.16 0 0);
   color: oklch(0.92 0 0);
   padding: 12px 14px;
-  font-size: 12px;
+  font-size: var(--pf-chat-code-size);
   display: flex;
   flex-direction: column;
   gap: 3px;

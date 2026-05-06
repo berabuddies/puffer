@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy, onMount, tick } from "svelte";
   import { ensureLocalDaemonClient } from "../../api/daemonClient";
   import {
     browserRecording,
@@ -12,9 +12,16 @@
   type Props = {
     timeline: TimelineItem[];
     sessionId?: string | null;
+    selectedActionId?: string | null;
+    onSelectAction?: (actionId: string) => void;
   };
 
-  let { timeline, sessionId = null }: Props = $props();
+  let {
+    timeline,
+    sessionId = null,
+    selectedActionId = null,
+    onSelectAction
+  }: Props = $props();
 
   type ActionKind = "write" | "terminal" | "browser";
   type DetailRow = { kind: "ctx" | "add" | "del" | "omit"; line: number | null; text: string };
@@ -115,8 +122,10 @@
   let actions = $derived(buildActions(timeline));
   let selectedId = $state<string | null>(null);
   let selected = $derived(actions.find((action) => action.id === selectedId) ?? actions.at(-1) ?? null);
+  let terminalActions = $derived(actions.filter((action) => action.kind === "terminal"));
   let recordingFrames = $state<RecordingFrame[]>([]);
   let selectedFrameId = $state<string | null>(null);
+  let ptyShellEl = $state<HTMLDivElement | undefined>(undefined);
   let recordingDisposer: (() => void) | null = null;
 
   onMount(() => {
@@ -131,10 +140,22 @@
   });
 
   $effect(() => {
+    if (selectedActionId && actions.some((action) => action.id === selectedActionId)) {
+      selectedId = selectedActionId;
+      return;
+    }
     if (!selectedId && actions.length > 0) selectedId = actions.at(-1)?.id ?? null;
     if (selectedId && !actions.some((action) => action.id === selectedId)) {
       selectedId = actions.at(-1)?.id ?? null;
     }
+  });
+
+  $effect(() => {
+    if (selected?.kind !== "terminal" || !ptyShellEl) return;
+    const id = selected.id;
+    void tick().then(() => {
+      window.requestAnimationFrame(() => scrollTerminalActionToTop(id));
+    });
   });
 
   function compactRows(rows: DetailRow[], limit = 180): DetailRow[] {
@@ -205,8 +226,37 @@
     return stringField(action.output, ["stderr"]) ?? "";
   }
 
+  function terminalOutput(action: ActionItem): string {
+    const combined = stringField(action.output, [
+      "aggregatedOutput",
+      "combinedOutput",
+      "combined",
+      "output",
+      "text"
+    ]);
+    if (combined !== null) return combined;
+    const out = stdout(action);
+    const err = stderr(action);
+    if (out && err) return `${out}${out.endsWith("\n") ? "" : "\n"}${err}`;
+    return out || err;
+  }
+
   function terminalCommand(action: ActionItem): string {
     return stringField(action.input, ["command"]) ?? action.rawInput;
+  }
+
+  function selectAction(actionId: string) {
+    selectedId = actionId;
+    onSelectAction?.(actionId);
+  }
+
+  function scrollTerminalActionToTop(actionId: string) {
+    if (!ptyShellEl) return;
+    const target = Array.from(ptyShellEl.querySelectorAll<HTMLElement>(".pty-command"))
+      .find((element) => element.dataset.terminalId === actionId);
+    if (!target) return;
+    const targetTop = target.getBoundingClientRect().top - ptyShellEl.getBoundingClientRect().top + ptyShellEl.scrollTop;
+    ptyShellEl.scrollTo({ top: Math.max(0, targetTop - 8), behavior: "auto" });
   }
 
   function toRecordingFrame(frame: BrowserRecordedFrame): RecordingFrame {
@@ -305,21 +355,28 @@
           </div>
         </div>
       {:else if selected.kind === "terminal"}
-        <div class="pty-shell">
-          <div class="pty-stdin">
-            <span>stdin</span>
-            <pre>{terminalCommand(selected)}</pre>
-          </div>
-          <div class="pty-stream">
-            <div class="stream-label">stdout</div>
-            <pre>{stdout(selected) || "(no stdout)"}</pre>
-          </div>
-          {#if stderr(selected)}
-            <div class="pty-stream err">
-              <div class="stream-label">stderr</div>
-              <pre>{stderr(selected)}</pre>
-            </div>
-          {/if}
+        <div class="pty-shell" bind:this={ptyShellEl} aria-label="Shared command transcript">
+          {#each terminalActions as action (action.id)}
+            <section
+              class="pty-command"
+              class:selected={action.id === selected.id}
+              data-terminal-id={action.id}
+              aria-current={action.id === selected.id ? "true" : undefined}
+            >
+              <div class="pty-command-line">
+                <span class="prompt">$</span>
+                <pre>{terminalCommand(action)}</pre>
+                <span class="pty-status">{action.status}</span>
+              </div>
+              {#each [terminalOutput(action)] as output}
+                {#if output}
+                  <pre class="pty-output" class:err={!stdout(action) && Boolean(stderr(action))}>{output}</pre>
+                {:else}
+                  <div class="pty-empty">(no output)</div>
+                {/if}
+              {/each}
+            </section>
+          {/each}
         </div>
       {:else}
         <div class="browser-recording">
@@ -367,7 +424,7 @@
           data-kind={action.kind}
           style:width={`${segmentWidth(action)}px`}
           title={`${action.kind}: ${actionLabel(action)}`}
-          onclick={() => (selectedId = action.id)}
+          onclick={() => selectAction(action.id)}
         >
           <span></span>
         </button>
@@ -451,6 +508,12 @@
     padding: 12px;
   }
 
+  .detail[data-kind="terminal"] {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
   .detail-head {
     height: 34px;
     display: flex;
@@ -475,13 +538,13 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     font-weight: 600;
-    font-size: 13px;
+    font-size: var(--pf-chat-detail-size, 13px);
   }
 
   .status {
     margin-left: auto;
-    font-family: var(--font-mono);
-    font-size: 10px;
+    font-family: var(--font-sans);
+    font-size: var(--pf-chat-meta-size, 11.5px);
     color: var(--muted-foreground);
   }
 
@@ -499,7 +562,7 @@
     border-bottom: 1px solid var(--border);
     color: var(--muted-foreground);
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: var(--pf-chat-code-size, 12px);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -516,7 +579,7 @@
     min-height: 20px;
     line-height: 20px;
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: var(--pf-chat-code-size, 12px);
   }
 
   .diff-row .gutter,
@@ -538,38 +601,78 @@
   .diff-row.omit { color: var(--muted-foreground); background: var(--muted); }
 
   .pty-shell {
-    padding: 0;
-    background: #0b0f14;
-    color: #d7e0ea;
-  }
-
-  .pty-stdin,
-  .pty-stream {
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  }
-
-  .pty-stdin span,
-  .stream-label {
-    display: block;
-    padding: 7px 10px 0;
-    color: #7d8b99;
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding: 10px 10px min(360px, 55vh);
+    background: var(--background);
+    color: var(--foreground);
     font-family: var(--font-mono);
-    font-size: 10px;
-    text-transform: uppercase;
-  }
-
-  pre {
-    margin: 0;
-    padding: 8px 10px 10px;
-    white-space: pre-wrap;
-    word-break: break-word;
-    font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: var(--pf-chat-code-size, 12px);
     line-height: 1.45;
   }
 
-  .pty-stream.err {
-    color: #ffb4a9;
+  .pty-command {
+    position: relative;
+    border-left: 2px solid transparent;
+    padding: 0 0 8px 10px;
+    scroll-margin-top: 8px;
+  }
+
+  .pty-command.selected {
+    border-left-color: var(--action);
+    background: color-mix(in oklab, var(--action) 7%, transparent);
+  }
+
+  .pty-command-line {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 8px;
+    padding: 5px 8px 5px 0;
+    border-top: 1px solid color-mix(in oklab, var(--border) 75%, transparent);
+  }
+
+  .prompt {
+    color: color-mix(in oklab, var(--puffer-accent) 70%, var(--foreground));
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: inherit;
+    user-select: none;
+  }
+
+  .pty-status {
+    color: var(--muted-foreground);
+    font-family: var(--font-sans);
+    font-size: var(--pf-chat-meta-size, 11.5px);
+    line-height: inherit;
+    white-space: nowrap;
+  }
+
+  .pty-empty {
+    padding: 2px 0 0 20px;
+    color: var(--muted-foreground);
+    font-family: var(--font-sans);
+    font-size: var(--pf-chat-meta-size, 11.5px);
+  }
+
+  .pty-command-line pre,
+  .pty-output {
+    margin: 0;
+    padding: 2px 0 4px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: var(--font-mono);
+    font-size: inherit;
+    line-height: inherit;
+  }
+
+  .pty-output {
+    padding-left: 20px;
+  }
+
+  .pty-output.err {
+    color: oklch(0.55 0.2 30);
   }
 
   .browser-recording {
@@ -600,7 +703,7 @@
     gap: 8px;
     padding: 7px 9px;
     border-top: 1px solid var(--border);
-    font-size: 11px;
+    font-size: var(--pf-chat-meta-size, 11.5px);
   }
 
   .browser-screen figcaption span:first-child {

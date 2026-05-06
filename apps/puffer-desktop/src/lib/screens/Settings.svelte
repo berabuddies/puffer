@@ -870,10 +870,24 @@
         </div>
       </div>
 
+      <div class="pf-settings-row">
+        <div class="meta">
+          <div class="label">User name</div>
+          <div class="desc">Shown beside your chat messages.</div>
+        </div>
+        <input
+          class="sc-input"
+          value={props.tweaks.userName}
+          placeholder="Otter"
+          oninput={(e) => props.onTweakChange("userName", (e.currentTarget as HTMLInputElement).value)}
+          style="width: 220px;"
+        />
+      </div>
+
       <div class="pf-settings-row" style="border-bottom: 0;">
         <div class="meta">
           <div class="label">Reset appearance</div>
-          <div class="desc">Restore the default theme, accent, density, and font mix.</div>
+          <div class="desc">Restore the default theme, accent, density, font mix, and chat name.</div>
         </div>
         <div style="display: flex; justify-content: flex-end;">
           <button type="button" class="sc-btn" data-variant="outline" data-size="sm" onclick={props.onResetAppearance}>
@@ -1044,12 +1058,14 @@
     font-weight: 500;
   }
   .pf-choice-pill:hover {
-    background: var(--accent);
+    background: var(--pf-selected-bg-hover);
+    font-weight: 700;
   }
   .pf-choice-pill[data-active="true"] {
-    background: var(--foreground);
-    color: var(--background);
-    border-color: var(--foreground);
+    background: var(--pf-selected-bg);
+    color: var(--foreground);
+    border-color: transparent;
+    font-weight: 700;
   }
   .pf-color-swatch {
     width: 26px;

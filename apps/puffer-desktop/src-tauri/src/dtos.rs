@@ -18,6 +18,8 @@ pub(crate) struct SessionListItemDto {
     pub tags: Vec<String>,
     pub note: Option<String>,
     pub parent_session_id: Option<String>,
+    pub provider_id: String,
+    pub model_id: Option<String>,
 }
 
 /// Describes one grouped folder section in the desktop sidebar.
@@ -151,6 +153,8 @@ pub(crate) struct SessionDetailDto {
     pub tags: Vec<String>,
     pub note: Option<String>,
     pub parent_session_id: Option<String>,
+    pub provider_id: String,
+    pub model_id: Option<String>,
     pub timeline: Vec<TimelineItemDto>,
     pub latest_diff: Option<DiffSummaryDto>,
     pub diff_history: Vec<DiffSummaryDto>,
@@ -288,13 +292,4 @@ pub(crate) struct ExternalCredentialDto {
     pub kind: String,
     pub description: String,
     pub source_path: String,
-}
-
-/// Describes one remote command or file operation result for the desktop scratchpad.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct RemoteOperationDto {
-    pub success: bool,
-    pub stdout: String,
-    pub stderr: String,
 }

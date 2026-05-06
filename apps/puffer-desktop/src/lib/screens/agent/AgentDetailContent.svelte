@@ -1,7 +1,5 @@
 <script lang="ts">
   import Icon from "../../design/Icon.svelte";
-  import HighlightedLine from "../../components/HighlightedLine.svelte";
-  import ActionHistoryPane from "./ActionHistoryPane.svelte";
   import ConversationView from "./ConversationView.svelte";
   import DiffView from "../../components/DiffView.svelte";
   import BrowserPane from "./BrowserPane.svelte";
@@ -9,14 +7,17 @@
   import TerminalPane from "./TerminalPane.svelte";
   import type {
     PermissionTimelineItem,
+    DiffSnapshot,
     SessionDetail,
     SessionListItem,
+    SettingsSnapshot,
     TimelineItem,
     UserQuestionTimelineItem
   } from "../../types";
   import type { AgentState } from "../../shell/tweaks";
+  import type { AgentTurnOptions } from "../../api/desktop";
 
-  type Tab = "chat" | "diff" | "terminal" | "files" | "browser" | "history";
+  type Tab = "chat" | "diff" | "terminal" | "files" | "browser";
   type DiffSubTab = "agent" | "git" | "divergence";
 
   type Props = {
@@ -34,7 +35,9 @@
     turnStartedAtMs: number | null;
     turnThinking: boolean;
     turnStatusHint: string | null;
-    onSubmitMessage: (message: string) => void;
+    settingsSnapshot?: SettingsSnapshot | null;
+    userDisplayName?: string;
+    onSubmitMessage: (message: string, options?: AgentTurnOptions) => void;
     onResolvePermission: (permissionId: string, choice: string) => void;
     onResolveUserQuestion: (
       questionId: string,
@@ -42,6 +45,8 @@
       annotations?: Record<string, Record<string, string>>
     ) => void;
     onCancelTurn?: () => void;
+    onOpenFileLink?: (path: string, line?: number | null) => void;
+    fileToOpen?: string | null;
   };
 
   let {
@@ -59,30 +64,71 @@
     turnStartedAtMs,
     turnThinking,
     turnStatusHint,
+    settingsSnapshot = null,
+    userDisplayName = "Otter",
     onSubmitMessage,
     onResolvePermission,
     onResolveUserQuestion,
-    onCancelTurn
+    onCancelTurn,
+    onOpenFileLink,
+    fileToOpen = null
   }: Props = $props();
 
   let diffTab = $state<DiffSubTab>("agent");
   let agentDiff = $derived(sessionDetail?.agentDiff ?? { files: [], entries: [] });
+  let agentDiffSnapshot = $derived(agentDiffToSnapshot(agentDiff));
   let divergence = $derived(
     sessionDetail?.divergence ?? { agentOnly: [], gitOnly: [], agentTotal: 0, gitTotal: 0 }
   );
   let divergenceCount = $derived(divergence.agentOnly.length + divergence.gitOnly.length);
 
-  function kindIcon(kind: string): "edit" | "file" | "x" | "branch" {
-    switch (kind) {
-      case "write":
-        return "file";
-      case "remove":
-        return "x";
-      case "move":
-        return "branch";
-      default:
-        return "edit";
+  function agentDiffToSnapshot(diff: SessionDetail["agentDiff"]): DiffSnapshot | null {
+    if (diff.files.length === 0) return null;
+
+    const patch = diff.files.map(agentFilePatch).join("\n");
+    return {
+      id: "agent-diff",
+      source: "session_history",
+      title: "Agent edits",
+      command: "agent edits",
+      status: `${diff.files.length} files touched`,
+      unstagedDiffstat: "",
+      stagedDiffstat: "",
+      patch
+    };
+  }
+
+  function agentFilePatch(file: SessionDetail["agentDiff"]["files"][number]): string {
+    const kind = file.latestKind.toLowerCase();
+    const rawLines = file.latestSummary.split("\n").filter((line) => line.length > 0);
+    const bodyLines = normalizeAgentSummaryLines(rawLines, kind, file.path);
+    const oldCount = Math.max(0, bodyLines.filter((line) => !line.startsWith("+")).length);
+    const newCount = Math.max(0, bodyLines.filter((line) => !line.startsWith("-")).length);
+    const oldPath = kind === "write" || kind === "add" ? "/dev/null" : `a/${file.path}`;
+    const newPath = kind === "remove" || kind === "delete" ? "/dev/null" : `b/${file.path}`;
+    const oldRange = oldCount === 0 ? "0,0" : `1,${oldCount}`;
+    const newRange = newCount === 0 ? "0,0" : `1,${newCount}`;
+
+    return [
+      `diff --git a/${file.path} b/${file.path}`,
+      `--- ${oldPath}`,
+      `+++ ${newPath}`,
+      `@@ -${oldRange} +${newRange} @@ ${file.latestKind}${file.editCount > 1 ? ` x${file.editCount}` : ""}`,
+      ...bodyLines
+    ].join("\n");
+  }
+
+  function normalizeAgentSummaryLines(lines: string[], kind: string, path: string): string[] {
+    if (lines.length === 0) {
+      return kind === "remove" || kind === "delete" ? [`-${path}`] : [`+${kind}`];
     }
+
+    return lines.map((line) => {
+      if (kind === "write" || kind === "add") return line.startsWith("+") ? line : `+${line}`;
+      if (kind === "remove" || kind === "delete") return line.startsWith("-") ? line : `-${line}`;
+      if (line.startsWith("+") || line.startsWith("-") || line.startsWith(" ")) return line;
+      return ` ${line}`;
+    });
   }
 </script>
 
@@ -90,7 +136,6 @@
   {#if tab === "chat"}
     <ConversationView
       session={session}
-      agentName={displayName}
       agentState={pufferState}
       timeline={timeline}
       pendingPermissions={pendingPermissions}
@@ -100,13 +145,14 @@
       turnStartedAtMs={turnStartedAtMs}
       turnThinking={turnThinking}
       turnStatusHint={turnStatusHint}
+      settingsSnapshot={settingsSnapshot}
+      {userDisplayName}
       onSubmitMessage={onSubmitMessage}
       onResolvePermission={onResolvePermission}
       onResolveUserQuestion={onResolveUserQuestion}
       onCancelTurn={onCancelTurn}
+      onOpenFileLink={onOpenFileLink}
     />
-  {:else if tab === "history"}
-    <ActionHistoryPane timeline={timeline} sessionId={session?.id ?? null} />
   {:else if tab === "diff"}
     <div class="diff-subtabs">
       <button class="diff-subtab" class:on={diffTab === "agent"} onclick={() => (diffTab = "agent")}>
@@ -127,7 +173,7 @@
         onclick={() => (diffTab = "divergence")}
         title={divergenceCount > 0 ? "Agent and git disagree on which files changed" : "Agent and git agree"}
       >
-        <Icon name="bolt" size={11} />Divergence
+        <Icon name="bolt" size={11} />Agent/Git
         {#if divergenceCount > 0}
           <span class="pf-agent-tab-badge warn">{divergenceCount}</span>
         {/if}
@@ -135,23 +181,9 @@
     </div>
 
     {#if diffTab === "agent"}
-      {#if agentDiff.files.length > 0}
+      {#if agentDiffSnapshot}
         <div class="diff-wrap">
-          <div class="agent-diff-list">
-            {#each agentDiff.files as file (file.path)}
-              <article class="agent-diff-card">
-                <header>
-                  <Icon name={kindIcon(file.latestKind)} size={12} color="var(--muted-foreground)" />
-                  <span class="path mono" title={file.path}>{file.path}</span>
-                  <span class="kind">{file.latestKind}</span>
-                  {#if file.editCount > 1}
-                    <span class="count">x{file.editCount}</span>
-                  {/if}
-                </header>
-                <pre class="diff-snippet"><code>{#each file.latestSummary.split("\n") as line, i (i)}<span><HighlightedLine text={line || " "} path={file.path} /></span>{/each}</code></pre>
-              </article>
-            {/each}
-          </div>
+          <DiffView diff={agentDiffSnapshot} />
         </div>
       {:else}
         <div class="pane-empty">
@@ -176,50 +208,79 @@
         </div>
       {/if}
     {:else}
-      <div class="diff-wrap divergence-pane">
+      <div class="diff-wrap agent-git-pane">
         {#if divergenceCount === 0}
-          <div class="pane-empty">
-            <Icon name="check" size={20} color="var(--muted-foreground)" />
-            <div class="title">Agent and git agree</div>
-            <div class="sub">
-              Every file the agent edited shows up in git diff, and nothing else has changed on disk.
-              {divergence.agentTotal} agent - {divergence.gitTotal} git.
+          <div class="agent-git-empty">
+            <Icon name="check" size={20} color="var(--diff-add-fg)" />
+            <div>
+              <div class="title">Agent and git agree</div>
+              <div class="sub">
+                Every file the agent edited is represented in git diff, and nothing else has changed on disk.
+              </div>
             </div>
           </div>
         {:else}
-          {#if divergence.agentOnly.length > 0}
-            <section class="diverge-block">
-              <header><Icon name="sparkles" size={12} />Agent edited, not in git ({divergence.agentOnly.length})</header>
-              <p class="hint">
-                The agent claims to have edited these files but they do not appear in the current git diff.
-              </p>
-              <ul>
-                {#each divergence.agentOnly as path (path)}
-                  <li class="mono">{path}</li>
-                {/each}
-              </ul>
+          <header class="agent-git-head">
+            <div>
+              <div class="eyebrow">Agent/Git diff</div>
+              <h3>Changed-file reconciliation</h3>
+              <p>Compare what the agent reports touching against the current working tree.</p>
+            </div>
+            <div class="agent-git-counts">
+              <span>{divergence.agentTotal} agent</span>
+              <span>{divergence.gitTotal} git</span>
+              <span class="warn">{divergenceCount} drift</span>
+            </div>
+          </header>
+          <div class="agent-git-grid">
+            <section class="agent-git-card">
+              <header>
+                <Icon name="sparkles" size={13} />
+                <span>Agent edited, not in git</span>
+                <strong>{divergence.agentOnly.length}</strong>
+              </header>
+              <p>The agent transcript contains edits for these paths, but the working tree diff does not.</p>
+              <div class="reconcile-list">
+                {#if divergence.agentOnly.length === 0}
+                  <div class="reconcile-empty">No agent-only files.</div>
+                {:else}
+                  {#each divergence.agentOnly as path (path)}
+                    <div class="reconcile-row">
+                      <span class="file-dot agent"></span>
+                      <span class="mono" title={path}>{path}</span>
+                    </div>
+                  {/each}
+                {/if}
+              </div>
             </section>
-          {/if}
-          {#if divergence.gitOnly.length > 0}
-            <section class="diverge-block">
-              <header><Icon name="git" size={12} />Changed on disk, no agent edit ({divergence.gitOnly.length})</header>
-              <p class="hint">
-                Git sees these files as modified but no agent tool call touched them.
-              </p>
-              <ul>
-                {#each divergence.gitOnly as path (path)}
-                  <li class="mono">{path}</li>
-                {/each}
-              </ul>
+            <section class="agent-git-card">
+              <header>
+                <Icon name="git" size={13} />
+                <span>Changed on disk, no agent edit</span>
+                <strong>{divergence.gitOnly.length}</strong>
+              </header>
+              <p>Git sees these paths as changed, but no agent edit event touched them.</p>
+              <div class="reconcile-list">
+                {#if divergence.gitOnly.length === 0}
+                  <div class="reconcile-empty">No git-only files.</div>
+                {:else}
+                  {#each divergence.gitOnly as path (path)}
+                    <div class="reconcile-row">
+                      <span class="file-dot git"></span>
+                      <span class="mono" title={path}>{path}</span>
+                    </div>
+                  {/each}
+                {/if}
+              </div>
             </section>
-          {/if}
+          </div>
         {/if}
       </div>
     {/if}
   {:else if tab === "terminal"}
     <TerminalPane cwd={projectCwd} sessionId={session?.id ?? "preview"} />
   {:else if tab === "files"}
-    <FilesPane cwd={projectCwd} sessionId={session?.id ?? "preview"} />
+    <FilesPane cwd={projectCwd} sessionId={session?.id ?? "preview"} openPath={fileToOpen} />
   {:else if tab === "browser"}
     <BrowserPane sessionId={session?.id ?? "preview"} />
   {/if}
@@ -303,97 +364,178 @@
     border: 1px solid color-mix(in oklab, oklch(0.62 0.22 25) 35%, var(--border));
   }
 
-  .agent-diff-list {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
+  .agent-git-pane {
+    --diff-add-fg: oklch(0.42 0.13 145);
+    --diff-add-marker: oklch(0.55 0.16 145);
+    --diff-del-fg: oklch(0.48 0.18 25);
+    --diff-del-marker: oklch(0.62 0.2 25);
     padding: 14px 16px;
-  }
-
-  .agent-diff-card {
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    overflow: hidden;
     background: var(--background);
   }
 
-  .agent-diff-card header {
+  .agent-git-head {
+    min-height: 64px;
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 8px 12px;
-    background: color-mix(in oklab, var(--background) 96%, var(--muted));
-    border-bottom: 1px solid var(--border);
-    font-size: 12px;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: color-mix(in oklab, var(--background) 97%, var(--muted));
+    margin-bottom: 14px;
   }
 
-  .agent-diff-card .path {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--foreground);
-  }
-
-  .agent-diff-card .kind,
-  .agent-diff-card .count {
-    font-size: 10.5px;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    padding: 1px 6px;
-    border-radius: 4px;
-    background: var(--muted);
+  .agent-git-head .eyebrow {
     color: var(--muted-foreground);
-  }
-
-  .diff-snippet {
-    margin: 0;
-    padding: 10px 12px;
-    max-height: 260px;
-    overflow: auto;
-    background: var(--background);
     font-family: var(--font-mono);
-    font-size: 11.5px;
-    line-height: 1.5;
+    font-size: 10px;
+    text-transform: uppercase;
   }
 
-  .diff-snippet code {
-    display: flex;
-    flex-direction: column;
-    gap: 0;
+  .agent-git-head h3 {
+    margin: 1px 0 0;
+    font-size: 15px;
+    letter-spacing: 0;
   }
 
-  .divergence-pane {
-    padding: 14px 16px;
-  }
-
-  .diverge-block {
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 12px;
-    margin-bottom: 12px;
-    background: var(--background);
-  }
-
-  .diverge-block header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-weight: 600;
-    font-size: 13px;
-  }
-
-  .diverge-block .hint {
-    margin: 8px 0;
+  .agent-git-head p,
+  .agent-git-card p {
+    margin: 2px 0 0;
     color: var(--muted-foreground);
     font-size: 12px;
     line-height: 1.45;
   }
 
-  .diverge-block ul {
-    margin: 0;
-    padding-left: 18px;
+  .agent-git-counts {
+    display: inline-flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    font-family: var(--font-mono);
+    font-size: 11px;
+  }
+
+  .agent-git-counts span {
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    border-radius: 999px;
+    padding: 0 8px;
+    background: var(--muted);
+    color: var(--muted-foreground);
+  }
+
+  .agent-git-counts .warn {
+    color: var(--diff-del-fg);
+    background: color-mix(in oklab, var(--diff-del-marker) 13%, transparent);
+  }
+
+  .agent-git-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+  }
+
+  .agent-git-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--background);
+  }
+
+  .agent-git-card > header {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    background: color-mix(in oklab, var(--background) 96%, var(--muted));
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .agent-git-card > header strong {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--muted-foreground);
+  }
+
+  .agent-git-card > p {
+    padding: 10px 12px 0;
+  }
+
+  .reconcile-list {
+    padding: 10px 8px 12px;
+    display: grid;
+    gap: 4px;
+  }
+
+  .reconcile-row {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 8px;
+    align-items: center;
+    padding: 6px 8px;
+    border-radius: 5px;
+    background: color-mix(in oklab, var(--background) 96%, var(--muted));
+    font-size: 12px;
+  }
+
+  .reconcile-row .mono {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .file-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--muted-foreground);
+  }
+
+  .file-dot.agent {
+    background: var(--diff-add-marker);
+  }
+
+  .file-dot.git {
+    background: var(--diff-del-marker);
+  }
+
+  .reconcile-empty,
+  .agent-git-empty {
+    color: var(--muted-foreground);
+    font-size: 12px;
+  }
+
+  .agent-git-empty {
+    min-height: 260px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    text-align: left;
+  }
+
+  .agent-git-empty .title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--foreground);
+  }
+
+  .agent-git-empty .sub {
+    margin-top: 3px;
+    max-width: 420px;
+  }
+
+  @media (max-width: 900px) {
+    .agent-git-grid {
+      grid-template-columns: 1fr;
+    }
   }
 
   .mono {

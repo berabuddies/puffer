@@ -25,11 +25,17 @@
   text-align: left;
   font: inherit;
 }
-.pf-settings-nav-item:hover { background: var(--accent); }
-.pf-settings-nav-item[data-active="true"] {
-  background: color-mix(in oklab, var(--puffer-accent) 14%, transparent);
-  font-weight: 500;
+.pf-settings-nav-item:hover {
+  background: var(--pf-selected-bg-hover);
+  color: var(--foreground);
+  font-weight: 700;
 }
+.pf-settings-nav-item[data-active="true"] {
+  background: var(--pf-selected-bg);
+  color: var(--foreground);
+  font-weight: 700;
+}
+.pf-settings-nav-item[data-active="true"] svg { color: var(--foreground); }
 .pf-settings-pane { padding: 36px 48px; overflow: auto; }
 .pf-settings-pane h2 { font-size: 22px; letter-spacing: -0.02em; }
 .pf-settings-pane h3 { font-size: 14px; font-weight: 600; }
