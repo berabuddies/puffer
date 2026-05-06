@@ -161,13 +161,6 @@ pub(crate) fn run_streaming_loop(
     let mut items = transcript_to_items(inputs.state, inputs.input);
     session.pre_loop_inject(&mut items);
 
-    // Microcompact (env-gated, off by default). Mirrors Claude Code's
-    // pre-request pruning at `query.ts:401`. Runs ONCE before the loop
-    // — a single user turn's tool results piling up mid-loop is left
-    // for a follow-up. The pruning is in-place: tool_call ids stay,
-    // only stale `tool_result.text` content gets replaced.
-    maybe_microcompact(inputs.state, &mut items, inputs.observability.as_ref());
-
     let mut invocations: Vec<ToolInvocation> = Vec::new();
     let mut reflection_traces: Vec<ReflectionTraceEvent> = Vec::new();
     let mut reflection = inputs
@@ -267,6 +260,14 @@ pub(crate) fn run_streaming_loop(
         session.notify_compacted();
     }
 
+    // Pre-loop microcompact (env-gated, off by default). Mirrors Claude
+    // Code's pre-request pruning at `query.ts:401`. The trigger conditions
+    // (time-gap / token-budget) and the `[Old tool result content cleared]`
+    // stub check make this idempotent — calling it again inside the loop
+    // (below, per iteration) only fires when there is something *new* to
+    // clear, so the boundary message isn't spammed.
+    maybe_microcompact(inputs.state, &mut items, Some(&mut agent_span));
+
     let mut turn_index: u32 = 0;
     loop {
         // Cancel boundary: check before each turn's provider round-trip.
@@ -278,6 +279,13 @@ pub(crate) fn run_streaming_loop(
                 return Err(error);
             }
         }
+
+        // Per-iteration microcompact. Mirrors Claude Code's
+        // `query.ts:401` placement INSIDE the loop. Idempotent because
+        // already-cleared FCOs equal CLEARED_STUB and are skipped, so
+        // this only fires when a NEW compactable tool result was
+        // appended since the previous pass.
+        maybe_microcompact(inputs.state, &mut items, Some(&mut agent_span));
 
         // Drain completed background tasks and inject as user messages.
         let completed = crate::runtime::claude_tools::workflow::drain_completed_shell_tasks(
@@ -961,9 +969,8 @@ pub(crate) fn run_streaming_loop(
 pub(crate) fn maybe_microcompact(
     state: &crate::AppState,
     items: &mut Vec<ConversationItem>,
-    obs: Option<&puffer_observability::ObservabilityHandle>,
+    span: Option<&mut puffer_observability::SpanGuard>,
 ) -> Option<MicrocompactOutcome> {
-    let _ = obs; // observability span hookup deferred to a follow-up
     let config = MicrocompactConfig::from_env()?;
     let inputs = MicrocompactInputs {
         last_assistant_at: state.last_assistant_at,
@@ -984,6 +991,21 @@ Their call ids remain in context — re-run the tool if you need the content aga
         trigger_str,
     );
     items.push(ConversationItem::user_message(&boundary));
+    if let Some(span) = span {
+        span.set_str("puffer.microcompact.trigger", trigger_str);
+        span.set_str(
+            "puffer.microcompact.cleared_count",
+            outcome.cleared_count.to_string(),
+        );
+        span.set_str(
+            "puffer.microcompact.tokens_saved",
+            outcome.tokens_saved.to_string(),
+        );
+        span.set_str(
+            "puffer.microcompact.cleared_call_ids",
+            outcome.cleared_call_ids.join(","),
+        );
+    }
     Some(outcome)
 }
 
