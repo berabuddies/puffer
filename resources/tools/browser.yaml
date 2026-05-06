@@ -19,19 +19,32 @@ input_schema:
       enum:
         - list
         - open
+        - new
         - focus
+        - focus_ref
         - close
+        - quit
         - navigate
         - reload
         - back
         - forward
         - snapshot
         - click
+        - dblclick
+        - hover
         - type
+        - insertText
         - fill
+        - select
+        - check
+        - uncheck
         - press
+        - keydown
+        - keyup
+        - scroll
+        - scrollIntoView
         - evaluate
-      description: Browser action to perform. `open` with `url` is already a navigation.
+      description: Browser action to perform. `focus` switches tabs by `tabId`; `focus_ref` targets one snapshot ref. `open` with `url` is already a navigation.
     sessionId:
       type: string
       description: Puffer session id. Defaults to the current agent session.
@@ -46,16 +59,25 @@ input_schema:
       description: URL for open or navigate actions. Prefer one `open` call when creating a tab at a URL.
     ref:
       type: string
-      description: Fresh element ref from the latest snapshot, such as @e1.
+      description: Fresh element ref from the latest snapshot for ref-based actions, such as @e1.
+    value:
+      type: string
+      description: Exact option value or label text for `select` actions.
     text:
       type: string
-      description: Text for type or fill actions.
+      description: Text for `type`, `insertText`, or `fill` actions.
     key:
       type: string
-      description: Keyboard key for press actions, such as Enter or Escape.
+      description: Keyboard key for `press`, `keydown`, or `keyup`, such as Enter or Escape.
     script:
       type: string
-      description: JavaScript expression for evaluate actions.
+      description: JavaScript expression for `evaluate` actions.
+    direction:
+      type: string
+      description: Scroll direction for `scroll` actions: up, down, left, or right.
+    px:
+      type: integer
+      description: Optional scroll distance in pixels for `scroll` actions. Defaults to 600.
     width:
       type: integer
       description: Optional viewport width for launching a tab.

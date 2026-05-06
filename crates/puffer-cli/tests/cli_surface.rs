@@ -14,6 +14,7 @@ fn top_level_help_shows_claude_style_public_surface() {
         "agents",
         "auth",
         "auto-mode",
+        "browser",
         "doctor",
         "install",
         "mcp",
@@ -97,6 +98,41 @@ fn remote_help_mentions_ssh_launch() {
     assert!(stdout.contains("Launch Puffer on a remote host over SSH"));
     assert!(stdout.contains("<TARGET>"));
     assert!(stdout.contains("--cwd"));
+}
+
+#[test]
+fn browser_help_lists_phase_two_surface_commands() {
+    let (_tempdir, workspace, puffer_home) = configured_workspace();
+    let output = run_puffer(&workspace, &puffer_home, &["browser", "--help"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for command in [
+        "list", "open", "navigate", "back", "forward", "reload", "close", "quit", "tab",
+        "snapshot", "click", "select", "check", "uncheck", "fill", "type", "press", "eval",
+    ] {
+        assert!(
+            stdout.contains(command),
+            "missing `{command}` in browser help:\n{stdout}"
+        );
+    }
+    assert!(
+        !stdout.contains("window"),
+        "unexpected `window` in browser help:\n{stdout}"
+    );
+}
+
+#[test]
+fn browser_tab_help_lists_new_subcommand() {
+    let (_tempdir, workspace, puffer_home) = configured_workspace();
+    let output = run_puffer(&workspace, &puffer_home, &["browser", "tab", "--help"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for command in ["list", "new", "close"] {
+        assert!(
+            stdout.contains(command),
+            "missing `{command}` in browser tab help:\n{stdout}"
+        );
+    }
 }
 
 #[test]

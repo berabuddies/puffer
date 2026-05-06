@@ -3,6 +3,7 @@ mod auth_provider;
 mod authflow;
 mod benchmark_reflection;
 mod benchmark_run;
+mod browser;
 mod cli_args;
 mod command_surface;
 mod connectors;
@@ -251,6 +252,7 @@ fn main() -> Result<()> {
             token,
             print_handshake,
         }),
+        Some(Command::Browser(args)) => browser::run_browser_command(&cwd, &paths, args),
         Some(Command::BenchmarkRun {
             prompt,
             prompt_file,

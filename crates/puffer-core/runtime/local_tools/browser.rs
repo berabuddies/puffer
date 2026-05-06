@@ -4,6 +4,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use puffer_config::ConfigPaths;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::io::ErrorKind;
 use std::path::Path;
 use tungstenite::{connect, Message};
 use url::Url;
@@ -49,11 +50,17 @@ struct BrowserToolInput {
     #[serde(default, rename = "ref")]
     ref_id: Option<String>,
     #[serde(default)]
+    value: Option<String>,
+    #[serde(default)]
     text: Option<String>,
     #[serde(default)]
     key: Option<String>,
     #[serde(default)]
     script: Option<String>,
+    #[serde(default)]
+    direction: Option<String>,
+    #[serde(default)]
+    px: Option<u32>,
     #[serde(default)]
     width: Option<u32>,
     #[serde(default)]
@@ -67,6 +74,8 @@ struct BrowserToolInput {
 struct DaemonHandshake {
     url: String,
     token: String,
+    #[serde(default)]
+    workspace_root: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,14 +95,56 @@ struct DaemonError {
 
 fn read_handshake(cwd: &Path) -> Result<DaemonHandshake> {
     let paths = ConfigPaths::discover(cwd);
-    let path = paths.user_config_dir.join("daemon.handshake");
-    let text = std::fs::read_to_string(&path).with_context(|| {
-        format!(
-            "Browser tool requires a running Puffer daemon at {}",
-            path.display()
-        )
-    })?;
-    serde_json::from_str(&text).context("decode daemon handshake")
+    let workspace_root = canonical_workspace_root(&paths.workspace_root);
+    let workspace_path = paths.workspace_config_dir.join("daemon.handshake");
+    let user_path = paths.user_config_dir.join("daemon.handshake");
+    let mut last_error = None;
+    for path in [&workspace_path, &user_path] {
+        match std::fs::read_to_string(path) {
+            Ok(text) => match serde_json::from_str(&text) {
+                Ok(handshake) => {
+                    if handshake_matches_workspace(&handshake, &workspace_root) {
+                        return Ok(handshake);
+                    }
+                }
+                Err(error) => {
+                    last_error = Some(
+                        anyhow!(error)
+                            .context(format!("decode daemon handshake {}", path.display())),
+                    );
+                }
+            },
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                last_error = Some(
+                    anyhow!(error).context(format!("read daemon handshake {}", path.display())),
+                );
+            }
+        }
+    }
+    if let Some(error) = last_error {
+        return Err(error);
+    }
+    bail!(
+        "Browser tool requires a running Puffer daemon at {} or {}",
+        workspace_path.display(),
+        user_path.display()
+    );
+}
+
+fn handshake_matches_workspace(handshake: &DaemonHandshake, workspace_root: &Path) -> bool {
+    let workspace_root = canonical_workspace_root(workspace_root);
+    handshake
+        .workspace_root
+        .as_deref()
+        .map(Path::new)
+        .map(canonical_workspace_root)
+        .map(|candidate| candidate == workspace_root)
+        .unwrap_or(true)
+}
+
+fn canonical_workspace_root(path: &Path) -> std::path::PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn send_daemon_request(handshake: &DaemonHandshake, method: &str, params: Value) -> Result<Value> {
@@ -149,9 +200,12 @@ mod tests {
                 label: None,
                 url: None,
                 ref_id: None,
+                value: None,
                 text: None,
                 key: None,
                 script: None,
+                direction: None,
+                px: None,
                 width: None,
                 height: None,
                 activate: None,
@@ -172,14 +226,64 @@ mod tests {
             label: None,
             url: None,
             ref_id: None,
+            value: None,
             text: None,
             key: None,
             script: None,
+            direction: None,
+            px: None,
             width: None,
             height: None,
             activate: None,
         };
         normalize_session_id(&mut params, &current);
         assert_eq!(params.session_id.as_deref(), Some(explicit));
+    }
+
+    #[test]
+    fn preserves_extended_browser_action_fields() {
+        let params: BrowserToolInput = serde_json::from_value(serde_json::json!({
+            "action": "select",
+            "tabId": "t2",
+            "ref": "@e5",
+            "value": "New York",
+            "direction": "down",
+            "px": 480
+        }))
+        .unwrap();
+
+        let roundtrip = serde_json::to_value(params).unwrap();
+        assert_eq!(
+            roundtrip.get("value").and_then(Value::as_str),
+            Some("New York")
+        );
+        assert_eq!(
+            roundtrip.get("direction").and_then(Value::as_str),
+            Some("down")
+        );
+        assert_eq!(roundtrip.get("px").and_then(Value::as_u64), Some(480));
+    }
+
+    #[test]
+    fn handshake_workspace_filter_accepts_matching_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let handshake = DaemonHandshake {
+            url: "ws://127.0.0.1:1/ws".to_string(),
+            token: "token".to_string(),
+            workspace_root: Some(workspace.path().display().to_string()),
+        };
+        assert!(handshake_matches_workspace(&handshake, workspace.path()));
+    }
+
+    #[test]
+    fn handshake_workspace_filter_rejects_other_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let handshake = DaemonHandshake {
+            url: "ws://127.0.0.1:1/ws".to_string(),
+            token: "token".to_string(),
+            workspace_root: Some(other.path().display().to_string()),
+        };
+        assert!(!handshake_matches_workspace(&handshake, workspace.path()));
     }
 }
