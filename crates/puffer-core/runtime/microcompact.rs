@@ -70,6 +70,44 @@ impl Default for MicrocompactConfig {
     }
 }
 
+impl MicrocompactConfig {
+    /// Loads config from environment variables. Returns `None` when
+    /// microcompact is disabled (default — opt-in to match Claude Code's
+    /// `tengu_slate_heron` GrowthBook default of `enabled: false`).
+    ///
+    /// Variables:
+    /// - `PUFFER_MICROCOMPACT=1` — enables the pass.
+    /// - `PUFFER_MICROCOMPACT_KEEP_RECENT=N` — overrides default 5.
+    /// - `PUFFER_MICROCOMPACT_GAP_MINUTES=N` — overrides default 60.
+    /// - `PUFFER_MICROCOMPACT_TOKEN_THRESHOLD=N` — adds a token-budget
+    ///   trigger; without this only the time-gap trigger fires.
+    pub fn from_env() -> Option<Self> {
+        let enabled = std::env::var("PUFFER_MICROCOMPACT")
+            .ok()
+            .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+        if !enabled {
+            return None;
+        }
+        let mut cfg = Self::default();
+        if let Ok(s) = std::env::var("PUFFER_MICROCOMPACT_KEEP_RECENT") {
+            if let Ok(n) = s.parse::<usize>() {
+                cfg.keep_recent = n;
+            }
+        }
+        if let Ok(s) = std::env::var("PUFFER_MICROCOMPACT_GAP_MINUTES") {
+            if let Ok(n) = s.parse::<u64>() {
+                cfg.gap_threshold_minutes = n;
+            }
+        }
+        if let Ok(s) = std::env::var("PUFFER_MICROCOMPACT_TOKEN_THRESHOLD") {
+            if let Ok(n) = s.parse::<u32>() {
+                cfg.token_threshold = Some(n);
+            }
+        }
+        Some(cfg)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MicrocompactOutcome {
     pub trigger: MicrocompactTrigger,

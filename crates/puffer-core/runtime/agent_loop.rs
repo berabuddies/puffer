@@ -30,6 +30,10 @@ use puffer_provider_registry::{AuthStore, ProviderDescriptor, ProviderRegistry};
 use puffer_resources::LoadedResources;
 use puffer_tools::ToolRegistry;
 
+use super::microcompact::{
+    microcompact_in_place, MicrocompactConfig, MicrocompactInputs, MicrocompactOutcome,
+    MicrocompactTrigger,
+};
 use super::openai::conversation::{
     compact_conversation_with, inject_post_compact_context, transcript_to_items, ConversationItem,
     ToolOutputPayload,
@@ -156,6 +160,13 @@ pub(crate) fn run_streaming_loop(
 
     let mut items = transcript_to_items(inputs.state, inputs.input);
     session.pre_loop_inject(&mut items);
+
+    // Microcompact (env-gated, off by default). Mirrors Claude Code's
+    // pre-request pruning at `query.ts:401`. Runs ONCE before the loop
+    // — a single user turn's tool results piling up mid-loop is left
+    // for a follow-up. The pruning is in-place: tool_call ids stay,
+    // only stale `tool_result.text` content gets replaced.
+    maybe_microcompact(inputs.state, &mut items, inputs.observability.as_ref());
 
     let mut invocations: Vec<ToolInvocation> = Vec::new();
     let mut reflection_traces: Vec<ReflectionTraceEvent> = Vec::new();
@@ -938,6 +949,43 @@ pub(crate) fn run_streaming_loop(
 
 // `execute_tool_batch` lives in `runtime/tool_batch.rs`; the streaming
 // loop above and `blocking_loop::run_blocking_loop` call into it.
+
+/// Runs one microcompact pass and, on a successful clear, appends a
+/// boundary `<system-reminder>` user message describing what happened.
+/// Mirrors `services/compact/microCompact.ts:484` (boundary insertion).
+///
+/// Disabled by default — `MicrocompactConfig::from_env()` returns `None`
+/// unless `PUFFER_MICROCOMPACT=1` is set. See env var docs in
+/// `microcompact.rs`. When the trait grows a typed observability hook
+/// for context-edit operations, swap the println for that.
+pub(crate) fn maybe_microcompact(
+    state: &crate::AppState,
+    items: &mut Vec<ConversationItem>,
+    obs: Option<&puffer_observability::ObservabilityHandle>,
+) -> Option<MicrocompactOutcome> {
+    let _ = obs; // observability span hookup deferred to a follow-up
+    let config = MicrocompactConfig::from_env()?;
+    let inputs = MicrocompactInputs {
+        last_assistant_at: state.last_assistant_at,
+        last_input_tokens: state.last_input_tokens,
+        config: &config,
+    };
+    let outcome = microcompact_in_place(items.as_mut_slice(), &inputs)?;
+    let trigger_str = match outcome.trigger {
+        MicrocompactTrigger::TimeGap => "time_gap",
+        MicrocompactTrigger::TokenBudget => "token_budget",
+    };
+    let boundary = format!(
+        "<system-reminder>\n[microcompact] cleared {} stale tool result{} (~{} tokens reclaimed via {} trigger). \
+Their call ids remain in context — re-run the tool if you need the content again.\n</system-reminder>",
+        outcome.cleared_count,
+        if outcome.cleared_count == 1 { "" } else { "s" },
+        outcome.tokens_saved,
+        trigger_str,
+    );
+    items.push(ConversationItem::user_message(&boundary));
+    Some(outcome)
+}
 
 #[cfg(test)]
 mod cancel_token_tests {

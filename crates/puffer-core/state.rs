@@ -111,6 +111,11 @@ pub struct AppState {
     /// Last API-reported input token count (from `usage.input_tokens`).
     /// Updated after each Responses API call for accurate context-window display.
     pub last_input_tokens: Option<u32>,
+    /// Wall-clock timestamp of the most recent committed assistant message.
+    /// Set by `push_message` when role == Assistant. Consumed by the
+    /// microcompact time-based trigger to mirror Claude Code's "gap since
+    /// last assistant message" heuristic (`services/compact/microCompact.ts:421`).
+    pub last_assistant_at: Option<std::time::SystemTime>,
     /// Cache hit ratio for the most recent provider request (0.0–1.0).
     pub last_cache_hit_ratio: Option<f64>,
     /// Running session-average cache hit ratio (0.0–1.0).
@@ -179,6 +184,7 @@ impl AppState {
             status_line_signature: None,
             pending_query_prompt: None,
             last_input_tokens: None,
+            last_assistant_at: None,
             last_cache_hit_ratio: None,
             session_cache_hit_ratio: None,
             session_cache_turn_count: 0,
@@ -309,6 +315,7 @@ impl AppState {
 
     /// Appends a rendered message to the in-memory transcript.
     pub fn push_message(&mut self, role: MessageRole, text: impl Into<String>) {
+        let was_assistant = matches!(role, MessageRole::Assistant);
         self.transcript.push(RenderedMessage {
             role,
             text: text.into(),
@@ -318,6 +325,9 @@ impl AppState {
             tool_input: None,
             success: None,
         });
+        if was_assistant {
+            self.last_assistant_at = Some(std::time::SystemTime::now());
+        }
     }
 
     /// Appends a structured tool invocation (call + result) to the transcript.

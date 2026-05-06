@@ -8,7 +8,7 @@
 
 use anyhow::Result;
 
-use super::agent_loop::{LoopInputs, TurnSession};
+use super::agent_loop::{maybe_microcompact, LoopInputs, TurnSession};
 use super::openai::conversation::{
     compact_conversation_with, inject_post_compact_context, transcript_to_items,
     ConversationItem, ToolOutputPayload,
@@ -28,6 +28,9 @@ pub(crate) fn run_blocking_loop(
 
     let mut items = transcript_to_items(inputs.state, inputs.input);
     session.pre_loop_inject(&mut items);
+
+    // Microcompact (env-gated). Same hookup as the streaming loop.
+    maybe_microcompact(inputs.state, &mut items, inputs.observability.as_ref());
 
     let mut invocations: Vec<ToolInvocation> = Vec::new();
     let mut reflection_traces: Vec<ReflectionTraceEvent> = Vec::new();
