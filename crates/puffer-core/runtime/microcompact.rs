@@ -20,19 +20,24 @@
 //! `call_id`, tool ordering, and any preceding `FunctionCall` are untouched.
 
 use super::openai::conversation::{ConversationItem, ToolOutputPayload};
+use crate::tool_names::canonical_tool_name;
 use std::collections::{HashMap, HashSet};
 use std::time::SystemTime;
 
 /// Tools whose output is bulky and rarely re-read by the model after a few
-/// turns. Aligned with Claude Code `COMPACTABLE_TOOLS` in
-/// `services/compact/microCompact.ts:43-52`. Notably absent: `TaskCreate`,
-/// `Memory`, `Skill`, `Agent`, MCP tools — their results carry semantic
-/// state the model needs to keep.
+/// turns, expressed as **canonical names** (see `tool_names::canonical_tool_name`).
+/// Aligned with Claude Code `COMPACTABLE_TOOLS` in
+/// `services/compact/microCompact.ts:43-52`. Notably absent: `agent` (Task),
+/// MCP tools, and any task/skill/memory tool — their results carry
+/// semantic state the model needs to keep.
+///
+/// Membership is checked AFTER routing the wire-side tool name through
+/// `canonical_tool_name(...)`, so this list does NOT need to enumerate
+/// case variants or legacy aliases (`read_file`, `replace_in_file`, …);
+/// the canonicalizer collapses them all to lowercase canonical form.
 pub const COMPACTABLE_TOOLS: &[&str] = &[
-    "Read", "Bash", "Grep", "Glob", "WebSearch", "WebFetch", "Edit", "Write",
-    // Aliases puffer uses interchangeably:
-    "PowerShell",
-    "read_file", "write_file", "replace_in_file", "list_dir", "search_text", "bash",
+    "read", "bash", "grep", "glob", "websearch", "webfetch", "edit", "write",
+    "powershell",
 ];
 
 /// Replacement text for cleared `tool_result` payloads. Matches the constant
@@ -130,16 +135,22 @@ pub struct MicrocompactInputs<'a> {
     pub config: &'a MicrocompactConfig,
 }
 
+/// Returns true when a wire-side tool name (any case / alias) maps to one
+/// of the compactable canonical names. Centralizes the
+/// `canonical_tool_name` indirection so both passes stay in sync.
+fn is_compactable_tool(wire_name: &str) -> bool {
+    let canonical = canonical_tool_name(wire_name);
+    COMPACTABLE_TOOLS.contains(&canonical.as_str())
+}
+
 /// Walk `items` in encounter order and collect tool_use ids whose
-/// originating `FunctionCall.name` is in `COMPACTABLE_TOOLS`.
+/// originating `FunctionCall.name`, after canonical normalization,
+/// matches `COMPACTABLE_TOOLS`.
 fn collect_compactable_call_ids(items: &[ConversationItem]) -> Vec<String> {
-    let compactable: HashSet<&'static str> = COMPACTABLE_TOOLS.iter().copied().collect();
     items
         .iter()
         .filter_map(|item| match item {
-            ConversationItem::FunctionCall { call_id, name, .. }
-                if compactable.contains(name.as_str()) =>
-            {
+            ConversationItem::FunctionCall { call_id, name, .. } if is_compactable_tool(name) => {
                 Some(call_id.clone())
             }
             _ => None,
@@ -204,7 +215,6 @@ pub fn microcompact_in_place(
         })
         .collect();
 
-    let compactable_names: HashSet<&'static str> = COMPACTABLE_TOOLS.iter().copied().collect();
     let mut tokens_saved = 0usize;
     let mut cleared_call_ids = Vec::new();
 
@@ -218,9 +228,13 @@ pub fn microcompact_in_place(
         let Some(tool_name) = name_by_call.get(call_id) else {
             continue;
         };
-        if !compactable_names.contains(tool_name.as_str()) {
+        if !is_compactable_tool(tool_name) {
             continue;
         }
+        // CLEARED_STUB is a sentinel, not a marker prefix — only an exact
+        // match means we already cleared this slot. `starts_with`/`contains`
+        // would falsely skip outputs that legitimately quote the stub
+        // (e.g. a Read of this file's source code).
         if output.text == CLEARED_STUB {
             continue;
         }
@@ -467,6 +481,101 @@ mod tests {
             second.is_none(),
             "second pass with all stale entries already CLEARED_STUB should be a no-op"
         );
+    }
+
+    #[test]
+    fn canonical_normalization_handles_alias_and_lowercase_tool_names() {
+        // The four equivalent ways a tool name can show up on the wire:
+        //   - canonical lowercase ("read")
+        //   - TitleCase ("Read")
+        //   - legacy snake_case alias ("read_file")
+        //   - mixed-case alias ("Read_File")
+        // All four MUST be treated as compactable. Before the refactor the
+        // first and the last would silently no-op because the whitelist
+        // only contained TitleCase + a fixed alias list.
+        let mut items = vec![
+            fc("c1", "read"),
+            fco("c1", "lowercase"),
+            fc("c2", "Read"),
+            fco("c2", "titlecase"),
+            fc("c3", "read_file"),
+            fco("c3", "snake_alias"),
+            fc("c4", "Read_File"),
+            fco("c4", "mixed_alias_RECENT"),
+        ];
+        let cfg = MicrocompactConfig {
+            keep_recent: 1,
+            ..Default::default()
+        };
+        let outcome = microcompact_in_place(
+            &mut items,
+            &MicrocompactInputs {
+                last_assistant_at: Some(an_hour_ago()),
+                last_input_tokens: None,
+                config: &cfg,
+            },
+        )
+        .expect("trigger");
+        assert_eq!(outcome.cleared_count, 3, "first three Read variants clear");
+        let texts: Vec<_> = items
+            .iter()
+            .filter_map(|i| match i {
+                ConversationItem::FunctionCallOutput { call_id, output } => {
+                    Some((call_id.as_str(), output.text.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts[0].1, CLEARED_STUB);
+        assert_eq!(texts[1].1, CLEARED_STUB);
+        assert_eq!(texts[2].1, CLEARED_STUB);
+        assert_eq!(texts[3].1, "mixed_alias_RECENT");
+    }
+
+    #[test]
+    fn cleared_stub_substring_in_payload_does_not_skip_first_clear() {
+        // The CLEARED_STUB sentinel is a Rust constant in this very source
+        // file. If the model `Read`s `microcompact.rs`, the resulting
+        // tool_result will contain the stub as a SUBSTRING. Strict equality
+        // (`==`) is what makes the first-pass clear still fire — switching
+        // to `starts_with`/`contains` would break this. Lock the invariant.
+        let payload_with_substring = format!(
+            "fn foo() {{\n  pub const CLEARED_STUB: &str = \"{}\";\n}}\n",
+            CLEARED_STUB
+        );
+        let mut items = vec![
+            fc("c1", "Read"),
+            fco("c1", &payload_with_substring),
+            fc("c2", "Read"),
+            fco("c2", "RECENT"),
+        ];
+        let cfg = MicrocompactConfig {
+            keep_recent: 1,
+            ..Default::default()
+        };
+        let outcome = microcompact_in_place(
+            &mut items,
+            &MicrocompactInputs {
+                last_assistant_at: Some(an_hour_ago()),
+                last_input_tokens: None,
+                config: &cfg,
+            },
+        )
+        .expect("trigger");
+        assert_eq!(outcome.cleared_count, 1);
+        // After clearing, the FCO is exactly the stub. A second pass must
+        // detect that and skip (the existing idempotence test covers the
+        // mechanic; this one covers the substring-collision path).
+        let cleared_text = items
+            .iter()
+            .find_map(|i| match i {
+                ConversationItem::FunctionCallOutput { call_id, output } if call_id == "c1" => {
+                    Some(output.text.clone())
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(cleared_text, CLEARED_STUB, "exact stub, not substring");
     }
 
     #[test]
