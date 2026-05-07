@@ -9,6 +9,12 @@ use url::Url;
 
 use super::CHROME_START_TIMEOUT;
 
+#[derive(Clone, Debug)]
+pub(super) struct ChromePageTarget {
+    pub(super) target_id: String,
+    pub(super) page_ws: String,
+}
+
 /// Waits for Chrome to publish its browser-level DevTools WebSocket URL.
 pub(super) fn read_devtools_ws_url(child: &mut Child, profile_dir: &Path) -> Result<String> {
     let stderr = child.stderr.take().context("Chrome stderr missing")?;
@@ -48,9 +54,38 @@ fn spawn_stderr_drain<R: std::io::Read + Send + 'static>(mut reader: BufReader<R
     });
 }
 
-/// Creates a new Chrome page target and returns its DevTools WebSocket URL.
-pub(super) fn create_page_target(browser_ws: &str, url: &str) -> Result<String> {
-    let endpoint = format!("{}/json/new?{}", devtools_http_base(browser_ws)?, urlencoding(url));
+/// Returns the initial Chrome page target created during browser launch, if present.
+pub(super) fn initial_page_target(browser_ws: &str) -> Result<Option<ChromePageTarget>> {
+    let endpoint = format!("{}/json/list", devtools_http_base(browser_ws)?);
+    let client = Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .context("build Chrome HTTP client")?;
+    let value: Value = client
+        .get(endpoint)
+        .send()
+        .context("list Chrome targets")?
+        .error_for_status()
+        .context("Chrome target listing failed")?
+        .json()
+        .context("parse Chrome target listing")?;
+    let Some(targets) = value.as_array() else {
+        bail!("Chrome target listing response was not an array");
+    };
+    Ok(targets
+        .iter()
+        .find(|target| target.get("type").and_then(Value::as_str) == Some("page"))
+        .map(parse_page_target)
+        .transpose()?)
+}
+
+/// Creates a new Chrome page target and returns its target id and DevTools WebSocket URL.
+pub(super) fn create_page_target(browser_ws: &str, url: &str) -> Result<ChromePageTarget> {
+    let endpoint = format!(
+        "{}/json/new?{}",
+        devtools_http_base(browser_ws)?,
+        urlencoding(url)
+    );
     let client = Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
@@ -63,11 +98,23 @@ pub(super) fn create_page_target(browser_ws: &str, url: &str) -> Result<String> 
         .context("Chrome target creation failed")?
         .json()
         .context("parse Chrome target response")?;
-    value
-        .get("webSocketDebuggerUrl")
-        .and_then(Value::as_str)
-        .map(ToString::to_string)
-        .ok_or_else(|| anyhow!("Chrome target response missing webSocketDebuggerUrl"))
+    parse_page_target(&value)
+}
+
+/// Closes one Chrome page target by target id.
+pub(super) fn close_page_target(browser_ws: &str, target_id: &str) -> Result<()> {
+    let endpoint = format!("{}/json/close/{target_id}", devtools_http_base(browser_ws)?);
+    let client = Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .context("build Chrome HTTP client")?;
+    client
+        .get(endpoint)
+        .send()
+        .context("close Chrome target")?
+        .error_for_status()
+        .context("Chrome target close failed")?;
+    Ok(())
 }
 
 /// Finds the Chrome or Chromium executable Puffer should manage.
@@ -205,6 +252,23 @@ pub(super) fn safe_profile_name(session_id: &str) -> String {
 
 fn urlencoding(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
+}
+
+fn parse_page_target(value: &Value) -> Result<ChromePageTarget> {
+    let target_id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("Chrome target response missing id"))?;
+    let page_ws = value
+        .get("webSocketDebuggerUrl")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("Chrome target response missing webSocketDebuggerUrl"))?;
+    Ok(ChromePageTarget {
+        target_id: target_id.to_string(),
+        page_ws: page_ws.to_string(),
+    })
 }
 
 fn devtools_http_base(browser_ws: &str) -> Result<String> {

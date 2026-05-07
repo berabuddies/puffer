@@ -90,7 +90,8 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
             Ok(serde_json::to_value(tabs)?)
         }
         "quit" | "exit" => {
-            let tabs = close_all_tabs(state, &root_session_id)?;
+            state.browsers.close_root(&root_session_id)?;
+            let tabs = state.browsers.list_tabs(&root_session_id);
             publish_tabs(state, &root_session_id);
             Ok(serde_json::to_value(tabs)?)
         }
@@ -334,20 +335,6 @@ fn open_agent_tab(
     )
 }
 
-fn close_all_tabs(state: &Arc<DaemonState>, root_session_id: &str) -> Result<BrowserTabsState> {
-    let tab_ids = state
-        .browsers
-        .list_tabs(root_session_id)
-        .tabs
-        .into_iter()
-        .map(|tab| tab.tab_id)
-        .collect::<Vec<_>>();
-    for tab_id in tab_ids {
-        let _ = state.browsers.close_tab(root_session_id, &tab_id)?;
-    }
-    Ok(state.browsers.list_tabs(root_session_id))
-}
-
 impl BrowserRegistry {
     /// Captures an agent-readable DOM snapshot and fresh element refs.
     pub(crate) fn agent_snapshot(&self, backend_session_id: &str) -> Result<Value> {
@@ -557,18 +544,33 @@ fn ensure_target_tab(
     width: u32,
     height: u32,
 ) -> Result<(String, String)> {
+    let tabs = state.browsers.list_tabs(root_session_id);
     if let Some(tab_id) = optional_string(params, "tabId") {
         let backend_id = backend_session_id(root_session_id, &tab_id);
-        ensure_backend_session(state, root_session_id, &tab_id, &backend_id, width, height)?;
+        let restore_url = tabs
+            .tabs
+            .iter()
+            .find(|tab| tab.tab_id == tab_id)
+            .map(|tab| tab.url.clone())
+            .unwrap_or_else(|| DEFAULT_URL.to_string());
+        ensure_backend_session(
+            state,
+            root_session_id,
+            &tab_id,
+            &backend_id,
+            restore_url,
+            width,
+            height,
+        )?;
         return Ok((tab_id, backend_id));
     }
-    let tabs = state.browsers.list_tabs(root_session_id);
     if let Some(tab) = active_or_first(&tabs) {
         ensure_backend_session(
             state,
             root_session_id,
             &tab.tab_id,
             &tab.backend_session_id,
+            tab.url.clone(),
             width,
             height,
         )?;
@@ -593,6 +595,7 @@ fn ensure_backend_session(
     root_session_id: &str,
     tab_id: &str,
     backend_id: &str,
+    restore_url: String,
     width: u32,
     height: u32,
 ) -> Result<()> {
@@ -602,7 +605,7 @@ fn ensure_backend_session(
     let browser_state = state.browsers.open(
         state.event_sender(),
         backend_id.to_string(),
-        Some(DEFAULT_URL.to_string()),
+        Some(restore_url),
         width,
         height,
     )?;

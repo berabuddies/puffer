@@ -58,6 +58,16 @@ impl BrowserTabRegistry {
             .unwrap_or_default()
     }
 
+    /// Returns one recorded tab by id for the given root browser session.
+    pub(crate) fn tab(&self, root_session_id: &str, tab_id: &str) -> Option<BrowserTabInfo> {
+        self.sessions
+            .get(root_session_id)?
+            .tabs
+            .iter()
+            .find(|tab| tab.tab_id == tab_id)
+            .cloned()
+    }
+
     pub(crate) fn open_tab(
         &mut self,
         root_session_id: &str,
@@ -189,6 +199,11 @@ impl BrowserTabRegistry {
             tab.loading = false;
             tab.updated_at_ms = now_ms();
         }
+    }
+
+    /// Removes all tab metadata for one root browser session.
+    pub(crate) fn remove_root(&mut self, root_session_id: &str) {
+        self.sessions.remove(root_session_id);
     }
 }
 
