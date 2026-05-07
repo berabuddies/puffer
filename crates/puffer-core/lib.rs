@@ -52,12 +52,12 @@ pub use runtime::{
     execute_user_prompt_streaming_with_reflection as execute_user_turn_streaming_with_reflection,
     execute_user_prompt_streaming_with_structured_output as execute_user_turn_streaming_with_structured_output,
     execute_user_prompt_with_structured_output as execute_user_turn_with_structured_output,
-    shutdown_runtime_services, with_permission_prompt_handler, with_user_question_prompt_handler,
-    CancelToken, CodeJudgeConfig, LlmJudgeConfig, LlmJudgeContextScope, LlmJudgeMode,
-    LlmJudgePromptCacheMode, PermissionPromptAction, PermissionPromptRequest, ReflectionConfig,
-    ReflectionLanguage, ReflectionTraceEvent, StructuredOutputConfig, ToolCallRequest,
-    ToolInvocation, TurnExecution, TurnStreamEvent, TurnUsageReport, UserQuestionPromptRequest,
-    UserQuestionPromptResponse,
+    runtime_work_active, shutdown_runtime_services, with_permission_prompt_handler,
+    with_user_question_prompt_handler, CancelToken, CodeJudgeConfig, LlmJudgeConfig,
+    LlmJudgeContextScope, LlmJudgeMode, LlmJudgePromptCacheMode, PermissionPromptAction,
+    PermissionPromptRequest, ReflectionConfig, ReflectionLanguage, ReflectionTraceEvent,
+    StructuredOutputConfig, ToolCallRequest, ToolInvocation, TurnExecution, TurnStreamEvent,
+    TurnUsageReport, UserQuestionPromptRequest, UserQuestionPromptResponse,
 };
 pub use state::{AppState, MessageRole, RenderedMessage, TaskRecord, TaskStatus};
 

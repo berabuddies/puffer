@@ -16,6 +16,7 @@ mod daemon_title;
 mod daemon_ui_state;
 mod desktop_api;
 mod desktop_api_types;
+mod heartbeat;
 mod resource_fs;
 mod runner_selection;
 mod subscriptions;
@@ -136,6 +137,17 @@ fn main() -> Result<()> {
     // triggers as a side effect of inspecting state.
     let anthropic_base = providers.provider("anthropic").map(|p| p.base_url.clone());
     let start_background_runtimes = should_start_background_runtimes(&cli.subcommand);
+    let _heartbeat = if start_background_runtimes {
+        match heartbeat::start_from_env() {
+            Ok(handle) => handle,
+            Err(error) => {
+                eprintln!("heartbeat disabled: {error:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     let _workflow_runtime = if start_background_runtimes {
         match workflow_runtime::install(&paths, &config, &resources, &providers, &auth_store) {
             Ok(rt) => Some(rt),

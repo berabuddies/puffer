@@ -14,6 +14,7 @@ use reqwest::StatusCode;
 #[allow(unused_imports)]
 use serde_json::json;
 use serde_json::Value;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 #[cfg(test)]
@@ -79,6 +80,27 @@ pub fn observability_handle() -> Option<puffer_observability::ObservabilityHandl
 static OBSERVABILITY_HANDLE: std::sync::Mutex<
     Option<puffer_observability::ObservabilityHandle>,
 > = std::sync::Mutex::new(None);
+static ACTIVE_RUNTIME_WORK: AtomicUsize = AtomicUsize::new(0);
+
+/// Returns true while Puffer is actively executing a prompt turn or spawned agent turn.
+pub fn runtime_work_active() -> bool {
+    ACTIVE_RUNTIME_WORK.load(Ordering::SeqCst) > 0
+}
+
+struct RuntimeWorkGuard;
+
+impl RuntimeWorkGuard {
+    fn enter() -> Self {
+        ACTIVE_RUNTIME_WORK.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for RuntimeWorkGuard {
+    fn drop(&mut self) {
+        ACTIVE_RUNTIME_WORK.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 #[cfg(test)]
 use self::anthropic::{anthropic_tool_schema, execute_anthropic_tool_calls};
@@ -390,6 +412,7 @@ fn execute_user_prompt_with_options(
     input: &str,
     mut options: TurnRequestOptions<'_>,
 ) -> Result<TurnExecution> {
+    let _runtime_work = RuntimeWorkGuard::enter();
     apply_session_reflection_default(state, &mut options);
     // Inject the process-wide observability handle so the
     // non-streaming path (used by `execute_user_prompt`, in turn
@@ -628,6 +651,7 @@ fn execute_user_prompt_streaming_with_options<F>(
 where
     F: FnMut(TurnStreamEvent),
 {
+    let _runtime_work = RuntimeWorkGuard::enter();
     apply_session_reflection_default(state, &mut options);
     // Inject the process-wide observability handle when callers
     // didn't supply one. This means `execute_user_prompt_streaming(...)`
