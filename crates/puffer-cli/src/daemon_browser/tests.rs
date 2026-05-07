@@ -1,6 +1,15 @@
+use super::agent::{
+    checkable_state_expression, fill_expression, focus_expression, key_text, scroll_delta,
+    scroll_into_view_expression, select_expression,
+};
 use super::cursor::parse_cursor_response;
-use super::params::parse_input_event;
+use super::params::{parse_input_event, required_string_array};
+use super::screenshot::{
+    parse_agent_screenshot_options, parse_capture_screenshot_response, BrowserScreenshotFormat,
+};
 use super::selection::parse_copy_selection_response;
+use super::upload::parse_upload_handle_response;
+use super::upload::upload_input_handle_expression;
 use super::*;
 
 #[test]
@@ -244,6 +253,122 @@ fn parses_cursor_response() {
     }))
     .unwrap();
     assert_eq!(cursor.cursor, "pointer");
+}
+
+#[test]
+fn screenshot_options_default_to_plain_png_capture() {
+    let options = parse_agent_screenshot_options(&json!({})).unwrap();
+    assert_eq!(options.capture.format, BrowserScreenshotFormat::Png);
+    assert_eq!(options.capture.quality, None);
+    assert!(!options.annotate);
+}
+
+#[test]
+fn screenshot_options_require_jpeg_for_quality() {
+    let error = parse_agent_screenshot_options(&json!({
+        "screenshotQuality": 80
+    }))
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("`screenshotQuality` requires `screenshotFormat` `jpeg`"));
+}
+
+#[test]
+fn parses_capture_screenshot_response() {
+    let screenshot = parse_capture_screenshot_response(
+        &json!({
+            "id": 10,
+            "result": {
+                "data": "ZmFrZS1pbWFnZS1ieXRlcw=="
+            }
+        }),
+        BrowserScreenshotFormat::Jpeg,
+    )
+    .unwrap();
+    assert_eq!(screenshot.format, BrowserScreenshotFormat::Jpeg);
+    assert_eq!(screenshot.data, "ZmFrZS1pbWFnZS1ieXRlcw==");
+}
+
+#[test]
+fn parses_required_string_array_for_upload_files() {
+    let files =
+        required_string_array(&json!({ "files": ["a.txt", "nested/b.txt"] }), "files").unwrap();
+    assert_eq!(files, vec!["a.txt", "nested/b.txt"]);
+    assert!(required_string_array(&json!({ "files": [] }), "files").is_err());
+}
+
+#[test]
+fn parses_upload_handle_response_object_id() {
+    let object_id = parse_upload_handle_response(&json!({
+        "id": 10,
+        "result": {
+            "result": {
+                "type": "object",
+                "subtype": "node",
+                "className": "HTMLInputElement",
+                "objectId": "123.456.789"
+            }
+        }
+    }))
+    .unwrap();
+    assert_eq!(object_id, "123.456.789");
+}
+
+#[test]
+fn fill_expression_supports_label_controls() {
+    let expression = fill_expression(10.0, 20.0, "pufferfish").unwrap();
+    assert!(expression.contains("label.control"));
+    assert!(expression.contains("label.querySelector(editableSelector)"));
+}
+
+#[test]
+fn fill_expression_uses_native_value_setter() {
+    let expression = fill_expression(10.0, 20.0, "pufferfish").unwrap();
+    assert!(expression.contains("Object.getOwnPropertyDescriptor(prototype, 'value')"));
+    assert!(expression.contains("descriptor.set.call(target"));
+}
+
+#[test]
+fn focus_expression_targets_focusable_elements() {
+    let expression = focus_expression(10.0, 20.0);
+    assert!(expression.contains("target.focus"));
+    assert!(expression.contains("Target is not focusable"));
+}
+
+#[test]
+fn scroll_helpers_cover_alias_behaviour() {
+    assert_eq!(scroll_delta("down", 480).unwrap(), (0.0, 480.0));
+    assert!(scroll_delta("diagonal", 480).is_err());
+    assert_eq!(key_text("A").as_deref(), Some("A"));
+    assert_eq!(key_text("Enter"), None);
+    let expression = scroll_into_view_expression(10.0, 20.0);
+    assert!(expression.contains("scrollIntoView"));
+    assert!(expression.contains("behavior: 'instant'"));
+}
+
+#[test]
+fn select_expression_supports_label_bound_selects() {
+    let expression = select_expression(10.0, 20.0, "New York").unwrap();
+    assert!(expression.contains("label.control instanceof HTMLSelectElement"));
+    assert!(expression.contains("exact option value or label text"));
+    assert!(expression.contains("dispatchEvent(new Event('change'"));
+}
+
+#[test]
+fn upload_expression_supports_direct_inputs_and_labels() {
+    let expression = upload_input_handle_expression(10.0, 20.0);
+    assert!(expression.contains("node.closest('input[type=\"file\"]')"));
+    assert!(expression.contains("label.control instanceof HTMLInputElement"));
+    assert!(expression.contains("Target is not a native file input"));
+}
+
+#[test]
+fn checkable_state_expression_supports_labels_and_roles() {
+    let expression = checkable_state_expression(10.0, 20.0);
+    assert!(expression.contains("label.control instanceof HTMLInputElement"));
+    assert!(expression.contains("[role=\"checkbox\"], [role=\"radio\"]"));
+    assert!(expression.contains("Target is not a checkbox or radio control"));
 }
 
 #[test]

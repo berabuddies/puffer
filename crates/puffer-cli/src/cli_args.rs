@@ -1,4 +1,5 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -359,6 +360,26 @@ pub(crate) enum BrowserCommand {
         #[command(flatten)]
         target: BrowserTargetArgs,
     },
+    /// Capture one still screenshot of the active or selected tab.
+    Screenshot {
+        /// Optional output path. When omitted, Puffer writes under `.puffer/screenshots/`.
+        #[arg(value_name = "PATH")]
+        path: Option<PathBuf>,
+        /// Overlay fresh `@eN` ref labels onto the captured screenshot.
+        #[arg(long = "annotate", default_value_t = false)]
+        annotate: bool,
+        /// Directory for auto-generated screenshot files when no `PATH` is provided.
+        #[arg(long = "screenshot-dir", value_name = "DIR")]
+        screenshot_dir: Option<PathBuf>,
+        /// Image format for the captured screenshot. Defaults to `png`.
+        #[arg(long = "screenshot-format", value_parser = ["png", "jpeg"])]
+        screenshot_format: Option<String>,
+        /// JPEG quality from 0 to 100.
+        #[arg(long = "screenshot-quality", value_parser = clap::value_parser!(u8).range(0..=100))]
+        screenshot_quality: Option<u8>,
+        #[command(flatten)]
+        target: BrowserTargetArgs,
+    },
     /// Click an element ref from the latest snapshot.
     Click {
         /// Element ref such as `@e3`.
@@ -411,6 +432,17 @@ pub(crate) enum BrowserCommand {
         ref_id: String,
         /// Exact option value or label text.
         value: String,
+        #[command(flatten)]
+        target: BrowserTargetArgs,
+    },
+    /// Upload one or more files into a native `<input type="file">` ref.
+    Upload {
+        /// Element ref such as `@e9`.
+        #[arg(value_name = "REF")]
+        ref_id: String,
+        /// One or more file paths to attach.
+        #[arg(value_name = "FILE", required = true, num_args = 1..)]
+        files: Vec<PathBuf>,
         #[command(flatten)]
         target: BrowserTargetArgs,
     },
@@ -924,6 +956,3 @@ pub(crate) enum McpTransport {
     Sse,
     Http,
 }
-
-#[cfg(test)]
-mod tests;

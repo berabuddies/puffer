@@ -107,8 +107,26 @@ fn browser_help_lists_phase_two_surface_commands() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     for command in [
-        "list", "open", "navigate", "back", "forward", "reload", "close", "quit", "tab",
-        "snapshot", "click", "select", "check", "uncheck", "fill", "type", "press", "eval",
+        "list",
+        "open",
+        "navigate",
+        "back",
+        "forward",
+        "reload",
+        "close",
+        "quit",
+        "tab",
+        "snapshot",
+        "screenshot",
+        "click",
+        "select",
+        "upload",
+        "check",
+        "uncheck",
+        "fill",
+        "type",
+        "press",
+        "eval",
     ] {
         assert!(
             stdout.contains(command),

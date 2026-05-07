@@ -24,11 +24,25 @@ use super::cursor::{cursor_eval_expression, parse_cursor_response};
 use super::devtools::emit_devtools_event;
 use super::input::send_input;
 use super::recording::BrowserRecordingRegistry;
+use super::screenshot::{
+    capture_screenshot_command_params, parse_capture_screenshot_response,
+    BrowserCaptureScreenshotOptions, BrowserCapturedScreenshot, BrowserScreenshotFormat,
+};
 use super::selection::{parse_copy_selection_response, selection_eval_expression};
+use super::upload::{
+    parse_upload_handle_response, parse_upload_runtime_response, parse_upload_set_files_response,
+    upload_finalize_function, upload_prepare_function,
+};
+use super::worker::{
+    apply_viewport, frame_session_id_string, release_remote_object, send_state_eval,
+    set_read_timeout, start_screencast,
+};
 use super::{
     BrowserCopySelection, BrowserCursor, BrowserEvaluation, BrowserHistoryDirection,
     BrowserInputEvent, BrowserState, CDP_READ_TIMEOUT, DEFAULT_URL,
 };
+
+type UploadReply = Sender<std::result::Result<(), String>>;
 
 #[derive(Clone)]
 pub(super) struct BrowserRootSession {
@@ -280,6 +294,31 @@ impl BrowserSession {
             .map_err(|message| anyhow!("{message}"))
     }
 
+    /// Captures one still screenshot of the current browser viewport.
+    pub(super) fn capture_screenshot(
+        &self,
+        options: BrowserCaptureScreenshotOptions,
+    ) -> Result<BrowserCapturedScreenshot> {
+        let (reply, rx) = mpsc::channel();
+        self.send(BrowserCommand::CaptureScreenshot { options, reply })?;
+        rx.recv_timeout(Duration::from_secs(5))
+            .context("timed out waiting for browser screenshot")?
+            .map_err(|message| anyhow!("{message}"))
+    }
+
+    /// Uploads one or more files into a native file input selected by JavaScript.
+    pub(super) fn upload(&self, expression: String, files: Vec<String>) -> Result<()> {
+        let (reply, rx) = mpsc::channel();
+        self.send(BrowserCommand::Upload {
+            expression,
+            files,
+            reply,
+        })?;
+        rx.recv_timeout(Duration::from_secs(10))
+            .context("timed out waiting for browser upload")?
+            .map_err(|message| anyhow!("{message}"))
+    }
+
     /// Starts shutting down the page worker and returns the shutdown ack receiver.
     pub(super) fn begin_close(&self) -> Option<Receiver<()>> {
         if !self.is_alive() {
@@ -350,6 +389,15 @@ pub(super) enum BrowserCommand {
         expression: String,
         reply: Sender<std::result::Result<BrowserEvaluation, String>>,
     },
+    CaptureScreenshot {
+        options: BrowserCaptureScreenshotOptions,
+        reply: Sender<std::result::Result<BrowserCapturedScreenshot, String>>,
+    },
+    Upload {
+        expression: String,
+        files: Vec<String>,
+        reply: UploadReply,
+    },
     Close {
         reply: Sender<()>,
     },
@@ -365,6 +413,27 @@ enum PendingKind {
     },
     Evaluate {
         reply: Sender<std::result::Result<BrowserEvaluation, String>>,
+    },
+    CaptureScreenshot {
+        format: BrowserScreenshotFormat,
+        reply: Sender<std::result::Result<BrowserCapturedScreenshot, String>>,
+    },
+    UploadResolve {
+        files: Vec<String>,
+        reply: UploadReply,
+    },
+    UploadPrepare {
+        object_id: String,
+        files: Vec<String>,
+        reply: UploadReply,
+    },
+    UploadSetFiles {
+        object_id: String,
+        reply: UploadReply,
+    },
+    UploadFinalize {
+        object_id: String,
+        reply: UploadReply,
     },
 }
 
@@ -399,6 +468,7 @@ fn run_cdp_worker(
     let mut pending = HashMap::<u64, PendingKind>::new();
     let _ = send_cdp(&mut socket, &mut next_id, "Page.enable", json!({}));
     let _ = send_cdp(&mut socket, &mut next_id, "Runtime.enable", json!({}));
+    let _ = send_cdp(&mut socket, &mut next_id, "DOM.enable", json!({}));
     let _ = send_cdp(&mut socket, &mut next_id, "Log.enable", json!({}));
     let _ = send_cdp(&mut socket, &mut next_id, "Network.enable", json!({}));
     let _ = send_cdp(&mut socket, &mut next_id, "Page.bringToFront", json!({}));
@@ -564,6 +634,39 @@ fn handle_command(
             );
             pending.insert(id, PendingKind::Evaluate { reply });
         }
+        BrowserCommand::CaptureScreenshot { options, reply } => {
+            let id = send_cdp(
+                socket,
+                next_id,
+                "Page.captureScreenshot",
+                capture_screenshot_command_params(options),
+            );
+            pending.insert(
+                id,
+                PendingKind::CaptureScreenshot {
+                    format: options.format,
+                    reply,
+                },
+            );
+        }
+        BrowserCommand::Upload {
+            expression,
+            files,
+            reply,
+        } => {
+            let _ = send_cdp(socket, next_id, "Page.bringToFront", json!({}));
+            let id = send_cdp(
+                socket,
+                next_id,
+                "Runtime.evaluate",
+                json!({
+                    "expression": expression,
+                    "returnByValue": false,
+                    "awaitPromise": true
+                }),
+            );
+            pending.insert(id, PendingKind::UploadResolve { files, reply });
+        }
         BrowserCommand::Close { .. } => {}
     }
 }
@@ -599,6 +702,89 @@ fn handle_cdp_message(
                 let result =
                     parse_evaluation_response(&value).map_err(|error| format!("{error:#}"));
                 let _ = reply.send(result);
+            }
+            Some(PendingKind::CaptureScreenshot { format, reply }) => {
+                let result = parse_capture_screenshot_response(&value, format)
+                    .map_err(|error| format!("{error:#}"));
+                let _ = reply.send(result);
+            }
+            Some(PendingKind::UploadResolve { files, reply }) => {
+                match parse_upload_handle_response(&value) {
+                    Ok(object_id) => {
+                        let id = send_cdp(
+                            socket,
+                            next_id,
+                            "Runtime.callFunctionOn",
+                            json!({
+                                "objectId": &object_id,
+                                "functionDeclaration": upload_prepare_function(),
+                                "arguments": [{ "value": files.len() }],
+                                "returnByValue": true,
+                                "awaitPromise": true
+                            }),
+                        );
+                        pending.insert(
+                            id,
+                            PendingKind::UploadPrepare {
+                                object_id,
+                                files,
+                                reply,
+                            },
+                        );
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(format!("{error:#}")));
+                    }
+                }
+            }
+            Some(PendingKind::UploadPrepare {
+                object_id,
+                files,
+                reply,
+            }) => match parse_upload_runtime_response(&value, "browser upload target validation") {
+                Ok(()) => {
+                    let id = send_cdp(
+                        socket,
+                        next_id,
+                        "DOM.setFileInputFiles",
+                        json!({
+                            "objectId": &object_id,
+                            "files": files
+                        }),
+                    );
+                    pending.insert(id, PendingKind::UploadSetFiles { object_id, reply });
+                }
+                Err(error) => {
+                    release_remote_object(socket, next_id, &object_id);
+                    let _ = reply.send(Err(format!("{error:#}")));
+                }
+            },
+            Some(PendingKind::UploadSetFiles { object_id, reply }) => {
+                match parse_upload_set_files_response(&value) {
+                    Ok(()) => {
+                        let id = send_cdp(
+                            socket,
+                            next_id,
+                            "Runtime.callFunctionOn",
+                            json!({
+                                "objectId": &object_id,
+                                "functionDeclaration": upload_finalize_function(),
+                                "returnByValue": true,
+                                "awaitPromise": true
+                            }),
+                        );
+                        pending.insert(id, PendingKind::UploadFinalize { object_id, reply });
+                    }
+                    Err(error) => {
+                        release_remote_object(socket, next_id, &object_id);
+                        let _ = reply.send(Err(format!("{error:#}")));
+                    }
+                }
+            }
+            Some(PendingKind::UploadFinalize { object_id, reply }) => {
+                let result = parse_upload_runtime_response(&value, "browser upload event dispatch");
+                release_remote_object(socket, next_id, &object_id);
+                let _ = reply.send(result.map_err(|error| format!("{error:#}")));
             }
             None => {}
         }
@@ -735,18 +921,6 @@ fn emit_state_error<E: std::fmt::Display>(
     });
 }
 
-fn send_state_eval(socket: &mut WebSocket<MaybeTlsStream<TcpStream>>, next_id: &mut u64) -> u64 {
-    send_cdp(
-        socket,
-        next_id,
-        "Runtime.evaluate",
-        json!({
-            "expression": "({ url: location.href, title: document.title })",
-            "returnByValue": true
-        }),
-    )
-}
-
 /// Decodes one CDP evaluation response into the Browser API result shape.
 pub(crate) fn parse_evaluation_response(value: &Value) -> Result<BrowserEvaluation> {
     if let Some(details) = value.pointer("/result/exceptionDetails") {
@@ -785,45 +959,6 @@ pub(crate) fn parse_evaluation_response(value: &Value) -> Result<BrowserEvaluati
     })
 }
 
-fn apply_viewport(
-    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
-    next_id: &mut u64,
-    width: u32,
-    height: u32,
-) -> Result<u64> {
-    Ok(send_cdp(
-        socket,
-        next_id,
-        "Emulation.setDeviceMetricsOverride",
-        json!({
-            "width": width,
-            "height": height,
-            "deviceScaleFactor": 1,
-            "mobile": false
-        }),
-    ))
-}
-
-fn start_screencast(
-    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
-    next_id: &mut u64,
-    width: u32,
-    height: u32,
-) -> Result<u64> {
-    Ok(send_cdp(
-        socket,
-        next_id,
-        "Page.startScreencast",
-        json!({
-            "format": "jpeg",
-            "quality": 70,
-            "maxWidth": width,
-            "maxHeight": height,
-            "everyNthFrame": 1
-        }),
-    ))
-}
-
 /// Sends one raw CDP message and returns the assigned request id.
 pub(crate) fn send_cdp(
     socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
@@ -839,23 +974,6 @@ pub(crate) fn send_cdp(
             .into(),
     ));
     id
-}
-
-fn set_read_timeout(socket: &WebSocket<MaybeTlsStream<TcpStream>>, timeout: Option<Duration>) {
-    let stream = socket.get_ref();
-    let tcp: &TcpStream = match stream {
-        MaybeTlsStream::Plain(stream) => stream,
-        MaybeTlsStream::Rustls(stream) => stream.get_ref(),
-        _ => return,
-    };
-    let _ = tcp.set_read_timeout(timeout);
-}
-
-fn frame_session_id_string(session_id: &str, cdp_session_id: Option<&Value>) -> String {
-    match cdp_session_id.and_then(Value::as_i64) {
-        Some(value) => format!("{session_id}:{value}"),
-        None => session_id.to_string(),
-    }
 }
 
 fn ensure_root_alive(inner: &mut BrowserRootState) -> Result<()> {

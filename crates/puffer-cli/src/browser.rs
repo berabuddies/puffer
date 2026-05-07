@@ -1,12 +1,5 @@
 //! CLI command execution for `puffer browser`.
 
-use anyhow::{Context, Result};
-use indexmap::IndexMap;
-use puffer_config::ConfigPaths;
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
-use std::path::Path;
-
 use crate::cli_args::{
     BrowserArgs, BrowserCommand, BrowserKeyboardCommand, BrowserTabCommand, BrowserTargetArgs,
 };
@@ -14,16 +7,25 @@ use crate::daemon::Handshake;
 use crate::daemon_browser::{
     default_cli_session_id, ensure_daemon, send_daemon_request, BrowserTabInfo, BrowserTabsState,
 };
+use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use indexmap::IndexMap;
+use puffer_config::ConfigPaths;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Runs one `puffer browser` command end to end.
 pub(crate) fn run_browser_command(
-    _cwd: &Path,
+    cwd: &Path,
     paths: &ConfigPaths,
     args: BrowserArgs,
 ) -> Result<()> {
     let session_id = resolve_session_id(paths, args.session_id.as_deref())?;
     let handshake = ensure_daemon(paths)?;
-    let execution = execute_browser_command(&handshake, &session_id, args.command)?;
+    let execution = execute_browser_command(cwd, paths, &handshake, &session_id, args.command)?;
 
     if args.json {
         println!(
@@ -42,6 +44,8 @@ pub(crate) fn run_browser_command(
 }
 
 fn execute_browser_command(
+    cwd: &Path,
+    paths: &ConfigPaths,
     handshake: &Handshake,
     session_id: &str,
     command: BrowserCommand,
@@ -109,6 +113,25 @@ fn execute_browser_command(
             apply_target_args(&mut payload, &target);
             execute_agent_action(handshake, "snapshot", payload, BrowserPrintKind::Snapshot)
         }
+        BrowserCommand::Screenshot {
+            path,
+            annotate,
+            screenshot_dir,
+            screenshot_format,
+            screenshot_quality,
+            target,
+        } => execute_screenshot_action(
+            cwd,
+            paths,
+            handshake,
+            session_id,
+            path,
+            annotate,
+            screenshot_dir,
+            screenshot_format,
+            screenshot_quality,
+            target,
+        ),
         BrowserCommand::Click { ref_id, target } => {
             let mut payload = base_payload("click", session_id);
             apply_target_args(&mut payload, &target);
@@ -154,6 +177,21 @@ fn execute_browser_command(
             insert_optional_string(&mut payload, "ref", Some(ref_id.as_str()));
             insert_optional_string(&mut payload, "value", Some(value.as_str()));
             execute_agent_action(handshake, "select", payload, BrowserPrintKind::Ok)
+        }
+        BrowserCommand::Upload {
+            ref_id,
+            files,
+            target,
+        } => {
+            let mut payload = base_payload("upload", session_id);
+            apply_target_args(&mut payload, &target);
+            insert_optional_string(&mut payload, "ref", Some(ref_id.as_str()));
+            insert_string_array(
+                &mut payload,
+                "files",
+                canonicalize_upload_files(cwd, &files)?,
+            );
+            execute_agent_action(handshake, "upload", payload, BrowserPrintKind::Ok)
         }
         BrowserCommand::Check { ref_id, target } => {
             let mut payload = base_payload("check", session_id);
@@ -297,6 +335,118 @@ fn execute_targeted_ok_action(
     execute_agent_action(handshake, action, payload, BrowserPrintKind::Ok)
 }
 
+fn execute_screenshot_action(
+    cwd: &Path,
+    paths: &ConfigPaths,
+    handshake: &Handshake,
+    session_id: &str,
+    path: Option<PathBuf>,
+    annotate: bool,
+    screenshot_dir: Option<PathBuf>,
+    screenshot_format: Option<String>,
+    screenshot_quality: Option<u8>,
+    target: BrowserTargetArgs,
+) -> Result<BrowserExecution> {
+    let mut payload = base_payload("screenshot", session_id);
+    apply_target_args(&mut payload, &target);
+    payload.insert("annotate".to_string(), Value::Bool(annotate));
+    insert_optional_string(
+        &mut payload,
+        "screenshotFormat",
+        screenshot_format.as_deref(),
+    );
+    insert_optional_u32(
+        &mut payload,
+        "screenshotQuality",
+        screenshot_quality.map(u32::from),
+    );
+    let result = send_daemon_request(handshake, "browser_agent", Value::Object(payload))?;
+    let screenshot = persist_screenshot_result(cwd, paths, result, path, screenshot_dir)?;
+    Ok(BrowserExecution {
+        action: "screenshot",
+        result: serde_json::to_value(screenshot)?,
+        print_kind: BrowserPrintKind::Screenshot,
+    })
+}
+
+fn persist_screenshot_result(
+    cwd: &Path,
+    paths: &ConfigPaths,
+    result: Value,
+    path: Option<PathBuf>,
+    screenshot_dir: Option<PathBuf>,
+) -> Result<BrowserScreenshotOutput> {
+    let screenshot: BrowserScreenshotWire =
+        serde_json::from_value(result).context("decode browser screenshot")?;
+    let output_path = resolve_screenshot_path(
+        cwd,
+        paths,
+        path,
+        screenshot_dir,
+        &screenshot.tab_id,
+        &screenshot.format,
+    )?;
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create screenshot directory {}", parent.display()))?;
+    }
+    let bytes = BASE64_STANDARD
+        .decode(screenshot.data.as_bytes())
+        .context("decode browser screenshot data")?;
+    fs::write(&output_path, bytes)
+        .with_context(|| format!("write screenshot {}", output_path.display()))?;
+    Ok(normalize_screenshot_result(screenshot, output_path))
+}
+
+fn resolve_screenshot_path(
+    cwd: &Path,
+    paths: &ConfigPaths,
+    path: Option<PathBuf>,
+    screenshot_dir: Option<PathBuf>,
+    tab_id: &str,
+    format: &str,
+) -> Result<PathBuf> {
+    if let Some(path) = path {
+        return Ok(resolve_cli_path(cwd, path));
+    }
+    let dir = screenshot_dir
+        .map(|dir| resolve_cli_path(cwd, dir))
+        .unwrap_or_else(|| paths.workspace_config_dir.join("screenshots"));
+    let extension = screenshot_extension(format)?;
+    Ok(auto_screenshot_path(&dir, tab_id, extension))
+}
+
+fn resolve_cli_path(cwd: &Path, path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    }
+}
+
+fn screenshot_extension(format: &str) -> Result<&'static str> {
+    match format {
+        "png" => Ok("png"),
+        "jpeg" => Ok("jpeg"),
+        other => bail!("unsupported screenshot format `{other}`"),
+    }
+}
+
+fn auto_screenshot_path(dir: &Path, tab_id: &str, extension: &str) -> PathBuf {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let base = format!("screenshot-{tab_id}-{stamp}");
+    let mut candidate = dir.join(format!("{base}.{extension}"));
+    let mut suffix = 1u32;
+    while candidate.exists() {
+        candidate = dir.join(format!("{base}-{suffix}.{extension}"));
+        suffix += 1;
+    }
+    candidate
+}
+
 fn execute_agent_action(
     handshake: &Handshake,
     action: &'static str,
@@ -325,6 +475,7 @@ fn print_execution_result(session_id: &str, execution: &BrowserExecution) -> Res
             print_tab_event(session_id, execution.action, &tab);
         }
         BrowserPrintKind::Snapshot => print_snapshot_result(session_id, &execution.result)?,
+        BrowserPrintKind::Screenshot => print_screenshot_result(session_id, &execution.result)?,
         BrowserPrintKind::Value => {
             if let Some(value) = execution.result.get("value") {
                 println!("{}", serde_json::to_string_pretty(value)?);
@@ -374,6 +525,35 @@ fn insert_optional_u32(payload: &mut Map<String, Value>, key: &str, value: Optio
     }
 }
 
+fn insert_string_array(payload: &mut Map<String, Value>, key: &str, values: Vec<String>) {
+    payload.insert(
+        key.to_string(),
+        Value::Array(values.into_iter().map(Value::String).collect()),
+    );
+}
+
+fn canonicalize_upload_files(cwd: &Path, files: &[PathBuf]) -> Result<Vec<String>> {
+    files
+        .iter()
+        .map(|path| canonicalize_upload_file(cwd, path))
+        .collect()
+}
+
+fn canonicalize_upload_file(cwd: &Path, path: &Path) -> Result<String> {
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    let absolute = candidate
+        .canonicalize()
+        .with_context(|| format!("browser upload file not found: {}", path.display()))?;
+    if !absolute.is_file() {
+        bail!("browser upload path is not a file: {}", absolute.display());
+    }
+    Ok(absolute.to_string_lossy().into_owned())
+}
+
 fn print_tabs_state(session_id: &str, tabs: &BrowserTabsState) {
     println!("session: {session_id}");
     let active = tabs.active_tab_id.as_deref().unwrap_or("<none>");
@@ -419,6 +599,14 @@ fn print_snapshot_result(session_id: &str, result: &Value) -> Result<()> {
     Ok(())
 }
 
+fn print_screenshot_result(session_id: &str, result: &Value) -> Result<()> {
+    let screenshot: BrowserScreenshotOutput =
+        serde_json::from_value(result.clone()).context("decode browser screenshot")?;
+    println!("session: {session_id}");
+    print!("{}", render_screenshot_body(&screenshot));
+    Ok(())
+}
+
 fn render_snapshot_body(snapshot: &BrowserSnapshotOutput) -> String {
     let mut body = String::new();
     body.push_str(&format!("title: {}\n", printable_text(&snapshot.title)));
@@ -427,48 +615,70 @@ fn render_snapshot_body(snapshot: &BrowserSnapshotOutput) -> String {
     body.push_str("snapshot:\n");
     body.push_str(printable_text(&snapshot.snapshot));
 
-    if !snapshot.refs.is_empty() {
-        body.push('\n');
-        body.push('\n');
-        body.push_str("refs:\n");
-        for (ref_id, entry) in &snapshot.refs {
-            body.push_str("  ");
-            body.push_str(ref_id);
-            body.push(' ');
-            body.push_str(printable_text(&entry.role));
-            body.push(' ');
-            body.push_str(printable_text(&entry.tag));
-            if !entry.name.trim().is_empty() {
-                body.push(' ');
-                body.push('"');
-                body.push_str(&entry.name);
-                body.push('"');
-            }
-            if let Some(href) = entry
-                .href
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-            {
-                body.push(' ');
-                body.push('<');
-                body.push_str(href);
-                body.push('>');
-            }
-            body.push('\n');
-        }
-    }
+    append_refs_section(&mut body, &snapshot.refs);
+    append_instruction(&mut body, &snapshot.instruction);
+    body
+}
 
-    if let Some(instruction) =
-        (!snapshot.instruction.trim().is_empty()).then_some(snapshot.instruction.as_str())
-    {
+fn render_screenshot_body(screenshot: &BrowserScreenshotOutput) -> String {
+    let mut body = String::new();
+    body.push_str(&format!("tab: {}\n", screenshot.tab_id));
+    body.push_str(&format!("saved: {}\n", screenshot.path));
+    body.push_str(&format!(
+        "format: {} ({}x{})\n",
+        screenshot.format, screenshot.width, screenshot.height
+    ));
+    body.push_str(&format!("title: {}\n", printable_text(&screenshot.title)));
+    body.push_str(&format!("origin: {}\n", printable_text(&screenshot.origin)));
+    if screenshot.annotated {
+        body.push_str("annotated: true\n");
+    }
+    append_refs_section(&mut body, &screenshot.refs);
+    append_instruction(&mut body, &screenshot.instruction);
+    body
+}
+
+fn append_refs_section(body: &mut String, refs: &IndexMap<String, BrowserSnapshotRef>) {
+    if refs.is_empty() {
+        return;
+    }
+    body.push('\n');
+    body.push_str("refs:\n");
+    for (ref_id, entry) in refs {
+        body.push_str("  ");
+        body.push_str(ref_id);
+        body.push(' ');
+        body.push_str(printable_text(&entry.role));
+        body.push(' ');
+        body.push_str(printable_text(&entry.tag));
+        if !entry.name.trim().is_empty() {
+            body.push(' ');
+            body.push('"');
+            body.push_str(&entry.name);
+            body.push('"');
+        }
+        if let Some(href) = entry
+            .href
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            body.push(' ');
+            body.push('<');
+            body.push_str(href);
+            body.push('>');
+        }
+        body.push('\n');
+    }
+}
+
+fn append_instruction(body: &mut String, instruction: &str) {
+    if let Some(instruction) = (!instruction.trim().is_empty()).then_some(instruction) {
         body.push('\n');
         body.push_str(instruction);
         body.push('\n');
     } else {
         body.push('\n');
     }
-
-    body
 }
 fn ok_message(action: &str) -> &str {
     match action {
@@ -481,6 +691,7 @@ fn ok_message(action: &str) -> &str {
         "focus_ref" => "focused element",
         "fill" => "filled",
         "select" => "selected option",
+        "upload" => "uploaded files",
         "check" => "checked",
         "uncheck" => "unchecked",
         "type" => "typed",
@@ -512,8 +723,38 @@ fn normalize_agent_result(print_kind: BrowserPrintKind, result: Value) -> Result
 fn normalize_snapshot_result(result: Value) -> Result<BrowserSnapshotOutput> {
     let snapshot: BrowserSnapshotWire =
         serde_json::from_value(result).context("decode browser snapshot")?;
-    let refs = snapshot
-        .elements
+    let refs = normalize_snapshot_refs(snapshot.elements);
+    Ok(BrowserSnapshotOutput {
+        origin: snapshot.url,
+        title: snapshot.title,
+        snapshot: snapshot.text,
+        refs,
+        instruction: snapshot.instruction,
+    })
+}
+
+fn normalize_screenshot_result(
+    screenshot: BrowserScreenshotWire,
+    output_path: PathBuf,
+) -> BrowserScreenshotOutput {
+    BrowserScreenshotOutput {
+        tab_id: screenshot.tab_id,
+        path: output_path.display().to_string(),
+        format: screenshot.format,
+        origin: screenshot.url,
+        title: screenshot.title,
+        width: screenshot.width,
+        height: screenshot.height,
+        annotated: screenshot.annotated,
+        refs: normalize_snapshot_refs(screenshot.elements),
+        instruction: screenshot.instruction,
+    }
+}
+
+fn normalize_snapshot_refs(
+    elements: Vec<BrowserSnapshotWireElement>,
+) -> IndexMap<String, BrowserSnapshotRef> {
+    elements
         .into_iter()
         .map(|element| {
             (
@@ -526,14 +767,7 @@ fn normalize_snapshot_result(result: Value) -> Result<BrowserSnapshotOutput> {
                 },
             )
         })
-        .collect();
-    Ok(BrowserSnapshotOutput {
-        origin: snapshot.url,
-        title: snapshot.title,
-        snapshot: snapshot.text,
-        refs,
-        instruction: snapshot.instruction,
-    })
+        .collect()
 }
 
 fn redact_internal_fields(value: Value) -> Value {
@@ -565,6 +799,7 @@ enum BrowserPrintKind {
     TabsState,
     TabInfo,
     Snapshot,
+    Screenshot,
     Value,
     Ok,
 }
@@ -611,6 +846,41 @@ struct BrowserSnapshotRef {
     href: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserScreenshotWire {
+    tab_id: String,
+    format: String,
+    data: String,
+    url: String,
+    title: String,
+    width: u32,
+    height: u32,
+    #[serde(default)]
+    annotated: bool,
+    #[serde(default)]
+    elements: Vec<BrowserSnapshotWireElement>,
+    #[serde(default)]
+    instruction: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserScreenshotOutput {
+    tab_id: String,
+    path: String,
+    format: String,
+    origin: String,
+    title: String,
+    width: u32,
+    height: u32,
+    annotated: bool,
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    refs: IndexMap<String, BrowserSnapshotRef>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    instruction: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BrowserJsonOutput {
@@ -621,139 +891,5 @@ struct BrowserJsonOutput {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ok_message_is_human_readable_for_common_actions() {
-        assert_eq!(ok_message("reload"), "reloaded");
-        assert_eq!(ok_message("select"), "selected option");
-        assert_eq!(ok_message("press"), "pressed key");
-        assert_eq!(ok_message("scrollIntoView"), "scrolled into view");
-    }
-
-    #[test]
-    fn payload_helpers_skip_missing_values() {
-        let mut payload = base_payload("snapshot", "session-123");
-        apply_target_args(
-            &mut payload,
-            &BrowserTargetArgs {
-                tab_id: None,
-                width: Some(1200),
-                height: None,
-            },
-        );
-        assert_eq!(
-            payload.get("sessionId").and_then(Value::as_str),
-            Some("session-123")
-        );
-        assert_eq!(payload.get("width").and_then(Value::as_u64), Some(1200));
-        assert!(payload.get("tabId").is_none());
-        assert!(payload.get("height").is_none());
-    }
-
-    #[test]
-    fn snapshot_results_are_normalized_into_snapshot_and_refs() {
-        let result = normalize_agent_result(
-            BrowserPrintKind::Snapshot,
-            serde_json::json!({
-                "url": "https://example.com/form",
-                "title": "Example Form",
-                "text": "Name\nSave",
-                "elements": [
-                    {
-                        "ref": "@e1",
-                        "role": "textbox",
-                        "name": "Your name",
-                        "tag": "textarea",
-                        "href": null,
-                        "x": 120.0,
-                        "y": 220.0
-                    },
-                    {
-                        "ref": "@e2",
-                        "role": "button",
-                        "name": "Save",
-                        "tag": "button",
-                        "href": null,
-                        "x": 120.0,
-                        "y": 260.0
-                    }
-                ],
-                "instruction": "Refs are fresh for this snapshot."
-            }),
-        )
-        .expect("normalize snapshot");
-
-        assert_eq!(
-            result.get("origin").and_then(Value::as_str),
-            Some("https://example.com/form")
-        );
-        assert_eq!(
-            result.get("snapshot").and_then(Value::as_str),
-            Some("Name\nSave")
-        );
-        assert!(result.get("elements").is_none());
-        assert!(
-            result.pointer("/refs/@e1/x").is_none(),
-            "normalized refs should not expose raw coordinates"
-        );
-        assert_eq!(
-            result.pointer("/refs/@e2/role").and_then(Value::as_str),
-            Some("button")
-        );
-    }
-
-    #[test]
-    fn render_snapshot_body_uses_origin_snapshot_and_refs_sections() {
-        let snapshot = BrowserSnapshotOutput {
-            origin: "https://example.com/form".to_string(),
-            title: "Example Form".to_string(),
-            snapshot: "Name\nSave".to_string(),
-            refs: IndexMap::from([
-                (
-                    "@e1".to_string(),
-                    BrowserSnapshotRef {
-                        role: "textbox".to_string(),
-                        name: "Your name".to_string(),
-                        tag: "textarea".to_string(),
-                        href: None,
-                    },
-                ),
-                (
-                    "@e2".to_string(),
-                    BrowserSnapshotRef {
-                        role: "button".to_string(),
-                        name: "Save".to_string(),
-                        tag: "button".to_string(),
-                        href: Some("https://example.com/save".to_string()),
-                    },
-                ),
-            ]),
-            instruction: "Refs are fresh for this snapshot.".to_string(),
-        };
-
-        let rendered = render_snapshot_body(&snapshot);
-        assert!(rendered.contains("origin: https://example.com/form"));
-        assert!(rendered.contains("snapshot:\nName\nSave"));
-        assert!(rendered.contains("refs:\n  @e1 textbox textarea \"Your name\""));
-        assert!(rendered.contains("@e2 button button \"Save\" <https://example.com/save>"));
-    }
-
-    #[test]
-    fn redact_internal_fields_removes_backend_session_ids() {
-        let value = redact_internal_fields(serde_json::json!({
-            "tabId": "t1",
-            "backendSessionId": "root:browser:t1",
-            "tabs": [
-                {
-                    "tabId": "t2",
-                    "backendSessionId": "root:browser:t2"
-                }
-            ]
-        }));
-
-        assert!(value.get("backendSessionId").is_none());
-        assert!(value.pointer("/tabs/0/backendSessionId").is_none());
-    }
-}
+#[path = "browser_tests.rs"]
+mod tests;

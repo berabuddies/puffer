@@ -26,17 +26,20 @@ mod input;
 mod params;
 mod recording;
 mod rpc;
+mod screenshot;
 mod selection;
 mod session;
 mod tabs;
 mod types;
+mod upload;
+mod worker;
 
 pub(crate) use agent::handle_browser_agent;
-use agent::BrowserElementRef;
 use chrome::safe_profile_name;
 pub(crate) use client::{default_cli_session_id, ensure_daemon, send_daemon_request};
 use recording::BrowserRecordingRegistry;
 pub(crate) use rpc::*;
+use screenshot::BrowserElementRef;
 #[cfg(test)]
 pub(super) use session::parse_evaluation_response;
 pub(super) use session::send_cdp;

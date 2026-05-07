@@ -74,6 +74,28 @@ pub(super) fn optional_u32(value: &Value, key: &str) -> Option<u32> {
         .and_then(|value| u32::try_from(value).ok())
 }
 
+/// Reads one required array of non-empty strings from an RPC payload.
+pub(super) fn required_string_array(value: &Value, key: &str) -> Result<Vec<String>> {
+    let values = value
+        .get(key)
+        .and_then(Value::as_array)
+        .with_context(|| format!("missing `{key}`"))?;
+    if values.is_empty() {
+        bail!("`{key}` must include at least one path");
+    }
+    values
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(ToString::to_string)
+                .with_context(|| format!("`{key}` entries must be non-empty strings"))
+        })
+        .collect()
+}
+
 fn required_f64(value: &Value, key: &str) -> Result<f64> {
     value
         .get(key)
