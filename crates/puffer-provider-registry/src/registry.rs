@@ -198,10 +198,7 @@ impl ProviderRegistry {
             let id = entry.descriptor.id.as_str();
             match cache.entries.get(id) {
                 Some(cached) if now_ms.saturating_sub(cached.cached_at_ms) < CACHE_TTL_MS => {
-                    merge_discovered_models(
-                        &mut entry.descriptor.models,
-                        cached.models.clone(),
-                    );
+                    merge_discovered_models(&mut entry.descriptor.models, cached.models.clone());
                 }
                 _ => stale.push(entry.descriptor.id.clone()),
             }
@@ -403,8 +400,8 @@ mod tests {
     use crate::model::{ModelDiscoveryConfig, ModelDiscoveryFormat};
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::thread;
     use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::thread;
     use tempfile::tempdir;
 
     /// Process-global mutex serializing tests that mutate the
@@ -817,9 +814,6 @@ mod tests {
 
         let mut registry = ProviderRegistry::new();
         registry.register(openai);
-        assert_eq!(
-            registry.apply_discovery_cache(),
-            vec!["openai".to_string()]
-        );
+        assert_eq!(registry.apply_discovery_cache(), vec!["openai".to_string()]);
     }
 }
