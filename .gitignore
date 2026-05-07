@@ -1,6 +1,7 @@
 references/
 target/
 .worktree/
+.worktrees/
 .puffer/
 # Generated Terminal Bench harness artifacts.
 benchmark/.venv-harbor/
