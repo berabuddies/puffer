@@ -115,12 +115,7 @@ where
 fn is_terminal_event_name(name: Option<&str>) -> bool {
     matches!(
         name,
-        Some(
-            "response.completed"
-                | "response.done"
-                | "response.incomplete"
-                | "response.cancelled"
-        )
+        Some("response.completed" | "response.done" | "response.incomplete" | "response.cancelled")
     )
 }
 
@@ -219,9 +214,7 @@ where
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string();
-                    if call_id.is_empty()
-                        || state.emitted_tool_call_ids.insert(call_id.clone())
-                    {
+                    if call_id.is_empty() || state.emitted_tool_call_ids.insert(call_id.clone()) {
                         let action = item.get("action").cloned().unwrap_or(Value::Null);
                         let query = action
                             .get("query")
@@ -647,15 +640,13 @@ mod tests {
         );
         let mut invocations = Vec::new();
 
-        let parsed = super::parse_openai_sse_reader_typed(
-            BufReader::new(stream.as_bytes()),
-            &mut |event| {
+        let parsed =
+            super::parse_openai_sse_reader_typed(BufReader::new(stream.as_bytes()), &mut |event| {
                 if let super::TurnStreamEvent::ToolInvocations(items) = event {
                     invocations.extend(items);
                 }
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
 
         assert_eq!(invocations.len(), 1, "one synthesized invocation per call");
         let invocation = &invocations[0];
@@ -686,14 +677,11 @@ mod tests {
             "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_dup\",\"status\":\"completed\"}}\n\n"
         );
         let mut invocations = Vec::new();
-        super::parse_openai_sse_reader_typed(
-            BufReader::new(stream.as_bytes()),
-            &mut |event| {
-                if let super::TurnStreamEvent::ToolInvocations(items) = event {
-                    invocations.extend(items);
-                }
-            },
-        )
+        super::parse_openai_sse_reader_typed(BufReader::new(stream.as_bytes()), &mut |event| {
+            if let super::TurnStreamEvent::ToolInvocations(items) = event {
+                invocations.extend(items);
+            }
+        })
         .unwrap();
         assert_eq!(invocations.len(), 1, "deduped on call_id");
     }

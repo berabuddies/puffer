@@ -176,11 +176,8 @@ pub(crate) fn run_streaming_loop(
     let mut agent_span = if let Some(handle) = inputs.observability.as_ref() {
         let session_str = inputs.state.session.id.to_string();
         let cwd_str = cwd.to_string_lossy();
-        let mut span = puffer_observability::start_agent_loop_span(
-            Some(handle),
-            &session_str,
-            &cwd_str,
-        );
+        let mut span =
+            puffer_observability::start_agent_loop_span(Some(handle), &session_str, &cwd_str);
         span.set_str(
             puffer_observability::PUFFER_PROVIDER_ID,
             inputs.provider.id.clone(),
@@ -204,7 +201,11 @@ pub(crate) fn run_streaming_loop(
         } else {
             puffer_observability::ContentKind::Prompt
         };
-        span.set_content(puffer_observability::LANGFUSE_TRACE_INPUT, kind.clone(), inputs.input);
+        span.set_content(
+            puffer_observability::LANGFUSE_TRACE_INPUT,
+            kind.clone(),
+            inputs.input,
+        );
         span.set_content("puffer.input", kind, inputs.input);
         span
     } else {
@@ -386,7 +387,9 @@ pub(crate) fn run_streaming_loop(
                                 };
                                 serde_json::json!({ "role": role, "content": body })
                             }
-                            ConversationItem::FunctionCall { name, arguments, .. } => {
+                            ConversationItem::FunctionCall {
+                                name, arguments, ..
+                            } => {
                                 let args = if include_tool_io {
                                     serde_json::Value::String(arguments.clone())
                                 } else {
@@ -485,19 +488,9 @@ pub(crate) fn run_streaming_loop(
                 }
                 on_event(event);
             };
-            session.one_turn_streaming(
-                inputs.state,
-                inputs.auth_store,
-                &mut items,
-                &mut wrapped,
-            )
+            session.one_turn_streaming(inputs.state, inputs.auth_store, &mut items, &mut wrapped)
         } else {
-            session.one_turn_streaming(
-                inputs.state,
-                inputs.auth_store,
-                &mut items,
-                on_event,
-            )
+            session.one_turn_streaming(inputs.state, inputs.auth_store, &mut items, on_event)
         };
         // Surface usage on the provider span before propagating any
         // error so failed calls still record their token cost.
@@ -641,9 +634,7 @@ pub(crate) fn run_streaming_loop(
         // with the assistant text we have so far (typically empty for a
         // tool-only turn — that is fine, the tool itself owns the user
         // signal). See `pi-mono/packages/agent/src/agent-loop.ts:499`.
-        if !new_invocations.is_empty()
-            && new_invocations.iter().all(|inv| inv.terminate)
-        {
+        if !new_invocations.is_empty() && new_invocations.iter().all(|inv| inv.terminate) {
             run_turn_hooks(
                 inputs.resources,
                 &cwd,
@@ -704,187 +695,169 @@ pub(crate) fn run_streaming_loop(
             if inputs.observability.is_some() {
                 reflection_span.set_str("puffer.reflection.observed", "true");
                 for trace_event in &observation.trace_events {
-                match trace_event {
-                    ReflectionTraceEvent::BatchObserved {
-                        evaluation_score,
-                        evaluation_threshold,
-                        should_evaluate,
-                        skip_reason,
-                        ..
-                    } => {
-                        reflection_span.set_str(
-                            "puffer.reflection.assessment.score",
-                            evaluation_score.to_string(),
-                        );
-                        reflection_span.set_str(
-                            "puffer.reflection.assessment.threshold",
-                            evaluation_threshold.to_string(),
-                        );
-                        reflection_span.set_str(
-                            "puffer.reflection.assessment.should_evaluate",
-                            should_evaluate.to_string(),
-                        );
-                        if let Some(reason) = skip_reason {
+                    match trace_event {
+                        ReflectionTraceEvent::BatchObserved {
+                            evaluation_score,
+                            evaluation_threshold,
+                            should_evaluate,
+                            skip_reason,
+                            ..
+                        } => {
                             reflection_span.set_str(
-                                "puffer.reflection.assessment.skip_reason",
-                                reason.clone(),
+                                "puffer.reflection.assessment.score",
+                                evaluation_score.to_string(),
                             );
-                        }
-                    }
-                    ReflectionTraceEvent::CodeJudgeDecision {
-                        triggered,
-                        score,
-                        threshold,
-                        ..
-                    } => {
-                        reflection_span.set_str(
-                            "puffer.reflection.code_judge.triggered",
-                            triggered.to_string(),
-                        );
-                        reflection_span.set_str(
-                            "puffer.reflection.code_judge.score",
-                            score.to_string(),
-                        );
-                        reflection_span.set_str(
-                            "puffer.reflection.code_judge.threshold",
-                            threshold.to_string(),
-                        );
-                    }
-                    ReflectionTraceEvent::LlmJudgeSkipped { mode, reason } => {
-                        reflection_span.set_str(
-                            "puffer.reflection.llm_judge.fired",
-                            "false",
-                        );
-                        reflection_span.set_str(
-                            "puffer.reflection.llm_judge.skip_mode",
-                            mode.clone(),
-                        );
-                        reflection_span.set_str(
-                            "puffer.reflection.llm_judge.skip_reason",
-                            reason.clone(),
-                        );
-                    }
-                    ReflectionTraceEvent::LlmJudgeRequest {
-                        provider,
-                        model,
-                        context_scope,
-                        prompt_chars,
-                        prompt,
-                        ..
-                    } => {
-                        // First evidence the judge actually fired:
-                        // create the inner subagent generation span,
-                        // backdated to the start of `observe_batch_with_judge`
-                        // so the span bounds the real LLM latency.
-                        let mut span = puffer_observability::start_subagent_generation_span_at(
-                            inputs.observability.as_ref(),
-                            reflection_span.context(),
-                            "reflection_judge",
-                            Some(reflection_start_time),
-                        );
-                        if let Some(p) = provider {
-                            span.set_str(puffer_observability::GEN_AI_SYSTEM, p.clone());
-                        }
-                        if let Some(m) = model {
-                            span.set_str(puffer_observability::GEN_AI_REQUEST_MODEL, m.clone());
-                        }
-                        span.set_str("puffer.reflection.context_scope", context_scope.clone());
-                        span.set_str(
-                            "puffer.reflection.prompt_chars",
-                            prompt_chars.to_string(),
-                        );
-                        // Reflection's prompt embeds rendered tool
-                        // calls + outputs (`render_items`), so gating
-                        // on `include_prompts` alone would leak tool
-                        // I/O. Require BOTH flags before emitting the
-                        // raw prompt (review v4 BLOCK #3).
-                        if let Some(handle) = inputs.observability.as_ref() {
-                            let policy = handle.redaction();
-                            if policy.include_prompts() && policy.include_tool_io() {
-                                span.set_content(
-                                    puffer_observability::LANGFUSE_OBSERVATION_INPUT,
-                                    puffer_observability::ContentKind::Prompt,
-                                    prompt,
+                            reflection_span.set_str(
+                                "puffer.reflection.assessment.threshold",
+                                evaluation_threshold.to_string(),
+                            );
+                            reflection_span.set_str(
+                                "puffer.reflection.assessment.should_evaluate",
+                                should_evaluate.to_string(),
+                            );
+                            if let Some(reason) = skip_reason {
+                                reflection_span.set_str(
+                                    "puffer.reflection.assessment.skip_reason",
+                                    reason.clone(),
                                 );
                             }
                         }
-                        judge_gen_span = Some(span);
-                        reflection_span
-                            .set_str("puffer.reflection.llm_judge.fired", "true");
-                    }
-                    ReflectionTraceEvent::LlmJudgeResponse {
-                        decision,
-                        confidence,
-                        reason,
-                        next_action,
-                        input_tokens,
-                        output_tokens,
-                        cached_input_tokens,
-                        raw_response_text,
-                        ..
-                    } => {
-                        if let Some(span) = judge_gen_span.as_mut() {
-                            span.set_str("puffer.reflection.decision", decision.clone());
-                            if let Some(c) = confidence {
-                                span.set_str("puffer.reflection.confidence", c.clone());
+                        ReflectionTraceEvent::CodeJudgeDecision {
+                            triggered,
+                            score,
+                            threshold,
+                            ..
+                        } => {
+                            reflection_span.set_str(
+                                "puffer.reflection.code_judge.triggered",
+                                triggered.to_string(),
+                            );
+                            reflection_span
+                                .set_str("puffer.reflection.code_judge.score", score.to_string());
+                            reflection_span.set_str(
+                                "puffer.reflection.code_judge.threshold",
+                                threshold.to_string(),
+                            );
+                        }
+                        ReflectionTraceEvent::LlmJudgeSkipped { mode, reason } => {
+                            reflection_span.set_str("puffer.reflection.llm_judge.fired", "false");
+                            reflection_span
+                                .set_str("puffer.reflection.llm_judge.skip_mode", mode.clone());
+                            reflection_span
+                                .set_str("puffer.reflection.llm_judge.skip_reason", reason.clone());
+                        }
+                        ReflectionTraceEvent::LlmJudgeRequest {
+                            provider,
+                            model,
+                            context_scope,
+                            prompt_chars,
+                            prompt,
+                            ..
+                        } => {
+                            // First evidence the judge actually fired:
+                            // create the inner subagent generation span,
+                            // backdated to the start of `observe_batch_with_judge`
+                            // so the span bounds the real LLM latency.
+                            let mut span = puffer_observability::start_subagent_generation_span_at(
+                                inputs.observability.as_ref(),
+                                reflection_span.context(),
+                                "reflection_judge",
+                                Some(reflection_start_time),
+                            );
+                            if let Some(p) = provider {
+                                span.set_str(puffer_observability::GEN_AI_SYSTEM, p.clone());
                             }
-                            span.set_str("puffer.reflection.next_action", next_action.clone());
-                            span.set_token_usage(
-                                *input_tokens,
-                                *output_tokens,
-                                *cached_input_tokens,
+                            if let Some(m) = model {
+                                span.set_str(puffer_observability::GEN_AI_REQUEST_MODEL, m.clone());
+                            }
+                            span.set_str("puffer.reflection.context_scope", context_scope.clone());
+                            span.set_str(
+                                "puffer.reflection.prompt_chars",
+                                prompt_chars.to_string(),
                             );
-                            span.set_content(
-                                puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
-                                puffer_observability::ContentKind::Output,
-                                raw_response_text,
-                            );
-                            // Cache hit ratio: derive locally so the
-                            // viewer sees the percentage even when
-                            // upstream doesn't surface it directly.
-                            if let Some(in_tok) = input_tokens {
-                                if *in_tok > 0 {
-                                    let ratio = cached_input_tokens.unwrap_or(0) as f64
-                                        / *in_tok as f64;
-                                    span.set_f64("puffer.cache.hit_ratio", ratio);
+                            // Reflection's prompt embeds rendered tool
+                            // calls + outputs (`render_items`), so gating
+                            // on `include_prompts` alone would leak tool
+                            // I/O. Require BOTH flags before emitting the
+                            // raw prompt (review v4 BLOCK #3).
+                            if let Some(handle) = inputs.observability.as_ref() {
+                                let policy = handle.redaction();
+                                if policy.include_prompts() && policy.include_tool_io() {
+                                    span.set_content(
+                                        puffer_observability::LANGFUSE_OBSERVATION_INPUT,
+                                        puffer_observability::ContentKind::Prompt,
+                                        prompt,
+                                    );
                                 }
                             }
+                            judge_gen_span = Some(span);
+                            reflection_span.set_str("puffer.reflection.llm_judge.fired", "true");
                         }
-                        reflection_span.set_str(
-                            "puffer.reflection.llm_judge.decision",
-                            decision.clone(),
-                        );
-                        reflection_span.set_str(
-                            "puffer.reflection.llm_judge.reason",
-                            reason.clone(),
-                        );
-                    }
-                    ReflectionTraceEvent::LlmJudgeError { stage, error, .. } => {
-                        if let Some(span) = judge_gen_span.as_mut() {
-                            span.mark_error(error.clone());
+                        ReflectionTraceEvent::LlmJudgeResponse {
+                            decision,
+                            confidence,
+                            reason,
+                            next_action,
+                            input_tokens,
+                            output_tokens,
+                            cached_input_tokens,
+                            raw_response_text,
+                            ..
+                        } => {
+                            if let Some(span) = judge_gen_span.as_mut() {
+                                span.set_str("puffer.reflection.decision", decision.clone());
+                                if let Some(c) = confidence {
+                                    span.set_str("puffer.reflection.confidence", c.clone());
+                                }
+                                span.set_str("puffer.reflection.next_action", next_action.clone());
+                                span.set_token_usage(
+                                    *input_tokens,
+                                    *output_tokens,
+                                    *cached_input_tokens,
+                                );
+                                span.set_content(
+                                    puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
+                                    puffer_observability::ContentKind::Output,
+                                    raw_response_text,
+                                );
+                                // Cache hit ratio: derive locally so the
+                                // viewer sees the percentage even when
+                                // upstream doesn't surface it directly.
+                                if let Some(in_tok) = input_tokens {
+                                    if *in_tok > 0 {
+                                        let ratio = cached_input_tokens.unwrap_or(0) as f64
+                                            / *in_tok as f64;
+                                        span.set_f64("puffer.cache.hit_ratio", ratio);
+                                    }
+                                }
+                            }
+                            reflection_span
+                                .set_str("puffer.reflection.llm_judge.decision", decision.clone());
+                            reflection_span
+                                .set_str("puffer.reflection.llm_judge.reason", reason.clone());
                         }
-                        reflection_span.set_str(
-                            "puffer.reflection.llm_judge.error_stage",
-                            stage.clone(),
-                        );
-                    }
-                    ReflectionTraceEvent::FinalDecision {
-                        selected_source,
-                        triggered_checkpoint,
-                        ..
-                    } => {
-                        if let Some(src) = selected_source {
+                        ReflectionTraceEvent::LlmJudgeError { stage, error, .. } => {
+                            if let Some(span) = judge_gen_span.as_mut() {
+                                span.mark_error(error.clone());
+                            }
+                            reflection_span
+                                .set_str("puffer.reflection.llm_judge.error_stage", stage.clone());
+                        }
+                        ReflectionTraceEvent::FinalDecision {
+                            selected_source,
+                            triggered_checkpoint,
+                            ..
+                        } => {
+                            if let Some(src) = selected_source {
+                                reflection_span
+                                    .set_str("puffer.reflection.final.signal_source", src.clone());
+                            }
                             reflection_span.set_str(
-                                "puffer.reflection.final.signal_source",
-                                src.clone(),
+                                "puffer.reflection.final.checkpoint_triggered",
+                                triggered_checkpoint.to_string(),
                             );
                         }
-                        reflection_span.set_str(
-                            "puffer.reflection.final.checkpoint_triggered",
-                            triggered_checkpoint.to_string(),
-                        );
                     }
-                }
                 }
             }
             reflection_traces.extend(observation.trace_events);
@@ -926,10 +899,10 @@ pub(crate) fn run_streaming_loop(
                 let result = session.generate_summary(old, mid);
                 if let Some(ref text) = result {
                     gen_span.set_content(
-                    puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
-                    puffer_observability::ContentKind::OutputWithEmbeddedToolIo,
-                    text,
-                );
+                        puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
+                        puffer_observability::ContentKind::OutputWithEmbeddedToolIo,
+                        text,
+                    );
                 } else {
                     gen_span.mark_error("summary_returned_none".to_string());
                 }
@@ -953,7 +926,6 @@ pub(crate) fn run_streaming_loop(
         post_compaction_span.end();
     }
 }
-
 
 // `execute_tool_batch` lives in `runtime/tool_batch.rs`; the streaming
 // loop above and `blocking_loop::run_blocking_loop` call into it.
@@ -1012,8 +984,8 @@ Their call ids remain in context — re-run the tool if you need the content aga
 #[cfg(test)]
 mod cancel_token_tests {
     use super::CancelToken;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
 

@@ -42,7 +42,14 @@ $USING_YOUR_TOOLS
 
 $ENVIRONMENT"#;
 const BENCHMARK_ALLOWED_TOOL_IDS: &[&str] = &[
-    "Bash", "Edit", "Glob", "Grep", "Read", "Write", "WebSearch", "WebFetch",
+    "Bash",
+    "Edit",
+    "Glob",
+    "Grep",
+    "Read",
+    "Write",
+    "WebSearch",
+    "WebFetch",
 ];
 
 /// Carries CLI inputs for one unattended benchmark execution.

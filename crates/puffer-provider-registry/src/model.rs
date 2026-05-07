@@ -130,7 +130,13 @@ impl Eq for ModelCost {}
 
 impl ModelCost {
     /// Computes the total USD cost for the given token mix.
-    pub fn total(&self, input_tokens: u64, output_tokens: u64, cache_read_tokens: u64, cache_write_tokens: u64) -> f64 {
+    pub fn total(
+        &self,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_tokens: u64,
+        cache_write_tokens: u64,
+    ) -> f64 {
         let scale = 1.0 / 1_000_000.0;
         (self.input * input_tokens as f64
             + self.output * output_tokens as f64

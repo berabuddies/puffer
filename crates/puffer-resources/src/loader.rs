@@ -125,7 +125,38 @@ pub fn load_resources(paths: &ConfigPaths, runner: &dyn ToolRunner) -> Result<Lo
             &mut loaded.diagnostics,
         );
     }
+    apply_runtime_resource_filters(&mut loaded);
     Ok(loaded)
+}
+
+fn apply_runtime_resource_filters(resources: &mut LoadedResources) {
+    filter_browser_resources(resources, puffer_builtin_browser_disabled());
+}
+
+fn filter_browser_resources(resources: &mut LoadedResources, no_browser: bool) {
+    if !no_browser {
+        return;
+    }
+    resources
+        .skills
+        .retain(|skill| skill.value.name.trim() != "browser");
+    for plugin in &mut resources.plugins {
+        plugin
+            .value
+            .skills
+            .retain(|skill| skill.trim() != "browser");
+    }
+}
+
+fn puffer_builtin_browser_disabled() -> bool {
+    std::env::var("PUFFER_NO_BROWSER")
+        .ok()
+        .is_some_and(|value| enabled_flag(&value))
+}
+
+fn enabled_flag(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
 }
 
 /// Probe directory presence via the runner. Treats `NotFound` as absent and
@@ -1041,10 +1072,7 @@ mod tests {
         fn list_mcp_servers(&self) -> std::result::Result<Vec<McpServerInfo>, RunnerError> {
             Err(RunnerError::Unsupported("mcp".into()))
         }
-        fn list_mcp_tools(
-            &self,
-            _server: &str,
-        ) -> std::result::Result<Vec<McpTool>, RunnerError> {
+        fn list_mcp_tools(&self, _server: &str) -> std::result::Result<Vec<McpTool>, RunnerError> {
             Err(RunnerError::Unsupported("mcp".into()))
         }
         fn call_mcp_tool(
@@ -1156,6 +1184,46 @@ mod tests {
             .agents
             .iter()
             .any(|agent| agent.source_info.path.ends_with("plugins/example.yaml")));
+    }
+
+    #[test]
+    fn no_browser_filter_removes_builtin_browser_skill_references() {
+        let mut resources = LoadedResources {
+            skills: vec![LoadedItem {
+                value: SkillSpec {
+                    name: "browser".to_string(),
+                    description: "Browser".to_string(),
+                    content: "Use Browser".to_string(),
+                    ..SkillSpec::default()
+                },
+                source_info: SourceInfo {
+                    path: PathBuf::from("skills/browser/SKILL.md"),
+                    kind: SourceKind::Builtin,
+                },
+            }],
+            plugins: vec![LoadedItem {
+                value: PluginSpec {
+                    id: "puffer-builtins".to_string(),
+                    display_name: "Puffer Builtins".to_string(),
+                    description: String::new(),
+                    commands: Vec::new(),
+                    skills: vec!["reviewer".to_string(), "browser".to_string()],
+                    agents: Vec::new(),
+                    mcp_servers: Vec::new(),
+                    lsp_servers: Vec::new(),
+                },
+                source_info: SourceInfo {
+                    path: PathBuf::from("plugins/puffer-builtins.yaml"),
+                    kind: SourceKind::Builtin,
+                },
+            }],
+            ..LoadedResources::default()
+        };
+
+        filter_browser_resources(&mut resources, true);
+
+        assert!(skill_by_name(&resources, "browser").is_none());
+        assert_eq!(resources.plugins[0].value.skills, vec!["reviewer"]);
     }
 
     #[test]

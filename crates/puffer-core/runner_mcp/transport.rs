@@ -231,10 +231,7 @@ mod tests {
     #[test]
     fn expands_braced_variable() {
         with_env("PUFFER_MCP_EXPAND_TEST", Some("xyz"), || {
-            assert_eq!(
-                expand_env("Bearer ${PUFFER_MCP_EXPAND_TEST}"),
-                "Bearer xyz"
-            );
+            assert_eq!(expand_env("Bearer ${PUFFER_MCP_EXPAND_TEST}"), "Bearer xyz");
         });
     }
 
@@ -248,10 +245,7 @@ mod tests {
     #[test]
     fn missing_variable_becomes_empty() {
         with_env("PUFFER_MCP_EXPAND_MISSING", None, || {
-            assert_eq!(
-                expand_env("Bearer ${PUFFER_MCP_EXPAND_MISSING}"),
-                "Bearer "
-            );
+            assert_eq!(expand_env("Bearer ${PUFFER_MCP_EXPAND_MISSING}"), "Bearer ");
         });
     }
 

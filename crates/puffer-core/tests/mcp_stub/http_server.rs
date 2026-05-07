@@ -160,9 +160,12 @@ pub async fn spawn_http_stub_accepting_bearer_prefix(
             },
         );
 
-    let router = Router::new().nest_service("/mcp", service).layer(
-        middleware::from_fn_with_state(prefix, require_bearer_prefix),
-    );
+    let router = Router::new()
+        .nest_service("/mcp", service)
+        .layer(middleware::from_fn_with_state(
+            prefix,
+            require_bearer_prefix,
+        ));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;

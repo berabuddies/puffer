@@ -206,6 +206,9 @@ impl ToolRegistry {
 }
 
 fn definition_from_spec(spec: &ToolSpec) -> Option<ToolDefinition> {
+    if puffer_builtin_browser_disabled() && spec.handler == "runtime:browser" {
+        return None;
+    }
     if spec
         .approval_policy
         .as_deref()
@@ -260,6 +263,12 @@ fn definition_from_spec(spec: &ToolSpec) -> Option<ToolDefinition> {
         show_in_status: spec.display.show_in_status,
     };
     Some(definition)
+}
+
+fn puffer_builtin_browser_disabled() -> bool {
+    std::env::var("PUFFER_NO_BROWSER")
+        .ok()
+        .is_some_and(|value| enabled_if_value_disables_tool(&value) || value.trim() == "1")
 }
 
 fn parse_mcp_input_schema(schema: Option<&serde_json::Value>) -> ToolInputSchema {
@@ -401,6 +410,9 @@ mod tests {
     use std::collections::BTreeSet;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn workspace_builtin_tool_resources() -> LoadedResources {
         let tools_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/tools");
@@ -443,6 +455,24 @@ mod tests {
             aliases: Vec::new(),
             handler_args: Vec::new(),
             approval_policy: Some("on-request".to_string()),
+            sandbox_policy: Some("workspace-write".to_string()),
+            shared_lib: None,
+            enabled_if: None,
+            input_schema: None,
+            metadata: Default::default(),
+            display: Default::default(),
+        }
+    }
+
+    fn browser_tool_spec() -> ToolSpec {
+        ToolSpec {
+            id: "Browser".to_string(),
+            name: "Browser".to_string(),
+            description: "Control browser".to_string(),
+            handler: "runtime:browser".to_string(),
+            aliases: vec!["browser".to_string()],
+            handler_args: Vec::new(),
+            approval_policy: Some("auto".to_string()),
             sandbox_policy: Some("workspace-write".to_string()),
             shared_lib: None,
             enabled_if: None,
@@ -513,6 +543,47 @@ mod tests {
             definition.input_schema.as_json_schema()["required"],
             serde_json::json!(["duration_ms"])
         );
+    }
+
+    #[test]
+    fn puffer_no_browser_hides_builtin_browser_tool() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("PUFFER_NO_BROWSER", "1");
+        let resources = LoadedResources {
+            tools: vec![LoadedItem {
+                value: browser_tool_spec(),
+                source_info: SourceInfo {
+                    path: PathBuf::from("browser.yaml"),
+                    kind: SourceKind::Builtin,
+                },
+            }],
+            ..LoadedResources::default()
+        };
+        let registry = ToolRegistry::from_resources(&resources);
+        std::env::remove_var("PUFFER_NO_BROWSER");
+
+        assert!(registry.definition("Browser").is_none());
+        assert!(registry.definition("browser").is_none());
+    }
+
+    #[test]
+    fn puffer_browser_tool_registers_when_not_disabled() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("PUFFER_NO_BROWSER");
+        let resources = LoadedResources {
+            tools: vec![LoadedItem {
+                value: browser_tool_spec(),
+                source_info: SourceInfo {
+                    path: PathBuf::from("browser.yaml"),
+                    kind: SourceKind::Builtin,
+                },
+            }],
+            ..LoadedResources::default()
+        };
+        let registry = ToolRegistry::from_resources(&resources);
+
+        assert!(registry.definition("Browser").is_some());
+        assert!(registry.definition("browser").is_some());
     }
 
     #[test]

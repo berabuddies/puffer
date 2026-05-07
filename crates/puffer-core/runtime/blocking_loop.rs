@@ -10,8 +10,8 @@ use anyhow::Result;
 
 use super::agent_loop::{maybe_microcompact, LoopInputs, TurnSession};
 use super::openai::conversation::{
-    compact_conversation_with, inject_post_compact_context, transcript_to_items,
-    ConversationItem, ToolOutputPayload,
+    compact_conversation_with, inject_post_compact_context, transcript_to_items, ConversationItem,
+    ToolOutputPayload,
 };
 use super::reflection::{ReflectionTraceEvent, ReflectionTracker};
 use super::tool_batch::execute_tool_batch;
@@ -45,11 +45,8 @@ pub(crate) fn run_blocking_loop(
     let mut agent_span = if let Some(handle) = inputs.observability.as_ref() {
         let session_str = inputs.state.session.id.to_string();
         let cwd_str = cwd.to_string_lossy();
-        let mut span = puffer_observability::start_agent_loop_span(
-            Some(handle),
-            &session_str,
-            &cwd_str,
-        );
+        let mut span =
+            puffer_observability::start_agent_loop_span(Some(handle), &session_str, &cwd_str);
         span.set_str(
             puffer_observability::PUFFER_PROVIDER_ID,
             inputs.provider.id.clone(),
@@ -68,7 +65,11 @@ pub(crate) fn run_blocking_loop(
         } else {
             puffer_observability::ContentKind::Prompt
         };
-        span.set_content(puffer_observability::LANGFUSE_TRACE_INPUT, kind, inputs.input);
+        span.set_content(
+            puffer_observability::LANGFUSE_TRACE_INPUT,
+            kind,
+            inputs.input,
+        );
         span
     } else {
         puffer_observability::SpanGuard::Disabled
@@ -242,9 +243,7 @@ pub(crate) fn run_blocking_loop(
         invocations.extend(new_invocations.iter().cloned());
 
         // Pi-mono parity: early-terminate on unanimous `terminate: true`.
-        if !new_invocations.is_empty()
-            && new_invocations.iter().all(|inv| inv.terminate)
-        {
+        if !new_invocations.is_empty() && new_invocations.iter().all(|inv| inv.terminate) {
             run_turn_hooks(
                 inputs.resources,
                 &cwd,
@@ -296,10 +295,10 @@ pub(crate) fn run_blocking_loop(
                 let result = session.generate_summary(old, mid);
                 if let Some(ref text) = result {
                     gen_span.set_content(
-                    puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
-                    puffer_observability::ContentKind::OutputWithEmbeddedToolIo,
-                    text,
-                );
+                        puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
+                        puffer_observability::ContentKind::OutputWithEmbeddedToolIo,
+                        text,
+                    );
                 } else {
                     gen_span.mark_error("summary_returned_none".to_string());
                 }

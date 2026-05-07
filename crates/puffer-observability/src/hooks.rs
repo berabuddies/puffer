@@ -22,9 +22,7 @@ use crate::attributes::{
 };
 use crate::redaction::ContentKind;
 use crate::ObservabilityHandle;
-use opentelemetry::trace::{
-    Span as OtelSpan, SpanKind, Status, TraceContextExt, Tracer,
-};
+use opentelemetry::trace::{Span as OtelSpan, SpanKind, Status, TraceContextExt, Tracer};
 use opentelemetry::{Context as OtelContext, KeyValue};
 
 /// Span-like guard that records observability data when active and
@@ -306,11 +304,7 @@ pub fn start_tool_span(
     let tracer = handle.tracer();
     let parent_ctx = parent.cloned().unwrap_or_else(OtelContext::current);
     let mut builder = tracer
-        .span_builder(format!(
-            "{}.{}",
-            ObservationKind::Tool.span_name(),
-            tool_id
-        ))
+        .span_builder(format!("{}.{}", ObservationKind::Tool.span_name(), tool_id))
         .with_kind(SpanKind::Internal);
     builder.attributes = Some(
         AttributeBag::new()
@@ -462,11 +456,7 @@ mod tests {
     fn disabled_set_methods_are_inert() {
         let mut span = start_provider_span(None, None, "openai", "x", "y");
         span.set_str("k", "v");
-        span.set_content(
-            "k",
-            ContentKind::Prompt,
-            "secret",
-        );
+        span.set_content("k", ContentKind::Prompt, "secret");
         span.set_token_usage(Some(1), Some(2), Some(3));
         span.mark_cancelled();
         span.mark_error("nope");

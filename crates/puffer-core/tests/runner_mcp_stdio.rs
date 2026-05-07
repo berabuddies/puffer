@@ -16,7 +16,6 @@ use serde_json::json;
 
 const STUB_BIN: &str = env!("CARGO_BIN_EXE_puffer-mcp-stub-server");
 
-
 /// Counts stub server processes whose argv contains the given unique marker.
 /// Each test uses its own marker so concurrent tests don't interfere.
 fn count_stub_processes(marker: &str) -> usize {
@@ -67,7 +66,11 @@ fn lazy_spawn_does_not_run_until_first_call() {
     let runner = LocalToolRunner::new().with_mcp_servers(manifest_with_marker("stub", marker));
 
     // Construction alone should not spawn anything.
-    assert_eq!(count_stub_processes(marker), 0, "no children before first call");
+    assert_eq!(
+        count_stub_processes(marker),
+        0,
+        "no children before first call"
+    );
 
     let tools = runner.list_mcp_tools("stub").expect("list tools");
     assert!(tools.iter().any(|t| t.name == "echo"));
@@ -92,8 +95,10 @@ fn tools_list_returns_stub_tools() {
 
 #[test]
 fn tools_call_echo_round_trips() {
-    let runner = LocalToolRunner::new()
-        .with_mcp_servers(manifest_with_marker("stub", "puffer-mcp-stub-echo-round-trip"));
+    let runner = LocalToolRunner::new().with_mcp_servers(manifest_with_marker(
+        "stub",
+        "puffer-mcp-stub-echo-round-trip",
+    ));
     let mut sink = NullChunkSink;
     let result = runner
         .call_mcp_tool("stub", "echo", json!({ "text": "hello puffer" }), &mut sink)
@@ -148,7 +153,10 @@ fn crash_recovery_respawns_on_next_call() {
             break;
         }
     }
-    assert!(!is_pid_alive(first_pid), "stub should have exited after crash");
+    assert!(
+        !is_pid_alive(first_pid),
+        "stub should have exited after crash"
+    );
 
     // Next `echo` must succeed by spawning a fresh child.
     let result = runner
@@ -198,8 +206,10 @@ fn is_pid_alive(pid: u32) -> bool {
 
 #[test]
 fn list_resources_returns_stub_resources() {
-    let runner = LocalToolRunner::new()
-        .with_mcp_servers(manifest_with_marker("stub", "puffer-mcp-stub-resources-list"));
+    let runner = LocalToolRunner::new().with_mcp_servers(manifest_with_marker(
+        "stub",
+        "puffer-mcp-stub-resources-list",
+    ));
     let records = runner
         .list_mcp_resources(Some("stub"))
         .expect("list resources");
@@ -213,13 +223,17 @@ fn list_resources_returns_stub_resources() {
 
 #[test]
 fn read_resource_returns_text_and_blob() {
-    let runner = LocalToolRunner::new()
-        .with_mcp_servers(manifest_with_marker("stub", "puffer-mcp-stub-resources-read"));
+    let runner = LocalToolRunner::new().with_mcp_servers(manifest_with_marker(
+        "stub",
+        "puffer-mcp-stub-resources-read",
+    ));
     let text = runner
         .read_mcp_resource("stub", "stub://hello.txt")
         .expect("read text");
     match text.parts.first() {
-        Some(McpResourceContentPart::Text { text, mime_type, .. }) => {
+        Some(McpResourceContentPart::Text {
+            text, mime_type, ..
+        }) => {
             assert_eq!(text, "hello from stub");
             assert_eq!(mime_type.as_deref(), Some("text/plain"));
         }
@@ -230,7 +244,9 @@ fn read_resource_returns_text_and_blob() {
         .read_mcp_resource("stub", "stub://binary.bin")
         .expect("read blob");
     match blob.parts.first() {
-        Some(McpResourceContentPart::Blob { bytes, mime_type, .. }) => {
+        Some(McpResourceContentPart::Blob {
+            bytes, mime_type, ..
+        }) => {
             assert_eq!(bytes, &vec![0xde, 0xad, 0xbe]);
             assert_eq!(mime_type.as_deref(), Some("application/octet-stream"));
         }
@@ -307,13 +323,18 @@ impl ElicitationHandler for RecordingElicitationHandler {
 #[test]
 fn elicit_with_decline_handler_returns_decline() {
     // Default handler is `DeclineAllElicitations` — no override needed.
-    let runner = LocalToolRunner::new()
-        .with_mcp_servers(manifest_with_marker("stub", "puffer-mcp-stub-elicit-decline"));
+    let runner = LocalToolRunner::new().with_mcp_servers(manifest_with_marker(
+        "stub",
+        "puffer-mcp-stub-elicit-decline",
+    ));
     let mut sink = NullChunkSink;
     let result = runner
         .call_mcp_tool("stub", "request_user_input", json!({}), &mut sink)
         .expect("call request_user_input");
-    assert!(result.success, "elicit decline should still produce a tool result");
+    assert!(
+        result.success,
+        "elicit decline should still produce a tool result"
+    );
     let body: serde_json::Value =
         serde_json::from_str(&result.stdout).expect("stub returns JSON body");
     assert_eq!(body.get("action").and_then(|v| v.as_str()), Some("decline"));
@@ -326,7 +347,10 @@ fn elicit_with_accept_handler_returns_value() {
     })));
     let requests_handle = handler.requests.clone();
     let runner = LocalToolRunner::new()
-        .with_mcp_servers(manifest_with_marker("stub", "puffer-mcp-stub-elicit-accept"))
+        .with_mcp_servers(manifest_with_marker(
+            "stub",
+            "puffer-mcp-stub-elicit-accept",
+        ))
         .with_elicitation_handler(Arc::new(handler));
     let mut sink = NullChunkSink;
     let result = runner
@@ -369,6 +393,9 @@ fn tools_call_emits_progress_through_sink() {
         "expected at least one progress event, got none"
     );
     for event in events.iter() {
-        assert_eq!(event.get("kind").and_then(|v| v.as_str()), Some("mcp/progress"));
+        assert_eq!(
+            event.get("kind").and_then(|v| v.as_str()),
+            Some("mcp/progress")
+        );
     }
 }

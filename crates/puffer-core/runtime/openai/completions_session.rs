@@ -15,7 +15,7 @@ use anyhow::Result;
 use puffer_provider_openai::{
     build_chat_completions_request, extract_chat_completions_reasoning,
     extract_chat_completions_tool_calls, extract_chat_completions_visible_text,
-    parse_chat_completions_response, OpenAIChatCompletionsRequest, OpenAIChatCompletionTool,
+    parse_chat_completions_response, OpenAIChatCompletionTool, OpenAIChatCompletionsRequest,
     OpenAIChatResponseFormat, OpenAIRequestConfig, OpenAIResponsesToolChoiceMode,
 };
 use puffer_provider_registry::{AuthStore, ModelCompat, ProviderDescriptor, ThinkingFormat};
@@ -25,7 +25,8 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 
 use super::conversation::{
-    build_system_reminder, generate_openai_summary, items_to_chat_messages, ConversationItem,
+    build_system_reminder, generate_openai_summary, items_to_chat_messages,
+    managed_system_prompt_1_from_env, ConversationItem,
 };
 use super::{
     parse_openai_text, parse_openai_text_fallback, send_openai_request_with_refresh,
@@ -46,6 +47,7 @@ pub(super) struct OpenAICompletionsTurnSession {
     pub tools: Vec<OpenAIChatCompletionTool>,
     pub response_format: Option<OpenAIChatResponseFormat>,
     pub system_prompt: String,
+    pub managed_system_prompt_1: Option<String>,
     pub plan_mode_context: Option<String>,
     pub system_reminder: String,
     pub structured_output: Option<StructuredOutputConfig>,
@@ -95,7 +97,9 @@ impl TurnSession for OpenAICompletionsTurnSession {
         auth_store: &mut AuthStore,
         items: &mut Vec<ConversationItem>,
     ) -> Result<AssistantTurn> {
-        Ok(self.send_and_parse(state, auth_store, items)?.into_assistant_turn())
+        Ok(self
+            .send_and_parse(state, auth_store, items)?
+            .into_assistant_turn())
     }
 
     fn generate_summary(&self, old_context: &str, model_id: &str) -> Option<String> {
@@ -152,6 +156,7 @@ impl OpenAICompletionsTurnSession {
         let messages = items_to_chat_messages(
             items,
             Some(&self.system_prompt),
+            self.managed_system_prompt_1.as_deref(),
             self.plan_mode_context.as_deref(),
             Some(&self.system_reminder),
         );
@@ -165,8 +170,11 @@ impl OpenAICompletionsTurnSession {
         // patch every prior assistant message to carry an empty
         // `reasoning_content` so DeepSeek-style relays don't reject the
         // replay.
-        let reasoning_fields =
-            resolve_reasoning_fields(self.compat.as_ref(), self.model_supports_reasoning, &state.effort_level);
+        let reasoning_fields = resolve_reasoning_fields(
+            self.compat.as_ref(),
+            self.model_supports_reasoning,
+            &state.effort_level,
+        );
         let mut messages = messages;
         if reasoning_fields.requires_reasoning_content_on_assistant_messages
             && self.model_supports_reasoning
@@ -201,8 +209,11 @@ impl OpenAICompletionsTurnSession {
             )
         };
 
-        let response: Value =
-            send_openai_request_with_refresh(auth_store, &mut self.execution, body_for_each_attempt)?;
+        let response: Value = send_openai_request_with_refresh(
+            auth_store,
+            &mut self.execution,
+            body_for_each_attempt,
+        )?;
 
         let parsed = parse_chat_completions_response(&serde_json::to_string(&response)?)?;
         let tool_calls_vendor = extract_chat_completions_tool_calls(&parsed)?;
@@ -223,7 +234,9 @@ impl OpenAICompletionsTurnSession {
 
         let mut pre_tool_items: Vec<ConversationItem> = Vec::new();
         if !assistant_text_from_msg.trim().is_empty() {
-            pre_tool_items.push(ConversationItem::assistant_message(&assistant_text_from_msg));
+            pre_tool_items.push(ConversationItem::assistant_message(
+                &assistant_text_from_msg,
+            ));
         }
         for tc in &tool_calls_vendor {
             pre_tool_items.push(ConversationItem::FunctionCall {
@@ -264,10 +277,8 @@ pub(super) fn setup_completions_session(
     use_native: bool,
 ) -> Result<OpenAICompletionsTurnSession> {
     let execution = super::resolve_openai_execution_config(state, auth_store, provider)?;
-    let registry = super::super::mcp_discovery::registry_with_mcp_tools(
-        resources,
-        state.tool_runner.as_ref(),
-    );
+    let registry =
+        super::super::mcp_discovery::registry_with_mcp_tools(resources, state.tool_runner.as_ref());
     let permission_context = load_runtime_permission_context(&state.cwd, resources, state)?;
     let response_format = openai_chat_response_format(options.structured_output, use_native);
     let tools = openai_chat_completion_tools_for_request(
@@ -290,7 +301,9 @@ pub(super) fn setup_completions_session(
     let system_reminder = build_system_reminder(&crate::runtime::git_status_context());
 
     let model_descriptor = provider.models.iter().find(|m| m.id == model_id);
-    let model_supports_reasoning = model_descriptor.map(|m| m.supports_reasoning).unwrap_or(false);
+    let model_supports_reasoning = model_descriptor
+        .map(|m| m.supports_reasoning)
+        .unwrap_or(false);
     let compat = model_descriptor
         .and_then(|m| m.compat.as_ref())
         .and_then(|c| c.as_openai_completions())
@@ -301,6 +314,7 @@ pub(super) fn setup_completions_session(
         tools,
         response_format,
         system_prompt,
+        managed_system_prompt_1: managed_system_prompt_1_from_env(),
         plan_mode_context,
         system_reminder,
         structured_output: options.structured_output.cloned(),
@@ -401,8 +415,8 @@ fn resolve_reasoning_fields(
 #[cfg(test)]
 mod reasoning_fields_tests {
     use super::*;
-    use puffer_provider_registry::OpenAiCompletionsCompat;
     use indexmap::IndexMap;
+    use puffer_provider_registry::OpenAiCompletionsCompat;
 
     #[test]
     fn non_reasoning_model_emits_no_fields() {

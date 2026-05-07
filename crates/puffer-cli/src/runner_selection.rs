@@ -60,8 +60,8 @@ pub fn select_tool_runner(
 /// endpoint, which we treat as fatal (panic) to surface a misconfiguration.
 fn wait_for_remote_runner(config: &RemoteRunnerConfig) -> Arc<dyn ToolRunner> {
     let token = config.resolve_auth_token();
-    let runner = RemoteToolRunner::connect(&config.endpoint, token.as_deref())
-        .unwrap_or_else(|err| {
+    let runner =
+        RemoteToolRunner::connect(&config.endpoint, token.as_deref()).unwrap_or_else(|err| {
             panic!(
                 "puffer: failed to construct remote runner for {}: {err}",
                 config.endpoint
@@ -69,11 +69,11 @@ fn wait_for_remote_runner(config: &RemoteRunnerConfig) -> Arc<dyn ToolRunner> {
         });
 
     let initial = Duration::from_millis(
-        config.initial_backoff_ms.unwrap_or(DEFAULT_INITIAL_BACKOFF_MS),
+        config
+            .initial_backoff_ms
+            .unwrap_or(DEFAULT_INITIAL_BACKOFF_MS),
     );
-    let cap = Duration::from_millis(
-        config.max_backoff_ms.unwrap_or(DEFAULT_MAX_BACKOFF_MS),
-    );
+    let cap = Duration::from_millis(config.max_backoff_ms.unwrap_or(DEFAULT_MAX_BACKOFF_MS));
     let mut delay = initial;
     let mut attempt: u32 = 1;
     loop {

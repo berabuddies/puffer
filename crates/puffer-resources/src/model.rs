@@ -368,11 +368,9 @@ impl McpOAuthSpec {
     pub fn scopes(&self) -> Vec<String> {
         match self {
             McpOAuthSpec::Bool(_) => Vec::new(),
-            McpOAuthSpec::Detailed(d) => d
-                .scope
-                .split_whitespace()
-                .map(|s| s.to_string())
-                .collect(),
+            McpOAuthSpec::Detailed(d) => {
+                d.scope.split_whitespace().map(|s| s.to_string()).collect()
+            }
         }
     }
 

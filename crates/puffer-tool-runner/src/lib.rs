@@ -43,12 +43,9 @@ pub fn build_service_from_cwd(
         .with_context(|| format!("load resources from {}", cwd.display()))?;
 
     let router = Arc::new(BidiElicitationRouter::default());
-    let local = local_runner_from_resources(
-        &resources,
-        cwd.to_path_buf(),
-        Some(vec![cwd.to_path_buf()]),
-    )
-    .with_elicitation_handler(Arc::clone(&router) as Arc<dyn ElicitationHandler>);
+    let local =
+        local_runner_from_resources(&resources, cwd.to_path_buf(), Some(vec![cwd.to_path_buf()]))
+            .with_elicitation_handler(Arc::clone(&router) as Arc<dyn ElicitationHandler>);
     // The MCP host owns the post-dedup, post-plugin-merge view of the
     // manifest, so query it for the count we surface to logs and tests
     // rather than relying on `resources.mcp_servers.len()` (which is the

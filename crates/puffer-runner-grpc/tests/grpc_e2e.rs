@@ -10,9 +10,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use puffer_runner_api::{
-    ChunkKind, ChunkSink, ElicitationHandler, ElicitationRequest, ElicitationResponse,
-    FnChunkSink, McpResourceContentPart, NullChunkSink, OAuthStatus, OAuthTokensPayload,
-    RunnerError, ToolRequest, ToolResult, ToolRunner,
+    ChunkKind, ChunkSink, ElicitationHandler, ElicitationRequest, ElicitationResponse, FnChunkSink,
+    McpResourceContentPart, NullChunkSink, OAuthStatus, OAuthTokensPayload, RunnerError,
+    ToolRequest, ToolResult, ToolRunner,
 };
 use puffer_runner_grpc::server::ToolRunnerServer;
 use puffer_runner_grpc::{BidiElicitationRouter, RemoteToolRunner, ToolRunnerService};
@@ -115,13 +115,12 @@ fn spawn_server_on_port_with_router(
         .expect("spawn server thread");
 
     // Wait for the listener to be bound before handing the endpoint back.
-    runtime
-        .block_on(async {
-            tokio::time::timeout(Duration::from_secs(5), ready_rx)
-                .await
-                .expect("server bind timeout")
-                .expect("ready signal")
-        });
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(5), ready_rx)
+            .await
+            .expect("server bind timeout")
+            .expect("ready signal")
+    });
 
     ServerHandle {
         endpoint,
@@ -158,10 +157,7 @@ fn make_request(tool_id: &str, cwd: &Path, input: serde_json::Value) -> ToolRequ
     }
 }
 
-fn run_scenarios(
-    runner: &dyn ToolRunner,
-    workspace: &Path,
-) -> HashMap<&'static str, ToolResult> {
+fn run_scenarios(runner: &dyn ToolRunner, workspace: &Path) -> HashMap<&'static str, ToolResult> {
     let mut out = HashMap::new();
 
     // 1. Bash with stdout streaming.
@@ -234,11 +230,7 @@ fn run_scenarios(
     // 5. Glob.
     let glob = runner
         .execute_tool(
-            make_request(
-                "Glob",
-                workspace,
-                serde_json::json!({"pattern": "*.txt"}),
-            ),
+            make_request("Glob", workspace, serde_json::json!({"pattern": "*.txt"})),
             &mut NullChunkSink,
         )
         .expect("Glob");
@@ -290,8 +282,12 @@ fn cross_backend_equivalence() {
     let local_norm = normalize_workspace_paths(&local_results, local_workspace.path());
     let remote_norm = normalize_workspace_paths(&remote_results, remote_workspace.path());
     for tool in ["Bash", "Write", "Read", "Edit", "Glob", "Sleep"] {
-        let l = local_norm.get(tool).unwrap_or_else(|| panic!("missing local {tool}"));
-        let r = remote_norm.get(tool).unwrap_or_else(|| panic!("missing remote {tool}"));
+        let l = local_norm
+            .get(tool)
+            .unwrap_or_else(|| panic!("missing local {tool}"));
+        let r = remote_norm
+            .get(tool)
+            .unwrap_or_else(|| panic!("missing remote {tool}"));
         assert_eq!(l.success, r.success, "{tool}: success");
         assert_eq!(l.tool_id, r.tool_id, "{tool}: tool_id");
         // Bash output includes a per-run uuid in metadata; the stdout is
@@ -322,9 +318,7 @@ fn cross_backend_equivalence() {
     let remote_dir = remote.list_dir(remote_workspace.path()).unwrap();
     assert_eq!(local_dir.len(), remote_dir.len(), "list_dir length");
 
-    let local_glob = local_runner
-        .glob(local_workspace.path(), "*.txt")
-        .unwrap();
+    let local_glob = local_runner.glob(local_workspace.path(), "*.txt").unwrap();
     let remote_glob = remote.glob(remote_workspace.path(), "*.txt").unwrap();
     assert_eq!(local_glob.len(), remote_glob.len(), "glob length");
 
@@ -390,11 +384,17 @@ fn cross_backend_mcp_equivalence() {
     assert_eq!(local_ids, remote_ids);
 
     // 2. list_mcp_resources walks the filesystem stub's workspace root.
-    let local_resources = local_runner.list_mcp_resources(None).expect("local resources");
+    let local_resources = local_runner
+        .list_mcp_resources(None)
+        .expect("local resources");
     let remote_resources = remote.list_mcp_resources(None).expect("remote resources");
     assert_eq!(local_resources.len(), remote_resources.len());
-    assert!(local_resources.iter().any(|r| r.uri == "mcp://filesystem/hello.md"));
-    assert!(remote_resources.iter().any(|r| r.uri == "mcp://filesystem/hello.md"));
+    assert!(local_resources
+        .iter()
+        .any(|r| r.uri == "mcp://filesystem/hello.md"));
+    assert!(remote_resources
+        .iter()
+        .any(|r| r.uri == "mcp://filesystem/hello.md"));
 
     // 3. list_mcp_resources filtered by server.
     let local_filtered = local_runner
@@ -510,7 +510,13 @@ fn locate_stub_binary() -> std::path::PathBuf {
     if !candidate.exists() {
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
         let status = std::process::Command::new(cargo)
-            .args(["build", "-p", "puffer-core", "--bin", "puffer-mcp-stub-server"])
+            .args([
+                "build",
+                "-p",
+                "puffer-core",
+                "--bin",
+                "puffer-mcp-stub-server",
+            ])
             .status()
             .expect("build puffer-mcp-stub-server");
         assert!(status.success(), "cargo build of stub bin failed");
@@ -537,7 +543,10 @@ fn cross_backend_real_mcp_tools() {
             display_name: "Stub".into(),
             transport: "stdio".into(),
             endpoint: String::new(),
-            target: format!("'{}' --marker puffer-mcp-grpc-cross-backend", stub_bin.display()),
+            target: format!(
+                "'{}' --marker puffer-mcp-grpc-cross-backend",
+                stub_bin.display()
+            ),
             description: "Integration-test stub MCP server".into(),
             headers: Default::default(),
             oauth: None,
@@ -545,7 +554,8 @@ fn cross_backend_real_mcp_tools() {
     };
 
     let local_runner = LocalToolRunner::new().with_mcp_servers(manifest());
-    let server_runner: Arc<dyn ToolRunner> = Arc::new(LocalToolRunner::new().with_mcp_servers(manifest()));
+    let server_runner: Arc<dyn ToolRunner> =
+        Arc::new(LocalToolRunner::new().with_mcp_servers(manifest()));
     let server = spawn_server(server_runner);
     let remote = RemoteToolRunner::connect(&server.endpoint, Some(TEST_TOKEN))
         .expect("connect remote runner");
@@ -562,10 +572,20 @@ fn cross_backend_real_mcp_tools() {
     // tools/call echo — byte-equal payloads.
     let mut sink = NullChunkSink;
     let local_echo = local_runner
-        .call_mcp_tool("stub", "echo", serde_json::json!({"text": "ping"}), &mut sink)
+        .call_mcp_tool(
+            "stub",
+            "echo",
+            serde_json::json!({"text": "ping"}),
+            &mut sink,
+        )
         .expect("local echo");
     let remote_echo = remote
-        .call_mcp_tool("stub", "echo", serde_json::json!({"text": "ping"}), &mut sink)
+        .call_mcp_tool(
+            "stub",
+            "echo",
+            serde_json::json!({"text": "ping"}),
+            &mut sink,
+        )
         .expect("remote echo");
     assert_eq!(local_echo.success, remote_echo.success);
     assert_eq!(local_echo.stdout, remote_echo.stdout);
@@ -621,14 +641,19 @@ fn cross_backend_real_mcp_resources_and_prompts() {
     };
 
     let local_runner = LocalToolRunner::new().with_mcp_servers(manifest());
-    let server_runner: Arc<dyn ToolRunner> = Arc::new(LocalToolRunner::new().with_mcp_servers(manifest()));
+    let server_runner: Arc<dyn ToolRunner> =
+        Arc::new(LocalToolRunner::new().with_mcp_servers(manifest()));
     let server = spawn_server(server_runner);
     let remote = RemoteToolRunner::connect(&server.endpoint, Some(TEST_TOKEN))
         .expect("connect remote runner");
 
     // resources/list — same URIs, names, mime types in the same order.
-    let local_resources = local_runner.list_mcp_resources(Some("stub")).expect("local list_resources");
-    let remote_resources = remote.list_mcp_resources(Some("stub")).expect("remote list_resources");
+    let local_resources = local_runner
+        .list_mcp_resources(Some("stub"))
+        .expect("local list_resources");
+    let remote_resources = remote
+        .list_mcp_resources(Some("stub"))
+        .expect("remote list_resources");
     let local_uris: Vec<_> = local_resources.iter().map(|r| r.uri.clone()).collect();
     let remote_uris: Vec<_> = remote_resources.iter().map(|r| r.uri.clone()).collect();
     assert_eq!(local_uris, remote_uris);
@@ -672,8 +697,12 @@ fn cross_backend_real_mcp_resources_and_prompts() {
     }
 
     // prompts/list — same prompt names + arguments.
-    let local_prompts = local_runner.list_mcp_prompts("stub").expect("local list_prompts");
-    let remote_prompts = remote.list_mcp_prompts("stub").expect("remote list_prompts");
+    let local_prompts = local_runner
+        .list_mcp_prompts("stub")
+        .expect("local list_prompts");
+    let remote_prompts = remote
+        .list_mcp_prompts("stub")
+        .expect("remote list_prompts");
     let local_names: Vec<_> = local_prompts.iter().map(|p| p.name.clone()).collect();
     let remote_names: Vec<_> = remote_prompts.iter().map(|p| p.name.clone()).collect();
     assert_eq!(local_names, remote_names);
@@ -733,7 +762,8 @@ fn cross_backend_progress_notifications_round_trip() {
         }]
     };
 
-    let server_runner: Arc<dyn ToolRunner> = Arc::new(LocalToolRunner::new().with_mcp_servers(manifest()));
+    let server_runner: Arc<dyn ToolRunner> =
+        Arc::new(LocalToolRunner::new().with_mcp_servers(manifest()));
     let server = spawn_server(server_runner);
     let remote = RemoteToolRunner::connect(&server.endpoint, Some(TEST_TOKEN))
         .expect("connect remote runner");
@@ -757,7 +787,10 @@ fn cross_backend_progress_notifications_round_trip() {
         "expected at least one progress event over gRPC, got none"
     );
     for event in events.iter() {
-        assert_eq!(event.get("kind").and_then(|v| v.as_str()), Some("mcp/progress"));
+        assert_eq!(
+            event.get("kind").and_then(|v| v.as_str()),
+            Some("mcp/progress")
+        );
     }
 
     drop(remote);
@@ -1060,9 +1093,8 @@ fn cross_backend_elicitation_round_trips() {
     // Local side: install the recording handler directly on
     // LocalToolRunner. The handler is invoked synchronously by the
     // connection manager via spawn_blocking.
-    let local_handler = CrossBackendRecordingHandler::new(ElicitationResponse::accept(
-        accept_payload.clone(),
-    ));
+    let local_handler =
+        CrossBackendRecordingHandler::new(ElicitationResponse::accept(accept_payload.clone()));
     let local_requests = local_handler.requests.clone();
     let local_runner = LocalToolRunner::new()
         .with_mcp_servers(manifest())
@@ -1079,9 +1111,8 @@ fn cross_backend_elicitation_round_trips() {
     let server_runner: Arc<dyn ToolRunner> = Arc::new(server_runner_inner);
     let server = spawn_server_with_router(server_runner, router);
 
-    let remote_handler = CrossBackendRecordingHandler::new(ElicitationResponse::accept(
-        accept_payload.clone(),
-    ));
+    let remote_handler =
+        CrossBackendRecordingHandler::new(ElicitationResponse::accept(accept_payload.clone()));
     let remote_requests = remote_handler.requests.clone();
     let remote = RemoteToolRunner::connect(&server.endpoint, Some(TEST_TOKEN))
         .expect("connect remote runner")
@@ -1090,10 +1121,20 @@ fn cross_backend_elicitation_round_trips() {
     // Drive the eliciting tool through both backends.
     let mut sink = NullChunkSink;
     let local_result = local_runner
-        .call_mcp_tool("stub", "request_user_input", serde_json::json!({}), &mut sink)
+        .call_mcp_tool(
+            "stub",
+            "request_user_input",
+            serde_json::json!({}),
+            &mut sink,
+        )
         .expect("local request_user_input");
     let remote_result = remote
-        .call_mcp_tool("stub", "request_user_input", serde_json::json!({}), &mut sink)
+        .call_mcp_tool(
+            "stub",
+            "request_user_input",
+            serde_json::json!({}),
+            &mut sink,
+        )
         .expect("remote request_user_input");
 
     assert!(local_result.success);
@@ -1138,11 +1179,10 @@ mod http_stub {
     use axum::Router;
     use rmcp::handler::server::ServerHandler;
     use rmcp::model::{
-        CallToolRequestParams, CallToolResult, Content, GetPromptRequestParams,
-        GetPromptResult, Implementation, InitializeResult, ListPromptsResult,
-        ListResourcesResult, ListToolsResult, PaginatedRequestParams, Prompt,
-        PromptArgument, PromptMessage, PromptMessageRole, ProtocolVersion,
-        RawResource, ReadResourceRequestParams, ReadResourceResult, Resource,
+        CallToolRequestParams, CallToolResult, Content, GetPromptRequestParams, GetPromptResult,
+        Implementation, InitializeResult, ListPromptsResult, ListResourcesResult, ListToolsResult,
+        PaginatedRequestParams, Prompt, PromptArgument, PromptMessage, PromptMessageRole,
+        ProtocolVersion, RawResource, ReadResourceRequestParams, ReadResourceResult, Resource,
         ResourceContents, ServerCapabilities, Tool,
     };
     use rmcp::service::{NotificationContext, RequestContext, RoleServer};
@@ -1382,8 +1422,8 @@ fn cross_backend_http_mcp_round_trip() {
     let server_runner: Arc<dyn ToolRunner> =
         Arc::new(LocalToolRunner::new().with_mcp_servers(manifest()));
     let server = spawn_server(server_runner);
-    let remote = RemoteToolRunner::connect(&server.endpoint, Some(TEST_TOKEN))
-        .expect("connect remote");
+    let remote =
+        RemoteToolRunner::connect(&server.endpoint, Some(TEST_TOKEN)).expect("connect remote");
 
     // tools/list — both backends agree.
     let local_tools = local_runner.list_mcp_tools("stub").expect("local tools");
@@ -1396,10 +1436,20 @@ fn cross_backend_http_mcp_round_trip() {
     // tools/call echo — payloads round-trip byte-equal.
     let mut sink = NullChunkSink;
     let local_echo = local_runner
-        .call_mcp_tool("stub", "echo", serde_json::json!({"text": "ping"}), &mut sink)
+        .call_mcp_tool(
+            "stub",
+            "echo",
+            serde_json::json!({"text": "ping"}),
+            &mut sink,
+        )
         .expect("local echo");
     let remote_echo = remote
-        .call_mcp_tool("stub", "echo", serde_json::json!({"text": "ping"}), &mut sink)
+        .call_mcp_tool(
+            "stub",
+            "echo",
+            serde_json::json!({"text": "ping"}),
+            &mut sink,
+        )
         .expect("remote echo");
     assert_eq!(local_echo.success, remote_echo.success);
     assert_eq!(local_echo.stdout, remote_echo.stdout);
@@ -1606,7 +1656,10 @@ fn cross_backend_mcp_tool_advertising() {
 
     let local_ids = qualified_ids(&local_registry);
     let remote_ids = qualified_ids(&remote_registry);
-    assert_eq!(local_ids, remote_ids, "qualified ids must match across backends");
+    assert_eq!(
+        local_ids, remote_ids,
+        "qualified ids must match across backends"
+    );
     assert!(local_ids.contains(&"mcp__stub__echo".to_string()));
     assert!(local_ids.contains(&"mcp__stub__slow_echo".to_string()));
 

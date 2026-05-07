@@ -54,7 +54,10 @@ fn no_reasoning_returns_none_and_full_text() {
     let payload = r#"{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"plain answer"},"finish_reason":"stop"}]}"#;
     let parsed = parse_chat_completions_response(payload).unwrap();
     assert_eq!(extract_chat_completions_reasoning(&parsed), None);
-    assert_eq!(extract_chat_completions_visible_text(&parsed), "plain answer");
+    assert_eq!(
+        extract_chat_completions_visible_text(&parsed),
+        "plain answer"
+    );
 }
 
 #[test]

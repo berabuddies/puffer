@@ -50,9 +50,7 @@ fn spawn_mock() -> MockServer {
                                 // Crude: stop reading once we've seen
                                 // the end of the body header section
                                 // and at least 1 KB of body.
-                                if total.windows(4).any(|w| w == b"\r\n\r\n")
-                                    && total.len() > 256
-                                {
+                                if total.windows(4).any(|w| w == b"\r\n\r\n") && total.len() > 256 {
                                     break;
                                 }
                             }
@@ -88,8 +86,7 @@ fn config_for(addr: &str) -> ObservabilityConfig {
 fn handle_emits_span_to_mock_otlp_collector() {
     let _guard = global_test_lock().lock().unwrap_or_else(|p| p.into_inner());
     let server = spawn_mock();
-    let handle = ObservabilityHandle::init(config_for(&server.addr))
-        .expect("init handle");
+    let handle = ObservabilityHandle::init(config_for(&server.addr)).expect("init handle");
     {
         let tracer = handle.tracer();
         let mut span = tracer.start("agent_loop");
@@ -108,18 +105,12 @@ fn handle_emits_span_to_mock_otlp_collector() {
         thread::sleep(Duration::from_millis(50));
     }
     let reqs = server.requests.lock().unwrap();
-    assert!(
-        !reqs.is_empty(),
-        "mock collector did not receive any spans"
-    );
+    assert!(!reqs.is_empty(), "mock collector did not receive any spans");
     let payload = &reqs[0];
     let as_str: String = payload.iter().map(|&b| b as char).collect();
     // The OTLP/proto frame is binary, but ASCII attribute keys appear
     // verbatim (length-prefixed strings).
-    assert!(
-        as_str.contains("agent_loop"),
-        "span name not in payload"
-    );
+    assert!(as_str.contains("agent_loop"), "span name not in payload");
     assert!(
         as_str.contains("puffer.session.id"),
         "puffer.session.id attribute not in payload"
@@ -172,11 +163,7 @@ fn try_init_from_env_returns_handle_when_endpoint_set() {
 
 #[test]
 fn for_langfuse_builds_expected_endpoint_and_auth() {
-    let cfg = ObservabilityConfig::for_langfuse(
-        "http://localhost:3000",
-        "pk-lf-foo",
-        "sk-lf-bar",
-    );
+    let cfg = ObservabilityConfig::for_langfuse("http://localhost:3000", "pk-lf-foo", "sk-lf-bar");
     assert_eq!(cfg.endpoint, "http://localhost:3000/api/public/otel");
     let auth = cfg
         .headers
@@ -202,11 +189,7 @@ fn for_langfuse_builds_expected_endpoint_and_auth() {
 
 #[test]
 fn for_langfuse_default_does_not_send_content() {
-    let cfg = ObservabilityConfig::for_langfuse(
-        "http://localhost:3000",
-        "pk",
-        "sk",
-    );
+    let cfg = ObservabilityConfig::for_langfuse("http://localhost:3000", "pk", "sk");
     assert!(!cfg.include_prompts);
     assert!(!cfg.include_outputs);
     assert!(!cfg.include_tool_io);
@@ -214,11 +197,7 @@ fn for_langfuse_default_does_not_send_content() {
 
 #[test]
 fn for_langfuse_strips_trailing_slash() {
-    let cfg = ObservabilityConfig::for_langfuse(
-        "http://localhost:3000/",
-        "pk",
-        "sk",
-    );
+    let cfg = ObservabilityConfig::for_langfuse("http://localhost:3000/", "pk", "sk");
     assert_eq!(cfg.endpoint, "http://localhost:3000/api/public/otel");
 }
 
@@ -232,8 +211,7 @@ fn for_langfuse_strips_trailing_slash() {
 fn concurrent_subagent_spans_all_arrive() {
     let _guard = global_test_lock().lock().unwrap_or_else(|p| p.into_inner());
     let server = spawn_mock();
-    let handle = ObservabilityHandle::init(config_for(&server.addr))
-        .expect("init handle");
+    let handle = ObservabilityHandle::init(config_for(&server.addr)).expect("init handle");
 
     let workers = (0..3)
         .map(|i| {

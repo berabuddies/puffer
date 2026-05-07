@@ -143,7 +143,9 @@ impl ClientHandler for McpClientHandler {
         // worker for the duration of the user's response.
         let response = tokio::task::spawn_blocking(move || handler.elicit(dto))
             .await
-            .map_err(|e| McpError::internal_error(format!("elicitation handler join: {e}"), None))?;
+            .map_err(|e| {
+                McpError::internal_error(format!("elicitation handler join: {e}"), None)
+            })?;
         Ok(elicitation_response_to_rmcp(response))
     }
 }
@@ -239,13 +241,15 @@ impl ServerSlot {
 
     fn record_failure(&mut self) {
         let now = Instant::now();
-        self.failure_history.retain(|t| now.duration_since(*t) <= RETRY_WINDOW);
+        self.failure_history
+            .retain(|t| now.duration_since(*t) <= RETRY_WINDOW);
         self.failure_history.push(now);
     }
 
     fn retries_exhausted(&mut self) -> bool {
         let now = Instant::now();
-        self.failure_history.retain(|t| now.duration_since(*t) <= RETRY_WINDOW);
+        self.failure_history
+            .retain(|t| now.duration_since(*t) <= RETRY_WINDOW);
         self.failure_history.len() >= MAX_RETRIES as usize
     }
 }
@@ -395,9 +399,7 @@ impl McpConnectionManager {
         loop {
             match self.call_tool_once(server, tool, arguments.clone(), sink, &runtime) {
                 Ok(result) => return Ok(result),
-                Err(RunnerError::Mcp(msg))
-                    if attempt == 0 && msg_indicates_auth_required(&msg) =>
-                {
+                Err(RunnerError::Mcp(msg)) if attempt == 0 && msg_indicates_auth_required(&msg) => {
                     self.drop_client_and_refresh_oauth(server, &runtime)?;
                     attempt += 1;
                     continue;
@@ -467,15 +469,16 @@ impl McpConnectionManager {
             Ok((response, events))
         });
 
-        let (response, events) = outcome_with_events
-            .map_err(|e: rmcp::service::ServiceError| {
+        let (response, events) =
+            outcome_with_events.map_err(|e: rmcp::service::ServiceError| {
                 RunnerError::Mcp(format!("tools/call `{tool}` on `{server}` failed: {e}"))
             })?;
         for evt in events {
             sink.event(progress_event_to_json(&evt));
         }
-        let response = response
-            .map_err(|e| RunnerError::Mcp(format!("tools/call `{tool}` on `{server}` failed: {e}")))?;
+        let response = response.map_err(|e| {
+            RunnerError::Mcp(format!("tools/call `{tool}` on `{server}` failed: {e}"))
+        })?;
         let result = match response {
             ServerResult::CallToolResult(r) => r,
             other => {
@@ -489,10 +492,7 @@ impl McpConnectionManager {
     }
 
     /// Public, synchronous surface invoked by `McpHost::list_resources`.
-    pub fn list_resources(
-        &self,
-        server: &str,
-    ) -> Result<Vec<McpResourceRecord>, RunnerError> {
+    pub fn list_resources(&self, server: &str) -> Result<Vec<McpResourceRecord>, RunnerError> {
         let runtime = self.runtime();
         let mut attempt = 0;
         loop {
@@ -563,9 +563,7 @@ impl McpConnectionManager {
             let (client, _progress) = self.connect(server, &runtime)?;
             let result = runtime.block_on(async move { client.peer().list_all_prompts().await });
             match result {
-                Ok(prompts) => {
-                    return Ok(prompts.into_iter().map(rmcp_prompt_to_dto).collect())
-                }
+                Ok(prompts) => return Ok(prompts.into_iter().map(rmcp_prompt_to_dto).collect()),
                 Err(e) if attempt == 0 && is_auth_required_service_error(&e) => {
                     self.drop_client_and_refresh_oauth(server, &runtime)?;
                     attempt += 1;
@@ -644,10 +642,9 @@ impl McpConnectionManager {
         RunnerError,
     > {
         let key = server.to_ascii_lowercase();
-        let slot = self
-            .servers
-            .get(&key)
-            .ok_or_else(|| RunnerError::NotFound(format!("MCP server `{server}` not registered")))?;
+        let slot = self.servers.get(&key).ok_or_else(|| {
+            RunnerError::NotFound(format!("MCP server `{server}` not registered"))
+        })?;
 
         // Take the lock while we (a) check for an existing live client and
         // (b) potentially spawn a new one. This serializes connect attempts
@@ -712,10 +709,9 @@ impl McpConnectionManager {
         runtime: &Runtime,
     ) -> Result<(), RunnerError> {
         let key = server.to_ascii_lowercase();
-        let slot = self
-            .servers
-            .get(&key)
-            .ok_or_else(|| RunnerError::NotFound(format!("MCP server `{server}` not registered")))?;
+        let slot = self.servers.get(&key).ok_or_else(|| {
+            RunnerError::NotFound(format!("MCP server `{server}` not registered"))
+        })?;
         let (recipe, refresh_lock) = {
             let mut guard = slot.lock().map_err(|_| {
                 RunnerError::Mcp(format!("MCP server `{server}` connection mutex poisoned"))
@@ -1069,8 +1065,7 @@ fn prompt_message_to_dto(message: PromptMessage) -> McpPromptMessage {
 /// `McpResourceContentPart::Blob` JSON serializer. rmcp returns blobs as the
 /// raw base64 string the server sent, so we decode it back to bytes here.
 fn decode_blob_base64(input: &str) -> Vec<u8> {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let trimmed = input.trim().trim_end_matches('=');
     let mut out: Vec<u8> = Vec::with_capacity(trimmed.len() * 3 / 4);
     let mut buffer: u32 = 0;
@@ -1159,9 +1154,7 @@ pub fn entry_from_spec(spec: &puffer_resources::McpServerSpec) -> Option<Connect
     }
 }
 
-fn stdio_entry_from_spec(
-    spec: &puffer_resources::McpServerSpec,
-) -> Option<ConnectionEntry> {
+fn stdio_entry_from_spec(spec: &puffer_resources::McpServerSpec) -> Option<ConnectionEntry> {
     let target = spec.target.trim();
     if target.is_empty() {
         return None;
@@ -1182,9 +1175,7 @@ fn stdio_entry_from_spec(
     Some(ConnectionEntry::new(spec.id.clone(), recipe))
 }
 
-fn http_entry_from_spec(
-    spec: &puffer_resources::McpServerSpec,
-) -> Option<ConnectionEntry> {
+fn http_entry_from_spec(spec: &puffer_resources::McpServerSpec) -> Option<ConnectionEntry> {
     // `endpoint` is the historical field set by `puffer mcp add` for
     // HTTP/SSE entries; fall back to `target` so manifests that follow
     // the pass-1.5d convention (URL in `target`, `headers` map alongside)
@@ -1206,14 +1197,16 @@ fn http_entry_from_spec(
         .iter()
         .map(|(k, v)| (k.clone(), expand_env(v)))
         .collect();
-    let oauth = spec.oauth.as_ref().filter(|o| o.enabled()).map(|o| {
-        HttpOAuthSpec {
+    let oauth = spec
+        .oauth
+        .as_ref()
+        .filter(|o| o.enabled())
+        .map(|o| HttpOAuthSpec {
             scopes: o.scopes(),
             client_name: o
                 .client_name()
                 .unwrap_or_else(|| format!("puffer-{}", spec.id)),
-        }
-    });
+        });
     let recipe = TransportRecipe::Http(HttpTransportSpec {
         url,
         headers,

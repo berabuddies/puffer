@@ -70,9 +70,7 @@ pub(super) fn execute_runtime_local_tool(
         "runtime:list_mcp_resources" => {
             execute_list_mcp_resources(state.tool_runner.as_ref(), input)
         }
-        "runtime:read_mcp_resource" => {
-            execute_read_mcp_resource(state.tool_runner.as_ref(), input)
-        }
+        "runtime:read_mcp_resource" => execute_read_mcp_resource(state.tool_runner.as_ref(), input),
         "runtime:mcp_call" => execute_mcp_call(state.tool_runner.as_ref(), definition, input),
         other => Err(anyhow!("unsupported runtime-local tool handler {other}")),
     }
@@ -82,7 +80,11 @@ pub(super) fn execute_runtime_local_tool(
 /// tool runner. The qualified tool id is opaque to dispatch — we read the
 /// original `(server, tool)` strings from `handler_args`, which the
 /// registry stamped on at registration time.
-fn execute_mcp_call(runner: &dyn ToolRunner, definition: &ToolDefinition, input: Value) -> Result<String> {
+fn execute_mcp_call(
+    runner: &dyn ToolRunner,
+    definition: &ToolDefinition,
+    input: Value,
+) -> Result<String> {
     let server = definition
         .handler_args
         .first()
@@ -112,7 +114,6 @@ fn execute_mcp_call(runner: &dyn ToolRunner, definition: &ToolDefinition, input:
         Ok(String::new())
     }
 }
-
 
 fn execute_skill_tool(resources: &LoadedResources, input: Value) -> Result<String> {
     super::claude_tools::skill::execute_claude_skill_tool(resources, input)
@@ -193,9 +194,18 @@ fn execute_read_mcp_resource(runner: &dyn ToolRunner, input: Value) -> Result<St
     let contents: Vec<Value> = content
         .parts
         .into_iter()
-        .map(|part| part_to_legacy_json(part, &server, display_name.as_deref(), description.as_deref()))
+        .map(|part| {
+            part_to_legacy_json(
+                part,
+                &server,
+                display_name.as_deref(),
+                description.as_deref(),
+            )
+        })
         .collect();
-    Ok(serde_json::to_string_pretty(&json!({ "contents": contents }))?)
+    Ok(serde_json::to_string_pretty(
+        &json!({ "contents": contents }),
+    )?)
 }
 
 fn record_to_legacy_json(record: McpResourceRecord) -> Value {
@@ -215,16 +225,23 @@ fn part_to_legacy_json(
     description_override: Option<&str>,
 ) -> Value {
     let mut value = match part {
-        McpResourceContentPart::Text { uri, mime_type, text } => json!({
+        McpResourceContentPart::Text {
+            uri,
+            mime_type,
+            text,
+        } => json!({
             "uri": uri,
             "mimeType": mime_type,
             "text": text,
         }),
-        McpResourceContentPart::Blob { uri, mime_type, bytes } => {
+        McpResourceContentPart::Blob {
+            uri,
+            mime_type,
+            bytes,
+        } => {
             let saved = persist_blob_to_workspace(server, &uri, mime_type.as_deref(), &bytes);
-            let mut text_message = format!(
-                "[Resource from {server} at {uri}] Binary content saved",
-            );
+            let mut text_message =
+                format!("[Resource from {server} at {uri}] Binary content saved",);
             if let Some(path) = saved.as_deref() {
                 text_message.push_str(&format!(" to {} ({} bytes", path.display(), bytes.len()));
             } else {
@@ -508,8 +525,7 @@ mod tests {
             .with_mcp_servers(vec![filesystem_spec()])
             .with_mcp_workspace_root(temp.path().to_path_buf());
 
-        let listed =
-            execute_list_mcp_resources(&runner, json!({"server": "filesystem"})).unwrap();
+        let listed = execute_list_mcp_resources(&runner, json!({"server": "filesystem"})).unwrap();
         assert!(listed.contains("\"server\": \"filesystem\""));
         assert!(listed.contains("mcp://filesystem/notes/guide.md"));
         assert!(listed.contains("mcp://filesystem/notes/data.bin"));

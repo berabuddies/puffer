@@ -540,11 +540,8 @@ pub trait ToolRunner: Send + Sync + std::fmt::Debug {
         &self,
         server: Option<&str>,
     ) -> Result<Vec<McpResourceRecord>, RunnerError>;
-    fn read_mcp_resource(
-        &self,
-        server: &str,
-        uri: &str,
-    ) -> Result<McpResourceContent, RunnerError>;
+    fn read_mcp_resource(&self, server: &str, uri: &str)
+        -> Result<McpResourceContent, RunnerError>;
     fn list_mcp_prompts(&self, server: &str) -> Result<Vec<McpPrompt>, RunnerError>;
     fn get_mcp_prompt(
         &self,
@@ -626,8 +623,7 @@ mod serde_bytes_compat {
         }
     }
 
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     fn base64_encode(input: &[u8]) -> String {
         let mut out = String::with_capacity((input.len() + 2) / 3 * 4);

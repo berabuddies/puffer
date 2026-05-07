@@ -14,9 +14,9 @@ use std::fs;
 use std::net::{SocketAddr, TcpListener};
 use std::time::Duration;
 
+use puffer_runner_api::ToolRunner;
 use puffer_runner_grpc::server::ToolRunnerServer;
 use puffer_runner_grpc::RemoteToolRunner;
-use puffer_runner_api::ToolRunner;
 use puffer_tool_runner::build_service_from_cwd;
 use tempfile::tempdir;
 use tokio::sync::oneshot;
@@ -91,13 +91,12 @@ fn spawn_server(service: puffer_runner_grpc::ToolRunnerService) -> ServerHandle 
         })
         .expect("spawn server thread");
 
-    runtime
-        .block_on(async {
-            tokio::time::timeout(Duration::from_secs(5), ready_rx)
-                .await
-                .expect("server bind timeout")
-                .expect("ready signal")
-        });
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(5), ready_rx)
+            .await
+            .expect("server bind timeout")
+            .expect("ready signal")
+    });
 
     ServerHandle {
         endpoint,

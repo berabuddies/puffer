@@ -18,11 +18,11 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::agent_loop::{LoopInputs, TurnSession};
+use super::claude_tools::{self, ProviderToolContext};
 use super::tool_executor::{
     execute_tool_call, is_parallel_safe_tool, resolve_tool_permission, PermissionOutcome,
     ToolExecutionBackend,
 };
-use super::claude_tools::{self, ProviderToolContext};
 use super::{
     enforce_tool_result_budget, process_tool_result, ToolCallRequest, ToolInvocation,
     MAX_TOOL_RESULT_CHARS,
@@ -72,10 +72,8 @@ pub(super) fn execute_tool_batch(
     let working_dirs = inputs.state.working_dirs.clone();
     let allow_all_paths = workspace_paths::sandbox_allows_all_paths(&inputs.state.sandbox_mode);
     let session_id = inputs.state.session.id;
-    let provider_context = backend_to_provider_context(
-        session.tool_execution_backend(),
-        inputs.model_id,
-    );
+    let provider_context =
+        backend_to_provider_context(session.tool_execution_backend(), inputs.model_id);
     // Cloned once before `thread::scope` because the worker closures cannot
     // touch `inputs.state` (no `&mut AppState` across spawn boundaries).
     // `Arc<dyn ToolRunner>` is `Send + Sync` and clones cheaply.
@@ -86,8 +84,10 @@ pub(super) fn execute_tool_batch(
     let observability_handle = inputs.observability.clone();
     let parent_ctx_owned = parent_span_ctx.cloned();
     std::thread::scope(|s| {
-        let mut handles: Vec<(usize, std::thread::ScopedJoinHandle<'_, (String, bool, bool)>)> =
-            Vec::new();
+        let mut handles: Vec<(
+            usize,
+            std::thread::ScopedJoinHandle<'_, (String, bool, bool)>,
+        )> = Vec::new();
         for (i, tc) in tool_calls.iter().enumerate() {
             if !is_parallel_safe_tool(&tc.tool_id) {
                 continue;
@@ -283,11 +283,8 @@ pub(super) fn execute_tool_batch(
         let (raw_output, success, terminate) = results[i]
             .take()
             .unwrap_or_else(|| ("Tool was not executed".to_string(), false, false));
-        let output_text = process_tool_result(
-            &raw_output,
-            MAX_TOOL_RESULT_CHARS,
-            &inputs.state.session.id,
-        );
+        let output_text =
+            process_tool_result(&raw_output, MAX_TOOL_RESULT_CHARS, &inputs.state.session.id);
         invocations.push(ToolInvocation {
             call_id: tc.call_id.clone(),
             tool_id: tc.tool_id.clone(),
@@ -332,8 +329,7 @@ fn execute_tool_batch_serial(
             puffer_observability::SpanGuard::Disabled
         };
         let backend = session.tool_execution_backend();
-        let input_value: Value =
-            serde_json::from_str(&call.input).unwrap_or(Value::Null);
+        let input_value: Value = serde_json::from_str(&call.input).unwrap_or(Value::Null);
         let execution = match execute_tool_call(
             inputs.state,
             inputs.resources,
@@ -364,11 +360,8 @@ fn execute_tool_batch_serial(
         } else {
             format!("{}\n{}", execution.output.stdout, execution.output.stderr)
         };
-        let output_text = process_tool_result(
-            &raw_output,
-            MAX_TOOL_RESULT_CHARS,
-            &inputs.state.session.id,
-        );
+        let output_text =
+            process_tool_result(&raw_output, MAX_TOOL_RESULT_CHARS, &inputs.state.session.id);
         if inputs.observability.is_some() {
             tool_span.set_content(
                 puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
@@ -404,10 +397,7 @@ fn extract_terminate(metadata: &Value) -> bool {
         .unwrap_or(false)
 }
 
-fn enforce_tool_result_budget_in_place(
-    invocations: &mut [ToolInvocation],
-    session_id: &Uuid,
-) {
+fn enforce_tool_result_budget_in_place(invocations: &mut [ToolInvocation], session_id: &Uuid) {
     let mut output_strings: Vec<String> = invocations.iter().map(|i| i.output.clone()).collect();
     enforce_tool_result_budget(&mut output_strings, session_id);
     for (i, new_output) in output_strings.into_iter().enumerate() {
@@ -443,7 +433,6 @@ fn backend_to_provider_context<'a>(
 
 #[allow(dead_code)]
 fn _unused_def_marker(_d: &ToolDefinition) {}
-
 
 #[cfg(test)]
 mod terminate_tests {

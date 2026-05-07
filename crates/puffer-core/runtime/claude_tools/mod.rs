@@ -693,15 +693,15 @@ impl<'a> ProviderToolContext<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use puffer_resources::LoadedResources;
     use puffer_runner_api::{
         ChunkSink, DirEntry, McpPrompt, McpPromptContent, McpResourceContent, McpResourceRecord,
         McpResult, McpServerInfo, McpTool, RunnerCapabilities, RunnerError, ToolRequest,
         ToolResult, ToolRunner,
     };
-    use puffer_resources::LoadedResources;
     use puffer_tools::{
-        ToolDefinition, ToolDisplayHints, ToolInputSchema, ToolKind, ToolMetadata,
-        ToolPolicyHints, ToolRegistry,
+        ToolDefinition, ToolDisplayHints, ToolInputSchema, ToolKind, ToolMetadata, ToolPolicyHints,
+        ToolRegistry,
     };
     use serde_json::json;
     use std::path::Path;
@@ -752,11 +752,7 @@ mod tests {
         fn list_dir(&self, path: &Path) -> Result<Vec<DirEntry>, RunnerError> {
             self.inner.list_dir(path)
         }
-        fn glob(
-            &self,
-            root: &Path,
-            pattern: &str,
-        ) -> Result<Vec<std::path::PathBuf>, RunnerError> {
+        fn glob(&self, root: &Path, pattern: &str) -> Result<Vec<std::path::PathBuf>, RunnerError> {
             self.inner.glob(root, pattern)
         }
         fn list_mcp_servers(&self) -> Result<Vec<McpServerInfo>, RunnerError> {

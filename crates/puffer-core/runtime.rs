@@ -17,15 +17,14 @@ use serde_json::Value;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+mod agent_loop;
 #[cfg(test)]
 mod agent_runtime_tests;
-mod agent_loop;
-mod blocking_loop;
-mod tool_batch;
 mod agents;
 mod anthropic;
 mod anthropic_sse;
 pub mod background_tasks;
+mod blocking_loop;
 pub mod claude_tools;
 mod context_usage;
 mod hook_support;
@@ -43,6 +42,7 @@ mod side_question;
 mod structured_output_support;
 mod system_prompt;
 pub mod teammate_loop;
+mod tool_batch;
 mod tool_executor;
 
 mod debug_context;
@@ -78,9 +78,8 @@ pub fn observability_handle() -> Option<puffer_observability::ObservabilityHandl
         .clone()
 }
 
-static OBSERVABILITY_HANDLE: std::sync::Mutex<
-    Option<puffer_observability::ObservabilityHandle>,
-> = std::sync::Mutex::new(None);
+static OBSERVABILITY_HANDLE: std::sync::Mutex<Option<puffer_observability::ObservabilityHandle>> =
+    std::sync::Mutex::new(None);
 static ACTIVE_RUNTIME_WORK: AtomicUsize = AtomicUsize::new(0);
 
 /// Returns true while Puffer is actively executing a prompt turn or spawned agent turn.
@@ -123,8 +122,8 @@ pub use self::reflection::{
     ReflectionConfig, ReflectionLanguage, ReflectionTraceEvent,
 };
 pub(crate) use self::request_tool_filter::{build_request_tool_filter, RequestToolFilter};
-pub use self::structured_output_support::StructuredOutputConfig;
 use self::structured_output_support::validate_structured_output_schema;
+pub use self::structured_output_support::StructuredOutputConfig;
 
 #[cfg(test)]
 use self::structured_output_support::anthropic_tool_definitions;
@@ -198,8 +197,7 @@ impl CancelToken {
 
     /// Flips the token. Idempotent.
     pub fn cancel(&self) {
-        self.inner
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.inner.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Returns `Err(anyhow!("cancelled"))` when cancelled, otherwise
@@ -362,8 +360,8 @@ pub fn shutdown_runtime_services() -> Result<()> {
     // at the deadline are abandoned (their threads are killed by
     // process exit but the wait at least gives short subagent runs a
     // chance to land in Langfuse).
-    let still_active = background_tasks::task_manager()
-        .wait_for_drain(std::time::Duration::from_secs(30));
+    let still_active =
+        background_tasks::task_manager().wait_for_drain(std::time::Duration::from_secs(30));
     if still_active > 0 {
         eprintln!(
             "shutdown: {still_active} background agent(s) still running after 30s — \
@@ -984,7 +982,6 @@ fn parse_http_json_response(
     serde_json::from_str::<Value>(&response.text)
         .with_context(|| format!("response from {url} was not valid JSON"))
 }
-
 
 /// Trims older messages from the front when the estimated token count exceeds
 /// the threshold, keeping the most recent messages to stay within budget.

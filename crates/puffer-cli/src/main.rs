@@ -279,11 +279,15 @@ fn main() -> Result<()> {
             handshake_file,
             token,
             print_handshake,
+            no_browser,
+            system_prompt_1,
         }) => daemon::run(daemon::DaemonOptions {
             bind,
             handshake_file,
             token,
             print_handshake,
+            no_browser,
+            system_prompt_1,
         }),
         Some(Command::Browser(args)) => browser::run_browser_command(&cwd, &paths, args),
         Some(Command::BenchmarkRun {
@@ -525,8 +529,7 @@ fn run_existing_session_tui(
         state.cwd = cwd.to_path_buf();
         state.session.cwd = cwd.to_path_buf();
     }
-    let runner =
-        crate::runner_selection::select_tool_runner(config, resources, state.cwd.clone());
+    let runner = crate::runner_selection::select_tool_runner(config, resources, state.cwd.clone());
     state = state.with_tool_runner(runner);
     puffer_tui::run_app(
         &mut state,

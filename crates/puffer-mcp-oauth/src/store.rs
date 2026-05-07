@@ -23,9 +23,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use rmcp::transport::auth::{
-    AuthError, CredentialStore, OAuthTokenResponse, StoredCredentials,
-};
+use rmcp::transport::auth::{AuthError, CredentialStore, OAuthTokenResponse, StoredCredentials};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
@@ -245,8 +243,10 @@ impl FileCredentialStore {
 
     /// Returns the on-disk path the credentials live at.
     pub fn token_path(&self) -> PathBuf {
-        self.base_dir
-            .join(format!("{}.json", store_key(&self.server_id, &self.server_url)))
+        self.base_dir.join(format!(
+            "{}.json",
+            store_key(&self.server_id, &self.server_url)
+        ))
     }
 
     /// Best-effort: read the persisted JSON file (if any) and return the
@@ -386,15 +386,15 @@ impl FileCredentialStore {
             }
         }
         if let Some(parent) = self.token_path().parent() {
-            fs::create_dir_all(parent).map_err(|e| {
-                AuthError::InternalError(format!("create token dir: {e}"))
-            })?;
+            fs::create_dir_all(parent)
+                .map_err(|e| AuthError::InternalError(format!("create token dir: {e}")))?;
         }
         let path = self.token_path();
         let bytes = serde_json::to_vec_pretty(&payload)
             .map_err(|e| AuthError::InternalError(format!("serialize tokens: {e}")))?;
-        write_secret_file(&path, &bytes)
-            .map_err(|e| AuthError::InternalError(format!("write tokens to {}: {e}", path.display())))?;
+        write_secret_file(&path, &bytes).map_err(|e| {
+            AuthError::InternalError(format!("write tokens to {}: {e}", path.display()))
+        })?;
         Ok(())
     }
 }
@@ -405,10 +405,7 @@ impl FileCredentialStore {
 /// crash mid-write can't leave a half-written token file in place.
 fn write_secret_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut tmp = path.to_path_buf();
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("token");
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("token");
     tmp.set_file_name(format!(".{file_name}.tmp"));
     fs::write(&tmp, bytes)?;
     #[cfg(unix)]

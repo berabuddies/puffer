@@ -5,8 +5,8 @@ use super::{
 };
 use crate::permissions::load_runtime_permission_context;
 use crate::workspace_paths;
-pub(crate) mod conversation;
 mod completions_session;
+pub(crate) mod conversation;
 mod responses_session;
 mod support;
 mod websocket;
@@ -75,7 +75,6 @@ fn openai_request_version(provider: &ProviderDescriptor, oauth: bool) -> String 
         APP_VERSION.to_string()
     }
 }
-
 
 /// Legacy non-`agent_loop` streaming path. **Only reachable from
 /// `runtime/openai/websocket.rs`** (it falls back to this when
@@ -149,8 +148,8 @@ where
 {
     use self::conversation::{
         append_reasoning_items, append_tool_results, compact_conversation,
-        inject_post_compact_context, items_to_responses_input, transcript_to_items,
-        ConversationItem,
+        inject_post_compact_context, insert_managed_system_prompt_1, items_to_responses_input,
+        managed_system_prompt_1_from_env, transcript_to_items, ConversationItem,
     };
 
     let structured_output = options.structured_output;
@@ -178,6 +177,8 @@ where
     let instructions = openai_request_instructions(state, resources, Some(&system_prompt))?;
     // Unified: all internal logic on Vec<ConversationItem>.
     let mut items = transcript_to_items(state, input);
+    let managed_system_prompt_1 = managed_system_prompt_1_from_env();
+    insert_managed_system_prompt_1(&mut items, managed_system_prompt_1.as_deref());
     let mut reflection = options
         .reflection
         .map(|config| super::reflection::ReflectionTracker::new(input, config));
@@ -397,7 +398,6 @@ where
         }
     }
 }
-
 
 pub(super) fn execute_openai_tool_calls(
     state: &mut AppState,
@@ -1132,23 +1132,11 @@ impl super::provider_adapter::ProviderAdapter for OpenAIResponsesAdapter {
         input: &str,
         options: super::TurnRequestOptions<'_>,
     ) -> Result<super::TurnExecution> {
-        let use_native = prefer_native_structured_output(
-            state,
-            provider,
-            &model_id,
-            options.structured_output,
-        );
+        let use_native =
+            prefer_native_structured_output(state, provider, &model_id, options.structured_output);
         match run_responses_attempt(
-            state,
-            resources,
-            providers,
-            provider,
-            &model_id,
-            auth_store,
-            input,
-            &options,
-            use_native,
-            None,
+            state, resources, providers, provider, &model_id, auth_store, input, &options,
+            use_native, None,
         ) {
             Ok(turn) => Ok(turn),
             Err(error) if use_native && is_openai_structured_output_error(&error) => {
@@ -1159,16 +1147,8 @@ impl super::provider_adapter::ProviderAdapter for OpenAIResponsesAdapter {
                     structured_output_endpoint_id(provider),
                 );
                 run_responses_attempt(
-                    state,
-                    resources,
-                    providers,
-                    provider,
-                    &model_id,
-                    auth_store,
-                    input,
-                    &options,
-                    false,
-                    None,
+                    state, resources, providers, provider, &model_id, auth_store, input, &options,
+                    false, None,
                 )
             }
             Err(error) => Err(error),
@@ -1193,16 +1173,19 @@ impl super::provider_adapter::ProviderAdapter for OpenAIResponsesAdapter {
         if openai_websocket_enabled() {
             let mut wrapped = |event: super::TurnStreamEvent| on_event(event);
             return execute_openai_websocket_streaming(
-                state, resources, providers, provider, model_id, auth_store, input, options,
+                state,
+                resources,
+                providers,
+                provider,
+                model_id,
+                auth_store,
+                input,
+                options,
                 &mut wrapped,
             );
         }
-        let use_native = prefer_native_structured_output(
-            state,
-            provider,
-            &model_id,
-            options.structured_output,
-        );
+        let use_native =
+            prefer_native_structured_output(state, provider, &model_id, options.structured_output);
         match run_responses_attempt(
             state,
             resources,
@@ -1310,12 +1293,8 @@ impl super::provider_adapter::ProviderAdapter for OpenAICompletionsAdapter {
         input: &str,
         options: super::TurnRequestOptions<'_>,
     ) -> Result<super::TurnExecution> {
-        let use_native = prefer_native_structured_output(
-            state,
-            provider,
-            &model_id,
-            options.structured_output,
-        );
+        let use_native =
+            prefer_native_structured_output(state, provider, &model_id, options.structured_output);
         match run_completions_attempt(
             state, resources, providers, provider, &model_id, auth_store, input, &options,
             use_native, None,
@@ -1349,12 +1328,8 @@ impl super::provider_adapter::ProviderAdapter for OpenAICompletionsAdapter {
         options: super::TurnRequestOptions<'_>,
         on_event: &mut dyn FnMut(super::TurnStreamEvent),
     ) -> Result<super::TurnExecution> {
-        let use_native = prefer_native_structured_output(
-            state,
-            provider,
-            &model_id,
-            options.structured_output,
-        );
+        let use_native =
+            prefer_native_structured_output(state, provider, &model_id, options.structured_output);
         // Without an explicit streaming attempt the session's
         // `one_turn_streaming` (which synthesizes ThinkingDelta /
         // TextDelta from `reasoning_content`) is never invoked — the

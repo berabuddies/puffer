@@ -186,11 +186,7 @@ fn link_repo_resources(workspace: &Path) {
         .unwrap()
         .parent()
         .unwrap();
-    std::os::unix::fs::symlink(
-        repo_root.join("resources"),
-        workspace.join("resources"),
-    )
-    .unwrap();
+    std::os::unix::fs::symlink(repo_root.join("resources"), workspace.join("resources")).unwrap();
 }
 
 #[test]

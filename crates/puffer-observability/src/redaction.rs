@@ -22,8 +22,12 @@ pub const MAX_ATTR_BYTES: usize = 4096;
 pub enum ContentKind {
     Prompt,
     Output,
-    ToolInput { tool_id: String },
-    ToolOutput { tool_id: String },
+    ToolInput {
+        tool_id: String,
+    },
+    ToolOutput {
+        tool_id: String,
+    },
     /// Prompt that embeds rendered tool I/O (e.g. the reflection
     /// judge's input prompt or a spawned-agent root prompt). Requires
     /// BOTH `include_prompts` AND `include_tool_io` to pass through;
@@ -111,14 +115,9 @@ impl RedactionPolicy {
         let included = match kind {
             ContentKind::Prompt => self.include_prompts,
             ContentKind::Output => self.include_outputs,
-            ContentKind::PromptWithEmbeddedToolIo => {
-                self.include_prompts && self.include_tool_io
-            }
-            ContentKind::OutputWithEmbeddedToolIo => {
-                self.include_outputs && self.include_tool_io
-            }
-            ContentKind::ToolInput { tool_id }
-            | ContentKind::ToolOutput { tool_id } => {
+            ContentKind::PromptWithEmbeddedToolIo => self.include_prompts && self.include_tool_io,
+            ContentKind::OutputWithEmbeddedToolIo => self.include_outputs && self.include_tool_io,
+            ContentKind::ToolInput { tool_id } | ContentKind::ToolOutput { tool_id } => {
                 if self
                     .always_redact_tool_ids
                     .iter()
@@ -181,10 +180,7 @@ mod tests {
     #[test]
     fn pass_through_keeps_short_values_verbatim() {
         let policy = RedactionPolicy::pass_through();
-        assert_eq!(
-            policy.apply(ContentKind::Prompt, "hi there"),
-            "hi there"
-        );
+        assert_eq!(policy.apply(ContentKind::Prompt, "hi there"), "hi there");
     }
 
     #[test]
@@ -258,7 +254,9 @@ mod tests {
         // Other tools still pass through.
         assert_eq!(
             policy.apply(
-                ContentKind::ToolInput { tool_id: "Read".to_string() },
+                ContentKind::ToolInput {
+                    tool_id: "Read".to_string()
+                },
                 "fixture.txt",
             ),
             "fixture.txt"

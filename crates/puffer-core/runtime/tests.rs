@@ -1100,12 +1100,12 @@ fn tool_definitions_keep_never_approval_tools_enabled() {
     assert_eq!(openai_tools[0].name, "read_file");
 }
 
+#[path = "tests/agent_loop_e2e.rs"]
+mod agent_loop_e2e;
 #[path = "tests/http_retries.rs"]
 mod http_retries;
 #[path = "tests/iteration_behavior.rs"]
 mod iteration_behavior;
-#[path = "tests/agent_loop_e2e.rs"]
-mod agent_loop_e2e;
 #[path = "tests/openai_stream_transport.rs"]
 mod openai_stream_transport;
 #[path = "tests/openai_tool_errors.rs"]

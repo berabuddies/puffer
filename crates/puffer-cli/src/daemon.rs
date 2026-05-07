@@ -35,9 +35,9 @@ use puffer_config::{
     ensure_workspace_dirs, load_config, save_user_config, ConfigPaths, PufferConfig,
 };
 use puffer_core::{
-    execute_user_turn_streaming_with_permissions, with_user_question_prompt_handler, AppState,
-    MessageRole, PermissionPromptAction, PermissionPromptRequest, TurnStreamEvent,
-    UserQuestionPromptRequest, UserQuestionPromptResponse,
+    execute_user_turn_streaming_with_permissions_and_cancel, with_user_question_prompt_handler,
+    AppState, CancelToken, MessageRole, PermissionPromptAction, PermissionPromptRequest,
+    TurnStreamEvent, UserQuestionPromptRequest, UserQuestionPromptResponse,
 };
 use puffer_provider_openai::{
     exchange_authorization_code as exchange_openai_authorization_code,
@@ -103,6 +103,8 @@ pub(crate) struct DaemonOptions {
     pub handshake_file: Option<String>,
     pub token: Option<String>,
     pub print_handshake: bool,
+    pub no_browser: bool,
+    pub system_prompt_1: Option<String>,
 }
 
 pub(crate) fn run(options: DaemonOptions) -> Result<()> {
@@ -122,7 +124,25 @@ async fn run_async(options: DaemonOptions) -> Result<()> {
         .token
         .unwrap_or_else(|| load_or_generate_token(&paths));
 
-    let state = DaemonState::load(cwd.clone(), paths.clone(), token.clone())?;
+    let state = DaemonState::load(
+        cwd.clone(),
+        paths.clone(),
+        token.clone(),
+        options.no_browser,
+    )?;
+    if let Some(prompt) = options
+        .system_prompt_1
+        .as_deref()
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+    {
+        std::env::set_var("PUFFER_SYSTEM_PROMPT_1", prompt);
+    }
+    if options.no_browser {
+        std::env::set_var("PUFFER_NO_BROWSER", "1");
+    } else {
+        std::env::remove_var("PUFFER_NO_BROWSER");
+    }
     let state = Arc::new(state);
 
     let app = Router::new()
@@ -257,13 +277,19 @@ impl DaemonState {
 }
 
 struct TurnHandle {
+    cancel: CancelToken,
     pending: Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<PermissionPromptAction>>>>,
     pending_questions:
         Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<UserQuestionPromptResponse>>>>,
 }
 
 impl DaemonState {
-    fn load(cwd: std::path::PathBuf, paths: ConfigPaths, token: String) -> Result<Self> {
+    fn load(
+        cwd: std::path::PathBuf,
+        paths: ConfigPaths,
+        token: String,
+        no_browser: bool,
+    ) -> Result<Self> {
         let config = load_config(&paths)?;
         let (events, _rx) = broadcast::channel::<ServerEnvelope>(256);
         let browser_profile_root = paths.user_config_dir.join("browser-profiles");
@@ -279,7 +305,7 @@ impl DaemonState {
             next_request_id: Arc::new(AtomicU64::new(0)),
             ptys,
             fs_watches: Arc::new(FsWatchRegistry::new()),
-            browsers: Arc::new(BrowserRegistry::new(browser_profile_root)),
+            browsers: Arc::new(BrowserRegistry::new(browser_profile_root, !no_browser)),
             recent_events: Arc::new(Mutex::new(VecDeque::with_capacity(RECENT_EVENT_CAPACITY))),
         })
     }
@@ -1854,6 +1880,7 @@ fn handle_cancel_turn(state: &DaemonState, params: &Value) -> Result<Value> {
         .context("missing turnId")?;
     let mut turns = state.turns.lock().unwrap();
     if let Some(handle) = turns.get_mut(turn_id) {
+        handle.cancel.cancel();
         let mut pending = handle.pending.lock().unwrap();
         for (_, tx) in pending.drain() {
             let _ = tx.send(PermissionPromptAction::Deny);
@@ -1901,10 +1928,12 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     let pending_questions: Arc<
         Mutex<HashMap<String, std::sync::mpsc::Sender<UserQuestionPromptResponse>>>,
     > = Arc::new(Mutex::new(HashMap::new()));
+    let cancel = CancelToken::new();
 
     state.turns.lock().unwrap().insert(
         turn_id.clone(),
         TurnHandle {
+            cancel: cancel.clone(),
             pending: pending.clone(),
             pending_questions: pending_questions.clone(),
         },
@@ -2149,13 +2178,14 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
 
         let mut auth_store = inputs.auth_store.clone();
         let outcome = with_user_question_prompt_handler(on_user_question, || {
-            execute_user_turn_streaming_with_permissions(
+            execute_user_turn_streaming_with_permissions_and_cancel(
                 &mut app_state,
                 &inputs.resources,
                 &inputs.providers,
                 &mut auth_store,
                 &message_for_thread,
                 None,
+                &cancel,
                 on_event,
                 on_permission,
             )

@@ -12,9 +12,7 @@
 //! `agent_loop::run_streaming_loop` and `run_blocking_loop` can drive it
 //! without seeing any vendor types.
 
-use super::agent_loop::{
-    self, AssistantTurn, LoopInputs, TurnSession,
-};
+use super::agent_loop::{self, AssistantTurn, LoopInputs, TurnSession};
 use super::anthropic_sse::parse_anthropic_sse;
 use super::openai::conversation::{
     build_system_reminder, items_to_anthropic_messages, ConversationItem, ReasoningSummary,
@@ -964,7 +962,11 @@ mod thinking_gate_tests {
         ProviderDescriptor,
     };
 
-    fn provider_with(id: &str, base_url: &str, model_compat: Option<ModelCompat>) -> ProviderDescriptor {
+    fn provider_with(
+        id: &str,
+        base_url: &str,
+        model_compat: Option<ModelCompat>,
+    ) -> ProviderDescriptor {
         ProviderDescriptor {
             id: id.to_string(),
             display_name: id.to_string(),
@@ -992,7 +994,10 @@ mod thinking_gate_tests {
     #[test]
     fn canonical_anthropic_defaults_to_thinking_supported() {
         let provider = provider_with("anthropic", "https://api.anthropic.com", None);
-        assert!(anthropic_supports_thinking_api(&provider, "claude-sonnet-4-5"));
+        assert!(anthropic_supports_thinking_api(
+            &provider,
+            "claude-sonnet-4-5"
+        ));
     }
 
     #[test]
@@ -1005,7 +1010,10 @@ mod thinking_gate_tests {
         // Verified via curl against api.kimi.com/coding before flipping
         // the default.
         let provider = provider_with("kimi-coding", "https://api.kimi.com/coding", None);
-        assert!(anthropic_supports_thinking_api(&provider, "claude-sonnet-4-5"));
+        assert!(anthropic_supports_thinking_api(
+            &provider,
+            "claude-sonnet-4-5"
+        ));
     }
 
     #[test]
@@ -1018,7 +1026,10 @@ mod thinking_gate_tests {
             supports_thinking_api: Some(false),
         });
         let provider = provider_with("custom-anthropic", "http://1.2.3.4/", Some(compat));
-        assert!(!anthropic_supports_thinking_api(&provider, "claude-sonnet-4-5"));
+        assert!(!anthropic_supports_thinking_api(
+            &provider,
+            "claude-sonnet-4-5"
+        ));
     }
 
     #[test]
@@ -1027,7 +1038,10 @@ mod thinking_gate_tests {
             supports_thinking_api: Some(true),
         });
         let provider = provider_with("custom-anthropic", "http://1.2.3.4/", Some(compat));
-        assert!(anthropic_supports_thinking_api(&provider, "claude-sonnet-4-5"));
+        assert!(anthropic_supports_thinking_api(
+            &provider,
+            "claude-sonnet-4-5"
+        ));
     }
 
     #[test]
@@ -1105,7 +1119,11 @@ mod thinking_round_trip_tests {
         let content = messages[1]["content"]
             .as_array()
             .expect("assistant content should be a block array");
-        assert_eq!(content.len(), 2, "expected [thinking, tool_use], got {content:?}");
+        assert_eq!(
+            content.len(),
+            2,
+            "expected [thinking, tool_use], got {content:?}"
+        );
         assert_eq!(content[0]["type"], "thinking");
         assert_eq!(content[0]["thinking"], "Need to read /tmp/sample.txt.");
         assert_eq!(content[0]["signature"], "sig-abc-123");
@@ -1250,7 +1268,10 @@ mod thinking_round_trip_tests {
                 redacted,
             } => {
                 assert!(*redacted);
-                assert_eq!(encrypted_content.as_deref(), Some("OPAQUE-REDACTED-PAYLOAD"));
+                assert_eq!(
+                    encrypted_content.as_deref(),
+                    Some("OPAQUE-REDACTED-PAYLOAD")
+                );
                 assert!(summary.is_empty());
             }
             other => panic!("expected redacted Reasoning, got {other:?}"),

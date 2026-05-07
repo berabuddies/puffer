@@ -301,7 +301,10 @@ async fn oauth_discovery_finds_authorization_server() {
     .json()
     .await
     .unwrap();
-    assert!(resp["authorization_endpoint"].as_str().unwrap().contains("/authorize"));
+    assert!(resp["authorization_endpoint"]
+        .as_str()
+        .unwrap()
+        .contains("/authorize"));
     assert!(resp["token_endpoint"].as_str().unwrap().contains("/token"));
     assert!(resp["registration_endpoint"]
         .as_str()

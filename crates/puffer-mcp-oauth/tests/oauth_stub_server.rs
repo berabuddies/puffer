@@ -172,7 +172,10 @@ pub async fn spawn_oauth_stub(config: OAuthStubConfig) -> anyhow::Result<OAuthSt
 
 // Real metadata handler: captures the inbound `Host` header so rmcp's
 // absolute-URL parser doesn't choke on relative endpoint paths.
-async fn metadata(headers: HeaderMap, State(_state): State<Arc<Mutex<StubInner>>>) -> impl IntoResponse {
+async fn metadata(
+    headers: HeaderMap,
+    State(_state): State<Arc<Mutex<StubInner>>>,
+) -> impl IntoResponse {
     let host = headers
         .get(axum::http::header::HOST)
         .and_then(|h| h.to_str().ok())
@@ -296,10 +299,7 @@ fn error_response(status: StatusCode, message: &str) -> Response<Body> {
     Response::builder()
         .status(status)
         .header(CONTENT_TYPE, "application/json")
-        .body(Body::from(format!(
-            "{{\"error\":\"{}\"}}",
-            message
-        )))
+        .body(Body::from(format!("{{\"error\":\"{}\"}}", message)))
         .unwrap()
 }
 
@@ -403,8 +403,7 @@ fn verify_pkce(verifier: &str, challenge: &str) -> bool {
 }
 
 fn base64_url_no_pad(input: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
     let mut i = 0;
     while i < input.len() {

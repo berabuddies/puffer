@@ -345,10 +345,13 @@ impl ObservabilityHandle {
             std::env::var("LANGFUSE_SECRET_KEY"),
         ) {
             if !pk.is_empty() && !sk.is_empty() {
-                let basic = base64::engine::general_purpose::STANDARD
-                    .encode(format!("{pk}:{sk}"));
+                let basic = base64::engine::general_purpose::STANDARD.encode(format!("{pk}:{sk}"));
                 upsert_header(&mut headers, "Authorization", format!("Basic {basic}"));
-                upsert_header(&mut headers, "x-langfuse-ingestion-version", "4".to_string());
+                upsert_header(
+                    &mut headers,
+                    "x-langfuse-ingestion-version",
+                    "4".to_string(),
+                );
             }
         }
         let service_name =

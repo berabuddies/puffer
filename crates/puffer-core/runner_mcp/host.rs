@@ -393,13 +393,11 @@ impl McpHost {
             .workspace_root
             .as_deref()
             .ok_or_else(|| RunnerError::Mcp("filesystem MCP requires a workspace root".into()))?;
-        let relative = uri
-            .strip_prefix("mcp://filesystem/")
-            .ok_or_else(|| {
-                RunnerError::InvalidArgument(format!(
-                    "filesystem MCP URI `{uri}` must use the `mcp://filesystem/` scheme",
-                ))
-            })?;
+        let relative = uri.strip_prefix("mcp://filesystem/").ok_or_else(|| {
+            RunnerError::InvalidArgument(format!(
+                "filesystem MCP URI `{uri}` must use the `mcp://filesystem/` scheme",
+            ))
+        })?;
         let path = resolve_workspace_file(root, relative)
             .map_err(|e| RunnerError::Mcp(format!("resolve workspace file: {e}")))?;
         let bytes = fs::read(&path)

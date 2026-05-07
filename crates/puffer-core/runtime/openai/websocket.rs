@@ -7,7 +7,8 @@ use super::super::system_prompt::render_runtime_system_prompt;
 use super::super::{run_turn_hooks, TurnStreamEvent};
 use super::conversation::{
     append_reasoning_items, append_tool_results, compact_conversation, inject_post_compact_context,
-    items_to_responses_input, transcript_to_items, ConversationItem,
+    insert_managed_system_prompt_1, items_to_responses_input, managed_system_prompt_1_from_env,
+    transcript_to_items, ConversationItem,
 };
 use super::support::{
     apply_previous_response_id, is_openai_structured_output_error, openai_model_supports_reasoning,
@@ -189,10 +190,8 @@ where
 {
     let structured_output = options.structured_output;
     let mut execution = resolve_openai_execution_config(state, auth_store, provider)?;
-    let registry = super::super::mcp_discovery::registry_with_mcp_tools(
-        resources,
-        state.tool_runner.as_ref(),
-    );
+    let registry =
+        super::super::mcp_discovery::registry_with_mcp_tools(resources, state.tool_runner.as_ref());
     let permission_context = load_runtime_permission_context(&state.cwd, resources, state)?;
     let text = openai_responses_text_config(structured_output, use_native);
     let tools = openai_tool_definitions_for_request(
@@ -213,6 +212,8 @@ where
     )?;
     let instructions = openai_request_instructions(state, resources, Some(&system_prompt))?;
     let mut items = transcript_to_items(state, input);
+    let managed_system_prompt_1 = managed_system_prompt_1_from_env();
+    insert_managed_system_prompt_1(&mut items, managed_system_prompt_1.as_deref());
 
     let context_reminder = build_context_reminder_message();
     super::conversation::insert_context_reminder_preserving_legacy_leading_system(

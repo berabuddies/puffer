@@ -132,10 +132,7 @@ mod tests {
     #[tokio::test]
     async fn callback_server_returns_query_params() {
         let mut handle = spawn_callback_server().await.unwrap();
-        let url = format!(
-            "{}?code=abc123&state=xyz",
-            handle.redirect_uri
-        );
+        let url = format!("{}?code=abc123&state=xyz", handle.redirect_uri);
         // Hit the callback to satisfy the oneshot.
         let _ = reqwest::Client::new().get(&url).send().await.unwrap();
         let params = (&mut handle.callback).await.expect("callback");

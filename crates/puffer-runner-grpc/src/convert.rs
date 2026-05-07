@@ -63,7 +63,9 @@ pub(crate) fn to_proto_tool_completed(result: &ToolResult) -> proto::ToolComplet
     }
 }
 
-pub(crate) fn from_proto_tool_completed(value: proto::ToolCompleted) -> Result<ToolResult, RunnerError> {
+pub(crate) fn from_proto_tool_completed(
+    value: proto::ToolCompleted,
+) -> Result<ToolResult, RunnerError> {
     let metadata = if value.metadata_json.is_empty() {
         serde_json::Value::Null
     } else {
@@ -261,7 +263,9 @@ pub(crate) fn from_proto_mcp_resource_content(
     })
 }
 
-pub(crate) fn to_proto_mcp_resource_part(p: &McpResourceContentPart) -> proto::McpResourceContentPart {
+pub(crate) fn to_proto_mcp_resource_part(
+    p: &McpResourceContentPart,
+) -> proto::McpResourceContentPart {
     match p {
         McpResourceContentPart::Text {
             uri,

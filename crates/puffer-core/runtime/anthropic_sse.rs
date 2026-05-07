@@ -366,7 +366,10 @@ mod tests {
         let stream = "";
         let result = parse_anthropic_sse(stream.as_bytes(), &mut |_| {});
         let err = result.expect_err("empty stream must bail");
-        assert!(err.to_string().contains("without message_stop"), "got: {err}");
+        assert!(
+            err.to_string().contains("without message_stop"),
+            "got: {err}"
+        );
     }
 
     /// Pi-mono parity: when the upstream delivers the final

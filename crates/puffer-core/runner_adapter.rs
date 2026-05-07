@@ -67,12 +67,22 @@ pub fn execute_runner_tool(req: &ToolRequest, _sink: &mut dyn ChunkSink) -> Resu
             let execution = bash::execute_from_value(cwd, &session_id, input)?;
             let stdout = serde_json::to_string_pretty(&execution.output)
                 .context("failed to serialize Bash output")?;
-            Ok(plain_result(req.tool_id.as_str(), execution.success, stdout))
+            Ok(plain_result(
+                req.tool_id.as_str(),
+                execution.success,
+                stdout,
+            ))
         }
         "Read" => {
-            let stdout = read::execute_claude_read_tool(cwd, working_dirs, allow_all_paths, input.clone())?;
+            let stdout =
+                read::execute_claude_read_tool(cwd, working_dirs, allow_all_paths, input.clone())?;
             let updates = read_update_from_input(&input)?;
-            Ok(result_with_updates(req.tool_id.as_str(), true, stdout, updates))
+            Ok(result_with_updates(
+                req.tool_id.as_str(),
+                true,
+                stdout,
+                updates,
+            ))
         }
         "Write" => {
             let path = input_file_path(&input, "file_path")?;
@@ -85,11 +95,17 @@ pub fn execute_runner_tool(req: &ToolRequest, _sink: &mut dyn ChunkSink) -> Resu
                 }],
                 None => Vec::new(),
             };
-            Ok(result_with_updates(req.tool_id.as_str(), true, stdout, updates))
+            Ok(result_with_updates(
+                req.tool_id.as_str(),
+                true,
+                stdout,
+                updates,
+            ))
         }
         "Edit" => {
             let path = input_file_path(&input, "file_path")?;
-            let stdout = edit::execute_claude_edit(cwd, working_dirs, allow_all_paths, input.clone())?;
+            let stdout =
+                edit::execute_claude_edit(cwd, working_dirs, allow_all_paths, input.clone())?;
             let updates = match path.as_deref() {
                 Some(path) => vec![ReadStateUpdate {
                     path: path.to_path_buf(),
@@ -98,7 +114,12 @@ pub fn execute_runner_tool(req: &ToolRequest, _sink: &mut dyn ChunkSink) -> Resu
                 }],
                 None => Vec::new(),
             };
-            Ok(result_with_updates(req.tool_id.as_str(), true, stdout, updates))
+            Ok(result_with_updates(
+                req.tool_id.as_str(),
+                true,
+                stdout,
+                updates,
+            ))
         }
         "Glob" => {
             let stdout = glob::execute_claude_glob(cwd, working_dirs, allow_all_paths, input)?;
@@ -110,8 +131,12 @@ pub fn execute_runner_tool(req: &ToolRequest, _sink: &mut dyn ChunkSink) -> Resu
         }
         "NotebookEdit" => {
             let path = input_file_path(&input, "notebook_path")?;
-            let stdout =
-                notebook_edit::execute_notebook_edit_tool(cwd, working_dirs, allow_all_paths, input.clone())?;
+            let stdout = notebook_edit::execute_notebook_edit_tool(
+                cwd,
+                working_dirs,
+                allow_all_paths,
+                input.clone(),
+            )?;
             let updates = match path.as_deref() {
                 Some(path) if path.exists() => vec![ReadStateUpdate {
                     path: path.to_path_buf(),
@@ -120,7 +145,12 @@ pub fn execute_runner_tool(req: &ToolRequest, _sink: &mut dyn ChunkSink) -> Resu
                 }],
                 _ => Vec::new(),
             };
-            Ok(result_with_updates(req.tool_id.as_str(), true, stdout, updates))
+            Ok(result_with_updates(
+                req.tool_id.as_str(),
+                true,
+                stdout,
+                updates,
+            ))
         }
         "WebFetch" => {
             let stdout = serde_json::to_string_pretty(&web_fetch::execute_claude_web_fetch(input)?)
@@ -192,8 +222,9 @@ fn file_timestamp_ms(path: &Path) -> Result<u128> {
 fn parse_session_id(raw: Option<&str>) -> Result<Uuid> {
     match raw {
         None => Ok(Uuid::nil()),
-        Some(value) => Uuid::parse_str(value)
-            .map_err(|e| anyhow!("invalid session_id `{value}`: {e}")),
+        Some(value) => {
+            Uuid::parse_str(value).map_err(|e| anyhow!("invalid session_id `{value}`: {e}"))
+        }
     }
 }
 

@@ -30,15 +30,15 @@ use puffer_runner_api::{NullChunkSink, RunnerError, ToolRunner};
 use serde_json::json;
 use tempfile::TempDir;
 
-#[path = "mcp_stub/stub_server.rs"]
-#[allow(dead_code)]
-mod stub_server;
 #[path = "mcp_stub/http_server.rs"]
 #[allow(dead_code)]
 mod http_server;
 #[path = "../../puffer-mcp-oauth/tests/oauth_stub_server.rs"]
 #[allow(dead_code)]
 mod oauth_stub;
+#[path = "mcp_stub/stub_server.rs"]
+#[allow(dead_code)]
+mod stub_server;
 
 use http_server::spawn_http_stub_accepting_bearer_prefix;
 use oauth_stub::{spawn_oauth_stub, OAuthStubConfig};
@@ -75,7 +75,9 @@ fn manifest(server_id: &str, mcp_url: &str) -> Vec<McpServerSpec> {
 
 #[test]
 fn oauth_required_returns_typed_error_when_not_logged_in() {
-    let oauth_stub = rt().block_on(spawn_oauth_stub(OAuthStubConfig::default())).unwrap();
+    let oauth_stub = rt()
+        .block_on(spawn_oauth_stub(OAuthStubConfig::default()))
+        .unwrap();
     // Point the manifest at the OAuth stub itself so discovery succeeds —
     // we only care about the missing-tokens branch here.
     let token_dir = TempDir::new().unwrap();
@@ -143,10 +145,7 @@ fn cross_backend_oauth_http_round_trip() {
                         if resp.status().is_redirection() {
                             if let Some(loc) = resp.headers().get(reqwest::header::LOCATION) {
                                 let location = loc.to_str().unwrap().to_string();
-                                let _ = reqwest::Client::new()
-                                    .get(&location)
-                                    .send()
-                                    .await;
+                                let _ = reqwest::Client::new().get(&location).send().await;
                             }
                         }
                     });
@@ -251,7 +250,8 @@ fn force_refresh_succeeds_against_stub_then_persists_new_token() {
     .expect("tokens persisted")
     .access_token;
     // Refresh exactly once and re-read.
-    rt().block_on(service.force_refresh()).expect("force_refresh ok");
+    rt().block_on(service.force_refresh())
+        .expect("force_refresh ok");
     let after = puffer_mcp_oauth::PersistedTokens::read_from(
         token_dir.path(),
         "stub",
@@ -260,10 +260,7 @@ fn force_refresh_succeeds_against_stub_then_persists_new_token() {
     .unwrap()
     .expect("tokens persisted after refresh")
     .access_token;
-    assert_ne!(
-        before, after,
-        "force_refresh must rotate the access token"
-    );
+    assert_ne!(before, after, "force_refresh must rotate the access token");
     // Stub's metrics confirm exactly one refresh hit.
     let metrics = rt().block_on(oauth_stub.metrics());
     assert_eq!(metrics.refresh_grants, 1);

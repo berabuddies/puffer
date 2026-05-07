@@ -163,14 +163,9 @@ impl ServerHandler for StubServer {
             }
             "request_user_input" => {
                 let schema = ElicitationSchema::builder()
-                    .required_property(
-                        "confirmed",
-                        PrimitiveSchema::Boolean(BooleanSchema::new()),
-                    )
+                    .required_property("confirmed", PrimitiveSchema::Boolean(BooleanSchema::new()))
                     .build()
-                    .map_err(|e| {
-                        ErrorData::internal_error(format!("schema build: {e}"), None)
-                    })?;
+                    .map_err(|e| ErrorData::internal_error(format!("schema build: {e}"), None))?;
                 let response = context
                     .peer
                     .create_elicitation(CreateElicitationRequestParams::FormElicitationParams {
@@ -196,7 +191,9 @@ impl ServerHandler for StubServer {
                         "content": Value::Null,
                     }),
                 };
-                Ok(CallToolResult::success(vec![Content::text(body.to_string())]))
+                Ok(CallToolResult::success(vec![Content::text(
+                    body.to_string(),
+                )]))
             }
             other => Err(ErrorData::invalid_params(
                 format!("unknown tool `{other}`"),
@@ -357,8 +354,7 @@ fn object_schema(value: Value) -> Arc<Map<String, Value>> {
 }
 
 pub fn encode_base64(input: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
     for chunk in input.chunks(3) {
         let b0 = chunk[0];

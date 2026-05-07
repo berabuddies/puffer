@@ -153,9 +153,7 @@ pub fn extract_chat_completions_reasoning(
 /// `<think>…</think>` block when one is embedded in `content`. Pair
 /// with `extract_chat_completions_reasoning` so the same prose doesn't
 /// land in both the thinking card and the answer card.
-pub fn extract_chat_completions_visible_text(
-    response: &OpenAIChatCompletionsResponse,
-) -> String {
+pub fn extract_chat_completions_visible_text(response: &OpenAIChatCompletionsResponse) -> String {
     response::extract_chat_completions_visible_text(response)
 }
 

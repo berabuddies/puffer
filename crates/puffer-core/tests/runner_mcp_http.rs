@@ -25,11 +25,11 @@ use puffer_runner_api::{
 };
 use serde_json::json;
 
+#[path = "mcp_stub/http_server.rs"]
+mod http_server;
 #[path = "mcp_stub/stub_server.rs"]
 #[allow(dead_code)]
 mod stub_server;
-#[path = "mcp_stub/http_server.rs"]
-mod http_server;
 
 use http_server::spawn_http_stub;
 
@@ -129,7 +129,9 @@ fn read_resource_text_and_blob_over_http() {
         .read_mcp_resource("stub", "stub://hello.txt")
         .expect("read text");
     match text.parts.first() {
-        Some(McpResourceContentPart::Text { text, mime_type, .. }) => {
+        Some(McpResourceContentPart::Text {
+            text, mime_type, ..
+        }) => {
             assert_eq!(text, "hello from stub");
             assert_eq!(mime_type.as_deref(), Some("text/plain"));
         }
@@ -140,7 +142,9 @@ fn read_resource_text_and_blob_over_http() {
         .read_mcp_resource("stub", "stub://binary.bin")
         .expect("read blob");
     match blob.parts.first() {
-        Some(McpResourceContentPart::Blob { bytes, mime_type, .. }) => {
+        Some(McpResourceContentPart::Blob {
+            bytes, mime_type, ..
+        }) => {
             assert_eq!(bytes, &vec![0xde, 0xad, 0xbe]);
             assert_eq!(mime_type.as_deref(), Some("application/octet-stream"));
         }
@@ -210,11 +214,12 @@ fn tools_call_emits_progress_through_http_sse() {
 #[test]
 fn auth_header_is_required_when_server_enforces_it() {
     let token = "shibboleth-1234";
-    let stub = rt().block_on(spawn_http_stub(Some(token))).expect("spawn stub");
+    let stub = rt()
+        .block_on(spawn_http_stub(Some(token)))
+        .expect("spawn stub");
 
     // Manifest WITHOUT the header — must fail.
-    let no_header = LocalToolRunner::new()
-        .with_mcp_servers(http_manifest("stub", &stub.url()));
+    let no_header = LocalToolRunner::new().with_mcp_servers(http_manifest("stub", &stub.url()));
     let err = no_header
         .list_mcp_tools("stub")
         .expect_err("missing auth must fail");
@@ -235,7 +240,9 @@ fn auth_header_is_required_when_server_enforces_it() {
 #[test]
 fn header_values_expand_env_vars() {
     let token = "env-expanded-token-9876";
-    let stub = rt().block_on(spawn_http_stub(Some(token))).expect("spawn stub");
+    let stub = rt()
+        .block_on(spawn_http_stub(Some(token)))
+        .expect("spawn stub");
     let env_key = "PUFFER_MCP_HTTP_TEST_TOKEN";
     // SAFETY: tests in this binary are serial-by-default; we restore
     // the env var on exit just in case.

@@ -381,17 +381,18 @@ pub(crate) fn render(
         }
     } else {
         let (prompt_text, cursor_row, cursor_col) = if help_active && input.is_empty() {
-            (Text::from(Line::from("❯ /help")), 0u16, "❯ /help".len() as u16)
+            (
+                Text::from(Line::from("❯ /help")),
+                0u16,
+                "❯ /help".len() as u16,
+            )
         } else {
             multiline_prompt_text(input, cursor)
         };
         // When the input is taller than the prompt area, scroll so the cursor
         // line stays visible.
         let scroll = cursor_row.saturating_sub(prompt_lines.saturating_sub(1));
-        frame.render_widget(
-            Paragraph::new(prompt_text).scroll((scroll, 0)),
-            prompt_row,
-        );
+        frame.render_widget(Paragraph::new(prompt_text).scroll((scroll, 0)), prompt_row);
         let max_cursor = usize::from(prompt_row.width.saturating_sub(1));
         let display_cursor = usize::from(cursor_col).min(max_cursor);
         let cursor_x = prompt_row.x + display_cursor as u16;

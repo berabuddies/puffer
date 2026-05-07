@@ -478,6 +478,22 @@ pub(crate) fn items_to_responses_input(items: &[ConversationItem]) -> Value {
     )
 }
 
+pub(crate) fn managed_system_prompt_1_from_env() -> Option<String> {
+    std::env::var("PUFFER_SYSTEM_PROMPT_1")
+        .ok()
+        .map(|prompt| prompt.trim().to_string())
+        .filter(|prompt| !prompt.is_empty())
+}
+
+pub(crate) fn insert_managed_system_prompt_1(
+    items: &mut Vec<ConversationItem>,
+    prompt: Option<&str>,
+) {
+    if let Some(prompt) = prompt.map(str::trim).filter(|prompt| !prompt.is_empty()) {
+        items.insert(0, ConversationItem::system_message(prompt));
+    }
+}
+
 /// Inserts the per-turn synthetic context reminder at the right position
 /// in `items`: after any leading run of `role:"system"` items, so the
 /// boundary filter's first-position exemption keeps preserving the
@@ -633,6 +649,7 @@ fn content_parts_to_text(parts: &[ContentPart]) -> String {
 pub(crate) fn items_to_chat_messages(
     items: &[ConversationItem],
     system_prompt: Option<&str>,
+    managed_system_prompt_1: Option<&str>,
     plan_mode_context: Option<&str>,
     system_reminder: Option<&str>,
 ) -> Vec<OpenAIChatMessage> {
@@ -640,6 +657,9 @@ pub(crate) fn items_to_chat_messages(
 
     // System prompt as first message.
     if let Some(prompt) = system_prompt.filter(|p| !p.trim().is_empty()) {
+        messages.push(chat_message("system", prompt));
+    }
+    if let Some(prompt) = managed_system_prompt_1.filter(|p| !p.trim().is_empty()) {
         messages.push(chat_message("system", prompt));
     }
     if let Some(ctx) = plan_mode_context.filter(|c| !c.trim().is_empty()) {
@@ -1407,7 +1427,7 @@ mod tests {
             ConversationItem::system_message("Interrupted by user."),
             ConversationItem::user_message("second user message"),
         ];
-        let msgs = items_to_chat_messages(&items, Some("real system prompt"), None, None);
+        let msgs = items_to_chat_messages(&items, Some("real system prompt"), None, None, None);
         // Position 0 is the explicit top-level system_prompt; positions
         // 1..N must contain no further `system` role.
         assert_eq!(msgs[0].role, "system");
@@ -1521,7 +1541,7 @@ mod tests {
             ConversationItem::system_message("You are the bug-bounty subagent."),
             ConversationItem::user_message("audit this"),
         ];
-        let msgs = items_to_chat_messages(&items, Some("real system prompt"), None, None);
+        let msgs = items_to_chat_messages(&items, Some("real system prompt"), None, None, None);
         // Position 0 = explicit top-level system prompt; position 1 = the
         // sub-agent identity from items[0]; position 2 = the user message.
         assert_eq!(msgs[0].role, "system");
@@ -1531,6 +1551,50 @@ mod tests {
             Some("You are the bug-bounty subagent.")
         );
         assert_eq!(msgs[2].role, "user");
+    }
+
+    #[test]
+    fn managed_system_prompt_1_is_second_chat_system_message() {
+        let items = vec![ConversationItem::user_message("audit this")];
+        let msgs = items_to_chat_messages(
+            &items,
+            Some("base system prompt"),
+            Some("managed system prompt"),
+            None,
+            None,
+        );
+        assert_eq!(msgs[0].role, "system");
+        assert_eq!(
+            msgs[0].content.as_ref().and_then(|v| v.as_str()),
+            Some("base system prompt")
+        );
+        assert_eq!(msgs[1].role, "system");
+        assert_eq!(
+            msgs[1].content.as_ref().and_then(|v| v.as_str()),
+            Some("managed system prompt")
+        );
+        assert_eq!(msgs[2].role, "user");
+    }
+
+    #[test]
+    fn managed_system_prompt_1_is_leading_responses_system_item() {
+        let mut items = vec![ConversationItem::user_message("audit this")];
+        insert_managed_system_prompt_1(&mut items, Some("managed system prompt"));
+        insert_context_reminder_preserving_legacy_leading_system(
+            &mut items,
+            "[context: cwd=/foo, ts=...]",
+        );
+
+        let value = items_to_responses_input(&items);
+        let arr = value.as_array().unwrap();
+        assert_eq!(arr[0]["role"], "system");
+        assert_eq!(arr[0]["content"], "managed system prompt");
+        assert_eq!(arr[1]["role"], "user");
+        assert!(arr[1]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("context"));
+        assert_eq!(arr[2]["role"], "user");
     }
 
     /// Mid-conversation transient system items get dropped even when a
@@ -1579,7 +1643,7 @@ mod tests {
                 output: ToolOutputPayload::success("content2".into()),
             },
         ];
-        let msgs = items_to_chat_messages(&items, Some("sys prompt"), None, None);
+        let msgs = items_to_chat_messages(&items, Some("sys prompt"), None, None, None);
         // system + user + assistant(tool_calls) + tool + tool = 5
         assert_eq!(msgs.len(), 5);
         assert_eq!(msgs[0].role, "system");
@@ -1596,6 +1660,7 @@ mod tests {
         let msgs = items_to_chat_messages(
             &items,
             Some("base prompt"),
+            None,
             None,
             Some("# currentDate\nToday is 2026-04-12."),
         );
@@ -2124,7 +2189,7 @@ mod tests {
             },
             ConversationItem::user_message("next question"),
         ];
-        let msgs = items_to_chat_messages(&items, Some("sys"), None, None);
+        let msgs = items_to_chat_messages(&items, Some("sys"), None, None, None);
         // system + compaction(user) + user = 3
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[1].role, "user");
@@ -2488,7 +2553,7 @@ mod tests {
         assert_eq!(r[7]["role"], "assistant");
 
         // === Chat Completions (OpenAI legacy pattern) ===
-        let chat = items_to_chat_messages(&items, None, None, None);
+        let chat = items_to_chat_messages(&items, None, None, None, None);
         // user → assistant(tool_calls) → tool → assistant → user → assistant(tool_calls) → tool → assistant
         assert!(
             chat.len() >= 4,
@@ -2616,7 +2681,7 @@ mod tests {
         eprintln!("{}", serde_json::to_string_pretty(&responses).unwrap());
 
         // 2. Chat Completions
-        let chat = items_to_chat_messages(&items, None, None, None);
+        let chat = items_to_chat_messages(&items, None, None, None, None);
         let chat_json: Vec<Value> = chat
             .iter()
             .map(|m| {

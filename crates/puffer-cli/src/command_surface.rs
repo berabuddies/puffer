@@ -216,9 +216,7 @@ fn run_mcp_login(
             .interactive_login(None, move |url| {
                 eprintln!("Authorization URL: {url}");
                 if no_browser {
-                    eprintln!(
-                        "(--no-browser set; open the URL above in any browser to continue)"
-                    );
+                    eprintln!("(--no-browser set; open the URL above in any browser to continue)");
                     return Ok::<(), std::io::Error>(());
                 }
                 eprintln!("Opening browser to: {url}");
@@ -318,15 +316,8 @@ fn persisted_to_payload(p: &PersistedTokens) -> OAuthTokensPayload {
     }
 }
 
-fn find_oauth_server(
-    resources: &LoadedResources,
-    name: &str,
-) -> Result<McpServerSpec> {
-    if let Some(server) = resources
-        .mcp_servers
-        .iter()
-        .find(|s| s.value.id == name)
-    {
+fn find_oauth_server(resources: &LoadedResources, name: &str) -> Result<McpServerSpec> {
+    if let Some(server) = resources.mcp_servers.iter().find(|s| s.value.id == name) {
         return Ok(server.value.clone());
     }
     for plugin in &resources.plugins {

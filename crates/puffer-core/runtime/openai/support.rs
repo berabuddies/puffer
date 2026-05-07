@@ -209,8 +209,8 @@ pub(super) fn openai_supports_response_threading(
     if env_flag("PUFFER_OPENAI_ENABLE_CUSTOM_RESPONSE_THREADING") {
         return true;
     }
-    if let Some(declared) = openai_responses_compat(model)
-        .and_then(|c| c.supports_response_threading)
+    if let Some(declared) =
+        openai_responses_compat(model).and_then(|c| c.supports_response_threading)
     {
         return declared;
     }
@@ -256,7 +256,9 @@ fn auto_detect_responses_path_str(base_url: &str) -> &'static str {
 fn openai_responses_compat(
     model: Option<&ModelDescriptor>,
 ) -> Option<&puffer_provider_registry::OpenAiResponsesCompat> {
-    model.and_then(|m| m.compat.as_ref()).and_then(ModelCompat::as_openai_responses)
+    model
+        .and_then(|m| m.compat.as_ref())
+        .and_then(ModelCompat::as_openai_responses)
 }
 
 pub(super) fn openai_model_supports_reasoning(

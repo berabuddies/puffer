@@ -390,10 +390,11 @@ impl proto::tool_runner_server::ToolRunner for ToolRunnerService {
         self.check_auth(&req)?;
         let server = req.into_inner().server;
         let runner = self.runner.clone();
-        let records = tokio::task::spawn_blocking(move || runner.list_mcp_resources(server.as_deref()))
-            .await
-            .map_err(internal_join_error)?
-            .map_err(|e| runner_error_to_status(&e))?;
+        let records =
+            tokio::task::spawn_blocking(move || runner.list_mcp_resources(server.as_deref()))
+                .await
+                .map_err(internal_join_error)?
+                .map_err(|e| runner_error_to_status(&e))?;
         Ok(Response::new(proto::McpResourceList {
             resources: records.iter().map(to_proto_mcp_resource_record).collect(),
         }))
@@ -499,7 +500,6 @@ impl proto::tool_runner_server::ToolRunner for ToolRunnerService {
         .map_err(|e| runner_error_to_status(&e))?;
         Ok(Response::new(to_proto_mcp_prompt_content(&content)))
     }
-
 }
 
 fn internal_join_error(e: tokio::task::JoinError) -> Status {
@@ -539,9 +539,9 @@ impl ChannelChunkSink {
                 data: bytes.to_vec(),
             }),
         };
-        let _ = self
-            .tx
-            .blocking_send(Ok(proto::ToolEvent { payload: Some(payload) }));
+        let _ = self.tx.blocking_send(Ok(proto::ToolEvent {
+            payload: Some(payload),
+        }));
     }
 }
 
@@ -571,21 +571,27 @@ impl McpChannelMessageSink {
 impl ChunkSink for McpChannelMessageSink {
     fn stdout(&mut self, chunk: &[u8]) {
         let _ = self.tx.blocking_send(Ok(proto::McpToolMessage {
-            payload: Some(proto::mcp_tool_message::Payload::Stdout(proto::StreamChunk {
-                data: chunk.to_vec(),
-            })),
+            payload: Some(proto::mcp_tool_message::Payload::Stdout(
+                proto::StreamChunk {
+                    data: chunk.to_vec(),
+                },
+            )),
         }));
     }
     fn stderr(&mut self, chunk: &[u8]) {
         let _ = self.tx.blocking_send(Ok(proto::McpToolMessage {
-            payload: Some(proto::mcp_tool_message::Payload::Stderr(proto::StreamChunk {
-                data: chunk.to_vec(),
-            })),
+            payload: Some(proto::mcp_tool_message::Payload::Stderr(
+                proto::StreamChunk {
+                    data: chunk.to_vec(),
+                },
+            )),
         }));
     }
     fn event(&mut self, event: serde_json::Value) {
         let _ = self.tx.blocking_send(Ok(proto::McpToolMessage {
-            payload: Some(proto::mcp_tool_message::Payload::EventJson(event.to_string())),
+            payload: Some(proto::mcp_tool_message::Payload::EventJson(
+                event.to_string(),
+            )),
         }));
     }
 }
@@ -593,8 +599,7 @@ impl ChunkSink for McpChannelMessageSink {
 /// Pending-elicitations map keyed by stream-local request id (decimal
 /// string). Each in-flight request parks a `oneshot::Sender` here that the
 /// inbound loop pops when the matching response arrives.
-type PendingElicitations =
-    Arc<Mutex<HashMap<String, oneshot::Sender<ElicitationResponse>>>>;
+type PendingElicitations = Arc<Mutex<HashMap<String, oneshot::Sender<ElicitationResponse>>>>;
 
 /// One per-call routing record held by [`BidiElicitationRouter`].
 struct BidiRoute {

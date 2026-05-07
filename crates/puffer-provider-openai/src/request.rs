@@ -310,11 +310,7 @@ fn build_request_to_path<T: Serialize>(
             headers.push((name.to_string(), value));
         }
     };
-    push_default(
-        &mut headers,
-        "Content-Type",
-        "application/json".to_string(),
-    );
+    push_default(&mut headers, "Content-Type", "application/json".to_string());
     push_default(
         &mut headers,
         "User-Agent",
@@ -327,11 +323,7 @@ fn build_request_to_path<T: Serialize>(
     if let Some(session_id) = config.session_id.as_deref() {
         push_default(&mut headers, "session_id", session_id.to_string());
         if normalized_path.ends_with("/responses") {
-            push_default(
-                &mut headers,
-                "x-client-request-id",
-                session_id.to_string(),
-            );
+            push_default(&mut headers, "x-client-request-id", session_id.to_string());
         }
     }
     if let Some(account_id) = config.account_id.as_deref() {
@@ -779,10 +771,7 @@ mod tests {
                 originator: "codex_cli_rs".to_string(),
                 session_id: None,
                 account_id: None,
-                custom_headers: vec![(
-                    "User-Agent".to_string(),
-                    "claude-code/1.0".to_string(),
-                )],
+                custom_headers: vec![("User-Agent".to_string(), "claude-code/1.0".to_string())],
                 query_params: Vec::new(),
             },
             &OpenAIChatCompletionsRequest {

@@ -112,7 +112,9 @@ mod tests {
         // routing to the wrong adapter.
         assert!(adapter_for_api("gemini-generate").is_none());
         assert!(adapter_for_api("").is_none());
-        assert!(adapter_for_api("anthropic").is_none(), "must require full id");
+        assert!(
+            adapter_for_api("anthropic").is_none(),
+            "must require full id"
+        );
     }
 }
-

@@ -81,9 +81,14 @@ pub fn sanitize_tool_name(input: &str) -> String {
 /// `(server, tool)` strings in `handler_args` rather than relying on this
 /// helper for dispatch; this is provided only for diagnostics and tests.
 pub fn split_qualified_name(qualified: &str) -> Option<(&str, &str)> {
-    let stripped = qualified.strip_prefix("mcp")?.strip_prefix(MCP_TOOL_NAME_DELIMITER)?;
+    let stripped = qualified
+        .strip_prefix("mcp")?
+        .strip_prefix(MCP_TOOL_NAME_DELIMITER)?;
     let pos = stripped.find(MCP_TOOL_NAME_DELIMITER)?;
-    Some((&stripped[..pos], &stripped[pos + MCP_TOOL_NAME_DELIMITER.len()..]))
+    Some((
+        &stripped[..pos],
+        &stripped[pos + MCP_TOOL_NAME_DELIMITER.len()..],
+    ))
 }
 
 fn build_qualified(server: &str, tool: &str, suffix: Option<&str>) -> String {
@@ -160,14 +165,14 @@ mod tests {
 
     #[test]
     fn collisions_get_sha_suffix() {
-        let q = qualify_tools(vec![
-            key("a", "x"),
-            key("a", "x"),
-        ]);
+        let q = qualify_tools(vec![key("a", "x"), key("a", "x")]);
         assert_eq!(q[0].qualified_name, "mcp__a__x");
         assert_ne!(q[1].qualified_name, "mcp__a__x");
         assert!(q[1].qualified_name.starts_with("mcp__a__x__"));
-        assert_eq!(q[1].qualified_name.len(), "mcp__a__x__".len() + CALLABLE_NAME_HASH_LEN);
+        assert_eq!(
+            q[1].qualified_name.len(),
+            "mcp__a__x__".len() + CALLABLE_NAME_HASH_LEN
+        );
     }
 
     #[test]

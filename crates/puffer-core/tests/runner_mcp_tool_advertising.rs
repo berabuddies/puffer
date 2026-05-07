@@ -12,8 +12,8 @@
 //! * the synthetic `filesystem` server is excluded (its content is
 //!   surfaced via Read/ListDir/Glob).
 
-use puffer_core::runner_adapter::LocalToolRunner;
 use puffer_core::mcp_discovery::registry_with_mcp_tools;
+use puffer_core::runner_adapter::LocalToolRunner;
 use puffer_resources::{LoadedResources, McpServerSpec};
 use puffer_runner_api::ToolRunner;
 use puffer_tools::ToolRegistry;
@@ -53,8 +53,7 @@ fn registry_for(runner: &dyn ToolRunner) -> ToolRegistry {
 
 #[test]
 fn discover_registers_qualified_mcp_tools_from_local_runner() {
-    let runner =
-        LocalToolRunner::new().with_mcp_servers(stub_manifest("puffer-mcp-bridge-local"));
+    let runner = LocalToolRunner::new().with_mcp_servers(stub_manifest("puffer-mcp-bridge-local"));
     let registry = registry_for(&runner);
 
     let echo = registry
@@ -95,15 +94,17 @@ fn discover_is_a_noop_when_runner_has_no_servers() {
         .filter(|definition| definition.id.starts_with("mcp__"))
         .map(|definition| definition.id.clone())
         .collect();
-    assert!(qualified.is_empty(), "expected no mcp__ tools, got {qualified:?}");
+    assert!(
+        qualified.is_empty(),
+        "expected no mcp__ tools, got {qualified:?}"
+    );
 }
 
 #[test]
 fn discover_works_through_dyn_tool_runner() {
     // Mirrors the production path where the runtime holds an Arc<dyn ToolRunner>.
-    let runner: Arc<dyn ToolRunner> = Arc::new(
-        LocalToolRunner::new().with_mcp_servers(stub_manifest("puffer-mcp-bridge-arc")),
-    );
+    let runner: Arc<dyn ToolRunner> =
+        Arc::new(LocalToolRunner::new().with_mcp_servers(stub_manifest("puffer-mcp-bridge-arc")));
     let registry = registry_for(runner.as_ref());
     assert!(registry.definition("mcp__stub__echo").is_some());
     assert!(registry.definition("mcp__stub__slow_echo").is_some());

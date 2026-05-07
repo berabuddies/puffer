@@ -63,6 +63,7 @@ const AGENT_RECORDING_WINDOW: Duration = Duration::from_secs(5);
 pub(crate) struct BrowserRegistry {
     profile_root: PathBuf,
     roots: Arc<Mutex<HashMap<String, BrowserRootSession>>>,
+    enabled: bool,
     sessions: Arc<Mutex<HashMap<String, BrowserSession>>>,
     tabs: Arc<Mutex<BrowserTabRegistry>>,
     agent_refs: Arc<Mutex<HashMap<String, Vec<BrowserElementRef>>>>,
@@ -71,20 +72,23 @@ pub(crate) struct BrowserRegistry {
 
 impl BrowserRegistry {
     /// Creates an empty browser session registry.
-    pub(crate) fn new(profile_root: PathBuf) -> Self {
+    pub(crate) fn new(profile_root: PathBuf, enabled: bool) -> Self {
         let roots = Arc::new(Mutex::new(HashMap::<String, BrowserRootSession>::new()));
         let sessions = Arc::new(Mutex::new(HashMap::<String, BrowserSession>::new()));
         let tabs = Arc::new(Mutex::new(BrowserTabRegistry::default()));
         let agent_refs = Arc::new(Mutex::new(HashMap::new()));
-        spawn_idle_pruner(
-            Arc::clone(&roots),
-            Arc::clone(&sessions),
-            Arc::clone(&tabs),
-            Arc::clone(&agent_refs),
-        );
+        if enabled {
+            spawn_idle_pruner(
+                Arc::clone(&roots),
+                Arc::clone(&sessions),
+                Arc::clone(&tabs),
+                Arc::clone(&agent_refs),
+            );
+        }
         Self {
             profile_root,
             roots,
+            enabled,
             sessions,
             tabs,
             agent_refs,
@@ -101,6 +105,9 @@ impl BrowserRegistry {
         width: u32,
         height: u32,
     ) -> Result<BrowserState> {
+        if !self.enabled {
+            bail!("Puffer browser is disabled for this runtime");
+        }
         let width = width.max(1);
         let height = height.max(1);
         let normalized_url = url.as_deref().map(normalize_url).transpose()?;

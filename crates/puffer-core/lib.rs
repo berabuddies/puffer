@@ -38,11 +38,10 @@ pub use model_preferences::{
 };
 pub use runtime::background_tasks;
 pub use runtime::claude_tools::execute_workflow_tool;
-pub use runtime::mcp_discovery;
 pub use runtime::execute_user_prompt as execute_user_turn;
 pub use runtime::install_subscription_manager;
+pub use runtime::mcp_discovery;
 pub use runtime::subscription_manager;
-pub use runtime::{install_observability, observability_handle};
 pub use runtime::teammate_loop;
 pub use runtime::{
     execute_side_question, execute_user_prompt_streaming as execute_user_turn_streaming,
@@ -59,6 +58,7 @@ pub use runtime::{
     StructuredOutputConfig, ToolCallRequest, ToolInvocation, TurnExecution, TurnStreamEvent,
     TurnUsageReport, UserQuestionPromptRequest, UserQuestionPromptResponse,
 };
+pub use runtime::{install_observability, observability_handle};
 pub use state::{AppState, MessageRole, RenderedMessage, TaskRecord, TaskStatus};
 
 use anyhow::Result;

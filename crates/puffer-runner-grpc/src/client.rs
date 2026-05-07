@@ -49,8 +49,9 @@ use crate::convert::{
 use crate::proto;
 use crate::AUTH_METADATA_KEY;
 
-type RunnerClient =
-    proto::tool_runner_client::ToolRunnerClient<tonic::service::interceptor::InterceptedService<Channel, AuthInterceptor>>;
+type RunnerClient = proto::tool_runner_client::ToolRunnerClient<
+    tonic::service::interceptor::InterceptedService<Channel, AuthInterceptor>,
+>;
 
 #[derive(Clone)]
 struct AuthInterceptor {
@@ -126,10 +127,8 @@ impl RemoteToolRunner {
         })?;
 
         let interceptor = AuthInterceptor { token: token_meta };
-        let client = proto::tool_runner_client::ToolRunnerClient::with_interceptor(
-            channel,
-            interceptor,
-        );
+        let client =
+            proto::tool_runner_client::ToolRunnerClient::with_interceptor(channel, interceptor);
 
         Ok(Self {
             endpoint: endpoint.to_string(),
@@ -143,10 +142,7 @@ impl RemoteToolRunner {
     /// forwards a server-initiated `elicitation/create` request through a
     /// `CallMcpTool` bidi stream. Defaults to
     /// [`puffer_runner_api::DeclineAllElicitations`].
-    pub fn with_elicitation_handler(
-        mut self,
-        handler: Arc<dyn ElicitationHandler>,
-    ) -> Self {
+    pub fn with_elicitation_handler(mut self, handler: Arc<dyn ElicitationHandler>) -> Self {
         self.elicitation = handler;
         self
     }
@@ -233,11 +229,7 @@ impl ToolRunner for RemoteToolRunner {
             .map_err(status_to_runner_error)?;
             let mut stream = stream.into_inner();
             let mut completed: Option<ToolResult> = None;
-            while let Some(event) = stream
-                .message()
-                .await
-                .map_err(status_to_runner_error)?
-            {
+            while let Some(event) = stream.message().await.map_err(status_to_runner_error)? {
                 match event.payload {
                     Some(proto::tool_event::Payload::Stdout(chunk)) => sink.stdout(&chunk.data),
                     Some(proto::tool_event::Payload::Stderr(chunk)) => sink.stderr(&chunk.data),
@@ -312,7 +304,12 @@ impl ToolRunner for RemoteToolRunner {
                 .await
             })
             .map_err(status_to_runner_error)?;
-        Ok(resp.into_inner().paths.into_iter().map(PathBuf::from).collect())
+        Ok(resp
+            .into_inner()
+            .paths
+            .into_iter()
+            .map(PathBuf::from)
+            .collect())
     }
 
     fn list_mcp_servers(&self) -> Result<Vec<McpServerInfo>, RunnerError> {
@@ -398,11 +395,7 @@ impl ToolRunner for RemoteToolRunner {
             let mut inbound = inbound.into_inner();
 
             let mut result: Option<McpResult> = None;
-            while let Some(msg) = inbound
-                .message()
-                .await
-                .map_err(status_to_runner_error)?
-            {
+            while let Some(msg) = inbound.message().await.map_err(status_to_runner_error)? {
                 match msg.payload {
                     Some(proto::mcp_tool_message::Payload::Stdout(c)) => sink.stdout(&c.data),
                     Some(proto::mcp_tool_message::Payload::Stderr(c)) => sink.stderr(&c.data),

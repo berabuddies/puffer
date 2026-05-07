@@ -109,7 +109,9 @@ where
 }
 
 fn extract_request_body(raw: &str) -> &str {
-    raw.split_once("\r\n\r\n").map(|(_, body)| body).unwrap_or("")
+    raw.split_once("\r\n\r\n")
+        .map(|(_, body)| body)
+        .unwrap_or("")
 }
 
 // ---------------------------------------------------------------------------
@@ -396,9 +398,8 @@ fn openai_responses_reasoning_sse() -> String {
 #[test]
 fn openai_responses_streaming_emits_thinking_for_reasoning_summary() {
     let temp = tempfile::tempdir().unwrap();
-    let (base_url, _requests, server) = spawn_server("text/event-stream", 1, |_| {
-        openai_responses_reasoning_sse()
-    });
+    let (base_url, _requests, server) =
+        spawn_server("text/event-stream", 1, |_| openai_responses_reasoning_sse());
 
     let mut registry = ProviderRegistry::new();
     registry.register(openai_provider(base_url));
@@ -441,7 +442,10 @@ fn openai_responses_streaming_emits_thinking_for_reasoning_summary() {
          got 0 deltas — the SSE→on_event chain is broken"
     );
     assert_eq!(
-        thinking_deltas.iter().map(String::as_str).collect::<Vec<_>>(),
+        thinking_deltas
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
         vec!["Step 1.", " Step 2."],
         "ThinkingDelta payloads must mirror the SSE delta tokens 1:1"
     );
@@ -783,9 +787,7 @@ fn anthropic_and_openai_agent_loop_share_outcome_for_same_tool_round() {
 
 #[test]
 fn openai_responses_agent_loop_threads_previous_response_id() {
-    let _env_lock = refresh_env_lock()
-        .lock()
-        .unwrap_or_else(|p| p.into_inner());
+    let _env_lock = refresh_env_lock().lock().unwrap_or_else(|p| p.into_inner());
     // Clear the disable flags first; setup_responses_session checks
     // DISABLE_* before ENABLE_* so a stale "1" would trump our enable.
     let _disable1 = EnvGuard::set("PUFFER_OPENAI_DISABLE_RESPONSE_THREADING", "");
@@ -863,9 +865,9 @@ fn openai_responses_agent_loop_threads_previous_response_id() {
         vec!["function_call", "function_call_output"],
         "with threading enabled, turn 2 must send only [FunctionCall, FunctionCallOutput], got: {types:?}"
     );
-    let call_id_match = input_arr.iter().all(|item| {
-        item.get("call_id").and_then(Value::as_str) == Some("call_1")
-    });
+    let call_id_match = input_arr
+        .iter()
+        .all(|item| item.get("call_id").and_then(Value::as_str) == Some("call_1"));
     assert!(
         call_id_match,
         "all continuation items must reference call_1: {body2}"
@@ -978,7 +980,11 @@ fn anthropic_agent_loop_replays_thinking_signature_on_next_turn() {
             m.get("role").and_then(Value::as_str) == Some("assistant")
                 && m.get("content")
                     .and_then(Value::as_array)
-                    .map(|blocks| blocks.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("tool_use")))
+                    .map(|blocks| {
+                        blocks
+                            .iter()
+                            .any(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
+                    })
                     .unwrap_or(false)
         })
         .expect("assistant message containing tool_use must be present in turn 2 wire body");
@@ -1000,7 +1006,10 @@ fn anthropic_agent_loop_replays_thinking_signature_on_next_turn() {
         "tool_use must be present in the assistant message, got: {kinds:?}"
     );
     let thinking_block = &blocks[0];
-    assert_eq!(thinking_block["thinking"], "I should read fixture.txt to answer.");
+    assert_eq!(
+        thinking_block["thinking"],
+        "I should read fixture.txt to answer."
+    );
     assert_eq!(thinking_block["signature"], "sig-multi-turn-test");
 
     // Tool-use block must keep its original call_id so the upstream's

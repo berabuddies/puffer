@@ -97,7 +97,10 @@ fn full_tool_sequence_runs_through_runner() {
         )
         .expect("Write should succeed");
     assert!(write_result.success);
-    assert_eq!(fs::read_to_string(&target).unwrap(), "first line\nsecond line\n");
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "first line\nsecond line\n"
+    );
     apply_updates(&mut read_state, &write_result);
     assert_state_tracked(&read_state, &target, /* partial */ false);
 
@@ -327,7 +330,9 @@ fn read_mcp_resource_returns_text_for_workspace_files() {
         .unwrap();
     assert_eq!(content.parts.len(), 1);
     match &content.parts[0] {
-        McpResourceContentPart::Text { text, mime_type, .. } => {
+        McpResourceContentPart::Text {
+            text, mime_type, ..
+        } => {
             assert_eq!(text, "# Guide\n");
             assert_eq!(mime_type.as_deref(), Some("text/markdown"));
         }

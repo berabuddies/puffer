@@ -171,12 +171,13 @@ impl OAuthService {
                 authorization_url: None,
             });
         };
-        let metadata = manager.discover_metadata().await.map_err(|e| {
-            OAuthError::Discovery {
+        let metadata = manager
+            .discover_metadata()
+            .await
+            .map_err(|e| OAuthError::Discovery {
                 server_id: self.config.server_id.clone(),
                 source: e,
-            }
-        })?;
+            })?;
         manager.set_metadata(metadata);
         let client_secret = store.cached_client_secret().await;
         manager
@@ -222,12 +223,13 @@ impl OAuthService {
         };
 
         // Discover metadata once so refresh has the token endpoint.
-        let metadata = manager.discover_metadata().await.map_err(|e| {
-            OAuthError::Discovery {
+        let metadata = manager
+            .discover_metadata()
+            .await
+            .map_err(|e| OAuthError::Discovery {
                 server_id: self.config.server_id.clone(),
                 source: e,
-            }
-        })?;
+            })?;
         manager.set_metadata(metadata);
 
         let client_secret = store.cached_client_secret().await;
@@ -325,12 +327,14 @@ impl OAuthService {
                 source: e,
             })?;
 
-        let auth_url = state.get_authorization_url().await.map_err(|e| {
-            OAuthError::Registration {
-                server_id: self.config.server_id.clone(),
-                source: e,
-            }
-        })?;
+        let auth_url =
+            state
+                .get_authorization_url()
+                .await
+                .map_err(|e| OAuthError::Registration {
+                    server_id: self.config.server_id.clone(),
+                    source: e,
+                })?;
 
         // Best-effort: open the URL. If the spawn fails we still print the
         // URL so the user can copy-paste it.
@@ -374,12 +378,13 @@ impl OAuthService {
         // client_secret (if any) so the silent-resolve path can use it on
         // refresh. OAuthState doesn't expose configure-time inputs, so we
         // fish it out of the underlying manager via `into_authorization_manager`.
-        let manager = state.into_authorization_manager().ok_or_else(|| {
-            OAuthError::TokenExchange {
-                server_id: self.config.server_id.clone(),
-                source: AuthError::InternalError("not in authorized state".into()),
-            }
-        })?;
+        let manager =
+            state
+                .into_authorization_manager()
+                .ok_or_else(|| OAuthError::TokenExchange {
+                    server_id: self.config.server_id.clone(),
+                    source: AuthError::InternalError("not in authorized state".into()),
+                })?;
         let secret = client_secret_of(&manager);
         if secret.is_some() {
             store.set_client_secret(secret).await;
@@ -488,9 +493,7 @@ fn client_secret_of(_manager: &AuthorizationManager) -> Option<String> {
 mod credential_store_arc_adapter {
     use super::FileCredentialStore;
     use async_trait::async_trait;
-    use rmcp::transport::auth::{
-        AuthError, CredentialStore, StoredCredentials,
-    };
+    use rmcp::transport::auth::{AuthError, CredentialStore, StoredCredentials};
     use std::sync::Arc;
 
     #[derive(Clone)]

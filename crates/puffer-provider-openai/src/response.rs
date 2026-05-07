@@ -141,9 +141,7 @@ pub fn extract_chat_completions_reasoning(
 /// doesn't appear twice (once in the thinking card, once in the
 /// answer card). Falls back to the raw text when no think block is
 /// present.
-pub fn extract_chat_completions_visible_text(
-    response: &OpenAIChatCompletionsResponse,
-) -> String {
+pub fn extract_chat_completions_visible_text(response: &OpenAIChatCompletionsResponse) -> String {
     response
         .choices
         .first()

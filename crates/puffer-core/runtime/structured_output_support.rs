@@ -722,7 +722,9 @@ mod tests {
     fn openai_native_responses_format_is_emitted_when_enabled() {
         let config = StructuredOutputConfig::new("shape", json!({ "type": "object" }));
         let text = openai_responses_text_config(Some(&config), true).unwrap();
-        let format = text.format.expect("format must be emitted for structured output");
+        let format = text
+            .format
+            .expect("format must be emitted for structured output");
         assert_eq!(format.kind, "json_schema");
         assert_eq!(format.name, "shape");
         assert!(format.strict);

@@ -36,7 +36,14 @@ use std::time::SystemTime;
 /// case variants or legacy aliases (`read_file`, `replace_in_file`, …);
 /// the canonicalizer collapses them all to lowercase canonical form.
 pub const COMPACTABLE_TOOLS: &[&str] = &[
-    "read", "bash", "grep", "glob", "websearch", "webfetch", "edit", "write",
+    "read",
+    "bash",
+    "grep",
+    "glob",
+    "websearch",
+    "webfetch",
+    "edit",
+    "write",
     "powershell",
 ];
 
@@ -352,7 +359,7 @@ mod tests {
 
         assert_eq!(outcome.trigger, MicrocompactTrigger::TimeGap);
         assert_eq!(outcome.cleared_count, 4); // c1..c4 cleared, c5/c6 kept
-        // last two compactable outputs stay verbatim
+                                              // last two compactable outputs stay verbatim
         let kept_texts: Vec<_> = items
             .iter()
             .filter_map(|i| match i {

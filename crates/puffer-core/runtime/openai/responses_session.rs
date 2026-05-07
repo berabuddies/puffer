@@ -23,27 +23,27 @@ use serde_json::Value;
 use std::collections::HashSet;
 
 use super::conversation::{
-    append_reasoning_items, generate_openai_summary, items_to_responses_input, ConversationItem,
+    append_reasoning_items, generate_openai_summary,
+    insert_context_reminder_preserving_legacy_leading_system, insert_managed_system_prompt_1,
+    items_to_responses_input, managed_system_prompt_1_from_env, ConversationItem,
 };
 use super::support::{
     apply_previous_response_id, build_codex_openai_request_body, openai_responses_path,
 };
-use super::support::{
-    openai_model_supports_reasoning, openai_supports_response_threading,
-};
+use super::support::{openai_model_supports_reasoning, openai_supports_response_threading};
 use super::{
     parse_openai_assistant_text, resolve_openai_execution_config, send_openai_request_with_refresh,
     send_openai_request_with_refresh_streaming, OpenAIExecutionConfig,
 };
 use crate::permissions::load_runtime_permission_context;
+use crate::runtime::agent_loop::{AssistantTurn, TurnSession};
+use crate::runtime::structured_output_support::StructuredOutputConfig;
 use crate::runtime::structured_output_support::{
     openai_responses_text_config, openai_tool_definitions_for_request,
 };
 use crate::runtime::system_prompt::render_runtime_system_prompt;
-use crate::runtime::TurnRequestOptions;
-use crate::runtime::agent_loop::{AssistantTurn, TurnSession};
-use crate::runtime::structured_output_support::StructuredOutputConfig;
 use crate::runtime::tool_executor::ToolExecutionBackend;
+use crate::runtime::TurnRequestOptions;
 use crate::runtime::{ToolCallRequest, TurnStreamEvent, TurnUsageReport};
 use crate::AppState;
 
@@ -55,6 +55,7 @@ use crate::AppState;
 pub(super) struct OpenAIResponsesTurnSession {
     pub execution: OpenAIExecutionConfig,
     pub instructions: String,
+    pub managed_system_prompt_1: Option<String>,
     pub tools: Vec<OpenAIResponsesTool>,
     pub text: Option<OpenAIResponsesTextConfig>,
     pub structured_output: Option<StructuredOutputConfig>,
@@ -367,11 +368,12 @@ impl TurnSession for OpenAIResponsesTurnSession {
 
     fn pre_loop_inject(&mut self, items: &mut Vec<ConversationItem>) {
         // Pin per-turn dynamic context (currentDate + gitStatus) at
-        // index 0 so every Responses request includes it. Static
+        // the front so every Responses request includes it. Static
         // instructions stay in `instructions` — only this dynamic part
         // belongs in `input`.
+        insert_managed_system_prompt_1(items, self.managed_system_prompt_1.as_deref());
         let context_reminder = super::build_context_reminder_message();
-        items.insert(0, ConversationItem::user_message(&context_reminder));
+        insert_context_reminder_preserving_legacy_leading_system(items, &context_reminder);
     }
 
     fn notify_compacted(&mut self) {
@@ -396,10 +398,8 @@ pub(super) fn setup_responses_session(
     use_native: bool,
 ) -> Result<OpenAIResponsesTurnSession> {
     let execution = resolve_openai_execution_config(state, auth_store, provider)?;
-    let registry = super::super::mcp_discovery::registry_with_mcp_tools(
-        resources,
-        state.tool_runner.as_ref(),
-    );
+    let registry =
+        super::super::mcp_discovery::registry_with_mcp_tools(resources, state.tool_runner.as_ref());
     let permission_context = load_runtime_permission_context(&state.cwd, resources, state)?;
     let text = openai_responses_text_config(options.structured_output, use_native);
     let tools = openai_tool_definitions_for_request(
@@ -418,8 +418,7 @@ pub(super) fn setup_responses_session(
         .collect::<std::collections::BTreeSet<_>>();
     let system_prompt =
         render_runtime_system_prompt(state, resources, &model_id, &enabled_tool_names)?;
-    let instructions =
-        super::openai_request_instructions(state, resources, Some(&system_prompt))?;
+    let instructions = super::openai_request_instructions(state, resources, Some(&system_prompt))?;
     let model = provider.models.iter().find(|m| m.id == model_id);
     let supports_reasoning = openai_model_supports_reasoning(provider, &model_id);
     let supports_response_threading =
@@ -428,6 +427,7 @@ pub(super) fn setup_responses_session(
     Ok(OpenAIResponsesTurnSession {
         execution,
         instructions,
+        managed_system_prompt_1: managed_system_prompt_1_from_env(),
         tools,
         text,
         structured_output: options.structured_output.cloned(),
