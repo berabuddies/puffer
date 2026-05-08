@@ -4,7 +4,11 @@
 
 #![deny(missing_docs)]
 
+mod metrics;
 mod pr_corpus;
+mod report;
+mod replay;
+mod sandbox;
 mod transcript;
 
 use anyhow::Result;
@@ -69,11 +73,58 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Replay { pr, arm } => {
-            println!("Replay {pr} {arm} not yet implemented");
+            let arm = replay::Arm::parse(&arm)?;
+            let entries = pr_corpus::load_corpus(std::path::Path::new(
+                "benchmark/genskill/ladybird/pr_corpus",
+            ))?;
+            let entry = entries
+                .iter()
+                .find(|e| e.id == pr)
+                .ok_or_else(|| anyhow::anyhow!("pr {pr} not in corpus"))?;
+            let run_date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+            let cfg = replay::ReplayConfig {
+                corpus_entry: entry,
+                arm,
+                puffer_bin_host_path: std::path::PathBuf::from("target/release/puffer"),
+                image: sandbox::DEFAULT_IMAGE.to_string(),
+                wall_budget: std::time::Duration::from_secs(30 * 60),
+                tool_budget: 50,
+                token_budget: 250_000,
+                run_date_dir: std::path::PathBuf::from(format!(
+                    "benchmark/genskill/ladybird/reports/{run_date}"
+                )),
+            };
+            let artifact = replay::run_one(cfg).await?;
+            println!("{}", serde_json::to_string_pretty(&artifact)?);
             Ok(())
         }
         Cmd::Aggregate { run_date } => {
-            println!("Aggregate {run_date} not yet implemented");
+            let dir = std::path::PathBuf::from(format!(
+                "benchmark/genskill/ladybird/reports/{run_date}"
+            ));
+            let entries = pr_corpus::load_corpus(std::path::Path::new(
+                "benchmark/genskill/ladybird/pr_corpus",
+            ))?;
+            let mut by_pr: std::collections::BTreeMap<String, report::PrTriple> =
+                std::collections::BTreeMap::new();
+            for entry in &entries {
+                let mut triple: report::PrTriple = std::collections::BTreeMap::new();
+                for arm in [replay::Arm::NoSkill, replay::Arm::Direct, replay::Arm::Gepa] {
+                    let path = dir.join(format!("{}-{:?}.json", entry.id, arm));
+                    if !path.exists() { continue; }
+                    let artifact: replay::ReplayArtifact =
+                        serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+                    let reference_fix = std::fs::read_to_string(entry.dir.join("reference_fix.patch"))
+                        .unwrap_or_default();
+                    triple.insert(arm, metrics::compute(&artifact, &reference_fix));
+                }
+                if !triple.is_empty() { by_pr.insert(entry.id.clone(), triple); }
+            }
+            let md = report::render_summary(&run_date, &by_pr);
+            let out_path = dir.join("summary.md");
+            std::fs::write(&out_path, &md)?;
+            println!("{md}");
+            println!("\n(saved to {})", out_path.display());
             Ok(())
         }
     }
