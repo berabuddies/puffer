@@ -1,11 +1,15 @@
 use anyhow::{anyhow, Context, Result};
 use clap::Args;
+use indexmap::IndexMap;
 use puffer_config::{ConfigPaths, PufferConfig};
 use puffer_core::{
     command_surface, dispatch_command, execute_user_turn_streaming_with_permissions_and_cancel,
     AppState, CancelToken, MessageRole, PermissionPromptAction, TurnStreamEvent,
 };
-use puffer_provider_registry::{AuthStore, ProviderRegistry};
+use puffer_provider_registry::{
+    detect_import_candidates, AuthStore, ExternalImportFamily, Modality, ModelDescriptor,
+    ProviderRegistry, StoredCredential,
+};
 use puffer_resources::LoadedResources;
 use puffer_session_store::{SessionStore, TranscriptEvent};
 use serde::Serialize;
@@ -78,6 +82,7 @@ pub(crate) fn run_non_interactive_command(
 ) -> Result<()> {
     hydrate_env_auth(auth_store);
     apply_openai_base_url_override(providers);
+    hydrate_codex_openai_auth(providers, auth_store)?;
 
     let session_store = SessionStore::from_paths(paths)?;
     let session = session_store.create_session(cwd.to_path_buf())?;
@@ -339,7 +344,7 @@ fn latest_message_text(state: &AppState) -> Option<String> {
 
 fn apply_model_overrides(
     state: &mut AppState,
-    providers: &ProviderRegistry,
+    providers: &mut ProviderRegistry,
     args: &NonInteractiveArgs,
 ) -> Result<()> {
     let env_provider = env_nonempty("PUFFER_PROVIDER");
@@ -351,6 +356,7 @@ fn apply_model_overrides(
     }
     if let Some(model) = model_override {
         let selector = normalize_model_selector(state.current_provider.as_deref(), model);
+        ensure_model_selector_registered(providers, &selector)?;
         state.current_model = Some(selector);
     } else if state.current_model.is_none() {
         state.current_model = default_model_selector(state.current_provider.as_deref(), providers);
@@ -373,6 +379,49 @@ fn apply_model_overrides(
             "no model selected; configure default_model or pass --model"
         ));
     }
+    Ok(())
+}
+
+fn ensure_model_selector_registered(
+    providers: &mut ProviderRegistry,
+    selector: &str,
+) -> Result<()> {
+    if providers.resolve_model(selector).is_some() {
+        return Ok(());
+    }
+    let Some((provider_id, model_id)) = selector.split_once('/') else {
+        return Ok(());
+    };
+    if providers
+        .provider(provider_id)
+        .and_then(|provider| provider.models.iter().find(|model| model.id == model_id))
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    let entry = providers
+        .provider_entry(provider_id)
+        .cloned()
+        .ok_or_else(|| anyhow!("provider {provider_id} is not registered"))?;
+    let Some(prototype) = entry.descriptor.models.first().cloned() else {
+        return Err(anyhow!("provider {provider_id} has no configured models"));
+    };
+
+    let mut descriptor = entry.descriptor.clone();
+    descriptor.models.push(ModelDescriptor {
+        id: model_id.to_string(),
+        display_name: model_id.to_string(),
+        provider: provider_id.to_string(),
+        api: prototype.api,
+        context_window: prototype.context_window,
+        max_output_tokens: prototype.max_output_tokens,
+        supports_reasoning: prototype.supports_reasoning,
+        compat: None,
+        input: vec![Modality::Text],
+        cost: None,
+    });
+    providers.register_with_source(descriptor, entry.source);
     Ok(())
 }
 
@@ -510,6 +559,49 @@ fn apply_openai_base_url_override(providers: &mut ProviderRegistry) {
     }
 }
 
+fn hydrate_codex_openai_auth(
+    providers: &mut ProviderRegistry,
+    auth_store: &mut AuthStore,
+) -> Result<()> {
+    if auth_store.has_auth("openai") {
+        return Ok(());
+    }
+
+    let Some(candidate) = detect_import_candidates(ExternalImportFamily::OpenAi)?
+        .into_iter()
+        .next()
+    else {
+        return Ok(());
+    };
+
+    if let Some(base_url) = candidate.openai_base_url.as_deref() {
+        providers.set_openai_base_url(base_url);
+    }
+    if !candidate.openai_headers.is_empty() {
+        providers.set_openai_headers(
+            candidate
+                .openai_headers
+                .clone()
+                .into_iter()
+                .collect::<IndexMap<_, _>>(),
+        );
+    }
+    if !candidate.openai_query_params.is_empty() {
+        providers.set_openai_query_params(
+            candidate
+                .openai_query_params
+                .clone()
+                .into_iter()
+                .collect::<IndexMap<_, _>>(),
+        );
+    }
+    match candidate.credential {
+        StoredCredential::ApiKey { key } => auth_store.set_api_key("openai", key),
+        StoredCredential::OAuth(credential) => auth_store.set_oauth("openai", credential),
+    }
+    Ok(())
+}
+
 fn parse_tool_input(raw: &str) -> Value {
     serde_json::from_str(raw).unwrap_or_else(|_| serde_json::json!({ "value": raw }))
 }
@@ -632,6 +724,7 @@ impl ReplayArtifact {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use puffer_provider_registry::ProviderDescriptor;
 
     #[test]
     fn compose_prompt_includes_transcript_and_skill() {
@@ -665,5 +758,39 @@ mod tests {
             r#"{"type":"user_message","text":"hi"}"#
         ));
         assert!(!looks_like_jsonl_transcript(r#"{"role":"user"}"#));
+    }
+
+    #[test]
+    fn custom_model_selector_registers_unknown_provider_model() {
+        let mut providers = ProviderRegistry::new();
+        providers.register(ProviderDescriptor {
+            id: "openai".to_string(),
+            display_name: "OpenAI".to_string(),
+            base_url: "https://api.openai.com".to_string(),
+            default_api: "openai-responses".to_string(),
+            auth_modes: Vec::new(),
+            headers: IndexMap::new(),
+            query_params: IndexMap::new(),
+            discovery: None,
+            models: vec![ModelDescriptor {
+                id: "gpt-5.4".to_string(),
+                display_name: "GPT-5.4".to_string(),
+                provider: "openai".to_string(),
+                api: "openai-responses".to_string(),
+                context_window: 272_000,
+                max_output_tokens: 16_384,
+                supports_reasoning: true,
+                input: vec![Modality::Text],
+                cost: None,
+                compat: None,
+            }],
+        });
+
+        ensure_model_selector_registered(&mut providers, "openai/gpt-5.3-codex").unwrap();
+        let model = providers.resolve_model("openai/gpt-5.3-codex").unwrap();
+
+        assert_eq!(model.api, "openai-responses");
+        assert_eq!(model.context_window, 272_000);
+        assert!(model.supports_reasoning);
     }
 }

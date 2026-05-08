@@ -105,6 +105,9 @@ pub struct ReplayConfig<'a> {
     pub corpus_entry: &'a CorpusEntry,
     pub arm: Arm,
     pub puffer_bin_host_path: PathBuf,
+    pub agent_provider: String,
+    pub agent_model: String,
+    pub agent_effort: Option<String>,
     pub image: String,
     pub wall_budget: Duration,
     pub tool_budget: u64,
@@ -126,18 +129,15 @@ pub async fn run_one(cfg: ReplayConfig<'_>) -> Result<ReplayArtifact> {
     .context("starting sandbox")?;
 
     let test_filter = test_filter_for(cfg.corpus_entry);
-    let pre_check = sandbox
-        .exec(&[
-            "bash",
-            "-c",
-            &format!("ladybird-test --filter={test_filter}; echo 0"),
-        ])
-        .await
-        .ok();
+    let pre_check = run_target_test(&sandbox, &test_filter).await.ok();
     tracing::info!(?pre_check, "pre-replay test status");
 
     let mut puffer_args = vec![
         "non-interactive".to_string(),
+        "--provider".to_string(),
+        cfg.agent_provider.clone(),
+        "--model".to_string(),
+        cfg.agent_model.clone(),
         "--user-message".to_string(),
         cfg.corpus_entry.meta.task_prompt.clone(),
         "--max-tool-calls".to_string(),
@@ -151,6 +151,10 @@ pub async fn run_one(cfg: ReplayConfig<'_>) -> Result<ReplayArtifact> {
         "--artifact-arm".to_string(),
         cfg.arm.as_str().to_string(),
     ];
+    if let Some(effort) = cfg.agent_effort.as_deref() {
+        puffer_args.push("--effort".to_string());
+        puffer_args.push(effort.to_string());
+    }
     if let Some(skill_path) = skill_path_for(&cfg) {
         puffer_args.push("--load-skill".to_string());
         puffer_args.push(skill_path);
@@ -183,20 +187,10 @@ pub async fn run_one(cfg: ReplayConfig<'_>) -> Result<ReplayArtifact> {
         artifact.outcome = Outcome::WallTimeout;
     }
 
-    let test_run = sandbox
-        .exec(&[
-            "bash",
-            "-c",
-            &format!("ladybird-test --filter={test_filter}; echo EXIT=0"),
-        ])
-        .await;
-    if let Ok((stdout, _)) = test_run {
-        let exit_code = parse_exit_code(&stdout).unwrap_or(-1);
-        artifact.test_outcome = Some(TestOutcome {
-            command: format!("ladybird-test --filter={test_filter}"),
-            exit_code,
-            stdout_tail: tail(&stdout, 4_000),
-        });
+    let test_run = run_target_test(&sandbox, &test_filter).await;
+    if let Ok(test_outcome) = test_run {
+        let exit_code = test_outcome.exit_code;
+        artifact.test_outcome = Some(test_outcome);
         if exit_code == 0 && !matches!(artifact.outcome, Outcome::WallTimeout) {
             artifact.outcome = Outcome::Pass;
         } else if exit_code != 0 && matches!(artifact.outcome, Outcome::Pass) {
@@ -255,10 +249,39 @@ fn test_filter_for(entry: &CorpusEntry) -> String {
         .unwrap_or_else(|| entry.id.clone())
 }
 
-fn parse_exit_code(s: &str) -> Option<i32> {
-    s.lines()
-        .rev()
-        .find_map(|l| l.strip_prefix("EXIT=").and_then(|n| n.parse().ok()))
+async fn run_target_test(sandbox: &Sandbox, filter: &str) -> Result<TestOutcome> {
+    let command = test_command_for(filter);
+    let out = sandbox.exec_status(&["bash", "-lc", &command]).await?;
+    let combined = if out.stderr.trim().is_empty() {
+        out.stdout
+    } else {
+        format!("{}\n{}", out.stdout, out.stderr)
+    };
+    Ok(TestOutcome {
+        command,
+        exit_code: out.exit_code,
+        stdout_tail: tail(&combined, 4_000),
+    })
+}
+
+fn test_command_for(filter: &str) -> String {
+    let quoted_filter = shell_quote(filter);
+    format!(
+        "if [ -f Meta/ladybird.py ]; then \
+             python3 Meta/ladybird.py test {filter}; \
+         elif [ -x Meta/ladybird.sh ]; then \
+             ./Meta/ladybird.sh test {filter}; \
+         elif command -v ladybird-test >/dev/null 2>&1; then \
+             ladybird-test --filter={filter}; \
+         else \
+             echo 'no Ladybird test runner found' >&2; exit 127; \
+         fi",
+        filter = quoted_filter
+    )
+}
+
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\"'\"'"))
 }
 
 fn tail(s: &str, n: usize) -> String {
@@ -282,13 +305,27 @@ mod tests {
     }
 
     #[test]
-    fn parse_exit_extracts() {
-        assert_eq!(parse_exit_code("some\nEXIT=0\n"), Some(0));
+    fn shell_quote_wraps_simple_values() {
+        assert_eq!(
+            shell_quote("Tests/LibWeb/foo.html"),
+            "'Tests/LibWeb/foo.html'"
+        );
     }
 
     #[test]
-    fn parse_exit_finds_last() {
-        assert_eq!(parse_exit_code("EXIT=1\nlater\nEXIT=0\n"), Some(0));
+    fn shell_quote_escapes_single_quotes() {
+        assert_eq!(
+            shell_quote("LibRegex nested 'or'"),
+            "'LibRegex nested '\"'\"'or'\"'\"''"
+        );
+    }
+
+    #[test]
+    fn test_command_uses_ladybird_wrappers() {
+        let command = test_command_for("Tests/LibJS/foo.js");
+        assert!(command.contains("Meta/ladybird.py test 'Tests/LibJS/foo.js'"));
+        assert!(command.contains("./Meta/ladybird.sh test 'Tests/LibJS/foo.js'"));
+        assert!(command.contains("ladybird-test --filter='Tests/LibJS/foo.js'"));
     }
 
     #[test]

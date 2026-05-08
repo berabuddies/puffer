@@ -1,7 +1,7 @@
 //! Spawns and tears down replay sandboxes via the docker CLI.
 
 use anyhow::{anyhow, Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::process::Command;
 
@@ -11,9 +11,21 @@ pub const DEFAULT_IMAGE: &str = "puffer-genskill-eval-ladybird";
 /// Working directory inside the container where ladybird is checked out.
 pub const CONTAINER_WORKDIR: &str = "/work/ladybird";
 
+const CONTAINER_USER: &str = "ladybird";
+
 /// One running replay sandbox. Drop releases the container.
 pub struct Sandbox {
     container_id: String,
+}
+
+/// Result of running a command inside the sandbox.
+pub struct ExecOutput {
+    /// Process stdout decoded as UTF-8 lossily.
+    pub stdout: String,
+    /// Process stderr decoded as UTF-8 lossily.
+    pub stderr: String,
+    /// Process exit status code, or -1 if Docker did not report one.
+    pub exit_code: i32,
 }
 
 impl Sandbox {
@@ -39,9 +51,10 @@ impl Sandbox {
             )
         })?;
         let host_root = std::env::current_dir().context("resolving host workspace root")?;
+        let host_codex_dir = host_codex_dir();
 
-        let out = Command::new("docker")
-            .args(["run", "-d", "--rm"])
+        let mut cmd = Command::new("docker");
+        cmd.args(["run", "-d", "--rm"])
             .args([
                 "-v",
                 &format!("{}:/usr/local/bin/puffer:ro", puffer_bin_abs.display()),
@@ -51,11 +64,28 @@ impl Sandbox {
                 &format!("{}:/work/test_files:ro", test_files_abs.display()),
             ])
             .args(["-v", &format!("{}:/host:ro", host_root.display())])
-            .args(["-e", "OPENAI_API_KEY"])
-            .args(["-e", "ANTHROPIC_API_KEY"])
-            .args(["-e", "OPENAI_BASE_URL"])
-            .args(["-e", "PUFFER_PROVIDER"])
-            .args(["-e", "PUFFER_MODEL"])
+            .args(["-e", "HOME=/home/ladybird"]);
+        for name in [
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "OPENAI_BASE_URL",
+            "OPENAI_ORGANIZATION",
+            "OPENAI_PROJECT",
+            "PUFFER_PROVIDER",
+            "PUFFER_MODEL",
+            "PUFFER_EFFORT",
+            "PUFFER_EVAL_PROVIDER",
+            "PUFFER_EVAL_MODEL",
+            "PUFFER_EVAL_EFFORT",
+        ] {
+            cmd.args(["-e", name]);
+        }
+        if let Some(codex_dir) = host_codex_dir {
+            cmd.arg("-v")
+                .arg(format!("{}:/home/ladybird/.codex:ro", codex_dir.display()));
+        }
+        let out = cmd
+            .args(["--user", CONTAINER_USER])
             .args(["--workdir", CONTAINER_WORKDIR])
             .arg(image)
             .args(["sleep", "infinity"])
@@ -85,22 +115,35 @@ impl Sandbox {
 
     /// Runs a command inside the container, returning (stdout, stderr).
     pub async fn exec(&self, argv: &[&str]) -> Result<(String, String)> {
+        let out = self.exec_status(argv).await?;
+        if out.exit_code != 0 {
+            return Err(anyhow!(
+                "docker exec failed (status {}): {}",
+                out.exit_code,
+                out.stderr
+            ));
+        }
+        Ok((out.stdout, out.stderr))
+    }
+
+    /// Runs a command inside the container without treating non-zero exit as
+    /// an error. Docker invocation errors are still returned as errors.
+    pub async fn exec_status(&self, argv: &[&str]) -> Result<ExecOutput> {
         let mut cmd = Command::new("docker");
-        cmd.arg("exec").arg(&self.container_id);
+        cmd.arg("exec")
+            .args(["--user", CONTAINER_USER])
+            .arg(&self.container_id);
         for a in argv {
             cmd.arg(a);
         }
         let out = cmd.output().await.context("docker exec")?;
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        if !out.status.success() {
-            return Err(anyhow!(
-                "docker exec failed (status {:?}): {}",
-                out.status.code(),
-                stderr
-            ));
-        }
-        Ok((stdout, stderr))
+        Ok(ExecOutput {
+            stdout,
+            stderr,
+            exit_code: out.status.code().unwrap_or(-1),
+        })
     }
 
     /// Container id (for diagnostics).
@@ -108,6 +151,11 @@ impl Sandbox {
     pub fn container_id(&self) -> &str {
         &self.container_id
     }
+}
+
+fn host_codex_dir() -> Option<PathBuf> {
+    let dir = std::env::var_os("HOME").map(PathBuf::from)?.join(".codex");
+    dir.exists().then_some(dir)
 }
 
 impl Drop for Sandbox {

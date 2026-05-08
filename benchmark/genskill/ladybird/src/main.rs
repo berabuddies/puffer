@@ -86,6 +86,13 @@ async fn main() -> Result<()> {
                 corpus_entry: entry,
                 arm,
                 puffer_bin_host_path: std::path::PathBuf::from("target/release/puffer"),
+                agent_provider: env_nonempty("PUFFER_EVAL_PROVIDER")
+                    .unwrap_or_else(|| "openai".to_string()),
+                agent_model: env_nonempty("PUFFER_EVAL_MODEL")
+                    .or_else(|| env_nonempty("PUFFER_MODEL"))
+                    .unwrap_or_else(|| "gpt-5.4".to_string()),
+                agent_effort: env_nonempty("PUFFER_EVAL_EFFORT")
+                    .or_else(|| env_nonempty("PUFFER_EFFORT")),
                 image: sandbox::DEFAULT_IMAGE.to_string(),
                 wall_budget: std::time::Duration::from_secs(30 * 60),
                 tool_budget: 50,
@@ -131,5 +138,15 @@ async fn main() -> Result<()> {
             println!("\n(saved to {})", out_path.display());
             Ok(())
         }
+    }
+}
+
+fn env_nonempty(name: &str) -> Option<String> {
+    let value = std::env::var(name).ok()?;
+    let trimmed = value.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
     }
 }
