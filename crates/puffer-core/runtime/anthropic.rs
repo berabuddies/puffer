@@ -340,11 +340,7 @@ impl TurnSession for AnthropicTurnSession {
             ) {
                 Ok(response) => return turn_from_response(&response),
                 Err(error) => {
-                    let err_msg = error.to_string();
-                    let too_long = err_msg.contains("413")
-                        || err_msg.contains("prompt_too_long")
-                        || err_msg.contains("too long");
-                    if too_long && items.len() > 3 {
+                    if is_anthropic_too_large_error(&error.to_string()) && items.len() > 3 {
                         let drop_count = (items.len() / 3).max(1);
                         items.drain(..drop_count);
                         if !matches!(items.first(), Some(ConversationItem::Message { .. })) {
@@ -378,6 +374,37 @@ impl TurnSession for AnthropicTurnSession {
             structured_output: self.structured_output.as_ref(),
         }
     }
+}
+
+/// Recognizes the surface forms Anthropic / Anthropic-relays use
+/// when a request exceeds the model's context cap, so the blocking
+/// loop's drop-oldest-items recovery can trigger. Matches
+/// case-insensitively to handle:
+///
+/// - `413` — HTTP status code in the error string.
+/// - `prompt_too_long` — legacy / OpenAI-style typed error tag.
+/// - `request_too_large` — Anthropic's own `error.type` (also the
+///   bracketed tag emitted by `parse_anthropic_sse` after the
+///   error.type-surfacing change).
+/// - `payload too large` / `request entity too large` — HTTP status
+///   text from various proxies and gateways.
+/// - `too long` — legacy substring fallback for free-form messages
+///   like "prompt is too long: …".
+///
+/// Pulled out as its own function so the unit test can pin every
+/// form independently and so we don't accumulate the match list
+/// inline in the recovery loop.
+fn is_anthropic_too_large_error(err_msg: &str) -> bool {
+    let lower = err_msg.to_ascii_lowercase();
+    const NEEDLES: &[&str] = &[
+        "413",
+        "prompt_too_long",
+        "request_too_large",
+        "payload too large",
+        "request entity too large",
+        "too long",
+    ];
+    NEEDLES.iter().any(|needle| lower.contains(needle))
 }
 
 /// Converts an Anthropic response Value into the neutral
@@ -1380,5 +1407,77 @@ mod thinking_round_trip_tests {
         let items = synthesize_pre_tool_items(&response);
         assert_eq!(items.len(), 1);
         assert!(matches!(&items[0], ConversationItem::FunctionCall { .. }));
+    }
+}
+
+#[cfg(test)]
+mod too_large_error_tests {
+    use super::is_anthropic_too_large_error;
+
+    #[test]
+    fn matches_413_status_code() {
+        assert!(is_anthropic_too_large_error(
+            "request to https://api.anthropic.com/v1/messages failed with status 413: Request Entity Too Large"
+        ));
+    }
+
+    #[test]
+    fn matches_request_too_large_typed_error() {
+        // The Anthropic API's actual error.type for too-large
+        // requests; also the form `parse_anthropic_sse` now emits
+        // (`Anthropic SSE error [request_too_large]: ...`) after
+        // the error.type-surfacing change.
+        assert!(is_anthropic_too_large_error(
+            "Anthropic SSE error [request_too_large]: prompt is too long for context window"
+        ));
+    }
+
+    #[test]
+    fn matches_legacy_prompt_too_long() {
+        assert!(is_anthropic_too_large_error(
+            "request failed with status 400: prompt_too_long"
+        ));
+    }
+
+    #[test]
+    fn matches_payload_too_large_status_text() {
+        assert!(is_anthropic_too_large_error("Payload Too Large"));
+    }
+
+    #[test]
+    fn matches_request_entity_too_large_status_text() {
+        // Some upstream proxies / gateways emit this verbatim.
+        assert!(is_anthropic_too_large_error(
+            "HTTP 413 Request Entity Too Large"
+        ));
+    }
+
+    #[test]
+    fn matches_too_long_substring() {
+        // Catch-all for free-form messages.
+        assert!(is_anthropic_too_large_error(
+            "the prompt is too long to process"
+        ));
+    }
+
+    #[test]
+    fn matches_case_insensitively() {
+        assert!(is_anthropic_too_large_error(
+            "REQUEST_TOO_LARGE encountered"
+        ));
+        assert!(is_anthropic_too_large_error("PAYLOAD TOO LARGE"));
+    }
+
+    #[test]
+    fn does_not_match_other_4xx_errors() {
+        assert!(!is_anthropic_too_large_error(
+            "request failed with status 400: invalid_request_error"
+        ));
+        assert!(!is_anthropic_too_large_error(
+            "request failed with status 401: authentication_error"
+        ));
+        assert!(!is_anthropic_too_large_error(
+            "Anthropic SSE error [overloaded_error]: Service is temporarily overloaded"
+        ));
     }
 }
