@@ -316,30 +316,81 @@ async fn run_target_test(sandbox: &Sandbox, filters: &[String]) -> Result<TestOu
 }
 
 fn test_command_for(filters: &[String]) -> String {
-    let quoted_filters = filters
+    let web_filters = filters
         .iter()
-        .map(|filter| shell_quote(filter))
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!(
-        "status=0; \
-         for filter in {filters}; do \
-             echo \"=== target test: $filter ===\"; \
+        .filter_map(|filter| libweb_filter_arg(filter))
+        .collect::<Vec<_>>();
+    let ctest_patterns = filters
+        .iter()
+        .filter_map(|filter| ctest_pattern_arg(filter))
+        .collect::<Vec<_>>();
+    let unsupported_filters = filters
+        .iter()
+        .filter(|filter| libweb_filter_arg(filter).is_none() && ctest_pattern_arg(filter).is_none())
+        .collect::<Vec<_>>();
+
+    let mut commands = vec!["status=0".to_string()];
+    if !web_filters.is_empty() {
+        let web_args = web_filters
+            .iter()
+            .map(|filter| format!("-f {}", shell_quote(filter)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        commands.push(format!(
+            "echo '=== target web tests ==='; \
              if [ -f Meta/ladybird.py ]; then \
-                 python3 Meta/ladybird.py test \"$filter\"; \
+                 python3 Meta/ladybird.py run test-web {web_args}; \
              elif [ -x Meta/ladybird.sh ]; then \
-                 ./Meta/ladybird.sh test \"$filter\"; \
-             elif command -v ladybird-test >/dev/null 2>&1; then \
-                 ladybird-test --filter=\"$filter\"; \
+                 ./Meta/ladybird.sh run test-web {web_args}; \
+             elif command -v test-web >/dev/null 2>&1; then \
+                 test-web {web_args}; \
              else \
-                 echo 'no Ladybird test runner found' >&2; exit 127; \
+                 echo 'no Ladybird web test runner found' >&2; exit 127; \
              fi; \
              rc=$?; \
-             if [ $rc -ne 0 ]; then status=$rc; fi; \
-         done; \
-         exit $status",
-        filters = quoted_filters
-    )
+             if [ $rc -ne 0 ]; then status=$rc; fi"
+        ));
+    }
+
+    for pattern in ctest_patterns {
+        let quoted_pattern = shell_quote(&pattern);
+        commands.push(format!(
+            "echo '=== target ctest: {pattern} ==='; \
+             if [ -f Meta/ladybird.py ]; then \
+                 python3 Meta/ladybird.py test {quoted_pattern}; \
+             elif [ -x Meta/ladybird.sh ]; then \
+                 ./Meta/ladybird.sh test {quoted_pattern}; \
+             elif command -v ctest >/dev/null 2>&1; then \
+                 ctest --output-on-failure -R {quoted_pattern}; \
+             else \
+                 echo 'no Ladybird ctest runner found' >&2; exit 127; \
+             fi; \
+             rc=$?; \
+             if [ $rc -ne 0 ]; then status=$rc; fi"
+        ));
+    }
+
+    for filter in unsupported_filters {
+        let quoted_filter = shell_quote(filter);
+        commands.push(format!(
+            "echo unsupported target test filter: {quoted_filter} >&2; status=127"
+        ));
+    }
+
+    commands.push("exit $status".to_string());
+    commands.join("; ")
+}
+
+fn libweb_filter_arg(filter: &str) -> Option<String> {
+    filter
+        .strip_prefix("Tests/LibWeb/")
+        .map(ToString::to_string)
+}
+
+fn ctest_pattern_arg(filter: &str) -> Option<String> {
+    let path = Path::new(filter);
+    let stem = path.file_stem()?.to_str()?;
+    filter.ends_with(".cpp").then(|| stem.to_string())
 }
 
 fn shell_quote(s: &str) -> String {
@@ -383,13 +434,35 @@ mod tests {
     }
 
     #[test]
-    fn test_command_uses_ladybird_wrappers() {
+    fn test_command_uses_web_runner_for_libweb_filters() {
+        let filters = vec![
+            "Tests/LibWeb/Text/input/wpt-import/css/foo/bar.html".to_string(),
+            "Tests/LibWeb/Crash/CSS/foo.html".to_string(),
+        ];
+        let command = test_command_for(&filters);
+        assert!(command.contains("python3 Meta/ladybird.py run test-web"));
+        assert!(command.contains("-f 'Text/input/wpt-import/css/foo/bar.html'"));
+        assert!(command.contains("-f 'Crash/CSS/foo.html'"));
+        assert!(!command.contains("No tests were found"));
+    }
+
+    #[test]
+    fn test_command_uses_ctest_patterns_for_cpp_tests() {
+        let filters = vec![
+            "Tests/LibRegex/TestRegex.cpp".to_string(),
+            "Tests/LibURL/TestPublicSuffix.cpp".to_string(),
+        ];
+        let command = test_command_for(&filters);
+        assert!(command.contains("python3 Meta/ladybird.py test 'TestRegex'"));
+        assert!(command.contains("python3 Meta/ladybird.py test 'TestPublicSuffix'"));
+    }
+
+    #[test]
+    fn test_command_rejects_unsupported_filters() {
         let filters = vec!["Tests/LibJS/foo.js".to_string()];
         let command = test_command_for(&filters);
-        assert!(command.contains("python3 Meta/ladybird.py test \"$filter\""));
-        assert!(command.contains("./Meta/ladybird.sh test \"$filter\""));
-        assert!(command.contains("ladybird-test --filter=\"$filter\""));
-        assert!(command.contains("for filter in 'Tests/LibJS/foo.js'"));
+        assert!(command.contains("unsupported target test filter: 'Tests/LibJS/foo.js'"));
+        assert!(command.contains("status=127"));
     }
 
     #[test]
