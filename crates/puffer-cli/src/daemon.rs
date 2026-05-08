@@ -1477,8 +1477,19 @@ fn handle_create_session(state: &DaemonState, params: &Value) -> Result<Value> {
         .and_then(|v| v.as_str())
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| state.cwd.clone());
+    let display_name = params
+        .get("displayName")
+        .or_else(|| params.get("display_name"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
     let session_store = SessionStore::from_paths(&state.paths)?;
     let session = session_store.create_session(cwd)?;
+    if let Some(display_name) = display_name {
+        session_store.set_display_name(session.id, Some(display_name))?;
+    }
+    let session = session_store.load_session(session.id)?.metadata;
     // Broadcast so connected UIs can refresh their workspace board without
     // polling. Ignored silently if no one's listening.
     state.publish_event(ServerEnvelope::Event {
@@ -2259,4 +2270,49 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     });
 
     Ok(json!({"turnId": turn_id_resp}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{handle_create_session, DaemonState};
+    use puffer_config::{ensure_workspace_dirs, ConfigPaths};
+    use puffer_session_store::SessionStore;
+    use serde_json::json;
+
+    #[test]
+    fn create_session_accepts_display_name() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root.clone(), paths.clone(), "token".into(), true)
+            .expect("daemon state");
+
+        let response = handle_create_session(
+            &state,
+            &json!({
+                "cwd": workspace_root.display().to_string(),
+                "displayName": "  Managed Agent  ",
+            }),
+        )
+        .expect("create session");
+
+        let session_id = response["sessionId"].as_str().expect("sessionId");
+        assert_eq!(response["displayName"], "Managed Agent");
+        assert_eq!(response["generatedTitle"], serde_json::Value::Null);
+
+        let store = SessionStore::from_paths(&paths).expect("session store");
+        let session_id = uuid::Uuid::parse_str(session_id).expect("valid session id");
+        let session = store.load_session(session_id).expect("stored session");
+        assert_eq!(
+            session.metadata.display_name.as_deref(),
+            Some("Managed Agent")
+        );
+        assert_eq!(session.metadata.generated_title, None);
+    }
 }
