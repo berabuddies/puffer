@@ -67,6 +67,12 @@ pub struct RemoteRunnerConfig {
     /// unset.
     #[serde(default)]
     pub max_backoff_ms: Option<u64>,
+    /// Whether runtime construction should block until the remote runner
+    /// answers Ping. Defaults to true for interactive safety; managed
+    /// daemon sessions can disable this so tool-runner startup does not
+    /// block first-token latency when no tool is needed.
+    #[serde(default = "default_remote_runner_wait_for_ready")]
+    pub wait_for_ready: bool,
 }
 
 impl RemoteRunnerConfig {
@@ -135,6 +141,10 @@ impl Default for PufferConfig {
 
 fn default_editor_mode() -> String {
     "normal".to_string()
+}
+
+fn default_remote_runner_wait_for_ready() -> bool {
+    true
 }
 
 #[derive(Debug, Clone)]
@@ -634,5 +644,39 @@ tmux_golden_mode = false
 
         let paths = ConfigPaths::discover(&workspace);
         assert_eq!(paths.builtin_resources_dir, override_dir);
+    }
+
+    #[test]
+    fn remote_runner_wait_for_ready_defaults_to_true() {
+        let mut config = PufferConfig::default();
+        config.remote_runner = Some(RemoteRunnerConfig {
+            endpoint: "http://127.0.0.1:50051".to_string(),
+            auth_token: None,
+            auth_token_env: None,
+            initial_backoff_ms: None,
+            max_backoff_ms: None,
+            wait_for_ready: default_remote_runner_wait_for_ready(),
+        });
+        let raw = toml::to_string(&config).expect("serialize");
+        let config: PufferConfig = toml::from_str(&raw).expect("config");
+
+        assert!(config.remote_runner.expect("remote runner").wait_for_ready);
+    }
+
+    #[test]
+    fn remote_runner_wait_for_ready_can_be_disabled() {
+        let mut config = PufferConfig::default();
+        config.remote_runner = Some(RemoteRunnerConfig {
+            endpoint: "http://127.0.0.1:50051".to_string(),
+            auth_token: None,
+            auth_token_env: None,
+            initial_backoff_ms: None,
+            max_backoff_ms: None,
+            wait_for_ready: false,
+        });
+        let raw = toml::to_string(&config).expect("serialize");
+        let config: PufferConfig = toml::from_str(&raw).expect("config");
+
+        assert!(!config.remote_runner.expect("remote runner").wait_for_ready);
     }
 }
