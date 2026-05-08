@@ -11,6 +11,54 @@ use uuid::Uuid;
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
 
+/// Env override for the default Bash timeout. Mirrors Claude Code
+/// v2.1.133's `BASH_DEFAULT_TIMEOUT_MS` (`function ocH(H=process.env)`,
+/// bundle area). Without this, long-running workloads (cv2 frame
+/// loops, HF API hammering, large compilations) had no escape hatch
+/// shorter than recompiling puffer. Trajectory anchor: 2026-04-12
+/// `video-processing` step 11 hit the 600s cap on a cv2 iteration.
+const ENV_DEFAULT_TIMEOUT_MS: &str = "BASH_DEFAULT_TIMEOUT_MS";
+/// Env override for the per-call cap; clamped against the resolved
+/// default so `MAX < DEFAULT` is impossible. Mirrors CC's
+/// `BASH_MAX_TIMEOUT_MS` and the `Math.max(q, default)` guard.
+const ENV_MAX_TIMEOUT_MS: &str = "BASH_MAX_TIMEOUT_MS";
+
+fn parse_positive_ms(value: &str) -> Option<u64> {
+    value
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|millis| *millis > 0)
+}
+
+/// Resolves the effective default timeout:
+/// - `BASH_DEFAULT_TIMEOUT_MS` if set to a positive integer
+/// - else the compiled-in fallback (`DEFAULT_TIMEOUT_MS`)
+///
+/// Negative / zero / unparseable values are silently ignored so a
+/// malformed env entry can't disable the bash tool.
+fn resolved_default_timeout_ms() -> u64 {
+    std::env::var(ENV_DEFAULT_TIMEOUT_MS)
+        .ok()
+        .as_deref()
+        .and_then(parse_positive_ms)
+        .unwrap_or(DEFAULT_TIMEOUT_MS)
+}
+
+/// Resolves the effective per-call cap. The cap is at least
+/// `resolved_default_timeout_ms()` (so an admin who raised the
+/// default never accidentally lowers the ceiling below it) and at
+/// least the compiled-in `MAX_TIMEOUT_MS`.
+fn resolved_max_timeout_ms() -> u64 {
+    let default_ms = resolved_default_timeout_ms();
+    let env_value = std::env::var(ENV_MAX_TIMEOUT_MS)
+        .ok()
+        .as_deref()
+        .and_then(parse_positive_ms)
+        .unwrap_or(MAX_TIMEOUT_MS);
+    env_value.max(default_ms)
+}
+
 /// Claude-compatible input payload for the `Bash` tool.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ClaudeBashInput {
@@ -183,8 +231,8 @@ fn execute_background(
 fn execute_foreground(cwd: &Path, input: ClaudeBashInput) -> Result<ClaudeBashExecution> {
     let timeout_ms = input
         .timeout
-        .unwrap_or(DEFAULT_TIMEOUT_MS)
-        .clamp(1, MAX_TIMEOUT_MS);
+        .unwrap_or_else(resolved_default_timeout_ms)
+        .clamp(1, resolved_max_timeout_ms());
     let command = input.command.clone();
     let timed = run_bash_command(cwd, &command, timeout_ms)?;
     let mut stderr = String::from_utf8_lossy(&timed.output.stderr).to_string();
@@ -323,6 +371,83 @@ mod tests {
 
     fn test_session_id() -> Uuid {
         Uuid::nil()
+    }
+
+    /// Mutex serializing tests that mutate `BASH_*_TIMEOUT_MS` env
+    /// vars; without it, parallel test runs race on the env table.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Save+restore both BASH timeout env vars across a closure so
+    /// tests don't leak overrides into siblings.
+    fn with_bash_timeout_env<F: FnOnce()>(default_ms: Option<&str>, max_ms: Option<&str>, f: F) {
+        let _g = ENV_LOCK.lock().unwrap();
+        let prior_default = std::env::var(ENV_DEFAULT_TIMEOUT_MS).ok();
+        let prior_max = std::env::var(ENV_MAX_TIMEOUT_MS).ok();
+        match default_ms {
+            Some(v) => std::env::set_var(ENV_DEFAULT_TIMEOUT_MS, v),
+            None => std::env::remove_var(ENV_DEFAULT_TIMEOUT_MS),
+        }
+        match max_ms {
+            Some(v) => std::env::set_var(ENV_MAX_TIMEOUT_MS, v),
+            None => std::env::remove_var(ENV_MAX_TIMEOUT_MS),
+        }
+        f();
+        match prior_default {
+            Some(v) => std::env::set_var(ENV_DEFAULT_TIMEOUT_MS, v),
+            None => std::env::remove_var(ENV_DEFAULT_TIMEOUT_MS),
+        }
+        match prior_max {
+            Some(v) => std::env::set_var(ENV_MAX_TIMEOUT_MS, v),
+            None => std::env::remove_var(ENV_MAX_TIMEOUT_MS),
+        }
+    }
+
+    #[test]
+    fn timeout_defaults_when_env_unset() {
+        with_bash_timeout_env(None, None, || {
+            assert_eq!(resolved_default_timeout_ms(), DEFAULT_TIMEOUT_MS);
+            assert_eq!(resolved_max_timeout_ms(), MAX_TIMEOUT_MS);
+        });
+    }
+
+    #[test]
+    fn default_env_overrides_compiled_default() {
+        with_bash_timeout_env(Some("300000"), None, || {
+            assert_eq!(resolved_default_timeout_ms(), 300_000);
+            // Max stays at compiled value, which still ≥ default.
+            assert_eq!(resolved_max_timeout_ms(), MAX_TIMEOUT_MS);
+        });
+    }
+
+    #[test]
+    fn max_env_overrides_compiled_max() {
+        with_bash_timeout_env(None, Some("1800000"), || {
+            assert_eq!(resolved_default_timeout_ms(), DEFAULT_TIMEOUT_MS);
+            assert_eq!(resolved_max_timeout_ms(), 1_800_000);
+        });
+    }
+
+    #[test]
+    fn max_is_at_least_default_when_env_max_below_default() {
+        // User cranked default to 5min, didn't touch max — max must
+        // still be ≥ default so the clamp can never invert.
+        with_bash_timeout_env(Some("300000"), Some("60000"), || {
+            assert_eq!(resolved_default_timeout_ms(), 300_000);
+            // env_max=60000 < default=300000, so resolved_max = 300000.
+            assert_eq!(resolved_max_timeout_ms(), 300_000);
+        });
+    }
+
+    #[test]
+    fn malformed_env_falls_back_silently() {
+        with_bash_timeout_env(Some("not_a_number"), Some("-5"), || {
+            assert_eq!(resolved_default_timeout_ms(), DEFAULT_TIMEOUT_MS);
+            assert_eq!(resolved_max_timeout_ms(), MAX_TIMEOUT_MS);
+        });
+        with_bash_timeout_env(Some("0"), Some("0"), || {
+            assert_eq!(resolved_default_timeout_ms(), DEFAULT_TIMEOUT_MS);
+            assert_eq!(resolved_max_timeout_ms(), MAX_TIMEOUT_MS);
+        });
     }
 
     #[test]
