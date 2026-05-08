@@ -283,6 +283,40 @@ def harbor_attempt_failed(result: dict[str, Any] | None) -> bool:
     return metadata.get("success") is False
 
 
+# Delay before retrying after a quota-classed failure (HTTP 429 or
+# 403-access-terminated). Without this, run_tb2 retries immediately
+# and burns the per-task --max-agent-retries budget against the same
+# closed window. v16 trajectory analysis (kimi-v16-full89, 2026-04-21)
+# found 4/5 sampled "unsolved" tasks were quota-cascade deaths costing
+# ~3 retries each. See `crates/puffer-core/runtime/quota.rs`.
+QUOTA_RATE_LIMIT_RETRY_DELAY_SECONDS = 60
+QUOTA_ACCESS_TERMINATED_RETRY_DELAY_SECONDS = 600
+
+
+def quota_kind_from_result(result: dict[str, Any] | None) -> str | None:
+    """Extract the categorical quota tag puffer wrote to result.json.
+
+    Returns one of `quota_rate_limit` / `quota_access_terminated` when
+    the previous attempt died on a provider quota, else `None`.
+    """
+    if not result:
+        return None
+    metadata = ((result.get("agent_result") or {}).get("metadata")) or {}
+    kind = metadata.get("error_kind")
+    if isinstance(kind, str) and kind.startswith("quota_"):
+        return kind
+    return None
+
+
+def quota_retry_delay_seconds(kind: str | None) -> int:
+    """Map quota tag to recovery delay before next retry."""
+    if kind == "quota_access_terminated":
+        return QUOTA_ACCESS_TERMINATED_RETRY_DELAY_SECONDS
+    if kind == "quota_rate_limit":
+        return QUOTA_RATE_LIMIT_RETRY_DELAY_SECONDS
+    return 0
+
+
 def solved_from_rewards(rewards: dict[str, float | int] | None) -> bool:
     """Treat a task as solved when every reported reward is positive."""
     if not rewards:
@@ -393,6 +427,19 @@ def run_single_task(
             and harbor_attempt_failed(result)
             and attempt <= args.max_agent_retries
         ):
+            # Quota-aware backoff. If puffer's result.json tagged the
+            # failure as a quota event, sleep before the next retry so
+            # we don't keep slamming a closed window. Other failures
+            # retry immediately as before.
+            kind = quota_kind_from_result(result)
+            delay = quota_retry_delay_seconds(kind)
+            if delay > 0:
+                print(
+                    f"[run_tb2] {task.slug}: attempt {attempt} hit {kind}, "
+                    f"sleeping {delay}s before retry",
+                    flush=True,
+                )
+                time.sleep(delay)
             continue
 
         if attempt > args.max_agent_retries:

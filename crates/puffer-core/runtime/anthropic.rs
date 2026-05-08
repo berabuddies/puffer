@@ -269,6 +269,14 @@ impl TurnSession for AnthropicTurnSession {
             // SSE-parsed responses would be logged and rate-limit /
             // schema-rejection diagnoses would be opaque.
             trace_anthropic_stream_error(&self.request_url, status.as_u16(), &text);
+            // Promote 429 / 403-access-terminated to typed `QuotaError`
+            // so orchestration can delay-retry instead of burning the
+            // budget. See `runtime::quota`.
+            if let Some(quota) =
+                super::quota::classify_response("anthropic", status.as_u16(), &text)
+            {
+                return Err(anyhow::Error::new(quota));
+            }
             bail!("request failed with status {status}: {text}");
         }
 

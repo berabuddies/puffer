@@ -1057,6 +1057,13 @@ where
         .map(ToString::to_string);
     if !status.is_success() {
         let text = response.text()?;
+        // Promote 429 / 403-access-terminated to a typed `QuotaError`
+        // so the benchmark CLI can exit with a distinct code instead
+        // of letting the orchestration layer burn its retry budget on
+        // a quota window. See `runtime::quota` for design notes.
+        if let Some(quota) = super::quota::classify_response("openai", status.as_u16(), &text) {
+            return Err(anyhow::Error::new(quota));
+        }
         bail!("request failed with status {}: {}", status, text);
     }
     let mut reader = std::io::BufReader::new(response);

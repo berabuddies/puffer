@@ -36,6 +36,7 @@ mod openai_sse;
 mod openai_ws;
 mod permission_prompt;
 mod provider_adapter;
+pub mod quota;
 mod reflection;
 mod request_tool_filter;
 mod side_question;

@@ -89,6 +89,14 @@ struct BenchmarkResult {
     assistant_text: String,
     tool_invocations: Vec<BenchmarkToolInvocation>,
     error: Option<String>,
+    /// Categorical failure tag. Populated when the failure is
+    /// distinguishable from a generic exit-1 — currently only the
+    /// quota family (`quota_rate_limit` / `quota_access_terminated`).
+    /// `None` for success and for unclassified failures. Present in
+    /// `result.json` so `puffer_harbor_agent.py` / `run_tb2.py` can
+    /// decide whether to delay retry vs. fail-fast.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_kind: Option<String>,
 }
 
 /// Executes one unattended benchmark turn and writes optional result artifacts.
@@ -357,6 +365,7 @@ pub(crate) fn run_benchmark_command(
                 assistant_text: turn.assistant_text.clone(),
                 tool_invocations,
                 error: None,
+                error_kind: None,
             };
             let _ = session_store.append_event(
                 session_id,
@@ -379,6 +388,17 @@ pub(crate) fn run_benchmark_command(
             Ok(())
         }
         Err(error) => {
+            // Downcast to typed `QuotaError` so we can stamp
+            // `error_kind` in `result.json` and exit with a distinct
+            // code. Orchestration (`puffer_harbor_agent.py` /
+            // `run_tb2.py`) reads the exit code to delay-retry
+            // instead of burning the budget back-to-back. See
+            // `runtime::quota` for design notes and the v16
+            // trajectory-analysis finding (4/5 sampled "unsolved"
+            // tasks were quota-cascade deaths).
+            let quota_signal = error
+                .downcast_ref::<puffer_core::QuotaError>()
+                .map(|qe| qe.kind);
             let result = BenchmarkResult {
                 success: false,
                 session_id: session_id.to_string(),
@@ -391,12 +411,22 @@ pub(crate) fn run_benchmark_command(
                 assistant_text: String::new(),
                 tool_invocations: Vec::new(),
                 error: Some(error.to_string()),
+                error_kind: quota_signal.map(|kind| kind.slug().to_string()),
             };
             write_benchmark_artifacts(
                 &result,
                 args.result_json.as_deref(),
                 args.trajectory_json.as_deref(),
             )?;
+            if quota_signal.is_some() {
+                // Print the error chain like anyhow's default handler
+                // would, then exit with the quota-distinct code so
+                // the orchestration layer can detect this without
+                // parsing stderr. Skip returning Err — it would just
+                // retrigger anyhow's exit-1 path.
+                eprintln!("{error:?}");
+                std::process::exit(puffer_core::QUOTA_EXIT_CODE);
+            }
             Err(error)
         }
     }
@@ -878,6 +908,7 @@ mod tests {
             assistant_text: String::new(),
             tool_invocations: Vec::new(),
             error: Some("boom".to_string()),
+            error_kind: None,
         });
         assert_eq!(value["steps"][1]["message"], "Benchmark run failed: boom");
         assert_eq!(value["session_id"], "session-123");

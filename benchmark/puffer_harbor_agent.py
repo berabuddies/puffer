@@ -88,6 +88,11 @@ class PufferBenchAgent(BaseInstalledAgent):
             "model": payload.get("model"),
             "provider": payload.get("provider"),
             "success": payload.get("success"),
+            # Categorical failure tag (currently only quota-family).
+            # `run_tb2.py` reads this to delay retry on quota events
+            # instead of burning the budget back-to-back. See
+            # `crates/puffer-core/runtime/quota.rs`.
+            "error_kind": payload.get("error_kind"),
         }
 
     @with_prompt_template
