@@ -967,14 +967,32 @@ where
     G: FnMut(TurnStreamEvent),
 {
     let request = build_request(&execution.request_config)?;
-    let response = retry_openai_transport(
-        || send_openai_request_stream_raw(&request.url, &request.headers, &request.body),
-        |attempt, max, error| {
-            on_event(TurnStreamEvent::RetryAttempt {
-                attempt,
-                max_attempts: max,
-                error: error.to_string(),
-            });
+    // Layered retry: inner = connection-level (`retry_openai_transport`)
+    // surfaces `RetryAttempt` events on `on_event`; outer =
+    // HTTP 5xx response status (`runtime::retry_on_5xx`) traces
+    // via `tracing::warn!` to avoid the closure borrow conflict
+    // (both branches would otherwise want `&mut on_event`).
+    // CC's SDK retries on >=500 the same way (`shouldRetry` in
+    // claude-2.1.133 bundle).
+    let response = super::retry_on_5xx(
+        || {
+            retry_openai_transport(
+                || send_openai_request_stream_raw(&request.url, &request.headers, &request.body),
+                |attempt, max, error| {
+                    on_event(TurnStreamEvent::RetryAttempt {
+                        attempt,
+                        max_attempts: max,
+                        error: error.to_string(),
+                    });
+                },
+            )
+        },
+        |attempt, max, status| {
+            tracing::warn!(
+                target: "puffer::runtime::openai",
+                "5xx retry: attempt {attempt}/{max}, HTTP {}, sleeping before retry",
+                status.as_u16()
+            );
         },
     )?;
     if response.status() != StatusCode::UNAUTHORIZED || execution.refresh_token.is_none() {
@@ -994,14 +1012,25 @@ where
     auth_store.set_oauth(execution.provider_id.clone(), stored);
 
     let retry = build_request(&execution.request_config)?;
-    let retry_response = retry_openai_transport(
-        || send_openai_request_stream_raw(&retry.url, &retry.headers, &retry.body),
-        |attempt, max, error| {
-            on_event(TurnStreamEvent::RetryAttempt {
-                attempt,
-                max_attempts: max,
-                error: error.to_string(),
-            });
+    let retry_response = super::retry_on_5xx(
+        || {
+            retry_openai_transport(
+                || send_openai_request_stream_raw(&retry.url, &retry.headers, &retry.body),
+                |attempt, max, error| {
+                    on_event(TurnStreamEvent::RetryAttempt {
+                        attempt,
+                        max_attempts: max,
+                        error: error.to_string(),
+                    });
+                },
+            )
+        },
+        |attempt, max, status| {
+            tracing::warn!(
+                target: "puffer::runtime::openai",
+                "5xx retry (post-401-refresh): attempt {attempt}/{max}, HTTP {}",
+                status.as_u16()
+            );
         },
     )?;
     parse_openai_stream_response(&retry.url, retry_response, on_event)

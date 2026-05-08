@@ -878,6 +878,92 @@ fn retry_delay(config: HttpRetryConfig, attempt: usize) -> Duration {
     Duration::from_millis(config.delay_ms.saturating_mul(attempt as u64))
 }
 
+/// Provider-agnostic helper that retries a closure returning a
+/// `reqwest::blocking::Response` whenever the response status is 5xx.
+/// Mirrors Claude Code's SDK retry policy (`shouldRetry` in
+/// claude-2.1.133 bundle: retries on 408 / 409 / 429 / >=500) but
+/// scoped to 5xx — 408 / 409 are rare for our LLM providers and
+/// 429 is already promoted to typed `QuotaError` in the body-inspect
+/// layer (see `runtime::quota`).
+///
+/// Caller is responsible for connection-level retry (`reqwest::Error`)
+/// — that lives provider-side (`retry_openai_transport`,
+/// future Anthropic equivalent). This wrapper sits BETWEEN
+/// connection-retry and the response-body parse, catching transient
+/// 502/503/504 gateway errors that would otherwise abort the turn
+/// and force the harness to retry the whole task.
+///
+/// Backoff: exponential with ±25% jitter, capped at 8 seconds —
+/// matches CC's `min(0.5 * 2^attempt, 8) * (1 - random()*0.25)`
+/// formula. Configurable via env:
+///   - `PUFFER_HTTP_5XX_MAX_ATTEMPTS` (default 3, clamp 1–5)
+///   - `PUFFER_HTTP_5XX_BASE_DELAY_MS` (default 500, clamp 100–8000)
+///
+/// `on_retry` is called once per retry decision so the agent loop
+/// can surface the event in observability spans.
+pub(crate) fn retry_on_5xx<F>(
+    mut op: F,
+    mut on_retry: impl FnMut(usize, usize, reqwest::StatusCode),
+) -> Result<reqwest::blocking::Response>
+where
+    F: FnMut() -> Result<reqwest::blocking::Response>,
+{
+    let max_attempts = http_5xx_max_attempts();
+    let base_delay = http_5xx_base_delay();
+    for attempt in 1..=max_attempts {
+        let response = op()?;
+        let status = response.status();
+        if !status.is_server_error() || attempt == max_attempts {
+            return Ok(response);
+        }
+        // Free the failed response's connection before sleeping;
+        // some servers won't accept a parallel retry on the same
+        // socket otherwise.
+        drop(response);
+        on_retry(attempt, max_attempts, status);
+        let delay = http_5xx_backoff_with_jitter(base_delay, attempt);
+        std::thread::sleep(delay);
+    }
+    unreachable!("retry_on_5xx loop always returns or errors")
+}
+
+fn http_5xx_max_attempts() -> usize {
+    std::env::var("PUFFER_HTTP_5XX_MAX_ATTEMPTS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(3)
+        .clamp(1, 5)
+}
+
+fn http_5xx_base_delay() -> Duration {
+    let ms = std::env::var("PUFFER_HTTP_5XX_BASE_DELAY_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(500)
+        .clamp(100, 8_000);
+    Duration::from_millis(ms)
+}
+
+/// Backoff with full jitter capped at 8s. `attempt` is 1-indexed.
+/// At `attempt=1`, mean delay = base. At `attempt=2`, mean = 2*base.
+/// At `attempt=3`, mean = 4*base. The `* (1 - rand*0.25)` factor
+/// applies a deterministic-pseudo-random jitter without pulling in
+/// the `rand` crate — uses a hash of the current nanos so cargo
+/// tests stay reproducible-ish without needing a seedable RNG.
+fn http_5xx_backoff_with_jitter(base: Duration, attempt: usize) -> Duration {
+    let factor = 2u64.saturating_pow((attempt as u32).saturating_sub(1));
+    let nominal_ms = base.as_millis().saturating_mul(factor as u128).min(8_000) as u64;
+    // Cheap jitter: take low bits of monotonic nanos, scale to ±25%.
+    // Falls back to no-jitter if the clock is unavailable.
+    let jitter_factor = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| (d.subsec_nanos() % 250) as u64)
+        .unwrap_or(0);
+    let jitter_ms = nominal_ms.saturating_mul(jitter_factor) / 1_000;
+    Duration::from_millis(nominal_ms.saturating_sub(jitter_ms))
+}
+
 fn is_retryable_http_error(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause

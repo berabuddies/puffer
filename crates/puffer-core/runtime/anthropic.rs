@@ -256,10 +256,39 @@ impl TurnSession for AnthropicTurnSession {
         http_request = http_request
             .header("content-type", "application/json")
             .header("accept", "text/event-stream");
-        let http_response = http_request
-            .body(body.to_string())
-            .send()
-            .with_context(|| format!("failed to send streaming request to {}", self.request_url))?;
+        // Wrap send in 5xx retry so transient gateway errors (502 /
+        // 503 / 504, common during Anthropic load spikes) don't
+        // abort the whole turn. Connection-level errors (timeouts,
+        // resets) are handled by reqwest's own retry on the
+        // `with_context` path; those would surface as `?` errors
+        // before reaching this site.
+        let request_body = body.to_string();
+        let http_response = super::retry_on_5xx(
+            || {
+                let mut http_request = client.post(&self.request_url);
+                for (key, value) in &self.request_headers {
+                    http_request = http_request.header(key, value);
+                }
+                http_request
+                    .header("content-type", "application/json")
+                    .header("accept", "text/event-stream")
+                    .body(request_body.clone())
+                    .send()
+                    .with_context(|| {
+                        format!("failed to send streaming request to {}", self.request_url)
+                    })
+            },
+            |attempt, max, status| {
+                trace_anthropic_stream_error(
+                    &self.request_url,
+                    status.as_u16(),
+                    &format!("[5xx retry] attempt {attempt}/{max}, sleeping before next try"),
+                );
+            },
+        )?;
+        // Drop the now-unused initial builder so we don't have two
+        // outstanding `http_request`s in scope.
+        drop(http_request);
 
         if !http_response.status().is_success() {
             let status = http_response.status();
