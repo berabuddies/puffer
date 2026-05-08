@@ -20,6 +20,7 @@ members = [
     "crates/puffer-runner-grpc",
     "crates/puffer-tool-runner",
     "crates/puffer-session-store",
+    "crates/puffer-skill-evolution",
     "crates/puffer-subscriber-email",
     "crates/puffer-subscriber-runtime",
     "crates/puffer-subscriber-telegram-user",
