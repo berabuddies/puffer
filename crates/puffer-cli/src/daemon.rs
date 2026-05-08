@@ -105,6 +105,7 @@ pub(crate) struct DaemonOptions {
     pub print_handshake: bool,
     pub no_browser: bool,
     pub system_prompt_1: Option<String>,
+    pub disable_auto_title: bool,
 }
 
 pub(crate) fn run(options: DaemonOptions) -> Result<()> {
@@ -129,6 +130,7 @@ async fn run_async(options: DaemonOptions) -> Result<()> {
         paths.clone(),
         token.clone(),
         options.no_browser,
+        options.disable_auto_title,
     )?;
     if let Some(prompt) = options
         .system_prompt_1
@@ -248,6 +250,7 @@ pub(crate) struct DaemonState {
     pub(crate) fs_watches: Arc<FsWatchRegistry>,
     /// Chrome-backed browser sessions used by the desktop Browser tab.
     pub(crate) browsers: Arc<BrowserRegistry>,
+    disable_auto_title: bool,
     /// Transcript replay buffer — a bounded ring of recent session / clone /
     /// workspace events. On a fresh WebSocket connection we replay these
     /// so UIs that disconnected mid-turn don't miss deltas. Size capped at
@@ -289,6 +292,7 @@ impl DaemonState {
         paths: ConfigPaths,
         token: String,
         no_browser: bool,
+        disable_auto_title: bool,
     ) -> Result<Self> {
         let config = load_config(&paths)?;
         let (events, _rx) = broadcast::channel::<ServerEnvelope>(256);
@@ -306,6 +310,7 @@ impl DaemonState {
             ptys,
             fs_watches: Arc::new(FsWatchRegistry::new()),
             browsers: Arc::new(BrowserRegistry::new(browser_profile_root, !no_browser)),
+            disable_auto_title,
             recent_events: Arc::new(Mutex::new(VecDeque::with_capacity(RECENT_EVENT_CAPACITY))),
         })
     }
@@ -2008,11 +2013,12 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
             .events
             .iter()
             .any(|event| matches!(event, TranscriptEvent::UserMessage { .. }));
-        let auto_title = if crate::daemon_title::should_auto_title(
-            record.metadata.display_name.as_deref(),
-            record.metadata.generated_title.as_deref(),
-            has_user_message,
-        ) {
+        let auto_title = if !setup_state.disable_auto_title
+            && crate::daemon_title::should_auto_title(
+                record.metadata.display_name.as_deref(),
+                record.metadata.generated_title.as_deref(),
+                has_user_message,
+            ) {
             match crate::daemon_title::generate_title_with_model(
                 &AppState::from_session_record(
                     setup_state.config.lock().unwrap().clone(),
@@ -2290,8 +2296,14 @@ mod tests {
             builtin_resources_dir: workspace_root.join("resources"),
         };
         ensure_workspace_dirs(&paths).expect("workspace dirs");
-        let state = DaemonState::load(workspace_root.clone(), paths.clone(), "token".into(), true)
-            .expect("daemon state");
+        let state = DaemonState::load(
+            workspace_root.clone(),
+            paths.clone(),
+            "token".into(),
+            true,
+            false,
+        )
+        .expect("daemon state");
 
         let response = handle_create_session(
             &state,

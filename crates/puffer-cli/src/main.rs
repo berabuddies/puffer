@@ -281,6 +281,7 @@ fn main() -> Result<()> {
             print_handshake,
             no_browser,
             system_prompt_1,
+            disable_auto_title,
         }) => daemon::run(daemon::DaemonOptions {
             bind,
             handshake_file,
@@ -288,6 +289,7 @@ fn main() -> Result<()> {
             print_handshake,
             no_browser,
             system_prompt_1,
+            disable_auto_title,
         }),
         Some(Command::Browser(args)) => browser::run_browser_command(&cwd, &paths, args),
         Some(Command::BenchmarkRun {
