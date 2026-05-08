@@ -4437,6 +4437,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "puffer-genskill-eval"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "puffer-mcp-oauth"
 version = "0.1.0"
 dependencies = [

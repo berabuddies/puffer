@@ -27,16 +27,35 @@ impl Sandbox {
         test_files_host_dir: &Path,
     ) -> Result<Self> {
         let puffer_bin_abs = puffer_bin_host_path.canonicalize().with_context(|| {
-            format!("canonicalizing puffer binary path {}", puffer_bin_host_path.display())
+            format!(
+                "canonicalizing puffer binary path {}",
+                puffer_bin_host_path.display()
+            )
         })?;
         let test_files_abs = test_files_host_dir.canonicalize().with_context(|| {
-            format!("canonicalizing test files dir {}", test_files_host_dir.display())
+            format!(
+                "canonicalizing test files dir {}",
+                test_files_host_dir.display()
+            )
         })?;
+        let host_root = std::env::current_dir().context("resolving host workspace root")?;
 
         let out = Command::new("docker")
             .args(["run", "-d", "--rm"])
-            .args(["-v", &format!("{}:/usr/local/bin/puffer:ro", puffer_bin_abs.display())])
-            .args(["-v", &format!("{}:/work/test_files:ro", test_files_abs.display())])
+            .args([
+                "-v",
+                &format!("{}:/usr/local/bin/puffer:ro", puffer_bin_abs.display()),
+            ])
+            .args([
+                "-v",
+                &format!("{}:/work/test_files:ro", test_files_abs.display()),
+            ])
+            .args(["-v", &format!("{}:/host:ro", host_root.display())])
+            .args(["-e", "OPENAI_API_KEY"])
+            .args(["-e", "ANTHROPIC_API_KEY"])
+            .args(["-e", "OPENAI_BASE_URL"])
+            .args(["-e", "PUFFER_PROVIDER"])
+            .args(["-e", "PUFFER_MODEL"])
             .args(["--workdir", CONTAINER_WORKDIR])
             .arg(image)
             .args(["sleep", "infinity"])
@@ -45,15 +64,22 @@ impl Sandbox {
             .await
             .context("spawning docker run")?;
         if !out.status.success() {
-            return Err(anyhow!("docker run failed: {}", String::from_utf8_lossy(&out.stderr)));
+            return Err(anyhow!(
+                "docker run failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
         }
         let container_id = String::from_utf8(out.stdout)?.trim().to_string();
         if container_id.is_empty() {
             return Err(anyhow!("empty container id from docker run"));
         }
         let sandbox = Self { container_id };
-        sandbox.exec(&["git", "reset", "--hard", base_commit]).await?;
-        sandbox.exec(&["bash", "-c", "cp -r /work/test_files/. /work/ladybird/"]).await?;
+        sandbox
+            .exec(&["git", "reset", "--hard", base_commit])
+            .await?;
+        sandbox
+            .exec(&["bash", "-c", "cp -r /work/test_files/. /work/ladybird/"])
+            .await?;
         Ok(sandbox)
     }
 
@@ -78,6 +104,7 @@ impl Sandbox {
     }
 
     /// Container id (for diagnostics).
+    #[allow(dead_code)]
     pub fn container_id(&self) -> &str {
         &self.container_id
     }

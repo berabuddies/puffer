@@ -1,3 +1,4 @@
+use crate::non_interactive::NonInteractiveArgs;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
@@ -231,6 +232,9 @@ pub(crate) enum Command {
         #[arg(long = "deny-tool")]
         deny_tools: Vec<String>,
     },
+    /// Run one non-interactive agent turn.
+    #[command(name = "non-interactive")]
+    NonInteractive(NonInteractiveArgs),
 }
 
 /// Top-level CLI arguments for `puffer browser`.

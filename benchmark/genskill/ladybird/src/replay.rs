@@ -1,10 +1,10 @@
 //! One-replay execution: spawn sandbox, run puffer, capture artifact.
 
 use crate::pr_corpus::CorpusEntry;
-use crate::sandbox::{Sandbox, DEFAULT_IMAGE};
+use crate::sandbox::Sandbox;
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tokio::time::Duration;
 
 /// A replay arm: which skill (if any) was loaded.
@@ -26,7 +26,18 @@ impl Arm {
             "no-skill" => Ok(Arm::NoSkill),
             "direct" => Ok(Arm::Direct),
             "gepa" => Ok(Arm::Gepa),
-            _ => Err(anyhow!("unknown arm {s}; expected no-skill | direct | gepa")),
+            _ => Err(anyhow!(
+                "unknown arm {s}; expected no-skill | direct | gepa"
+            )),
+        }
+    }
+
+    /// Returns the kebab-case CLI spelling for this arm.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Arm::NoSkill => "no-skill",
+            Arm::Direct => "direct",
+            Arm::Gepa => "gepa",
         }
     }
 }
@@ -116,7 +127,11 @@ pub async fn run_one(cfg: ReplayConfig<'_>) -> Result<ReplayArtifact> {
 
     let test_filter = test_filter_for(cfg.corpus_entry);
     let pre_check = sandbox
-        .exec(&["bash", "-c", &format!("ladybird-test --filter={test_filter}; echo 0")])
+        .exec(&[
+            "bash",
+            "-c",
+            &format!("ladybird-test --filter={test_filter}; echo 0"),
+        ])
         .await
         .ok();
     tracing::info!(?pre_check, "pre-replay test status");
@@ -131,6 +146,10 @@ pub async fn run_one(cfg: ReplayConfig<'_>) -> Result<ReplayArtifact> {
         cfg.token_budget.to_string(),
         "--emit-artifact".to_string(),
         "/tmp/replay-artifact.json".to_string(),
+        "--artifact-pr".to_string(),
+        cfg.corpus_entry.id.clone(),
+        "--artifact-arm".to_string(),
+        cfg.arm.as_str().to_string(),
     ];
     if let Some(skill_path) = skill_path_for(&cfg) {
         puffer_args.push("--load-skill".to_string());
@@ -151,7 +170,9 @@ pub async fn run_one(cfg: ReplayConfig<'_>) -> Result<ReplayArtifact> {
         Ok(Ok(_)) => Outcome::Pass,
     };
 
-    let pulled = sandbox.exec(&["bash", "-c", "cat /tmp/replay-artifact.json"]).await;
+    let pulled = sandbox
+        .exec(&["bash", "-c", "cat /tmp/replay-artifact.json"])
+        .await;
     let mut artifact = if let Ok((stdout, _)) = pulled {
         serde_json::from_str::<ReplayArtifact>(&stdout).unwrap_or_else(|_| empty_artifact(&cfg))
     } else {
@@ -163,7 +184,11 @@ pub async fn run_one(cfg: ReplayConfig<'_>) -> Result<ReplayArtifact> {
     }
 
     let test_run = sandbox
-        .exec(&["bash", "-c", &format!("ladybird-test --filter={test_filter}; echo EXIT=0")])
+        .exec(&[
+            "bash",
+            "-c",
+            &format!("ladybird-test --filter={test_filter}; echo EXIT=0"),
+        ])
         .await;
     if let Ok((stdout, _)) = test_run {
         let exit_code = parse_exit_code(&stdout).unwrap_or(-1);
@@ -183,7 +208,8 @@ pub async fn run_one(cfg: ReplayConfig<'_>) -> Result<ReplayArtifact> {
 
     std::fs::create_dir_all(&cfg.run_date_dir)
         .with_context(|| format!("creating {}", cfg.run_date_dir.display()))?;
-    let artifact_path = cfg.run_date_dir
+    let artifact_path = cfg
+        .run_date_dir
         .join(format!("{}-{:?}.json", cfg.corpus_entry.id, cfg.arm));
     std::fs::write(&artifact_path, serde_json::to_string_pretty(&artifact)?)?;
     tracing::info!(path = %artifact_path.display(), "wrote replay artifact");
@@ -236,7 +262,11 @@ fn parse_exit_code(s: &str) -> Option<i32> {
 }
 
 fn tail(s: &str, n: usize) -> String {
-    if s.len() <= n { s.to_string() } else { s[s.len() - n..].to_string() }
+    if s.len() <= n {
+        s.to_string()
+    } else {
+        s[s.len() - n..].to_string()
+    }
 }
 
 #[cfg(test)]

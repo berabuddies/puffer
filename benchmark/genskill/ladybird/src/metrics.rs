@@ -51,21 +51,44 @@ fn normalize_key(call: &ToolCall) -> String {
     match call.name.as_str() {
         "Read" => format!(
             "Read::{}",
-            call.input.get("path").and_then(|v| v.as_str()).unwrap_or("?")
+            call.input
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?")
         ),
         "Bash" => {
-            let cmd = call.input.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            format!("Bash::{}", cmd.trim().to_ascii_lowercase().split_whitespace().collect::<Vec<_>>().join(" "))
+            let cmd = call
+                .input
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            format!(
+                "Bash::{}",
+                cmd.trim()
+                    .to_ascii_lowercase()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
         }
         "Grep" => format!(
             "Grep::{}::{}",
-            call.input.get("pattern").and_then(|v| v.as_str()).unwrap_or(""),
-            call.input.get("path").and_then(|v| v.as_str()).unwrap_or("")
+            call.input
+                .get("pattern")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+            call.input
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
         ),
         "Edit" | "Write" => format!(
             "{}::{}",
             call.name,
-            call.input.get("file_path").and_then(|v| v.as_str()).unwrap_or("?")
+            call.input
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?")
         ),
         other => format!("{other}::{}", call.input),
     }
@@ -73,7 +96,10 @@ fn normalize_key(call: &ToolCall) -> String {
 
 fn files_in_diff(diff: &str) -> HashSet<String> {
     diff.lines()
-        .filter_map(|l| l.strip_prefix("+++ b/").or_else(|| l.strip_prefix("--- a/")))
+        .filter_map(|l| {
+            l.strip_prefix("+++ b/")
+                .or_else(|| l.strip_prefix("--- a/"))
+        })
         .map(|s| s.trim().to_string())
         .collect()
 }
@@ -98,7 +124,11 @@ fn symbols_in_diff(diff: &str) -> HashSet<String> {
 
 fn jaccard<T: Eq + std::hash::Hash>(a: &HashSet<T>, b: &HashSet<T>) -> f32 {
     let union = a.union(b).count();
-    if union == 0 { 0.0 } else { a.intersection(b).count() as f32 / union as f32 }
+    if union == 0 {
+        0.0
+    } else {
+        a.intersection(b).count() as f32 / union as f32
+    }
 }
 
 #[cfg(test)]
@@ -126,9 +156,24 @@ mod tests {
     #[test]
     fn duplicate_score_simple() {
         let log = vec![
-            ToolCall { name: "Read".into(), input: serde_json::json!({"path":"x"}), output_size: 0, ts: "".into() },
-            ToolCall { name: "Read".into(), input: serde_json::json!({"path":"x"}), output_size: 0, ts: "".into() },
-            ToolCall { name: "Read".into(), input: serde_json::json!({"path":"y"}), output_size: 0, ts: "".into() },
+            ToolCall {
+                name: "Read".into(),
+                input: serde_json::json!({"path":"x"}),
+                output_size: 0,
+                ts: "".into(),
+            },
+            ToolCall {
+                name: "Read".into(),
+                input: serde_json::json!({"path":"x"}),
+                output_size: 0,
+                ts: "".into(),
+            },
+            ToolCall {
+                name: "Read".into(),
+                input: serde_json::json!({"path":"y"}),
+                output_size: 0,
+                ts: "".into(),
+            },
         ];
         assert_eq!(compute_duplicate_score(&log), 1);
     }

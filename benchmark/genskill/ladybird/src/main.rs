@@ -6,8 +6,8 @@
 
 mod metrics;
 mod pr_corpus;
-mod report;
 mod replay;
+mod report;
 mod sandbox;
 mod transcript;
 
@@ -99,9 +99,8 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Aggregate { run_date } => {
-            let dir = std::path::PathBuf::from(format!(
-                "benchmark/genskill/ladybird/reports/{run_date}"
-            ));
+            let dir =
+                std::path::PathBuf::from(format!("benchmark/genskill/ladybird/reports/{run_date}"));
             let entries = pr_corpus::load_corpus(std::path::Path::new(
                 "benchmark/genskill/ladybird/pr_corpus",
             ))?;
@@ -111,14 +110,19 @@ async fn main() -> Result<()> {
                 let mut triple: report::PrTriple = std::collections::BTreeMap::new();
                 for arm in [replay::Arm::NoSkill, replay::Arm::Direct, replay::Arm::Gepa] {
                     let path = dir.join(format!("{}-{:?}.json", entry.id, arm));
-                    if !path.exists() { continue; }
+                    if !path.exists() {
+                        continue;
+                    }
                     let artifact: replay::ReplayArtifact =
                         serde_json::from_str(&std::fs::read_to_string(&path)?)?;
-                    let reference_fix = std::fs::read_to_string(entry.dir.join("reference_fix.patch"))
-                        .unwrap_or_default();
+                    let reference_fix =
+                        std::fs::read_to_string(entry.dir.join("reference_fix.patch"))
+                            .unwrap_or_default();
                     triple.insert(arm, metrics::compute(&artifact, &reference_fix));
                 }
-                if !triple.is_empty() { by_pr.insert(entry.id.clone(), triple); }
+                if !triple.is_empty() {
+                    by_pr.insert(entry.id.clone(), triple);
+                }
             }
             let md = report::render_summary(&run_date, &by_pr);
             let out_path = dir.join("summary.md");

@@ -18,6 +18,7 @@ mod daemon_ui_state;
 mod desktop_api;
 mod desktop_api_types;
 mod heartbeat;
+mod non_interactive;
 mod resource_fs;
 mod runner_selection;
 mod subscriptions;
@@ -33,6 +34,7 @@ use command_surface::{
     run_install_command, run_mcp_command, run_plugin_command, run_setup_token_command,
     run_update_command,
 };
+use non_interactive::run_non_interactive_command;
 use puffer_config::{ensure_workspace_dirs, load_config, ConfigPaths};
 use puffer_core::{resolve_resume_launch, supported_commands, AppState, ResumeLaunchResolution};
 use puffer_provider_openai::{
@@ -323,6 +325,15 @@ fn main() -> Result<()> {
                 trajectory_json,
                 deny_tools,
             },
+        ),
+        Some(Command::NonInteractive(args)) => run_non_interactive_command(
+            &cwd,
+            &config,
+            &resources,
+            &mut providers,
+            &mut auth_store,
+            &paths,
+            args,
         ),
         Some(Command::AnthropicRequestFixture) => {
             let request = build_messages_request(
