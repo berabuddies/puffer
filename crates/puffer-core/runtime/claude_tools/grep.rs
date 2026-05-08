@@ -10,6 +10,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const DEFAULT_HEAD_LIMIT: usize = 250;
 const VCS_DIRECTORIES_TO_EXCLUDE: [&str; 6] = [".git", ".svn", ".hg", ".bzr", ".jj", ".sl"];
 
+/// Linux pseudo-filesystem directories that GNU grep would otherwise
+/// recurse into when the agent passes `path: "/"` (or any ancestor).
+/// They contain millions of synthetic entries — most unreadable —
+/// and produce gigabytes of stderr like
+/// `grep: /proc/sys/kernel/apparmor_display_secid_mode: …`. Observed
+/// 2026-04-12 in `make-doom-for-mips` step 44 where a single `Grep`
+/// over `/` produced 1.8MB of stderr that puffer correctly truncated
+/// to a 2KB preview, leaving the agent unable to act on the result.
+///
+/// Applied as `--exclude-dir=<basename>` only when the grep target
+/// is `/` exactly. Picking that narrow trigger avoids surprising
+/// behavior on user projects that happen to contain a sub-directory
+/// named `proc` (rare but legal).
+const PSEUDO_FS_DIRS: [&str; 4] = ["proc", "sys", "dev", "run"];
+
 #[derive(Debug, Deserialize)]
 struct ClaudeGrepInput {
     pattern: String,
@@ -97,6 +112,7 @@ pub fn execute_claude_grep(
         "500".to_string(),
     ];
     append_vcs_exclusions(&mut args);
+    append_pseudo_fs_exclusions_rg(&mut args, &absolute_target);
     if input.multiline.unwrap_or(false) {
         args.push("-U".to_string());
         args.push("--multiline-dotall".to_string());
@@ -265,6 +281,7 @@ fn run_grep_fallback(
     command.arg("-E");
     append_grep_mode_flags(&mut command, mode, input);
     append_grep_exclusions(&mut command);
+    append_pseudo_fs_exclusions_grep(&mut command, absolute_target);
     append_grep_file_filters(
         &mut command,
         input.glob.as_deref(),
@@ -322,6 +339,38 @@ fn append_grep_mode_flags(command: &mut Command, mode: GrepMode, input: &ClaudeG
 
 fn append_grep_exclusions(command: &mut Command) {
     for dir in VCS_DIRECTORIES_TO_EXCLUDE {
+        command.arg(format!("--exclude-dir={dir}"));
+    }
+}
+
+/// True when the grep target is the root `/`. Triggers
+/// pseudo-FS exclusions in both the ripgrep and GNU-grep paths.
+fn target_includes_pseudo_fs_roots(target: &Path) -> bool {
+    target == Path::new("/")
+}
+
+/// ripgrep variant: pass `--glob '!proc'` etc. so the walker skips
+/// `proc`/`sys`/`dev`/`run` basenames anywhere in the search tree.
+/// Only fires when the target is `/`, so non-system grep targets
+/// that incidentally contain a `proc/` subdir are unaffected.
+fn append_pseudo_fs_exclusions_rg(args: &mut Vec<String>, target: &Path) {
+    if !target_includes_pseudo_fs_roots(target) {
+        return;
+    }
+    for dir in PSEUDO_FS_DIRS {
+        args.push("--glob".to_string());
+        args.push(format!("!{dir}"));
+    }
+}
+
+/// GNU grep fallback variant: pass `--exclude-dir=proc` etc. Only
+/// fires when the target is `/` for the same reason as the ripgrep
+/// helper above.
+fn append_pseudo_fs_exclusions_grep(command: &mut Command, target: &Path) {
+    if !target_includes_pseudo_fs_roots(target) {
+        return;
+    }
+    for dir in PSEUDO_FS_DIRS {
         command.arg(format!("--exclude-dir={dir}"));
     }
 }
@@ -562,6 +611,34 @@ fn to_relative_path(cwd: &Path, path_text: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn pseudo_fs_exclusions_only_fire_for_root_target() {
+        assert!(target_includes_pseudo_fs_roots(Path::new("/")));
+        // Anything more specific is the user's intent — leave alone.
+        assert!(!target_includes_pseudo_fs_roots(Path::new("/proc")));
+        assert!(!target_includes_pseudo_fs_roots(Path::new("/app")));
+        assert!(!target_includes_pseudo_fs_roots(Path::new("/home/user")));
+    }
+
+    #[test]
+    fn pseudo_fs_exclusions_rg_emits_glob_pairs_for_root_only() {
+        let mut args: Vec<String> = Vec::new();
+        append_pseudo_fs_exclusions_rg(&mut args, Path::new("/"));
+        // For each pseudo-FS dir we push two args: --glob then !dir.
+        assert_eq!(args.len(), PSEUDO_FS_DIRS.len() * 2);
+        for chunk in args.chunks_exact(2) {
+            assert_eq!(chunk[0], "--glob");
+            assert!(chunk[1].starts_with('!'));
+        }
+
+        let mut args2: Vec<String> = Vec::new();
+        append_pseudo_fs_exclusions_rg(&mut args2, Path::new("/app"));
+        assert!(
+            args2.is_empty(),
+            "non-root targets should not get pseudo-FS exclusions"
+        );
+    }
 
     #[test]
     fn grep_files_with_matches_mode_returns_expected_shape() {
