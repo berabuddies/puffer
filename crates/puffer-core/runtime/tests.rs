@@ -61,6 +61,27 @@ fn simple_turn_tool_suppression_is_env_gated() {
     std::env::remove_var(SUPPRESS_TOOLS_FOR_SIMPLE_TURNS_ENV);
 }
 
+#[test]
+fn local_simple_turn_reply_requires_both_env_flags() {
+    let _guard = env_lock();
+    std::env::remove_var(SUPPRESS_TOOLS_FOR_SIMPLE_TURNS_ENV);
+    std::env::remove_var(LOCAL_REPLY_FOR_SIMPLE_TURNS_ENV);
+    assert!(!suppress_tools_for_simple_turn("hi"));
+    assert!(!local_reply_for_simple_turns_enabled());
+
+    std::env::set_var(SUPPRESS_TOOLS_FOR_SIMPLE_TURNS_ENV, "1");
+    assert!(suppress_tools_for_simple_turn("hi"));
+    assert!(!local_reply_for_simple_turns_enabled());
+
+    std::env::set_var(LOCAL_REPLY_FOR_SIMPLE_TURNS_ENV, "1");
+    assert!(local_reply_for_simple_turns_enabled());
+    assert_eq!(local_simple_turn_reply("hi"), "Hi.");
+    assert_eq!(local_simple_turn_reply(" hey "), "Hey.");
+
+    std::env::remove_var(SUPPRESS_TOOLS_FOR_SIMPLE_TURNS_ENV);
+    std::env::remove_var(LOCAL_REPLY_FOR_SIMPLE_TURNS_ENV);
+}
+
 pub(super) fn state() -> AppState {
     AppState::new(
         PufferConfig::default(),
