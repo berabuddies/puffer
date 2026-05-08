@@ -275,12 +275,30 @@ where
             return Ok(true); // Terminal event
         }
         "error" => {
-            let msg = event
-                .get("error")
+            // Anthropic error events carry both `error.type` (e.g.
+            // `overloaded_error`, `rate_limit_error`,
+            // `request_too_large`, `invalid_request_error`,
+            // `authentication_error`, `permission_error`,
+            // `not_found_error`, `api_error`) and `error.message`.
+            // Surfacing both gives downstream readers (observability
+            // pipelines, the model when this bail propagates to a
+            // tool result, future retry logic) enough info to act.
+            // Symmetric with `format_openai_sse_error` which already
+            // pulls `code` + `message`.
+            let error_obj = event.get("error");
+            let kind = error_obj
+                .and_then(|e| e.get("type"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let msg = error_obj
                 .and_then(|e| e.get("message"))
                 .and_then(Value::as_str)
                 .unwrap_or("unknown error");
-            bail!("Anthropic SSE error: {msg}");
+            if kind.is_empty() {
+                bail!("Anthropic SSE error: {msg}");
+            } else {
+                bail!("Anthropic SSE error [{kind}]: {msg}");
+            }
         }
         _ => {} // ping, etc.
     }
@@ -547,5 +565,51 @@ mod tests {
         let result = parse_anthropic_sse(stream.as_bytes(), &mut |_| {})
             .expect("trailing message_stop without blank line must succeed");
         assert_eq!(result["content"][0]["text"], "hi");
+    }
+
+    /// Anthropic error events carry both `type` and `message`. The
+    /// `type` lets downstream readers distinguish overloaded /
+    /// rate_limit / request_too_large etc. without parsing the
+    /// human-readable text. Pre-2026-05-08 puffer dropped the type;
+    /// the bail message now includes both. Symmetric with
+    /// `format_openai_sse_error` which already extracts `code`.
+    #[test]
+    fn error_event_includes_type_and_message_in_bail() {
+        let stream = concat!(
+            "event:message_start\n",
+            "data:{\"type\":\"message_start\",\"message\":{\"id\":\"msg_x\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+            "event:error\n",
+            "data:{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Service is temporarily overloaded\"}}\n\n",
+        );
+        let err = parse_anthropic_sse(stream.as_bytes(), &mut |_| {}).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("overloaded_error"),
+            "bail message must include the error type for actionable downstream handling; got: {msg}"
+        );
+        assert!(
+            msg.contains("Service is temporarily overloaded"),
+            "bail message must preserve the human-readable message; got: {msg}"
+        );
+    }
+
+    /// When `error.type` is missing (older Anthropic relay or a
+    /// non-conforming proxy), fall back to the original "Anthropic
+    /// SSE error: <message>" wording — preserves backward-compat
+    /// for log scrapers / tests that match the old format.
+    #[test]
+    fn error_event_without_type_falls_back_to_legacy_wording() {
+        let stream = concat!(
+            "event:message_start\n",
+            "data:{\"type\":\"message_start\",\"message\":{\"id\":\"msg_x\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+            "event:error\n",
+            "data:{\"type\":\"error\",\"error\":{\"message\":\"something went wrong\"}}\n\n",
+        );
+        let err = parse_anthropic_sse(stream.as_bytes(), &mut |_| {}).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.starts_with("Anthropic SSE error: "));
+        assert!(msg.contains("something went wrong"));
+        // No bracketed type tag.
+        assert!(!msg.contains("[]"));
     }
 }
