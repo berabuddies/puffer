@@ -61,14 +61,41 @@ pub fn execute_claude_edit(
     } else {
         let occurrences = occurrence_count(&original, &input.old_string);
         if occurrences == 0 {
+            // Mirror CC's actionable wording: include a snippet of the
+            // string so the model sees what it actually sent (vs. a
+            // memory-only reference that could have drifted), plus a
+            // `\uXXXX`-escape diagnostic note when the input contains
+            // those escape forms — that's the most common silent
+            // mismatch class (model emitted ` ` literally vs. an
+            // actual NBSP in the file). Codex parity for the
+            // `String to replace not found` branch.
+            let snippet = old_string_diagnostic_snippet(&input.old_string);
+            let escape_hint = if contains_unicode_escape(&input.old_string) {
+                "\n(Note: Edit also tried swapping `\\uXXXX` escapes and their characters; \
+                 neither form matched, so the mismatch is likely elsewhere in old_string. \
+                 Re-read the file and copy the exact surrounding text.)"
+            } else {
+                ""
+            };
             bail!(
-                "Edit failed: old_string was not found in {}",
+                "Edit failed: old_string was not found in {}.\n\
+                String: {snippet}{escape_hint}",
                 path.display()
             );
         }
         if occurrences > 1 && !input.replace_all {
+            // Include the exact match count so the model can pick a
+            // strategy: 2-3 matches → add 1-2 lines of context;
+            // many matches → use `replace_all`. Codex parity:
+            // `Found N matches of the string to replace, but
+            // replace_all is false. ...`
+            let snippet = old_string_diagnostic_snippet(&input.old_string);
             bail!(
-                "Edit failed: old_string is not unique in {}. Use replace_all or provide more context.",
+                "Edit failed: Found {occurrences} matches of old_string in {}, \
+                but replace_all is false. To replace all occurrences, set \
+                replace_all to true. To replace only one occurrence, please \
+                provide more context to uniquely identify the instance.\n\
+                String: {snippet}",
                 path.display()
             );
         }
@@ -115,6 +142,48 @@ fn occurrence_count(haystack: &str, needle: &str) -> usize {
     haystack.match_indices(needle).count()
 }
 
+/// Truncate `old_string` to a single-line snippet for inclusion in
+/// error messages. Wraps in backticks; collapses internal newlines
+/// to `↵` so the agent sees the structure without the message
+/// becoming unreadable. Caps at 200 chars — long enough to identify
+/// the line, short enough to avoid bloating the error tool result.
+fn old_string_diagnostic_snippet(old_string: &str) -> String {
+    const MAX: usize = 200;
+    let normalized = old_string.replace('\n', "↵");
+    let chars: Vec<char> = normalized.chars().collect();
+    if chars.len() <= MAX {
+        format!("`{normalized}`")
+    } else {
+        let head: String = chars.iter().take(MAX).collect();
+        let omitted = chars.len() - MAX;
+        format!("`{head}…` ({omitted} more chars)")
+    }
+}
+
+/// Detect whether a string contains a literal `\uXXXX` escape
+/// sequence. When true, the not-found error includes a hint that
+/// codex's bundle calls "the most common silent mismatch class"
+/// — model emitted the escape literal but the file has the actual
+/// codepoint (or vice versa). Mirrors codex `bo9` predicate
+/// (`claude-2.1.133` bundle).
+fn contains_unicode_escape(s: &str) -> bool {
+    // Match `\u` followed by 4 hex digits. A literal backslash in
+    // Rust source is just `\\` in the regex source we emit through
+    // bytes-iter (avoids a regex crate dep for this trivial check).
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i + 5 < bytes.len() {
+        if bytes[i] == b'\\'
+            && bytes[i + 1] == b'u'
+            && bytes[i + 2..i + 6].iter().all(u8::is_ascii_hexdigit)
+        {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 fn build_structured_patch(original: &str, updated: &str) -> Vec<Value> {
     let old_lines = split_lines(original);
     let new_lines = split_lines(updated);
@@ -143,6 +212,103 @@ fn split_lines(content: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn old_string_diagnostic_snippet_truncates_long_strings() {
+        let s = "x".repeat(500);
+        let snippet = old_string_diagnostic_snippet(&s);
+        assert!(snippet.starts_with("`"));
+        assert!(snippet.contains("more chars"));
+        assert!(snippet.len() < 350); // 200 chars + decoration
+    }
+
+    #[test]
+    fn old_string_diagnostic_snippet_collapses_newlines() {
+        let snippet = old_string_diagnostic_snippet("a\nb\nc");
+        assert_eq!(snippet, "`a↵b↵c`");
+    }
+
+    #[test]
+    fn contains_unicode_escape_detects_uxxxx_form() {
+        assert!(contains_unicode_escape(r"\u00A0"));
+        assert!(contains_unicode_escape(r"foo\u2014bar"));
+        assert!(!contains_unicode_escape("plain string"));
+        assert!(!contains_unicode_escape(r"\u00")); // too few hex digits
+        assert!(!contains_unicode_escape(r"\nXXXX")); // not \u
+    }
+
+    #[test]
+    fn not_found_error_includes_string_snippet() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("sample.txt");
+        fs::write(&file, "alpha\nbeta\n").unwrap();
+        let input = json!({
+            "file_path": file.display().to_string(),
+            "old_string": "missing_thing",
+            "new_string": "x"
+        });
+
+        let err = execute_claude_edit(temp.path(), &[], false, input).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("was not found"));
+        assert!(
+            msg.contains("missing_thing"),
+            "error message should include the user-supplied old_string; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn not_found_error_emits_unicode_escape_hint_when_relevant() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("sample.txt");
+        fs::write(&file, "plain ascii\n").unwrap();
+        let input = json!({
+            "file_path": file.display().to_string(),
+            "old_string": r"non_breaking\u00A0space",
+            "new_string": "x"
+        });
+
+        let err = execute_claude_edit(temp.path(), &[], false, input).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("\\uXXXX") || msg.contains("escape"));
+    }
+
+    #[test]
+    fn not_found_error_omits_unicode_hint_when_no_escape() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("sample.txt");
+        fs::write(&file, "alpha\nbeta\n").unwrap();
+        let input = json!({
+            "file_path": file.display().to_string(),
+            "old_string": "missing_thing",
+            "new_string": "x"
+        });
+
+        let err = execute_claude_edit(temp.path(), &[], false, input).unwrap_err();
+        let msg = err.to_string();
+        assert!(!msg.contains("escapes"));
+    }
+
+    #[test]
+    fn not_unique_error_includes_match_count() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("sample.txt");
+        fs::write(&file, "foo\nfoo\nfoo\nbar\n").unwrap();
+        let input = json!({
+            "file_path": file.display().to_string(),
+            "old_string": "foo",
+            "new_string": "x"
+            // replace_all defaults to false
+        });
+
+        let err = execute_claude_edit(temp.path(), &[], false, input).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Found 3 matches"),
+            "error message should report the exact match count; got: {msg}"
+        );
+        assert!(msg.contains("replace_all"));
+    }
 
     #[test]
     fn edit_replaces_unique_occurrence() {
@@ -188,7 +354,10 @@ mod tests {
         });
 
         let error = execute_claude_edit(temp.path(), &[], false, input).unwrap_err();
-        assert!(error.to_string().contains("not unique"));
+        assert!(
+            error.to_string().contains("Found 2 matches")
+                || error.to_string().contains("not unique")
+        );
     }
 
     #[test]
