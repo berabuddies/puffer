@@ -138,6 +138,7 @@ const OPENAI_CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const HTTP_RETRY_ATTEMPTS_ENV: &str = "PUFFER_HTTP_RETRY_ATTEMPTS";
 const HTTP_RETRY_DELAY_MS_ENV: &str = "PUFFER_HTTP_RETRY_DELAY_MS";
 const SUPPRESS_TOOLS_FOR_SIMPLE_TURNS_ENV: &str = "PUFFER_SUPPRESS_TOOLS_FOR_SIMPLE_TURNS";
+const LOCAL_REPLY_FOR_SIMPLE_TURNS_ENV: &str = "PUFFER_LOCAL_REPLY_FOR_SIMPLE_TURNS";
 
 #[derive(Clone, Default)]
 struct TurnRequestOptions<'a> {
@@ -675,6 +676,15 @@ where
         options.observability = observability_handle();
     }
     let suppress_tools = suppress_tools_for_simple_turn(input);
+    if suppress_tools && local_reply_for_simple_turns_enabled() {
+        let assistant_text = local_simple_turn_reply(input);
+        on_event(TurnStreamEvent::TextDelta(assistant_text.to_string()));
+        return Ok(TurnExecution {
+            assistant_text: assistant_text.to_string(),
+            tool_invocations: Vec::new(),
+            reflection_traces: Vec::new(),
+        });
+    }
     let (provider, model_id) = resolve_provider_and_model(state, providers)?;
     let api = resolve_model_api(state, providers, provider, &model_id);
     let Some(adapter) = provider_adapter::adapter_for_api(&api) else {
@@ -708,6 +718,19 @@ fn suppress_tools_for_simple_turn(input: &str) -> bool {
         input.trim().to_ascii_lowercase().as_str(),
         "hi" | "hello" | "hey"
     )
+}
+
+fn local_reply_for_simple_turns_enabled() -> bool {
+    std::env::var(LOCAL_REPLY_FOR_SIMPLE_TURNS_ENV)
+        .ok()
+        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+fn local_simple_turn_reply(input: &str) -> &'static str {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "hey" => "Hey.",
+        _ => "Hi.",
+    }
 }
 fn resolve_provider_and_model<'a>(
     state: &AppState,
