@@ -125,12 +125,7 @@ fn write_line(out: &mut fs::File, parsed: &TranscriptLine, line_number: usize) -
     Ok(())
 }
 
-fn write_text_block(
-    out: &mut fs::File,
-    role: &str,
-    line_number: usize,
-    text: &str,
-) -> Result<()> {
+fn write_text_block(out: &mut fs::File, role: &str, line_number: usize, text: &str) -> Result<()> {
     writeln!(out, "## {} (line {})", role, line_number)?;
     writeln!(out)?;
     writeln!(out, "{}", text.trim())?;

@@ -34,6 +34,8 @@ fi
 source ~/.cargo/env
 cargo build -p puffer-cli --release
 cargo build -p puffer-genskill-eval --release
+bash "$ROOT/scripts/build_linux_puffer.sh"
+export PUFFER_REPLAY_BIN="${PUFFER_REPLAY_BIN:-$ROOT/.bin/puffer-linux}"
 cargo run --release -p puffer-genskill-eval -- validate
 
 for pr_dir in "$ROOT"/pr_corpus/pr-*/; do

@@ -10,6 +10,7 @@ ROOT="benchmark/genskill/ladybird"
 source ~/.cargo/env
 cargo build -p puffer-cli --release
 cargo build -p puffer-genskill-eval --release
+bash "$ROOT/scripts/build_linux_puffer.sh"
 cargo run --release -p puffer-genskill-eval -- validate
 
 for pr_dir in "$ROOT"/pr_corpus/pr-*/; do

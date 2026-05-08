@@ -14,7 +14,8 @@ ROOT="benchmark/genskill/ladybird"
 CORPUS_DIR="$ROOT/pr_corpus/$PR"
 META="$CORPUS_DIR/meta.json"
 IMAGE_TAG="${IMAGE_TAG:-puffer-genskill-eval-ladybird}"
-PUFFER_BIN="${PUFFER_BIN:-target/release/puffer}"
+HOST_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+PUFFER_LINUX_BIN="${PUFFER_LINUX_BIN:-$HOST_ROOT/benchmark/genskill/ladybird/.bin/puffer-linux}"
 PROVIDER="${PUFFER_EVAL_PROVIDER:-openai}"
 MODEL="${PUFFER_EVAL_MODEL:-${PUFFER_MODEL:-gpt-5.4}}"
 EFFORT="${PUFFER_EVAL_EFFORT:-${PUFFER_EFFORT:-}}"
@@ -23,21 +24,24 @@ MAX_TOKENS="${EXPERT_TOKEN_BUDGET:-400000}"
 FORCE="${FORCE:-0}"
 
 [ -f "$META" ] || { echo "no meta.json at $META" >&2; exit 1; }
-[ -x "$PUFFER_BIN" ] || { echo "missing executable puffer at $PUFFER_BIN" >&2; exit 1; }
+[ -x "$PUFFER_LINUX_BIN" ] || {
+  echo "missing Linux puffer binary at $PUFFER_LINUX_BIN" >&2
+  echo "run: bash benchmark/genskill/ladybird/scripts/build_linux_puffer.sh" >&2
+  exit 1
+}
 
 if [ "$FORCE" != "1" ] && [ -f "$CORPUS_DIR/expert_run.md" ] && [ -f "$CORPUS_DIR/expert_run.jsonl" ]; then
   echo "Synthetic expert run already exists for $PR; set FORCE=1 to regenerate."
   exit 0
 fi
 
-HOST_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-PUFFER_BIN_ABS="$(cd "$(dirname "$PUFFER_BIN")" && pwd -P)/$(basename "$PUFFER_BIN")"
+PUFFER_LINUX_BIN_ABS="$(cd "$(dirname "$PUFFER_LINUX_BIN")" && pwd -P)/$(basename "$PUFFER_LINUX_BIN")"
 BASE_SHA=$(jq -r '.base_commit' "$META")
 TASK_PROMPT=$(jq -r '.task_prompt' "$META")
 
 docker_args=(
   run -d --rm
-  -v "$PUFFER_BIN_ABS:/usr/local/bin/puffer:ro"
+  -v "$PUFFER_LINUX_BIN_ABS:/usr/local/bin/puffer:ro"
   -v "$HOST_ROOT:/host:ro"
   -e HOME=/home/ladybird
   -e OPENAI_API_KEY

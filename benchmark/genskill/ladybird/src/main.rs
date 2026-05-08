@@ -85,7 +85,9 @@ async fn main() -> Result<()> {
             let cfg = replay::ReplayConfig {
                 corpus_entry: entry,
                 arm,
-                puffer_bin_host_path: std::path::PathBuf::from("target/release/puffer"),
+                puffer_bin_host_path: env_nonempty("PUFFER_REPLAY_BIN")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(default_replay_puffer_bin),
                 agent_provider: env_nonempty("PUFFER_EVAL_PROVIDER")
                     .unwrap_or_else(|| "openai".to_string()),
                 agent_model: env_nonempty("PUFFER_EVAL_MODEL")
@@ -138,6 +140,15 @@ async fn main() -> Result<()> {
             println!("\n(saved to {})", out_path.display());
             Ok(())
         }
+    }
+}
+
+fn default_replay_puffer_bin() -> std::path::PathBuf {
+    let linux_bin = std::path::PathBuf::from("benchmark/genskill/ladybird/.bin/puffer-linux");
+    if linux_bin.exists() {
+        linux_bin
+    } else {
+        std::path::PathBuf::from("target/release/puffer")
     }
 }
 
