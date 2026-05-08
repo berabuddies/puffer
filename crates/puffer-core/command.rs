@@ -11,6 +11,7 @@ use crate::command_helpers::{
     record_command_checkpoint, reload_config_from_disk, remove_provider_credentials,
     render_login_guidance, rewind_transcript, run_doctor, run_provider_login_flow,
     should_hide_terminal_setup_command, supports_auth_mode, terminal_setup_command_description,
+    handle_genskill_command,
 };
 use crate::{
     render_buddy_summary, render_cost_summary, render_status_summary, render_usage_summary,
@@ -191,6 +192,13 @@ pub fn supported_commands() -> Vec<CommandSpec> {
             &["objective"],
             "Set or view the goal for a long-running task",
             Some("[<text> | clear | budget <N> | status]"),
+            CommandKind::Local,
+        ),
+        cmd(
+            "genskill",
+            &[],
+            "Generate a reusable skill from the current conversation",
+            Some("[--candidates N] [--rounds K]"),
             CommandKind::Local,
         ),
         cmd(
@@ -864,6 +872,10 @@ fn execute_local_command(
         }
         "effort" => handle_effort_command(state, providers, session_store, args),
         "fast" => handle_fast_command(state, session_store, args),
+        "genskill" => {
+            let message = handle_genskill_command(state, resources, providers, auth_store, args)?;
+            emit_system(state, session_store, message)
+        }
         "theme" => {
             if args.is_empty() {
                 emit_system(

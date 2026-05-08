@@ -8,6 +8,7 @@ mod config;
 mod doctor;
 mod ecosystem;
 mod goal;
+mod genskill;
 mod model;
 mod plugins;
 pub(crate) mod prompt;
@@ -45,6 +46,7 @@ pub(crate) use ecosystem::{
     render_mcp_actions, render_mcp_summary,
 };
 pub(crate) use goal::handle_goal_command;
+pub(crate) use genskill::handle_genskill_command;
 pub(crate) use model::{
     apply_model_preferences, handle_effort_command, handle_fast_command, handle_model_command,
 };
