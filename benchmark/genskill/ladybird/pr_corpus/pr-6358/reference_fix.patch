@@ -1,0 +1,53 @@
+diff --git a/Libraries/LibGfx/ImageFormats/GIFLoader.cpp b/Libraries/LibGfx/ImageFormats/GIFLoader.cpp
+index bd5144667a39e..b7272810f9e59 100644
+--- a/Libraries/LibGfx/ImageFormats/GIFLoader.cpp
++++ b/Libraries/LibGfx/ImageFormats/GIFLoader.cpp
+@@ -189,7 +189,10 @@ static ErrorOr<void> decode_frame(GIFLoadingContext& context, size_t frame_index
+         if (image->lzw_min_code_size > 8)
+             return Error::from_string_literal("LZW minimum code size is greater than 8");
+ 
+-        auto decoded_stream = TRY(Compress::LzwDecompressor<LittleEndianInputBitStream>::decompress_all(image->lzw_encoded_bytes, image->lzw_min_code_size));
++        ByteBuffer decoded_stream;
++        if (!image->lzw_encoded_bytes.is_empty()) {
++            decoded_stream = TRY(Compress::LzwDecompressor<LittleEndianInputBitStream>::decompress_all(image->lzw_encoded_bytes, image->lzw_min_code_size));
++        }
+ 
+         auto const& color_map = image->use_global_color_map ? context.logical_screen.color_map : image->color_map;
+ 
+@@ -237,8 +240,8 @@ static ErrorOr<void> decode_frame(GIFLoadingContext& context, size_t frame_index
+ 
+ static ErrorOr<void> load_header_and_logical_screen(GIFLoadingContext& context)
+ {
+-    if (TRY(context.stream.size()) < 32)
+-        return Error::from_string_literal("Size too short for GIF frame descriptors");
++    if (TRY(context.stream.size()) < 26)
++        return Error::from_string_literal("Size too short for minimal GIF structure");
+ 
+     TRY(decode_gif_header(context.stream));
+ 
+diff --git a/Tests/LibGfx/TestImageDecoder.cpp b/Tests/LibGfx/TestImageDecoder.cpp
+index bda3bd5150b1c..89f6fbb246ce1 100644
+--- a/Tests/LibGfx/TestImageDecoder.cpp
++++ b/Tests/LibGfx/TestImageDecoder.cpp
+@@ -215,6 +215,17 @@ TEST_CASE(test_gif_without_global_color_table)
+     EXPECT_EQ(frame.image->get_pixel(0, 0), Gfx::Color::NamedColor::Red);
+ }
+ 
++TEST_CASE(test_gif_empty_lzw_data)
++{
++    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("gif/minimal-1x1.gif"sv)));
++    EXPECT(Gfx::GIFImageDecoderPlugin::sniff(file->bytes()));
++    auto plugin_decoder = TRY_OR_FAIL(Gfx::GIFImageDecoderPlugin::create(file->bytes()));
++
++    EXPECT_EQ(plugin_decoder->frame_count(), 1u);
++    auto frame = TRY_OR_FAIL(plugin_decoder->frame(0));
++    EXPECT_EQ(frame.image->size(), Gfx::IntSize(1, 1));
++}
++
+ TEST_CASE(test_not_ico)
+ {
+     auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("png/buggie.png"sv)));
+diff --git a/Tests/LibGfx/test-inputs/gif/minimal-1x1.gif b/Tests/LibGfx/test-inputs/gif/minimal-1x1.gif
+new file mode 100644
+index 0000000000000..264e471abd043
+Binary files /dev/null and b/Tests/LibGfx/test-inputs/gif/minimal-1x1.gif differ
