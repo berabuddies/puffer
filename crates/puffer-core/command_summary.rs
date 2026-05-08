@@ -396,6 +396,12 @@ fn session_status_lines(state: &AppState) -> Vec<String> {
     if let Some(remote_status) = state.remote_session_status.as_deref() {
         lines.push(format!("Remote status: {remote_status}"));
     }
+    if let Some(goal) = state.session_goal.as_ref() {
+        lines.push(format!("Goal: {}", goal.objective));
+        if let Some(budget) = goal.token_budget {
+            lines.push(format!("Goal budget: {budget} tokens"));
+        }
+    }
     lines
 }
 

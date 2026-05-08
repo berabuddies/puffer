@@ -2,15 +2,15 @@ use crate::command_helpers::{
     append_tool_invocations, append_trace_events, describe_context, describe_files_in_context,
     describe_git_diff, emit_system, execute_skill_command, handle_agents_command,
     handle_branch_command, handle_config_command, handle_copy_command, handle_effort_command,
-    handle_export_command, handle_fast_command, handle_hooks_command, handle_ide_command,
-    handle_keybindings_command, handle_mcp_command, handle_memory_command, handle_model_command,
-    handle_permissions_command, handle_plan_command, handle_plugin_command, handle_reflect_command,
-    handle_remote_control_command, handle_remote_env_command, handle_resume_command,
-    handle_sandbox_command, handle_session_command, handle_tag_command, handle_tasks_command,
-    handle_terminal_setup_command, list_skills, persist_user_settings, record_command_checkpoint,
-    reload_config_from_disk, remove_provider_credentials, render_login_guidance, rewind_transcript,
-    run_doctor, run_provider_login_flow, should_hide_terminal_setup_command, supports_auth_mode,
-    terminal_setup_command_description,
+    handle_export_command, handle_fast_command, handle_goal_command, handle_hooks_command,
+    handle_ide_command, handle_keybindings_command, handle_mcp_command, handle_memory_command,
+    handle_model_command, handle_permissions_command, handle_plan_command, handle_plugin_command,
+    handle_reflect_command, handle_remote_control_command, handle_remote_env_command,
+    handle_resume_command, handle_sandbox_command, handle_session_command, handle_tag_command,
+    handle_tasks_command, handle_terminal_setup_command, list_skills, persist_user_settings,
+    record_command_checkpoint, reload_config_from_disk, remove_provider_credentials,
+    render_login_guidance, rewind_transcript, run_doctor, run_provider_login_flow,
+    should_hide_terminal_setup_command, supports_auth_mode, terminal_setup_command_description,
 };
 use crate::{
     render_buddy_summary, render_cost_summary, render_status_summary, render_usage_summary,
@@ -185,6 +185,13 @@ pub fn supported_commands() -> Vec<CommandSpec> {
             "Toggle fast mode",
             Some("[on|off]"),
             CommandKind::Ui,
+        ),
+        cmd(
+            "goal",
+            &["objective"],
+            "Set or view the goal for a long-running task",
+            Some("[<text> | clear | budget <N> | status]"),
+            CommandKind::Local,
         ),
         cmd(
             "help",
@@ -901,6 +908,7 @@ fn execute_local_command(
             emit_system(state, session_store, text)
         }
         "plan" => handle_plan_command(state, resources, providers, auth_store, session_store, args),
+        "goal" => handle_goal_command(state, session_store, args),
         "reflect" => handle_reflect_command(state, session_store, args),
         "agents" => handle_agents_command(state, session_store, args),
         "memory" => handle_memory_command(state, session_store, args),

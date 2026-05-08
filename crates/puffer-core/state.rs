@@ -67,6 +67,24 @@ pub(crate) struct ClaudeReadState {
     pub(crate) is_partial_view: bool,
 }
 
+/// Session-scoped goal record set via `/goal`. Mirrors the public-facing
+/// shape of Codex's per-thread goal (`codex/codex-rs/core/src/goals.rs`):
+/// a free-form `objective` plus an optional `token_budget`. We do not yet
+/// auto-track token usage against the budget — surfacing the goal to the
+/// user is the bar for the MVP. Persisted across turns within a session
+/// but not across sessions (lives only on `AppState`, not in
+/// `SessionMetadata`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionGoal {
+    /// The user-provided objective string. Trimmed at parse time.
+    pub objective: String,
+    /// Optional token budget the user attached. `None` means open-ended.
+    pub token_budget: Option<u32>,
+    /// Wall-clock timestamp (Unix ms) when the goal was set. Used by
+    /// `/status` and `/goal` to render an elapsed-time hint.
+    pub set_at_ms: u128,
+}
+
 /// Stores the mutable session and UI state for one interactive Puffer run.
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -99,6 +117,12 @@ pub struct AppState {
     pub vim_mode: bool,
     /// Session-scoped reflection policy toggled via `/reflect`; `None` means off.
     pub reflection_config: Option<ReflectionConfig>,
+    /// Optional persisted goal for the current session, set via `/goal`.
+    /// Borrows the shape of Codex's per-thread goal (`codex/codex-rs/core/src/goals.rs`)
+    /// — objective text + creation timestamp + optional token budget.
+    /// Visible in `/status` so long-running tasks have a reference
+    /// point on every check-in.
+    pub session_goal: Option<SessionGoal>,
     pub should_exit: bool,
     pub reload_resources_requested: bool,
     pub(crate) claude_read_state: HashMap<PathBuf, ClaudeReadState>,
@@ -175,6 +199,7 @@ impl AppState {
             status_line_text: None,
             vim_mode,
             reflection_config: None,
+            session_goal: None,
             should_exit: false,
             reload_resources_requested: false,
             claude_read_state: HashMap::new(),
