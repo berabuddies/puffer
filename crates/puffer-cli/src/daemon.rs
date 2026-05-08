@@ -35,9 +35,10 @@ use puffer_config::{
     ensure_workspace_dirs, load_config, save_user_config, ConfigPaths, PufferConfig,
 };
 use puffer_core::{
-    execute_user_turn_streaming_with_permissions_and_cancel, with_user_question_prompt_handler,
-    AppState, CancelToken, MessageRole, PermissionPromptAction, PermissionPromptRequest,
-    TurnStreamEvent, UserQuestionPromptRequest, UserQuestionPromptResponse,
+    apply_model_preferences, execute_user_turn_streaming_with_permissions_and_cancel,
+    with_user_question_prompt_handler, AppState, CancelToken, MessageRole, PermissionPromptAction,
+    PermissionPromptRequest, TurnStreamEvent, UserQuestionPromptRequest,
+    UserQuestionPromptResponse,
 };
 use puffer_provider_openai::{
     exchange_authorization_code as exchange_openai_authorization_code,
@@ -1929,6 +1930,13 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         .and_then(|v| v.as_str())
         .context("missing message")?
         .to_string();
+    let model_override = params
+        .get("modelOverride")
+        .or_else(|| params.get("model_override"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
 
     // Parse cheap, non-tokio-touching things synchronously so we can fail
     // fast with a clean error. Anything that builds a runtime (i.e. the
@@ -1970,6 +1978,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     let setup_state = state.clone();
     let message_for_thread = message.clone();
     let session_id_for_thread = session_id.clone();
+    let model_override_for_thread = model_override.clone();
     std::thread::spawn(move || {
         setup_state.publish_event(ServerEnvelope::Event {
             event: channel_thread.clone(),
@@ -2041,6 +2050,22 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         };
         let cfg_for_turn = setup_state.config.lock().unwrap().clone();
         let mut app_state = AppState::from_session_record(cfg_for_turn.clone(), record);
+        if let Some(model_override) = model_override_for_thread.as_deref() {
+            if let Err(err) =
+                apply_turn_model_override(&mut app_state, &inputs.providers, model_override)
+            {
+                setup_state.publish_event(ServerEnvelope::Event {
+                    event: channel_thread.clone(),
+                    payload: json!({
+                        "type": "turn-error",
+                        "turnId": turn_id_thread,
+                        "error": format!("modelOverride: {err:#}"),
+                    }),
+                });
+                setup_state.turns.lock().unwrap().remove(&turn_id_thread);
+                return;
+            }
+        }
         let runner = crate::runner_selection::select_tool_runner(
             &cfg_for_turn,
             &inputs.resources,
@@ -2278,12 +2303,52 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     Ok(json!({"turnId": turn_id_resp}))
 }
 
+fn apply_turn_model_override(
+    app_state: &mut AppState,
+    providers: &ProviderRegistry,
+    requested: &str,
+) -> Result<()> {
+    let (provider_id, model_id) = if let Some((provider_id, model_id)) = requested.split_once('/') {
+        let provider = providers
+            .provider(provider_id)
+            .with_context(|| format!("provider {provider_id} not found"))?;
+        let model = provider
+            .models
+            .iter()
+            .find(|model| model.id == model_id)
+            .with_context(|| format!("model {requested} not found"))?;
+        (provider.id.clone(), model.id.clone())
+    } else {
+        let (provider, model) = providers
+            .providers()
+            .find_map(|provider| {
+                provider
+                    .models
+                    .iter()
+                    .find(|model| model.id == requested)
+                    .map(|model| (provider, model))
+            })
+            .with_context(|| format!("model {requested} not found"))?;
+        (provider.id.clone(), model.id.clone())
+    };
+
+    let effort = app_state.effort_level.clone();
+    let fast_mode = app_state.fast_mode;
+    apply_model_preferences(app_state, &provider_id, &model_id, &effort, fast_mode)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{handle_create_session, DaemonState};
-    use puffer_config::{ensure_workspace_dirs, ConfigPaths};
-    use puffer_session_store::SessionStore;
+    use super::{apply_turn_model_override, handle_create_session, DaemonState};
+    use indexmap::IndexMap;
+    use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
+    use puffer_core::AppState;
+    use puffer_provider_registry::{
+        Modality, ModelDescriptor, ProviderDescriptor, ProviderRegistry,
+    };
+    use puffer_session_store::{SessionMetadata, SessionStore};
     use serde_json::json;
+    use uuid::Uuid;
 
     #[test]
     fn create_session_accepts_display_name() {
@@ -2326,5 +2391,72 @@ mod tests {
             Some("Managed Agent")
         );
         assert_eq!(session.metadata.generated_title, None);
+    }
+
+    #[test]
+    fn turn_model_override_selects_matching_provider_model() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let metadata = SessionMetadata {
+            id: Uuid::new_v4(),
+            display_name: None,
+            generated_title: None,
+            cwd: temp.path().to_path_buf(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        };
+        let mut state = AppState::new(PufferConfig::default(), temp.path().to_path_buf(), metadata);
+        state.effort_level = "off".to_string();
+        state.fast_mode = true;
+
+        let mut providers = ProviderRegistry::new();
+        providers.register(provider("openai", &["gpt-5.4"]));
+        providers.register(provider("anthropic", &["claude-sonnet-4-5"]));
+
+        apply_turn_model_override(&mut state, &providers, "anthropic/claude-sonnet-4-5")
+            .expect("override");
+
+        assert_eq!(state.current_provider.as_deref(), Some("anthropic"));
+        assert_eq!(
+            state.current_model.as_deref(),
+            Some("anthropic/claude-sonnet-4-5")
+        );
+        assert_eq!(
+            state.config.default_model.as_deref(),
+            Some("anthropic/claude-sonnet-4-5")
+        );
+        assert_eq!(state.effort_level, "off");
+        assert!(state.fast_mode);
+    }
+
+    fn provider(id: &str, models: &[&str]) -> ProviderDescriptor {
+        ProviderDescriptor {
+            id: id.to_string(),
+            display_name: id.to_string(),
+            base_url: "https://example.invalid".to_string(),
+            default_api: "openai-responses".to_string(),
+            auth_modes: Vec::new(),
+            headers: IndexMap::new(),
+            query_params: IndexMap::new(),
+            discovery: None,
+            models: models
+                .iter()
+                .map(|model| ModelDescriptor {
+                    id: (*model).to_string(),
+                    display_name: (*model).to_string(),
+                    provider: id.to_string(),
+                    api: "openai-responses".to_string(),
+                    context_window: 128_000,
+                    max_output_tokens: 16_384,
+                    supports_reasoning: true,
+                    input: vec![Modality::Text],
+                    cost: None,
+                    compat: None,
+                })
+                .collect(),
+        }
     }
 }
