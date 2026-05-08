@@ -12,8 +12,8 @@
 //!
 //! So when `config.remote_runner` is set, this module:
 //!   1. Constructs a `RemoteToolRunner` (lazy gRPC channel, no I/O).
-//!   2. Loops calling `runner.ping()` with exponential backoff (capped),
-//!      logging every attempt, until the runner answers.
+//!   2. Optionally loops calling `runner.ping()` with exponential backoff
+//!      (capped), logging every attempt, until the runner answers.
 //!   3. Returns the runner.
 //!
 //! There is **no fallback to `LocalToolRunner`** when a remote is
@@ -45,7 +45,7 @@ pub fn select_tool_runner(
     workspace_root: PathBuf,
 ) -> Arc<dyn ToolRunner> {
     if let Some(remote) = config.remote_runner.as_ref() {
-        return wait_for_remote_runner(remote);
+        return remote_runner(remote);
     }
     // The TUI / in-process flow leaves the sandbox wide open so resource
     // loaders can still reach `~/.config/puffer` and other non-workspace
@@ -58,7 +58,7 @@ pub fn select_tool_runner(
 /// loop until the remote reports back. Construction itself is infallible
 /// because the channel is lazy; the only failure mode here is a malformed
 /// endpoint, which we treat as fatal (panic) to surface a misconfiguration.
-fn wait_for_remote_runner(config: &RemoteRunnerConfig) -> Arc<dyn ToolRunner> {
+fn remote_runner(config: &RemoteRunnerConfig) -> Arc<dyn ToolRunner> {
     let token = config.resolve_auth_token();
     let runner =
         RemoteToolRunner::connect(&config.endpoint, token.as_deref()).unwrap_or_else(|err| {
@@ -67,6 +67,9 @@ fn wait_for_remote_runner(config: &RemoteRunnerConfig) -> Arc<dyn ToolRunner> {
                 config.endpoint
             )
         });
+    if !config.wait_for_ready {
+        return Arc::new(runner);
+    }
 
     let initial = Duration::from_millis(
         config
