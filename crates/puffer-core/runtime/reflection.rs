@@ -124,6 +124,76 @@ impl Default for LlmJudgePromptCacheMode {
     }
 }
 
+/// Dispatch axis for the LLM judge — how it produces its verdict.
+///
+/// Mirrors the architectural choice in Claude Code's "Define Outcomes"
+/// (https://platform.claude.com/docs/en/managed-agents/define-outcomes):
+/// the grader runs in a "separate context window to avoid being
+/// influenced by the main agent's implementation choices." CC always
+/// dispatches the grader as a sub-agent; puffer offers both modes so
+/// the cheaper one-shot path stays available for transcript-only
+/// judgements that don't need filesystem evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmJudgeStrategy {
+    /// One LLM round-trip with the rendered conversation context as
+    /// the entire input. Fastest, cheapest, deterministic. Best when
+    /// the judgement is self-contained in the transcript (e.g. "did
+    /// the model converge?"). Default — preserves prior behavior.
+    SingleCall,
+    /// Spawn a sub-agent with read-only verification tools (Read,
+    /// Grep, Glob). The sub-agent iterates: opens the file the main
+    /// agent claimed to edit, greps for a referenced symbol, etc.
+    /// Returns the same `JudgeSignal` shape but with grounded
+    /// evidence. More expensive, more accurate for verification-heavy
+    /// judgements. Mirrors CC's "Define Outcomes" grader pattern.
+    SubAgent {
+        /// Suggested upper bound on the sub-agent's tool calls. The
+        /// sub-agent is *instructed* to stop within this budget but
+        /// the loop does not hard-cap (matching CC, where
+        /// `max_iterations` defaults to 3 and tops out at 20). The
+        /// model is trusted to converge; in practice 1–3 read-tool
+        /// calls is plenty for verification.
+        max_iterations: u32,
+    },
+}
+
+impl Default for LlmJudgeStrategy {
+    fn default() -> Self {
+        Self::SingleCall
+    }
+}
+
+/// Default sub-agent iteration budget when the env var doesn't override.
+/// Matches Claude Code's `max_iterations: 3` default.
+pub const DEFAULT_LLM_JUDGE_SUBAGENT_ITERATIONS: u32 = 3;
+
+impl LlmJudgeStrategy {
+    /// Reads `PUFFER_REFLECTION_JUDGE_STRATEGY` and (when sub-agent)
+    /// `PUFFER_REFLECTION_JUDGE_MAX_ITERATIONS`. Returns `None` when
+    /// the env var is absent so callers can keep the configured /
+    /// default value.
+    ///
+    /// Accepted values for `PUFFER_REFLECTION_JUDGE_STRATEGY`
+    /// (case-insensitive):
+    /// - `single_call` / `single` / `inline` → `SingleCall`
+    /// - `sub_agent`   / `subagent` / `agent` → `SubAgent { … }`
+    pub fn from_env() -> Option<Self> {
+        let raw = std::env::var("PUFFER_REFLECTION_JUDGE_STRATEGY").ok()?;
+        let normalized = raw.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "single_call" | "single" | "inline" => Some(Self::SingleCall),
+            "sub_agent" | "subagent" | "agent" => {
+                let max_iterations = std::env::var("PUFFER_REFLECTION_JUDGE_MAX_ITERATIONS")
+                    .ok()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(DEFAULT_LLM_JUDGE_SUBAGENT_ITERATIONS);
+                Some(Self::SubAgent { max_iterations })
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Configures the optional LLM-based reflection judge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LlmJudgeConfig {
@@ -135,6 +205,9 @@ pub struct LlmJudgeConfig {
     pub recent_item_count: usize,
     pub max_context_chars: usize,
     pub max_tool_output_chars: usize,
+    /// Dispatch path: one-shot prompt vs evidence-gathering sub-agent.
+    /// See `LlmJudgeStrategy` for the design rationale.
+    pub strategy: LlmJudgeStrategy,
 }
 
 impl Default for LlmJudgeConfig {
@@ -148,6 +221,7 @@ impl Default for LlmJudgeConfig {
             recent_item_count: 12,
             max_context_chars: 12_000,
             max_tool_output_chars: 1_200,
+            strategy: LlmJudgeStrategy::from_env().unwrap_or_default(),
         }
     }
 }
@@ -367,6 +441,7 @@ impl ReflectionTracker {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn observe_batch_with_judge(
         &mut self,
         invocations: &[ToolInvocation],
@@ -375,6 +450,9 @@ impl ReflectionTracker {
         resources: &LoadedResources,
         providers: &ProviderRegistry,
         auth_store: &mut AuthStore,
+        // Parent loop's cancel token; threaded into the LLM judge
+        // sub-agent path so user Ctrl+C stops an in-flight grader.
+        cancel: Option<&super::CancelToken>,
     ) -> Option<ReflectionObservation> {
         let observation = self.observe_batch_internal(invocations, unix_time_ms())?;
         let mut trace_events = vec![batch_observed_event(
@@ -416,6 +494,7 @@ impl ReflectionTracker {
             providers,
             auth_store,
             &mut trace_events,
+            cancel,
         );
         let final_signal = select_final_signal(
             self.config.llm_judge.as_ref().map(|config| config.mode),
@@ -740,6 +819,7 @@ impl ReflectionTracker {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn llm_judge_signal(
         &self,
         assessment: &BatchAssessment,
@@ -750,6 +830,7 @@ impl ReflectionTracker {
         providers: &ProviderRegistry,
         auth_store: &mut AuthStore,
         trace_events: &mut Vec<ReflectionTraceEvent>,
+        cancel: Option<&super::CancelToken>,
     ) -> Option<Option<JudgeSignal>> {
         let Some(config) = self.config.llm_judge.as_ref() else {
             trace_events.push(llm_judge_disabled_event(
@@ -777,6 +858,7 @@ impl ReflectionTracker {
             resources,
             providers,
             auth_store,
+            cancel,
         );
         trace_events.push(llm_judge_request_event(config, &attempt));
         if let Some(error) = &attempt.error {

@@ -46,6 +46,68 @@ fn llm_judge_defaults_use_gpt_54_low_and_current_window() {
 }
 
 #[test]
+fn llm_judge_strategy_default_is_single_call_when_env_unset() {
+    // Use a fresh AppState path: clear env then construct default.
+    let _guard = ENV_LOCK.lock().unwrap();
+    let prior = std::env::var("PUFFER_REFLECTION_JUDGE_STRATEGY").ok();
+    std::env::remove_var("PUFFER_REFLECTION_JUDGE_STRATEGY");
+    let config = LlmJudgeConfig::default();
+    assert_eq!(config.strategy, LlmJudgeStrategy::SingleCall);
+    if let Some(value) = prior {
+        std::env::set_var("PUFFER_REFLECTION_JUDGE_STRATEGY", value);
+    }
+}
+
+#[test]
+fn llm_judge_strategy_from_env_parses_aliases() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let prior = std::env::var("PUFFER_REFLECTION_JUDGE_STRATEGY").ok();
+    let prior_iters = std::env::var("PUFFER_REFLECTION_JUDGE_MAX_ITERATIONS").ok();
+
+    for raw in ["single_call", "single", "inline", "SINGLE_CALL"] {
+        std::env::set_var("PUFFER_REFLECTION_JUDGE_STRATEGY", raw);
+        assert_eq!(
+            LlmJudgeStrategy::from_env(),
+            Some(LlmJudgeStrategy::SingleCall)
+        );
+    }
+    for raw in ["sub_agent", "subagent", "agent", "Sub_Agent"] {
+        std::env::set_var("PUFFER_REFLECTION_JUDGE_STRATEGY", raw);
+        std::env::remove_var("PUFFER_REFLECTION_JUDGE_MAX_ITERATIONS");
+        // Default 3 when MAX_ITERATIONS unset.
+        assert_eq!(
+            LlmJudgeStrategy::from_env(),
+            Some(LlmJudgeStrategy::SubAgent { max_iterations: 3 })
+        );
+    }
+    std::env::set_var("PUFFER_REFLECTION_JUDGE_STRATEGY", "agent");
+    std::env::set_var("PUFFER_REFLECTION_JUDGE_MAX_ITERATIONS", "7");
+    assert_eq!(
+        LlmJudgeStrategy::from_env(),
+        Some(LlmJudgeStrategy::SubAgent { max_iterations: 7 })
+    );
+
+    // Garbage strategy → None (caller falls back to default).
+    std::env::set_var("PUFFER_REFLECTION_JUDGE_STRATEGY", "nonsense");
+    assert_eq!(LlmJudgeStrategy::from_env(), None);
+
+    std::env::remove_var("PUFFER_REFLECTION_JUDGE_STRATEGY");
+    std::env::remove_var("PUFFER_REFLECTION_JUDGE_MAX_ITERATIONS");
+    assert_eq!(LlmJudgeStrategy::from_env(), None, "absent env → None");
+    if let Some(v) = prior {
+        std::env::set_var("PUFFER_REFLECTION_JUDGE_STRATEGY", v);
+    }
+    if let Some(v) = prior_iters {
+        std::env::set_var("PUFFER_REFLECTION_JUDGE_MAX_ITERATIONS", v);
+    }
+}
+
+/// Process-global mutex for tests that mutate env vars used by
+/// `LlmJudgeStrategy::from_env`. Without serialization these tests
+/// race when run with `--test-threads > 1`.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[test]
 fn llm_judge_side_state_inherits_main_agent_cache_key_by_default() {
     let mut state = crate::AppState::new(
         PufferConfig::default(),
@@ -81,6 +143,44 @@ fn llm_judge_side_state_inherits_main_agent_cache_key_by_default() {
     assert_eq!(
         side_state.prompt_cache_key_override.as_deref(),
         Some("main-cache-key")
+    );
+}
+
+/// Recursion guard: a sub-agent grader must NOT inherit the parent's
+/// `reflection_config`, otherwise `apply_session_reflection_default`
+/// would re-inject it into the sub-agent's `TurnRequestOptions` and
+/// each judge would spawn its own grader sub-agent indefinitely.
+/// `build_llm_judge_side_state` is the single chokepoint that has to
+/// clear it; this test pins that contract.
+#[test]
+fn llm_judge_side_state_clears_reflection_config_to_prevent_recursion() {
+    let mut state = crate::AppState::new(
+        PufferConfig::default(),
+        std::env::temp_dir(),
+        SessionMetadata {
+            id: Uuid::nil(),
+            display_name: None,
+            generated_title: None,
+            cwd: std::env::temp_dir(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        },
+    );
+    // Parent has reflection enabled (the common case for any user
+    // who turned on `/reflect`). The clone-and-clear contract must
+    // strip it from the side state.
+    state.reflection_config = Some(super::ReflectionConfig::default());
+
+    let config = LlmJudgeConfig::default();
+    let side_state = judge::build_llm_judge_side_state(&state, &config, "judge prompt");
+
+    assert!(
+        side_state.reflection_config.is_none(),
+        "side state must not inherit parent reflection_config (recursion guard)"
     );
 }
 
@@ -333,6 +433,7 @@ fn llm_judge_skipped_event_fires_when_llm_judge_is_disabled() {
         &resources,
         &providers,
         &mut auth_store,
+        None,
     );
 
     // Batch 2: batch_count=2, total_tool_calls=4, stall score >= 4. Evaluation
@@ -350,6 +451,7 @@ fn llm_judge_skipped_event_fires_when_llm_judge_is_disabled() {
             &resources,
             &providers,
             &mut auth_store,
+            None,
         )
         .expect("second batch should produce an observation");
 

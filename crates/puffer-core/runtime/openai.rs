@@ -368,6 +368,10 @@ where
                 resources,
                 providers,
                 auth_store,
+                // Legacy openai path doesn't thread the agent loop's
+                // cancel token in today; preserved as None. Same
+                // follow-up note as websocket.rs.
+                None,
             )
         }) {
             for trace_event in &observation.trace_events {
@@ -1263,6 +1267,7 @@ fn run_responses_attempt(
         tool_filter: options.tool_filter,
         registry: &registry,
         cancel: options.cancel,
+        max_turns: options.max_turns,
         observability: options.observability.clone(),
     };
     match on_event {
@@ -1418,6 +1423,7 @@ fn run_completions_attempt(
         tool_filter: options.tool_filter,
         registry: &registry,
         cancel: options.cancel,
+        max_turns: options.max_turns,
         observability: options.observability.clone(),
     };
     match on_event {

@@ -31,6 +31,11 @@ pub(crate) fn run_blocking_loop(
 
     let mut invocations: Vec<ToolInvocation> = Vec::new();
     let mut reflection_traces: Vec<ReflectionTraceEvent> = Vec::new();
+    // Carries the most recent assistant text across iterations so the
+    // `max_turns` break path can return whatever reasoning the model
+    // produced before its budget was cut. Empty until the first
+    // provider response.
+    let mut last_assistant_text = String::new();
     let mut reflection = inputs
         .reflection_config
         .clone()
@@ -134,6 +139,26 @@ pub(crate) fn run_blocking_loop(
                 return Err(error);
             }
         }
+        // Hard cap on inner-loop iterations — see streaming loop. Used
+        // by reflection sub-agents to bound a grader's tool-use budget.
+        // Returns whatever assistant text the model produced on its
+        // last full round-trip; tool calls from the in-progress turn
+        // are abandoned (the budget is exhausted, by design).
+        if let Some(max_turns) = inputs.max_turns {
+            if turn_index >= max_turns {
+                agent_span.set_str("puffer.subagent.max_turns_reached", "true");
+                agent_span.set_content(
+                    puffer_observability::LANGFUSE_TRACE_OUTPUT,
+                    puffer_observability::ContentKind::Output,
+                    &last_assistant_text,
+                );
+                return Ok(TurnExecution {
+                    assistant_text: last_assistant_text,
+                    tool_invocations: invocations,
+                    reflection_traces,
+                });
+            }
+        }
         // Per-iteration microcompact (idempotent — see streaming loop comment).
         maybe_microcompact(inputs.state, &mut items, Some(&mut agent_span));
         let mut turn_span = puffer_observability::start_turn_span(
@@ -179,6 +204,7 @@ pub(crate) fn run_blocking_loop(
                 return Err(error);
             }
         };
+        last_assistant_text.clone_from(&turn.assistant_text);
         provider_span.set_content(
             puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
             puffer_observability::ContentKind::Output,
@@ -265,6 +291,7 @@ pub(crate) fn run_blocking_loop(
                 inputs.resources,
                 inputs.providers,
                 inputs.auth_store,
+                inputs.cancel,
             )
         }) {
             reflection_traces.extend(observation.trace_events);

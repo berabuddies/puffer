@@ -89,6 +89,56 @@ Output JSON schema:\n\
     }
 }
 
+/// Wraps `build_llm_judge_prompt` with a verification preamble that
+/// instructs the sub-agent to use Read/Grep/Glob to ground its
+/// judgement in actual filesystem evidence before producing JSON.
+///
+/// Mirrors the philosophy of CC's "Define Outcomes" grader: a judge
+/// with its own context window and tools, evaluating against criteria.
+pub(super) fn build_llm_judge_subagent_prompt(
+    language: ReflectionLanguage,
+    goal: &str,
+    assessment: &BatchAssessment,
+    code_signal: Option<&JudgeSignal>,
+    context: &str,
+    relevant_paths: &str,
+    max_iterations: u32,
+) -> String {
+    let inner = build_llm_judge_prompt(
+        language,
+        goal,
+        assessment,
+        code_signal,
+        context,
+        relevant_paths,
+    );
+    let preamble = match language {
+        ReflectionLanguage::Chinese => format!(
+            "你被分配为一个独立的判断 sub-agent — 独立于主 agent 的上下文窗口，可以使用以下只读工具去验证主 agent 的工作：\n\
+- Read：读文件确认主 agent 声称的修改是否存在\n\
+- Grep：搜符号、引用、错误信息\n\
+- Glob：列文件\n\n\
+请最多使用 {max_iterations} 次工具调用收集证据，然后再输出最终 JSON。\n\
+不要做任何写操作（无 Edit/Write/Bash），你的职责是判断不是修复。\n\
+工具调用结束后，按下面要求只输出一个 JSON 对象。\n\n\
+==== 判断任务开始 ====\n\n",
+            max_iterations = max_iterations,
+        ),
+        ReflectionLanguage::English => format!(
+            "You are a dedicated judge sub-agent running in a context window separate from the main agent. You have these read-only verification tools:\n\
+- Read: open a file to confirm a claimed edit is present\n\
+- Grep: search for a referenced symbol or error message\n\
+- Glob: list files\n\n\
+Use at most {max_iterations} tool calls to gather evidence, then return the final JSON.\n\
+Do NOT perform any write operation (no Edit/Write/Bash). You judge, you do not repair.\n\
+After your tool-use phase, output one JSON object as specified below and nothing else.\n\n\
+==== Judgement task begins ====\n\n",
+            max_iterations = max_iterations,
+        ),
+    };
+    format!("{preamble}{inner}")
+}
+
 pub(super) fn render_judge_lines(signal: &JudgeSignal) -> String {
     let mut lines = vec![
         format!("- source: {}", signal.source),

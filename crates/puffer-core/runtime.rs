@@ -146,6 +146,17 @@ struct TurnRequestOptions<'a> {
     /// Cooperative cancellation token. When set, the agent loop checks
     /// it at every turn boundary. See [`CancelToken`].
     cancel: Option<&'a CancelToken>,
+    /// Hard cap on inner-loop iterations (provider round-trips). When
+    /// `Some(N)`, the agent loop bails after N iterations regardless
+    /// of whether the model is still requesting tool calls. Mirrors
+    /// Claude Code's `runForkedAgent.maxTurns` (cc-src
+    /// `utils/forkedAgent.ts:103`; v2.1.131 `compact` fork uses
+    /// `maxTurns: 1`). `None` keeps the existing unbounded behavior
+    /// — the loop exits only when the model stops requesting tools.
+    /// Used by [`subagent::execute_subagent`] to bound grader-style
+    /// sub-agents that would otherwise loop indefinitely on a soft
+    /// prompt-side budget.
+    max_turns: Option<u32>,
     /// Optional observability handle. When set, the agent loop wraps
     /// each turn / provider call / tool batch in OTel spans and pushes
     /// them to the configured OTLP endpoint (typically Langfuse).
@@ -319,6 +330,7 @@ pub(crate) fn execute_user_prompt_with_tool_filter(
             tool_filter,
             reflection: None,
             cancel: None,
+            max_turns: None,
             observability: None,
         },
     )
@@ -398,6 +410,7 @@ pub fn execute_user_prompt_with_structured_output(
             tool_filter: None,
             reflection: None,
             cancel: None,
+            max_turns: None,
             observability: None,
         },
     )
@@ -495,6 +508,7 @@ where
                 tool_filter: None,
                 reflection: None,
                 cancel: None,
+                max_turns: None,
                 observability: None,
             },
             &mut on_event,
@@ -535,6 +549,7 @@ where
                 tool_filter: None,
                 reflection: None,
                 cancel: Some(cancel),
+                max_turns: None,
                 observability: None,
             },
             &mut on_event,
@@ -567,6 +582,7 @@ where
             tool_filter: None,
             reflection: None,
             cancel: None,
+            max_turns: None,
             observability: None,
         },
         &mut on_event,
@@ -602,6 +618,7 @@ where
             tool_filter: None,
             reflection: None,
             cancel: Some(cancel),
+            max_turns: None,
             observability: None,
         },
         &mut on_event,
@@ -632,6 +649,7 @@ where
             tool_filter: None,
             reflection: Some(reflection),
             cancel: None,
+            max_turns: None,
             observability: None,
         },
         &mut on_event,

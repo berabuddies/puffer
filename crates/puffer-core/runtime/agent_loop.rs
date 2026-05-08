@@ -138,6 +138,15 @@ pub(crate) struct LoopInputs<'a> {
     /// the loop runs uninterruptibly. Mirrors pi-mono's `signal:
     /// AbortSignal` (`pi-mono/packages/ai/src/types.ts:70`).
     pub cancel: Option<&'a CancelToken>,
+    /// Hard cap on inner-loop iterations (provider round-trips). When
+    /// `Some(N)`, both `run_streaming_loop` and `run_blocking_loop`
+    /// bail after N iterations even if the model is still requesting
+    /// tool calls. `None` keeps the existing unbounded behavior.
+    /// Mirrors Claude Code's `runForkedAgent.maxTurns` shape — the
+    /// `compact` fork in v2.1.131 sets `maxTurns: 1`. Used by
+    /// [`crate::runtime::subagent::execute_subagent`] to bound
+    /// grader-style sub-agents that would otherwise loop indefinitely.
+    pub max_turns: Option<u32>,
     /// Optional observability handle. When `Some`, the loop wraps
     /// each turn / provider call / tool batch in OTel spans and pushes
     /// them to the configured OTLP endpoint (e.g. Langfuse). When
@@ -163,6 +172,11 @@ pub(crate) fn run_streaming_loop(
 
     let mut invocations: Vec<ToolInvocation> = Vec::new();
     let mut reflection_traces: Vec<ReflectionTraceEvent> = Vec::new();
+    // Carries the most recent assistant text across iterations so the
+    // `max_turns` break path can return whatever reasoning the model
+    // produced before its budget was cut. Empty until the first
+    // provider response.
+    let mut last_assistant_text = String::new();
     let mut reflection = inputs
         .reflection_config
         .clone()
@@ -278,6 +292,27 @@ pub(crate) fn run_streaming_loop(
             if let Err(error) = cancel.check() {
                 agent_span.mark_cancelled();
                 return Err(error);
+            }
+        }
+
+        // Hard cap on inner-loop iterations. Mirrors Claude Code's
+        // `runForkedAgent.maxTurns` semantics — when a sub-agent has
+        // burned its budget, return what we have so far rather than
+        // letting the model loop indefinitely. `None` keeps the
+        // existing unbounded behavior for normal user turns.
+        if let Some(max_turns) = inputs.max_turns {
+            if turn_index >= max_turns {
+                agent_span.set_str("puffer.subagent.max_turns_reached", "true");
+                agent_span.set_content(
+                    puffer_observability::LANGFUSE_TRACE_OUTPUT,
+                    puffer_observability::ContentKind::Output,
+                    &last_assistant_text,
+                );
+                return Ok(TurnExecution {
+                    assistant_text: last_assistant_text,
+                    tool_invocations: invocations,
+                    reflection_traces,
+                });
             }
         }
 
@@ -531,6 +566,7 @@ pub(crate) fn run_streaming_loop(
                 return Err(error);
             }
         };
+        last_assistant_text.clone_from(&turn.assistant_text);
         provider_span.set_content(
             puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
             puffer_observability::ContentKind::Output,
@@ -683,6 +719,7 @@ pub(crate) fn run_streaming_loop(
                 inputs.resources,
                 inputs.providers,
                 inputs.auth_store,
+                inputs.cancel,
             )
         }) {
             // Always emit ReflectionTrace events for the TUI / trajectory.

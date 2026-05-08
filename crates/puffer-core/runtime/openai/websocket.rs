@@ -475,6 +475,12 @@ where
                 resources,
                 providers,
                 auth_store,
+                // Websocket path doesn't thread the agent loop's
+                // cancel token in today; passing None preserves the
+                // pre-existing behavior. Threading it through is a
+                // follow-up — the cancel flow on this path needs a
+                // wider audit.
+                None,
             )
         }) {
             for trace_event in &observation.trace_events {

@@ -1,14 +1,19 @@
-use super::llm::{build_llm_judge_prompt, render_llm_judge_context, render_relevant_paths};
+use super::llm::{
+    build_llm_judge_prompt, build_llm_judge_subagent_prompt, render_llm_judge_context,
+    render_relevant_paths,
+};
 use super::{
-    BatchAssessment, JudgeSignal, LlmJudgeConfig, LlmJudgePromptCacheMode, ReflectionLanguage,
+    BatchAssessment, JudgeSignal, LlmJudgeConfig, LlmJudgePromptCacheMode, LlmJudgeStrategy,
+    ReflectionLanguage,
 };
 use crate::runtime::openai::conversation::{items_to_responses_input, ConversationItem};
 use crate::runtime::openai::{
     build_codex_openai_request_body, parse_openai_assistant_text, resolve_openai_execution_config,
     send_openai_request_with_refresh,
 };
+use crate::runtime::request_tool_filter::build_request_tool_filter;
 use crate::runtime::system_prompt::render_runtime_system_prompt;
-use crate::runtime::{execute_user_prompt_with_options, TurnRequestOptions};
+use crate::runtime::{execute_user_prompt_with_options, CancelToken, TurnRequestOptions};
 // `resolve_provider_and_model` / `resolve_model_api` are file-private in
 // `runtime.rs`; pulling them through `super::super` at the import site keeps
 // the reaching-up-two-levels smell confined to one place.
@@ -49,6 +54,7 @@ impl LlmJudgeAttempt {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn run_llm_judge(
     goal: &str,
     relevant_paths: &BTreeSet<String>,
@@ -61,21 +67,70 @@ pub(super) fn run_llm_judge(
     resources: &LoadedResources,
     providers: &ProviderRegistry,
     auth_store: &mut AuthStore,
+    // Parent agent loop's cancel token. Threaded into the sub-agent path
+    // so user Ctrl+C interrupts an in-flight judge instead of burning
+    // more provider calls; ignored by the single-call path (one
+    // round-trip, nothing to interrupt mid-stream).
+    cancel: Option<&CancelToken>,
 ) -> LlmJudgeAttempt {
-    let prompt = build_llm_judge_prompt(
-        language,
-        goal,
-        assessment,
-        code_signal,
-        &render_llm_judge_context(
-            items,
-            config.context_scope,
-            config.recent_item_count,
-            config.max_context_chars,
-            config.max_tool_output_chars,
-        ),
-        &render_relevant_paths(relevant_paths),
+    // Dispatch on strategy. The two paths share `build_llm_judge_side_state`
+    // (= same parent_session_id linkage, fresh trace, etc.) and the same
+    // return type — only the prompt + tool catalog differ.
+    let context = render_llm_judge_context(
+        items,
+        config.context_scope,
+        config.recent_item_count,
+        config.max_context_chars,
+        config.max_tool_output_chars,
     );
+    let relevant = render_relevant_paths(relevant_paths);
+    match config.strategy {
+        LlmJudgeStrategy::SingleCall => run_llm_judge_single_call(
+            language,
+            goal,
+            assessment,
+            code_signal,
+            &context,
+            &relevant,
+            config,
+            state,
+            resources,
+            providers,
+            auth_store,
+        ),
+        LlmJudgeStrategy::SubAgent { max_iterations } => run_llm_judge_subagent(
+            language,
+            goal,
+            assessment,
+            code_signal,
+            &context,
+            &relevant,
+            max_iterations,
+            config,
+            state,
+            resources,
+            providers,
+            auth_store,
+            cancel,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_llm_judge_single_call(
+    language: ReflectionLanguage,
+    goal: &str,
+    assessment: &BatchAssessment,
+    code_signal: Option<&JudgeSignal>,
+    context: &str,
+    relevant: &str,
+    config: &LlmJudgeConfig,
+    state: &AppState,
+    resources: &LoadedResources,
+    providers: &ProviderRegistry,
+    auth_store: &mut AuthStore,
+) -> LlmJudgeAttempt {
+    let prompt = build_llm_judge_prompt(language, goal, assessment, code_signal, context, relevant);
     let mut side_state = build_llm_judge_side_state(state, config, &prompt);
     let mut side_resources = resources.clone();
     side_resources.tools.clear();
@@ -131,6 +186,146 @@ pub(super) fn run_llm_judge(
             tool_filter: None,
             reflection: None,
             cancel: None,
+            max_turns: None,
+            observability: None,
+        },
+    ) {
+        Ok(response) => LlmJudgeAttempt {
+            provider,
+            model,
+            prompt,
+            request_url: None,
+            prompt_cache_key: side_state.prompt_cache_key_override.clone(),
+            request_body: None,
+            raw_response_text: Some(response.assistant_text),
+            raw_response_body: None,
+            response_id: None,
+            input_tokens: side_state.last_input_tokens.map(u64::from),
+            output_tokens: None,
+            cached_input_tokens: None,
+            cache_hit_ratio: side_state
+                .last_cache_hit_ratio
+                .map(|value| format!("{value:.2}")),
+            error: None,
+        },
+        Err(error) => LlmJudgeAttempt {
+            provider,
+            model,
+            prompt,
+            request_url: None,
+            prompt_cache_key: side_state.prompt_cache_key_override.clone(),
+            request_body: None,
+            raw_response_text: None,
+            raw_response_body: None,
+            response_id: None,
+            input_tokens: None,
+            output_tokens: None,
+            cached_input_tokens: None,
+            cache_hit_ratio: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+/// Sub-agent reflection judge. Same side-state plumbing as the
+/// single-call path, but:
+/// - Tool catalog narrowed to `Read`/`Grep`/`Glob` (read-only
+///   verification) via the request-scoped tool filter.
+/// - Prompt instructs the judge to *use* those tools to ground its
+///   verdict in filesystem evidence, then return the same JSON shape.
+/// - `reflection_config` is cleared on the cloned side state and
+///   `TurnRequestOptions.reflection` is `None` (recursion guard —
+///   without both, `apply_session_reflection_default` re-injects the
+///   parent's policy and the judge spawns its own grader).
+/// - Parent `cancel` is forwarded so user Ctrl+C interrupts an
+///   in-flight judge instead of burning more provider calls.
+/// - `max_iterations` becomes `TurnRequestOptions.max_turns`, a hard
+///   cap on inner-loop turns. The prompt also advertises the limit;
+///   the cap is the safety net for a model that ignores the hint.
+#[allow(clippy::too_many_arguments)]
+fn run_llm_judge_subagent(
+    language: ReflectionLanguage,
+    goal: &str,
+    assessment: &BatchAssessment,
+    code_signal: Option<&JudgeSignal>,
+    context: &str,
+    relevant: &str,
+    max_iterations: u32,
+    config: &LlmJudgeConfig,
+    state: &AppState,
+    resources: &LoadedResources,
+    providers: &ProviderRegistry,
+    auth_store: &mut AuthStore,
+    cancel: Option<&CancelToken>,
+) -> LlmJudgeAttempt {
+    let prompt = build_llm_judge_subagent_prompt(
+        language,
+        goal,
+        assessment,
+        code_signal,
+        context,
+        relevant,
+        max_iterations,
+    );
+    let mut side_state = build_llm_judge_side_state(state, config, &prompt);
+    let provider = side_state.current_provider.clone();
+    let model = side_state.current_model.clone();
+
+    // Verification toolset: Read / Grep / Glob only. The
+    // `request_tool_filter` is canonical-name aware so callers don't
+    // need to enumerate aliases. Write/Edit/Bash are deliberately
+    // absent — the judge judges, it does not repair.
+    let allowed_tools: Vec<String> = ["Read", "Grep", "Glob"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    let tool_filter = match build_request_tool_filter(&allowed_tools) {
+        Ok(filter) => filter,
+        Err(error) => {
+            return LlmJudgeAttempt {
+                provider,
+                model,
+                prompt,
+                request_url: None,
+                prompt_cache_key: side_state.prompt_cache_key_override.clone(),
+                request_body: None,
+                raw_response_text: None,
+                raw_response_body: None,
+                response_id: None,
+                input_tokens: None,
+                output_tokens: None,
+                cached_input_tokens: None,
+                cache_hit_ratio: None,
+                error: Some(format!("failed to build judge tool filter: {error}")),
+            };
+        }
+    };
+
+    match execute_user_prompt_with_options(
+        &mut side_state,
+        resources,
+        providers,
+        auth_store,
+        &prompt,
+        TurnRequestOptions {
+            structured_output: None,
+            tool_filter: tool_filter.as_ref(),
+            // Recursive reflection inside a reflection sub-agent would
+            // burn tokens for negligible signal — disable. Note: we
+            // also clear `side_state.reflection_config` in
+            // `build_llm_judge_side_state` because
+            // `apply_session_reflection_default` would otherwise
+            // re-inject it from the cloned parent state.
+            reflection: None,
+            // Inherit the parent's cancel token so user Ctrl+C
+            // interrupts a long judge run mid-iteration. The agent
+            // loop checks the token at every turn boundary.
+            cancel,
+            // Hard cap so even a misbehaving model that keeps
+            // requesting Read/Grep/Glob calls forever stops at the
+            // configured budget. The prompt also advertises this
+            // limit; this is the belt to that suspenders.
+            max_turns: Some(max_iterations),
             observability: None,
         },
     ) {
@@ -189,6 +384,16 @@ pub(super) fn build_llm_judge_side_state(
     side_state.session.parent_session_id = Some(state.session.id);
     side_state.session.id = uuid::Uuid::new_v4();
     side_state.transcript.clear();
+    // Recursion guard. Without this, `apply_session_reflection_default`
+    // (runtime.rs) would re-inject the parent's `reflection_config`
+    // into the sub-agent's `TurnRequestOptions` because we cloned the
+    // parent state — and the sub-agent would then spawn its own
+    // grader sub-agent, which would spawn another, etc. Setting
+    // `options.reflection = None` at the call site is necessary but
+    // not sufficient; the cloned state has to be cleared too. Mirrors
+    // CC's `runForkedAgent`, which deliberately strips
+    // recursion-prone session knobs before forking.
+    side_state.reflection_config = None;
     side_state.plan_mode = false;
     side_state.plan_mode_attachment_turns = 0;
     side_state.plan_mode_attachment_count = 0;
