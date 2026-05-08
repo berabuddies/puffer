@@ -169,14 +169,16 @@ fn read_text(
         }
     };
     let total_lines = contents.lines().count();
-    let start_line = offset.unwrap_or(1);
+    // CC convention is 1-indexed offsets ("Line numbers begin at 1").
+    // A model that passes `offset: 0` previously got back
+    // `start_line: 0` and content rendered with line numbers
+    // `0\tfirst_line\n` — a quietly off-by-one rendering that the
+    // model isn't told about and can't easily detect. Clamp to 1
+    // so the rendering matches the convention.
+    let start_line = offset.map(|o| o.max(1)).unwrap_or(1);
     let effective_limit = limit.unwrap_or(MAX_LINES_TO_READ);
 
-    let start_index = if start_line == 0 {
-        0
-    } else {
-        start_line.saturating_sub(1)
-    };
+    let start_index = start_line.saturating_sub(1);
     let all_lines = contents.lines().collect::<Vec<_>>();
     let end_index = start_index
         .saturating_add(effective_limit)
@@ -653,6 +655,39 @@ mod tests {
         assert!(parsed["file"]["content"]
             .as_str()
             .is_some_and(|text| text.contains("contents are empty")));
+    }
+
+    /// Regression: a model that passes `offset: 0` used to get back
+    /// `start_line: 0` and content rendered with line numbers
+    /// `0\tfirst_line\n` — quietly off-by-one vs the
+    /// CC-convention 1-indexing the rest of Read uses. Now clamped
+    /// to 1.
+    #[test]
+    fn offset_zero_is_clamped_to_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("file.txt");
+        fs::write(&path, "alpha\nbeta\ngamma\n").unwrap();
+        let output = execute_claude_read_tool(
+            temp.path(),
+            &[],
+            false,
+            serde_json::json!({
+                "file_path": path.display().to_string(),
+                "offset": 0,
+                "limit": 2,
+            }),
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["file"]["startLine"], 1, "offset=0 must clamp to 1");
+        // Line numbering should start at 1, not 0.
+        let content = parsed["file"]["content"].as_str().unwrap();
+        assert!(
+            content.starts_with("     1\talpha"),
+            "first line should be numbered 1; got: {content:?}"
+        );
+        assert!(content.contains("     2\tbeta"));
+        assert!(!content.contains("     0\t"));
     }
 
     #[test]
