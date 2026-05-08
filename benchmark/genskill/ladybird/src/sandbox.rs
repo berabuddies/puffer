@@ -53,6 +53,7 @@ impl Sandbox {
         let host_root = std::env::current_dir().context("resolving host workspace root")?;
         let host_codex_dir = host_codex_dir();
         let vcpkg_cache_dir = host_vcpkg_binary_cache_dir(&host_root)?;
+        let compiler_cache_dir = host_compiler_cache_dir(&host_root)?;
 
         let mut cmd = Command::new("docker");
         cmd.args(["run", "-d", "--rm"])
@@ -68,12 +69,22 @@ impl Sandbox {
                 "-v",
                 &format!("{}:/work/vcpkg-binary-cache", vcpkg_cache_dir.display()),
             ])
+            .args([
+                "-v",
+                &format!("{}:/work/ccache", compiler_cache_dir.display()),
+            ])
             .args(["-v", &format!("{}:/host:ro", host_root.display())])
             .args(["-e", "HOME=/home/ladybird"])
             .args([
                 "-e",
                 "VCPKG_BINARY_SOURCES=clear;files,/work/vcpkg-binary-cache,readwrite",
-            ]);
+            ])
+            .args(["-e", "CCACHE_DIR=/work/ccache"])
+            .args(["-e", "CCACHE_BASEDIR=/work/ladybird"])
+            .args(["-e", "CCACHE_COMPILERCHECK=content"])
+            .args(["-e", "CCACHE_MAXSIZE=20G"])
+            .args(["-e", "CMAKE_C_COMPILER_LAUNCHER=ccache"])
+            .args(["-e", "CMAKE_CXX_COMPILER_LAUNCHER=ccache"]);
         for name in [
             "OPENAI_API_KEY",
             "ANTHROPIC_API_KEY",
@@ -168,13 +179,30 @@ fn host_codex_dir() -> Option<PathBuf> {
 }
 
 fn host_vcpkg_binary_cache_dir(host_root: &Path) -> Result<PathBuf> {
-    let dir = std::env::var_os("PUFFER_LADYBIRD_VCPKG_BINARY_CACHE")
+    let dir = cache_dir_from_env(
+        "PUFFER_LADYBIRD_VCPKG_BINARY_CACHE",
+        host_root,
+        "vcpkg-binary",
+    );
+    prepare_host_cache_dir(dir)
+}
+
+fn host_compiler_cache_dir(host_root: &Path) -> Result<PathBuf> {
+    let dir = cache_dir_from_env("PUFFER_LADYBIRD_CCACHE_DIR", host_root, "ccache");
+    prepare_host_cache_dir(dir)
+}
+
+fn cache_dir_from_env(env_name: &str, host_root: &Path, default_name: &str) -> PathBuf {
+    std::env::var_os(env_name)
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             host_root
                 .join("benchmark/genskill/ladybird/.cache")
-                .join("vcpkg-binary")
-        });
+                .join(default_name)
+        })
+}
+
+fn prepare_host_cache_dir(dir: PathBuf) -> Result<PathBuf> {
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     make_cache_dir_writable(&dir)?;
     dir.canonicalize()

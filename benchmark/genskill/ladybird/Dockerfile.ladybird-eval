@@ -10,7 +10,7 @@ FROM ubuntu:24.04
 ARG LADYBIRD_REPO=https://github.com/LadybirdBrowser/ladybird.git
 ARG LADYBIRD_REF=master
 
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y     build-essential cmake ninja-build git pkg-config     autoconf autoconf-archive automake libtool libtool-bin     libgl1-mesa-dev libssl-dev libavcodec-dev libavformat-dev     libavutil-dev libavfilter-dev libopenal-dev libxkbcommon-dev     libpulse-dev libwayland-dev libwebp-dev     qt6-base-dev qt6-tools-dev qt6-multimedia-dev qt6-wayland     ca-certificates curl jq python3 zip unzip tar  && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y     build-essential cmake ninja-build git pkg-config ccache     autoconf autoconf-archive automake libtool libtool-bin     libgl1-mesa-dev libssl-dev libavcodec-dev libavformat-dev     libavutil-dev libavfilter-dev libopenal-dev libxkbcommon-dev     libpulse-dev libwayland-dev libwebp-dev     qt6-base-dev qt6-tools-dev qt6-multimedia-dev qt6-wayland     ca-certificates curl jq python3 zip unzip tar  && rm -rf /var/lib/apt/lists/*
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y     gcc-14 g++-14  && rm -rf /var/lib/apt/lists/*
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y     mesa-common-dev python3-venv  && rm -rf /var/lib/apt/lists/*
 
