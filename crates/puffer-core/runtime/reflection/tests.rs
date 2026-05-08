@@ -469,6 +469,136 @@ fn llm_judge_skipped_event_fires_when_llm_judge_is_disabled() {
     }
 }
 
+/// G2: circuit breaker — once `consecutive_llm_judge_failures` reaches
+/// `MAX_CONSECUTIVE_LLM_JUDGE_FAILURES` (= 3, mirroring CC's `pd7=3`
+/// at claude-2.1.133 bundle:4885), `llm_judge_signal` must skip
+/// further judge calls without issuing a request. The first batch
+/// after the trip emits a `LlmJudgeSkipped` event explaining the
+/// trip; subsequent batches stay silent.
+#[test]
+fn llm_judge_circuit_breaker_trips_after_three_consecutive_failures() {
+    use puffer_provider_registry::{AuthStore, ProviderRegistry};
+    use puffer_resources::LoadedResources;
+
+    // Real config with llm_judge enabled — without the breaker, the
+    // tracker would try to issue an HTTP request via `run_llm_judge`.
+    let mut config = ReflectionConfig::default();
+    config.code_judge = Some(CodeJudgeConfig {
+        soft_stall_ms: 0,
+        hard_stall_ms: 0,
+        min_score: 1,
+        ..CodeJudgeConfig::default()
+    });
+    let mut tracker = ReflectionTracker::new("verify circuit breaker semantics", config);
+    // Pre-trip the breaker.
+    tracker.force_llm_judge_failures_for_test(super::MAX_CONSECUTIVE_LLM_JUDGE_FAILURES);
+
+    let state = crate::AppState::new(
+        PufferConfig::default(),
+        std::env::temp_dir(),
+        SessionMetadata {
+            id: Uuid::nil(),
+            display_name: None,
+            generated_title: None,
+            cwd: std::env::temp_dir(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        },
+    );
+    let resources = LoadedResources::default();
+    let providers = ProviderRegistry::new();
+    let mut auth_store = AuthStore::default();
+
+    // Drive two batches so evaluation actually fires (same shape as
+    // `llm_judge_skipped_event_fires_when_llm_judge_is_disabled`).
+    let _ = tracker.observe_batch_with_judge(
+        &[
+            bash_invocation("echo ping", "pong", true),
+            bash_invocation("echo ping", "pong", true),
+        ],
+        &[],
+        &state,
+        &resources,
+        &providers,
+        &mut auth_store,
+        None,
+    );
+    let observation = tracker
+        .observe_batch_with_judge(
+            &[
+                bash_invocation("echo ping", "pong", true),
+                bash_invocation("echo ping", "pong", true),
+            ],
+            &[],
+            &state,
+            &resources,
+            &providers,
+            &mut auth_store,
+            None,
+        )
+        .expect("second batch should produce an observation");
+
+    // No request should have been issued.
+    assert!(
+        !observation
+            .trace_events
+            .iter()
+            .any(|event| matches!(event, ReflectionTraceEvent::LlmJudgeRequest { .. })),
+        "circuit-broken tracker must not emit LlmJudgeRequest"
+    );
+
+    // The trip event must fire exactly once (this batch).
+    let skipped: Vec<&ReflectionTraceEvent> = observation
+        .trace_events
+        .iter()
+        .filter(|event| matches!(event, ReflectionTraceEvent::LlmJudgeSkipped { .. }))
+        .collect();
+    assert_eq!(
+        skipped.len(),
+        1,
+        "exactly one LlmJudgeSkipped should describe the trip"
+    );
+    if let ReflectionTraceEvent::LlmJudgeSkipped { reason, .. } = skipped[0] {
+        assert!(
+            reason.to_ascii_lowercase().contains("circuit breaker"),
+            "skip reason should mention the breaker; got: {reason}"
+        );
+    }
+
+    assert!(
+        tracker.llm_judge_breaker_tripped_for_test(),
+        "breaker flag must be set after the trip"
+    );
+
+    // A subsequent batch should still skip but stay silent (no
+    // duplicate trip event).
+    let observation2 = tracker
+        .observe_batch_with_judge(
+            &[
+                bash_invocation("echo ping", "pong", true),
+                bash_invocation("echo ping", "pong", true),
+            ],
+            &[],
+            &state,
+            &resources,
+            &providers,
+            &mut auth_store,
+            None,
+        )
+        .expect("third batch should produce an observation");
+    assert!(
+        !observation2
+            .trace_events
+            .iter()
+            .any(|event| matches!(event, ReflectionTraceEvent::LlmJudgeSkipped { .. })),
+        "post-trip batches must NOT re-emit a skip event"
+    );
+}
+
 #[test]
 fn scp_style_remote_is_not_treated_as_filesystem_path() {
     let tracker = ReflectionTracker::new(
