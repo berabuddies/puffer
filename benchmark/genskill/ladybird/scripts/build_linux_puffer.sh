@@ -17,7 +17,7 @@ docker run --rm \
   -e CARGO_TARGET_DIR=/tmp/puffer-target \
   --workdir /work/puffer \
   "$RUST_IMAGE" \
-  bash -c 'export PATH="/usr/local/cargo/bin:$PATH"; cargo build -p puffer-cli --release && cp /tmp/puffer-target/release/puffer /work/puffer/benchmark/genskill/ladybird/.bin/puffer-linux'
+  bash -c 'set -euo pipefail; export PATH="/usr/local/cargo/bin:$PATH"; apt-get update; DEBIAN_FRONTEND=noninteractive apt-get install -y protobuf-compiler pkg-config libssl-dev libsqlite3-dev; cargo build -p puffer-cli --release; cp /tmp/puffer-target/release/puffer /work/puffer/benchmark/genskill/ladybird/.bin/puffer-linux'
 
 chmod +x "$OUT"
 echo "Built Linux puffer binary at $OUT"
