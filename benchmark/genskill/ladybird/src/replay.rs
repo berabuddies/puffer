@@ -4,7 +4,7 @@ use crate::pr_corpus::CorpusEntry;
 use crate::sandbox::Sandbox;
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::time::Duration;
 
 /// A replay arm: which skill (if any) was loaded.
@@ -128,8 +128,8 @@ pub async fn run_one(cfg: ReplayConfig<'_>) -> Result<ReplayArtifact> {
     .await
     .context("starting sandbox")?;
 
-    let test_filter = test_filter_for(cfg.corpus_entry);
-    let pre_check = run_target_test(&sandbox, &test_filter).await.ok();
+    let test_filters = test_filters_for(cfg.corpus_entry);
+    let pre_check = run_target_test(&sandbox, &test_filters).await.ok();
     tracing::info!(?pre_check, "pre-replay test status");
 
     let mut puffer_args = vec![
@@ -187,7 +187,7 @@ pub async fn run_one(cfg: ReplayConfig<'_>) -> Result<ReplayArtifact> {
         artifact.outcome = Outcome::WallTimeout;
     }
 
-    let test_run = run_target_test(&sandbox, &test_filter).await;
+    let test_run = run_target_test(&sandbox, &test_filters).await;
     if let Ok(test_outcome) = test_run {
         let exit_code = test_outcome.exit_code;
         artifact.test_outcome = Some(test_outcome);
@@ -239,18 +239,69 @@ fn skill_path_for(cfg: &ReplayConfig<'_>) -> Option<String> {
     }
 }
 
-fn test_filter_for(entry: &CorpusEntry) -> String {
-    entry
-        .meta
-        .files_changed
-        .iter()
-        .find(|p| p.starts_with("Tests/"))
-        .cloned()
-        .unwrap_or_else(|| entry.id.clone())
+fn test_filters_for(entry: &CorpusEntry) -> Vec<String> {
+    let mut filters = corpus_test_files(&entry.dir.join("tests"))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|path| corpus_test_filter(&path))
+        .collect::<Vec<_>>();
+    filters.sort();
+    filters.dedup();
+    if filters.is_empty() {
+        vec![entry.id.clone()]
+    } else {
+        filters
+    }
 }
 
-async fn run_target_test(sandbox: &Sandbox, filter: &str) -> Result<TestOutcome> {
-    let command = test_command_for(filter);
+fn corpus_test_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    collect_corpus_test_files(root, root, &mut files)?;
+    Ok(files)
+}
+
+fn collect_corpus_test_files(root: &Path, current: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    for dent in
+        std::fs::read_dir(current).with_context(|| format!("reading {}", current.display()))?
+    {
+        let dent = dent?;
+        let path = dent.path();
+        if path.is_dir() {
+            collect_corpus_test_files(root, &path, files)?;
+        } else if path.is_file() {
+            files.push(path.strip_prefix(root)?.to_path_buf());
+        }
+    }
+    Ok(())
+}
+
+fn corpus_test_filter(path: &Path) -> Option<String> {
+    let path = path.to_string_lossy().replace('\\', "/");
+    if !path.starts_with("Tests/") || path.ends_with("/CMakeLists.txt") {
+        return None;
+    }
+
+    if let Some(stem) = path
+        .strip_prefix("Tests/LibWeb/Text/expected/")
+        .or_else(|| path.strip_prefix("Tests/LibWeb/Layout/expected/"))
+        .and_then(|value| value.strip_suffix(".txt"))
+    {
+        let prefix = if path.starts_with("Tests/LibWeb/Text/expected/") {
+            "Tests/LibWeb/Text/input/"
+        } else {
+            "Tests/LibWeb/Layout/input/"
+        };
+        return Some(format!("{prefix}{stem}.html"));
+    }
+
+    if path.ends_with(".html") || path.ends_with(".cpp") || path.ends_with(".js") {
+        return Some(path);
+    }
+    None
+}
+
+async fn run_target_test(sandbox: &Sandbox, filters: &[String]) -> Result<TestOutcome> {
+    let command = test_command_for(filters);
     let out = sandbox.exec_status(&["bash", "-lc", &command]).await?;
     let combined = if out.stderr.trim().is_empty() {
         out.stdout
@@ -264,19 +315,30 @@ async fn run_target_test(sandbox: &Sandbox, filter: &str) -> Result<TestOutcome>
     })
 }
 
-fn test_command_for(filter: &str) -> String {
-    let quoted_filter = shell_quote(filter);
+fn test_command_for(filters: &[String]) -> String {
+    let quoted_filters = filters
+        .iter()
+        .map(|filter| shell_quote(filter))
+        .collect::<Vec<_>>()
+        .join(" ");
     format!(
-        "if [ -f Meta/ladybird.py ]; then \
-             python3 Meta/ladybird.py test {filter}; \
-         elif [ -x Meta/ladybird.sh ]; then \
-             ./Meta/ladybird.sh test {filter}; \
-         elif command -v ladybird-test >/dev/null 2>&1; then \
-             ladybird-test --filter={filter}; \
-         else \
-             echo 'no Ladybird test runner found' >&2; exit 127; \
-         fi",
-        filter = quoted_filter
+        "status=0; \
+         for filter in {filters}; do \
+             echo \"=== target test: $filter ===\"; \
+             if [ -f Meta/ladybird.py ]; then \
+                 python3 Meta/ladybird.py test \"$filter\"; \
+             elif [ -x Meta/ladybird.sh ]; then \
+                 ./Meta/ladybird.sh test \"$filter\"; \
+             elif command -v ladybird-test >/dev/null 2>&1; then \
+                 ladybird-test --filter=\"$filter\"; \
+             else \
+                 echo 'no Ladybird test runner found' >&2; exit 127; \
+             fi; \
+             rc=$?; \
+             if [ $rc -ne 0 ]; then status=$rc; fi; \
+         done; \
+         exit $status",
+        filters = quoted_filters
     )
 }
 
@@ -322,10 +384,50 @@ mod tests {
 
     #[test]
     fn test_command_uses_ladybird_wrappers() {
-        let command = test_command_for("Tests/LibJS/foo.js");
-        assert!(command.contains("Meta/ladybird.py test 'Tests/LibJS/foo.js'"));
-        assert!(command.contains("./Meta/ladybird.sh test 'Tests/LibJS/foo.js'"));
-        assert!(command.contains("ladybird-test --filter='Tests/LibJS/foo.js'"));
+        let filters = vec!["Tests/LibJS/foo.js".to_string()];
+        let command = test_command_for(&filters);
+        assert!(command.contains("python3 Meta/ladybird.py test \"$filter\""));
+        assert!(command.contains("./Meta/ladybird.sh test \"$filter\""));
+        assert!(command.contains("ladybird-test --filter=\"$filter\""));
+        assert!(command.contains("for filter in 'Tests/LibJS/foo.js'"));
+    }
+
+    #[test]
+    fn corpus_test_filter_maps_text_expected_to_input() {
+        assert_eq!(
+            corpus_test_filter(Path::new(
+                "Tests/LibWeb/Text/expected/wpt-import/css/foo/bar.txt"
+            )),
+            Some("Tests/LibWeb/Text/input/wpt-import/css/foo/bar.html".to_string())
+        );
+    }
+
+    #[test]
+    fn corpus_test_filter_maps_layout_expected_to_input() {
+        assert_eq!(
+            corpus_test_filter(Path::new("Tests/LibWeb/Layout/expected/flex/foo.txt")),
+            Some("Tests/LibWeb/Layout/input/flex/foo.html".to_string())
+        );
+    }
+
+    #[test]
+    fn corpus_test_filter_keeps_crash_and_cpp_tests() {
+        assert_eq!(
+            corpus_test_filter(Path::new("Tests/LibWeb/Crash/CSS/foo.html")),
+            Some("Tests/LibWeb/Crash/CSS/foo.html".to_string())
+        );
+        assert_eq!(
+            corpus_test_filter(Path::new("Tests/LibRegex/TestRegex.cpp")),
+            Some("Tests/LibRegex/TestRegex.cpp".to_string())
+        );
+    }
+
+    #[test]
+    fn corpus_test_filter_ignores_build_metadata() {
+        assert_eq!(
+            corpus_test_filter(Path::new("Tests/LibURL/CMakeLists.txt")),
+            None
+        );
     }
 
     #[test]
