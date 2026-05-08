@@ -52,6 +52,7 @@ impl Sandbox {
         })?;
         let host_root = std::env::current_dir().context("resolving host workspace root")?;
         let host_codex_dir = host_codex_dir();
+        let vcpkg_cache_dir = host_vcpkg_binary_cache_dir(&host_root)?;
 
         let mut cmd = Command::new("docker");
         cmd.args(["run", "-d", "--rm"])
@@ -63,8 +64,16 @@ impl Sandbox {
                 "-v",
                 &format!("{}:/work/test_files:ro", test_files_abs.display()),
             ])
+            .args([
+                "-v",
+                &format!("{}:/work/vcpkg-binary-cache", vcpkg_cache_dir.display()),
+            ])
             .args(["-v", &format!("{}:/host:ro", host_root.display())])
-            .args(["-e", "HOME=/home/ladybird"]);
+            .args(["-e", "HOME=/home/ladybird"])
+            .args([
+                "-e",
+                "VCPKG_BINARY_SOURCES=clear;files,/work/vcpkg-binary-cache,readwrite",
+            ]);
         for name in [
             "OPENAI_API_KEY",
             "ANTHROPIC_API_KEY",
@@ -156,6 +165,37 @@ impl Sandbox {
 fn host_codex_dir() -> Option<PathBuf> {
     let dir = std::env::var_os("HOME").map(PathBuf::from)?.join(".codex");
     dir.exists().then_some(dir)
+}
+
+fn host_vcpkg_binary_cache_dir(host_root: &Path) -> Result<PathBuf> {
+    let dir = std::env::var_os("PUFFER_LADYBIRD_VCPKG_BINARY_CACHE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            host_root
+                .join("benchmark/genskill/ladybird/.cache")
+                .join("vcpkg-binary")
+        });
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    make_cache_dir_writable(&dir)?;
+    dir.canonicalize()
+        .with_context(|| format!("canonicalizing {}", dir.display()))
+}
+
+#[cfg(unix)]
+fn make_cache_dir_writable(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = std::fs::metadata(dir)
+        .with_context(|| format!("reading metadata for {}", dir.display()))?
+        .permissions();
+    permissions.set_mode(0o777);
+    std::fs::set_permissions(dir, permissions)
+        .with_context(|| format!("setting permissions on {}", dir.display()))
+}
+
+#[cfg(not(unix))]
+fn make_cache_dir_writable(_dir: &Path) -> Result<()> {
+    Ok(())
 }
 
 impl Drop for Sandbox {
