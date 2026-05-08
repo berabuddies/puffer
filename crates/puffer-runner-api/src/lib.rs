@@ -309,10 +309,24 @@ pub struct ReadStateSnapshot {
 }
 
 /// Reasons the dispatcher's pre-flight staleness gate may reject a call.
+///
+/// `PartialRead` was previously folded into `NotRead`. CC v2.1.133's
+/// equivalent gate (`if(!w||w.isPartialView) return … "File has not been
+/// read yet" …`) conflates them too; puffer deliberately diverges so the
+/// model gets an actionable error instead of one that lies about prior
+/// state. Trajectory anchor: 2026-04-12 `torch-tensor-parallelism`
+/// steps 25–40 where Edit kept hitting `NotRead` after a partial Read
+/// and the agent retried the same Edit ~9 times with no new
+/// information, confused that "Read it first" couldn't possibly apply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StalenessRejection {
-    /// The path was never (fully) read in this session.
+    /// The path was never read in this session.
     NotRead,
+    /// The path was read, but only with `offset`/`limit` set — Edit /
+    /// Write require a full-file view to be safe (otherwise the
+    /// `old_string` they target may live outside the window the
+    /// model saw).
+    PartialRead,
     /// The path was read, but the on-disk mtime has advanced since.
     StaleRead,
 }
@@ -320,11 +334,13 @@ pub enum StalenessRejection {
 impl StalenessRejection {
     pub const NOT_READ_MESSAGE: &'static str =
         "File has not been read yet. Read it first before writing to it.";
+    pub const PARTIAL_READ_MESSAGE: &'static str = "File was only read partially (offset/limit was set). Do a full Read (without offset or limit) before writing or editing.";
     pub const STALE_READ_MESSAGE: &'static str = "File has been modified since read, either by the user or by a linter. Read it again before attempting to write it.";
 
     pub fn message(&self) -> &'static str {
         match self {
             StalenessRejection::NotRead => Self::NOT_READ_MESSAGE,
+            StalenessRejection::PartialRead => Self::PARTIAL_READ_MESSAGE,
             StalenessRejection::StaleRead => Self::STALE_READ_MESSAGE,
         }
     }
@@ -343,7 +359,7 @@ pub fn check_read_freshness(
         return Err(StalenessRejection::NotRead);
     };
     if snapshot.is_partial_view {
-        return Err(StalenessRejection::NotRead);
+        return Err(StalenessRejection::PartialRead);
     }
     if current_mtime_ms > snapshot.timestamp_ms {
         return Err(StalenessRejection::StaleRead);

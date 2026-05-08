@@ -204,6 +204,48 @@ fn dispatcher_rejects_edit_without_prior_read() {
     assert_eq!(must_not_have_run.backend, "local");
 }
 
+/// Pinned in 2026-05-08: a partial Read (offset/limit) used to surface
+/// as `StalenessRejection::NotRead` with the misleading message
+/// "File has not been read yet" — confusing the model into retrying
+/// the same Edit unchanged. Now distinct as `PartialRead` with a
+/// message that tells the model exactly what to do.
+/// Trajectory anchor: 2026-04-12 `torch-tensor-parallelism` step 25+.
+#[test]
+fn partial_read_is_rejected_distinctly_from_not_read() {
+    let temp = tempdir().unwrap();
+    let target = temp.path().join("partial.txt");
+    fs::write(&target, "v1\n").unwrap();
+
+    // Simulate a partial-view snapshot (Read with offset/limit set).
+    let mut read_state: HashMap<PathBuf, ReadStateSnapshot> = HashMap::new();
+    read_state.insert(
+        target.clone(),
+        ReadStateSnapshot {
+            timestamp_ms: file_mtime_ms(&target),
+            is_partial_view: true,
+        },
+    );
+
+    let snapshot = read_state.get(&target).cloned();
+    let rejection = check_read_freshness(snapshot.as_ref(), file_mtime_ms(&target))
+        .expect_err("Edit after partial Read must still be rejected");
+    assert_eq!(rejection, StalenessRejection::PartialRead);
+    assert!(
+        rejection
+            .message()
+            .contains("partially")
+            || rejection.message().contains("offset")
+            || rejection.message().contains("limit"),
+        "PartialRead message must mention partial / offset / limit so the model knows what to do; got: {}",
+        rejection.message()
+    );
+    assert_ne!(
+        rejection.message(),
+        StalenessRejection::NOT_READ_MESSAGE,
+        "PartialRead must not reuse the misleading NotRead message"
+    );
+}
+
 #[test]
 fn dispatcher_rejects_edit_when_file_changed_after_read() {
     let temp = tempdir().unwrap();
