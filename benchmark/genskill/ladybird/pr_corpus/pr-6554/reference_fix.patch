@@ -1,0 +1,131 @@
+diff --git a/Meta/generate_public_suffix_data.py b/Meta/generate_public_suffix_data.py
+index 64058f00ae3cf..94125560a065d 100644
+--- a/Meta/generate_public_suffix_data.py
++++ b/Meta/generate_public_suffix_data.py
+@@ -38,8 +38,6 @@ class PublicSuffixData {
+     bool is_public_suffix(StringView host);
+     Optional<String> get_public_suffix(StringView string);
+ 
+-private:
+-    Trie<char, Empty> m_dictionary;
+ };
+ 
+ }
+@@ -52,6 +50,7 @@ class PublicSuffixData {
+ 
+ def generate_implementation_file(input_path: Path, output_path: Path) -> None:
+     content = """#include <AK/String.h>
++#include <AK/BinarySearch.h>
+ #include <AK/Vector.h>
+ #include <LibURL/PublicSuffixData.h>
+ 
+@@ -59,6 +58,7 @@ def generate_implementation_file(input_path: Path, output_path: Path) -> None:
+ 
+ static constexpr auto s_public_suffixes = Array {"""
+ 
++    reversed_lines = []
+     with open(input_path, "r", encoding="utf-8") as f:
+         for line in f:
+             line = line.strip()
+@@ -67,25 +67,23 @@ def generate_implementation_file(input_path: Path, output_path: Path) -> None:
+                 continue
+ 
+             reversed_line = ".".join(line.split(".")[::-1])
+-            content += f'\n    "{reversed_line}"sv,'
++            reversed_lines.append(reversed_line)
++
++    reversed_lines.sort()
++
++    for item in reversed_lines:
++        content += f'\n    "{item}"sv,'
+ 
+     content += """
+ };
+ 
+-PublicSuffixData::PublicSuffixData()
+-    : m_dictionary('/')
+-{
+-    // FIXME: Reduce the depth of this trie
+-    for (auto str : s_public_suffixes) {
+-        MUST(m_dictionary.insert(str.begin(), str.end(), Empty {}, [](auto const&, auto const&) -> Optional<Empty> { return {}; }));
+-    }
++PublicSuffixData::PublicSuffixData()   
++{    
+ }
+ 
+ bool PublicSuffixData::is_public_suffix(StringView host)
+ {
+-    auto it = host.begin();
+-    auto& node = m_dictionary.traverse_until_last_accessible_node(it, host.end());
+-    return it.is_end() && node.has_metadata();
++    return binary_search(s_public_suffixes, host);
+ }
+ 
+ Optional<String> PublicSuffixData::get_public_suffix(StringView string)
+diff --git a/Tests/LibURL/CMakeLists.txt b/Tests/LibURL/CMakeLists.txt
+index 3fc65de05a37c..a56a497063c1c 100644
+--- a/Tests/LibURL/CMakeLists.txt
++++ b/Tests/LibURL/CMakeLists.txt
+@@ -1,6 +1,7 @@
+ set(URL_TEST_SOURCES
+     TestURL.cpp
+     TestURLPatternConstructorStringParser.cpp
++    TestPublicSuffix.cpp
+ )
+ 
+ foreach(source IN LISTS URL_TEST_SOURCES)
+diff --git a/Tests/LibURL/TestPublicSuffix.cpp b/Tests/LibURL/TestPublicSuffix.cpp
+new file mode 100644
+index 0000000000000..d3c0327ce566c
+--- /dev/null
++++ b/Tests/LibURL/TestPublicSuffix.cpp
+@@ -0,0 +1,49 @@
++/*
++ * Copyright (c) 2025, Tim Ledbetter <tim.ledbetter@ladybird.org>
++ *
++ * SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#include <LibTest/TestCase.h>
++
++#include <LibURL/PublicSuffixData.h>
++
++TEST_CASE(is_public_suffix)
++{
++    auto* public_suffix_data = URL::PublicSuffixData::the();
++
++    EXPECT(public_suffix_data->is_public_suffix("com"sv));
++    EXPECT(public_suffix_data->is_public_suffix("com.br"sv));
++
++    EXPECT(!public_suffix_data->is_public_suffix(""sv));
++    EXPECT(!public_suffix_data->is_public_suffix("."sv));
++    EXPECT(!public_suffix_data->is_public_suffix(".."sv));
++    EXPECT(!public_suffix_data->is_public_suffix("/"sv));
++    EXPECT(!public_suffix_data->is_public_suffix("not-a-public-suffix.com"sv));
++    EXPECT(!public_suffix_data->is_public_suffix("com."sv));
++    EXPECT(!public_suffix_data->is_public_suffix("com/"sv));
++    EXPECT(!public_suffix_data->is_public_suffix("/com"sv));
++    EXPECT(!public_suffix_data->is_public_suffix("not-a-public-suffix"sv));
++    EXPECT(!public_suffix_data->is_public_suffix(" com"sv));
++    EXPECT(!public_suffix_data->is_public_suffix("com "sv));
++}
++
++TEST_CASE(get_public_suffix)
++{
++    auto* public_suffix_data = URL::PublicSuffixData::the();
++
++    EXPECT_EQ(public_suffix_data->get_public_suffix(""sv), OptionalNone {});
++    EXPECT_EQ(public_suffix_data->get_public_suffix("."sv), OptionalNone {});
++    EXPECT_EQ(public_suffix_data->get_public_suffix(".."sv), OptionalNone {});
++    EXPECT_EQ(public_suffix_data->get_public_suffix(" "sv), OptionalNone {});
++    EXPECT_EQ(public_suffix_data->get_public_suffix("/"sv), OptionalNone {});
++    EXPECT_EQ(public_suffix_data->get_public_suffix("not-a-public-suffix"sv), OptionalNone {});
++
++    EXPECT_EQ(public_suffix_data->get_public_suffix("com"sv), "com"sv);
++    EXPECT_EQ(public_suffix_data->get_public_suffix("not-a-public-suffix.com"sv), "com"sv);
++    EXPECT_EQ(public_suffix_data->get_public_suffix("com."sv), "com"sv);
++    EXPECT_EQ(public_suffix_data->get_public_suffix(".com."sv), "com"sv);
++    EXPECT_EQ(public_suffix_data->get_public_suffix("..com."sv), "com"sv);
++    EXPECT_EQ(public_suffix_data->get_public_suffix("com.br"sv), "com.br"sv);
++    EXPECT_EQ(public_suffix_data->get_public_suffix("not-a-public-suffix.com.br"sv), "com.br"sv);
++}

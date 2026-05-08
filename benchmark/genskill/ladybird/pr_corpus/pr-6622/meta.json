@@ -1,0 +1,13 @@
+{
+  "pr_number": 6622,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/6622",
+  "title": "LibWeb/CSS: Do not crash when parsing some multi-layer mask shorthands",
+  "merged_at": "2025-10-29T06:50:47Z",
+  "base_commit": "d2b2d573879a50d8f3d568f9c35b8c660bc43013",
+  "merge_commit": "35254d17d166ba2efb9829d81166c3f78f633fc3",
+  "area": "libweb-css",
+  "files_changed": [
+    "Libraries/LibWeb/CSS/Parser/PropertyParsing.cpp"
+  ],
+  "task_prompt": "Fix the crash triggered by Tests/LibWeb/Crash/CSS/mask-parsing-shorthand-multi-layer-mask-clip.html. Loading that page causes an abort/crash inside the CSS parser when parsing a multi-layer mask shorthand that specifies mask-clip with certain combinations of values. The page should load without crashing."
+}

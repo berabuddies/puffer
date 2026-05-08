@@ -1,0 +1,17 @@
+{
+  "pr_number": 6646,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/6646",
+  "title": "LibWeb/CSS: Stop stripping out whitespace tokens before parsing property values",
+  "merged_at": "2025-11-03T11:23:21Z",
+  "base_commit": "01ad18018254d1f2872774106be0fd9f730747ae",
+  "merge_commit": "61a0898f5fedaa562e3a3cc680b75982894cd03d",
+  "area": "libweb-css",
+  "files_changed": [
+    "Libraries/LibWeb/CSS/Parser/PropertyParsing.cpp",
+    "Libraries/LibWeb/CSS/Parser/ValueParsing.cpp",
+    "Libraries/LibWeb/CSS/Serialize.cpp",
+    "Libraries/LibWeb/CSS/Serialize.h",
+    "Libraries/LibWeb/CSS/StyleValues/UnresolvedStyleValue.cpp"
+  ],
+  "task_prompt": "Fix the failing test Tests/LibWeb/Text/input/wpt-import/css/css-overflow/parsing/scrollbar-gutter-valid.html and the CSS Typed OM tests under Tests/LibWeb/Text/input/wpt-import/css/css-typed-om/. Whitespace tokens are being stripped from CSS property values before parsing, which breaks cases where whitespace is meaningful — for example, custom property values that contain whitespace, or Typed OM serialization that requires whitespace to round-trip correctly. The expected outputs are the corresponding .txt files in Tests/LibWeb/Text/expected/."
+}

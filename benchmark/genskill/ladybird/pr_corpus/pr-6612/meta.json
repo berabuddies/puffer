@@ -1,0 +1,13 @@
+{
+  "pr_number": 6612,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/6612",
+  "title": "LibWeb: Properly simplify sum nodes containing negated sum nodes",
+  "merged_at": "2025-10-30T12:18:24Z",
+  "base_commit": "e5d5ff952c00b9c3db6a2c5a055dc754ac93def5",
+  "merge_commit": "c2ca7124062411ee71e073f6297e84dc0a5a57c7",
+  "area": "libweb-css",
+  "files_changed": [
+    "Libraries/LibWeb/CSS/StyleValues/CalculatedStyleValue.cpp"
+  ],
+  "task_prompt": "Fix the failing test Tests/LibWeb/Text/input/wpt-import/css/css-values/calc-nesting-002.html. When simplifying calc() expressions, a sum node that contains a negated sum node (e.g., calc(1px - (2px + 3px))) is not correctly simplified — the negation is not distributed over the inner sum's children, producing wrong computed values. The expected output is in Tests/LibWeb/Text/expected/wpt-import/css/css-values/calc-nesting-002.txt."
+}

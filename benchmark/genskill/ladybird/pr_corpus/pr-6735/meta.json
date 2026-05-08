@@ -1,0 +1,14 @@
+{
+  "pr_number": 6735,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/6735",
+  "title": "LibWeb: Mark flex item main size definite if resolved from aspect-ratio",
+  "merged_at": "2025-11-07T15:42:32Z",
+  "base_commit": "cde3941d9fbbcecd893996e8d6d011d46ae367d9",
+  "merge_commit": "6894034774f8b1d1a682b6306174e63589ac4448",
+  "area": "libweb-css",
+  "files_changed": [
+    "Libraries/LibWeb/Layout/FlexFormattingContext.cpp",
+    "Libraries/LibWeb/Layout/FlexFormattingContext.h"
+  ],
+  "task_prompt": "Fix the failing layout test Tests/LibWeb/Layout/input/flex/item-with-main-size-from-cross-size-and-aspect-ratio-and-percentage-height-in-child.html. A flex item whose main size is resolved from its cross size via aspect-ratio is not being marked as having a definite size, so children with percentage heights inside that flex item resolve incorrectly. The expected output is in Tests/LibWeb/Layout/expected/flex/item-with-main-size-from-cross-size-and-aspect-ratio-and-percentage-height-in-child.txt."
+}

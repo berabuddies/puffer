@@ -1,0 +1,13 @@
+{
+  "pr_number": 6662,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/6662",
+  "title": "LibRegex: Account for nested 'or' compare ops",
+  "merged_at": "2025-11-01T16:49:57Z",
+  "base_commit": "8c9c2ee289ab1b8cc07353ea93cc3aff10426a66",
+  "merge_commit": "57ef949b61ed9e8f8fab02c74ba4a8bdca923b6b",
+  "area": "libjs",
+  "files_changed": [
+    "Libraries/LibRegex/RegexOptimizer.cpp"
+  ],
+  "task_prompt": "Fix the failing test cases in Tests/LibRegex/TestRegex.cpp related to nested character class 'or' operations. The regex optimizer does not correctly account for nested 'or' compare ops when analyzing character classes, causing certain regex patterns with nested character classes to produce incorrect match results. Look for the newly added test cases in TestRegex.cpp for the specific patterns that fail."
+}
