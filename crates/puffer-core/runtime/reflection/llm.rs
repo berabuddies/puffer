@@ -93,8 +93,13 @@ Output JSON schema:\n\
 /// instructs the sub-agent to use Read/Grep/Glob to ground its
 /// judgement in actual filesystem evidence before producing JSON.
 ///
-/// Mirrors the philosophy of CC's "Define Outcomes" grader: a judge
-/// with its own context window and tools, evaluating against criteria.
+/// The shape borrows from Anthropic's *server-side* "Define Outcomes"
+/// managed-agents grader (separate context, max_iterations budget,
+/// rubric-style verdict). CC v2.1.133's CLI does NOT itself run such
+/// a grader — the API only appears in its bundle as `claude-api`
+/// skill markdown teaching SDK consumers to use it. So this prompt
+/// is puffer running CC's *philosophy* without CC's *implementation*:
+/// fork off a read-only sub-agent, hard-cap turns, demand JSON.
 pub(super) fn build_llm_judge_subagent_prompt(
     language: ReflectionLanguage,
     goal: &str,

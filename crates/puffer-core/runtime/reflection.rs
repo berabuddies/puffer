@@ -145,14 +145,25 @@ pub enum LlmJudgeStrategy {
     /// agent claimed to edit, greps for a referenced symbol, etc.
     /// Returns the same `JudgeSignal` shape but with grounded
     /// evidence. More expensive, more accurate for verification-heavy
-    /// judgements. Mirrors CC's "Define Outcomes" grader pattern.
+    /// judgements.
+    ///
+    /// CC v2.1.133 ships no client-side judge fork — `define_outcomes`
+    /// is a server-side SDK feature, present in the bundle only as
+    /// `claude-api` skill markdown. Among CC's nine actual fork
+    /// labels, the only one that does multi-turn tool use is
+    /// `extract_memories` (`maxTurns:5`); single-shot summarizers
+    /// (`compact`, `reactive-compact`, `away_summary`,
+    /// `side_question`) all use `maxTurns:1`. Our default of 3 sits
+    /// between the two and matches CC's pervasive tripwire constant
+    /// (`pd7=3` autocompact circuit breaker, `_d5=3`
+    /// max-output-tokens recovery, `xO6=3` rapid-refill, denial
+    /// `maxConsecutive:3`).
     SubAgent {
-        /// Suggested upper bound on the sub-agent's tool calls. The
-        /// sub-agent is *instructed* to stop within this budget but
-        /// the loop does not hard-cap (matching CC, where
-        /// `max_iterations` defaults to 3 and tops out at 20). The
-        /// model is trusted to converge; in practice 1–3 read-tool
-        /// calls is plenty for verification.
+        /// Hard cap on the sub-agent's inner-loop turns. Threaded
+        /// into `TurnRequestOptions.max_turns` and enforced at the
+        /// top of `run_streaming_loop` / `run_blocking_loop`; the
+        /// prompt also advertises the budget so the model can wind
+        /// down on its own. Default 3.
         max_iterations: u32,
     },
 }

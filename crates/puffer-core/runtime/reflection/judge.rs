@@ -97,6 +97,7 @@ pub(super) fn run_llm_judge(
             resources,
             providers,
             auth_store,
+            cancel,
         ),
         LlmJudgeStrategy::SubAgent { max_iterations } => run_llm_judge_subagent(
             language,
@@ -129,6 +130,7 @@ fn run_llm_judge_single_call(
     resources: &LoadedResources,
     providers: &ProviderRegistry,
     auth_store: &mut AuthStore,
+    cancel: Option<&CancelToken>,
 ) -> LlmJudgeAttempt {
     let prompt = build_llm_judge_prompt(language, goal, assessment, code_signal, context, relevant);
     let mut side_state = build_llm_judge_side_state(state, config, &prompt);
@@ -172,6 +174,7 @@ fn run_llm_judge_single_call(
             &model_id,
             auth_store,
             &prompt,
+            cancel,
         );
     }
 
@@ -185,7 +188,12 @@ fn run_llm_judge_single_call(
             structured_output: None,
             tool_filter: None,
             reflection: None,
-            cancel: None,
+            // Inherit parent's cancel so user Ctrl+C interrupts an
+            // in-flight single-call judge — mirrors CC's `M85`
+            // reactive-compact (`maxTurns:1`) which checks
+            // `abortController.signal.aborted` after the fork returns
+            // (claude-2.1.133 bundle line 2212).
+            cancel,
             max_turns: None,
             observability: None,
         },
@@ -430,7 +438,34 @@ fn run_openai_responses_judge(
     model_id: &str,
     auth_store: &mut AuthStore,
     prompt: &str,
+    cancel: Option<&CancelToken>,
 ) -> LlmJudgeAttempt {
+    // Pre-flight cancel check: if the user already pressed Esc before
+    // this judge call started (parent loop hadn't reached its next
+    // turn boundary yet), skip the HTTP round-trip entirely. Mirrors
+    // CC's `M85` post-fork `abortController.signal.aborted` check
+    // (claude-2.1.133 bundle line 2212) — same granularity, just
+    // applied at the only sync boundary this path has.
+    if let Some(token) = cancel {
+        if token.is_cancelled() {
+            return LlmJudgeAttempt {
+                provider: Some(provider.id.clone()),
+                model: Some(format!("{}/{}", provider.id, model_id)),
+                prompt: prompt.to_string(),
+                request_url: None,
+                prompt_cache_key: state.prompt_cache_key_override.clone(),
+                request_body: None,
+                raw_response_text: None,
+                raw_response_body: None,
+                response_id: None,
+                input_tokens: None,
+                output_tokens: None,
+                cached_input_tokens: None,
+                cache_hit_ratio: None,
+                error: Some("judge cancelled by user".to_string()),
+            };
+        }
+    }
     let mut attempt = LlmJudgeAttempt {
         provider: Some(provider.id.clone()),
         model: Some(format!("{}/{}", provider.id, model_id)),
