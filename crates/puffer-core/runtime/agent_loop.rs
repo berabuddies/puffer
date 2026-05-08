@@ -503,7 +503,10 @@ pub(crate) fn run_streaming_loop(
         let captured_usage = std::cell::RefCell::new(None::<TurnUsageReport>);
         let captured_first_token = std::cell::RefCell::new(None::<std::time::Instant>);
         let request_started = std::time::Instant::now();
-        let result = if observability_handle.is_some() {
+        // Capture usage regardless of observability — the goal-accounting
+        // hook below ALSO needs the per-turn token count, and it should
+        // fire on production runs that have observability disabled.
+        let result = {
             let captured_usage_ref = &captured_usage;
             let captured_first_token_ref = &captured_first_token;
             let mut wrapped = |event: TurnStreamEvent| {
@@ -524,11 +527,12 @@ pub(crate) fn run_streaming_loop(
                 on_event(event);
             };
             session.one_turn_streaming(inputs.state, inputs.auth_store, &mut items, &mut wrapped)
-        } else {
-            session.one_turn_streaming(inputs.state, inputs.auth_store, &mut items, on_event)
         };
         // Surface usage on the provider span before propagating any
-        // error so failed calls still record their token cost.
+        // error so failed calls still record their token cost. Also
+        // credit the active goal (if any) — codex parity for the
+        // `ToolCompleted` accounting event (`core/src/goals.rs:822-932`),
+        // simplified here to per-turn rather than per-tool-call.
         if let Some(u) = captured_usage.into_inner() {
             provider_span.set_token_usage(
                 Some(u.input_tokens),
@@ -548,6 +552,7 @@ pub(crate) fn run_streaming_loop(
                 let ratio = u.cache_read_tokens as f64 / u.input_tokens as f64;
                 provider_span.set_f64("puffer.cache.hit_ratio", ratio);
             }
+            super::goals::account_token_usage(inputs.state, &u);
         }
         // Time-to-first-token: monotonic ms from request start to the
         // first stream event that carries content. Numeric so Langfuse

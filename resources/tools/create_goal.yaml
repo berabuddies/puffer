@@ -1,0 +1,24 @@
+id: create_goal
+name: create_goal
+description: |-
+  Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks.
+
+  Set `token_budget` only when an explicit token budget is requested. Fails if a goal already exists; use `update_goal` only to mark the existing goal complete.
+
+  Returns the freshly created goal as a JSON object identical in shape to `get_goal`'s response.
+
+handler: runtime:workflow:create_goal
+approval_policy: auto
+sandbox_policy: workspace-write
+input_schema:
+  type: object
+  properties:
+    objective:
+      type: string
+      description: "Required. The concrete objective to start pursuing. This starts a new active goal only when no goal is currently defined; if a goal already exists, this tool fails."
+    token_budget:
+      type: integer
+      description: "Optional positive token budget for the new active goal."
+  required:
+    - objective
+  additionalProperties: false

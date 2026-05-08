@@ -67,22 +67,93 @@ pub(crate) struct ClaudeReadState {
     pub(crate) is_partial_view: bool,
 }
 
-/// Session-scoped goal record set via `/goal`. Mirrors the public-facing
-/// shape of Codex's per-thread goal (`codex/codex-rs/core/src/goals.rs`):
-/// a free-form `objective` plus an optional `token_budget`. We do not yet
-/// auto-track token usage against the budget — surfacing the goal to the
-/// user is the bar for the MVP. Persisted across turns within a session
-/// but not across sessions (lives only on `AppState`, not in
-/// `SessionMetadata`).
+/// Status of a session goal. Mirrors the four-state machine codex
+/// uses (`codex/codex-rs/state/src/model/thread_goal.rs:11-36`):
+/// `Active` is the sole non-terminal state; `Paused` is a transient
+/// interruption (reserved for future Ctrl+C wiring); `BudgetLimited`
+/// fires automatically when `tokens_used >= token_budget`; `Complete`
+/// is set by the model via the `update_goal` tool. We deliberately
+/// match codex's vocabulary so cross-runtime telemetry / serialization
+/// can line up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoalStatus {
+    Active,
+    Paused,
+    BudgetLimited,
+    Complete,
+}
+
+impl GoalStatus {
+    /// Wire / display tag (matches codex `as_str` / wire camelCase).
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Paused => "paused",
+            Self::BudgetLimited => "budget_limited",
+            Self::Complete => "complete",
+        }
+    }
+
+    pub fn is_active(self) -> bool {
+        matches!(self, Self::Active)
+    }
+
+    /// Codex semantics: `BudgetLimited` and `Complete` are terminal;
+    /// `Paused` is a transient interruption that resume can revive.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::BudgetLimited | Self::Complete)
+    }
+}
+
+/// Session-scoped goal record. Borrows the public-facing shape of
+/// Codex's per-thread goal (`codex/codex-rs/core/src/goals.rs`,
+/// `codex-rs/state/src/model/thread_goal.rs`): an `objective`,
+/// `status`, optional `token_budget`, and live `tokens_used`
+/// counter. Persisted across turns within a session but not across
+/// sessions (lives only on `AppState`, not in `SessionMetadata` —
+/// codex uses SQLite for persistence; puffer is currently in-memory).
+///
+/// Lifecycle:
+///   - `slash_set_goal` (slash command) creates with `status: Active`.
+///   - `create_goal` tool (model) creates with `status: Active`,
+///     fails if any goal already exists.
+///   - `account_token_usage` increments `tokens_used` on every turn;
+///     transitions to `BudgetLimited` when the cap is reached.
+///   - `mark_complete` tool (model) flips to `Complete`. The
+///     model-facing `update_goal` tool intentionally cannot pause /
+///     budget-limit / clear — those transitions are reserved for the
+///     runtime / user (codex parity).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionGoal {
+    /// Stable identifier for optimistic concurrency (uuid v4-ish
+    /// hex). Mirrors codex's `goal_id` — used so future persistence
+    /// can detect goal-replacement races.
+    pub goal_id: String,
     /// The user-provided objective string. Trimmed at parse time.
     pub objective: String,
-    /// Optional token budget the user attached. `None` means open-ended.
+    /// Lifecycle status (see [`GoalStatus`]).
+    pub status: GoalStatus,
+    /// Optional token budget the user attached. `None` means
+    /// open-ended (no auto-transition to `BudgetLimited`).
     pub token_budget: Option<u32>,
-    /// Wall-clock timestamp (Unix ms) when the goal was set. Used by
-    /// `/status` and `/goal` to render an elapsed-time hint.
-    pub set_at_ms: u128,
+    /// Cumulative non-cached input + output tokens consumed since
+    /// the goal entered `Active`. Bumped on every turn boundary by
+    /// `runtime::goals::account_token_usage`.
+    pub tokens_used: u64,
+    /// Wall-clock timestamp (Unix ms) when the goal was created.
+    pub created_at_ms: u128,
+    /// Wall-clock timestamp (Unix ms) of the last status / tokens
+    /// mutation. `/goal status` renders elapsed time from this.
+    pub updated_at_ms: u128,
+}
+
+impl SessionGoal {
+    /// Remaining budget if any. `None` means budget unset (or
+    /// already exceeded — clamped at 0).
+    pub fn remaining_tokens(&self) -> Option<u64> {
+        let budget = self.token_budget? as u64;
+        Some(budget.saturating_sub(self.tokens_used))
+    }
 }
 
 /// Stores the mutable session and UI state for one interactive Puffer run.

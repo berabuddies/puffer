@@ -1,0 +1,16 @@
+id: get_goal
+name: get_goal
+description: |-
+  Get the current goal for this thread, including status, budget, token usage, and remaining token budget.
+
+  Returns a JSON object with the active goal's `objective`, `status` (one of `active` | `paused` | `budget_limited` | `complete`), `tokenBudget`, `tokensUsed`, `remainingTokens`, plus the goal id and creation/update timestamps. Returns `{ "goal": null }` when no goal is set.
+
+  Use this tool to check whether a goal is active before deciding whether to call `create_goal`, and to inspect remaining token budget before deciding whether to wrap up.
+
+handler: runtime:workflow:get_goal
+approval_policy: auto
+sandbox_policy: read-only
+input_schema:
+  type: object
+  properties: {}
+  additionalProperties: false
