@@ -1078,31 +1078,93 @@ fn persist_and_preview(text: &str, session_id: &uuid::Uuid) -> Option<String> {
 }
 
 fn build_persisted_output_message(filepath: &str, text: &str) -> String {
-    let (preview, has_more) = generate_preview(text, PREVIEW_SIZE_CHARS);
+    let total_chars = text.chars().count();
     let size_str = format_byte_size(text.len());
-    let preview_size_str = format_byte_size(PREVIEW_SIZE_CHARS);
+    if total_chars <= PREVIEW_SIZE_CHARS {
+        // Short enough to show in full — single-block preview, no
+        // truncation marker. (Reachable only when `text.len() >
+        // max_chars` triggered persistence but the char count is
+        // smaller than the byte length — multi-byte UTF-8 case.)
+        return format!(
+            "{PERSISTED_OUTPUT_TAG}\n\
+             Output too large ({size_str}). Full output saved to: {filepath}\n\n\
+             Preview:\n\
+             {text}\n\
+             {PERSISTED_OUTPUT_CLOSING_TAG}"
+        );
+    }
+    if total_chars <= PREVIEW_SIZE_CHARS * 2 {
+        // Output just barely exceeds the threshold — the tail would
+        // be tiny, so head-only stays as informative as head+tail
+        // would be. Preserves CC-parity wording for this common case.
+        let (preview, _) = head_preview(text, PREVIEW_SIZE_CHARS);
+        let preview_size_str = format_byte_size(PREVIEW_SIZE_CHARS);
+        return format!(
+            "{PERSISTED_OUTPUT_TAG}\n\
+             Output too large ({size_str}). Full output saved to: {filepath}\n\n\
+             Preview (first {preview_size_str}):\n\
+             {preview}\n...\n\
+             {PERSISTED_OUTPUT_CLOSING_TAG}"
+        );
+    }
+    // Long output: show head + tail so terminal failure messages
+    // (errors that print at the END of long builds / test runs /
+    // greps) survive the preview. CC v2.1.133's `I3_` is head-only;
+    // we deliberately diverge here. Anchor: 2026-04-12
+    // `make-doom-for-mips` step 44 — 1.8MB grep stderr where the
+    // useful exit-status line was at the bottom.
+    let head_budget = PREVIEW_SIZE_CHARS / 2;
+    let tail_budget = PREVIEW_SIZE_CHARS - head_budget;
+    let (head, _) = head_preview(text, head_budget);
+    let tail = tail_preview(text, tail_budget, total_chars);
+    let omitted = total_chars
+        .saturating_sub(head.chars().count())
+        .saturating_sub(tail.chars().count());
+    let head_size_str = format_byte_size(head_budget);
+    let tail_size_str = format_byte_size(tail_budget);
     format!(
         "{PERSISTED_OUTPUT_TAG}\n\
          Output too large ({size_str}). Full output saved to: {filepath}\n\n\
-         Preview (first {preview_size_str}):\n\
-         {preview}{}\
-         {PERSISTED_OUTPUT_CLOSING_TAG}",
-        if has_more { "\n...\n" } else { "\n" },
+         Preview (first {head_size_str} head + last {tail_size_str} tail):\n\
+         {head}\n\n[…{omitted} chars omitted…]\n\n{tail}\n\
+         {PERSISTED_OUTPUT_CLOSING_TAG}"
     )
 }
 
-/// Generate a preview of text, trying to cut at a newline boundary.
-fn generate_preview(text: &str, max_chars: usize) -> (String, bool) {
+/// Cut `text` to `max_chars` from the start, preferring a newline
+/// boundary within the back half to avoid mid-line breaks. Returns
+/// `(preview, has_more)`.
+fn head_preview(text: &str, max_chars: usize) -> (String, bool) {
     if text.chars().count() <= max_chars {
         return (text.to_string(), false);
     }
     let truncated: String = text.chars().take(max_chars).collect();
-    // Cut at last newline within the back half, to avoid mid-line breaks.
     let cut = truncated
         .rfind('\n')
         .filter(|&pos| pos > truncated.len() / 2)
         .unwrap_or(truncated.len());
     (truncated[..cut].to_string(), true)
+}
+
+/// Cut `text` to `max_chars` from the END, preferring a newline
+/// boundary within the front half so we don't strand a half-line.
+/// `total_chars` is passed in to avoid re-counting (the caller
+/// already has it).
+fn tail_preview(text: &str, max_chars: usize, total_chars: usize) -> String {
+    if total_chars <= max_chars {
+        return text.to_string();
+    }
+    let skip = total_chars - max_chars;
+    let suffix: String = text.chars().skip(skip).collect();
+    // Walk forward to the next newline if it sits in the leading
+    // quarter of the suffix — drops a likely-mid-line fragment but
+    // keeps the trailing content intact.
+    let cut = suffix
+        .find('\n')
+        .filter(|&pos| pos < suffix.len() / 4)
+        .map(|pos| pos + 1)
+        .unwrap_or(0);
+    suffix[cut..].to_string()
 }
 
 fn format_byte_size(bytes: usize) -> String {
