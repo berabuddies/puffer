@@ -12,6 +12,7 @@ use puffer_skill_evolution::{
     run_gepa, AgentRuntime, ExecutionTrace, GepaOptions, SkillCandidate, TranscriptStep,
 };
 use std::fs;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -73,21 +74,32 @@ pub(crate) fn handle_genskill_command(
         providers: providers.clone(),
         auth_store: Mutex::new(auth_store.clone()),
     };
-    let candidate = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("creating genskill runtime")?
-        .block_on(run_gepa(
-            &runtime,
-            &trace,
-            &opts,
-            &puffer_skill_evolution::DefaultGeneratePrompt,
-            &puffer_skill_evolution::DefaultJudgePrompt,
-            &puffer_skill_evolution::DefaultMutatePrompt,
-        ))?;
+    let candidate = block_on_genskill_future(run_gepa(
+        &runtime,
+        &trace,
+        &opts,
+        &puffer_skill_evolution::DefaultGeneratePrompt,
+        &puffer_skill_evolution::DefaultJudgePrompt,
+        &puffer_skill_evolution::DefaultMutatePrompt,
+    ))?;
 
     let path = write_skill_to_disk(&candidate)?;
     Ok(format!("Skill written to {}", path.display()))
+}
+
+fn block_on_genskill_future<F, T>(future: F) -> Result<T>
+where
+    F: Future<Output = Result<T>>,
+{
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        return tokio::task::block_in_place(|| handle.block_on(future));
+    }
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("creating genskill runtime")?
+        .block_on(future)
 }
 
 fn parse_args(args: &str) -> Result<GepaOptions> {
@@ -185,5 +197,25 @@ mod tests {
         let opts = parse_args("--candidates 5 --rounds 3").unwrap();
         assert_eq!(opts.n_candidates, 5);
         assert_eq!(opts.k_rounds, 3);
+    }
+
+    #[test]
+    fn block_on_genskill_future_outside_runtime() {
+        let value = block_on_genskill_future(async { Ok(7) }).unwrap();
+        assert_eq!(value, 7);
+    }
+
+    #[test]
+    fn block_on_genskill_future_inside_runtime() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let value = block_on_genskill_future(async { Ok(7) }).unwrap();
+            assert_eq!(value, 7);
+        });
     }
 }
