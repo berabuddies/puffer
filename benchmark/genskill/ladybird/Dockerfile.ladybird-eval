@@ -18,6 +18,7 @@ WORKDIR /work
 RUN git clone --branch "${LADYBIRD_REF}" "${LADYBIRD_REPO}" ladybird
 RUN useradd -m -s /bin/bash ladybird && chown -R ladybird:ladybird /work
 RUN mkdir -p /opt/puffer && echo "Mount /usr/local/bin/puffer at runtime" > /opt/puffer/README
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y     generate-ninja  && rm -rf /var/lib/apt/lists/*
 
 # Warm build cache -- tolerate failure because individual replays rebuild from
 # their corpus base commit before running the target test.
