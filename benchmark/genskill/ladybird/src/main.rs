@@ -4,6 +4,8 @@
 
 #![deny(missing_docs)]
 
+mod pr_corpus;
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
@@ -42,7 +44,13 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Validate => {
-            println!("Corpus validation not yet implemented");
+            let entries = pr_corpus::load_corpus(std::path::Path::new(
+                "benchmark/genskill/ladybird/pr_corpus",
+            ))?;
+            println!("OK: {} entries", entries.len());
+            for e in &entries {
+                println!("  {} ({}, {})", e.id, e.meta.area, e.meta.title);
+            }
             Ok(())
         }
         Cmd::Replay { pr, arm } => {
