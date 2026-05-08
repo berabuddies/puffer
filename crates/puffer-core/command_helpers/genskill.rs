@@ -5,7 +5,7 @@
 //! `resources/skills/<name>/SKILL.md`.
 
 use crate::{AppState, MessageRole};
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use puffer_resources::LoadedResources;
 use puffer_skill_evolution::{
@@ -26,19 +26,21 @@ struct PufferAgentRuntime {
 #[async_trait::async_trait]
 impl AgentRuntime for PufferAgentRuntime {
     async fn invoke_agent(&self, prompt: &str) -> Result<String> {
-        let mut state = self.state.lock().expect("genskill state lock poisoned");
-        let mut auth_store = self
-            .auth_store
-            .lock()
-            .expect("genskill auth store lock poisoned");
-        let turn = crate::runtime::execute_user_prompt(
-            &mut state,
-            &self.resources,
-            &self.providers,
-            &mut auth_store,
-            prompt,
-        )?;
-        Ok(turn.assistant_text)
+        run_blocking_outside_tokio(|| {
+            let mut state = self.state.lock().expect("genskill state lock poisoned");
+            let mut auth_store = self
+                .auth_store
+                .lock()
+                .expect("genskill auth store lock poisoned");
+            let turn = crate::runtime::execute_user_prompt(
+                &mut state,
+                &self.resources,
+                &self.providers,
+                &mut auth_store,
+                prompt,
+            )?;
+            Ok(turn.assistant_text)
+        })
     }
 }
 
@@ -100,6 +102,23 @@ where
         .build()
         .context("creating genskill runtime")?
         .block_on(future)
+}
+
+fn run_blocking_outside_tokio<F, T>(f: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T> + Send,
+    T: Send,
+{
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return std::thread::scope(|scope| {
+            scope
+                .spawn(f)
+                .join()
+                .map_err(|_| anyhow!("genskill blocking worker panicked"))?
+        });
+    }
+
+    f()
 }
 
 fn parse_args(args: &str) -> Result<GepaOptions> {
@@ -215,6 +234,27 @@ mod tests {
 
         runtime.block_on(async {
             let value = block_on_genskill_future(async { Ok(7) }).unwrap();
+            assert_eq!(value, 7);
+        });
+    }
+
+    #[test]
+    fn run_blocking_outside_tokio_allows_nested_block_on_inside_runtime() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let value = run_blocking_outside_tokio(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async { Ok(7) })
+            })
+            .unwrap();
             assert_eq!(value, 7);
         });
     }
