@@ -5,6 +5,7 @@
 #![deny(missing_docs)]
 
 mod pr_corpus;
+mod transcript;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -25,6 +26,15 @@ struct Cli {
 enum Cmd {
     /// Validate the on-disk corpus structure.
     Validate,
+    /// Convert a puffer session JSONL transcript to flat markdown.
+    TranscriptToMd {
+        /// Input JSONL transcript path.
+        #[arg(long = "in")]
+        input: std::path::PathBuf,
+        /// Output markdown path.
+        #[arg(long = "out")]
+        output: std::path::PathBuf,
+    },
     /// Run a single replay: one PR, one arm.
     Replay {
         /// PR id (matches pr_corpus/<id>/).
@@ -51,6 +61,11 @@ async fn main() -> Result<()> {
             for e in &entries {
                 println!("  {} ({}, {})", e.id, e.meta.area, e.meta.title);
             }
+            Ok(())
+        }
+        Cmd::TranscriptToMd { input, output } => {
+            transcript::transcript_to_md(&input, &output)?;
+            println!("Wrote {}", output.display());
             Ok(())
         }
         Cmd::Replay { pr, arm } => {
