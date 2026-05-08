@@ -168,6 +168,7 @@ struct TurnRequestOptions<'a> {
     /// Owned (Arc-backed clone) so we can fall back to the
     /// process-wide handle without lifetime gymnastics.
     observability: Option<puffer_observability::ObservabilityHandle>,
+    lightweight_context: bool,
 }
 
 #[derive(Debug)]
@@ -337,6 +338,7 @@ pub(crate) fn execute_user_prompt_with_tool_filter(
             cancel: None,
             max_turns: None,
             observability: None,
+            lightweight_context: false,
         },
     )
 }
@@ -417,6 +419,7 @@ pub fn execute_user_prompt_with_structured_output(
             cancel: None,
             max_turns: None,
             observability: None,
+            lightweight_context: false,
         },
     )
 }
@@ -515,6 +518,7 @@ where
                 cancel: None,
                 max_turns: None,
                 observability: None,
+                lightweight_context: false,
             },
             &mut on_event,
         )
@@ -556,6 +560,7 @@ where
                 cancel: Some(cancel),
                 max_turns: None,
                 observability: None,
+                lightweight_context: false,
             },
             &mut on_event,
         )
@@ -589,6 +594,7 @@ where
             cancel: None,
             max_turns: None,
             observability: None,
+            lightweight_context: false,
         },
         &mut on_event,
     )
@@ -625,6 +631,7 @@ where
             cancel: Some(cancel),
             max_turns: None,
             observability: None,
+            lightweight_context: false,
         },
         &mut on_event,
     )
@@ -656,6 +663,7 @@ where
             cancel: None,
             max_turns: None,
             observability: None,
+            lightweight_context: false,
         },
         &mut on_event,
     )
@@ -696,6 +704,7 @@ where
         // emits the canonical "not executable yet" error message.
         if suppress_tools {
             options.tool_filter = Some(RequestToolFilter::empty_static());
+            options.lightweight_context = true;
         }
         return execute_user_prompt_with_options(
             state, resources, providers, auth_store, input, options,
@@ -703,6 +712,7 @@ where
     };
     if suppress_tools {
         options.tool_filter = Some(RequestToolFilter::empty_static());
+        options.lightweight_context = true;
     }
     adapter.execute_turn_streaming(
         state, resources, providers, provider, model_id, auth_store, input, options, on_event,

@@ -170,19 +170,27 @@ where
         use_native,
         Some(&permission_context),
     )?;
-    let system_prompt = render_runtime_system_prompt(
-        state,
-        resources,
-        &model_id,
-        &tools
-            .iter()
-            .map(|tool| tool.name.clone())
-            .collect::<std::collections::BTreeSet<_>>(),
-    )?;
-    let instructions = openai_request_instructions(state, resources, Some(&system_prompt))?;
+    let instructions = if options.lightweight_context {
+        "Reply directly and concisely.".to_string()
+    } else {
+        let system_prompt = render_runtime_system_prompt(
+            state,
+            resources,
+            &model_id,
+            &tools
+                .iter()
+                .map(|tool| tool.name.clone())
+                .collect::<std::collections::BTreeSet<_>>(),
+        )?;
+        openai_request_instructions(state, resources, Some(&system_prompt))?
+    };
     // Unified: all internal logic on Vec<ConversationItem>.
     let mut items = transcript_to_items(state, input);
-    let managed_system_prompt_1 = managed_system_prompt_1_from_env();
+    let managed_system_prompt_1 = if options.lightweight_context {
+        None
+    } else {
+        managed_system_prompt_1_from_env()
+    };
     insert_managed_system_prompt_1(&mut items, managed_system_prompt_1.as_deref());
     let mut reflection = options
         .reflection
@@ -191,11 +199,13 @@ where
 
     // Inject dynamic context as a user message at the start of the input
     // array (matching Codex/CC pattern).
-    let context_reminder = build_context_reminder_message();
-    super::openai::conversation::insert_context_reminder_preserving_legacy_leading_system(
-        &mut items,
-        &context_reminder,
-    );
+    if !options.lightweight_context {
+        let context_reminder = build_context_reminder_message();
+        super::openai::conversation::insert_context_reminder_preserving_legacy_leading_system(
+            &mut items,
+            &context_reminder,
+        );
+    }
 
     let mut invocations = Vec::new();
     let supports_reasoning = openai_model_supports_reasoning(provider, &model_id);
