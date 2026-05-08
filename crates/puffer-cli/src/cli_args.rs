@@ -179,6 +179,9 @@ pub(crate) enum Command {
         /// Additional managed-agent system prompt inserted after Puffer's base system prompt.
         #[arg(long = "system-prompt-1")]
         system_prompt_1: Option<String>,
+        /// Disable automatic first-message title generation for managed runtimes.
+        #[arg(long = "disable-auto-title", default_value_t = false)]
+        disable_auto_title: bool,
     },
     /// Internal: run a baked-in subscriber skill driver. Invoked by the
     /// subscriber supervisor; not intended for direct use.
