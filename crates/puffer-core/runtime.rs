@@ -20,6 +20,7 @@ use std::time::Duration;
 mod agent_loop;
 #[cfg(test)]
 mod agent_runtime_tests;
+mod agent_support;
 mod agents;
 mod anthropic;
 mod anthropic_sse;
