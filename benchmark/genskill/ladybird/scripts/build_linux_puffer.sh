@@ -17,7 +17,7 @@ docker run --rm \
   -e CARGO_TARGET_DIR=/tmp/puffer-target \
   --workdir /work/puffer \
   "$RUST_IMAGE" \
-  bash -lc 'cargo build -p puffer-cli --release && cp /tmp/puffer-target/release/puffer /work/puffer/benchmark/genskill/ladybird/.bin/puffer-linux'
+  bash -c 'export PATH="/usr/local/cargo/bin:$PATH"; cargo build -p puffer-cli --release && cp /tmp/puffer-target/release/puffer /work/puffer/benchmark/genskill/ladybird/.bin/puffer-linux'
 
 chmod +x "$OUT"
 echo "Built Linux puffer binary at $OUT"
