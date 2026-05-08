@@ -355,15 +355,15 @@ fn test_command_for(filters: &[String]) -> String {
     for pattern in ctest_patterns {
         let quoted_pattern = shell_quote(&pattern);
         commands.push(format!(
-            "echo '=== target ctest: {pattern} ==='; \
+            "echo '=== target unit test: {pattern} ==='; \
              if [ -f Meta/ladybird.py ]; then \
-                 python3 Meta/ladybird.py test {quoted_pattern}; \
+                 python3 Meta/ladybird.py run {quoted_pattern}; \
              elif [ -x Meta/ladybird.sh ]; then \
-                 ./Meta/ladybird.sh test {quoted_pattern}; \
+                 ./Meta/ladybird.sh run {quoted_pattern}; \
              elif command -v ctest >/dev/null 2>&1; then \
                  ctest --output-on-failure -R {quoted_pattern}; \
              else \
-                 echo 'no Ladybird ctest runner found' >&2; exit 127; \
+                 echo 'no Ladybird unit-test runner found' >&2; exit 127; \
              fi; \
              rc=$?; \
              if [ $rc -ne 0 ]; then status=$rc; fi"
@@ -453,8 +453,8 @@ mod tests {
             "Tests/LibURL/TestPublicSuffix.cpp".to_string(),
         ];
         let command = test_command_for(&filters);
-        assert!(command.contains("python3 Meta/ladybird.py test 'TestRegex'"));
-        assert!(command.contains("python3 Meta/ladybird.py test 'TestPublicSuffix'"));
+        assert!(command.contains("python3 Meta/ladybird.py run 'TestRegex'"));
+        assert!(command.contains("python3 Meta/ladybird.py run 'TestPublicSuffix'"));
     }
 
     #[test]
