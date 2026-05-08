@@ -137,6 +137,7 @@ const OPENAI_CODEX_COMPAT_VERSION: &str = "0.125.0";
 const OPENAI_CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const HTTP_RETRY_ATTEMPTS_ENV: &str = "PUFFER_HTTP_RETRY_ATTEMPTS";
 const HTTP_RETRY_DELAY_MS_ENV: &str = "PUFFER_HTTP_RETRY_DELAY_MS";
+const SUPPRESS_TOOLS_FOR_SIMPLE_TURNS_ENV: &str = "PUFFER_SUPPRESS_TOOLS_FOR_SIMPLE_TURNS";
 
 #[derive(Clone, Default)]
 struct TurnRequestOptions<'a> {
@@ -665,17 +666,37 @@ where
     if options.observability.is_none() {
         options.observability = observability_handle();
     }
+    let suppress_tools = suppress_tools_for_simple_turn(input);
     let (provider, model_id) = resolve_provider_and_model(state, providers)?;
     let api = resolve_model_api(state, providers, provider, &model_id);
     let Some(adapter) = provider_adapter::adapter_for_api(&api) else {
         // Adapter unknown → fall through to non-streaming dispatch which
         // emits the canonical "not executable yet" error message.
+        if suppress_tools {
+            options.tool_filter = Some(RequestToolFilter::empty_static());
+        }
         return execute_user_prompt_with_options(
             state, resources, providers, auth_store, input, options,
         );
     };
+    if suppress_tools {
+        options.tool_filter = Some(RequestToolFilter::empty_static());
+    }
     adapter.execute_turn_streaming(
         state, resources, providers, provider, model_id, auth_store, input, options, on_event,
+    )
+}
+
+fn suppress_tools_for_simple_turn(input: &str) -> bool {
+    if !std::env::var(SUPPRESS_TOOLS_FOR_SIMPLE_TURNS_ENV)
+        .ok()
+        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+    {
+        return false;
+    }
+    matches!(
+        input.trim().to_ascii_lowercase().as_str(),
+        "hi" | "hello" | "hey"
     )
 }
 fn resolve_provider_and_model<'a>(

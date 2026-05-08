@@ -4,6 +4,7 @@ use glob::Pattern;
 use puffer_tools::ToolDefinition;
 use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
+use std::sync::OnceLock;
 
 /// Stores one request-scoped tool allowlist derived from slash-command metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +26,11 @@ enum ToolRuleMatcher {
 }
 
 impl RequestToolFilter {
+    pub(crate) fn empty_static() -> &'static Self {
+        static EMPTY: OnceLock<RequestToolFilter> = OnceLock::new();
+        EMPTY.get_or_init(|| Self { rules: Vec::new() })
+    }
+
     /// Returns true when a tool definition should be exposed to the model.
     pub(crate) fn allows_definition(&self, definition: &ToolDefinition) -> bool {
         self.rules
