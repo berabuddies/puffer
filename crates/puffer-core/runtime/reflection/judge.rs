@@ -132,6 +132,7 @@ pub(super) fn run_llm_judge(
             reflection: None,
             cancel: None,
             observability: None,
+            lightweight_context: false,
         },
     ) {
         Ok(response) => LlmJudgeAttempt {

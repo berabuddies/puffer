@@ -288,17 +288,30 @@ pub(super) fn setup_completions_session(
         Some(&permission_context),
         options.tool_filter,
     )?;
-    let system_prompt = render_runtime_system_prompt(
-        state,
-        resources,
-        &model_id,
-        &tools
-            .iter()
-            .map(|tool| tool.function.name.clone())
-            .collect::<std::collections::BTreeSet<_>>(),
-    )?;
-    let plan_mode_context = crate::plan_mode::take_plan_mode_context_message(state, resources)?;
-    let system_reminder = build_system_reminder(&crate::runtime::git_status_context());
+    let (system_prompt, managed_system_prompt_1, plan_mode_context, system_reminder) =
+        if options.lightweight_context {
+            (
+                "Reply directly and concisely.".to_string(),
+                None,
+                None,
+                String::new(),
+            )
+        } else {
+            (
+                render_runtime_system_prompt(
+                    state,
+                    resources,
+                    &model_id,
+                    &tools
+                        .iter()
+                        .map(|tool| tool.function.name.clone())
+                        .collect::<std::collections::BTreeSet<_>>(),
+                )?,
+                managed_system_prompt_1_from_env(),
+                crate::plan_mode::take_plan_mode_context_message(state, resources)?,
+                build_system_reminder(&crate::runtime::git_status_context()),
+            )
+        };
 
     let model_descriptor = provider.models.iter().find(|m| m.id == model_id);
     let model_supports_reasoning = model_descriptor
@@ -314,7 +327,7 @@ pub(super) fn setup_completions_session(
         tools,
         response_format,
         system_prompt,
-        managed_system_prompt_1: managed_system_prompt_1_from_env(),
+        managed_system_prompt_1,
         plan_mode_context,
         system_reminder,
         structured_output: options.structured_output.cloned(),
