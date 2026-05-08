@@ -233,18 +233,25 @@ pub(crate) fn execute_tool(
             };
             Ok(tool_result(definition, true, output))
         }
-        _ if definition.handler.starts_with("runtime:workflow:") => Ok(tool_result(
-            definition,
-            true,
-            execute_workflow_tool(
+        _ if definition.handler.starts_with("runtime:workflow:") => {
+            let stdout = execute_workflow_tool(
                 state,
                 resources,
                 cwd,
                 definition.id.as_str(),
                 input,
                 provider_context.structured_output(),
-            )?,
-        )),
+            )?;
+            // Some workflow tools want to set `metadata.terminate = true`
+            // so the agent loop ends the turn after their result is
+            // delivered to the model — pi-mono parity for
+            // `AgentToolResult.terminate`. The post-process is opt-in
+            // per tool id; default is `Value::Null` for everything else.
+            let metadata = workflow_terminate_metadata(definition.id.as_str(), &stdout);
+            Ok(tool_result_with_metadata(
+                definition, true, stdout, metadata,
+            ))
+        }
         _ if super::local_tools::is_runtime_local_tool(definition) => Ok(tool_result(
             definition,
             true,
@@ -461,14 +468,58 @@ fn staleness_failure(
 }
 
 fn tool_result(definition: &ToolDefinition, success: bool, stdout: String) -> ToolExecutionResult {
+    tool_result_with_metadata(definition, success, stdout, Value::Null)
+}
+
+/// Build a `ToolExecutionResult` with explicit metadata. The metadata
+/// is what the tool-batch dispatcher inspects for `"terminate": true`
+/// (see `runtime/tool_batch.rs::extract_terminate`) — used by tools
+/// that want to end the turn after their result is delivered.
+fn tool_result_with_metadata(
+    definition: &ToolDefinition,
+    success: bool,
+    stdout: String,
+    metadata: Value,
+) -> ToolExecutionResult {
     ToolExecutionResult {
         tool_id: definition.id.clone(),
         success,
         output: ToolOutput {
             stdout,
             stderr: String::new(),
-            metadata: Value::Null,
+            metadata,
         },
+    }
+}
+
+/// Decide whether a workflow tool's result should carry
+/// `metadata.terminate = true`. Today only `update_goal` opts in,
+/// and only when the model successfully marked the goal `complete`
+/// (we sniff the JSON response since the workflow handler returns
+/// pretty-printed JSON). Pi-mono pattern: tools that mark a unit of
+/// work done can short-circuit the next provider round-trip.
+///
+/// Returning `Value::Null` is a no-op and matches the historical
+/// behavior for every other workflow tool.
+fn workflow_terminate_metadata(tool_id: &str, stdout: &str) -> Value {
+    if tool_id != "update_goal" {
+        return Value::Null;
+    }
+    // Cheap parse — workflow handlers always emit pretty-printed
+    // JSON. If parsing fails (shouldn't, but defensive) treat it
+    // as no-terminate.
+    let Ok(parsed) = serde_json::from_str::<Value>(stdout) else {
+        return Value::Null;
+    };
+    if parsed
+        .pointer("/goal/status")
+        .and_then(Value::as_str)
+        .map(|s| s == "complete")
+        .unwrap_or(false)
+    {
+        serde_json::json!({ "terminate": true })
+    } else {
+        Value::Null
     }
 }
 
@@ -697,6 +748,44 @@ impl<'a> ProviderToolContext<'a> {
 mod tests {
     use super::*;
     use puffer_resources::LoadedResources;
+
+    #[test]
+    fn workflow_terminate_metadata_only_fires_for_completed_update_goal() {
+        // Anything other than update_goal: never set terminate.
+        assert_eq!(
+            workflow_terminate_metadata("create_goal", "{\"goal\":{\"status\":\"complete\"}}"),
+            Value::Null
+        );
+        assert_eq!(
+            workflow_terminate_metadata("get_goal", "{\"goal\":{\"status\":\"complete\"}}"),
+            Value::Null
+        );
+        // update_goal but the goal didn't actually flip to complete:
+        // also no terminate (defensive — shouldn't happen given our
+        // serde lock, but the helper is the only post-process site).
+        assert_eq!(
+            workflow_terminate_metadata("update_goal", "{\"goal\":{\"status\":\"active\"}}"),
+            Value::Null
+        );
+        // update_goal with completed goal: terminate set.
+        let metadata = workflow_terminate_metadata(
+            "update_goal",
+            "{\"goal\":{\"status\":\"complete\",\"objective\":\"x\"}}",
+        );
+        assert_eq!(metadata.get("terminate"), Some(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn workflow_terminate_metadata_handles_malformed_json_gracefully() {
+        // Defensive — workflow handler always emits valid JSON, but
+        // a malformed payload must not panic the dispatcher.
+        assert_eq!(
+            workflow_terminate_metadata("update_goal", "not json"),
+            Value::Null
+        );
+        assert_eq!(workflow_terminate_metadata("update_goal", ""), Value::Null);
+    }
+
     use puffer_runner_api::{
         ChunkSink, DirEntry, McpPrompt, McpPromptContent, McpResourceContent, McpResourceRecord,
         McpResult, McpServerInfo, McpTool, RunnerCapabilities, RunnerError, ToolRequest,
