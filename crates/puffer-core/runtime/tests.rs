@@ -7,7 +7,9 @@ use puffer_provider_openai::{
     OpenAIResponsesTextFormat, OpenAIResponsesTool,
 };
 use puffer_provider_registry::{AuthMode, OAuthCredential, ProviderDescriptor, StoredCredential};
-use puffer_resources::{AgentSpec, LoadedItem, LoadedResources, SourceInfo, SourceKind, ToolSpec};
+use puffer_resources::{
+    load_resources, AgentSpec, LoadedItem, LoadedResources, SourceInfo, SourceKind, ToolSpec,
+};
 use puffer_session_store::SessionMetadata;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -200,12 +202,43 @@ pub(super) fn refresh_env_lock() -> &'static Mutex<()> {
     crate::test_locks::env_lock()
 }
 
+fn bundled_resources() -> LoadedResources {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("workspace root")
+        .to_path_buf();
+    let temp = tempfile::tempdir().unwrap();
+    let paths = ConfigPaths {
+        workspace_root: temp.path().join("workspace"),
+        workspace_config_dir: temp.path().join("workspace/.puffer"),
+        user_config_dir: temp.path().join("user"),
+        builtin_resources_dir: root.join("resources"),
+    };
+    ensure_workspace_dirs(&paths).unwrap();
+    load_resources(&paths).unwrap()
+}
+
 #[test]
 fn anthropic_tool_schema_lists_expected_fields() {
     let schema = anthropic_tool_schema("write_file");
     let required = schema.get("required").and_then(Value::as_array).unwrap();
     assert!(required.iter().any(|value| value == "path"));
     assert!(required.iter().any(|value| value == "contents"));
+}
+
+#[test]
+fn runtime_system_prompt_mentions_ignore_memory_policy() {
+    let prompt = super::system_prompt::render_runtime_system_prompt(
+        &state(),
+        &bundled_resources(),
+        "gpt-5",
+        &std::collections::BTreeSet::new(),
+    )
+    .unwrap();
+
+    assert!(prompt.contains("ignore or not use memory"));
+    assert!(prompt.contains("loaded memory files were empty"));
 }
 
 #[test]

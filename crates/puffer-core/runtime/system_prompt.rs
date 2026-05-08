@@ -70,6 +70,7 @@ $SESSION_GUIDANCE
 
 # Important context behavior
 When working with tool results, write down any important information you might need later in your response, as the original tool result may be cleared later to free context space.
+If the user explicitly says to ignore or not use memory, proceed as if any loaded memory files were empty. Do not apply remembered facts, cite memory content, compare against memory, or mention memory unless the user later re-enables it.
 
 $ENVIRONMENT"#;
 
@@ -519,6 +520,7 @@ mod tests {
         assert!(prompt.contains("AskUserQuestion"));
         assert!(prompt.contains("# Environment"));
         assert!(prompt.contains("Primary working directory:"));
+        assert!(prompt.contains("ignore or not use memory"));
     }
 
     #[test]
