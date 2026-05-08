@@ -44,7 +44,7 @@ input_schema:
         - scroll
         - scrollIntoView
         - evaluate
-      description: Browser action to perform. `focus` switches tabs by `tabId`; `focus_ref` targets one snapshot ref. `open` with `url` is already a navigation.
+      description: "Browser action to perform. `focus` switches tabs by `tabId`; `focus_ref` targets one snapshot ref. `open` with `url` is already a navigation."
     sessionId:
       type: string
       description: Puffer session id. Defaults to the current agent session.
