@@ -30,7 +30,7 @@ impl Drop for ScopedEnvVar {
 }
 
 #[test]
-fn http_retry_config_defaults_to_no_retries() {
+fn http_retry_config_defaults_to_three_retries() {
     let _lock = super::refresh_env_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
@@ -40,7 +40,7 @@ fn http_retry_config_defaults_to_no_retries() {
     assert_eq!(
         super::super::http_retry_config(),
         super::super::HttpRetryConfig {
-            retries: 0,
+            retries: 3,
             delay_ms: 1_000,
         }
     );
