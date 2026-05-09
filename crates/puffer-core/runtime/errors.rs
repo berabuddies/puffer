@@ -213,6 +213,39 @@ impl ProviderError {
     }
 }
 
+/// Bridge from the existing `runtime::quota::QuotaError` (introduced
+/// in #83) into the typed `ProviderError` enum. Lets adapters that
+/// already classify quota signals upstream lift them into the unified
+/// error vocabulary without a second round of body inspection.
+///
+/// `QuotaErrorKind::RateLimit` → `ProviderError::RateLimit { .. }` —
+/// `retry_after` / `resets_at` are left as `None` because `QuotaError`
+/// does not currently carry header-derived hints; callers that need
+/// them should classify via [`classify`] (which sees the `HeaderMap`)
+/// instead of going through this conversion.
+///
+/// `QuotaErrorKind::AccessTerminated` →
+/// `ProviderError::AccessTerminated { .. }` — preserves the original
+/// provider tag and body so downstream telemetry / `result.json`
+/// stamping is unchanged.
+impl From<crate::runtime::quota::QuotaError> for ProviderError {
+    fn from(quota: crate::runtime::quota::QuotaError) -> Self {
+        use crate::runtime::quota::QuotaErrorKind;
+        match quota.kind {
+            QuotaErrorKind::RateLimit => ProviderError::RateLimit {
+                retry_after: None,
+                resets_at: None,
+                body: quota.body,
+                status: quota.status,
+            },
+            QuotaErrorKind::AccessTerminated => ProviderError::AccessTerminated {
+                provider: quota.provider,
+                body: quota.body,
+            },
+        }
+    }
+}
+
 /// Parse a `Retry-After` header value. Per RFC 7231 the value is
 /// either a non-negative integer (seconds) or an HTTP-date; this
 /// helper handles only the integer form, which is what every LLM
@@ -532,6 +565,38 @@ mod tests {
         // Defensive: a 200 with an embedded error body is the
         // caller's responsibility, not classify's.
         assert!(classify("openai", 200, &HeaderMap::new(), "ok").is_none());
+    }
+
+    #[test]
+    fn from_quota_error_rate_limit_round_trip() {
+        use crate::runtime::quota::{QuotaError, QuotaErrorKind};
+        let q = QuotaError {
+            kind: QuotaErrorKind::RateLimit,
+            provider: "anthropic".to_string(),
+            status: 429,
+            body: "rate limited".to_string(),
+        };
+        let err: ProviderError = q.into();
+        assert!(matches!(err, ProviderError::RateLimit { status: 429, .. }));
+    }
+
+    #[test]
+    fn from_quota_error_access_terminated_round_trip() {
+        use crate::runtime::quota::{QuotaError, QuotaErrorKind};
+        let q = QuotaError {
+            kind: QuotaErrorKind::AccessTerminated,
+            provider: "kimi".to_string(),
+            status: 403,
+            body: "usage limit reached for this period".to_string(),
+        };
+        let err: ProviderError = q.into();
+        match err {
+            ProviderError::AccessTerminated { provider, body } => {
+                assert_eq!(provider, "kimi");
+                assert!(body.contains("usage limit reached"));
+            }
+            other => panic!("expected AccessTerminated, got {other:?}"),
+        }
     }
 
     #[test]
