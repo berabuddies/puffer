@@ -1144,19 +1144,19 @@ mod persisted_output_preview {
             message.contains("head + last"),
             "head+tail format should advertise both blocks; got: {message}"
         );
-        let omitted_idx = message.find("omitted").expect("omitted marker present");
-        let (before_omitted, after_omitted) = message.split_at(omitted_idx);
+        let marker_idx = message.find("truncated").expect("truncated marker present");
+        let (before_marker, after_marker) = message.split_at(marker_idx);
         assert!(
-            before_omitted.contains('A'),
-            "head should contain A's; before omitted: {before_omitted}"
+            before_marker.contains('A'),
+            "head should contain A's; before marker: {before_marker}"
         );
         assert!(
-            !before_omitted.contains('Z'),
-            "head must not contain tail content; before omitted has Z"
+            !before_marker.contains('Z'),
+            "head must not contain tail content; before marker has Z"
         );
         assert!(
-            after_omitted.contains('Z'),
-            "tail should contain Z's; after omitted: {after_omitted}"
+            after_marker.contains('Z'),
+            "tail should contain Z's; after marker: {after_marker}"
         );
     }
 
@@ -1177,13 +1177,13 @@ mod persisted_output_preview {
             "borderline output should NOT use head+tail wording"
         );
         assert!(
-            !message.contains("omitted"),
-            "borderline output should NOT show an omitted-chars marker"
+            !message.contains("chars truncated"),
+            "borderline output should NOT show a truncated-chars marker"
         );
     }
 
     #[test]
-    fn long_output_omitted_count_is_within_slack_of_expected() {
+    fn long_output_truncated_count_is_within_slack_of_expected() {
         let head = "h".repeat(2_000);
         let mid = "m".repeat(10_000);
         let tail = "t".repeat(2_000);
@@ -1194,19 +1194,19 @@ mod persisted_output_preview {
 
         let marker = message
             .lines()
-            .find(|line| line.contains("chars omitted"))
-            .expect("omitted marker line");
+            .find(|line| line.contains("chars truncated"))
+            .expect("truncated marker line");
         let n: usize = marker
             .chars()
             .filter(|c| c.is_ascii_digit())
             .collect::<String>()
             .parse()
-            .expect("omitted count parses");
+            .expect("truncated count parses");
         let expected = total - PREVIEW_SIZE_CHARS;
         let slack = 8;
         assert!(
             n + slack >= expected && n <= expected + slack,
-            "omitted count {n} should be within ±{slack} of {expected}"
+            "truncated count {n} should be within ±{slack} of {expected}"
         );
     }
 }

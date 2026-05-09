@@ -1126,7 +1126,7 @@ fn build_persisted_output_message(filepath: &str, text: &str) -> String {
         "{PERSISTED_OUTPUT_TAG}\n\
          Output too large ({size_str}). Full output saved to: {filepath}\n\n\
          Preview (first {head_size_str} head + last {tail_size_str} tail):\n\
-         {head}\n\n[…{omitted} chars omitted…]\n\n{tail}\n\
+         {head}\n\n[…{omitted} chars truncated…]\n\n{tail}\n\
          {PERSISTED_OUTPUT_CLOSING_TAG}"
     )
 }
