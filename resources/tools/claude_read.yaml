@@ -26,7 +26,7 @@ input_schema:
       description: The absolute path to the file to read
     offset:
       type: integer
-      description: The line number to start reading from. Only provide if the file is too large to read at once
+      description: The line number to start reading from. Only provide if the file is too large to read at once (1-indexed)
       minimum: 0
     limit:
       type: integer
