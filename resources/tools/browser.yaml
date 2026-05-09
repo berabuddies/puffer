@@ -74,7 +74,7 @@ input_schema:
       description: JavaScript expression for `evaluate` actions.
     direction:
       type: string
-      description: Scroll direction for `scroll` actions: up, down, left, or right.
+      description: "Scroll direction for `scroll` actions: up, down, left, or right."
     px:
       type: integer
       description: Optional scroll distance in pixels for `scroll` actions. Defaults to 600.
