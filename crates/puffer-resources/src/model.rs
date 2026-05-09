@@ -457,6 +457,12 @@ pub struct ProviderPack {
     pub headers: indexmap::IndexMap<String, String>,
     #[serde(default)]
     pub query_params: indexmap::IndexMap<String, String>,
+    /// Optional override for `/v1/chat/completions`. Used by relays
+    /// whose `base_url` already includes a versioned prefix (Zhipu's
+    /// `/api/paas/v4`, MiniMax's `/v1` already-suffixed proxies, etc.)
+    /// so we don't double up to `/v4/v1/chat/completions`.
+    #[serde(default)]
+    pub chat_completions_path: Option<String>,
     #[serde(default)]
     pub discovery: Option<ModelDiscoveryConfig>,
     #[serde(default)]
@@ -474,6 +480,7 @@ impl ProviderPack {
             auth_modes: self.auth_modes,
             headers: self.headers,
             query_params: self.query_params,
+            chat_completions_path: self.chat_completions_path,
             discovery: self.discovery,
             models: self.models,
         }
@@ -494,4 +501,29 @@ pub struct LoadedResources {
     pub mcp_servers: Vec<LoadedItem<McpServerSpec>>,
     pub ides: Vec<LoadedItem<IdeSpec>>,
     pub diagnostics: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Confirms the bundled `zhipu.yaml` parses as a `ProviderPack`
+    /// and that `chat_completions_path` flows from yaml through to
+    /// `ProviderDescriptor` so the runtime sees the override. Without
+    /// this end-to-end wiring the relay 404s on
+    /// `…/api/paas/v4/v1/chat/completions`.
+    #[test]
+    fn zhipu_yaml_parses_with_chat_completions_path_override() {
+        let yaml = include_str!("../../../resources/providers/zhipu.yaml");
+        let pack: ProviderPack = serde_yaml::from_str(yaml).expect("zhipu.yaml parses");
+        assert_eq!(pack.id, "zhipu");
+        assert_eq!(pack.base_url, "https://open.bigmodel.cn/api/paas/v4");
+        assert_eq!(pack.chat_completions_path.as_deref(), Some("/chat/completions"));
+        let descriptor = pack.into_descriptor();
+        assert_eq!(
+            descriptor.chat_completions_path.as_deref(),
+            Some("/chat/completions"),
+            "chat_completions_path must flow through into_descriptor"
+        );
+    }
 }

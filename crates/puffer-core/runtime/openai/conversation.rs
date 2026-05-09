@@ -1824,6 +1824,7 @@ mod tests {
                 input: vec![puffer_provider_registry::Modality::Text],
                 cost: None,
             }],
+            chat_completions_path: None,
         }
     }
 
@@ -1837,6 +1838,8 @@ mod tests {
             account_id: None,
             custom_headers: Vec::new(),
             query_params: Vec::new(),
+            chat_completions_path: None,
+            responses_path: None,
         }
     }
 

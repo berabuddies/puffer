@@ -657,6 +657,7 @@ mod tests {
                 input: vec![puffer_provider_registry::Modality::Text],
                 cost: None,
             }],
+            chat_completions_path: None,
         }
     }
 

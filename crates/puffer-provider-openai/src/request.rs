@@ -234,6 +234,18 @@ pub struct OpenAIRequestConfig {
     pub account_id: Option<String>,
     pub custom_headers: Vec<(String, String)>,
     pub query_params: Vec<(String, String)>,
+    /// Override for the Chat Completions endpoint path. When `None`,
+    /// defaults to `/v1/chat/completions`. Non-OpenAI relays whose base
+    /// URL already encodes a versioned prefix (e.g. Zhipu's
+    /// `https://open.bigmodel.cn/api/paas/v4`) need to set this to
+    /// `/chat/completions` so we don't construct
+    /// `…/v4/v1/chat/completions` and 404 the call.
+    pub chat_completions_path: Option<String>,
+    /// Override for the Responses endpoint path. When `None`, defaults
+    /// to `/v1/responses`. Same rationale as `chat_completions_path`
+    /// for relays that already include a versioned prefix in
+    /// `base_url`.
+    pub responses_path: Option<String>,
 }
 
 /// An ordered HTTP request representation for tests and execution adapters.
@@ -266,7 +278,11 @@ pub(crate) fn build_chat_completions_request(
     config: &OpenAIRequestConfig,
     request: &OpenAIChatCompletionsRequest,
 ) -> anyhow::Result<BuiltOpenAIRequest> {
-    build_request_to_path(config, request, "/v1/chat/completions", false)
+    let path = config
+        .chat_completions_path
+        .as_deref()
+        .unwrap_or("/v1/chat/completions");
+    build_request_to_path(config, request, path, false)
 }
 
 /// Builds an ordered JSON POST request for OpenAI-compatible endpoints.
@@ -282,7 +298,11 @@ fn build_request<T: Serialize>(
     config: &OpenAIRequestConfig,
     request: &T,
 ) -> anyhow::Result<BuiltOpenAIRequest> {
-    build_request_to_path(config, request, "/v1/responses", false)
+    let path = config
+        .responses_path
+        .as_deref()
+        .unwrap_or("/v1/responses");
+    build_request_to_path(config, request, path, false)
 }
 
 fn build_request_to_path<T: Serialize>(
@@ -388,6 +408,8 @@ mod tests {
                 account_id: None,
                 custom_headers: Vec::new(),
                 query_params: Vec::new(),
+                chat_completions_path: None,
+                responses_path: None,
             },
             &OpenAIResponsesRequest {
                 model: "gpt-5".to_string(),
@@ -414,6 +436,8 @@ mod tests {
                 account_id: None,
                 custom_headers: Vec::new(),
                 query_params: Vec::new(),
+                chat_completions_path: None,
+                responses_path: None,
             },
             &OpenAIResponsesRequest {
                 model: "llama3.1:8b".to_string(),
@@ -440,6 +464,8 @@ mod tests {
                 account_id: Some("account-123".to_string()),
                 custom_headers: vec![("version".to_string(), "0.1.0".to_string())],
                 query_params: Vec::new(),
+                chat_completions_path: None,
+                responses_path: None,
             },
             &OpenAIResponsesToolRequest {
                 model: "gpt-5".to_string(),
@@ -508,6 +534,8 @@ mod tests {
                 account_id: None,
                 custom_headers: Vec::new(),
                 query_params: Vec::new(),
+                chat_completions_path: None,
+                responses_path: None,
             },
             &OpenAIChatCompletionsRequest {
                 model: "demo-model".to_string(),
@@ -557,6 +585,8 @@ mod tests {
                 account_id: None,
                 custom_headers: Vec::new(),
                 query_params: Vec::new(),
+                chat_completions_path: None,
+                responses_path: None,
             },
             &OpenAIChatCompletionsRequest {
                 model: "gpt-5".to_string(),
@@ -613,6 +643,8 @@ mod tests {
                 account_id: None,
                 custom_headers: Vec::new(),
                 query_params: Vec::new(),
+                chat_completions_path: None,
+                responses_path: None,
             },
             &OpenAIResponsesToolRequest {
                 model: "gpt-5".to_string(),
@@ -658,6 +690,8 @@ mod tests {
                 account_id: Some("account-123".to_string()),
                 custom_headers: Vec::new(),
                 query_params: vec![("api-version".to_string(), "2025-01-01".to_string())],
+                chat_completions_path: None,
+                responses_path: None,
             },
             "/responses",
             &json!({
@@ -697,6 +731,8 @@ mod tests {
                 account_id: None,
                 custom_headers: Vec::new(),
                 query_params: Vec::new(),
+                chat_completions_path: None,
+                responses_path: None,
             },
             "/v1/responses",
             &json!({
@@ -721,6 +757,8 @@ mod tests {
                 account_id: None,
                 custom_headers: Vec::new(),
                 query_params: Vec::new(),
+                chat_completions_path: None,
+                responses_path: None,
             },
             &OpenAIResponsesToolRequest {
                 model: "gpt-5.4".to_string(),
@@ -773,6 +811,8 @@ mod tests {
                 account_id: None,
                 custom_headers: vec![("User-Agent".to_string(), "claude-code/1.0".to_string())],
                 query_params: Vec::new(),
+                chat_completions_path: None,
+                responses_path: None,
             },
             &OpenAIChatCompletionsRequest {
                 model: "k2p5".to_string(),
@@ -804,5 +844,136 @@ mod tests {
             .collect();
         assert_eq!(user_agents.len(), 1, "headers: {:?}", request.headers);
         assert_eq!(user_agents[0], "claude-code/1.0");
+    }
+
+    fn minimal_chat_request() -> OpenAIChatCompletionsRequest {
+        OpenAIChatCompletionsRequest {
+            model: "demo".to_string(),
+            messages: vec![OpenAIChatMessage {
+                role: "user".to_string(),
+                content: Some(json!("hi")),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                reasoning_content: None,
+            }],
+            tools: Vec::new(),
+            tool_choice: None,
+            response_format: None,
+            reasoning_effort: None,
+            reasoning: None,
+            thinking: None,
+            enable_thinking: None,
+            chat_template_kwargs: None,
+        }
+    }
+
+    /// When `chat_completions_path` is unset, the canonical OpenAI
+    /// path `/v1/chat/completions` is appended to `base_url`.
+    #[test]
+    fn default_chat_completions_path_when_unset() {
+        let request = build_chat_completions_request(
+            &OpenAIRequestConfig {
+                base_url: "https://api.openai.com".to_string(),
+                version: "0.1.0".to_string(),
+                auth: OpenAIAuth::ApiKey("sk-test".to_string()),
+                originator: "codex_cli_rs".to_string(),
+                session_id: None,
+                account_id: None,
+                custom_headers: Vec::new(),
+                query_params: Vec::new(),
+                chat_completions_path: None,
+                responses_path: None,
+            },
+            &minimal_chat_request(),
+        )
+        .unwrap();
+        assert_eq!(request.url, "https://api.openai.com/v1/chat/completions");
+    }
+
+    /// A custom `chat_completions_path` overrides the default,
+    /// preserving the existing `base_url` end-to-end.
+    #[test]
+    fn custom_chat_completions_path_overrides_default() {
+        let request = build_chat_completions_request(
+            &OpenAIRequestConfig {
+                base_url: "https://relay.example.com".to_string(),
+                version: "0.1.0".to_string(),
+                auth: OpenAIAuth::ApiKey("sk-test".to_string()),
+                originator: "codex_cli_rs".to_string(),
+                session_id: None,
+                account_id: None,
+                custom_headers: Vec::new(),
+                query_params: Vec::new(),
+                chat_completions_path: Some("/api/openai/chat/completions".to_string()),
+                responses_path: None,
+            },
+            &minimal_chat_request(),
+        )
+        .unwrap();
+        assert_eq!(
+            request.url,
+            "https://relay.example.com/api/openai/chat/completions"
+        );
+    }
+
+    /// Zhipu's `base_url` already encodes a versioned prefix
+    /// (`/api/paas/v4`); pairing it with `/chat/completions` must
+    /// produce `/api/paas/v4/chat/completions` (NO `/v1/`!) so the
+    /// relay actually accepts the call.
+    #[test]
+    fn zhipu_style_path_constructs_correctly() {
+        let request = build_chat_completions_request(
+            &OpenAIRequestConfig {
+                base_url: "https://open.bigmodel.cn/api/paas/v4".to_string(),
+                version: "0.1.0".to_string(),
+                auth: OpenAIAuth::ApiKey("sk-test".to_string()),
+                originator: "codex_cli_rs".to_string(),
+                session_id: None,
+                account_id: None,
+                custom_headers: Vec::new(),
+                query_params: Vec::new(),
+                chat_completions_path: Some("/chat/completions".to_string()),
+                responses_path: None,
+            },
+            &minimal_chat_request(),
+        )
+        .unwrap();
+        assert_eq!(
+            request.url,
+            "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+        );
+        assert!(
+            !request.url.contains("/v1/"),
+            "URL must not contain /v1/: {}",
+            request.url
+        );
+    }
+
+    /// The same override mechanism works for the Responses API path,
+    /// so relays that proxy `/v1/responses` under a different prefix
+    /// don't get double-versioned URLs.
+    #[test]
+    fn custom_responses_path_overrides_default() {
+        let request = build_responses_request(
+            &OpenAIRequestConfig {
+                base_url: "https://relay.example.com".to_string(),
+                version: "0.1.0".to_string(),
+                auth: OpenAIAuth::ApiKey("sk-test".to_string()),
+                originator: "codex_cli_rs".to_string(),
+                session_id: None,
+                account_id: None,
+                custom_headers: Vec::new(),
+                query_params: Vec::new(),
+                chat_completions_path: None,
+                responses_path: Some("/api/openai/responses".to_string()),
+            },
+            &OpenAIResponsesRequest {
+                model: "gpt-5".to_string(),
+                input: "hi".to_string(),
+                text: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(request.url, "https://relay.example.com/api/openai/responses");
     }
 }

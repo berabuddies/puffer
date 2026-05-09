@@ -1,0 +1,27 @@
+id: zhipu
+display_name: Zhipu (BigModel)
+# Zhipu's OpenAI-compatible Chat Completions endpoint lives under
+# `/api/paas/v4/chat/completions`, NOT `/v1/chat/completions`. We
+# encode the versioned prefix in `base_url` and override
+# `chat_completions_path` so puffer doesn't construct
+# `…/v4/v1/chat/completions` and 404 the call.
+base_url: https://open.bigmodel.cn/api/paas/v4
+chat_completions_path: /chat/completions
+default_api: openai-completions
+auth_modes:
+  - api_key
+models:
+  - id: glm-4.6
+    display_name: GLM-4.6
+    provider: zhipu
+    api: openai-completions
+    context_window: 200000
+    max_output_tokens: 32768
+    supports_reasoning: true
+  - id: glm-4.5
+    display_name: GLM-4.5
+    provider: zhipu
+    api: openai-completions
+    context_window: 128000
+    max_output_tokens: 32768
+    supports_reasoning: true

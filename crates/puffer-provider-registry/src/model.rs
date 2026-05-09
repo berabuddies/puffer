@@ -318,6 +318,19 @@ pub struct ProviderDescriptor {
     pub headers: IndexMap<String, String>,
     #[serde(default)]
     pub query_params: IndexMap<String, String>,
+    /// Override for the OpenAI Chat Completions endpoint path. Set
+    /// when the provider's `base_url` already encodes a versioned
+    /// prefix (e.g. Zhipu: `https://open.bigmodel.cn/api/paas/v4` +
+    /// `chat_completions_path: "/chat/completions"`). When omitted,
+    /// the OpenAI provider crate falls back to `/v1/chat/completions`.
+    ///
+    /// Note: the analogous override for the Responses API lives in the
+    /// per-model `OpenAiResponsesCompat::responses_path` enum, since
+    /// today only `/v1/responses` and `/responses` are observed in the
+    /// wild. If a third variant ever appears, we can promote that field
+    /// to a free-form string here too.
+    #[serde(default)]
+    pub chat_completions_path: Option<String>,
     #[serde(default)]
     pub discovery: Option<ModelDiscoveryConfig>,
     #[serde(default)]

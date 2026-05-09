@@ -205,6 +205,8 @@ mod tests {
                 account_id: None,
                 custom_headers: Vec::new(),
                 query_params: Vec::new(),
+                chat_completions_path: None,
+                responses_path: None,
             },
             &OpenAIResponsesRequest {
                 model: "gpt-5".to_string(),
@@ -229,6 +231,8 @@ mod tests {
                 account_id: None,
                 custom_headers: Vec::new(),
                 query_params: Vec::new(),
+                chat_completions_path: None,
+                responses_path: None,
             },
             &OpenAIResponsesToolRequest {
                 model: "gpt-5".to_string(),
@@ -275,6 +279,8 @@ mod tests {
                 account_id: None,
                 custom_headers: Vec::new(),
                 query_params: Vec::new(),
+                chat_completions_path: None,
+                responses_path: None,
             },
             &OpenAIChatCompletionsRequest {
                 model: "auto".to_string(),

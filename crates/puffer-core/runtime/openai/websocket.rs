@@ -730,6 +730,8 @@ mod tests {
             account_id: None,
             custom_headers: vec![("X-Custom".to_string(), "value".to_string())],
             query_params: vec![],
+            chat_completions_path: None,
+            responses_path: None,
         };
         let headers = ws_headers_from_config(&config);
         assert_eq!(
@@ -758,6 +760,8 @@ mod tests {
             account_id: Some("acct-456".to_string()),
             custom_headers: vec![],
             query_params: vec![],
+            chat_completions_path: None,
+            responses_path: None,
         };
         let headers = ws_headers_from_config(&config);
         assert_eq!(
@@ -785,6 +789,8 @@ mod tests {
             account_id: None,
             custom_headers: vec![],
             query_params: vec![],
+            chat_completions_path: None,
+            responses_path: None,
         };
         let headers = ws_headers_from_config(&config);
         assert!(find_header(&headers, "Authorization").is_none());

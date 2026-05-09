@@ -852,6 +852,8 @@ pub(super) fn resolve_openai_execution_config(
                     .iter()
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect(),
+                chat_completions_path: provider.chat_completions_path.clone(),
+                responses_path: None,
             },
             refresh_token: None,
             codex_style: codex_style_for_provider(provider, false),
@@ -871,6 +873,8 @@ pub(super) fn resolve_openai_execution_config(
                     .iter()
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect(),
+                chat_completions_path: provider.chat_completions_path.clone(),
+                responses_path: None,
             },
             refresh_token: Some(credential.refresh_token.clone()),
             codex_style: codex_style_for_provider(provider, true),
@@ -890,6 +894,8 @@ pub(super) fn resolve_openai_execution_config(
                     .iter()
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect(),
+                chat_completions_path: provider.chat_completions_path.clone(),
+                responses_path: None,
             },
             refresh_token: None,
             codex_style: codex_style_for_provider(provider, false),

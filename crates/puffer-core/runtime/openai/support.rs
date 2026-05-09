@@ -527,6 +527,7 @@ mod tests {
             query_params: Default::default(),
             discovery: None,
             models: Vec::new(),
+            chat_completions_path: None,
         }
     }
 

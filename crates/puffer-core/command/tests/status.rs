@@ -42,6 +42,7 @@ fn status_command_reports_richer_session_and_resource_status() {
             input: vec![puffer_provider_registry::Modality::Text],
             cost: None,
         }],
+        chat_completions_path: None,
     });
     let mut auth_store = AuthStore::default();
     auth_store.set_api_key("openai".to_string(), "sk-test".to_string());

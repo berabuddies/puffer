@@ -1080,6 +1080,7 @@ mod thinking_gate_tests {
                 cost: None,
                 compat: model_compat,
             }],
+            chat_completions_path: None,
         }
     }
 

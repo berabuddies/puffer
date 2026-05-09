@@ -37,6 +37,7 @@ fn provider() -> ProviderDescriptor {
             input: vec![puffer_provider_registry::Modality::Text],
             cost: None,
         }],
+        chat_completions_path: None,
     }
 }
 
@@ -156,6 +157,7 @@ fn openai_provider(base_url: String) -> ProviderDescriptor {
             input: vec![puffer_provider_registry::Modality::Text],
             cost: None,
         }],
+        chat_completions_path: None,
     }
 }
 
@@ -189,6 +191,8 @@ fn test_openai_request_config() -> OpenAIRequestConfig {
         account_id: None,
         custom_headers: Vec::new(),
         query_params: Vec::new(),
+        chat_completions_path: None,
+        responses_path: None,
     }
 }
 

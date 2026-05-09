@@ -86,6 +86,7 @@ fn context_command_renders_anthropic_context_breakdown() {
             input: vec![puffer_provider_registry::Modality::Text],
             cost: None,
         }],
+        chat_completions_path: None,
     });
 
     dispatch_command(
@@ -164,6 +165,7 @@ fn context_command_renders_openai_context_breakdown() {
             input: vec![puffer_provider_registry::Modality::Text],
             cost: None,
         }],
+        chat_completions_path: None,
     });
 
     dispatch_command(

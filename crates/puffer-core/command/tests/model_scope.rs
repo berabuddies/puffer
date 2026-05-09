@@ -29,6 +29,7 @@ fn provider(id: &str, models: &[&str]) -> puffer_provider_registry::ProviderDesc
                 cost: None,
             })
             .collect(),
+        chat_completions_path: None,
     }
 }
 

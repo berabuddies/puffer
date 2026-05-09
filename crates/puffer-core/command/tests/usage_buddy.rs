@@ -50,6 +50,7 @@ fn usage_command_reports_runtime_and_resource_counts() {
             input: vec![puffer_provider_registry::Modality::Text],
             cost: None,
         }],
+        chat_completions_path: None,
     });
     let mut auth_store = AuthStore::default();
     auth_store.set_api_key("anthropic", "sk-ant");
@@ -380,6 +381,7 @@ fn anthropic_provider() -> ProviderDescriptor {
             input: vec![puffer_provider_registry::Modality::Text],
             cost: None,
         }],
+        chat_completions_path: None,
     }
 }
 
@@ -405,6 +407,7 @@ fn openai_provider() -> ProviderDescriptor {
             input: vec![puffer_provider_registry::Modality::Text],
             cost: None,
         }],
+        chat_completions_path: None,
     }
 }
 

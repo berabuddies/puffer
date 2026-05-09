@@ -326,6 +326,7 @@ fn doctor_reports_discovery_and_diagnostics() {
             headers: Default::default(),
         }),
         models: Vec::new(),
+        chat_completions_path: None,
     });
     let mut auth_store = AuthStore::default();
     auth_store.set_api_key("anthropic", "sk-ant");

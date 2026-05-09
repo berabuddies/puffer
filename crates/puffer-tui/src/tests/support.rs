@@ -201,6 +201,7 @@ pub(super) fn openai_provider_resources() -> LoadedResources {
                     input: vec![puffer_provider_registry::Modality::Text],
                     cost: None,
                 }],
+                chat_completions_path: None,
             },
         )],
         ..LoadedResources::default()
@@ -244,6 +245,7 @@ pub(super) fn sample_providers() -> ProviderRegistry {
                 cost: None,
             },
         ],
+        chat_completions_path: None,
     });
     providers.register(ProviderDescriptor {
         id: "openai".to_string(),
@@ -266,6 +268,7 @@ pub(super) fn sample_providers() -> ProviderRegistry {
             input: vec![puffer_provider_registry::Modality::Text],
             cost: None,
         }],
+        chat_completions_path: None,
     });
     providers.register(ProviderDescriptor {
         id: "ollama".to_string(),
@@ -288,6 +291,7 @@ pub(super) fn sample_providers() -> ProviderRegistry {
             input: vec![puffer_provider_registry::Modality::Text],
             cost: None,
         }],
+        chat_completions_path: None,
     });
     providers
 }

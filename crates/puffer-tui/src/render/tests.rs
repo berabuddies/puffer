@@ -814,6 +814,7 @@ pub(super) fn sample_providers() -> ProviderRegistry {
             input: vec![puffer_provider_registry::Modality::Text],
             cost: None,
         }],
+        chat_completions_path: None,
     });
     registry.register(ProviderDescriptor {
         id: "openai".to_string(),
@@ -836,6 +837,7 @@ pub(super) fn sample_providers() -> ProviderRegistry {
             input: vec![puffer_provider_registry::Modality::Text],
             cost: None,
         }],
+        chat_completions_path: None,
     });
     registry
 }
