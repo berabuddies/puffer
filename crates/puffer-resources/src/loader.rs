@@ -1613,4 +1613,40 @@ mod tests {
         assert_eq!(loaded.mcp_servers.len(), 1);
         assert_eq!(loaded.mcp_servers[0].value.id, "enabled");
     }
+
+    /// Smoke test: every embedded `resources/tools/*.yaml` must parse as a
+    /// `ToolSpec`. Regression guard for bugs like browser.yaml's unquoted
+    /// `actions: u` substring, which YAML silently parsed as a nested
+    /// mapping and broke 6 of 14 `tool_visibility::*` tests on master
+    /// before being fixed in this PR. A single broken file now fails this
+    /// fast, with the offending path in the panic message.
+    #[test]
+    fn all_embedded_tool_yamls_parse() {
+        let dir = BUILTIN_RESOURCES
+            .get_dir("tools")
+            .expect("embedded resources/tools directory");
+        let mut files: Vec<_> = dir.files().collect();
+        files.sort_by_key(|f| f.path().to_path_buf());
+
+        let mut yaml_count = 0usize;
+        for file in files {
+            let path = file.path();
+            let ext = path.extension().and_then(|e| e.to_str());
+            if !matches!(ext, Some("yaml" | "yml")) {
+                continue;
+            }
+            yaml_count += 1;
+            let raw = file
+                .contents_utf8()
+                .unwrap_or_else(|| panic!("embedded tool yaml {} is not UTF-8", path.display()));
+            if let Err(err) = serde_yaml::from_str::<ToolSpec>(raw) {
+                panic!("embedded tool yaml {} failed to parse: {err}", path.display());
+            }
+        }
+
+        assert!(
+            yaml_count > 0,
+            "expected at least one embedded tool yaml, found none"
+        );
+    }
 }
