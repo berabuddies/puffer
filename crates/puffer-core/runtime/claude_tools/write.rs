@@ -1,5 +1,6 @@
 use crate::workspace_paths;
 use anyhow::{bail, Context, Result};
+use puffer_runner_api::StalenessRejection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -140,7 +141,8 @@ fn validate_existing_write(
         bail!(NOT_READ_ERROR);
     };
     if snapshot.is_partial_view {
-        bail!(NOT_READ_ERROR);
+        // defense-in-depth: pre-flight gate at mod.rs:402 catches first; keep messages aligned with StalenessRejection
+        bail!(StalenessRejection::PARTIAL_READ_MESSAGE);
     }
     let last_write_time = file_timestamp_ms(path)?;
     if last_write_time > snapshot.timestamp_ms {
@@ -300,7 +302,7 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(error.contains(NOT_READ_ERROR));
+        assert!(error.contains(StalenessRejection::PARTIAL_READ_MESSAGE));
     }
 
     #[test]

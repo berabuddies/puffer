@@ -575,7 +575,8 @@ fn enforce_read_precondition(state: &AppState, path: Option<&Path>) -> Result<()
         bail!("File has not been read yet. Read it first before writing to it.");
     };
     if snapshot.is_partial_view {
-        bail!("File has not been read yet. Read it first before writing to it.");
+        // defense-in-depth: pre-flight gate at mod.rs:402 catches first; keep messages aligned with StalenessRejection
+        bail!(StalenessRejection::PARTIAL_READ_MESSAGE);
     }
     let timestamp_ms = file_timestamp_ms(path)?;
     if timestamp_ms > snapshot.timestamp_ms {
