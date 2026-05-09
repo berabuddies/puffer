@@ -27,6 +27,7 @@ pub mod background_tasks;
 mod blocking_loop;
 pub mod claude_tools;
 mod context_usage;
+pub mod errors;
 pub mod goals;
 mod hook_support;
 mod local_tools;
