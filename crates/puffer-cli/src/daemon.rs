@@ -1940,9 +1940,14 @@ fn handle_steer_turn(state: &DaemonState, params: &Value) -> Result<Value> {
         (handle.session_id, handle.steering.clone())
     };
 
-    steering.append(content.clone());
     let session_store = SessionStore::from_paths(&state.paths)?;
-    session_store.append_event(session_id, TranscriptEvent::UserMessage { text: content })?;
+    session_store.append_event(
+        session_id,
+        TranscriptEvent::UserMessage {
+            text: content.clone(),
+        },
+    )?;
+    steering.append(content);
     Ok(json!({"ok": true}))
 }
 
