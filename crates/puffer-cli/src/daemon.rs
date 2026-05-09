@@ -36,9 +36,10 @@ use puffer_config::{
 };
 use puffer_core::{
     apply_model_preferences, command_surface, dispatch_command,
-    execute_user_turn_streaming_with_permissions_and_cancel, with_user_question_prompt_handler,
-    AppState, CancelToken, MessageRole, PermissionPromptAction, PermissionPromptRequest,
-    TurnStreamEvent, UserQuestionPromptRequest, UserQuestionPromptResponse,
+    execute_user_turn_streaming_with_permissions_cancel_and_steering,
+    with_user_question_prompt_handler, AppState, CancelToken, MessageRole, PermissionPromptAction,
+    PermissionPromptRequest, TurnSteering, TurnStreamEvent, UserQuestionPromptRequest,
+    UserQuestionPromptResponse,
 };
 use puffer_provider_openai::{
     exchange_authorization_code as exchange_openai_authorization_code,
@@ -282,6 +283,8 @@ impl DaemonState {
 
 struct TurnHandle {
     cancel: CancelToken,
+    session_id: Uuid,
+    steering: TurnSteering,
     pending: Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<PermissionPromptAction>>>>,
     pending_questions:
         Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<UserQuestionPromptResponse>>>>,
@@ -743,6 +746,7 @@ async fn dispatch_request(
 
         "resolve_permission" => respond!(handle_resolve_permission(&state, &params)),
         "resolve_user_question" => respond!(handle_resolve_user_question(&state, &params)),
+        "steer_turn" | "append_turn_input" => respond!(handle_steer_turn(&state, &params)),
         "cancel_turn" => respond!(handle_cancel_turn(&state, &params)),
 
         other => {
@@ -1913,6 +1917,35 @@ fn handle_cancel_turn(state: &DaemonState, params: &Value) -> Result<Value> {
     Ok(json!({"ok": true}))
 }
 
+fn handle_steer_turn(state: &DaemonState, params: &Value) -> Result<Value> {
+    let turn_id = params
+        .get("turnId")
+        .or_else(|| params.get("turn_id"))
+        .and_then(|v| v.as_str())
+        .context("missing turnId")?;
+    let content = params
+        .get("message")
+        .or_else(|| params.get("content"))
+        .and_then(|v| v.as_str())
+        .context("missing message")?;
+    if content.trim().is_empty() {
+        anyhow::bail!("missing message");
+    }
+    let content = content.to_string();
+    let (session_id, steering) = {
+        let turns = state.turns.lock().unwrap();
+        let handle = turns
+            .get(turn_id)
+            .with_context(|| format!("no active turn `{turn_id}` to steer"))?;
+        (handle.session_id, handle.steering.clone())
+    };
+
+    steering.append(content.clone());
+    let session_store = SessionStore::from_paths(&state.paths)?;
+    session_store.append_event(session_id, TranscriptEvent::UserMessage { text: content })?;
+    Ok(json!({"ok": true}))
+}
+
 // ---------------------------------------------------------------------------
 // Turn driver — spawns a std::thread to run the (synchronous) agent loop
 // and relays events onto the broadcast bus.
@@ -1953,11 +1986,14 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         Mutex<HashMap<String, std::sync::mpsc::Sender<UserQuestionPromptResponse>>>,
     > = Arc::new(Mutex::new(HashMap::new()));
     let cancel = CancelToken::new();
+    let steering = TurnSteering::new();
 
     state.turns.lock().unwrap().insert(
         turn_id.clone(),
         TurnHandle {
             cancel: cancel.clone(),
+            session_id: session_uuid,
+            steering: steering.clone(),
             pending: pending.clone(),
             pending_questions: pending_questions.clone(),
         },
@@ -1979,6 +2015,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     let message_for_thread = message.clone();
     let session_id_for_thread = session_id.clone();
     let model_override_for_thread = model_override.clone();
+    let steering_for_thread = steering.clone();
     std::thread::spawn(move || {
         setup_state.publish_event(ServerEnvelope::Event {
             event: channel_thread.clone(),
@@ -2219,6 +2256,11 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                     "turnId": ev_turn,
                     "summary": s,
                 }),
+                TurnStreamEvent::SteeringMessagesAppended(messages) => json!({
+                    "type": "turn-steering-appended",
+                    "turnId": ev_turn,
+                    "messages": messages,
+                }),
                 TurnStreamEvent::ReflectionTrace(_) => return,
                 TurnStreamEvent::RetryAttempt {
                     attempt,
@@ -2293,7 +2335,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
 
         let mut auth_store = inputs.auth_store.clone();
         let outcome = with_user_question_prompt_handler(on_user_question, || {
-            execute_user_turn_streaming_with_permissions_and_cancel(
+            execute_user_turn_streaming_with_permissions_cancel_and_steering(
                 &mut app_state,
                 &inputs.resources,
                 &inputs.providers,
@@ -2301,6 +2343,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                 &message_for_thread,
                 None,
                 &cancel,
+                &steering_for_thread,
                 on_event,
                 on_permission,
             )

@@ -1274,6 +1274,7 @@ fn run_responses_attempt(
         registry: &registry,
         cancel: options.cancel,
         observability: options.observability.clone(),
+        steering: options.steering,
     };
     match on_event {
         Some(sink) => super::agent_loop::run_streaming_loop(&mut inputs, &mut session, sink),
@@ -1429,6 +1430,7 @@ fn run_completions_attempt(
         registry: &registry,
         cancel: options.cancel,
         observability: options.observability.clone(),
+        steering: options.steering,
     };
     match on_event {
         Some(sink) => super::agent_loop::run_streaming_loop(&mut inputs, &mut session, sink),

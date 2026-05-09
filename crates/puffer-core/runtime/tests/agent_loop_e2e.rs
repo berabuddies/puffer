@@ -266,6 +266,55 @@ fn openai_responses_final_sse() -> String {
     ).to_string()
 }
 
+fn openai_responses_text_sse(response_id: &str, text: &str) -> String {
+    [
+        (
+            "response.created",
+            json!({
+                "type": "response.created",
+                "response": { "id": response_id },
+            }),
+        ),
+        (
+            "response.output_text.delta",
+            json!({
+                "type": "response.output_text.delta",
+                "delta": text,
+            }),
+        ),
+        (
+            "response.output_item.done",
+            json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": text }],
+                },
+            }),
+        ),
+        (
+            "response.completed",
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "id": response_id,
+                    "status": "completed",
+                    "usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 3,
+                        "input_tokens_details": { "cached_tokens": 0 },
+                    },
+                },
+            }),
+        ),
+    ]
+    .into_iter()
+    .map(|(event, data)| format!("event: {event}\ndata: {data}\n\n"))
+    .collect::<Vec<_>>()
+    .join("")
+}
+
 #[test]
 fn openai_responses_streaming_agent_loop_runs_tool_then_text() {
     let temp = tempfile::tempdir().unwrap();
@@ -353,6 +402,80 @@ fn openai_responses_streaming_agent_loop_runs_tool_then_text() {
     assert!(
         has_function_output,
         "streaming second request must contain function_call_output for call_1: {body2}"
+    );
+}
+
+#[test]
+fn openai_responses_streaming_appends_steering_before_finalizing_same_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    let original = "ORIGINAL";
+    let steered = "STEERED";
+    let steering_content = "Steering update: reply with STEERED.";
+    let (base_url, requests, server) = spawn_server("text/event-stream", 2, move |index| {
+        if index == 0 {
+            openai_responses_text_sse("resp_original", original)
+        } else {
+            openai_responses_text_sse("resp_steered", steered)
+        }
+    });
+
+    let mut registry = ProviderRegistry::new();
+    registry.register(openai_provider(base_url));
+    let mut auth_store = AuthStore::default();
+    auth_store.set_api_key("openai", "sk-openai");
+
+    let mut state = AppState::new(
+        PufferConfig::default(),
+        temp.path().to_path_buf(),
+        session_for(temp.path()),
+    );
+    state.current_provider = Some("openai".to_string());
+    state.current_model = Some("openai/gpt-5".to_string());
+
+    let resources = LoadedResources::default();
+    let cancel = CancelToken::new();
+    let steering = TurnSteering::new();
+    let steering_for_event = steering.clone();
+    let mut text_deltas = Vec::new();
+    let mut appended_messages = Vec::new();
+
+    let turn = execute_user_prompt_streaming_with_permissions_cancel_and_steering(
+        &mut state,
+        &resources,
+        &registry,
+        &mut auth_store,
+        "Reply with ORIGINAL.",
+        None,
+        &cancel,
+        &steering,
+        |event| match event {
+            TurnStreamEvent::TextDelta(delta) => {
+                if delta == original {
+                    steering_for_event.append(steering_content);
+                }
+                text_deltas.push(delta);
+            }
+            TurnStreamEvent::SteeringMessagesAppended(messages) => {
+                appended_messages.extend(messages);
+            }
+            _ => {}
+        },
+        |_| PermissionPromptAction::AllowAllSession,
+    )
+    .unwrap();
+
+    server.join().unwrap();
+
+    assert_eq!(turn.assistant_text, steered);
+    assert_eq!(text_deltas, vec![original.to_string(), steered.to_string()]);
+    assert_eq!(appended_messages, vec![steering_content.to_string()]);
+
+    let captured = requests.lock().unwrap();
+    assert_eq!(captured.len(), 2);
+    let body2 = extract_request_body(&captured[1]);
+    assert!(
+        body2.contains(steering_content),
+        "second request must include appended steering message: {body2}"
     );
 }
 

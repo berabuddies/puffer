@@ -340,6 +340,7 @@ pub(crate) fn handle_prompt_submit(
                     // which isn't moved into the worker thread). No persistence
                     // work on the stream side — avoids double-write.
                     TurnStreamEvent::ReflectionTrace(_) => {}
+                    TurnStreamEvent::SteeringMessagesAppended(_) => {}
                     TurnStreamEvent::RetryAttempt {
                         attempt,
                         max_attempts,

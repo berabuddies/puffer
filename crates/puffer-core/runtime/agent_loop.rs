@@ -43,8 +43,8 @@ use super::request_tool_filter::RequestToolFilter;
 use super::tool_batch::execute_tool_batch;
 use super::tool_executor::ToolExecutionBackend;
 use super::{
-    enforce_tool_result_budget, process_tool_result, run_turn_hooks, CancelToken, ToolCallRequest,
-    ToolInvocation, TurnExecution, TurnStreamEvent, TurnUsageReport, MAX_TOOL_RESULT_CHARS,
+    run_turn_hooks, CancelToken, ToolCallRequest, ToolInvocation, TurnExecution, TurnSteering,
+    TurnStreamEvent, TurnUsageReport,
 };
 use crate::AppState;
 
@@ -147,6 +147,10 @@ pub(crate) struct LoopInputs<'a> {
     /// `crates/puffer-observability` and
     /// `docs/observability/langfuse-design.md`.
     pub observability: Option<puffer_observability::ObservabilityHandle>,
+    /// Optional in-flight steering queue. When present, user messages
+    /// appended while this turn is running are drained into the next
+    /// provider request without cancelling or starting a new turn.
+    pub steering: Option<&'a TurnSteering>,
 }
 
 /// Streaming turn loop. Drives the conversation until the model stops
@@ -280,6 +284,7 @@ pub(crate) fn run_streaming_loop(
                 return Err(error);
             }
         }
+        drain_pending_steering(inputs.steering, &mut items, on_event);
 
         // Per-iteration microcompact. Mirrors Claude Code's
         // `query.ts:401` placement INSIDE the loop. Idempotent because
@@ -557,6 +562,9 @@ pub(crate) fn run_streaming_loop(
 
         // No tool calls → final assistant text, run hooks, return.
         if turn.tool_calls.is_empty() {
+            if drain_steering_after_assistant_turn(inputs.steering, &mut items, &turn, on_event) {
+                continue;
+            }
             run_turn_hooks(
                 inputs.resources,
                 &cwd,
@@ -929,6 +937,60 @@ pub(crate) fn run_streaming_loop(
 
 // `execute_tool_batch` lives in `runtime/tool_batch.rs`; the streaming
 // loop above and `blocking_loop::run_blocking_loop` call into it.
+
+fn drain_pending_steering(
+    steering: Option<&TurnSteering>,
+    items: &mut Vec<ConversationItem>,
+    on_event: &mut dyn FnMut(TurnStreamEvent),
+) -> bool {
+    let messages = steering
+        .map(TurnSteering::drain)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|message| !message.trim().is_empty())
+        .collect::<Vec<_>>();
+    if messages.is_empty() {
+        return false;
+    }
+
+    for message in &messages {
+        items.push(ConversationItem::user_message(message.clone()));
+    }
+    on_event(TurnStreamEvent::SteeringMessagesAppended(messages));
+    true
+}
+
+fn drain_steering_after_assistant_turn(
+    steering: Option<&TurnSteering>,
+    items: &mut Vec<ConversationItem>,
+    turn: &AssistantTurn,
+    on_event: &mut dyn FnMut(TurnStreamEvent),
+) -> bool {
+    let messages = steering
+        .map(TurnSteering::drain)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|message| !message.trim().is_empty())
+        .collect::<Vec<_>>();
+    if messages.is_empty() {
+        return false;
+    }
+
+    if turn.pre_tool_items.is_empty() {
+        if !turn.assistant_text.is_empty() {
+            items.push(ConversationItem::assistant_message(
+                turn.assistant_text.clone(),
+            ));
+        }
+    } else {
+        items.extend(turn.pre_tool_items.clone());
+    }
+    for message in &messages {
+        items.push(ConversationItem::user_message(message.clone()));
+    }
+    on_event(TurnStreamEvent::SteeringMessagesAppended(messages));
+    true
+}
 
 /// Runs one microcompact pass and, on a successful clear, appends a
 /// boundary `<system-reminder>` user message describing what happened.

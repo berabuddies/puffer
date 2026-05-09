@@ -155,6 +155,8 @@ struct TurnRequestOptions<'a> {
     /// process-wide handle without lifetime gymnastics.
     observability: Option<puffer_observability::ObservabilityHandle>,
     lightweight_context: bool,
+    /// Optional in-flight user-message queue consumed by the streaming loop.
+    steering: Option<&'a TurnSteering>,
 }
 
 #[derive(Debug)]
@@ -210,6 +212,36 @@ impl CancelToken {
             anyhow::bail!("cancelled");
         }
         Ok(())
+    }
+}
+
+/// Queue of user steering messages appended while a turn is already running.
+#[derive(Debug, Clone, Default)]
+pub struct TurnSteering {
+    inner: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+}
+
+impl TurnSteering {
+    /// Creates an empty steering queue.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Appends a user message to be consumed by the active turn.
+    pub fn append(&self, content: impl Into<String>) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push_back(content.into());
+    }
+
+    /// Drains all currently queued steering messages in arrival order.
+    pub fn drain(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .drain(..)
+            .collect()
     }
 }
 
@@ -274,6 +306,8 @@ pub enum TurnStreamEvent {
     ToolInvocations(Vec<ToolInvocation>),
     ReflectionTrace(ReflectionTraceEvent),
     ReflectionCheckpoint(String),
+    /// User steering messages appended to the active turn.
+    SteeringMessagesAppended(Vec<String>),
     /// A transport-level retry is about to be attempted.
     RetryAttempt {
         attempt: usize,
@@ -324,6 +358,7 @@ pub(crate) fn execute_user_prompt_with_tool_filter(
             cancel: None,
             observability: None,
             lightweight_context: false,
+            steering: None,
         },
     )
 }
@@ -404,6 +439,7 @@ pub fn execute_user_prompt_with_structured_output(
             cancel: None,
             observability: None,
             lightweight_context: false,
+            steering: None,
         },
     )
 }
@@ -502,6 +538,7 @@ where
                 cancel: None,
                 observability: None,
                 lightweight_context: false,
+                steering: None,
             },
             &mut on_event,
         )
@@ -543,6 +580,45 @@ where
                 cancel: Some(cancel),
                 observability: None,
                 lightweight_context: false,
+                steering: None,
+            },
+            &mut on_event,
+        )
+    })
+}
+
+/// Streaming + interactive permissions + cancellation + in-flight steering.
+pub fn execute_user_prompt_streaming_with_permissions_cancel_and_steering<F, P>(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    providers: &ProviderRegistry,
+    auth_store: &mut AuthStore,
+    input: &str,
+    structured_output: Option<&StructuredOutputConfig>,
+    cancel: &CancelToken,
+    steering: &TurnSteering,
+    mut on_event: F,
+    on_permission: P,
+) -> Result<TurnExecution>
+where
+    F: FnMut(TurnStreamEvent),
+    P: FnMut(PermissionPromptRequest) -> PermissionPromptAction + 'static,
+{
+    with_permission_prompt_handler(on_permission, || {
+        execute_user_prompt_streaming_with_options(
+            state,
+            resources,
+            providers,
+            auth_store,
+            input,
+            TurnRequestOptions {
+                structured_output,
+                tool_filter: None,
+                reflection: None,
+                cancel: Some(cancel),
+                observability: None,
+                lightweight_context: false,
+                steering: Some(steering),
             },
             &mut on_event,
         )
@@ -576,6 +652,7 @@ where
             cancel: None,
             observability: None,
             lightweight_context: false,
+            steering: None,
         },
         &mut on_event,
     )
@@ -612,6 +689,7 @@ where
             cancel: Some(cancel),
             observability: None,
             lightweight_context: false,
+            steering: None,
         },
         &mut on_event,
     )
@@ -643,6 +721,7 @@ where
             cancel: None,
             observability: None,
             lightweight_context: false,
+            steering: None,
         },
         &mut on_event,
     )

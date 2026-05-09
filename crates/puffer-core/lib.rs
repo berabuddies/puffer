@@ -48,6 +48,7 @@ pub use runtime::{
     execute_user_prompt_streaming_with_cancel as execute_user_turn_streaming_with_cancel,
     execute_user_prompt_streaming_with_permissions as execute_user_turn_streaming_with_permissions,
     execute_user_prompt_streaming_with_permissions_and_cancel as execute_user_turn_streaming_with_permissions_and_cancel,
+    execute_user_prompt_streaming_with_permissions_cancel_and_steering as execute_user_turn_streaming_with_permissions_cancel_and_steering,
     execute_user_prompt_streaming_with_reflection as execute_user_turn_streaming_with_reflection,
     execute_user_prompt_streaming_with_structured_output as execute_user_turn_streaming_with_structured_output,
     execute_user_prompt_with_structured_output as execute_user_turn_with_structured_output,
@@ -55,8 +56,8 @@ pub use runtime::{
     with_user_question_prompt_handler, CancelToken, CodeJudgeConfig, LlmJudgeConfig,
     LlmJudgeContextScope, LlmJudgeMode, LlmJudgePromptCacheMode, PermissionPromptAction,
     PermissionPromptRequest, ReflectionConfig, ReflectionLanguage, ReflectionTraceEvent,
-    StructuredOutputConfig, ToolCallRequest, ToolInvocation, TurnExecution, TurnStreamEvent,
-    TurnUsageReport, UserQuestionPromptRequest, UserQuestionPromptResponse,
+    StructuredOutputConfig, ToolCallRequest, ToolInvocation, TurnExecution, TurnSteering,
+    TurnStreamEvent, TurnUsageReport, UserQuestionPromptRequest, UserQuestionPromptResponse,
 };
 pub use runtime::{install_observability, observability_handle};
 pub use state::{AppState, MessageRole, RenderedMessage, TaskRecord, TaskStatus};
