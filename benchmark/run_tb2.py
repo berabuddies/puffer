@@ -292,6 +292,12 @@ def harbor_attempt_failed(result: dict[str, Any] | None) -> bool:
 QUOTA_RATE_LIMIT_RETRY_DELAY_SECONDS = 60
 QUOTA_ACCESS_TERMINATED_RETRY_DELAY_SECONDS = 600
 
+# Mirrors `crates/puffer-core/runtime/quota.rs::QUOTA_EXIT_CODE`. The
+# `benchmark-run` CLI exits with this code when a turn dies on a typed
+# `QuotaError` so this orchestrator can distinguish quota deaths from
+# generic anyhow bails (which exit 1) without parsing stderr.
+QUOTA_EXIT_CODE = 3
+
 
 def quota_kind_from_result(result: dict[str, Any] | None) -> str | None:
     """Extract the categorical quota tag puffer wrote to result.json.
@@ -423,7 +429,7 @@ def run_single_task(
             )
 
         if (
-            completed.returncode == 0
+            (completed.returncode == 0 or completed.returncode == QUOTA_EXIT_CODE)
             and harbor_attempt_failed(result)
             and attempt <= args.max_agent_retries
         ):
@@ -431,6 +437,16 @@ def run_single_task(
             # failure as a quota event, sleep before the next retry so
             # we don't keep slamming a closed window. Other failures
             # retry immediately as before.
+            #
+            # NOTE on the returncode gate: the typed-quota path now
+            # exits with `QUOTA_EXIT_CODE` (3) for 429 / 403-access-
+            # terminated. The earlier `== 0` gate silently skipped this
+            # branch for exactly the failure mode the sleep was added
+            # to handle. `harbor_attempt_failed` and
+            # `quota_kind_from_result` are still consulted, so non-quota
+            # exit-3 cases (none today, but future-proof) get
+            # `delay == 0` and fall through to immediate retry as
+            # before.
             kind = quota_kind_from_result(result)
             delay = quota_retry_delay_seconds(kind)
             if delay > 0:

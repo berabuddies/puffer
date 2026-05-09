@@ -782,8 +782,20 @@ fn send_http_request_raw(
         match send_http_request_raw_once(url, headers, body, anthropic) {
             Ok(response) => {
                 trace_http_response(url, response.status.as_u16(), &response.text);
-                // Retry on 429 (rate limit) and 5xx (server errors).
+                // Retry on 429 (rate limit) and 5xx (server errors) — UNLESS
+                // the response classifies as a `QuotaError`. Retrying a 429
+                // 4 times with linear backoff burns the budget the typed
+                // quota path is supposed to protect: by the time the
+                // classifier sees the error, the orchestrator has already
+                // wasted ~10s of cooldown on a window that needs minutes
+                // (or hours for `access_terminated`). Bail immediately so
+                // the provider adapter can promote the error and the
+                // benchmark CLI can exit with `QUOTA_EXIT_CODE`.
                 let status = response.status.as_u16();
+                let provider = if anthropic { "anthropic" } else { "openai" };
+                if quota::classify_response(provider, status, &response.text).is_some() {
+                    return Ok(response);
+                }
                 if attempt < total_attempts && (status == 429 || (500..=599).contains(&status)) {
                     let delay = retry_delay(retry_config, attempt);
                     if !delay.is_zero() {
@@ -970,6 +982,21 @@ fn parse_http_json_response(
     response: RawHttpResponse,
 ) -> Result<Value> {
     if !response.status.is_success() {
+        // Promote 429 / 403-access-terminated to a typed `QuotaError`
+        // before falling back to the generic `bail!`. Without this, the
+        // entire Anthropic blocking path (the only caller that goes
+        // through `send_http_request` → `parse_http_json_response`)
+        // bypasses quota classification: the SSE / streaming paths in
+        // `runtime/anthropic.rs:275` and `runtime/openai.rs:1064`
+        // already do this, but the blocking path used by
+        // `one_turn_blocking` would otherwise lose the typed error and
+        // the benchmark CLI would never see `QUOTA_EXIT_CODE`.
+        let provider = if anthropic { "anthropic" } else { "openai" };
+        if let Some(quota) =
+            quota::classify_response(provider, response.status.as_u16(), &response.text)
+        {
+            return Err(anyhow::Error::new(quota));
+        }
         bail!(
             "request failed with status {}: {}",
             response.status,

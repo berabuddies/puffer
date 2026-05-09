@@ -172,4 +172,131 @@ mod tests {
         assert!(rendered.contains("quota_rate_limit"));
         assert!(rendered.contains("429"));
     }
+
+    /// Regression: prior to the classify-before-retry fix the inner
+    /// `send_http_request_raw` retry loop saw a 429 and retried 3 more
+    /// times before any caller could classify. By the time the
+    /// provider adapter saw the response, the orchestrator had already
+    /// burned ~10s of cooldown — exactly the budget the typed quota
+    /// path is supposed to protect.
+    ///
+    /// This test stands up a TCP listener that always replies 429,
+    /// counts inbound connections, configures the retry loop for 3
+    /// retries (= 4 attempts), and asserts the listener saw exactly 1
+    /// connection — proving the loop bails on first 429 instead of
+    /// retrying.
+    #[test]
+    fn quota_429_short_circuits_inner_retry_loop() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        // Serialize against other tests that mutate the retry env vars.
+        let _guard = crate::test_locks::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        // Force 3 retries (4 total attempts) and a tiny delay so the
+        // test runs quickly even if the regression bug returns. With
+        // the fix in place we should still only see 1 attempt.
+        let prev_attempts = std::env::var_os(super::super::HTTP_RETRY_ATTEMPTS_ENV);
+        let prev_delay = std::env::var_os(super::super::HTTP_RETRY_DELAY_MS_ENV);
+        std::env::set_var(super::super::HTTP_RETRY_ATTEMPTS_ENV, "3");
+        std::env::set_var(super::super::HTTP_RETRY_DELAY_MS_ENV, "1");
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let connection_count = Arc::new(Mutex::new(0_usize));
+        let counter = Arc::clone(&connection_count);
+
+        let server = thread::spawn(move || {
+            // Accept up to 5 connections so a regression (which would
+            // produce 4) is observable rather than hanging the test on
+            // accept(). Each connection drains one HTTP request and
+            // replies 429.
+            for _ in 0..5 {
+                listener.set_nonblocking(false).ok();
+                let accept = listener.accept();
+                let (mut stream, _) = match accept {
+                    Ok(pair) => pair,
+                    Err(_) => return,
+                };
+                {
+                    let mut count = counter.lock().unwrap();
+                    *count += 1;
+                }
+                let mut buffer = [0_u8; 4096];
+                let _ = stream.read(&mut buffer);
+                let body = r#"{"error":{"message":"rate_limit_reached"}}"#;
+                let response = format!(
+                    "HTTP/1.1 429 Too Many Requests\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+
+        // Fire one logical request — should NOT spin the inner retry
+        // loop now that 429 is classified before the retry decision.
+        let url = format!("http://{address}/v1/messages");
+        let result = super::super::send_http_request_raw(&url, &[], "{}", true);
+
+        // Restore env before any assertion can panic.
+        match prev_attempts {
+            Some(value) => std::env::set_var(super::super::HTTP_RETRY_ATTEMPTS_ENV, value),
+            None => std::env::remove_var(super::super::HTTP_RETRY_ATTEMPTS_ENV),
+        }
+        match prev_delay {
+            Some(value) => std::env::set_var(super::super::HTTP_RETRY_DELAY_MS_ENV, value),
+            None => std::env::remove_var(super::super::HTTP_RETRY_DELAY_MS_ENV),
+        }
+
+        // Drop the listener handle by closing the spawned thread once
+        // a small grace period passes. We don't join here because the
+        // server only exits after `accept()` returns an error or 5
+        // connections — and on the success path we only sent 1.
+        drop(server);
+
+        // The raw call returns Ok(response) with status 429 (the
+        // typed-error promotion happens in the parser path). The
+        // critical invariant is: only 1 inbound HTTP request reached
+        // the listener, not 4.
+        let response = result.expect("send_http_request_raw should return Ok with 429 body");
+        assert_eq!(response.status.as_u16(), 429);
+
+        let connections = *connection_count.lock().unwrap();
+        assert_eq!(
+            connections, 1,
+            "expected the inner retry loop to short-circuit on 429, but it made {connections} attempts"
+        );
+    }
+
+    /// Pair test: once the response reaches `parse_http_json_response`,
+    /// the 429 must be promoted to a typed `QuotaError` rather than a
+    /// generic `bail!`. Without this the entire Anthropic blocking
+    /// path would lose the typed signal.
+    #[test]
+    fn parse_http_json_response_promotes_429_to_quota_error() {
+        use reqwest::StatusCode;
+
+        let raw = super::super::RawHttpResponse {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            content_type: Some("application/json".to_string()),
+            text: r#"{"error":{"message":"rate_limit"}}"#.to_string(),
+        };
+        let err = super::super::parse_http_json_response(
+            "https://api.anthropic.com/v1/messages",
+            true,
+            raw,
+        )
+        .expect_err("429 must surface as Err");
+        let quota = err
+            .downcast_ref::<QuotaError>()
+            .expect("error must downcast to QuotaError");
+        assert_eq!(quota.kind, QuotaErrorKind::RateLimit);
+        assert_eq!(quota.status, 429);
+        assert_eq!(quota.provider, "anthropic");
+    }
 }
