@@ -6,6 +6,7 @@
 
 mod auth;
 mod codex;
+pub mod compat;
 mod request;
 mod response;
 mod usage;
@@ -20,6 +21,10 @@ pub use auth::OPENAI_REDIRECT_URI;
 pub use auth::OPENAI_SCOPE;
 pub use auth::OPENAI_TOKEN_URL;
 pub use codex::codex_user_agent;
+pub use compat::CacheControlFormat;
+pub use compat::MaxTokensField;
+pub use compat::OpenAICompat;
+pub use compat::ThinkingFormat;
 pub use request::BuiltOpenAIRequest;
 pub use request::OpenAIChatCompletionTool;
 pub use request::OpenAIChatCompletionToolFunction;
