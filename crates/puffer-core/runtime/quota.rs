@@ -81,6 +81,62 @@ impl std::error::Error for QuotaError {}
 /// path uses 1; 2 is reserved by clap for arg-parse failures).
 pub const QUOTA_EXIT_CODE: i32 = 3;
 
+/// Returns true when `body` carries the `access_terminated_error`
+/// signature in a way that is unambiguous (i.e. *not* just a docs URL
+/// like `https://example.com/docs/access_terminated_error`).
+///
+/// Three layers, in order of trust:
+///
+/// 1. **Structured JSON match** — try parsing the body as JSON and
+///    look for `error.type == "access_terminated_error"`. This is the
+///    Anthropic-shape and the strongest signal.
+/// 2. **JSON-shaped substring** — look for the literal
+///    `"type":"access_terminated_error"` (with quote characters). This
+///    catches Kimi's non-conforming responses that quote the marker
+///    inside a non-JSON-validating envelope.
+/// 3. **Period-quota string** — Kimi's older-shape body uses the
+///    free-form `"usage limit reached for this period"`. Kept as a
+///    last-ditch fallback only because there's no JSON-field equivalent.
+///
+/// Bare `access_terminated_error` substring is intentionally NOT a
+/// match: a docs URL with that path segment is a false positive that
+/// would trip the long quota cooldown on a transient 403.
+fn body_signals_access_terminated(body: &str) -> bool {
+    if body.is_empty() {
+        return false;
+    }
+
+    // Structured-JSON path. Case-sensitive — JSON field values are
+    // case-sensitive on the wire. Don't pre-lowercase here.
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(kind) = value.get("error").and_then(|err| err.get("type")).and_then(serde_json::Value::as_str) {
+            if kind == "access_terminated_error" {
+                return true;
+            }
+        }
+    }
+
+    // Fallback substring matches — lowercase the haystack so casings
+    // like `Access_Terminated_Error` still classify. The needles are
+    // already lowercase. This branch only runs when the structured
+    // parse failed or the field was missing.
+    let lowered = body.to_ascii_lowercase();
+    if lowered.contains(r#""type":"access_terminated_error""#) {
+        return true;
+    }
+    // Tolerate one space after the colon (`"type": "access_terminated_error"`)
+    // — some providers pretty-print the body.
+    if lowered.contains(r#""type": "access_terminated_error""#) {
+        return true;
+    }
+    // Kimi's free-form period-quota message. Distinctive enough that
+    // we accept the bare substring even without JSON structure.
+    if lowered.contains("usage limit reached for this period") {
+        return true;
+    }
+    false
+}
+
 /// Inspect an HTTP status + response body and classify the failure.
 /// Returns `Some(QuotaError)` when this is unambiguously a quota
 /// signal; `None` for anything else (the caller should fall back to
@@ -89,7 +145,24 @@ pub const QUOTA_EXIT_CODE: i32 = 3;
 /// This intentionally does not allocate when the status is success —
 /// the caller is expected to short-circuit on `status.is_success()`
 /// before calling here.
+///
+/// When the body carries an `access_terminated_error` marker the
+/// classifier promotes the result to `AccessTerminated` regardless of
+/// status code. Kimi has been observed returning the marker on a 429
+/// envelope, and the *kind* drives orchestration's cooldown — getting
+/// it right matters more than mirroring the wire status.
 pub fn classify_response(provider: &str, status: u16, body: &str) -> Option<QuotaError> {
+    let access_terminated = body_signals_access_terminated(body);
+
+    if access_terminated {
+        return Some(QuotaError {
+            kind: QuotaErrorKind::AccessTerminated,
+            status,
+            provider: provider.to_string(),
+            body: body.to_string(),
+        });
+    }
+
     match status {
         429 => Some(QuotaError {
             kind: QuotaErrorKind::RateLimit,
@@ -97,16 +170,6 @@ pub fn classify_response(provider: &str, status: u16, body: &str) -> Option<Quot
             provider: provider.to_string(),
             body: body.to_string(),
         }),
-        403 if body.contains("access_terminated_error")
-            || body.contains("usage limit reached for this period") =>
-        {
-            Some(QuotaError {
-                kind: QuotaErrorKind::AccessTerminated,
-                status,
-                provider: provider.to_string(),
-                body: body.to_string(),
-            })
-        }
         _ => None,
     }
 }
@@ -143,6 +206,92 @@ mod tests {
         // quota event; orchestration must not treat it as retryable.
         let body = r#"{"error":{"type":"permission_denied"}}"#;
         assert!(classify_response("openai", 403, body).is_none());
+    }
+
+    /// Reviewer-flagged false positive: a 403 error body whose only
+    /// occurrence of `access_terminated_error` is inside a docs URL
+    /// (e.g. an HTML page or a free-form error pointing at
+    /// `https://example.com/docs/access_terminated_error`) must NOT
+    /// classify as quota — it would otherwise trigger the 600s
+    /// AccessTerminated cooldown on what is actually a transient or
+    /// unrelated 403.
+    #[test]
+    fn classify_403_with_docs_url_mention_is_not_quota() {
+        let body = "See https://example.com/docs/access_terminated_error for details.";
+        assert!(
+            classify_response("openai", 403, body).is_none(),
+            "URL path containing the marker must not trip AccessTerminated"
+        );
+    }
+
+    /// Anthropic-shape: structured JSON with `error.type ==
+    /// access_terminated_error`. Strongest signal, matched at the
+    /// JSON-field level.
+    #[test]
+    fn classify_403_with_quoted_field_marker_is_quota() {
+        let body = r#"{"error":{"type":"access_terminated_error","message":"…"}}"#;
+        let qe = classify_response("anthropic", 403, body)
+            .expect("structured access_terminated_error must classify");
+        assert_eq!(qe.kind, QuotaErrorKind::AccessTerminated);
+    }
+
+    /// Kimi-shape: not valid JSON end-to-end, but the `"type":"access_terminated_error"`
+    /// quoted-key fragment is present. Classifier should still match
+    /// via the JSON-shaped-substring fallback.
+    #[test]
+    fn classify_403_with_kimi_style_string_is_quota() {
+        let body = r#"some prefix "type":"access_terminated_error" some suffix"#;
+        let qe = classify_response("kimi", 403, body)
+            .expect("Kimi-style quoted marker must classify");
+        assert_eq!(qe.kind, QuotaErrorKind::AccessTerminated);
+    }
+
+    /// Casing variants — providers occasionally upper-case the
+    /// machine-readable type field. ASCII-lowercasing the haystack
+    /// before the substring fallback keeps these classified.
+    #[test]
+    fn classify_403_capitalized_uppercase() {
+        let body = r#"{"error":{"type":"Access_Terminated_Error"}}"#;
+        let qe = classify_response("kimi", 403, body)
+            .expect("upper-cased Access_Terminated_Error should still classify");
+        assert_eq!(qe.kind, QuotaErrorKind::AccessTerminated);
+    }
+
+    /// Kimi has been observed returning 429 (RateLimit-shaped status)
+    /// with an `access_terminated_error` body. The *kind* drives
+    /// cooldown duration in orchestration (RateLimit ≈ seconds vs
+    /// AccessTerminated ≈ hours), so the marker must win regardless
+    /// of status.
+    #[test]
+    fn classify_429_with_access_terminated_body_promotes_to_access_terminated() {
+        let body = r#"{"error":{"type":"access_terminated_error","message":"period exhausted"}}"#;
+        let qe = classify_response("kimi", 429, body)
+            .expect("429 with access_terminated body must classify");
+        assert_eq!(
+            qe.kind,
+            QuotaErrorKind::AccessTerminated,
+            "marker must take priority over status-derived RateLimit"
+        );
+        // Status is still recorded faithfully on the wire.
+        assert_eq!(qe.status, 429);
+    }
+
+    /// Empty 403 body. Today this returns `None` — we have no signal
+    /// to disambiguate auth-vs-quota without a body. Kimi has been
+    /// observed sending bare 403s on quota exhaustion; the right fix
+    /// is provider-aware fallback (e.g. "if provider=='kimi' and
+    /// status==403 with empty body, assume AccessTerminated") but
+    /// that requires plumbing provider hints down further. Captured
+    /// as a TODO; not implemented in this PR.
+    ///
+    /// TODO(quota): provider-aware fallback for empty-body 403 on
+    /// Kimi → AccessTerminated.
+    #[test]
+    fn classify_403_empty_body() {
+        assert!(
+            classify_response("kimi", 403, "").is_none(),
+            "empty body currently returns None; provider-aware fallback is a follow-up"
+        );
     }
 
     #[test]

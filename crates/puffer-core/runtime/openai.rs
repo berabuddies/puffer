@@ -1056,7 +1056,12 @@ where
         .and_then(|value| value.to_str().ok())
         .map(ToString::to_string);
     if !status.is_success() {
-        let text = response.text()?;
+        // Use lossy decode (`unwrap_or_default`) instead of `?` so a
+        // non-UTF8 / partially-truncated body still reaches the
+        // classifier — for the quota-error path losing a byte or two
+        // is preferable to surfacing a UTF-8 error and missing the
+        // 429/403 promotion entirely. Mirrors anthropic.rs:266.
+        let text = response.text().unwrap_or_default();
         // Promote 429 / 403-access-terminated to a typed `QuotaError`
         // so the benchmark CLI can exit with a distinct code instead
         // of letting the orchestration layer burn its retry budget on
