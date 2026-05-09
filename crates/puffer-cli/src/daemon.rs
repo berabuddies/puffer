@@ -35,10 +35,10 @@ use puffer_config::{
     ensure_workspace_dirs, load_config, save_user_config, ConfigPaths, PufferConfig,
 };
 use puffer_core::{
-    apply_model_preferences, execute_user_turn_streaming_with_permissions_and_cancel,
-    with_user_question_prompt_handler, AppState, CancelToken, MessageRole, PermissionPromptAction,
-    PermissionPromptRequest, TurnStreamEvent, UserQuestionPromptRequest,
-    UserQuestionPromptResponse,
+    apply_model_preferences, command_surface, dispatch_command,
+    execute_user_turn_streaming_with_permissions_and_cancel, with_user_question_prompt_handler,
+    AppState, CancelToken, MessageRole, PermissionPromptAction, PermissionPromptRequest,
+    TurnStreamEvent, UserQuestionPromptRequest, UserQuestionPromptResponse,
 };
 use puffer_provider_openai::{
     exchange_authorization_code as exchange_openai_authorization_code,
@@ -2089,6 +2089,79 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
             }
         }
 
+        if message_for_thread.trim_start().starts_with('/') {
+            let previous_auth_store = inputs.auth_store.clone();
+            let command_result = dispatch_command(
+                &mut app_state,
+                &command_surface(&inputs.resources),
+                &inputs.resources,
+                &mut inputs.providers,
+                &mut inputs.auth_store,
+                &inputs.session_store,
+                &message_for_thread,
+            );
+            if inputs.auth_store != previous_auth_store {
+                let auth_path = setup_state.paths.user_config_dir.join("auth.json");
+                if let Err(err) = inputs.auth_store.save(&auth_path) {
+                    setup_state.publish_event(ServerEnvelope::Event {
+                        event: channel_thread.clone(),
+                        payload: json!({
+                            "type": "turn-error",
+                            "turnId": turn_id_thread,
+                            "error": format!("save auth store: {err:#}"),
+                        }),
+                    });
+                    setup_state.turns.lock().unwrap().remove(&turn_id_thread);
+                    return;
+                }
+            }
+
+            match command_result {
+                Ok(()) => {
+                    let command_text = app_state
+                        .transcript
+                        .iter()
+                        .rev()
+                        .find(|message| {
+                            matches!(message.role, MessageRole::System | MessageRole::Assistant)
+                        })
+                        .map(|message| message.text.clone())
+                        .unwrap_or_default();
+                    setup_state.publish_event(ServerEnvelope::Event {
+                        event: channel_thread.clone(),
+                        payload: json!({
+                            "type": "turn-complete",
+                            "turnId": turn_id_thread,
+                            "assistantText": command_text,
+                            "currentModel": app_state.current_model.clone(),
+                            "current_model": app_state.current_model.clone(),
+                        }),
+                    });
+                    setup_state.publish_event(ServerEnvelope::Event {
+                        event: "workspace:sessions:changed".to_string(),
+                        payload: json!({
+                            "reason": "command_complete",
+                            "sessionId": session_id_for_thread.clone(),
+                        }),
+                    });
+                }
+                Err(err) => {
+                    eprintln!("command turn {turn_id_thread} failed: {err:#}");
+                    setup_state.publish_event(ServerEnvelope::Event {
+                        event: channel_thread.clone(),
+                        payload: json!({
+                            "type": "turn-error",
+                            "turnId": turn_id_thread,
+                            "error": format!("{err:#}"),
+                        }),
+                    });
+                }
+            }
+
+            setup_state.turns.lock().unwrap().remove(&turn_id_thread);
+            return;
+        }
+
         // Persist the user message before the turn starts so a crash
         // doesn't silently drop it.
         app_state.push_message(MessageRole::User, message_for_thread.clone());
@@ -2269,6 +2342,8 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                         "type": "turn-complete",
                         "turnId": turn_id_thread,
                         "assistantText": turn.assistant_text,
+                        "currentModel": app_state.current_model.clone(),
+                        "current_model": app_state.current_model.clone(),
                     }),
                 });
                 // Transcript mutated — let boards / sidebars re-render.
@@ -2339,15 +2414,16 @@ fn apply_turn_model_override(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_turn_model_override, handle_create_session, DaemonState};
+    use super::{apply_turn_model_override, handle_create_session, start_turn, DaemonState};
     use indexmap::IndexMap;
     use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
     use puffer_core::AppState;
     use puffer_provider_registry::{
         Modality, ModelDescriptor, ProviderDescriptor, ProviderRegistry,
     };
-    use puffer_session_store::{SessionMetadata, SessionStore};
+    use puffer_session_store::{SessionMetadata, SessionStore, TranscriptEvent};
     use serde_json::json;
+    use std::sync::Arc;
     use uuid::Uuid;
 
     #[test]
@@ -2361,6 +2437,7 @@ mod tests {
             builtin_resources_dir: workspace_root.join("resources"),
         };
         ensure_workspace_dirs(&paths).expect("workspace dirs");
+        std::fs::create_dir_all(&paths.builtin_resources_dir).expect("builtin resources dir");
         let state = DaemonState::load(
             workspace_root.clone(),
             paths.clone(),
@@ -2391,6 +2468,73 @@ mod tests {
             Some("Managed Agent")
         );
         assert_eq!(session.metadata.generated_title, None);
+    }
+
+    #[tokio::test]
+    async fn slash_turn_dispatches_command_without_persisting_user_message() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        std::fs::create_dir_all(&paths.builtin_resources_dir).expect("builtin resources dir");
+        let state = DaemonState::load(
+            workspace_root.clone(),
+            paths.clone(),
+            "token".into(),
+            true,
+            true,
+        )
+        .expect("daemon state");
+        let response = handle_create_session(
+            &state,
+            &json!({
+                "cwd": workspace_root.display().to_string(),
+                "displayName": "Command Session",
+            }),
+        )
+        .expect("create session");
+        let session_id = response["sessionId"].as_str().expect("sessionId");
+        let state = Arc::new(state);
+        let mut events = state.events.subscribe();
+
+        start_turn(
+            state.clone(),
+            json!({
+                "sessionId": session_id,
+                "message": "/help",
+            }),
+        )
+        .await
+        .expect("start slash turn");
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let envelope = events.recv().await.expect("event");
+                if let super::ServerEnvelope::Event { payload, .. } = envelope {
+                    if payload.get("type").and_then(|value| value.as_str()) == Some("turn-complete")
+                    {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("turn complete");
+
+        let store = SessionStore::from_paths(&paths).expect("session store");
+        let session_uuid = Uuid::parse_str(session_id).expect("valid session id");
+        let session = store.load_session(session_uuid).expect("stored session");
+        assert!(session.events.iter().any(
+            |event| matches!(event, TranscriptEvent::CommandInvoked { name, .. } if name == "help")
+        ));
+        assert!(!session.events.iter().any(
+            |event| matches!(event, TranscriptEvent::UserMessage { text } if text == "/help")
+        ));
     }
 
     #[test]
