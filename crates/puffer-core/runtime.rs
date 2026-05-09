@@ -893,7 +893,8 @@ fn retry_delay(config: HttpRetryConfig, attempt: usize) -> Duration {
 /// 502/503/504 gateway errors that would otherwise abort the turn
 /// and force the harness to retry the whole task.
 ///
-/// Backoff: exponential with ±25% jitter, capped at 8 seconds —
+/// Backoff: exponential with up to 25% reduction (one-sided, matches
+/// CC's `1 - random()*0.25`), capped at 8 seconds —
 /// matches CC's `min(0.5 * 2^attempt, 8) * (1 - random()*0.25)`
 /// formula. Configurable via env:
 ///   - `PUFFER_HTTP_5XX_MAX_ATTEMPTS` (default 3, clamp 1–5)
@@ -916,15 +917,69 @@ where
         if !status.is_server_error() || attempt == max_attempts {
             return Ok(response);
         }
+        // Honor server-supplied retry hints when present
+        // (`retry-after-ms` wins over `Retry-After`, mirroring CC's
+        // claude-2.1.133 bundle line 50). Falls back to exponential
+        // backoff with jitter otherwise.
+        let server_hint = parse_retry_after_headers(response.headers());
         // Free the failed response's connection before sleeping;
         // some servers won't accept a parallel retry on the same
         // socket otherwise.
         drop(response);
         on_retry(attempt, max_attempts, status);
-        let delay = http_5xx_backoff_with_jitter(base_delay, attempt);
+        let delay = server_hint.unwrap_or_else(|| {
+            http_5xx_backoff_with_jitter(base_delay, attempt)
+        });
         std::thread::sleep(delay);
     }
     unreachable!("retry_on_5xx loop always returns or errors")
+}
+
+/// Maximum delay we'll honor from a server-supplied `Retry-After` /
+/// `retry-after-ms` header. Caps malicious or misconfigured upstreams
+/// from making puffer hang indefinitely while still allowing reasonable
+/// rate-limit cooldowns. CC's bundle uses the same 60s ceiling.
+const RETRY_AFTER_CAP_MS: u64 = 60_000;
+
+/// Parse `retry-after-ms` (preferred) or `Retry-After` (RFC 7231 §7.1.3)
+/// from a response's headers. Returns `None` when neither header is
+/// present or parseable. Result is clamped to [0, 60_000ms].
+///
+/// Mirrors Anthropic SDK / CC bundle (claude-2.1.133, line 50):
+///   1. `retry-after-ms` — millisecond integer, non-standard but used
+///      by Anthropic's Messages API for sub-second precision.
+///   2. `Retry-After` — either a non-negative integer (delta-seconds)
+///      or an HTTP-date (RFC 7231 IMF-fixdate).
+fn parse_retry_after_headers(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    // 1. `retry-after-ms` takes precedence (Anthropic-specific, CC parity).
+    if let Some(value) = headers.get("retry-after-ms").and_then(|v| v.to_str().ok()) {
+        if let Ok(ms) = value.trim().parse::<u64>() {
+            return Some(Duration::from_millis(ms.min(RETRY_AFTER_CAP_MS)));
+        }
+    }
+    // 2. `Retry-After`: integer seconds OR HTTP-date.
+    let raw = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    let trimmed = raw.trim();
+    if let Ok(seconds) = trimmed.parse::<u64>() {
+        let ms = seconds.saturating_mul(1_000).min(RETRY_AFTER_CAP_MS);
+        return Some(Duration::from_millis(ms));
+    }
+    // HTTP-date: parse as RFC 2822 (covers IMF-fixdate, the only modern
+    // preferred HTTP-date format per RFC 7231 §7.1.1.1).
+    if let Ok(target) = time::OffsetDateTime::parse(
+        trimmed,
+        &time::format_description::well_known::Rfc2822,
+    ) {
+        let now = time::OffsetDateTime::now_utc();
+        let diff = target - now;
+        let ms = diff.whole_milliseconds();
+        if ms <= 0 {
+            return Some(Duration::ZERO);
+        }
+        let ms = (ms as u64).min(RETRY_AFTER_CAP_MS);
+        return Some(Duration::from_millis(ms));
+    }
+    None
 }
 
 fn http_5xx_max_attempts() -> usize {
@@ -944,16 +999,18 @@ fn http_5xx_base_delay() -> Duration {
     Duration::from_millis(ms)
 }
 
-/// Backoff with full jitter capped at 8s. `attempt` is 1-indexed.
-/// At `attempt=1`, mean delay = base. At `attempt=2`, mean = 2*base.
-/// At `attempt=3`, mean = 4*base. The `* (1 - rand*0.25)` factor
+/// Backoff with up to 25% reduction (one-sided, matches CC's
+/// `1 - random()*0.25`) capped at 8s. `attempt` is 1-indexed.
+/// At `attempt=1`, max delay = base. At `attempt=2`, max = 2*base.
+/// At `attempt=3`, max = 4*base. The `* (1 - rand*0.25)` factor
 /// applies a deterministic-pseudo-random jitter without pulling in
-/// the `rand` crate — uses a hash of the current nanos so cargo
+/// the `rand` crate — uses subsecond wall-clock nanos so cargo
 /// tests stay reproducible-ish without needing a seedable RNG.
 fn http_5xx_backoff_with_jitter(base: Duration, attempt: usize) -> Duration {
     let factor = 2u64.saturating_pow((attempt as u32).saturating_sub(1));
     let nominal_ms = base.as_millis().saturating_mul(factor as u128).min(8_000) as u64;
-    // Cheap jitter: take low bits of monotonic nanos, scale to ±25%.
+    // Cheap jitter: take low bits of wall-clock subsec nanos, scale to
+    // [0, 25%] reduction (one-sided, never adds to the delay).
     // Falls back to no-jitter if the clock is unavailable.
     let jitter_factor = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
