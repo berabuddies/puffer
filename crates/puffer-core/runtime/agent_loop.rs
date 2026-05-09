@@ -66,6 +66,18 @@ pub(crate) struct AssistantTurn {
     /// `tool_call_start` events). Used by the loop to suppress
     /// duplicate `ToolCallsRequested` emissions.
     pub emitted_tool_call_ids: std::collections::HashSet<String>,
+    /// Per-turn token usage report for the **blocking** path. The
+    /// streaming path emits the same data via
+    /// `TurnStreamEvent::Usage`; the blocking path can't emit events
+    /// (no `on_event` channel), so we surface usage as a struct field
+    /// the blocking loop reads after `one_turn_blocking` returns.
+    /// Populated today only by the Anthropic blocking transport
+    /// (`turn_from_response` reads `/usage`); other providers leave
+    /// it `None` because they go through `one_turn_streaming` even
+    /// for non-streaming entrypoints (the default-impl forwards with
+    /// a no-op sink) and the streaming Usage event already covers
+    /// them.
+    pub usage_report: Option<TurnUsageReport>,
 }
 
 /// Provider-side session that captures vendor-specific setup and

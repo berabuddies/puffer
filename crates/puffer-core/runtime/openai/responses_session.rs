@@ -241,6 +241,10 @@ impl TurnSession for OpenAIResponsesTurnSession {
             assistant_text: final_assistant_text,
             input_tokens_hint: input_tokens,
             emitted_tool_call_ids: response.emitted_tool_call_ids,
+            // Streaming path emits usage via `TurnStreamEvent::Usage`
+            // from `openai.rs:290`, so the blocking-loop fallback isn't
+            // used here.
+            usage_report: None,
         })
     }
 
@@ -348,6 +352,7 @@ impl TurnSession for OpenAIResponsesTurnSession {
             assistant_text: final_assistant_text,
             input_tokens_hint: input_tokens,
             emitted_tool_call_ids: HashSet::new(),
+            usage_report: None,
         })
     }
 

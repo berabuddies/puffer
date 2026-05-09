@@ -3,7 +3,7 @@
 //! Handles event types: message_start, content_block_start,
 //! content_block_delta, content_block_stop, message_delta, message_stop.
 
-use super::TurnStreamEvent;
+use super::{TurnStreamEvent, TurnUsageReport};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::io::BufRead;
@@ -99,6 +99,29 @@ where
     match event_type {
         "message_start" => {
             if let Some(msg) = event.get("message") {
+                // `message_start` carries the initial usage block:
+                // `input_tokens`, `cache_read_input_tokens`,
+                // `cache_creation_input_tokens`, plus a placeholder
+                // `output_tokens` (usually 1). Capture all four — output
+                // is incremented by `message_delta.usage.output_tokens`
+                // events for the streaming totals.
+                if let Some(usage) = msg.get("usage") {
+                    state.usage_input_tokens =
+                        usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                    state.usage_cache_read_tokens = usage
+                        .get("cache_read_input_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    state.usage_cache_creation_tokens = usage
+                        .get("cache_creation_input_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    state.usage_output_tokens = usage
+                        .get("output_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    state.saw_usage = true;
+                }
                 state.response = Some(msg.clone());
             }
         }
@@ -202,8 +225,53 @@ where
                     state.stop_reason = Some(reason.to_string());
                 }
             }
+            // Anthropic streams the running output token count in
+            // `message_delta.usage.output_tokens`. This is the
+            // authoritative final value (the `message_start` placeholder
+            // is just `1`). Treat the last seen value as the total —
+            // some relays emit cumulative, others only the terminal
+            // delta, so taking the max of (start, delta) is robust.
+            if let Some(usage) = event.get("usage") {
+                if let Some(output) = usage.get("output_tokens").and_then(Value::as_u64) {
+                    state.usage_output_tokens = state.usage_output_tokens.max(output);
+                    state.saw_usage = true;
+                }
+                // `message_delta.usage` may also restate input / cache
+                // counts; honor them when present (defensive — matches
+                // pi-mono's "last write wins" treatment).
+                if let Some(input) = usage.get("input_tokens").and_then(Value::as_u64) {
+                    state.usage_input_tokens = state.usage_input_tokens.max(input);
+                }
+                if let Some(cache_read) =
+                    usage.get("cache_read_input_tokens").and_then(Value::as_u64)
+                {
+                    state.usage_cache_read_tokens =
+                        state.usage_cache_read_tokens.max(cache_read);
+                }
+                if let Some(cache_creation) = usage
+                    .get("cache_creation_input_tokens")
+                    .and_then(Value::as_u64)
+                {
+                    state.usage_cache_creation_tokens =
+                        state.usage_cache_creation_tokens.max(cache_creation);
+                }
+            }
         }
         "message_stop" => {
+            // Emit the per-turn usage report exactly once. Without
+            // this, `agent_loop::run_streaming_loop` never sees a
+            // `TurnStreamEvent::Usage` for Claude users and the goal
+            // budget accounting hook (`account_token_usage`) is a
+            // no-op for the entire Anthropic provider — meaning
+            // `tokens_used` stays at 0 and `/goal` budgets never trip.
+            if state.saw_usage {
+                on_event(TurnStreamEvent::Usage(TurnUsageReport {
+                    input_tokens: state.usage_input_tokens,
+                    output_tokens: state.usage_output_tokens,
+                    cache_read_tokens: state.usage_cache_read_tokens,
+                    cache_creation_tokens: state.usage_cache_creation_tokens,
+                }));
+            }
             return Ok(true); // Terminal event
         }
         "error" => {
@@ -226,6 +294,17 @@ struct AnthropicSseState {
     content_blocks: Vec<Value>,
     partial_json: std::collections::HashMap<usize, String>,
     stop_reason: Option<String>,
+    /// Per-turn token usage, accumulated across `message_start`
+    /// (initial input + cache counts) and `message_delta`
+    /// (running / final output count). Emitted as a single
+    /// `TurnStreamEvent::Usage` on `message_stop` so the agent loop's
+    /// goal-accounting hook fires for Anthropic streams the same way
+    /// it does for OpenAI streams.
+    usage_input_tokens: u64,
+    usage_output_tokens: u64,
+    usage_cache_read_tokens: u64,
+    usage_cache_creation_tokens: u64,
+    saw_usage: bool,
 }
 
 impl AnthropicSseState {
@@ -370,6 +449,76 @@ mod tests {
             err.to_string().contains("without message_stop"),
             "got: {err}"
         );
+    }
+
+    /// Without an emitted `TurnStreamEvent::Usage` the agent loop's
+    /// `account_token_usage` hook is a no-op for Anthropic — meaning
+    /// `/goal` budgets never trip for Claude users (the headline bug
+    /// for PR #84). This test wires synthetic SSE that carries usage
+    /// in `message_start` (input + cache hits) and `message_delta`
+    /// (running output count) and asserts exactly one Usage event
+    /// fires with the accumulated numbers.
+    #[test]
+    fn emits_usage_event_on_message_stop() {
+        let stream = concat!(
+            "event:message_start\n",
+            "data:{\"type\":\"message_start\",\"message\":{\"id\":\"msg_u\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":1234,\"output_tokens\":1,\"cache_read_input_tokens\":900,\"cache_creation_input_tokens\":50}}}\n\n",
+            "event:content_block_start\n",
+            "data:{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event:content_block_delta\n",
+            "data:{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+            "event:content_block_stop\n",
+            "data:{\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event:message_delta\n",
+            "data:{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":42}}\n\n",
+            "event:message_stop\n",
+            "data:{\"type\":\"message_stop\"}\n\n",
+        );
+
+        let mut usages = Vec::new();
+        let mut other_events = 0;
+        parse_anthropic_sse(stream.as_bytes(), &mut |event| match event {
+            TurnStreamEvent::Usage(u) => usages.push(u),
+            _ => other_events += 1,
+        })
+        .unwrap();
+
+        assert_eq!(usages.len(), 1, "expected exactly one Usage event");
+        let u = &usages[0];
+        assert_eq!(u.input_tokens, 1234);
+        assert_eq!(u.output_tokens, 42);
+        assert_eq!(u.cache_read_tokens, 900);
+        assert_eq!(u.cache_creation_tokens, 50);
+        assert!(other_events > 0, "expected at least one TextDelta event");
+    }
+
+    /// Streams that omit usage entirely (legacy upstream, mocked
+    /// fixtures, etc.) must NOT synthesize a zero-token Usage event —
+    /// that would falsely tick the goal budget by 0 tokens (harmless)
+    /// but also make the OTel cache-hit-ratio path divide by zero.
+    #[test]
+    fn no_usage_event_when_stream_omits_usage_block() {
+        let stream = concat!(
+            "event:message_start\n",
+            "data:{\"type\":\"message_start\",\"message\":{\"id\":\"msg_n\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+            "event:content_block_start\n",
+            "data:{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event:content_block_delta\n",
+            "data:{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+            "event:content_block_stop\n",
+            "data:{\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event:message_stop\n",
+            "data:{\"type\":\"message_stop\"}\n\n",
+        );
+
+        let mut saw_usage = false;
+        parse_anthropic_sse(stream.as_bytes(), &mut |event| {
+            if matches!(event, TurnStreamEvent::Usage(_)) {
+                saw_usage = true;
+            }
+        })
+        .unwrap();
+        assert!(!saw_usage, "must not emit Usage when the stream omits it");
     }
 
     /// Pi-mono parity: when the upstream delivers the final

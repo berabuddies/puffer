@@ -205,6 +205,27 @@ pub(crate) fn run_blocking_loop(
             }
         };
         last_assistant_text.clone_from(&turn.assistant_text);
+        // Goal accounting parity with the streaming loop. The blocking
+        // transport can't emit `TurnStreamEvent::Usage` (no event
+        // channel), so providers surface usage on
+        // `AssistantTurn.usage_report` (populated by the Anthropic
+        // blocking JSON path — `runtime/anthropic.rs:turn_from_response`).
+        // Without this hook, `/goal` budgets never trip for blocking
+        // entrypoints (subagents, teammates, the reflection judge).
+        if let Some(ref usage) = turn.usage_report {
+            provider_span.set_token_usage(
+                Some(usage.input_tokens),
+                Some(usage.output_tokens),
+                Some(usage.cache_read_tokens),
+            );
+            if usage.cache_creation_tokens > 0 {
+                provider_span.set_str(
+                    "gen_ai.usage.cache_creation_input_tokens",
+                    usage.cache_creation_tokens.to_string(),
+                );
+            }
+            super::goals::account_token_usage(inputs.state, usage);
+        }
         provider_span.set_content(
             puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
             puffer_observability::ContentKind::Output,

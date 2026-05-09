@@ -137,6 +137,7 @@ impl CompletionsTurnResult {
             assistant_text: self.assistant_text,
             input_tokens_hint: None,
             emitted_tool_call_ids: HashSet::new(),
+            usage_report: None,
         }
     }
 }

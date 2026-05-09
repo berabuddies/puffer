@@ -369,12 +369,38 @@ fn turn_from_response(response: &Value) -> Result<AssistantTurn> {
         .pointer("/usage/input_tokens")
         .and_then(Value::as_u64)
         .map(|v| v as usize);
+    // Surface per-turn usage on the **blocking** path. Anthropic's
+    // non-streaming JSON returns the same `usage` block as the SSE
+    // stream's terminal `message_delta`. Without this, the goal
+    // accounting hook (`account_token_usage`) only fires for the
+    // streaming path — meaning subagent / teammate / reflection-judge
+    // calls that go through `run_blocking_loop` (see
+    // `runtime/blocking_loop.rs`) never tick the budget either.
+    let usage_report = response.get("usage").map(|usage| super::TurnUsageReport {
+        input_tokens: usage
+            .get("input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        output_tokens: usage
+            .get("output_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        cache_read_tokens: usage
+            .get("cache_read_input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        cache_creation_tokens: usage
+            .get("cache_creation_input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+    });
     Ok(AssistantTurn {
         pre_tool_items,
         tool_calls,
         assistant_text,
         input_tokens_hint,
         emitted_tool_call_ids: std::collections::HashSet::new(),
+        usage_report,
     })
 }
 
