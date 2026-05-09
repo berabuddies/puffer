@@ -37,6 +37,7 @@ fslock.workspace = true
 html2text.workspace = true
 indexmap.workspace = true
 jsonschema.workspace = true
+regex.workspace = true
 reqwest.workspace = true
 rmcp.workspace = true
 tokio.workspace = true

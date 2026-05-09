@@ -35,6 +35,7 @@ mod microcompact;
 mod openai;
 mod openai_sse;
 mod openai_ws;
+pub(crate) mod overflow;
 mod permission_prompt;
 mod provider_adapter;
 pub mod quota;

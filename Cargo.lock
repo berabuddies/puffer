@@ -4413,6 +4413,7 @@ dependencies = [
  "puffer-tools",
  "puffer-transport-anthropic",
  "puffer-workflow",
+ "regex",
  "reqwest",
  "rmcp",
  "serde",
