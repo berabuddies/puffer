@@ -1,3 +1,4 @@
+pub mod env_vars;
 mod settings_catalog;
 
 use anyhow::Context;
