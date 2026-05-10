@@ -279,6 +279,13 @@ pub fn supported_commands() -> Vec<CommandSpec> {
             CommandKind::Ui,
         ),
         cmd(
+            "pentest",
+            &[],
+            "Run an authorized web penetration test",
+            Some("<url> [max-iterations] | stop"),
+            CommandKind::Local,
+        ),
+        cmd(
             "permissions",
             &["allowed-tools"],
             "Manage allow & deny tool permission rules",
@@ -1014,6 +1021,14 @@ fn execute_local_command(
         "loop" | "maximize" | "minimize" => {
             // Handled in TUI flow layer which has access to TuiState.
             // If we reach here the command was dispatched outside the TUI.
+            emit_system(
+                state,
+                session_store,
+                format!("/{} requires the interactive TUI.", command.name),
+            )
+        }
+        "pentest" => {
+            // TUI-managed multi-turn command.
             emit_system(
                 state,
                 session_store,

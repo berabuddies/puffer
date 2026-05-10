@@ -28,6 +28,17 @@ fn reflect_command_is_registered_as_local() {
 }
 
 #[test]
+fn pentest_command_is_registered_as_local() {
+    let commands = supported_commands();
+    let pentest = find_command(&commands, "pentest").expect("pentest command");
+    assert_eq!(pentest.kind, CommandKind::Local);
+    assert_eq!(
+        pentest.argument_hint.as_deref(),
+        Some("<url> [max-iterations] | stop")
+    );
+}
+
+#[test]
 fn btw_stays_local_and_compact_runs_as_provider_prompt() {
     let commands = supported_commands();
     assert_eq!(

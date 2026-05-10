@@ -9,6 +9,7 @@ mod doctor;
 mod ecosystem;
 mod goal;
 mod model;
+mod pentest;
 mod plugins;
 pub(crate) mod prompt;
 mod reflect;
@@ -47,6 +48,10 @@ pub(crate) use ecosystem::{
 pub(crate) use goal::handle_goal_command;
 pub(crate) use model::{
     apply_model_preferences, handle_effort_command, handle_fast_command, handle_model_command,
+};
+pub use pentest::{
+    prepare_pentest_command, PentestCommand, PentestStart, DEFAULT_PENTEST_MAX_ITERATIONS,
+    PENTEST_USAGE,
 };
 pub use plugins::PluginActionEntry;
 pub(crate) use plugins::{

@@ -30,6 +30,10 @@ pub use command_helpers::PluginActionEntry;
 pub use command_helpers::ResumeLaunchResolution;
 pub use command_helpers::SessionOverlayView;
 pub use command_helpers::TaskActionEntry;
+pub use command_helpers::{
+    prepare_pentest_command, PentestCommand, PentestStart, DEFAULT_PENTEST_MAX_ITERATIONS,
+    PENTEST_USAGE,
+};
 pub(crate) use command_summary::{render_buddy_summary, render_cost_summary, render_usage_summary};
 pub use hooks::run_resource_hooks;
 pub use model_preferences::{

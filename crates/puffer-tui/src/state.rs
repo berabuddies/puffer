@@ -1,5 +1,6 @@
 use crate::approval_overlay::ApprovalOverlay;
 use crate::btw_overlay::BtwOverlay;
+use crate::pentest::PentestState;
 use crate::popup::popup_rows;
 use crate::session_overlay::SessionOverlay;
 use crate::status_overlay::StatusOverlay;
@@ -68,6 +69,7 @@ pub(crate) struct TuiState {
     pub(crate) pending_submit: Option<PendingSubmit>,
     pub(crate) queued_prompts: VecDeque<String>,
     pub(crate) active_loop: Option<LoopState>,
+    pub(crate) active_pentest: Option<PentestState>,
     /// Timestamp of last Ctrl+C press. Second press within 2s exits.
     pub(crate) last_ctrl_c: Option<std::time::Instant>,
     /// Transient hint shown in the status bar (auto-clears after 2s).
@@ -165,6 +167,7 @@ impl Default for TuiState {
             pending_submit: None,
             queued_prompts: VecDeque::new(),
             active_loop: None,
+            active_pentest: None,
             last_ctrl_c: None,
             status_hint: None,
             pending_pastes: Vec::new(),

@@ -1,5 +1,6 @@
 use crate::approval_overlay::ApprovalOverlay;
 use crate::btw_overlay::BtwOverlay;
+use crate::pentest_command;
 use anyhow::Result;
 use puffer_config::{save_user_config, ConfigPaths};
 use puffer_core::{
@@ -241,7 +242,24 @@ pub(crate) fn handle_prompt_submit(
     if submitted.is_empty() {
         return Ok(());
     }
+    if pentest_command::try_handle_pentest_command(
+        state,
+        resources,
+        session_store,
+        tui,
+        &submitted,
+    )? {
+        return Ok(());
+    }
+    let had_pentest_before_loop_command = pentest_command::is_active(tui);
+    let queued_before_loop_command = tui.queued_prompts.len();
     if try_handle_loop_command(state, session_store, tui, &submitted)? {
+        if had_pentest_before_loop_command && tui.active_loop.is_some() {
+            pentest_command::clear_active(tui);
+            for _ in 0..queued_before_loop_command {
+                let _ = tui.queued_prompts.pop_front();
+            }
+        }
         return Ok(());
     }
     if tui.has_pending_submit() && is_provider_prompt_input(&submitted) {
@@ -260,9 +278,13 @@ pub(crate) fn handle_prompt_submit(
             submitted,
             no_alt_screen,
         )?;
-        // Clear active loop if transcript was wiped (/compact, /clear).
-        if had_transcript && state.transcript.is_empty() && tui.active_loop.is_some() {
+        // Clear active pentest if transcript was wiped (/compact, /clear).
+        if had_transcript
+            && state.transcript.is_empty()
+            && (tui.active_loop.is_some() || pentest_command::is_active(tui))
+        {
             tui.active_loop = None;
+            pentest_command::clear_active(tui);
             tui.queued_prompts.clear();
         }
         return Ok(());
