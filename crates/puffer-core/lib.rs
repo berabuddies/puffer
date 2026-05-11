@@ -53,6 +53,7 @@ pub use runtime::{
     execute_user_prompt_streaming_with_cancel as execute_user_turn_streaming_with_cancel,
     execute_user_prompt_streaming_with_permissions as execute_user_turn_streaming_with_permissions,
     execute_user_prompt_streaming_with_permissions_and_cancel as execute_user_turn_streaming_with_permissions_and_cancel,
+    execute_user_prompt_streaming_with_prompt_tools_and_cancel as execute_user_turn_streaming_with_prompt_tools_and_cancel,
     execute_user_prompt_streaming_with_reflection as execute_user_turn_streaming_with_reflection,
     execute_user_prompt_streaming_with_structured_output as execute_user_turn_streaming_with_structured_output,
     execute_user_prompt_with_structured_output as execute_user_turn_with_structured_output,

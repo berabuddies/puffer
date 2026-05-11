@@ -5,7 +5,7 @@ use anyhow::Result;
 use puffer_config::{save_user_config, ConfigPaths};
 use puffer_core::{
     command_surface, dispatch_command, execute_user_turn,
-    execute_user_turn_streaming_with_permissions_and_cancel, reload_runtime_resources,
+    execute_user_turn_streaming_with_prompt_tools_and_cancel, reload_runtime_resources,
     render_config_summary, render_context_panel, render_copy_actions, render_doctor_report,
     render_hooks_actions, render_ide_actions, render_mcp_actions, render_permissions_panel,
     render_plugin_actions, render_sandbox_actions, render_skills_panel, run_resource_hooks,
@@ -305,6 +305,7 @@ pub(crate) fn handle_prompt_submit(
     let worker_resources = resources.clone();
     let worker_providers = providers.clone();
     let worker_prompt = submitted.clone();
+    let worker_prompt_tool_scope = pentest_command::prompt_tool_scope(tui).map(str::to_string);
     let mut worker_auth_store = auth_store.clone();
     let (sender, receiver) = mpsc::channel();
     // Cancel handle: cloned into the worker thread, original kept on
@@ -331,12 +332,13 @@ pub(crate) fn handle_prompt_submit(
                 .unwrap_or_else(|_| empty_user_question_response())
         };
         let outcome = with_user_question_prompt_handler(on_user_question, || {
-            execute_user_turn_streaming_with_permissions_and_cancel(
+            execute_user_turn_streaming_with_prompt_tools_and_cancel(
                 &mut worker_state,
                 &worker_resources,
                 &worker_providers,
                 &mut worker_auth_store,
                 &worker_prompt,
+                worker_prompt_tool_scope.as_deref(),
                 None,
                 &worker_cancel,
                 |event| match event {

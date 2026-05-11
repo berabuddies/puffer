@@ -561,6 +561,49 @@ where
     })
 }
 
+/// Streaming + interactive permissions + cancellation, scoped by a prompt's
+/// declarative `allowed_tools` metadata.
+pub fn execute_user_prompt_streaming_with_prompt_tools_and_cancel<F, P>(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    providers: &ProviderRegistry,
+    auth_store: &mut AuthStore,
+    input: &str,
+    prompt_tool_scope: Option<&str>,
+    structured_output: Option<&StructuredOutputConfig>,
+    cancel: &CancelToken,
+    mut on_event: F,
+    on_permission: P,
+) -> Result<TurnExecution>
+where
+    F: FnMut(TurnStreamEvent),
+    P: FnMut(PermissionPromptRequest) -> PermissionPromptAction + 'static,
+{
+    let tool_filter = prompt_tool_scope
+        .and_then(|prompt_id| puffer_resources::prompt_by_id(resources, prompt_id))
+        .map(|prompt| build_request_tool_filter(&prompt.value.allowed_tools))
+        .transpose()?
+        .flatten();
+    with_permission_prompt_handler(on_permission, || {
+        execute_user_prompt_streaming_with_options(
+            state,
+            resources,
+            providers,
+            auth_store,
+            input,
+            TurnRequestOptions {
+                structured_output,
+                tool_filter: tool_filter.as_ref(),
+                reflection: None,
+                cancel: Some(cancel),
+                max_turns: None,
+                observability: None,
+            },
+            &mut on_event,
+        )
+    })
+}
+
 /// Executes one user prompt with a request-scoped structured output contract and streaming events.
 pub fn execute_user_prompt_streaming_with_structured_output<F>(
     state: &mut AppState,
