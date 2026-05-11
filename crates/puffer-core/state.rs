@@ -626,7 +626,8 @@ impl AppState {
         self.sync_session_tool_permissions_from_state();
     }
 
-    pub(crate) fn set_session_allow_all(&mut self) {
+    /// Grants all tool permissions for the current session.
+    pub fn set_session_allow_all(&mut self) {
         self.session_allow_all = true;
         self.session_permission_state.set_allow_all_tools(true);
     }

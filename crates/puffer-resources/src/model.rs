@@ -518,7 +518,10 @@ mod tests {
         let pack: ProviderPack = serde_yaml::from_str(yaml).expect("zhipu.yaml parses");
         assert_eq!(pack.id, "zhipu");
         assert_eq!(pack.base_url, "https://open.bigmodel.cn/api/paas/v4");
-        assert_eq!(pack.chat_completions_path.as_deref(), Some("/chat/completions"));
+        assert_eq!(
+            pack.chat_completions_path.as_deref(),
+            Some("/chat/completions")
+        );
         let descriptor = pack.into_descriptor();
         assert_eq!(
             descriptor.chat_completions_path.as_deref(),

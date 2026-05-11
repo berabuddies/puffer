@@ -233,12 +233,10 @@ fn request_scoped_write_path_filters_allow_only_matching_paths() {
     let denied_dir = cwd.join("other");
     fs::create_dir_all(&allowed_dir).unwrap();
     fs::create_dir_all(&denied_dir).unwrap();
-    let filter = super::super::build_request_tool_filter(&[format!(
-        "Write({}/**)",
-        allowed_dir.display()
-    )])
-    .unwrap()
-    .unwrap();
+    let filter =
+        super::super::build_request_tool_filter(&[format!("Write({}/**)", allowed_dir.display())])
+            .unwrap()
+            .unwrap();
     let permission_context = crate::permissions::load_runtime_permission_context_with_inputs(
         &cwd,
         &resources,
@@ -313,12 +311,10 @@ fn request_scoped_edit_path_filters_allow_only_the_selected_file() {
     let cwd = std::path::PathBuf::from("/tmp/work");
     let allowed_path = cwd.join("allowed").join("file.txt");
     let denied_path = cwd.join("other").join("file.txt");
-    let filter = super::super::build_request_tool_filter(&[format!(
-        "Edit({})",
-        allowed_path.display()
-    )])
-    .unwrap()
-    .unwrap();
+    let filter =
+        super::super::build_request_tool_filter(&[format!("Edit({})", allowed_path.display())])
+            .unwrap()
+            .unwrap();
     let permission_context = crate::permissions::load_runtime_permission_context_with_inputs(
         &cwd,
         &resources,

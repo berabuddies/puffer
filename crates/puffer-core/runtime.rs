@@ -1015,9 +1015,8 @@ where
         // socket otherwise.
         drop(response);
         on_retry(attempt, max_attempts, status);
-        let delay = server_hint.unwrap_or_else(|| {
-            http_5xx_backoff_with_jitter(base_delay, attempt)
-        });
+        let delay =
+            server_hint.unwrap_or_else(|| http_5xx_backoff_with_jitter(base_delay, attempt));
         std::thread::sleep(delay);
     }
     unreachable!("retry_on_5xx loop always returns or errors")
@@ -1054,10 +1053,9 @@ fn parse_retry_after_headers(headers: &reqwest::header::HeaderMap) -> Option<Dur
     }
     // HTTP-date: parse as RFC 2822 (covers IMF-fixdate, the only modern
     // preferred HTTP-date format per RFC 7231 §7.1.1.1).
-    if let Ok(target) = time::OffsetDateTime::parse(
-        trimmed,
-        &time::format_description::well_known::Rfc2822,
-    ) {
+    if let Ok(target) =
+        time::OffsetDateTime::parse(trimmed, &time::format_description::well_known::Rfc2822)
+    {
         let now = time::OffsetDateTime::now_utc();
         let diff = target - now;
         let ms = diff.whole_milliseconds();

@@ -681,7 +681,7 @@ mod tests {
         let output = execute_claude_read_tool(
             temp.path(),
             &[],
-            false,
+            &workspace_write_policy(),
             serde_json::json!({
                 "file_path": path.display().to_string(),
                 "offset": 0,

@@ -1640,7 +1640,10 @@ mod tests {
                 .contents_utf8()
                 .unwrap_or_else(|| panic!("embedded tool yaml {} is not UTF-8", path.display()));
             if let Err(err) = serde_yaml::from_str::<ToolSpec>(raw) {
-                panic!("embedded tool yaml {} failed to parse: {err}", path.display());
+                panic!(
+                    "embedded tool yaml {} failed to parse: {err}",
+                    path.display()
+                );
             }
         }
 

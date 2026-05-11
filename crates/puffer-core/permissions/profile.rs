@@ -8,6 +8,7 @@ use puffer_tools::ToolDefinition;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use uuid::Uuid;
 
 /// Enumerates the normalized permission surfaces exposed by `puffer-core`.
@@ -284,7 +285,6 @@ impl SessionGrantProfile {
                     BrowserGrantCategory::CrossSessionAccess,
                 ))
     }
-
 }
 
 /// Summarizes session-scoped grants folded into the effective profile.
@@ -395,7 +395,6 @@ impl EffectivePermissionProfile {
                 .tool_overrides
                 .contains_key(&normalize_tool_id("Browser"))
     }
-
 }
 
 /// Describes a request-scoped filter built from prompt-backed allowed-tools selectors.
@@ -443,6 +442,11 @@ pub(crate) fn build_request_tool_filter(selectors: &[String]) -> Result<Option<R
 }
 
 impl RequestToolFilter {
+    pub(crate) fn empty_static() -> &'static Self {
+        static EMPTY: OnceLock<RequestToolFilter> = OnceLock::new();
+        EMPTY.get_or_init(|| Self { rules: Vec::new() })
+    }
+
     pub(crate) fn allows_definition(&self, definition: &ToolDefinition) -> bool {
         let names = request_tool_names(&definition.id);
         self.rules.iter().any(|rule| {

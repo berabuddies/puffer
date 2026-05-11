@@ -20,11 +20,11 @@ use std::path::{Component, Path, PathBuf};
 pub(crate) use self::execution::{
     DerivedPermissionPolicy, FilesystemPermissionPolicy, LegacyExecutorPermissionBridge,
 };
+pub use profile::SessionPermissionState;
 pub(crate) use profile::{
     build_request_tool_filter, BrowserActionCategory, BrowserGrantCategory,
     EffectivePermissionProfile, RequestToolFilter, SessionPermissionGrants,
 };
-pub use profile::SessionPermissionState;
 
 /// Stores persisted workspace permission overrides for tool ids.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

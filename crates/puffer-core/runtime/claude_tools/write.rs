@@ -1,7 +1,7 @@
 use crate::workspace_paths;
 use anyhow::{bail, Context, Result};
-use puffer_runner_api::StalenessRejection;
 use puffer_runner_api::FilesystemExecutionPolicy;
+use puffer_runner_api::StalenessRejection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;

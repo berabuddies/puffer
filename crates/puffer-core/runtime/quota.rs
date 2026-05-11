@@ -109,7 +109,11 @@ fn body_signals_access_terminated(body: &str) -> bool {
     // Structured-JSON path. Case-sensitive — JSON field values are
     // case-sensitive on the wire. Don't pre-lowercase here.
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
-        if let Some(kind) = value.get("error").and_then(|err| err.get("type")).and_then(serde_json::Value::as_str) {
+        if let Some(kind) = value
+            .get("error")
+            .and_then(|err| err.get("type"))
+            .and_then(serde_json::Value::as_str)
+        {
             if kind == "access_terminated_error" {
                 return true;
             }
@@ -241,8 +245,8 @@ mod tests {
     #[test]
     fn classify_403_with_kimi_style_string_is_quota() {
         let body = r#"some prefix "type":"access_terminated_error" some suffix"#;
-        let qe = classify_response("kimi", 403, body)
-            .expect("Kimi-style quoted marker must classify");
+        let qe =
+            classify_response("kimi", 403, body).expect("Kimi-style quoted marker must classify");
         assert_eq!(qe.kind, QuotaErrorKind::AccessTerminated);
     }
 

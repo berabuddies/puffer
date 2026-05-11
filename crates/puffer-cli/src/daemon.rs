@@ -107,6 +107,7 @@ pub(crate) struct DaemonOptions {
     pub no_browser: bool,
     pub system_prompt_1: Option<String>,
     pub disable_auto_title: bool,
+    pub yolo: bool,
 }
 
 pub(crate) fn run(options: DaemonOptions) -> Result<()> {
@@ -132,6 +133,7 @@ async fn run_async(options: DaemonOptions) -> Result<()> {
         token.clone(),
         options.no_browser,
         options.disable_auto_title,
+        options.yolo,
     )?;
     if let Some(prompt) = options
         .system_prompt_1
@@ -252,6 +254,7 @@ pub(crate) struct DaemonState {
     /// Chrome-backed browser sessions used by the desktop Browser tab.
     pub(crate) browsers: Arc<BrowserRegistry>,
     disable_auto_title: bool,
+    yolo: bool,
     /// Transcript replay buffer — a bounded ring of recent session / clone /
     /// workspace events. On a fresh WebSocket connection we replay these
     /// so UIs that disconnected mid-turn don't miss deltas. Size capped at
@@ -294,6 +297,7 @@ impl DaemonState {
         token: String,
         no_browser: bool,
         disable_auto_title: bool,
+        yolo: bool,
     ) -> Result<Self> {
         let config = load_config(&paths)?;
         let (events, _rx) = broadcast::channel::<ServerEnvelope>(256);
@@ -312,6 +316,7 @@ impl DaemonState {
             fs_watches: Arc::new(FsWatchRegistry::new()),
             browsers: Arc::new(BrowserRegistry::new(browser_profile_root, !no_browser)),
             disable_auto_title,
+            yolo,
             recent_events: Arc::new(Mutex::new(VecDeque::with_capacity(RECENT_EVENT_CAPACITY))),
         })
     }
@@ -2050,6 +2055,9 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         };
         let cfg_for_turn = setup_state.config.lock().unwrap().clone();
         let mut app_state = AppState::from_session_record(cfg_for_turn.clone(), record);
+        if setup_state.yolo {
+            apply_daemon_yolo_mode(&mut app_state);
+        }
         if let Some(model_override) = model_override_for_thread.as_deref() {
             if let Err(err) =
                 apply_turn_model_override(&mut app_state, &inputs.providers, model_override)
@@ -2337,9 +2345,16 @@ fn apply_turn_model_override(
     apply_model_preferences(app_state, &provider_id, &model_id, &effort, fast_mode)
 }
 
+fn apply_daemon_yolo_mode(app_state: &mut AppState) {
+    app_state.sandbox_mode = "danger-full-access".to_string();
+    app_state.set_session_allow_all();
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{apply_turn_model_override, handle_create_session, DaemonState};
+    use super::{
+        apply_daemon_yolo_mode, apply_turn_model_override, handle_create_session, DaemonState,
+    };
     use indexmap::IndexMap;
     use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
     use puffer_core::AppState;
@@ -2366,6 +2381,7 @@ mod tests {
             paths.clone(),
             "token".into(),
             true,
+            false,
             false,
         )
         .expect("daemon state");
@@ -2432,11 +2448,35 @@ mod tests {
         assert!(state.fast_mode);
     }
 
+    #[test]
+    fn daemon_yolo_mode_sets_allow_all_and_danger_full_access() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let metadata = SessionMetadata {
+            id: Uuid::new_v4(),
+            display_name: None,
+            generated_title: None,
+            cwd: temp.path().to_path_buf(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        };
+        let mut state = AppState::new(PufferConfig::default(), temp.path().to_path_buf(), metadata);
+
+        apply_daemon_yolo_mode(&mut state);
+
+        assert_eq!(state.sandbox_mode, "danger-full-access");
+        assert!(state.session_allow_all);
+    }
+
     fn provider(id: &str, models: &[&str]) -> ProviderDescriptor {
         ProviderDescriptor {
             id: id.to_string(),
             display_name: id.to_string(),
             base_url: "https://example.invalid".to_string(),
+            chat_completions_path: None,
             default_api: "openai-responses".to_string(),
             auth_modes: Vec::new(),
             headers: IndexMap::new(),

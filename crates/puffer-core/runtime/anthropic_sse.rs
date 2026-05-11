@@ -106,8 +106,10 @@ where
                 // is incremented by `message_delta.usage.output_tokens`
                 // events for the streaming totals.
                 if let Some(usage) = msg.get("usage") {
-                    state.usage_input_tokens =
-                        usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                    state.usage_input_tokens = usage
+                        .get("input_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
                     state.usage_cache_read_tokens = usage
                         .get("cache_read_input_tokens")
                         .and_then(Value::as_u64)
@@ -245,8 +247,7 @@ where
                 if let Some(cache_read) =
                     usage.get("cache_read_input_tokens").and_then(Value::as_u64)
                 {
-                    state.usage_cache_read_tokens =
-                        state.usage_cache_read_tokens.max(cache_read);
+                    state.usage_cache_read_tokens = state.usage_cache_read_tokens.max(cache_read);
                 }
                 if let Some(cache_creation) = usage
                     .get("cache_creation_input_tokens")
