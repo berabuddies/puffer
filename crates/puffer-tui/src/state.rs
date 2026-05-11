@@ -7,8 +7,9 @@ use crate::text_overlay::TextOverlay;
 use crate::usage::UsageOverlay;
 use crate::user_question_overlay::UserQuestionOverlay;
 use puffer_core::{
-    CommandSpec, PermissionPromptAction, PermissionPromptRequest, ToolCallRequest, ToolInvocation,
-    TurnExecution, TurnUsageReport, UserQuestionPromptRequest, UserQuestionPromptResponse,
+    CommandSpec, PermissionPromptAction, PermissionPromptRequest, SessionPermissionState,
+    ToolCallRequest, ToolInvocation, TurnExecution, TurnUsageReport, UserQuestionPromptRequest,
+    UserQuestionPromptResponse,
 };
 use puffer_provider_registry::{AuthStore, ExternalImportCandidate};
 use puffer_session_store::SessionSummary;
@@ -93,8 +94,8 @@ pub(crate) struct TuiState {
 pub(crate) struct PendingSubmitResult {
     pub(crate) outcome: std::result::Result<TurnExecution, String>,
     pub(crate) auth_store: AuthStore,
-    /// Session-level tool permissions accumulated on the worker clone.
-    pub(crate) session_tool_permissions: std::collections::HashMap<String, String>,
+    /// Session-level permission state accumulated on the worker clone.
+    pub(crate) session_permission_state: SessionPermissionState,
     /// Whether the user chose "allow all" during this turn.
     pub(crate) session_allow_all: bool,
 }

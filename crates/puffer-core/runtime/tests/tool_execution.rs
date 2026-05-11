@@ -3,6 +3,7 @@ use puffer_config::PufferConfig;
 use puffer_session_store::SessionMetadata;
 use std::fs;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 use uuid::Uuid;
 
@@ -527,6 +528,208 @@ fn execute_tool_call_requires_prior_read_for_notebook_edit() {
         .output
         .stdout
         .contains("File has not been read yet. Read it first before writing to it."));
+}
+
+#[test]
+fn allow_session_persists_runtime_bash_approval_for_the_session() {
+    let mut tool = loaded_tool("Bash", "Run shell", "runtime:claude_bash");
+    tool.value.approval_policy = Some("ask".to_string());
+    tool.value.sandbox_policy = Some("workspace-write".to_string());
+    let resources = LoadedResources {
+        tools: vec![tool],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let mut providers = ProviderRegistry::new();
+    providers.register(openai_provider("http://127.0.0.1".to_string()));
+    let request_config = test_openai_request_config();
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let prompt_log = prompts.clone();
+
+    with_permission_prompt_handler(
+        move |request| {
+            prompt_log.lock().unwrap().push(request.tool_id);
+            PermissionPromptAction::AllowSession
+        },
+        || {
+            let first = execute_tool_call(
+                &mut state,
+                &resources,
+                &providers,
+                &mut AuthStore::default(),
+                &registry,
+                "gpt-5",
+                &cwd,
+                ToolExecutionBackend::OpenAi {
+                    request_config: &request_config,
+                    structured_output: None,
+                },
+                None,
+                "Bash",
+                json!({"command": "printf hi"}),
+            )
+            .unwrap();
+            assert!(first.success);
+            let reloaded_permission_context =
+                crate::permissions::load_runtime_permission_context_with_inputs(
+                    &cwd,
+                    &resources,
+                    &state,
+                    crate::permissions::RuntimePermissionInputs::default(),
+                )
+                .unwrap();
+            let reloaded_decision = reloaded_permission_context.decision_for_tool_call(
+                registry.definition("Bash").unwrap(),
+                &json!({"command": "printf hi-again"}),
+            );
+            assert_eq!(
+                reloaded_decision.behavior,
+                crate::permissions::ToolPermissionBehavior::Allow
+            );
+
+            let second = execute_tool_call(
+                &mut state,
+                &resources,
+                &providers,
+                &mut AuthStore::default(),
+                &registry,
+                "gpt-5",
+                &cwd,
+                ToolExecutionBackend::OpenAi {
+                    request_config: &request_config,
+                    structured_output: None,
+                },
+                None,
+                "Bash",
+                json!({"command": "printf hi-again"}),
+            )
+            .unwrap();
+            assert!(second.success);
+        },
+    );
+
+    let prompts = prompts.lock().unwrap();
+    assert_eq!(prompts.as_slice(), &["Bash".to_string()]);
+    assert_eq!(
+        state
+            .session_tool_permissions
+            .get("bash")
+            .map(String::as_str),
+        Some("allow")
+    );
+}
+
+#[test]
+fn allow_session_scopes_browser_approval_to_evaluate_actions() {
+    let mut tool = loaded_tool("Browser", "Managed browser", "runtime:browser");
+    tool.value.approval_policy = Some("auto".to_string());
+    tool.value.sandbox_policy = Some("workspace-write".to_string());
+    let resources = LoadedResources {
+        tools: vec![tool],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let mut providers = ProviderRegistry::new();
+    providers.register(openai_provider("http://127.0.0.1".to_string()));
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let prompt_log = prompts.clone();
+
+    with_permission_prompt_handler(
+        move |request| {
+            prompt_log.lock().unwrap().push(
+                request
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| request.tool_id.clone()),
+            );
+            PermissionPromptAction::AllowSession
+        },
+        || {
+            let first = resolve_tool_permission(
+                &mut state,
+                &resources,
+                &registry,
+                &cwd,
+                "Browser",
+                &json!({"action": "evaluate", "script": "document.title"}),
+                None,
+            )
+            .unwrap();
+            assert!(matches!(first, PermissionOutcome::Allowed(_)));
+
+            let second = resolve_tool_permission(
+                &mut state,
+                &resources,
+                &registry,
+                &cwd,
+                "Browser",
+                &json!({"action": "evaluate", "script": "window.location.href"}),
+                None,
+            )
+            .unwrap();
+            assert!(matches!(second, PermissionOutcome::Allowed(_)));
+
+            let third = resolve_tool_permission(
+                &mut state,
+                &resources,
+                &registry,
+                &cwd,
+                "Browser",
+                &json!({"action": "snapshot"}),
+                None,
+            )
+            .unwrap();
+            assert!(matches!(third, PermissionOutcome::Allowed(_)));
+        },
+    );
+
+    let prompts = prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 1);
+    assert!(prompts[0].contains("executes page JavaScript"));
+    assert!(!state.session_tool_permissions.contains_key("browser"));
+}
+
+#[test]
+fn cross_session_browser_evaluate_can_be_denied_at_prompt_time() {
+    let mut tool = loaded_tool("Browser", "Managed browser", "runtime:browser");
+    tool.value.approval_policy = Some("auto".to_string());
+    tool.value.sandbox_policy = Some("workspace-write".to_string());
+    let resources = LoadedResources {
+        tools: vec![tool],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let other_session = "b4f239fd-1493-4be7-a3a1-9e58fe612576";
+
+    with_permission_prompt_handler(
+        move |_request| PermissionPromptAction::Deny,
+        || {
+            let first = resolve_tool_permission(
+                &mut state,
+                &resources,
+                &registry,
+                &cwd,
+                "Browser",
+                &json!({
+                    "action": "evaluate",
+                    "sessionId": other_session,
+                    "script": "document.title"
+                }),
+                None,
+            )
+            .unwrap();
+            let PermissionOutcome::Denied(result) = first else {
+                panic!("expected denied browser permission outcome");
+            };
+            assert!(result.output.stdout.contains("permission denied by user"));
+        },
+    );
 }
 
 #[test]

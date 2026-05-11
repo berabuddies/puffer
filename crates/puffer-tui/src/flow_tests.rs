@@ -243,6 +243,76 @@ fn cancel_pending_submit_records_interrupt_and_starts_next_queued_prompt() {
         .any(|message| { message.role == MessageRole::User && message.text == "second" }));
 }
 
+#[test]
+fn poll_pending_submit_preserves_browser_category_session_grants() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = sample_state(session, tempdir.path());
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let mut auth_store = AuthStore::default();
+    let mut tui = TuiState::default();
+
+    let browser = puffer_tools::ToolDefinition {
+        id: "Browser".to_string(),
+        name: "Browser".to_string(),
+        description: String::new(),
+        handler: String::new(),
+        aliases: Vec::new(),
+        handler_args: Vec::new(),
+        kind: puffer_tools::ToolKind::Custom,
+        input_schema: puffer_tools::ToolInputSchema::default(),
+        metadata: puffer_tools::ToolMetadata::default(),
+        policy: puffer_tools::ToolPolicyHints::default(),
+        shared_lib: None,
+        enabled_if: None,
+        display: puffer_tools::ToolDisplayHints::default(),
+    };
+    state.allow_permission_for_tool_call(
+        &browser,
+        &serde_json::json!({"action": "evaluate", "script": "document.title"}),
+    );
+    let worker_permission_state = state.session_permission_state().clone();
+
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    event_tx
+        .send(PendingSubmitEvent::Finished(PendingSubmitResult {
+            outcome: Err("cancelled".to_string()),
+            auth_store: auth_store.clone(),
+            session_permission_state: worker_permission_state,
+            session_allow_all: false,
+        }))
+        .unwrap();
+
+    tui.pending_submit = Some(PendingSubmit {
+        prompt: "hi".to_string(),
+        receiver: event_rx,
+        rendered_tool_invocations: 0,
+        pending_tool_calls: Vec::new(),
+        started_at: std::time::Instant::now(),
+        thinking_active: false,
+        status_hint: None,
+        cancel: puffer_core::CancelToken::new(),
+    });
+
+    let completed = poll_pending_submit(
+        &mut state,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+    )
+    .unwrap();
+
+    assert!(completed);
+    assert!(state.session_permission_state().has_browser_grant());
+    assert!(!state.session_tool_permissions.contains_key("browser"));
+}
+
 // ---------------------------------------------------------------------------
 // Loop / Maximize / Minimize tests
 // ---------------------------------------------------------------------------

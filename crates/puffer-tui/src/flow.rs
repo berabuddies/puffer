@@ -367,7 +367,7 @@ pub(crate) fn handle_prompt_submit(
         let _ = sender.send(PendingSubmitEvent::Finished(PendingSubmitResult {
             outcome,
             auth_store: worker_auth_store,
-            session_tool_permissions: worker_state.session_tool_permissions.clone(),
+            session_permission_state: worker_state.session_permission_state().clone(),
             session_allow_all: worker_state.session_allow_all,
         }));
     });
@@ -456,7 +456,7 @@ pub(crate) fn poll_pending_submit(
             Err(TryRecvError::Disconnected) => PendingSubmitEvent::Finished(PendingSubmitResult {
                 outcome: Err("background request disconnected".to_string()),
                 auth_store: auth_store.clone(),
-                session_tool_permissions: std::collections::HashMap::new(),
+                session_permission_state: state.session_permission_state().clone(),
                 session_allow_all: false,
             }),
         };
@@ -526,13 +526,13 @@ pub(crate) fn poll_pending_submit(
                 let rendered_tool_invocations = pending.rendered_tool_invocations;
                 let previous_auth_store = auth_store.clone();
                 *auth_store = result.auth_store;
-                // Sync session permissions from worker clone back to main state.
-                state
-                    .session_tool_permissions
-                    .extend(result.session_tool_permissions);
-                if result.session_allow_all {
-                    state.session_allow_all = true;
-                }
+                // Sync the full typed session permission state from the worker
+                // clone so category grants survive the worker/UI round-trip.
+                // This also avoids depending on AppState's legacy rebuild path,
+                // where sync_session_permission_state() assumes
+                // session_allow_all was updated before reconstruction.
+                let _ = result.session_allow_all;
+                state.replace_session_permission_state(result.session_permission_state);
                 match result.outcome {
                     Ok(turn) => {
                         if rendered_tool_invocations < turn.tool_invocations.len() {
