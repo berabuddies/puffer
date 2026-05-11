@@ -39,6 +39,8 @@ pub use model_preferences::{
 pub use permissions::SessionPermissionState;
 pub use runtime::background_tasks;
 pub use runtime::claude_tools::execute_workflow_tool;
+pub use runtime::resource_watcher;
+pub use runtime::resource_watcher::ResourceWatcher;
 pub use runtime::execute_user_prompt as execute_user_turn;
 pub use runtime::install_subscription_manager;
 pub use runtime::mcp_discovery;
@@ -314,7 +316,16 @@ pub fn resolve_resume_launch(
     command_helpers::resolve_resume_launch(session_store, current_cwd, query)
 }
 
-/// Reloads declarative resources and rebuilds the provider registry for the active session.
+/// Reloads declarative resources, rebuilds the provider registry, and
+/// hot-swaps the MCP roster on the live tool runner for the active session.
+///
+/// Skills are picked up implicitly because the system prompt is rebuilt
+/// from `resources.skills` on every turn; replacing `*resources` is enough.
+/// MCP servers need an extra step: the in-memory `McpHost` cached inside
+/// `LocalToolRunner` keeps live subprocess handles indexed by the old
+/// roster, so we hot-swap it via [`runner_adapter::LocalToolRunner::replace_mcp_roster`]
+/// so newly added manifests can launch on the next call and removed ones
+/// stop being callable immediately.
 pub fn reload_runtime_resources(
     state: &AppState,
     resources: &mut LoadedResources,
@@ -331,5 +342,49 @@ pub fn reload_runtime_resources(
         );
     }
     let _ = providers.discover_and_merge_all(auth_store);
+    apply_mcp_roster_to_runner(state, resources);
     command_helpers::reload_plugins_summary(state, resources)
+}
+
+/// Pushes the freshly-loaded MCP server roster onto the live tool runner.
+///
+/// Walks `Arc<dyn ToolRunner>` through the `as_any()` seam exposed by
+/// `puffer_runner_api::ToolRunner` and, if the underlying type is a
+/// `LocalToolRunner`, rebuilds its `McpHost`. Non-local runners (e.g.
+/// `RemoteToolRunner`) ignore this: they manage MCP lifecycle out of
+/// band, and forcing a reload here would step on the remote's roster.
+fn apply_mcp_roster_to_runner(state: &AppState, resources: &LoadedResources) {
+    let Some(any) = state.tool_runner.as_any() else {
+        return;
+    };
+    let Some(local) = any.downcast_ref::<runner_adapter::LocalToolRunner>() else {
+        return;
+    };
+    let servers = collect_runner_mcp_roster(resources);
+    let workspace = Some(state.cwd.clone());
+    local.replace_mcp_roster(servers, workspace);
+}
+
+/// Merges `resources.mcp_servers` with plugin-embedded MCP servers,
+/// deduplicating by id (case-insensitive). Mirrors the merge done at
+/// startup in `puffer_runner_local::local_runner_from_resources` so a
+/// hot-reload yields the same effective roster as a fresh start.
+fn collect_runner_mcp_roster(
+    resources: &LoadedResources,
+) -> Vec<puffer_resources::McpServerSpec> {
+    let mut servers: Vec<puffer_resources::McpServerSpec> = resources
+        .mcp_servers
+        .iter()
+        .map(|item| item.value.clone())
+        .collect();
+    for (_plugin, spec) in puffer_resources::plugin_mcp_servers(resources) {
+        if servers
+            .iter()
+            .any(|existing| existing.id.eq_ignore_ascii_case(&spec.id))
+        {
+            continue;
+        }
+        servers.push(spec.clone());
+    }
+    servers
 }

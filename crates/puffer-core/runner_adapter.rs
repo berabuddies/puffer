@@ -17,7 +17,7 @@ use puffer_runner_api::{
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Instant, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -302,10 +302,16 @@ fn result_with_updates(
 /// instantiate one without depending on the higher-level
 /// `puffer-runner-local` crate (which itself re-exports this type as
 /// `LocalToolRunner` for external callers).
+///
+/// `mcp_host` is held behind `Arc<RwLock<_>>` so the MCP roster can be
+/// hot-swapped via [`LocalToolRunner::replace_mcp_host`] without rebuilding
+/// the surrounding `Arc<dyn ToolRunner>` stored in `AppState`. All clones of
+/// `LocalToolRunner` share the same `RwLock`, so a swap is visible
+/// immediately to every in-flight handle.
 #[derive(Debug, Clone)]
 pub struct LocalToolRunner {
     sandbox_roots: Vec<PathBuf>,
-    mcp_host: McpHost,
+    mcp_host: Arc<RwLock<McpHost>>,
     started: Instant,
 }
 
@@ -313,7 +319,7 @@ impl Default for LocalToolRunner {
     fn default() -> Self {
         Self {
             sandbox_roots: Vec::new(),
-            mcp_host: McpHost::default(),
+            mcp_host: Arc::new(RwLock::new(McpHost::default())),
             started: Instant::now(),
         }
     }
@@ -328,7 +334,7 @@ impl LocalToolRunner {
         let workspace = roots.first().cloned();
         Self {
             sandbox_roots: roots,
-            mcp_host: McpHost::new(Vec::new(), workspace),
+            mcp_host: Arc::new(RwLock::new(McpHost::new(Vec::new(), workspace))),
             started: Instant::now(),
         }
     }
@@ -336,32 +342,45 @@ impl LocalToolRunner {
     /// Configures the runner with an MCP manifest. The first sandbox root
     /// (or the explicit override passed via `with_workspace_root`) is used
     /// by the built-in `filesystem` server when present.
-    pub fn with_mcp_servers(mut self, servers: Vec<McpServerSpec>) -> Self {
-        let workspace = self
-            .mcp_host
-            .workspace_root()
-            .map(Path::to_path_buf)
-            .or_else(|| self.sandbox_roots.first().cloned());
-        let handler = self.mcp_host.elicitation_handler();
-        self.mcp_host = McpHost::with_elicitation(servers, workspace, handler);
+    pub fn with_mcp_servers(self, servers: Vec<McpServerSpec>) -> Self {
+        let (workspace, handler) = {
+            let host = self.mcp_host.read().expect("mcp host rwlock poisoned");
+            (
+                host.workspace_root()
+                    .map(Path::to_path_buf)
+                    .or_else(|| self.sandbox_roots.first().cloned()),
+                host.elicitation_handler(),
+            )
+        };
+        let new_host = McpHost::with_elicitation(servers, workspace, handler);
+        *self.mcp_host.write().expect("mcp host rwlock poisoned") = new_host;
         self
     }
 
     /// Overrides the workspace root used by built-in MCP transports (today
     /// only the filesystem stub). Mostly useful when the sandbox roots are
     /// disjoint from the MCP workspace.
-    pub fn with_mcp_workspace_root(mut self, workspace: PathBuf) -> Self {
-        let handler = self.mcp_host.elicitation_handler();
-        let servers = self.mcp_host.into_servers();
-        self.mcp_host = McpHost::with_elicitation(servers, Some(workspace), handler);
+    pub fn with_mcp_workspace_root(self, workspace: PathBuf) -> Self {
+        let (handler, servers) = {
+            let mut host = self.mcp_host.write().expect("mcp host rwlock poisoned");
+            let handler = host.elicitation_handler();
+            let servers = std::mem::take(&mut *host).into_servers();
+            (handler, servers)
+        };
+        let new_host = McpHost::with_elicitation(servers, Some(workspace), handler);
+        *self.mcp_host.write().expect("mcp host rwlock poisoned") = new_host;
         self
     }
 
     /// Installs an elicitation handler that the connection manager will
     /// invoke whenever an MCP server sends `elicitation/create` mid-tool-call.
     /// Defaults to [`puffer_runner_api::DeclineAllElicitations`].
-    pub fn with_elicitation_handler(mut self, handler: Arc<dyn ElicitationHandler>) -> Self {
-        self.mcp_host = self.mcp_host.with_elicitation_handler(handler);
+    pub fn with_elicitation_handler(self, handler: Arc<dyn ElicitationHandler>) -> Self {
+        let new_host = {
+            let host = self.mcp_host.read().expect("mcp host rwlock poisoned");
+            host.clone().with_elicitation_handler(handler)
+        };
+        *self.mcp_host.write().expect("mcp host rwlock poisoned") = new_host;
         self
     }
 
@@ -369,15 +388,29 @@ impl LocalToolRunner {
     /// this to scope per-test runs to a `TempDir`; production callers
     /// rely on the [`puffer_mcp_oauth::default_token_dir`] default
     /// (`<config>/puffer/mcp-tokens`).
-    pub fn with_oauth_token_dir(mut self, dir: PathBuf) -> Self {
-        self.mcp_host = self.mcp_host.with_oauth_token_dir(dir);
+    pub fn with_oauth_token_dir(self, dir: PathBuf) -> Self {
+        let new_host = {
+            let host = self.mcp_host.read().expect("mcp host rwlock poisoned");
+            host.clone().with_oauth_token_dir(dir)
+        };
+        *self.mcp_host.write().expect("mcp host rwlock poisoned") = new_host;
         self
     }
 
-    /// Read-only view of the configured MCP servers (used by the runtime's
-    /// permissions / display surfaces).
-    pub fn mcp_host(&self) -> &McpHost {
-        &self.mcp_host
+    /// Snapshot of the MCP host. Use for short read-only inspections; the
+    /// returned `RwLockReadGuard` blocks concurrent hot-swaps.
+    pub fn mcp_host(&self) -> std::sync::RwLockReadGuard<'_, McpHost> {
+        self.mcp_host.read().expect("mcp host rwlock poisoned")
+    }
+
+    /// Hot-swap the MCP host roster. Used by the resource reload pathway to
+    /// pick up additions, removals, or edits to MCP manifests without
+    /// restarting the process. Existing live MCP subprocess connections
+    /// owned by the previous host are dropped (their `kill_on_drop` children
+    /// exit asynchronously); the next MCP call lazily spawns whatever the
+    /// new roster requires.
+    pub fn replace_mcp_host(&self, host: McpHost) {
+        *self.mcp_host.write().expect("mcp host rwlock poisoned") = host;
     }
 
     fn check_sandbox(&self, path: &Path) -> Result<(), RunnerError> {
@@ -492,10 +525,10 @@ impl ToolRunner for LocalToolRunner {
     }
 
     fn list_mcp_servers(&self) -> Result<Vec<McpServerInfo>, RunnerError> {
-        Ok(self.mcp_host.list_servers())
+        Ok(self.mcp_host().list_servers())
     }
     fn list_mcp_tools(&self, server: &str) -> Result<Vec<McpTool>, RunnerError> {
-        self.mcp_host.list_tools(server)
+        self.mcp_host().list_tools(server)
     }
     fn call_mcp_tool(
         &self,
@@ -507,23 +540,23 @@ impl ToolRunner for LocalToolRunner {
         // The connection manager routes any `notifications/progress` events
         // emitted by the underlying MCP server into `sink.event(...)` so
         // long-running tools can stream partial state to the model.
-        self.mcp_host.call_tool(server, tool, args, sink)
+        self.mcp_host().call_tool(server, tool, args, sink)
     }
     fn list_mcp_resources(
         &self,
         server: Option<&str>,
     ) -> Result<Vec<McpResourceRecord>, RunnerError> {
-        self.mcp_host.list_resources(server)
+        self.mcp_host().list_resources(server)
     }
     fn read_mcp_resource(
         &self,
         server: &str,
         uri: &str,
     ) -> Result<McpResourceContent, RunnerError> {
-        self.mcp_host.read_resource(server, uri)
+        self.mcp_host().read_resource(server, uri)
     }
     fn list_mcp_prompts(&self, server: &str) -> Result<Vec<McpPrompt>, RunnerError> {
-        self.mcp_host.list_prompts(server)
+        self.mcp_host().list_prompts(server)
     }
     fn get_mcp_prompt(
         &self,
@@ -531,7 +564,7 @@ impl ToolRunner for LocalToolRunner {
         name: &str,
         args: serde_json::Value,
     ) -> Result<McpPromptContent, RunnerError> {
-        self.mcp_host.get_prompt(server, name, args)
+        self.mcp_host().get_prompt(server, name, args)
     }
 
     fn push_oauth_tokens(
@@ -539,14 +572,53 @@ impl ToolRunner for LocalToolRunner {
         server: &str,
         tokens: OAuthTokensPayload,
     ) -> Result<(), RunnerError> {
-        self.mcp_host.push_oauth_tokens(server, tokens)
+        self.mcp_host().push_oauth_tokens(server, tokens)
     }
 
     fn oauth_status(&self, server: &str) -> Result<OAuthStatus, RunnerError> {
-        self.mcp_host.oauth_status(server)
+        self.mcp_host().oauth_status(server)
     }
 
     fn clear_oauth_tokens(&self, server: &str) -> Result<(), RunnerError> {
-        self.mcp_host.clear_oauth_tokens(server)
+        self.mcp_host().clear_oauth_tokens(server)
+    }
+
+    fn as_any(&self) -> Option<&(dyn std::any::Any + 'static)> {
+        Some(self)
+    }
+}
+
+impl LocalToolRunner {
+    /// Hot-swap the MCP roster while preserving the live elicitation
+    /// handler, OAuth token directory, and (if not overridden) workspace
+    /// root. `workspace` overrides the host's filesystem-MCP root when
+    /// `Some`; otherwise the current host's root is reused, falling back
+    /// to the first sandbox root. The previous host (and its live MCP
+    /// connections) is dropped — their `kill_on_drop` child processes
+    /// exit asynchronously, and the next MCP call lazily spawns the new
+    /// roster.
+    pub fn replace_mcp_roster(
+        &self,
+        servers: Vec<McpServerSpec>,
+        workspace: Option<PathBuf>,
+    ) {
+        let (handler, fallback_workspace, oauth_dir) = {
+            let host = self.mcp_host();
+            (
+                host.elicitation_handler(),
+                host.workspace_root().map(Path::to_path_buf),
+                host.oauth_token_dir().map(Path::to_path_buf),
+            )
+        };
+        let resolved_workspace = workspace
+            .or(fallback_workspace)
+            .or_else(|| self.sandbox_roots.first().cloned());
+        let new_host = McpHost::with_elicitation_and_oauth_dir(
+            servers,
+            resolved_workspace,
+            handler,
+            oauth_dir,
+        );
+        self.replace_mcp_host(new_host);
     }
 }

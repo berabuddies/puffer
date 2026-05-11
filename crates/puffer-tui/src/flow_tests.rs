@@ -456,6 +456,103 @@ fn try_handle_loop_command_creates_maximize_state() {
 }
 
 #[test]
+fn maybe_apply_requested_reload_swallows_parse_errors_as_system_message() {
+    // Regression: a malformed YAML file under `.puffer/resources/`
+    // (e.g. user mid-edit, atomic-rename save catching the file in a
+    // transient invalid state) must not propagate out of
+    // `maybe_apply_requested_reload`. The watcher fires after every
+    // save; a single bad save would otherwise kill the TUI and discard
+    // the in-memory transcript. The reload error should surface as a
+    // system message instead.
+    let tempdir = tempdir().unwrap();
+    let workspace = tempdir.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let paths = ConfigPaths {
+        workspace_root: workspace.clone(),
+        workspace_config_dir: workspace.join(".puffer"),
+        user_config_dir: tempdir.path().join(".home/.puffer"),
+        builtin_resources_dir: tempdir.path().join("builtin-resources"),
+    };
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store.create_session(workspace.clone()).unwrap();
+    let mut state = sample_state(session, &workspace);
+    let mut resources = LoadedResources::default();
+    let mut providers = ProviderRegistry::new();
+    let auth_store = AuthStore::default();
+
+    // Drop a syntactically broken MCP manifest into the watched dir.
+    let mcp_dir = paths.workspace_config_dir.join("resources/mcp_servers");
+    std::fs::create_dir_all(&mcp_dir).unwrap();
+    std::fs::write(
+        mcp_dir.join("busted.yaml"),
+        "id: broken\nthis is: : invalid: yaml\n  - structure\n",
+    )
+    .unwrap();
+
+    // Simulate a watcher-driven reload request.
+    state.reload_signal().store(true, std::sync::atomic::Ordering::Release);
+
+    // Must NOT propagate — the TUI loop calls this with `?` and a
+    // returned `Err` would crash `run_app` and lose the session.
+    let result = maybe_apply_requested_reload(
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &auth_store,
+        &session_store,
+    );
+    assert!(
+        result.is_ok(),
+        "reload parse error must be swallowed, got: {result:?}"
+    );
+
+    // The transcript should now contain a system message describing
+    // the failure so the user knows what happened.
+    let last = state.transcript.last().expect("system message appended");
+    assert!(matches!(last.role, MessageRole::System));
+    assert!(
+        last.text.contains("Resource hot-reload failed"),
+        "expected reload-failure system message, got: {}",
+        last.text
+    );
+
+    // And the signal must have been consumed so we don't spin trying
+    // to reload the same broken file every loop tick.
+    assert!(!state.take_reload_request());
+}
+
+#[test]
+fn maybe_apply_requested_reload_no_op_when_no_signal_pending() {
+    // Sanity: when neither the in-loop flag nor the watcher signal is
+    // set, the reload helper is a cheap no-op and doesn't touch the
+    // transcript. This is the dominant code path on every TUI loop
+    // tick — must stay free of side effects.
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = sample_state(session, tempdir.path());
+    let initial_len = state.transcript.len();
+    let mut resources = LoadedResources::default();
+    let mut providers = ProviderRegistry::new();
+    let auth_store = AuthStore::default();
+
+    maybe_apply_requested_reload(
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &auth_store,
+        &session_store,
+    )
+    .unwrap();
+    assert_eq!(state.transcript.len(), initial_len);
+}
+
+#[test]
 fn stop_command_clears_active_loop() {
     let tempdir = tempdir().unwrap();
     let paths = ConfigPaths::discover(tempdir.path());

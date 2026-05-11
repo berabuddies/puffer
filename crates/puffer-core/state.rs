@@ -9,6 +9,7 @@ use puffer_session_store::{
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// Describes the role of a rendered transcript message.
@@ -197,6 +198,12 @@ pub struct AppState {
     pub session_goal: Option<SessionGoal>,
     pub should_exit: bool,
     pub reload_resources_requested: bool,
+    /// Cross-thread signal raised by the filesystem watcher when a tracked
+    /// skill/MCP/plugin file changes. Mirrors `reload_resources_requested`
+    /// but is safe to flip from background threads (e.g. the resource
+    /// watcher). The TUI loop ORs both sources together via
+    /// [`AppState::take_reload_request`] before deciding to reload.
+    pub resource_reload_signal: Arc<AtomicBool>,
     pub(crate) claude_read_state: HashMap<PathBuf, ClaudeReadState>,
     pub(crate) session_permission_state: SessionPermissionState,
     pub session_tool_permissions: HashMap<String, String>,
@@ -275,6 +282,7 @@ impl AppState {
             session_goal: None,
             should_exit: false,
             reload_resources_requested: false,
+            resource_reload_signal: Arc::new(AtomicBool::new(false)),
             claude_read_state: HashMap::new(),
             session_permission_state: SessionPermissionState::default(),
             session_tool_permissions: HashMap::new(),
@@ -301,6 +309,23 @@ impl AppState {
     pub fn with_tool_runner(mut self, runner: Arc<dyn ToolRunner>) -> Self {
         self.tool_runner = runner;
         self
+    }
+
+    /// Returns true and clears both the command-driven flag and the
+    /// background filesystem-watcher signal if either is set. The caller
+    /// (typically `puffer-tui`) is then expected to invoke
+    /// [`crate::reload_runtime_resources`] before continuing the loop so a
+    /// turn never starts against stale resources.
+    pub fn take_reload_request(&mut self) -> bool {
+        let from_signal = self.resource_reload_signal.swap(false, Ordering::AcqRel);
+        let from_flag = std::mem::replace(&mut self.reload_resources_requested, false);
+        from_signal || from_flag
+    }
+
+    /// Returns a cheap clone of the cross-thread reload signal so background
+    /// services (e.g. the filesystem watcher) can raise it from off-loop.
+    pub fn reload_signal(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.resource_reload_signal)
     }
 
     /// Restores application state from a persisted session record.

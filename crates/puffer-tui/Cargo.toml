@@ -17,6 +17,7 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 time.workspace = true
+tracing = "0.1"
 unicode-width = "0.2.0"
 url = "2.5.7"
 puffer-config = { path = "../puffer-config" }

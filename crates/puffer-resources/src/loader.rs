@@ -1151,14 +1151,15 @@ mod tests {
 
         let paths = ConfigPaths::discover(&root);
         let loaded = load_resources(&paths, &FsTestRunner).unwrap();
-        assert_eq!(loaded.agents.len(), 1);
-        assert_eq!(loaded.prompts.len(), 1);
-        assert_eq!(loaded.hooks.len(), 1);
-        assert_eq!(loaded.skills.len(), 1);
-        assert_eq!(loaded.plugins.len(), 1);
-        assert_eq!(loaded.agents[0].value.id, "default");
-        assert_eq!(loaded.skills[0].value.name, "reviewer");
-        assert_eq!(loaded.plugins[0].value.id, "example");
+        // `load_resources` always merges in the embedded builtin
+        // resources baked into the binary, so we can't assert strict
+        // counts — verify the workspace-layer entries we wrote are
+        // present instead.
+        assert!(loaded.agents.iter().any(|a| a.value.id == "default"));
+        assert!(loaded.prompts.iter().any(|p| p.value.id == "plan"));
+        assert!(loaded.hooks.iter().any(|h| h.value.id == "tool-end"));
+        assert!(loaded.skills.iter().any(|s| s.value.name == "reviewer"));
+        assert!(loaded.plugins.iter().any(|p| p.value.id == "example"));
     }
 
     #[test]
@@ -1175,7 +1176,7 @@ mod tests {
 
         let paths = ConfigPaths::discover(&root);
         let loaded = load_resources(&paths, &FsTestRunner).unwrap();
-        assert_eq!(loaded.plugins.len(), 1);
+        assert!(loaded.plugins.iter().any(|p| p.value.id == "example"));
         assert!(loaded
             .agents
             .iter()
@@ -1245,8 +1246,10 @@ mod tests {
             builtin_resources_dir: root.join("resources"),
         };
         let loaded = load_resources(&paths, &FsTestRunner).unwrap();
-        assert_eq!(loaded.skills.len(), 1);
-        assert_eq!(loaded.skills[0].value.name, "review-helper");
+        // Embedded builtin skills get merged in too; verify the
+        // workspace skill we wrote is present and addressable by
+        // normalized names.
+        assert!(loaded.skills.iter().any(|s| s.value.name == "review-helper"));
         assert!(skill_by_name(&loaded, "Review Helper ++").is_some());
         assert!(skill_by_name(&loaded, "review helper").is_some());
         assert!(skill_by_name(&loaded, "review-helper").is_some());
@@ -1271,7 +1274,9 @@ mod tests {
             builtin_resources_dir: root.join("resources"),
         };
         let loaded = load_resources(&paths, &FsTestRunner).unwrap();
-        let skill = &loaded.skills[0].value;
+        let skill = &skill_by_name(&loaded, "review-helper")
+            .expect("workspace skill should load")
+            .value;
         assert_eq!(skill.name, "review-helper");
         assert_eq!(skill.description, "Review changes");
         assert_eq!(skill.allowed_tools, vec!["Read", "Grep", "Glob"]);
@@ -1317,9 +1322,12 @@ mod tests {
             builtin_resources_dir: root.join("resources"),
         };
         let loaded = load_resources(&paths, &FsTestRunner).unwrap();
-        assert_eq!(loaded.prompts.len(), 1);
-        assert_eq!(loaded.prompts[0].value.description, "Workspace");
-        assert!(loaded.prompts[0]
+        // Embedded prompts also load; verify the `review` prompt
+        // ultimately resolves to the workspace override.
+        let review = prompt_by_id(&loaded, "review")
+            .expect("review prompt should resolve");
+        assert_eq!(review.value.description, "Workspace");
+        assert!(review
             .source_info
             .path
             .to_string_lossy()
@@ -1358,8 +1366,10 @@ mod tests {
             builtin_resources_dir: root.join("resources"),
         };
         let loaded = load_resources(&paths, &FsTestRunner).unwrap();
-        assert_eq!(loaded.prompts.len(), 1);
-        assert_eq!(loaded.prompts[0].value.description, "Second");
+        // The `z_review.yaml` override wins because it sorts after
+        // `a_review.yaml` and load_yaml_dir is sorted.
+        let review = prompt_by_id(&loaded, "review").expect("review");
+        assert_eq!(review.value.description, "Second");
         assert!(loaded.diagnostics.iter().any(|item| {
             item.contains("duplicate prompt `review` in builtin resources")
                 && item.contains("z_review.yaml")
@@ -1398,15 +1408,17 @@ mod tests {
             builtin_resources_dir: root.join("resources"),
         };
         let loaded = load_resources(&paths, &FsTestRunner).unwrap();
-        assert_eq!(loaded.hooks.len(), 2);
+        // Embedded hooks may add more entries; verify our additions and
+        // that the workspace override wins for `tool-end`.
+        assert!(hook_by_id(&loaded, "tool-end").is_some());
+        assert!(hook_by_id(&loaded, "tool-start").is_some());
         assert_eq!(
             hook_by_id(&loaded, "tool-end").unwrap().value.command,
             "echo workspace"
         );
         let tool_end_hooks = hooks_for_event(&loaded, "tool_end");
-        assert_eq!(tool_end_hooks.len(), 1);
-        assert_eq!(tool_end_hooks[0].value.id, "tool-end");
-        assert_eq!(tool_end_hooks[0].value.command, "echo workspace");
+        assert!(tool_end_hooks.iter().any(|h| h.value.id == "tool-end"
+            && h.value.command == "echo workspace"));
         assert!(loaded
             .diagnostics
             .iter()
@@ -1442,7 +1454,8 @@ mod tests {
             builtin_resources_dir: root.join("resources"),
         };
         let loaded = load_resources(&paths, &FsTestRunner).unwrap();
-        assert_eq!(loaded.prompts.len(), 3);
+        // Embedded prompts are also loaded; verify the workspace
+        // overrides our `system-base` id by checking variant resolution.
         assert_eq!(
             prompt_for(&loaded, "system-base", None, Some("claude-opus-4-6"))
                 .unwrap()
@@ -1501,7 +1514,8 @@ mod tests {
             builtin_resources_dir: root.join("resources"),
         };
         let loaded = load_resources(&paths, &FsTestRunner).unwrap();
-        assert_eq!(loaded.prompts.len(), 2);
+        // Embedded prompts also load; verify the workspace variant
+        // overrides the builtin opus variant for the same model.
         assert_eq!(
             prompt_for(&loaded, "system-base", None, Some("claude-opus-4-6"))
                 .unwrap()
@@ -1537,9 +1551,14 @@ mod tests {
             builtin_resources_dir: root.join("resources"),
         };
         let loaded = load_resources(&paths, &FsTestRunner).unwrap();
-        assert_eq!(loaded.mcp_servers.len(), 1);
-        assert_eq!(loaded.mcp_servers[0].value.id, "legacy");
-        assert!(loaded.mcp_servers[0]
+        // Embedded MCP servers also load; verify the legacy entry is
+        // present and sourced from the legacy directory.
+        let legacy = loaded
+            .mcp_servers
+            .iter()
+            .find(|item| item.value.id == "legacy")
+            .expect("legacy MCP entry should be present");
+        assert!(legacy
             .source_info
             .path
             .to_string_lossy()
@@ -1572,18 +1591,26 @@ mod tests {
             builtin_resources_dir: root.join("resources"),
         };
         let loaded = load_resources(&paths, &FsTestRunner).unwrap();
-        assert_eq!(loaded.mcp_servers.len(), 1);
-        assert_eq!(loaded.mcp_servers[0].value.id, "docs");
-        assert_eq!(loaded.mcp_servers[0].value.display_name, "Canonical Docs");
-        assert!(loaded.mcp_servers[0]
+        let docs = loaded
+            .mcp_servers
+            .iter()
+            .find(|item| item.value.id == "docs")
+            .expect("docs MCP entry should be present");
+        assert_eq!(docs.value.display_name, "Canonical Docs");
+        assert!(docs
             .source_info
             .path
             .to_string_lossy()
             .contains("resources/mcp_servers/docs.yaml"));
+        // The filesystem builtin layer overrides the embedded `docs`
+        // entry shipped under `resources/mcp_servers/docs.yaml`, so a
+        // diagnostic is expected — what we care about is that the
+        // *canonical* directory wins over the legacy `mcp/` directory
+        // (i.e. no `from .../resources/mcp/docs.yaml` provenance).
         assert!(!loaded
             .diagnostics
             .iter()
-            .any(|item| item.contains("mcp_server `docs`")));
+            .any(|item| item.contains("resources/mcp/docs.yaml")));
     }
 
     #[test]
@@ -1610,8 +1637,13 @@ mod tests {
             builtin_resources_dir: root.join("resources"),
         };
         let loaded = load_resources(&paths, &FsTestRunner).unwrap();
-        assert_eq!(loaded.mcp_servers.len(), 1);
-        assert_eq!(loaded.mcp_servers[0].value.id, "enabled");
+        // Embedded MCP servers are also loaded; verify the
+        // workspace-layer `enabled` survives but `disabled` is dropped.
+        assert!(loaded.mcp_servers.iter().any(|item| item.value.id == "enabled"));
+        assert!(!loaded
+            .mcp_servers
+            .iter()
+            .any(|item| item.value.id == "disabled"));
     }
 
     /// Smoke test: every embedded `resources/tools/*.yaml` must parse as a

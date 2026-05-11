@@ -144,6 +144,15 @@ impl McpHost {
         self.workspace_root.as_deref()
     }
 
+    /// Returns the OAuth token storage directory, if one was pinned via
+    /// [`McpHost::with_oauth_token_dir`] or
+    /// [`McpHost::with_elicitation_and_oauth_dir`]. Used by the
+    /// hot-reload pathway to preserve a custom token dir across an
+    /// `McpHost` swap so persisted tokens stay reachable.
+    pub fn oauth_token_dir(&self) -> Option<&Path> {
+        self.oauth_token_dir.as_deref()
+    }
+
     /// Consumes the host and returns the configured server specs. Useful
     /// when reconfiguring the workspace root without re-loading manifests.
     pub fn into_servers(self) -> Vec<McpServerSpec> {

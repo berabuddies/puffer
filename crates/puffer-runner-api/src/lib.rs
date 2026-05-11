@@ -627,6 +627,19 @@ pub trait ToolRunner: Send + Sync + std::fmt::Debug {
             "clear_oauth_tokens is not implemented for this runner".into(),
         ))
     }
+
+    /// Returns the runner as `&dyn Any` for the hot-reload pathway. Default
+    /// impl returns `None`; the local runner overrides it to expose its
+    /// concrete type so `puffer_core::reload_runtime_resources` can rebuild
+    /// the MCP roster without restarting the process. Remote runners leave
+    /// this as `None` because they don't own MCP server lifecycle here.
+    ///
+    /// This is intentionally a narrow seam — callers should match on the
+    /// concrete extension trait/type they care about, not paw through
+    /// arbitrary methods.
+    fn as_any(&self) -> Option<&(dyn std::any::Any + 'static)> {
+        None
+    }
 }
 
 /// Bytes serializer that round-trips through both bincode-style and JSON

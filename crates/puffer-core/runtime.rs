@@ -42,6 +42,7 @@ mod provider_adapter;
 pub mod quota;
 mod reflection;
 mod request_tool_filter;
+pub mod resource_watcher;
 mod side_question;
 mod structured_output_support;
 mod system_prompt;

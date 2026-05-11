@@ -900,7 +900,17 @@ pub(crate) fn submit_queued_prompt_if_ready(
     Ok(())
 }
 
-/// Reloads runtime resources when commands request it and emits the reload summary.
+/// Reloads runtime resources when commands or the resource watcher request
+/// it and emits the reload summary. Coalesces the in-loop flag and the
+/// cross-thread filesystem watcher signal so the watcher and `/reload-plugins`
+/// hit the same code path.
+///
+/// A reload error (e.g. transient invalid YAML from an editor's atomic-save
+/// of a partially-written file under `.puffer/resources/`) is surfaced as a
+/// system message rather than propagated; the watcher-driven path must not
+/// be able to kill the TUI session and discard the in-memory transcript
+/// just because a SKILL.md is mid-edit. The user can re-save to retry — the
+/// watcher will fire again.
 pub(crate) fn maybe_apply_requested_reload(
     state: &mut AppState,
     resources: &mut LoadedResources,
@@ -908,12 +918,14 @@ pub(crate) fn maybe_apply_requested_reload(
     auth_store: &AuthStore,
     session_store: &SessionStore,
 ) -> Result<()> {
-    if !state.reload_resources_requested {
+    if !state.take_reload_request() {
         return Ok(());
     }
-    state.reload_resources_requested = false;
-    let summary = reload_runtime_resources(state, resources, providers, auth_store)?;
-    emit_system_message(state, session_store, summary)
+    let message = match reload_runtime_resources(state, resources, providers, auth_store) {
+        Ok(summary) => summary,
+        Err(err) => format!("Resource hot-reload failed: {err:#}"),
+    };
+    emit_system_message(state, session_store, message)
 }
 
 /// Appends one system message to the in-memory transcript and persisted session log.
