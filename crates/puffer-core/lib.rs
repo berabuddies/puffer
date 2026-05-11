@@ -61,6 +61,7 @@ pub use runtime::{
 };
 pub use runtime::{install_observability, observability_handle};
 pub use state::{AppState, MessageRole, RenderedMessage, TaskRecord, TaskStatus};
+pub use permissions::SessionPermissionState;
 
 use anyhow::Result;
 use puffer_provider_registry::{AuthStore, ProviderRegistry};

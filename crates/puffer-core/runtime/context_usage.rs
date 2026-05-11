@@ -245,7 +245,7 @@ fn tool_rows_for_summary(
 ) -> Result<(Vec<UsageRow>, BTreeSet<String>)> {
     if api == "anthropic-messages" {
         let definitions =
-            anthropic_tool_definitions_for_request(registry, None, Some(permission_context), None)?;
+            anthropic_tool_definitions_for_request(registry, None, Some(permission_context))?;
         let rows = definitions
             .into_iter()
             .filter_map(|definition| {
@@ -265,13 +265,8 @@ fn tool_rows_for_summary(
     }
 
     let use_native = false;
-    let definitions = openai_tool_definitions_for_request(
-        registry,
-        None,
-        use_native,
-        Some(permission_context),
-        None,
-    )?;
+    let definitions =
+        openai_tool_definitions_for_request(registry, None, use_native, Some(permission_context))?;
     let rows = definitions
         .into_iter()
         .map(|definition| UsageRow {

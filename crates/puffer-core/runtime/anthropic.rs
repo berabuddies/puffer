@@ -29,7 +29,7 @@ use super::{
     send_http_request, ToolCallRequest, ToolInvocation, TurnExecution, TurnRequestOptions,
     TurnStreamEvent, APP_VERSION, MAX_TOOL_RESULT_CHARS,
 };
-use crate::permissions::load_runtime_permission_context;
+use crate::permissions::{load_runtime_permission_context_with_inputs, RuntimePermissionInputs};
 use crate::AppState;
 use anyhow::{anyhow, bail, Context, Result};
 use puffer_provider_registry::{
@@ -79,7 +79,14 @@ fn setup_anthropic_session(
     let auth = anthropic_auth_for_provider(auth_store, provider)?;
     let registry =
         super::mcp_discovery::registry_with_mcp_tools(resources, state.tool_runner.as_ref());
-    let permission_context = load_runtime_permission_context(&state.cwd, resources, state)?;
+    let permission_context = load_runtime_permission_context_with_inputs(
+        &state.cwd,
+        resources,
+        state,
+        RuntimePermissionInputs {
+            request_tool_filter: options.tool_filter.cloned(),
+        },
+    )?;
     let plan_mode_context = crate::plan_mode::take_plan_mode_context_message(state, resources)?;
 
     let request_config = AnthropicRequestConfig {
@@ -115,7 +122,6 @@ fn setup_anthropic_session(
         &registry,
         options.structured_output,
         Some(&permission_context),
-        options.tool_filter,
     )?;
 
     let system_prompt = render_runtime_system_prompt(

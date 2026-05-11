@@ -3,8 +3,7 @@ use super::{
     run_turn_hooks, send_http_request_raw, PermissionOutcome, ToolExecutionBackend, ToolInvocation,
     TurnStreamEvent, APP_VERSION, OPENAI_CODEX_COMPAT_VERSION,
 };
-use crate::permissions::load_runtime_permission_context;
-use crate::workspace_paths;
+use crate::permissions::{load_runtime_permission_context_with_inputs, RuntimePermissionInputs};
 mod completions_session;
 pub(crate) mod conversation;
 mod responses_session;
@@ -156,14 +155,20 @@ where
     let mut execution = resolve_openai_execution_config(state, auth_store, provider)?;
     let registry =
         super::mcp_discovery::registry_with_mcp_tools(resources, state.tool_runner.as_ref());
-    let permission_context = load_runtime_permission_context(&state.cwd, resources, state)?;
+    let permission_context = load_runtime_permission_context_with_inputs(
+        &state.cwd,
+        resources,
+        state,
+        RuntimePermissionInputs {
+            request_tool_filter: options.tool_filter.cloned(),
+        },
+    )?;
     let text = openai_responses_text_config(structured_output, use_native);
     let tools = openai_tool_definitions_for_request(
         &registry,
         structured_output,
         use_native,
         Some(&permission_context),
-        options.tool_filter,
     )?;
     let system_prompt = render_runtime_system_prompt(
         state,
@@ -458,7 +463,6 @@ pub(super) fn execute_openai_tool_calls(
     // ---------- Phase 2: Execute tools ----------
     // Clone immutable data needed by parallel tools.
     let working_dirs = state.working_dirs.clone();
-    let allow_all_paths = workspace_paths::sandbox_allows_all_paths(&state.sandbox_mode);
     let provider_context = super::claude_tools::ProviderToolContext::OpenAI {
         request_config,
         model_id,
@@ -484,6 +488,10 @@ pub(super) fn execute_openai_tool_calls(
                 results[i] = Some((denied.output.stdout.clone(), denied.success));
                 continue;
             }
+            let filesystem_policy = match &permissions[i] {
+                PermissionOutcome::Allowed(policy) => policy.clone(),
+                PermissionOutcome::Denied(_) => unreachable!(),
+            };
             let definition = match registry.definition(&tc.name) {
                 Some(d) => d.clone(),
                 None => {
@@ -503,7 +511,7 @@ pub(super) fn execute_openai_tool_calls(
                         &definition,
                         cwd,
                         wd,
-                        allow_all_paths,
+                        &filesystem_policy,
                         sid,
                         args,
                         resources,

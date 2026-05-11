@@ -58,7 +58,6 @@ pub fn is_runner_supported(tool_id: &str) -> bool {
 pub fn execute_runner_tool(req: &ToolRequest, _sink: &mut dyn ChunkSink) -> Result<ToolResult> {
     let cwd = req.cwd.as_path();
     let working_dirs = req.working_dirs.as_slice();
-    let allow_all_paths = req.allow_all_paths;
     let input = req.input.clone();
 
     match req.tool_id.as_str() {
@@ -75,7 +74,7 @@ pub fn execute_runner_tool(req: &ToolRequest, _sink: &mut dyn ChunkSink) -> Resu
         }
         "Read" => {
             let stdout =
-                read::execute_claude_read_tool(cwd, working_dirs, allow_all_paths, input.clone())?;
+                read::execute_claude_read_tool(cwd, working_dirs, &req.filesystem, input.clone())?;
             let updates = read_update_from_input(&input)?;
             Ok(result_with_updates(
                 req.tool_id.as_str(),
@@ -86,7 +85,7 @@ pub fn execute_runner_tool(req: &ToolRequest, _sink: &mut dyn ChunkSink) -> Resu
         }
         "Write" => {
             let path = input_file_path(&input, "file_path")?;
-            let stdout = run_claude_write(cwd, working_dirs, allow_all_paths, input.clone())?;
+            let stdout = run_claude_write(cwd, working_dirs, &req.filesystem, input.clone())?;
             let updates = match path.as_deref() {
                 Some(path) => vec![ReadStateUpdate {
                     path: path.to_path_buf(),
@@ -105,7 +104,7 @@ pub fn execute_runner_tool(req: &ToolRequest, _sink: &mut dyn ChunkSink) -> Resu
         "Edit" => {
             let path = input_file_path(&input, "file_path")?;
             let stdout =
-                edit::execute_claude_edit(cwd, working_dirs, allow_all_paths, input.clone())?;
+                edit::execute_claude_edit(cwd, working_dirs, &req.filesystem, input.clone())?;
             let updates = match path.as_deref() {
                 Some(path) => vec![ReadStateUpdate {
                     path: path.to_path_buf(),
@@ -122,11 +121,11 @@ pub fn execute_runner_tool(req: &ToolRequest, _sink: &mut dyn ChunkSink) -> Resu
             ))
         }
         "Glob" => {
-            let stdout = glob::execute_claude_glob(cwd, working_dirs, allow_all_paths, input)?;
+            let stdout = glob::execute_claude_glob(cwd, working_dirs, &req.filesystem, input)?;
             Ok(plain_result(req.tool_id.as_str(), true, stdout))
         }
         "Grep" => {
-            let stdout = grep::execute_claude_grep(cwd, working_dirs, allow_all_paths, input)?;
+            let stdout = grep::execute_claude_grep(cwd, working_dirs, &req.filesystem, input)?;
             Ok(plain_result(req.tool_id.as_str(), true, stdout))
         }
         "NotebookEdit" => {
@@ -134,7 +133,7 @@ pub fn execute_runner_tool(req: &ToolRequest, _sink: &mut dyn ChunkSink) -> Resu
             let stdout = notebook_edit::execute_notebook_edit_tool(
                 cwd,
                 working_dirs,
-                allow_all_paths,
+                &req.filesystem,
                 input.clone(),
             )?;
             let updates = match path.as_deref() {
@@ -231,7 +230,7 @@ fn parse_session_id(raw: Option<&str>) -> Result<Uuid> {
 fn run_claude_write(
     cwd: &Path,
     working_dirs: &[std::path::PathBuf],
-    allow_all_paths: bool,
+    filesystem: &puffer_runner_api::FilesystemExecutionPolicy,
     input: Value,
 ) -> Result<String> {
     use crate::runtime::claude_tools::write::{execute_claude_write_tool, ClaudeReadSnapshot};
@@ -248,7 +247,7 @@ fn run_claude_write(
             );
         }
     }
-    execute_claude_write_tool(cwd, working_dirs, allow_all_paths, input, &mut bypass)
+    execute_claude_write_tool(cwd, working_dirs, filesystem, input, &mut bypass)
 }
 
 fn sleep_dispatch(input: Value) -> Result<String> {

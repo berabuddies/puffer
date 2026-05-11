@@ -1,13 +1,15 @@
 mod browser;
 mod sleep;
 
+use crate::permissions::FilesystemPermissionPolicy;
 use crate::workspace_paths;
 use crate::AppState;
 use anyhow::{anyhow, Result};
 use glob::Pattern;
 use puffer_resources::LoadedResources;
 use puffer_runner_api::{
-    McpResourceContentPart, McpResourceRecord, NullChunkSink, RunnerError, ToolRunner,
+    FilesystemExecutionPolicy, McpResourceContentPart, McpResourceRecord, NullChunkSink,
+    RunnerError, ToolRunner,
 };
 use puffer_tools::{ToolDefinition, ToolRegistry};
 use serde::Deserialize;
@@ -54,18 +56,14 @@ pub(super) fn execute_runtime_local_tool(
     registry: &ToolRegistry,
     definition: &ToolDefinition,
     cwd: &Path,
+    filesystem_policy: &FilesystemPermissionPolicy,
     input: Value,
 ) -> Result<String> {
     match definition.handler.as_str() {
         "runtime:skill" => execute_skill_tool(resources, input),
         "runtime:tool_search" => execute_tool_search(registry, input),
         "runtime:browser" => browser::execute_browser_tool(cwd, &state.session.id, input),
-        "runtime:glob" => execute_glob_tool(
-            cwd,
-            &state.working_dirs,
-            workspace_paths::sandbox_allows_all_paths(&state.sandbox_mode),
-            input,
-        ),
+        "runtime:glob" => execute_glob_tool(cwd, &state.working_dirs, filesystem_policy, input),
         "runtime:sleep" => sleep::execute_sleep(input),
         "runtime:list_mcp_resources" => {
             execute_list_mcp_resources(state.tool_runner.as_ref(), input)
@@ -126,25 +124,21 @@ fn execute_tool_search(registry: &ToolRegistry, input: Value) -> Result<String> 
 fn execute_glob_tool(
     cwd: &Path,
     working_dirs: &[PathBuf],
-    allow_all_paths: bool,
+    filesystem_policy: &FilesystemPermissionPolicy,
     input: Value,
 ) -> Result<String> {
+    let runner_policy: FilesystemExecutionPolicy = filesystem_policy.runner_policy();
     let input: GlobInput = serde_json::from_value(input)?;
     let pattern = Pattern::new(&input.pattern)
         .map_err(|error| anyhow!("invalid glob pattern `{}`: {error}", input.pattern))?;
-    let sandbox_mode = if allow_all_paths {
-        "danger-full-access"
-    } else {
-        "workspace-write"
-    };
     let root = input
         .path
         .as_deref()
         .map(|path| {
-            workspace_paths::resolve_path_for_session(
+            workspace_paths::resolve_path_for_filesystem_policy(
                 cwd,
                 working_dirs,
-                sandbox_mode,
+                runner_policy.sandbox_mode,
                 Path::new(path),
             )
         })
@@ -364,10 +358,21 @@ fn collect_glob_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::permissions::profile::{EffectiveApprovalPolicy, EffectiveSandboxMode};
+    use crate::permissions::FilesystemPermissionPolicy;
     use crate::runner_adapter::LocalToolRunner;
     use puffer_resources::{
         LoadedItem, McpServerSpec, SkillSpec, SourceInfo, SourceKind, ToolSpec,
     };
+
+    fn workspace_write_filesystem_policy(root: &Path) -> FilesystemPermissionPolicy {
+        FilesystemPermissionPolicy {
+            approval: EffectiveApprovalPolicy::Allow,
+            sandbox_mode: EffectiveSandboxMode::WorkspaceWrite,
+            workspace_roots: vec![root.to_path_buf()],
+            session_granted: true,
+        }
+    }
 
     fn docs_spec() -> McpServerSpec {
         McpServerSpec {
@@ -554,8 +559,14 @@ mod tests {
         std::fs::create_dir_all(temp.path().join("src")).unwrap();
         std::fs::write(temp.path().join("src/lib.rs"), "pub fn hi() {}").unwrap();
         std::fs::write(temp.path().join("src/main.rs"), "fn main() {}").unwrap();
-        let output =
-            execute_glob_tool(temp.path(), &[], false, json!({"pattern": "src/*.rs"})).unwrap();
+        let filesystem_policy = workspace_write_filesystem_policy(temp.path());
+        let output = execute_glob_tool(
+            temp.path(),
+            &[],
+            &filesystem_policy,
+            json!({"pattern": "src/*.rs"}),
+        )
+        .unwrap();
         assert!(output.contains("src/lib.rs"));
         assert!(output.contains("src/main.rs"));
     }
@@ -572,7 +583,7 @@ mod tests {
         let output = execute_glob_tool(
             &cwd,
             std::slice::from_ref(&extra),
-            false,
+            &workspace_write_filesystem_policy(&cwd),
             json!({
                 "pattern": "guides/*.md",
                 "path": extra.display().to_string()

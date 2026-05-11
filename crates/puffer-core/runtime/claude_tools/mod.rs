@@ -1,7 +1,7 @@
+use crate::permissions::FilesystemPermissionPolicy;
 use crate::runner_adapter;
 use crate::runtime::structured_output_support::StructuredOutputConfig;
 use crate::state::ClaudeReadState;
-use crate::workspace_paths;
 use crate::AppState;
 use anyhow::{bail, Context, Result};
 use puffer_provider_openai::OpenAIRequestConfig;
@@ -91,12 +91,13 @@ pub(crate) fn execute_tool(
     registry: &ToolRegistry,
     definition: &ToolDefinition,
     cwd: &Path,
+    filesystem_policy: &FilesystemPermissionPolicy,
     input: Value,
     provider_context: ProviderToolContext<'_>,
 ) -> Result<ToolExecutionResult> {
-    let allow_all_paths = workspace_paths::sandbox_allows_all_paths(&state.sandbox_mode);
     if runner_adapter::is_runner_supported(definition.id.as_str()) {
-        if let Some(result) = try_runner_dispatch(state, definition, cwd, &input, allow_all_paths)?
+        if let Some(result) =
+            try_runner_dispatch(state, definition, cwd, &input, filesystem_policy)?
         {
             return Ok(result);
         }
@@ -125,7 +126,7 @@ pub(crate) fn execute_tool(
             let output = read::execute_claude_read_tool(
                 cwd,
                 &state.working_dirs,
-                allow_all_paths,
+                &filesystem_policy.runner_policy(),
                 input.clone(),
             )?;
             record_read_from_input(state, &input)?;
@@ -136,7 +137,7 @@ pub(crate) fn execute_tool(
             let output = write::execute_claude_write_tool(
                 cwd,
                 &state.working_dirs,
-                allow_all_paths,
+                &filesystem_policy.runner_policy(),
                 input.clone(),
                 &mut read_state,
             )?;
@@ -153,7 +154,7 @@ pub(crate) fn execute_tool(
             let output = edit::execute_claude_edit(
                 cwd,
                 &state.working_dirs,
-                allow_all_paths,
+                &filesystem_policy.runner_policy(),
                 input.clone(),
             )?;
             if let Some(path) = input_file_path(&input, "file_path")? {
@@ -164,12 +165,22 @@ pub(crate) fn execute_tool(
         "Glob" => Ok(tool_result(
             definition,
             true,
-            glob::execute_claude_glob(cwd, &state.working_dirs, allow_all_paths, input)?,
+            glob::execute_claude_glob(
+                cwd,
+                &state.working_dirs,
+                &filesystem_policy.runner_policy(),
+                input,
+            )?,
         )),
         "Grep" => Ok(tool_result(
             definition,
             true,
-            grep::execute_claude_grep(cwd, &state.working_dirs, allow_all_paths, input)?,
+            grep::execute_claude_grep(
+                cwd,
+                &state.working_dirs,
+                &filesystem_policy.runner_policy(),
+                input,
+            )?,
         )),
         "NotebookEdit" => {
             if let Err(error) = enforce_read_precondition(
@@ -181,7 +192,7 @@ pub(crate) fn execute_tool(
             let output = notebook_edit::execute_notebook_edit_tool(
                 cwd,
                 &state.working_dirs,
-                allow_all_paths,
+                &filesystem_policy.runner_policy(),
                 input.clone(),
             )?;
             if let Some(path) = input_file_path(&input, "notebook_path")? {
@@ -203,7 +214,13 @@ pub(crate) fn execute_tool(
             definition,
             true,
             super::local_tools::execute_runtime_local_tool(
-                state, resources, registry, definition, cwd, input,
+                state,
+                resources,
+                registry,
+                definition,
+                cwd,
+                filesystem_policy,
+                input,
             )?,
         )),
         "WebFetch" => {
@@ -256,7 +273,13 @@ pub(crate) fn execute_tool(
             definition,
             true,
             super::local_tools::execute_runtime_local_tool(
-                state, resources, registry, definition, cwd, input,
+                state,
+                resources,
+                registry,
+                definition,
+                cwd,
+                filesystem_policy,
+                input,
             )?,
         )),
         _ => registry.execute_json(&definition.id, cwd, input),
@@ -281,7 +304,7 @@ pub(crate) fn execute_parallel_tool(
     definition: &ToolDefinition,
     cwd: &Path,
     working_dirs: &[PathBuf],
-    allow_all_paths: bool,
+    filesystem_policy: &FilesystemPermissionPolicy,
     session_id: &Uuid,
     input: Value,
     resources: &LoadedResources,
@@ -294,7 +317,7 @@ pub(crate) fn execute_parallel_tool(
             tool_id: definition.id.clone(),
             cwd: cwd.to_path_buf(),
             working_dirs: working_dirs.to_vec(),
-            allow_all_paths,
+            filesystem: filesystem_policy.runner_policy(),
             input: input.clone(),
             session_id: Some(session_id.to_string()),
         };
@@ -368,7 +391,7 @@ fn try_runner_dispatch(
     definition: &ToolDefinition,
     cwd: &Path,
     input: &Value,
-    allow_all_paths: bool,
+    filesystem_policy: &FilesystemPermissionPolicy,
 ) -> Result<Option<ToolExecutionResult>> {
     let tool_id = definition.id.as_str();
 
@@ -417,7 +440,7 @@ fn try_runner_dispatch(
         tool_id: tool_id.to_string(),
         cwd: cwd.to_path_buf(),
         working_dirs: state.working_dirs.clone(),
-        allow_all_paths,
+        filesystem: filesystem_policy.runner_policy(),
         input: input.clone(),
         session_id: Some(state.session.id.to_string()),
     };
@@ -748,6 +771,8 @@ impl<'a> ProviderToolContext<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::permissions::profile::{EffectiveApprovalPolicy, EffectiveSandboxMode};
+    use crate::permissions::FilesystemPermissionPolicy;
     use puffer_resources::LoadedResources;
 
     #[test]
@@ -933,11 +958,17 @@ mod tests {
         let glob_def = claude_tool_def("Glob", "runtime:claude_glob");
 
         let bash_input = json!({"command": "echo parallel-runner"});
+        let filesystem_policy = FilesystemPermissionPolicy {
+            approval: EffectiveApprovalPolicy::Allow,
+            sandbox_mode: EffectiveSandboxMode::DangerFullAccess,
+            workspace_roots: vec![cwd.clone()],
+            session_granted: true,
+        };
         let bash_result = execute_parallel_tool(
             &bash_def,
             &cwd,
             &working_dirs,
-            true,
+            &filesystem_policy,
             &session_id,
             bash_input,
             &resources,
@@ -958,7 +989,7 @@ mod tests {
             &glob_def,
             &cwd,
             &working_dirs,
-            true,
+            &filesystem_policy,
             &session_id,
             glob_input,
             &resources,

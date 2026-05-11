@@ -35,7 +35,7 @@ use super::{
     parse_openai_assistant_text, resolve_openai_execution_config, send_openai_request_with_refresh,
     send_openai_request_with_refresh_streaming, OpenAIExecutionConfig,
 };
-use crate::permissions::load_runtime_permission_context;
+use crate::permissions::{load_runtime_permission_context_with_inputs, RuntimePermissionInputs};
 use crate::runtime::agent_loop::{AssistantTurn, TurnSession};
 use crate::runtime::structured_output_support::StructuredOutputConfig;
 use crate::runtime::structured_output_support::{
@@ -405,14 +405,20 @@ pub(super) fn setup_responses_session(
     let execution = resolve_openai_execution_config(state, auth_store, provider)?;
     let registry =
         super::super::mcp_discovery::registry_with_mcp_tools(resources, state.tool_runner.as_ref());
-    let permission_context = load_runtime_permission_context(&state.cwd, resources, state)?;
+    let permission_context = load_runtime_permission_context_with_inputs(
+        &state.cwd,
+        resources,
+        state,
+        RuntimePermissionInputs {
+            request_tool_filter: options.tool_filter.cloned(),
+        },
+    )?;
     let text = openai_responses_text_config(options.structured_output, use_native);
     let tools = openai_tool_definitions_for_request(
         &registry,
         options.structured_output,
         use_native,
         Some(&permission_context),
-        options.tool_filter,
     )?;
     // Native server-side tools (e.g. `web_search`) serialize without a name,
     // so filter empty entries out of the system-prompt tool set.

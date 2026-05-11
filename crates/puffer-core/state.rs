@@ -1,3 +1,4 @@
+use crate::permissions::{SessionPermissionGrants, SessionPermissionState};
 use crate::runner_adapter::LocalToolRunner;
 use crate::runtime::ReflectionConfig;
 use puffer_config::PufferConfig;
@@ -197,6 +198,7 @@ pub struct AppState {
     pub should_exit: bool,
     pub reload_resources_requested: bool,
     pub(crate) claude_read_state: HashMap<PathBuf, ClaudeReadState>,
+    pub(crate) session_permission_state: SessionPermissionState,
     pub session_tool_permissions: HashMap<String, String>,
     /// When true, all tool permission prompts are auto-allowed for the session.
     pub session_allow_all: bool,
@@ -274,6 +276,7 @@ impl AppState {
             should_exit: false,
             reload_resources_requested: false,
             claude_read_state: HashMap::new(),
+            session_permission_state: SessionPermissionState::default(),
             session_tool_permissions: HashMap::new(),
             session_allow_all: false,
             native_structured_output_unsupported: HashSet::new(),
@@ -566,8 +569,78 @@ impl AppState {
     }
 
     pub(crate) fn allow_tool_for_session(&mut self, tool_id: &str) {
-        self.session_tool_permissions
-            .insert(tool_id.to_ascii_lowercase(), "allow".to_string());
+        let definition = puffer_tools::ToolDefinition {
+            id: tool_id.to_string(),
+            name: tool_id.to_string(),
+            description: String::new(),
+            handler: String::new(),
+            aliases: Vec::new(),
+            handler_args: Vec::new(),
+            kind: puffer_tools::ToolKind::Custom,
+            input_schema: puffer_tools::ToolInputSchema::default(),
+            metadata: puffer_tools::ToolMetadata::default(),
+            policy: puffer_tools::ToolPolicyHints::default(),
+            shared_lib: None,
+            enabled_if: None,
+            display: puffer_tools::ToolDisplayHints::default(),
+        };
+        self.allow_permission_for_tool_call(&definition, &serde_json::Value::Null);
+    }
+
+    /// Grants session-scoped permission for one tool call and refreshes the
+    /// legacy projection cache used by older callers.
+    pub fn allow_permission_for_tool_call(
+        &mut self,
+        definition: &puffer_tools::ToolDefinition,
+        input: &serde_json::Value,
+    ) {
+        self.session_permission_state.grants_mut().grant_tool_call(
+            definition,
+            input,
+            &self.session.id,
+        );
+        self.session_tool_permissions = self
+            .session_permission_state
+            .grants()
+            .legacy_tool_permissions();
+    }
+
+    /// Rebuilds legacy session tool permissions from the typed session state.
+    pub fn sync_session_tool_permissions_from_state(&mut self) {
+        self.session_tool_permissions = self
+            .session_permission_state
+            .grants()
+            .legacy_tool_permissions();
+    }
+
+    /// Returns the typed session permission state.
+    pub fn session_permission_state(&self) -> &SessionPermissionState {
+        &self.session_permission_state
+    }
+
+    /// Replaces the typed session permission state and refreshes the legacy
+    /// projection cache so worker and UI threads stay in sync.
+    pub fn replace_session_permission_state(&mut self, state: SessionPermissionState) {
+        self.session_permission_state = state;
+        self.session_allow_all = self.session_permission_state.allow_all_tools();
+        self.sync_session_tool_permissions_from_state();
+    }
+
+    pub(crate) fn set_session_allow_all(&mut self) {
+        self.session_allow_all = true;
+        self.session_permission_state.set_allow_all_tools(true);
+    }
+
+    /// Rebuilds the typed session permission state from legacy session fields.
+    ///
+    /// Callers must update `self.session_allow_all` before invoking this helper.
+    /// The typed `allow_all_tools` bit is sourced from that legacy flag and then
+    /// combined with grants projected from `self.session_tool_permissions`.
+    pub(crate) fn sync_session_permission_state(&mut self) {
+        self.session_permission_state = SessionPermissionState::new(
+            self.session_allow_all,
+            SessionPermissionGrants::from_legacy_tool_permissions(&self.session_tool_permissions),
+        );
     }
 
     pub(crate) fn native_structured_output_key(
