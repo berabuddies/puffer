@@ -1,5 +1,6 @@
 use crate::workspace_paths;
 use anyhow::{bail, Context, Result};
+use puffer_runner_api::FilesystemExecutionPolicy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -56,7 +57,7 @@ struct ClaudeWriteOutput {
 pub fn execute_claude_write_tool(
     cwd: &Path,
     working_dirs: &[PathBuf],
-    allow_all_paths: bool,
+    filesystem: &FilesystemExecutionPolicy,
     input: Value,
     read_file_state: &mut HashMap<PathBuf, ClaudeReadSnapshot>,
 ) -> Result<String> {
@@ -69,15 +70,10 @@ pub fn execute_claude_write_tool(
     {
         bail!("file_path must be an absolute path");
     }
-    let sandbox_mode = if allow_all_paths {
-        "danger-full-access"
-    } else {
-        "workspace-write"
-    };
-    let path = workspace_paths::resolve_path_for_session(
+    let path = workspace_paths::resolve_path_for_filesystem_policy(
         cwd,
         working_dirs,
-        sandbox_mode,
+        filesystem.sandbox_mode,
         Path::new(&input.file_path),
     )?;
     if path.is_dir() {
@@ -226,7 +222,20 @@ fn file_timestamp_ms(path: &Path) -> Result<u128> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use puffer_runner_api::{FilesystemExecutionPolicy, FilesystemSandboxMode};
     use serde_json::json;
+
+    fn workspace_write_policy() -> FilesystemExecutionPolicy {
+        FilesystemExecutionPolicy {
+            sandbox_mode: FilesystemSandboxMode::WorkspaceWrite,
+        }
+    }
+
+    fn danger_full_access_policy() -> FilesystemExecutionPolicy {
+        FilesystemExecutionPolicy {
+            sandbox_mode: FilesystemSandboxMode::DangerFullAccess,
+        }
+    }
 
     fn write_input(path: &Path, content: &str) -> Value {
         json!({
@@ -244,7 +253,7 @@ mod tests {
         let output = execute_claude_write_tool(
             temp.path(),
             &[],
-            false,
+            &workspace_write_policy(),
             write_input(&path, "hello"),
             &mut read_state,
         )
@@ -268,7 +277,7 @@ mod tests {
         let error = execute_claude_write_tool(
             temp.path(),
             &[],
-            false,
+            &workspace_write_policy(),
             write_input(&path, "new"),
             &mut read_state,
         )
@@ -294,7 +303,7 @@ mod tests {
         let error = execute_claude_write_tool(
             temp.path(),
             &[],
-            false,
+            &workspace_write_policy(),
             write_input(&path, "new"),
             &mut read_state,
         )
@@ -320,7 +329,7 @@ mod tests {
         let error = execute_claude_write_tool(
             temp.path(),
             &[],
-            false,
+            &workspace_write_policy(),
             write_input(&path, "new"),
             &mut read_state,
         )
@@ -346,7 +355,7 @@ mod tests {
         let output = execute_claude_write_tool(
             temp.path(),
             &[],
-            false,
+            &workspace_write_policy(),
             write_input(&path, "new"),
             &mut read_state,
         )
@@ -373,7 +382,7 @@ mod tests {
         let output = execute_claude_write_tool(
             temp.path(),
             &[],
-            false,
+            &workspace_write_policy(),
             write_input(&path, "hello"),
             &mut read_state,
         )
@@ -394,7 +403,7 @@ mod tests {
         let error = execute_claude_write_tool(
             temp.path(),
             &[],
-            false,
+            &workspace_write_policy(),
             write_input(&path, "hello"),
             &mut read_state,
         )
@@ -414,7 +423,7 @@ mod tests {
         let output = execute_claude_write_tool(
             temp.path(),
             &[],
-            true,
+            &danger_full_access_policy(),
             write_input(&path, "hello"),
             &mut read_state,
         )

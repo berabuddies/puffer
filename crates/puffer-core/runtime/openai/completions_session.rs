@@ -32,7 +32,7 @@ use super::{
     parse_openai_text, parse_openai_text_fallback, send_openai_request_with_refresh,
     OpenAIExecutionConfig,
 };
-use crate::permissions::load_runtime_permission_context;
+use crate::permissions::{load_runtime_permission_context_with_inputs, RuntimePermissionInputs};
 use crate::runtime::agent_loop::{AssistantTurn, TurnSession};
 use crate::runtime::structured_output_support::{
     openai_chat_completion_tools_for_request, openai_chat_response_format, StructuredOutputConfig,
@@ -279,14 +279,20 @@ pub(super) fn setup_completions_session(
     let execution = super::resolve_openai_execution_config(state, auth_store, provider)?;
     let registry =
         super::super::mcp_discovery::registry_with_mcp_tools(resources, state.tool_runner.as_ref());
-    let permission_context = load_runtime_permission_context(&state.cwd, resources, state)?;
+    let permission_context = load_runtime_permission_context_with_inputs(
+        &state.cwd,
+        resources,
+        state,
+        RuntimePermissionInputs {
+            request_tool_filter: options.tool_filter.cloned(),
+        },
+    )?;
     let response_format = openai_chat_response_format(options.structured_output, use_native);
     let tools = openai_chat_completion_tools_for_request(
         &registry,
         options.structured_output,
         use_native,
         Some(&permission_context),
-        options.tool_filter,
     )?;
     let system_prompt = render_runtime_system_prompt(
         state,

@@ -20,7 +20,7 @@ use super::{
     parse_openai_text, parse_openai_text_fallback, resolve_openai_execution_config,
     OpenAIExecutionConfig,
 };
-use crate::permissions::load_runtime_permission_context;
+use crate::permissions::{load_runtime_permission_context_with_inputs, RuntimePermissionInputs};
 use crate::AppState;
 use anyhow::Result;
 use puffer_provider_openai::{
@@ -192,14 +192,20 @@ where
     let mut execution = resolve_openai_execution_config(state, auth_store, provider)?;
     let registry =
         super::super::mcp_discovery::registry_with_mcp_tools(resources, state.tool_runner.as_ref());
-    let permission_context = load_runtime_permission_context(&state.cwd, resources, state)?;
+    let permission_context = load_runtime_permission_context_with_inputs(
+        &state.cwd,
+        resources,
+        state,
+        RuntimePermissionInputs {
+            request_tool_filter: options.tool_filter.cloned(),
+        },
+    )?;
     let text = openai_responses_text_config(structured_output, use_native);
     let tools = openai_tool_definitions_for_request(
         &registry,
         structured_output,
         use_native,
         Some(&permission_context),
-        options.tool_filter,
     )?;
     let system_prompt = render_runtime_system_prompt(
         state,

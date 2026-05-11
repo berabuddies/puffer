@@ -8,7 +8,10 @@ use super::structured_output_support::{
     requested_structured_output_definition_for_request, StructuredOutputConfig,
 };
 use super::RequestToolFilter;
-use crate::permissions::{load_runtime_permission_context, ToolPermissionBehavior};
+use crate::permissions::{
+    load_runtime_permission_context_with_inputs, FilesystemPermissionPolicy,
+    RuntimePermissionInputs, ToolPermissionBehavior,
+};
 use crate::AppState;
 use anyhow::{anyhow, Result};
 use puffer_provider_openai::OpenAIRequestConfig;
@@ -60,47 +63,44 @@ pub(super) fn execute_tool_call(
             .filter(|definition| definition.id == tool_id)
             .ok_or_else(|| anyhow!("unknown tool {tool_id}"))?,
     };
-    if let Some(filter) = tool_filter {
-        if !filter.allows_call(&definition, cwd, &input)? {
+    let permission_context = load_runtime_permission_context_with_inputs(
+        cwd,
+        resources,
+        state,
+        RuntimePermissionInputs {
+            request_tool_filter: tool_filter.cloned(),
+        },
+    )?;
+    let filesystem_policy = permission_context.derived_policy().filesystem().clone();
+    let permission_decision = permission_context.decision_for_tool_call(&definition, &input);
+    match permission_decision.behavior {
+        ToolPermissionBehavior::Allow => {}
+        ToolPermissionBehavior::Deny => {
             return Ok(blocked_runtime_tool(
                 tool_id,
                 ToolPermissionBehavior::Deny,
-                Some("slash command tool scope denied this tool call".to_string()),
+                permission_decision.reason,
             ));
         }
-    }
-    if !state.session_allow_all {
-        let permission_context = load_runtime_permission_context(cwd, resources, state)?;
-        let permission_decision = permission_context.decision_for_tool_call(&definition, &input);
-        match permission_decision.behavior {
-            ToolPermissionBehavior::Allow => {}
-            ToolPermissionBehavior::Deny => {
-                return Ok(blocked_runtime_tool(
-                    tool_id,
-                    ToolPermissionBehavior::Deny,
-                    permission_decision.reason,
-                ));
-            }
-            ToolPermissionBehavior::Ask => {
-                match prompt_for_permission(build_permission_prompt_request(
-                    &definition,
-                    &input,
-                    permission_decision.reason.as_deref(),
-                )) {
-                    PermissionPromptAction::AllowOnce => {}
-                    PermissionPromptAction::AllowSession => {
-                        state.allow_tool_for_session(&definition.id);
-                    }
-                    PermissionPromptAction::AllowAllSession => {
-                        state.session_allow_all = true;
-                    }
-                    PermissionPromptAction::Deny => {
-                        return Ok(blocked_runtime_tool(
-                            tool_id,
-                            ToolPermissionBehavior::Deny,
-                            Some("permission denied by user".to_string()),
-                        ));
-                    }
+        ToolPermissionBehavior::Ask => {
+            match prompt_for_permission(build_permission_prompt_request(
+                &definition,
+                &input,
+                permission_decision.reason.as_deref(),
+            )) {
+                PermissionPromptAction::AllowOnce => {}
+                PermissionPromptAction::AllowSession => {
+                    state.allow_permission_for_tool_call(&definition, &input);
+                }
+                PermissionPromptAction::AllowAllSession => {
+                    state.set_session_allow_all();
+                }
+                PermissionPromptAction::Deny => {
+                    return Ok(blocked_runtime_tool(
+                        tool_id,
+                        ToolPermissionBehavior::Deny,
+                        Some("permission denied by user".to_string()),
+                    ));
                 }
             }
         }
@@ -135,6 +135,7 @@ pub(super) fn execute_tool_call(
             registry,
             &definition,
             cwd,
+            &filesystem_policy,
             input,
             provider_context,
         )?
@@ -178,7 +179,7 @@ pub(super) fn is_parallel_safe_tool(tool_id: &str) -> bool {
 /// The result of pre-resolving permission for a tool call.
 pub(super) enum PermissionOutcome {
     /// Tool execution is permitted.
-    Allowed,
+    Allowed(FilesystemPermissionPolicy),
     /// Tool execution was denied; carry the pre-built denial result.
     Denied(ToolExecutionResult),
 }
@@ -207,22 +208,19 @@ pub(super) fn resolve_tool_permission(
             )));
         }
     };
-    if let Some(filter) = tool_filter {
-        if !filter.allows_call(&definition, cwd, input)? {
-            return Ok(PermissionOutcome::Denied(blocked_runtime_tool(
-                tool_id,
-                ToolPermissionBehavior::Deny,
-                Some("slash command tool scope denied this tool call".to_string()),
-            )));
-        }
-    }
-    if state.session_allow_all {
-        return Ok(PermissionOutcome::Allowed);
-    }
-    let permission_context = load_runtime_permission_context(cwd, resources, state)?;
+    let permission_context = load_runtime_permission_context_with_inputs(
+        cwd,
+        resources,
+        state,
+        RuntimePermissionInputs {
+            request_tool_filter: tool_filter.cloned(),
+        },
+    )?;
     let permission_decision = permission_context.decision_for_tool_call(&definition, input);
     match permission_decision.behavior {
-        ToolPermissionBehavior::Allow => Ok(PermissionOutcome::Allowed),
+        ToolPermissionBehavior::Allow => Ok(PermissionOutcome::Allowed(
+            permission_context.derived_policy().filesystem().clone(),
+        )),
         ToolPermissionBehavior::Deny => Ok(PermissionOutcome::Denied(blocked_runtime_tool(
             tool_id,
             ToolPermissionBehavior::Deny,
@@ -234,14 +232,26 @@ pub(super) fn resolve_tool_permission(
                 input,
                 permission_decision.reason.as_deref(),
             )) {
-                PermissionPromptAction::AllowOnce => Ok(PermissionOutcome::Allowed),
+                PermissionPromptAction::AllowOnce => Ok(PermissionOutcome::Allowed(
+                    permission_context.derived_policy().filesystem().clone(),
+                )),
                 PermissionPromptAction::AllowSession => {
-                    state.allow_tool_for_session(&definition.id);
-                    Ok(PermissionOutcome::Allowed)
+                    state.allow_permission_for_tool_call(&definition, input);
+                    Ok(PermissionOutcome::Allowed(runtime_filesystem_policy(
+                        cwd,
+                        resources,
+                        state,
+                        tool_filter,
+                    )?))
                 }
                 PermissionPromptAction::AllowAllSession => {
-                    state.session_allow_all = true;
-                    Ok(PermissionOutcome::Allowed)
+                    state.set_session_allow_all();
+                    Ok(PermissionOutcome::Allowed(runtime_filesystem_policy(
+                        cwd,
+                        resources,
+                        state,
+                        tool_filter,
+                    )?))
                 }
                 PermissionPromptAction::Deny => {
                     Ok(PermissionOutcome::Denied(blocked_runtime_tool(
@@ -253,6 +263,24 @@ pub(super) fn resolve_tool_permission(
             }
         }
     }
+}
+
+/// Loads the effective filesystem policy for the current runtime permission state.
+fn runtime_filesystem_policy(
+    cwd: &Path,
+    resources: &LoadedResources,
+    state: &AppState,
+    tool_filter: Option<&RequestToolFilter>,
+) -> Result<FilesystemPermissionPolicy> {
+    let permission_context = load_runtime_permission_context_with_inputs(
+        cwd,
+        resources,
+        state,
+        RuntimePermissionInputs {
+            request_tool_filter: tool_filter.cloned(),
+        },
+    )?;
+    Ok(permission_context.derived_policy().filesystem().clone())
 }
 
 fn blocked_runtime_tool(

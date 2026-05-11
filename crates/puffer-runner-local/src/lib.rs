@@ -68,7 +68,10 @@ fn collect_mcp_servers(resources: &LoadedResources) -> Vec<McpServerSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use puffer_runner_api::{NullChunkSink, RunnerError, ToolRequest, ToolRunner};
+    use puffer_runner_api::{
+        FilesystemExecutionPolicy, FilesystemSandboxMode, NullChunkSink, RunnerError, ToolRequest,
+        ToolRunner,
+    };
     use std::fs;
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
@@ -125,7 +128,9 @@ mod tests {
             tool_id: "DefinitelyUnknown".into(),
             cwd: PathBuf::from("/"),
             working_dirs: Vec::new(),
-            allow_all_paths: false,
+            filesystem: FilesystemExecutionPolicy {
+                sandbox_mode: FilesystemSandboxMode::WorkspaceWrite,
+            },
             input: serde_json::json!({}),
             session_id: None,
         };
