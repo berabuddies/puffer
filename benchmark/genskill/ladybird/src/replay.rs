@@ -240,6 +240,12 @@ fn skill_path_for(cfg: &ReplayConfig<'_>) -> Option<String> {
 }
 
 fn test_filters_for(entry: &CorpusEntry) -> Vec<String> {
+    if let Ok(filters) = explicit_test_filters(&entry.dir.join("test_filters.txt")) {
+        if !filters.is_empty() {
+            return filters;
+        }
+    }
+
     let mut filters = corpus_test_files(&entry.dir.join("tests"))
         .unwrap_or_default()
         .into_iter()
@@ -252,6 +258,23 @@ fn test_filters_for(entry: &CorpusEntry) -> Vec<String> {
     } else {
         filters
     }
+}
+
+fn explicit_test_filters(path: &Path) -> Result<Vec<String>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut filters = std::fs::read_to_string(path)
+        .with_context(|| format!("reading {}", path.display()))?
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    filters.sort();
+    filters.dedup();
+    Ok(filters)
 }
 
 fn corpus_test_files(root: &Path) -> Result<Vec<PathBuf>> {
@@ -339,7 +362,7 @@ fn test_command_for(filters: &[String]) -> String {
         commands.push(format!(
             "echo '=== target web tests ==='; \
              if [ -f Meta/ladybird.py ]; then \
-                 python3 Meta/ladybird.py run test-web {web_args}; \
+                 python3 Meta/ladybird.py run --jobs 1 test-web {web_args}; \
              elif [ -x Meta/ladybird.sh ]; then \
                  ./Meta/ladybird.sh run test-web {web_args}; \
              elif command -v test-web >/dev/null 2>&1; then \
@@ -352,20 +375,35 @@ fn test_command_for(filters: &[String]) -> String {
         ));
     }
 
-    for pattern in ctest_patterns {
+    for (target, pattern, workdir) in ctest_patterns {
+        let quoted_target = shell_quote(&target);
         let quoted_pattern = shell_quote(&pattern);
+        let case_command = workdir
+            .as_deref()
+            .map(|dir| {
+                format!(
+                    "(cd {} && /work/ladybird/Build/release/bin/{target} {quoted_pattern})",
+                    shell_quote(dir)
+                )
+            })
+            .unwrap_or_else(|| {
+                format!("/work/ladybird/Build/release/bin/{target} {quoted_pattern}")
+            });
         commands.push(format!(
-            "echo '=== target unit test: {pattern} ==='; \
+            "echo '=== target unit test: {target} {pattern} ==='; \
              if [ -f Meta/ladybird.py ]; then \
-                 python3 Meta/ladybird.py run {quoted_pattern}; \
+                 python3 Meta/ladybird.py build --jobs 1 {quoted_target}; \
+                 rc=$?; \
+                 if [ $rc -eq 0 ]; then {case_command}; rc=$?; fi; \
              elif [ -x Meta/ladybird.sh ]; then \
-                 ./Meta/ladybird.sh run {quoted_pattern}; \
+                 ./Meta/ladybird.sh run {quoted_target} {quoted_pattern}; \
+                 rc=$?; \
              elif command -v ctest >/dev/null 2>&1; then \
-                 ctest --output-on-failure -R {quoted_pattern}; \
+                 ctest --output-on-failure -R {quoted_target}; \
+                 rc=$?; \
              else \
                  echo 'no Ladybird unit-test runner found' >&2; exit 127; \
              fi; \
-             rc=$?; \
              if [ $rc -ne 0 ]; then status=$rc; fi"
         ));
     }
@@ -387,10 +425,17 @@ fn libweb_filter_arg(filter: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn ctest_pattern_arg(filter: &str) -> Option<String> {
-    let path = Path::new(filter);
-    let stem = path.file_stem()?.to_str()?;
-    filter.ends_with(".cpp").then(|| stem.to_string())
+fn ctest_pattern_arg(filter: &str) -> Option<(String, String, Option<String>)> {
+    let (path, case) = filter
+        .split_once(':')
+        .map_or((filter, "*"), |(path, case)| (path, case));
+    let stem = Path::new(path).file_stem()?.to_str()?;
+    let workdir = Path::new(path)
+        .parent()
+        .and_then(Path::to_str)
+        .map(ToString::to_string);
+    path.ends_with(".cpp")
+        .then(|| (stem.to_string(), case.to_string(), workdir))
 }
 
 fn shell_quote(s: &str) -> String {
@@ -440,7 +485,7 @@ mod tests {
             "Tests/LibWeb/Crash/CSS/foo.html".to_string(),
         ];
         let command = test_command_for(&filters);
-        assert!(command.contains("python3 Meta/ladybird.py run test-web"));
+        assert!(command.contains("python3 Meta/ladybird.py run --jobs 1 test-web"));
         assert!(command.contains("-f 'Text/input/wpt-import/css/foo/bar.html'"));
         assert!(command.contains("-f 'Crash/CSS/foo.html'"));
         assert!(!command.contains("No tests were found"));
@@ -453,8 +498,33 @@ mod tests {
             "Tests/LibURL/TestPublicSuffix.cpp".to_string(),
         ];
         let command = test_command_for(&filters);
-        assert!(command.contains("python3 Meta/ladybird.py run 'TestRegex'"));
-        assert!(command.contains("python3 Meta/ladybird.py run 'TestPublicSuffix'"));
+        assert!(command.contains("python3 Meta/ladybird.py build --jobs 1 'TestRegex'"));
+        assert!(command.contains("/work/ladybird/Build/release/bin/TestRegex '*'"));
+        assert!(command.contains("python3 Meta/ladybird.py build --jobs 1 'TestPublicSuffix'"));
+        assert!(command.contains("/work/ladybird/Build/release/bin/TestPublicSuffix '*'"));
+    }
+
+    #[test]
+    fn test_command_passes_cpp_case_pattern_to_unit_binary() {
+        let filters = vec!["Tests/LibGfx/TestImageDecoder.cpp:test_gif_empty_lzw_data".to_string()];
+        let command = test_command_for(&filters);
+        assert!(command.contains("python3 Meta/ladybird.py build --jobs 1 'TestImageDecoder'"));
+        assert!(command.contains(
+            "(cd 'Tests/LibGfx' && /work/ladybird/Build/release/bin/TestImageDecoder 'test_gif_empty_lzw_data')"
+        ));
+        assert!(command.contains("ctest --output-on-failure -R 'TestImageDecoder'"));
+    }
+
+    #[test]
+    fn test_command_isolates_cpp_case_workdirs() {
+        let filters = vec![
+            "Tests/LibGfx/TestImageDecoder.cpp:a".to_string(),
+            "Tests/LibGfx/TestImageDecoder.cpp:b".to_string(),
+        ];
+        let command = test_command_for(&filters);
+        assert_eq!(command.matches("(cd 'Tests/LibGfx' &&").count(), 2);
+        assert!(command.contains("=== target unit test: TestImageDecoder a ==="));
+        assert!(command.contains("=== target unit test: TestImageDecoder b ==="));
     }
 
     #[test]
@@ -500,6 +570,23 @@ mod tests {
         assert_eq!(
             corpus_test_filter(Path::new("Tests/LibURL/CMakeLists.txt")),
             None
+        );
+    }
+
+    #[test]
+    fn explicit_test_filters_skip_comments_and_sort() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            "\n# comment\nTests/LibGfx/TestImageDecoder.cpp:b\nTests/LibGfx/TestImageDecoder.cpp:a\n",
+        )
+        .unwrap();
+        assert_eq!(
+            explicit_test_filters(tmp.path()).unwrap(),
+            vec![
+                "Tests/LibGfx/TestImageDecoder.cpp:a".to_string(),
+                "Tests/LibGfx/TestImageDecoder.cpp:b".to_string()
+            ]
         );
     }
 

@@ -10,6 +10,7 @@ set -euo pipefail
 
 ROOT="benchmark/genskill/ladybird"
 RUN_DATE="${1:-$(date -u +%Y-%m-%d)}"
+REPORT_DIR="$ROOT/reports/$RUN_DATE"
 
 missing=0
 for pr_dir in "$ROOT"/pr_corpus/pr-*/; do
@@ -30,6 +31,9 @@ if [ "$missing" -ne 0 ]; then
   echo "Refusing to run full eval until all expert runs and skills exist." >&2
   exit 1
 fi
+
+mkdir -p "$REPORT_DIR"
+rm -f "$REPORT_DIR"/pr-*.json "$REPORT_DIR"/summary.md
 
 source ~/.cargo/env
 cargo build -p puffer-cli --release
