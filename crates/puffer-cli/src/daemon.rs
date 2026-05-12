@@ -37,7 +37,7 @@ use puffer_config::{
 use puffer_core::{
     apply_model_preferences, execute_user_turn_streaming_with_permissions_and_cancel,
     with_user_question_prompt_handler, AppState, CancelToken, MessageRole, PermissionPromptAction,
-    PermissionPromptRequest, TurnStreamEvent, UserQuestionPromptRequest,
+    PermissionPromptRequest, ToolInvocation, TurnStreamEvent, UserQuestionPromptRequest,
     UserQuestionPromptResponse,
 };
 use puffer_provider_openai::{
@@ -1894,6 +1894,85 @@ fn handle_resolve_user_question(state: &DaemonState, params: &Value) -> Result<V
     Ok(json!({"ok": true}))
 }
 
+/// Appends a turn's completed tool invocations + assistant text to the
+/// session store and mirrors them into the in-memory `AppState` so the
+/// next turn's prompt builder sees them.
+///
+/// Used by `start_turn` for both the `Ok(turn)` success path (sourced from
+/// `TurnExecution`) and the `Err(_)` path (sourced from accumulators fed
+/// by the streaming `on_event` callback). The Err path is the cancel-
+/// history fix — without it, the session record never sees a cancelled
+/// turn's already-completed tool calls, so the next prompt's LLM has no
+/// idea those calls happened.
+fn persist_turn_artifacts(
+    session_store: &SessionStore,
+    session_uuid: Uuid,
+    app_state: &mut AppState,
+    invocations: &[ToolInvocation],
+    assistant_text: &str,
+) {
+    for inv in invocations {
+        let _ = session_store.append_event(
+            session_uuid,
+            TranscriptEvent::ToolInvocation {
+                call_id: inv.call_id.clone(),
+                tool_id: inv.tool_id.clone(),
+                input: inv.input.clone(),
+                output: inv.output.clone(),
+                success: inv.success,
+            },
+        );
+    }
+    if !assistant_text.is_empty() {
+        app_state.push_message(MessageRole::Assistant, assistant_text.to_string());
+        let _ = session_store.append_event(
+            session_uuid,
+            TranscriptEvent::AssistantMessage {
+                text: assistant_text.to_string(),
+            },
+        );
+    }
+}
+
+/// Builds the system-message marker appended to session.jsonl when a turn
+/// ends in Err (user cancel or transport error). Carries an explicit
+/// "turn was aborted" signal plus a count of tool calls that DID complete
+/// before the bail — the next LLM turn reads this and won't pretend the
+/// turn ran to completion.
+///
+/// Mirrors codex's `<turn_aborted>` developer message
+/// (`context/turn_aborted.rs`) and pi-mono's `stopReason: "aborted"` flag.
+fn format_turn_aborted_marker(err: &str, completed: &[ToolInvocation]) -> String {
+    let reason = if err.contains("cancelled") || err.contains("Cancelled") {
+        "cancelled by user"
+    } else {
+        "ended with error"
+    };
+    let tool_summary = if completed.is_empty() {
+        "No tool calls completed before the abort.".to_string()
+    } else {
+        let names: Vec<String> = completed
+            .iter()
+            .map(|inv| inv.tool_id.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        format!(
+            "{} tool call{} completed before the abort: {}.",
+            completed.len(),
+            if completed.len() == 1 { "" } else { "s" },
+            names.join(", ")
+        )
+    };
+    format!(
+        "[turn-aborted] The previous turn was {reason}. {tool_summary} \
+         Any side effects of those tool calls (file writes, network calls, task creation) \
+         have already happened. Do NOT assume the turn ran to completion; verify state \
+         before continuing, and confirm with the user if uncertain. \
+         Error: {err}"
+    )
+}
+
 fn handle_cancel_turn(state: &DaemonState, params: &Value) -> Result<Value> {
     let turn_id = params
         .get("turnId")
@@ -2111,7 +2190,29 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         let ev_state = setup_state.clone();
         let ev_channel = channel_thread.clone();
         let ev_turn = turn_id_thread.clone();
+        // Accumulators so a cancelled / errored turn still persists the
+        // tool calls and partial assistant text it already produced before
+        // bailing. Without these, the Err arm below drops everything the
+        // agent has done so far and the NEXT turn's session_record won't
+        // include the cancelled turn's tool invocations — letting the LLM
+        // think it never executed any tools (the "cancel amnesia" bug).
+        let acc_invocations: Arc<Mutex<Vec<ToolInvocation>>> = Arc::new(Mutex::new(Vec::new()));
+        let acc_text: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let on_event_invocations = acc_invocations.clone();
+        let on_event_text = acc_text.clone();
         let on_event = move |event: TurnStreamEvent| {
+            // Accumulate first, then re-emit. Cloning is cheap; the SSE
+            // payload below moves out of `event` so the accumulator copy
+            // must happen up front.
+            match &event {
+                TurnStreamEvent::TextDelta(delta) => {
+                    on_event_text.lock().unwrap().push_str(delta);
+                }
+                TurnStreamEvent::ToolInvocations(invs) => {
+                    on_event_invocations.lock().unwrap().extend(invs.iter().cloned());
+                }
+                _ => {}
+            }
             let payload = match event {
                 TurnStreamEvent::TextDelta(delta) => {
                     json!({"type": "text-delta", "turnId": ev_turn, "delta": delta})
@@ -2243,27 +2344,13 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
 
         match outcome {
             Ok(turn) => {
-                for inv in &turn.tool_invocations {
-                    let _ = inputs.session_store.append_event(
-                        session_uuid,
-                        TranscriptEvent::ToolInvocation {
-                            call_id: inv.call_id.clone(),
-                            tool_id: inv.tool_id.clone(),
-                            input: inv.input.clone(),
-                            output: inv.output.clone(),
-                            success: inv.success,
-                        },
-                    );
-                }
-                if !turn.assistant_text.is_empty() {
-                    app_state.push_message(MessageRole::Assistant, turn.assistant_text.clone());
-                    let _ = inputs.session_store.append_event(
-                        session_uuid,
-                        TranscriptEvent::AssistantMessage {
-                            text: turn.assistant_text.clone(),
-                        },
-                    );
-                }
+                persist_turn_artifacts(
+                    &inputs.session_store,
+                    session_uuid,
+                    &mut app_state,
+                    &turn.tool_invocations,
+                    &turn.assistant_text,
+                );
                 for trace in &turn.reflection_traces {
                     let _ = inputs.session_store.append_trace_event(
                         session_uuid,
@@ -2290,12 +2377,56 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
             }
             Err(err) => {
                 eprintln!("turn {turn_id_thread} failed: {err:#}");
+                // Cancel-history fix: persist whatever the agent_loop
+                // already streamed before bailing. The Ok arm above writes
+                // turn.tool_invocations + turn.assistant_text once at the
+                // end; the Err arm never receives a TurnExecution, so
+                // without this block the cancelled turn's completed tool
+                // calls and partial text vanish from session.jsonl and
+                // the next turn's LLM context-build can't see them.
+                let partial_invocations =
+                    std::mem::take(&mut *acc_invocations.lock().unwrap());
+                let partial_text = std::mem::take(&mut *acc_text.lock().unwrap());
+                persist_turn_artifacts(
+                    &inputs.session_store,
+                    session_uuid,
+                    &mut app_state,
+                    &partial_invocations,
+                    &partial_text,
+                );
+                // Append a turn-aborted marker as a system message so the
+                // next turn's LLM context build sees an explicit signal
+                // "the previous turn was interrupted; any tool calls
+                // above may have only partially completed." Without this,
+                // the LLM sees the tool_call rows and assumes the turn
+                // ran to completion — leading to gaslighting answers like
+                // "I haven't done anything yet" or "your task is queued"
+                // when the user can plainly see the tool ran. Mirrors
+                // codex's `<turn_aborted>` developer marker and pi-mono's
+                // `stopReason: aborted` flag.
+                let marker = format_turn_aborted_marker(&err.to_string(), &partial_invocations);
+                app_state.push_message(MessageRole::System, marker.clone());
+                let _ = inputs.session_store.append_event(
+                    session_uuid,
+                    TranscriptEvent::SystemMessage { text: marker },
+                );
                 setup_state.publish_event(ServerEnvelope::Event {
                     event: channel_thread.clone(),
                     payload: json!({
                         "type": "turn-error",
                         "turnId": turn_id_thread,
                         "error": format!("{err:#}"),
+                        "partialInvocations": partial_invocations.len(),
+                    }),
+                });
+                // Sidebar / boards should re-render even when no tools
+                // completed — the SystemMessage marker is itself a
+                // transcript mutation.
+                setup_state.publish_event(ServerEnvelope::Event {
+                    event: "workspace:sessions:changed".to_string(),
+                    payload: json!({
+                        "reason": "turn_aborted",
+                        "sessionId": session_id_for_thread.clone(),
                     }),
                 });
             }
@@ -2446,6 +2577,227 @@ mod tests {
         );
         assert_eq!(state.effort_level, "off");
         assert!(state.fast_mode);
+    }
+
+    #[test]
+    fn persist_turn_artifacts_records_invocations_and_text_for_cancelled_turn() {
+        use super::persist_turn_artifacts;
+        use puffer_core::ToolInvocation;
+        use puffer_session_store::TranscriptEvent;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let store = SessionStore::from_paths(&paths).expect("session store");
+        let metadata = store
+            .create_session(workspace_root.clone())
+            .expect("create session");
+        let session_id = metadata.id;
+        store
+            .append_event(
+                session_id,
+                TranscriptEvent::UserMessage {
+                    text: "clone openai/codex".to_string(),
+                },
+            )
+            .expect("append user message");
+
+        let mut app_state =
+            AppState::new(PufferConfig::default(), workspace_root.clone(), metadata);
+
+        // Simulate one TaskCreate tool call completed before the user
+        // pressed cancel — this is the exact pattern seen in the
+        // eab60bad-c00c-41d9-86b9-42675b0d9e52 agent's history.
+        let inv = ToolInvocation {
+            call_id: "call_abc123".to_string(),
+            tool_id: "TaskCreate".to_string(),
+            input: r#"{"subject":"Clone repository"}"#.to_string(),
+            output: r#"{"task":{"id":"task-1","subject":"Clone repository"}}"#.to_string(),
+            success: true,
+            terminate: false,
+        };
+        let partial_text = "I'll clone the repo now: ".to_string();
+
+        persist_turn_artifacts(&store, session_id, &mut app_state, &[inv.clone()], &partial_text);
+
+        // Reload the persisted record — this is what the next turn will
+        // see when it builds the LLM context from session.jsonl.
+        let session = store.load_session(session_id).expect("reload session");
+        let kinds: Vec<&'static str> = session
+            .events
+            .iter()
+            .map(|e| match e {
+                TranscriptEvent::UserMessage { .. } => "UserMessage",
+                TranscriptEvent::AssistantMessage { .. } => "AssistantMessage",
+                TranscriptEvent::ToolInvocation { .. } => "ToolInvocation",
+                TranscriptEvent::SystemMessage { .. } => "SystemMessage",
+                _ => "Other",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["UserMessage", "ToolInvocation", "AssistantMessage"],
+            "cancelled turn must leave ToolInvocation + AssistantMessage in session.jsonl"
+        );
+
+        // Confirm the specific event details survived the round-trip.
+        let tool_event = session
+            .events
+            .iter()
+            .find_map(|e| match e {
+                TranscriptEvent::ToolInvocation {
+                    call_id,
+                    tool_id,
+                    input,
+                    output,
+                    success,
+                } => Some((call_id.clone(), tool_id.clone(), input.clone(), output.clone(), *success)),
+                _ => None,
+            })
+            .expect("ToolInvocation event present");
+        assert_eq!(tool_event.0, "call_abc123");
+        assert_eq!(tool_event.1, "TaskCreate");
+        assert_eq!(tool_event.2, r#"{"subject":"Clone repository"}"#);
+        assert!(tool_event.3.contains("task-1"));
+        assert!(tool_event.4);
+
+        let asst_text = session
+            .events
+            .iter()
+            .find_map(|e| match e {
+                TranscriptEvent::AssistantMessage { text } => Some(text.clone()),
+                _ => None,
+            })
+            .expect("AssistantMessage event present");
+        assert_eq!(asst_text, "I'll clone the repo now: ");
+    }
+
+    #[test]
+    fn persist_turn_artifacts_skips_empty_text_keeps_invocations() {
+        use super::persist_turn_artifacts;
+        use puffer_core::ToolInvocation;
+        use puffer_session_store::TranscriptEvent;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let store = SessionStore::from_paths(&paths).expect("session store");
+        let metadata = store
+            .create_session(workspace_root.clone())
+            .expect("create session");
+        let session_id = metadata.id;
+        let mut app_state =
+            AppState::new(PufferConfig::default(), workspace_root.clone(), metadata);
+
+        let inv = ToolInvocation {
+            call_id: "call_xyz".to_string(),
+            tool_id: "Bash".to_string(),
+            input: r#"{"command":"git clone https://github.com/openai/codex"}"#.to_string(),
+            output: "Cloning into 'codex'...\n".to_string(),
+            success: true,
+            terminate: false,
+        };
+        // No partial text — model called tool but never emitted text before cancel.
+        persist_turn_artifacts(&store, session_id, &mut app_state, &[inv], "");
+
+        let session = store.load_session(session_id).expect("reload session");
+        let kinds: Vec<&'static str> = session
+            .events
+            .iter()
+            .map(|e| match e {
+                TranscriptEvent::ToolInvocation { .. } => "ToolInvocation",
+                TranscriptEvent::AssistantMessage { .. } => "AssistantMessage",
+                _ => "Other",
+            })
+            .collect();
+        // ToolInvocation must be present; AssistantMessage must NOT be (text was empty).
+        assert!(kinds.iter().any(|k| *k == "ToolInvocation"));
+        assert!(!kinds.iter().any(|k| *k == "AssistantMessage"));
+    }
+
+    #[test]
+    fn persist_turn_artifacts_noop_when_nothing_to_save() {
+        use super::persist_turn_artifacts;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let store = SessionStore::from_paths(&paths).expect("session store");
+        let metadata = store
+            .create_session(workspace_root.clone())
+            .expect("create session");
+        let session_id = metadata.id;
+        let mut app_state =
+            AppState::new(PufferConfig::default(), workspace_root.clone(), metadata);
+
+        // Cancel BEFORE any tool ran — both accumulators empty.
+        persist_turn_artifacts(&store, session_id, &mut app_state, &[], "");
+
+        let session = store.load_session(session_id).expect("reload session");
+        assert!(
+            session.events.is_empty(),
+            "no events expected when both invocations and text are empty, got {:?}",
+            session.events
+        );
+    }
+
+    #[test]
+    fn turn_aborted_marker_carries_reason_and_tool_summary() {
+        use super::format_turn_aborted_marker;
+        use puffer_core::ToolInvocation;
+
+        // Case 1: user cancel with one tool completed
+        let inv = ToolInvocation {
+            call_id: "call_1".to_string(),
+            tool_id: "TaskCreate".to_string(),
+            input: "{}".to_string(),
+            output: "{}".to_string(),
+            success: true,
+            terminate: false,
+        };
+        let marker = format_turn_aborted_marker("cancelled", &[inv.clone()]);
+        assert!(marker.contains("cancelled by user"), "{marker}");
+        assert!(marker.contains("1 tool call"), "{marker}");
+        assert!(marker.contains("TaskCreate"), "{marker}");
+        assert!(marker.contains("Do NOT assume"), "{marker}");
+
+        // Case 2: cancel with no tools completed
+        let marker = format_turn_aborted_marker("cancelled", &[]);
+        assert!(marker.contains("cancelled by user"), "{marker}");
+        assert!(marker.contains("No tool calls completed"), "{marker}");
+
+        // Case 3: provider 5xx error (not a cancel)
+        let marker = format_turn_aborted_marker("HTTP 503 upstream", &[]);
+        assert!(marker.contains("ended with error"), "{marker}");
+        assert!(marker.contains("HTTP 503 upstream"), "{marker}");
+
+        // Case 4: two tool calls, same tool name → dedup'd via BTreeSet
+        let inv2 = ToolInvocation {
+            tool_id: "TaskCreate".to_string(),
+            ..inv.clone()
+        };
+        let marker = format_turn_aborted_marker("cancelled", &[inv, inv2]);
+        assert!(marker.contains("2 tool calls"), "{marker}");
+        // Only one TaskCreate in the listing since names dedup.
+        assert_eq!(marker.matches("TaskCreate").count(), 1, "{marker}");
     }
 
     #[test]
