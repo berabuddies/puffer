@@ -2394,21 +2394,35 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                     &partial_invocations,
                     &partial_text,
                 );
-                // Append a turn-aborted marker as a system message so the
+                // Append a turn-aborted marker as a USER message so the
                 // next turn's LLM context build sees an explicit signal
                 // "the previous turn was interrupted; any tool calls
                 // above may have only partially completed." Without this,
                 // the LLM sees the tool_call rows and assumes the turn
-                // ran to completion — leading to gaslighting answers like
-                // "I haven't done anything yet" or "your task is queued"
-                // when the user can plainly see the tool ran. Mirrors
-                // codex's `<turn_aborted>` developer marker and pi-mono's
-                // `stopReason: aborted` flag.
+                // ran to completion — leading to gaslighting answers
+                // ("I haven't done anything yet", "your task is queued")
+                // when the user can plainly see the tool ran.
+                //
+                // Why role:user and not role:system: puffer's wire
+                // serializers filter non-leading `role:"system"` items
+                // out of LLM requests on purpose
+                // (`puffer-core/runtime/openai/conversation.rs:556` for
+                // Responses/Chat, `:803` for Anthropic) because strict
+                // backends (ChatGPT Codex `chatgpt.com/backend-api/codex
+                // /responses`) 400 on mid-conversation system items.
+                // A SystemMessage marker would render in the TUI but
+                // never reach the model — defeating the whole point.
+                // role:user survives the filter, `push_or_merge` bundles
+                // it with adjacent tool_results into one Anthropic
+                // message, and semantically the user IS the actor who
+                // cancelled — matches codex's developer-role pattern
+                // (codex-rs/core/src/context/turn_aborted.rs:21) which
+                // similarly leverages a role that the wire respects.
                 let marker = format_turn_aborted_marker(&err.to_string(), &partial_invocations);
-                app_state.push_message(MessageRole::System, marker.clone());
+                app_state.push_message(MessageRole::User, marker.clone());
                 let _ = inputs.session_store.append_event(
                     session_uuid,
-                    TranscriptEvent::SystemMessage { text: marker },
+                    TranscriptEvent::UserMessage { text: marker },
                 );
                 setup_state.publish_event(ServerEnvelope::Event {
                     event: channel_thread.clone(),

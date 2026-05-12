@@ -1498,6 +1498,129 @@ mod tests {
         }
     }
 
+    /// Pins the wire contract behind the cancel-history fix: a
+    /// `[turn-aborted]` marker emitted as `TranscriptEvent::UserMessage`
+    /// MUST reach the LLM payload in all three serializers (Anthropic,
+    /// OpenAI Responses, OpenAI Chat Completions).
+    ///
+    /// An earlier iteration of `puffer-cli/src/daemon.rs` emitted the
+    /// marker as `TranscriptEvent::SystemMessage` — which `items_to_*`
+    /// strip mid-conversation on purpose (`drop_transient_system_messages`
+    /// for Responses/Chat, the `role == "system" => continue` branch in
+    /// `items_to_anthropic_messages`). Result: marker rendered in TUI,
+    /// invisible on the wire. Switching to `UserMessage` bypasses both
+    /// filters; this test exists so a future filter refactor or marker
+    /// emit-point relocation cannot silently regress the LLM-visibility
+    /// guarantee.
+    ///
+    /// Reference patterns (validated by the cross-impl research):
+    /// - codex `ContextualUser` mode puts `<turn_aborted>...` on role:user
+    ///   (`codex-rs/core/src/context/turn_aborted.rs:9`).
+    /// - claude-code emits `tool_result` with `is_error: "Interrupted by
+    ///   user"` as a role:user message (`cc-src/query.ts:123-149`).
+    /// - pi-mono drops the aborted assistant entirely and synthesizes
+    ///   `"No result provided"` tool_results (no marker); that pattern is
+    ///   less aggressive and runs the risk of compaction confusion, so
+    ///   puffer follows the codex/cc shape instead.
+    #[test]
+    fn turn_aborted_marker_survives_all_three_wire_serializers() {
+        let marker = "[turn-aborted] The previous turn was cancelled by user. \
+                      1 tool call completed before the abort: Bash. \
+                      Do NOT assume the turn ran to completion; verify state.";
+        let items = vec![
+            ConversationItem::user_message("clone openai/codex"),
+            ConversationItem::FunctionCall {
+                call_id: "call_1".to_string(),
+                name: "Bash".to_string(),
+                arguments: r#"{"command":"echo HELLO"}"#.to_string(),
+            },
+            ConversationItem::FunctionCallOutput {
+                call_id: "call_1".to_string(),
+                output: ToolOutputPayload {
+                    text: "HELLO\n".to_string(),
+                    is_error: false,
+                },
+            },
+            ConversationItem::user_message(marker),
+        ];
+
+        // --- Anthropic ---
+        let msgs = items_to_anthropic_messages(&items);
+        let serialized = serde_json::to_string(&msgs).expect("anthropic json");
+        assert!(
+            serialized.contains("[turn-aborted]"),
+            "Anthropic payload missing turn-aborted marker: {serialized}"
+        );
+        // The marker must live on a role:user message (not stripped, not
+        // demoted to system, not stranded as assistant text). `push_or_merge`
+        // collapses adjacent same-role items, so the marker text may be
+        // bundled together with the prior tool_result user message — both
+        // shapes are acceptable as long as the role stays user.
+        let marker_carrier = msgs.iter().find(|m| {
+            m.get("role").and_then(|r| r.as_str()) == Some("user")
+                && serde_json::to_string(m).unwrap().contains("[turn-aborted]")
+        });
+        assert!(
+            marker_carrier.is_some(),
+            "Anthropic marker must be on role:user, got: {msgs:?}"
+        );
+
+        // --- OpenAI Responses ---
+        let value = items_to_responses_input(&items);
+        let serialized = serde_json::to_string(&value).expect("responses json");
+        assert!(
+            serialized.contains("[turn-aborted]"),
+            "OpenAI Responses payload missing turn-aborted marker: {serialized}"
+        );
+
+        // --- OpenAI Chat Completions ---
+        let chat = items_to_chat_messages(&items, Some("base system prompt"), None, None, None);
+        let serialized = serde_json::to_string(&chat).expect("chat json");
+        assert!(
+            serialized.contains("[turn-aborted]"),
+            "OpenAI Chat Completions payload missing turn-aborted marker: {serialized}"
+        );
+    }
+
+    /// Negative-control twin of the above: the original SystemMessage
+    /// emit path that this PR replaced would silently lose the marker on
+    /// all three wires. We pin the failure mode explicitly so a future
+    /// regression "let's restore the system-role marker, system roles are
+    /// just metadata anyway" can't sneak through review.
+    #[test]
+    fn legacy_system_role_marker_would_be_dropped_by_wire_filters() {
+        let marker = "[turn-aborted] should never reach the LLM via role:system";
+        let items = vec![
+            ConversationItem::user_message("first user"),
+            ConversationItem::assistant_message("partial reply"),
+            ConversationItem::system_message(marker),
+        ];
+
+        // Anthropic: top-level system, mid-conversation role:system dropped.
+        let msgs = items_to_anthropic_messages(&items);
+        let serialized = serde_json::to_string(&msgs).unwrap();
+        assert!(
+            !serialized.contains("[turn-aborted]"),
+            "Anthropic should strip system-role marker, got: {serialized}"
+        );
+
+        // OpenAI Responses: drop_transient_system_messages strips non-leading systems.
+        let value = items_to_responses_input(&items);
+        let serialized = serde_json::to_string(&value).unwrap();
+        assert!(
+            !serialized.contains("[turn-aborted]"),
+            "Responses should strip non-leading system marker, got: {serialized}"
+        );
+
+        // OpenAI Chat Completions: same filter.
+        let chat = items_to_chat_messages(&items, Some("base"), None, None, None);
+        let serialized = serde_json::to_string(&chat).unwrap();
+        assert!(
+            !serialized.contains("[turn-aborted]"),
+            "Chat Completions should strip non-leading system marker, got: {serialized}"
+        );
+    }
+
     /// Regression for the gap that codex-review R2 surfaced: the runtime
     /// path used to do `items.insert(0, user_message(context_reminder))`
     /// before the wire boundary, which pushed the sub-agent identity
