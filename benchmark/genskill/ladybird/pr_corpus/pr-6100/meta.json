@@ -1,0 +1,14 @@
+{
+  "pr_number": 6100,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/6100",
+  "title": "LibJS: Make class accessors non-enumerable",
+  "merged_at": "2025-09-07T12:35:10Z",
+  "base_commit": "3c6472dc0089f22080f3a513809164e9f04f9aad",
+  "merge_commit": "4f0e8236a02df49bb7443d5c100ada02328b9332",
+  "area": "libjs",
+  "files_changed": [
+    "Libraries/LibJS/AST.cpp",
+    "Libraries/LibJS/Tests/classes/class-accessor-enumerable.js"
+  ],
+  "task_prompt": "Fix the failing LibJS class accessor enumerability regression in Libraries/LibJS/Tests/classes/class-accessor-enumerable.js. Make class accessors non-enumerable per JavaScript semantics."
+}

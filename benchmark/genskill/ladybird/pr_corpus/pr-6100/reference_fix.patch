@@ -1,0 +1,57 @@
+From b098fe285178c5433e8c08e952a6960dbd8d4163 Mon Sep 17 00:00:00 2001
+From: Pavel Shliak <shlyakpavel@gmail.com>
+Date: Sat, 6 Sep 2025 18:29:37 +0400
+Subject: [PATCH] LibJS: Make class accessors non-enumerable
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+According to ECMA-262 §15.4.5 (MethodDefinitionEvaluation),
+getters and setters defined in class bodies
+must create property descriptors with
+[[Enumerable]]: false. Previously we incorrectly marked them enumerable.
+
+This patch updates `ClassMethod::class_element_evaluation` so that both
+getter and setter descriptors use `.enumerable = false`.
+---
+ Libraries/LibJS/AST.cpp                              |  4 ++--
+ .../LibJS/Tests/classes/class-accessor-enumerable.js | 12 ++++++++++++
+ 2 files changed, 14 insertions(+), 2 deletions(-)
+ create mode 100644 Libraries/LibJS/Tests/classes/class-accessor-enumerable.js
+
+diff --git a/Libraries/LibJS/AST.cpp b/Libraries/LibJS/AST.cpp
+index 52a1912599e7d..76cd372bb4625 100644
+--- a/Libraries/LibJS/AST.cpp
++++ b/Libraries/LibJS/AST.cpp
+@@ -191,11 +191,11 @@ ThrowCompletionOr<ClassElement::ClassValue> ClassMethod::class_element_evaluatio
+             break;
+         case ClassMethod::Kind::Getter:
+             set_function_name("get"sv);
+-            TRY(target.define_property_or_throw(property_key, { .get = &method_function, .enumerable = true, .configurable = true }));
++            TRY(target.define_property_or_throw(property_key, { .get = &method_function, .enumerable = false, .configurable = true }));
+             break;
+         case ClassMethod::Kind::Setter:
+             set_function_name("set"sv);
+-            TRY(target.define_property_or_throw(property_key, { .set = &method_function, .enumerable = true, .configurable = true }));
++            TRY(target.define_property_or_throw(property_key, { .set = &method_function, .enumerable = false, .configurable = true }));
+             break;
+         default:
+             VERIFY_NOT_REACHED();
+diff --git a/Libraries/LibJS/Tests/classes/class-accessor-enumerable.js b/Libraries/LibJS/Tests/classes/class-accessor-enumerable.js
+new file mode 100644
+index 0000000000000..7a29e7518dfd6
+--- /dev/null
++++ b/Libraries/LibJS/Tests/classes/class-accessor-enumerable.js
+@@ -0,0 +1,12 @@
++test("class accessor should be non-enumerable", () => {
++    class C {
++        get x() {
++            return 1;
++        }
++        set x(v) {}
++    }
++
++    const desc = Object.getOwnPropertyDescriptor(C.prototype, "x");
++    expect(desc.enumerable).toBeFalse();
++    expect(Object.keys(C.prototype).includes("x")).toBeFalse();
++});

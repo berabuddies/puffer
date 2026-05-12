@@ -1,0 +1,230 @@
+From 34123428b135d817a688f2fa821f14217769649b Mon Sep 17 00:00:00 2001
+From: Jelle Raaijmakers <jelle@ladybird.org>
+Date: Fri, 25 Jul 2025 12:47:11 +0200
+Subject: [PATCH 1/2] AK: Add HashMap::update()
+
+This updates a HashMap by copying another HashMap's keys and values.
+---
+ AK/HashMap.h             |  6 ++++++
+ Tests/AK/TestHashMap.cpp | 26 ++++++++++++++++++++++++++
+ 2 files changed, 32 insertions(+)
+
+diff --git a/AK/HashMap.h b/AK/HashMap.h
+index d4dc439ff1313..1f1571fceaf07 100644
+--- a/AK/HashMap.h
++++ b/AK/HashMap.h
+@@ -64,6 +64,12 @@ class HashMap {
+     ErrorOr<HashSetResult> try_set(K const& key, V&& value, HashSetExistingEntryBehavior existing_entry_behavior = HashSetExistingEntryBehavior::Replace) { return m_table.try_set({ key, move(value) }, existing_entry_behavior); }
+     ErrorOr<HashSetResult> try_set(K&& key, V&& value, HashSetExistingEntryBehavior existing_entry_behavior = HashSetExistingEntryBehavior::Replace) { return m_table.try_set({ move(key), move(value) }, existing_entry_behavior); }
+ 
++    void update(HashMap const& other)
++    {
++        for (auto const& [key, value] : other)
++            set(key, value);
++    }
++
+     bool remove(K const& key)
+     {
+         auto it = find(key);
+diff --git a/Tests/AK/TestHashMap.cpp b/Tests/AK/TestHashMap.cpp
+index 2f55cb7e9a709..d4bbd7aa7450d 100644
+--- a/Tests/AK/TestHashMap.cpp
++++ b/Tests/AK/TestHashMap.cpp
+@@ -327,3 +327,29 @@ TEST_CASE(move_assign)
+     EXPECT_EQ(second.size(), static_cast<size_t>(3));
+     EXPECT_EQ(second.get(2), Optional<int>(20));
+ }
++
++TEST_CASE(update)
++{
++    HashMap<int, int> first;
++    HashMap<int, int> second;
++
++    first.set(1, 10);
++    first.set(2, 20);
++
++    second.set(1, 9);
++    second.set(3, 30);
++    second.set(4, 40);
++
++    first.update(second);
++
++    EXPECT_EQ(4u, first.size());
++    EXPECT_EQ(3u, second.size());
++
++    EXPECT_EQ(9, first.get(1));
++    EXPECT_EQ(20, first.get(2));
++    EXPECT_EQ(30, first.get(3));
++    EXPECT_EQ(40, first.get(4));
++
++    second.update(first);
++    EXPECT_EQ(4u, second.size());
++}
+
+From d15c4a79a1b77a1c02343101c39ec3697da4da7e Mon Sep 17 00:00:00 2001
+From: Jelle Raaijmakers <jelle@ladybird.org>
+Date: Fri, 25 Jul 2025 12:48:39 +0200
+Subject: [PATCH 2/2] Everywhere: Use HashMap::update() where applicable
+
+---
+ Libraries/LibIDL/IDLParser.cpp                  |  9 +++------
+ Libraries/LibIDL/Types.cpp                      | 16 ++++------------
+ Libraries/LibRegex/RegexByteCode.h              |  3 +--
+ Libraries/LibWeb/Animations/KeyframeEffect.cpp  |  3 +--
+ Libraries/LibWeb/CSS/StyleComputer.cpp          |  6 ++----
+ Libraries/LibWeb/HTML/XMLSerializer.cpp         |  3 +--
+ Libraries/LibWeb/Layout/InlineLevelIterator.cpp |  4 +---
+ 7 files changed, 13 insertions(+), 31 deletions(-)
+
+diff --git a/Libraries/LibIDL/IDLParser.cpp b/Libraries/LibIDL/IDLParser.cpp
+index 544b36eac6dae..de5cc6e26b7c3 100644
+--- a/Libraries/LibIDL/IDLParser.cpp
++++ b/Libraries/LibIDL/IDLParser.cpp
+@@ -1202,8 +1202,7 @@ Interface& Parser::parse()
+                 interface.extend_with_partial_interface(*partial_interface);
+         }
+ 
+-        for (auto& dictionary : import.dictionaries)
+-            interface.dictionaries.set(dictionary.key, dictionary.value);
++        interface.dictionaries.update(import.dictionaries);
+ 
+         for (auto& partial_dictionary : import.partial_dictionaries) {
+             auto& it = interface.partial_dictionaries.ensure(partial_dictionary.key);
+@@ -1216,8 +1215,7 @@ Interface& Parser::parse()
+             interface.enumerations.set(enumeration.key, move(enumeration_copy));
+         }
+ 
+-        for (auto& typedef_ : import.typedefs)
+-            interface.typedefs.set(typedef_.key, typedef_.value);
++        interface.typedefs.update(import.typedefs);
+ 
+         for (auto& mixin : import.mixins) {
+             if (auto it = interface.mixins.find(mixin.key); it != interface.mixins.end() && it->value != mixin.value)
+@@ -1225,8 +1223,7 @@ Interface& Parser::parse()
+             interface.mixins.set(mixin.key, mixin.value);
+         }
+ 
+-        for (auto& callback_function : import.callback_functions)
+-            interface.callback_functions.set(callback_function.key, callback_function.value);
++        interface.callback_functions.update(import.callback_functions);
+     }
+ 
+     // Resolve mixins
+diff --git a/Libraries/LibIDL/Types.cpp b/Libraries/LibIDL/Types.cpp
+index 56b168d1fe901..ece480200ae65 100644
+--- a/Libraries/LibIDL/Types.cpp
++++ b/Libraries/LibIDL/Types.cpp
+@@ -309,17 +309,13 @@ void Interface::extend_with_partial_interface(Interface const& partial)
+ {
+     for (auto const& attribute : partial.attributes) {
+         auto attribute_copy = attribute;
+-        for (auto const& [key, value] : partial.extended_attributes) {
+-            attribute_copy.extended_attributes.set(key, value);
+-        }
++        attribute_copy.extended_attributes.update(partial.extended_attributes);
+         attributes.append(move(attribute_copy));
+     }
+ 
+     for (auto const& static_attribute : partial.static_attributes) {
+         auto static_attribute_copy = static_attribute;
+-        for (auto const& [key, value] : partial.extended_attributes) {
+-            static_attribute_copy.extended_attributes.set(key, value);
+-        }
++        static_attribute_copy.extended_attributes.update(partial.extended_attributes);
+         static_attributes.append(move(static_attribute_copy));
+     }
+ 
+@@ -327,17 +323,13 @@ void Interface::extend_with_partial_interface(Interface const& partial)
+ 
+     for (auto const& function : partial.functions) {
+         auto function_copy = function;
+-        for (auto const& [key, value] : partial.extended_attributes) {
+-            function_copy.extended_attributes.set(key, value);
+-        }
++        function_copy.extended_attributes.update(partial.extended_attributes);
+         functions.append(move(function_copy));
+     }
+ 
+     for (auto const& static_function : partial.static_functions) {
+         auto static_function_copy = static_function;
+-        for (auto const& [key, value] : partial.extended_attributes) {
+-            static_function_copy.extended_attributes.set(key, value);
+-        }
++        static_function_copy.extended_attributes.update(partial.extended_attributes);
+         static_functions.append(move(static_function_copy));
+     }
+ }
+diff --git a/Libraries/LibRegex/RegexByteCode.h b/Libraries/LibRegex/RegexByteCode.h
+index c18aa21b32136..87a5ed7c399bf 100644
+--- a/Libraries/LibRegex/RegexByteCode.h
++++ b/Libraries/LibRegex/RegexByteCode.h
+@@ -278,8 +278,7 @@ class REGEX_API ByteCode : public DisjointChunks<ByteCodeValueType> {
+                 }
+                 m_string_table.m_table.set(entry.key, entry.value);
+             }
+-            for (auto const& entry : other.m_string_table.m_inverse_table)
+-                m_string_table.m_inverse_table.set(entry.key, entry.value);
++            m_string_table.m_inverse_table.update(other.m_string_table.m_inverse_table);
+         }
+     }
+ 
+diff --git a/Libraries/LibWeb/Animations/KeyframeEffect.cpp b/Libraries/LibWeb/Animations/KeyframeEffect.cpp
+index 35403d6402eee..8657558b83126 100644
+--- a/Libraries/LibWeb/Animations/KeyframeEffect.cpp
++++ b/Libraries/LibWeb/Animations/KeyframeEffect.cpp
+@@ -416,8 +416,7 @@ static WebIDL::ExceptionOr<Vector<BaseKeyframe>> process_a_keyframes_argument(JS
+             if (keyframe_a.computed_offset.value() == keyframe_b.computed_offset.value()) {
+                 keyframe_a.easing = keyframe_b.easing;
+                 keyframe_a.composite = keyframe_b.composite;
+-                for (auto const& [property_name, property_value] : keyframe_b.unparsed_properties())
+-                    keyframe_a.unparsed_properties().set(property_name, property_value);
++                keyframe_a.unparsed_properties().update(keyframe_b.unparsed_properties());
+                 processed_keyframes.remove(i + 1);
+                 i--;
+             }
+diff --git a/Libraries/LibWeb/CSS/StyleComputer.cpp b/Libraries/LibWeb/CSS/StyleComputer.cpp
+index cab9bd98aad42..ad3cb3bf727b1 100644
+--- a/Libraries/LibWeb/CSS/StyleComputer.cpp
++++ b/Libraries/LibWeb/CSS/StyleComputer.cpp
+@@ -983,10 +983,8 @@ static void cascade_custom_properties(DOM::Element& element, Optional<CSS::Pseud
+     }
+ 
+     if (!pseudo_element.has_value()) {
+-        if (auto const inline_style = element.inline_style()) {
+-            for (auto const& it : inline_style->custom_properties())
+-                custom_properties.set(it.key, it.value);
+-        }
++        if (auto const inline_style = element.inline_style())
++            custom_properties.update(inline_style->custom_properties());
+     }
+ }
+ 
+diff --git a/Libraries/LibWeb/HTML/XMLSerializer.cpp b/Libraries/LibWeb/HTML/XMLSerializer.cpp
+index 86f666f1f8367..9f50313465a54 100644
+--- a/Libraries/LibWeb/HTML/XMLSerializer.cpp
++++ b/Libraries/LibWeb/HTML/XMLSerializer.cpp
+@@ -515,8 +515,7 @@ static WebIDL::ExceptionOr<String> serialize_element(DOM::Element const& element
+     // To copy a namespace prefix map map means to copy the map's keys into a new empty namespace prefix map,
+     // and to copy each of the values in the namespace prefix list associated with each keys' value into a new list
+     // which should be associated with the respective key in the new map.
+-    for (auto const& map_entry : namespace_prefix_map)
+-        map.set(map_entry.key, map_entry.value);
++    map.update(namespace_prefix_map);
+ 
+     // 7. Let local prefixes map be an empty map. The map has unique Node prefix strings as its keys, with corresponding namespaceURI Node values
+     //    as the map's key values (in this map, the null namespace is represented by the empty string).
+diff --git a/Libraries/LibWeb/Layout/InlineLevelIterator.cpp b/Libraries/LibWeb/Layout/InlineLevelIterator.cpp
+index 7e3037211ad56..7e98a49e84f16 100644
+--- a/Libraries/LibWeb/Layout/InlineLevelIterator.cpp
++++ b/Libraries/LibWeb/Layout/InlineLevelIterator.cpp
+@@ -461,9 +461,7 @@ Gfx::ShapeFeatures InlineLevelIterator::create_and_merge_font_features() const
+     // FIXME 2. If the font is defined via an @font-face rule, the font features implied by the font-feature-settings descriptor in the @font-face rule.
+ 
+     // 3. Font features implied by the value of the ‘font-variant’ property, the related ‘font-variant’ subproperties and any other CSS property that uses OpenType features (e.g. the ‘font-kerning’ property).
+-    for (auto& it : shape_features_map()) {
+-        merged_features.set(it.key, it.value);
+-    }
++    merged_features.update(shape_features_map());
+ 
+     // FIXME 4. Feature settings determined by properties other than ‘font-variant’ or ‘font-feature-settings’. For example, setting a non-default value for the ‘letter-spacing’ property disables common ligatures.
+ 

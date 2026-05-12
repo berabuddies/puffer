@@ -1,0 +1,6 @@
+# Keep the canvas target tests explicit and run them through test-web with
+# low build parallelism to avoid LibWeb compiler OOM on small Docker hosts.
+Tests/LibWeb/Text/input/wpt-import/html/canvas/element/path-objects/2d.path.isPointInPath.transform.1.html
+Tests/LibWeb/Text/input/wpt-import/html/canvas/element/path-objects/2d.path.isPointInPath.transform.2.html
+Tests/LibWeb/Text/input/wpt-import/html/canvas/element/path-objects/2d.path.isPointInPath.transform.3.html
+Tests/LibWeb/Text/input/wpt-import/html/canvas/element/path-objects/2d.path.isPointInPath.transform.4.html

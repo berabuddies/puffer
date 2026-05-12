@@ -1,0 +1,4 @@
+# Run only the regression case added by this PR. The full TestImageDecoder
+# binary expects many image fixtures that are intentionally not part of the
+# minimized corpus.
+Tests/LibGfx/TestImageDecoder.cpp:test_gif_empty_lzw_data

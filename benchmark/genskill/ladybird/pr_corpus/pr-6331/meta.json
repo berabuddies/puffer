@@ -1,0 +1,14 @@
+{
+  "pr_number": 6331,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/6331",
+  "title": "LibJS: Move Typed Array copyWithin optimization before index update",
+  "merged_at": "2025-10-02T17:41:31Z",
+  "base_commit": "20490d146cbdb1398fd793cc9720a128f0f0f21e",
+  "merge_commit": "d082e7ec58e8a5f0c94a5eca73571571518ee26b",
+  "area": "libjs",
+  "files_changed": [
+    "Libraries/LibJS/Runtime/TypedArrayPrototype.cpp",
+    "Libraries/LibJS/Tests/builtins/TypedArray/TypedArray.prototype.copyWithin.js"
+  ],
+  "task_prompt": "Fix the failing LibJS TypedArray copyWithin regression in Libraries/LibJS/Tests/builtins/TypedArray/TypedArray.prototype.copyWithin.js. Preserve index update semantics while applying the optimization safely."
+}

@@ -1,0 +1,2 @@
+Libraries/LibJS/Tests/builtins/RegExp/RegExp.prototype.exec.js
+Tests/LibRegex/TestRegex.cpp

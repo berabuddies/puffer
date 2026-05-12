@@ -1,0 +1,1 @@
+Libraries/LibJS/Tests/classes/class-accessor-enumerable.js

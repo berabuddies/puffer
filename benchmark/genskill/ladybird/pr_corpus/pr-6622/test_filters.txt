@@ -1,0 +1,3 @@
+# Keep the crash regression explicit and run it through test-web with low
+# build parallelism to avoid LibWeb compiler OOM on small Docker hosts.
+Tests/LibWeb/Crash/CSS/mask-parsing-shorthand-multi-layer-mask-clip.html

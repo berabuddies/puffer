@@ -1,0 +1,14 @@
+{
+  "pr_number": 5623,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/5623",
+  "title": "LibRegex: Account for opcode size when calculating incoming jump edges",
+  "merged_at": "2025-07-28T15:06:59Z",
+  "base_commit": "c8888609f4058b864cc64d7450fbe31effa626c7",
+  "merge_commit": "8ada4b7fdca7cd4f280ee57f1f03a71cc3c6c904",
+  "area": "libregex",
+  "files_changed": [
+    "Libraries/LibRegex/RegexOptimizer.cpp",
+    "Tests/LibRegex/TestRegex.cpp"
+  ],
+  "task_prompt": "Fix the failing LibRegex optimizer regression in Tests/LibRegex/TestRegex.cpp. Account for opcode size when calculating incoming jump edges."
+}

@@ -1,0 +1,45 @@
+From 966ffa80e69c67828aa441674502702867daaa74 Mon Sep 17 00:00:00 2001
+From: Rocco Corsi <5201151+rcorsi@users.noreply.github.com>
+Date: Tue, 2 Sep 2025 12:44:27 -0400
+Subject: [PATCH] LibCore: Fix ThreadedPromise issues found with
+ ThreadSanitizer
+
+---
+ Libraries/LibCore/ThreadedPromise.h  | 3 +--
+ Tests/LibCore/TestLibCorePromise.cpp | 2 +-
+ 2 files changed, 2 insertions(+), 3 deletions(-)
+
+diff --git a/Libraries/LibCore/ThreadedPromise.h b/Libraries/LibCore/ThreadedPromise.h
+index 0910457f54d9b..d37d513abc1c3 100644
+--- a/Libraries/LibCore/ThreadedPromise.h
++++ b/Libraries/LibCore/ThreadedPromise.h
+@@ -61,7 +61,6 @@ class ThreadedPromise
+ 
+     bool has_completed()
+     {
+-        Threading::MutexLocker locker { m_mutex };
+         return m_has_completed;
+     }
+ 
+@@ -183,7 +182,7 @@ class ThreadedPromise
+     Function<ErrorOr<void>(ResultType&&)> m_resolution_handler;
+     Function<void(ErrorType&&)> m_rejection_handler;
+     Threading::Mutex m_mutex;
+-    bool m_has_completed;
++    Atomic<bool> m_has_completed;
+ };
+ 
+ }
+diff --git a/Tests/LibCore/TestLibCorePromise.cpp b/Tests/LibCore/TestLibCorePromise.cpp
+index feb39cd504ace..7fac926307078 100644
+--- a/Tests/LibCore/TestLibCorePromise.cpp
++++ b/Tests/LibCore/TestLibCorePromise.cpp
+@@ -158,7 +158,7 @@ TEST_CASE(threaded_promise_resolved_later)
+ {
+     Core::EventLoop loop;
+ 
+-    IGNORE_USE_IN_ESCAPING_LAMBDA bool unblock_thread = false;
++    IGNORE_USE_IN_ESCAPING_LAMBDA Atomic<bool> unblock_thread = false;
+     bool resolved = false;
+     bool rejected = true;
+     Optional<pthread_t> thread_id;

@@ -1,0 +1,229 @@
+From 04848f51cb0c6ef45bf3a1c684dc97217ca0e26f Mon Sep 17 00:00:00 2001
+From: Zaggy1024 <Zaggy1024@gmail.com>
+Date: Fri, 7 Nov 2025 18:18:36 -0600
+Subject: [PATCH 1/2] AK: Simplify calculation of the right padding when
+ formatting u64
+
+---
+ AK/Format.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/AK/Format.cpp b/AK/Format.cpp
+index 08f69f06279c9..1a38edcbf642d 100644
+--- a/AK/Format.cpp
++++ b/AK/Format.cpp
+@@ -337,7 +337,7 @@ ErrorOr<void> FormatBuilder::put_u64(
+         TRY(put_padding(fill, used_by_right_padding));
+     } else if (align == Align::Center) {
+         auto const used_by_left_padding = used_by_padding / 2;
+-        auto const used_by_right_padding = ceil_div<size_t, size_t>(used_by_padding, 2);
++        auto const used_by_right_padding = used_by_padding - used_by_left_padding;
+ 
+         TRY(put_padding(fill, used_by_left_padding));
+         TRY(put_prefix());
+
+From e58c6fb3441800431a8b20a049919cf0e50153d1 Mon Sep 17 00:00:00 2001
+From: Zaggy1024 <Zaggy1024@gmail.com>
+Date: Fri, 7 Nov 2025 18:19:19 -0600
+Subject: [PATCH 2/2] AK+Tests: Add a formatter for Duration
+
+This will format Duration as seconds, with as much decimal precision as
+necessary to fully represent its value. The alternate format specifier
+can be used to make it print the units on the end, i.e. "1.23s".
+---
+ AK/Time.cpp             | 107 ++++++++++++++++++++++++++++++++++++++++
+ AK/Time.h               |   7 +++
+ Tests/AK/TestFormat.cpp |  33 +++++++++++++
+ 3 files changed, 147 insertions(+)
+
+diff --git a/AK/Time.cpp b/AK/Time.cpp
+index 96aac19f77ac8..aed63edeca27a 100644
+--- a/AK/Time.cpp
++++ b/AK/Time.cpp
+@@ -218,6 +218,113 @@ Duration Duration::from_half_sanitized(i64 seconds, i32 extra_seconds, u32 nanos
+     return Duration { seconds + extra_seconds, nanoseconds };
+ }
+ 
++ErrorOr<void> Formatter<Duration>::format(FormatBuilder& builder, Duration value)
++{
++    if (value.m_nanoseconds >= 1'000'000'000)
++        return builder.put_string("{ INVALID }"sv);
++
++    auto align = m_align;
++    if (align == FormatBuilder::Align::Default)
++        align = FormatBuilder::Align::Right;
++
++    auto sign_mode = m_sign_mode;
++    if (sign_mode == FormatBuilder::SignMode::Default)
++        sign_mode = FormatBuilder::SignMode::OnlyIfNeeded;
++
++    auto align_width = m_width.value_or(0);
++
++    u8 base;
++    bool upper_case = false;
++    if (m_mode == Mode::Default || m_mode == Mode::FixedPoint) {
++        base = 10;
++    } else if (m_mode == Mode::Hexfloat) {
++        base = 16;
++    } else if (m_mode == Mode::HexfloatUppercase) {
++        base = 16;
++        upper_case = true;
++    } else if (m_mode == Mode::Binary) {
++        base = 2;
++    } else if (m_mode == Mode::BinaryUppercase) {
++        base = 2;
++        upper_case = true;
++    } else if (m_mode == Mode::Octal) {
++        base = 8;
++    } else {
++        VERIFY_NOT_REACHED();
++    }
++
++    auto is_negative = value.m_seconds < 0;
++    auto seconds = is_negative ? 0 - static_cast<u64>(value.m_seconds) : static_cast<u64>(value.m_seconds);
++    auto nanoseconds = value.m_nanoseconds;
++    if (is_negative && nanoseconds > 0) {
++        seconds--;
++        nanoseconds = 1'000'000'000 - nanoseconds;
++    }
++
++    VERIFY(nanoseconds < 1'000'000'000);
++
++    size_t integer_width = 1;
++    if (seconds != 0) {
++        auto remaining_seconds = seconds / 10;
++        while (remaining_seconds != 0) {
++            remaining_seconds /= base;
++            integer_width++;
++        }
++    }
++    if (sign_mode != FormatBuilder::SignMode::OnlyIfNeeded)
++        integer_width++;
++
++    constexpr size_t nanoseconds_length = 9;
++    size_t precision = 0;
++    u64 nanoseconds_to_precision = nanoseconds;
++    if (m_precision.has_value()) {
++        precision = min(m_precision.value(), nanoseconds_length);
++        for (size_t i = nanoseconds_length; i > precision; i--)
++            nanoseconds_to_precision /= base;
++    } else if (nanoseconds_to_precision != 0) {
++        auto trailing_zeroes = 0;
++        while ((nanoseconds_to_precision % base) == 0) {
++            nanoseconds_to_precision /= base;
++            trailing_zeroes++;
++        }
++        precision = nanoseconds_length - trailing_zeroes;
++    }
++
++    size_t non_integer_width = 0;
++    if (precision != 0)
++        non_integer_width = precision + 1;
++    if (m_alternative_form)
++        non_integer_width++;
++
++    auto total_width = integer_width + non_integer_width;
++
++    size_t integer_align_width = 0;
++    if (align == FormatBuilder::Align::Right)
++        integer_align_width = Checked<size_t>::saturating_sub(align_width, non_integer_width);
++    else if (align == FormatBuilder::Align::Center)
++        integer_align_width = integer_width + Checked<size_t>::saturating_sub(align_width, total_width) / 2;
++    TRY(builder.put_u64(seconds, base, false, upper_case, m_zero_pad, m_use_separator, FormatBuilder::Align::Right, integer_align_width, m_fill, m_sign_mode, is_negative));
++
++    if (nanoseconds_to_precision != 0) {
++        TRY(builder.builder().try_append('.'));
++        TRY(builder.put_u64(nanoseconds_to_precision, base, false, upper_case, true, m_use_separator, FormatBuilder::Align::Right, precision));
++        if (m_precision.has_value() && m_precision.value() > nanoseconds_length) {
++            auto zeroes = m_precision.value() - nanoseconds_length;
++            TRY(builder.put_padding('0', zeroes));
++        }
++    }
++
++    if (m_alternative_form)
++        TRY(builder.builder().try_append('s'));
++
++    if (align_width > 0 && align != FormatBuilder::Align::Right) {
++        auto padding_width = Checked<size_t>::saturating_sub(align_width, max(integer_width, integer_align_width) + non_integer_width);
++        TRY(builder.builder().try_append_repeated(m_fill, padding_width));
++    }
++
++    return {};
++}
++
+ namespace {
+ 
+ #if defined(AK_OS_WINDOWS)
+diff --git a/AK/Time.h b/AK/Time.h
+index bf6ea5e2102d1..6595b25b22ca3 100644
+--- a/AK/Time.h
++++ b/AK/Time.h
+@@ -353,6 +353,8 @@ class Duration {
+     }
+ 
+ private:
++    friend struct Formatter<Duration>;
++
+     constexpr explicit Duration(i64 seconds, u32 nanoseconds)
+         : m_seconds(seconds)
+         , m_nanoseconds(nanoseconds)
+@@ -365,6 +367,11 @@ class Duration {
+     u32 m_nanoseconds { 0 }; // Always less than 1'000'000'000
+ };
+ 
++template<>
++struct Formatter<Duration> : StandardFormatter {
++    ErrorOr<void> format(FormatBuilder&, Duration);
++};
++
+ namespace Detail {
+ 
+ // Common base class for all unaware time types.
+diff --git a/Tests/AK/TestFormat.cpp b/Tests/AK/TestFormat.cpp
+index d6d113b70c3d8..1e6c49acb1a24 100644
+--- a/Tests/AK/TestFormat.cpp
++++ b/Tests/AK/TestFormat.cpp
+@@ -8,6 +8,7 @@
+ 
+ #include <AK/ByteString.h>
+ #include <AK/StringBuilder.h>
++#include <AK/Time.h>
+ #include <AK/Vector.h>
+ 
+ #ifdef AK_OS_WINDOWS
+@@ -479,3 +480,35 @@ TEST_CASE(format_checked)
+         EXPECT_EQ(ByteString::formatted("{}", c), "{ OVERFLOW }");
+     }
+ }
++
++TEST_CASE(format_duration)
++{
++    EXPECT_EQ(ByteString::formatted("{}", AK::Duration::from_seconds(0)), "0");
++    EXPECT_EQ(ByteString::formatted("{}", AK::Duration::from_seconds(NumericLimits<i64>::max())), "9223372036854775807");
++    EXPECT_EQ(ByteString::formatted("{}", AK::Duration::from_seconds(NumericLimits<i64>::min())), "-9223372036854775808");
++
++    EXPECT_EQ(ByteString::formatted("{}", AK::Duration::from_microseconds(6'500)), "0.0065");
++    EXPECT_EQ(ByteString::formatted("{}", AK::Duration::from_microseconds(-6'500)), "-0.0065");
++    EXPECT_EQ(ByteString::formatted("{}", AK::Duration::from_milliseconds(-1'500)), "-1.5");
++
++    EXPECT_EQ(ByteString::formatted("{}", AK::Duration::from_nanoseconds(1)), "0.000000001");
++    EXPECT_EQ(ByteString::formatted("{}", AK::Duration::from_nanoseconds(999'999'999)), "0.999999999");
++    EXPECT_EQ(ByteString::formatted("{}", AK::Duration::from_nanoseconds(-999'999'999)), "-0.999999999");
++
++    EXPECT_EQ(ByteString::formatted("{:05}", AK::Duration::from_seconds(1)), "00001");
++    EXPECT_EQ(ByteString::formatted("{:8}", AK::Duration::from_milliseconds(1'250)), "    1.25");
++    EXPECT_EQ(ByteString::formatted("{:|>4}", AK::Duration::from_seconds(1)), "|||1");
++    EXPECT_EQ(ByteString::formatted("{:.<20}", AK::Duration::from_nanoseconds(1'050'250'000'001)), "1050.250000001......");
++    EXPECT_EQ(ByteString::formatted("{:^5}", AK::Duration::from_milliseconds(1'500)), " 1.5 ");
++    EXPECT_EQ(ByteString::formatted("{:^+6}", AK::Duration::from_milliseconds(1'500)), " +1.5 ");
++
++    EXPECT_EQ(ByteString::formatted("{:.10}", AK::Duration::from_milliseconds(100'000'500)), "100000.5000000000");
++    EXPECT_EQ(ByteString::formatted("{:.0}", AK::Duration::from_milliseconds(67'500)), "67");
++    EXPECT_EQ(ByteString::formatted("{:.0}", AK::Duration::from_nanoseconds(123'456'789)), "0");
++    EXPECT_EQ(ByteString::formatted("{:.3}", AK::Duration::from_nanoseconds(123'456'789)), "0.123");
++    EXPECT_EQ(ByteString::formatted("{:.9}", AK::Duration::from_milliseconds(500)), "0.500000000");
++    EXPECT_EQ(ByteString::formatted("{:.21}", AK::Duration::from_milliseconds(500)), "0.500000000000000000000");
++
++    EXPECT_EQ(ByteString::formatted("{:#}", AK::Duration::from_milliseconds(12'054)), "12.054s");
++    EXPECT_EQ(ByteString::formatted("{:^#8}", AK::Duration::from_milliseconds(1'512)), " 1.512s ");
++}

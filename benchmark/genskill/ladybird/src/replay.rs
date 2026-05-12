@@ -300,7 +300,19 @@ fn collect_corpus_test_files(root: &Path, current: &Path, files: &mut Vec<PathBu
 
 fn corpus_test_filter(path: &Path) -> Option<String> {
     let path = path.to_string_lossy().replace('\\', "/");
-    if !path.starts_with("Tests/") || path.ends_with("/CMakeLists.txt") {
+    if path.ends_with("/CMakeLists.txt") {
+        return None;
+    }
+
+    if path.starts_with("Libraries/LibJS/Tests/") && path.ends_with(".js") {
+        return Some(path);
+    }
+
+    if path.starts_with("Libraries/LibWasm/Tests/Executor/") && path.ends_with(".js") {
+        return Some(path);
+    }
+
+    if !path.starts_with("Tests/") {
         return None;
     }
 
@@ -347,9 +359,22 @@ fn test_command_for(filters: &[String]) -> String {
         .iter()
         .filter_map(|filter| ctest_pattern_arg(filter))
         .collect::<Vec<_>>();
+    let js_filters = filters
+        .iter()
+        .filter_map(|filter| js_test_filter_arg(filter))
+        .collect::<Vec<_>>();
+    let wasm_filters = filters
+        .iter()
+        .filter_map(|filter| wasm_test_filter_arg(filter))
+        .collect::<Vec<_>>();
     let unsupported_filters = filters
         .iter()
-        .filter(|filter| libweb_filter_arg(filter).is_none() && ctest_pattern_arg(filter).is_none())
+        .filter(|filter| {
+            libweb_filter_arg(filter).is_none()
+                && ctest_pattern_arg(filter).is_none()
+                && js_test_filter_arg(filter).is_none()
+                && wasm_test_filter_arg(filter).is_none()
+        })
         .collect::<Vec<_>>();
 
     let mut commands = vec!["status=0".to_string()];
@@ -408,6 +433,22 @@ fn test_command_for(filters: &[String]) -> String {
         ));
     }
 
+    if !js_filters.is_empty() {
+        commands.push(js_runner_command(
+            "test-js",
+            "Libraries/LibJS/Tests",
+            &js_filters,
+        ));
+    }
+
+    if !wasm_filters.is_empty() {
+        commands.push(js_runner_command(
+            "test-wasm",
+            "Libraries/LibWasm/Tests",
+            &wasm_filters,
+        ));
+    }
+
     for filter in unsupported_filters {
         let quoted_filter = shell_quote(filter);
         commands.push(format!(
@@ -423,6 +464,46 @@ fn libweb_filter_arg(filter: &str) -> Option<String> {
     filter
         .strip_prefix("Tests/LibWeb/")
         .map(ToString::to_string)
+}
+
+fn js_test_filter_arg(filter: &str) -> Option<String> {
+    filter
+        .strip_prefix("Libraries/LibJS/Tests/")
+        .filter(|path| path.ends_with(".js"))
+        .map(ToString::to_string)
+}
+
+fn wasm_test_filter_arg(filter: &str) -> Option<String> {
+    filter
+        .strip_prefix("Libraries/LibWasm/Tests/")
+        .filter(|path| path.starts_with("Executor/") && path.ends_with(".js"))
+        .map(ToString::to_string)
+}
+
+fn js_runner_command(target: &str, root: &str, filters: &[String]) -> String {
+    let quoted_target = shell_quote(target);
+    let filter_args = filters
+        .iter()
+        .map(|filter| format!("-f {}", shell_quote(filter)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "echo '=== target js tests: {target} ==='; \
+         if [ -f Meta/ladybird.py ]; then \
+             python3 Meta/ladybird.py build --jobs 1 {quoted_target}; \
+             rc=$?; \
+             if [ $rc -eq 0 ]; then \
+                 /work/ladybird/Build/release/bin/{target} {filter_args} {root} Libraries/LibJS/Tests/test-common.js; \
+                 rc=$?; \
+             fi; \
+         elif [ -x Meta/ladybird.sh ]; then \
+             ./Meta/ladybird.sh run {quoted_target} {filter_args}; \
+             rc=$?; \
+         else \
+             echo 'no Ladybird JS test runner found' >&2; exit 127; \
+         fi; \
+         if [ $rc -ne 0 ]; then status=$rc; fi"
+    )
 }
 
 fn ctest_pattern_arg(filter: &str) -> Option<(String, String, Option<String>)> {
@@ -529,10 +610,33 @@ mod tests {
 
     #[test]
     fn test_command_rejects_unsupported_filters() {
-        let filters = vec!["Tests/LibJS/foo.js".to_string()];
+        let filters = vec!["Libraries/LibWasm/Tests/Fixtures/Modules/foo.wasm".to_string()];
         let command = test_command_for(&filters);
-        assert!(command.contains("unsupported target test filter: 'Tests/LibJS/foo.js'"));
+        assert!(command.contains(
+            "unsupported target test filter: 'Libraries/LibWasm/Tests/Fixtures/Modules/foo.wasm'"
+        ));
         assert!(command.contains("status=127"));
+    }
+
+    #[test]
+    fn test_command_runs_libjs_filters_with_test_js() {
+        let filters = vec!["Libraries/LibJS/Tests/regress/inline-caching.js".to_string()];
+        let command = test_command_for(&filters);
+        assert!(command.contains("python3 Meta/ladybird.py build --jobs 1 'test-js'"));
+        assert!(command.contains(
+            "/work/ladybird/Build/release/bin/test-js -f 'regress/inline-caching.js' Libraries/LibJS/Tests Libraries/LibJS/Tests/test-common.js"
+        ));
+    }
+
+    #[test]
+    fn test_command_runs_libwasm_executor_filters_with_test_wasm() {
+        let filters =
+            vec!["Libraries/LibWasm/Tests/Executor/test-memory_fill-order.js".to_string()];
+        let command = test_command_for(&filters);
+        assert!(command.contains("python3 Meta/ladybird.py build --jobs 1 'test-wasm'"));
+        assert!(command.contains(
+            "/work/ladybird/Build/release/bin/test-wasm -f 'Executor/test-memory_fill-order.js' Libraries/LibWasm/Tests Libraries/LibJS/Tests/test-common.js"
+        ));
     }
 
     #[test]
@@ -569,6 +673,22 @@ mod tests {
     fn corpus_test_filter_ignores_build_metadata() {
         assert_eq!(
             corpus_test_filter(Path::new("Tests/LibURL/CMakeLists.txt")),
+            None
+        );
+    }
+
+    #[test]
+    fn corpus_test_filter_keeps_libjs_and_libwasm_js_tests() {
+        assert_eq!(
+            corpus_test_filter(Path::new("Libraries/LibJS/Tests/regress/foo.js")),
+            Some("Libraries/LibJS/Tests/regress/foo.js".to_string())
+        );
+        assert_eq!(
+            corpus_test_filter(Path::new("Libraries/LibWasm/Tests/Executor/foo.js")),
+            Some("Libraries/LibWasm/Tests/Executor/foo.js".to_string())
+        );
+        assert_eq!(
+            corpus_test_filter(Path::new("Libraries/LibWasm/Tests/Fixtures/foo.wasm")),
             None
         );
     }

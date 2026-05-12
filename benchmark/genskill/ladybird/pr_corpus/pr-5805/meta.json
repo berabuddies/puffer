@@ -1,0 +1,14 @@
+{
+  "pr_number": 5805,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/5805",
+  "title": "LibJS: Handle out-of-range prefixed numbers in Token::double_value",
+  "merged_at": "2025-08-10T11:35:38Z",
+  "base_commit": "652a457f5239fa5824ba120b377268359e2a0966",
+  "merge_commit": "e2b245add184445635887616cf4547976a753a6f",
+  "area": "libjs",
+  "files_changed": [
+    "Libraries/LibJS/Tests/numeric-literals-basic.js",
+    "Libraries/LibJS/Token.cpp"
+  ],
+  "task_prompt": "Fix the failing LibJS numeric literal regression in Libraries/LibJS/Tests/numeric-literals-basic.js. Handle out-of-range prefixed numbers in Token::double_value correctly."
+}

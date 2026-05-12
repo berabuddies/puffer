@@ -1,0 +1,333 @@
+From 07908181d7787cebabce40387737a3b8ad39e3ec Mon Sep 17 00:00:00 2001
+From: Timothy Flynn <trflynn89@pm.me>
+Date: Mon, 18 Aug 2025 16:43:04 -0400
+Subject: [PATCH] AK: Specialize Optional for Utf16String and Utf16FlyString
+
+We added this for String some time ago, so let's give Utf16String the
+same optimization. Note that Utf16String was already handling its data
+member potentially being null as of 5af99f4dd0f0288eb7b9d4edaa3fdbace.
+---
+ AK/Utf16FlyString.h             | 97 +++++++++++++++++++++++++++++++++
+ AK/Utf16String.h                | 97 +++++++++++++++++++++++++++++++++
+ AK/Utf16StringBase.h            | 10 +++-
+ Tests/AK/TestUtf16FlyString.cpp | 24 ++++++++
+ Tests/AK/TestUtf16String.cpp    | 24 ++++++++
+ 5 files changed, 251 insertions(+), 1 deletion(-)
+
+diff --git a/AK/Utf16FlyString.h b/AK/Utf16FlyString.h
+index b7bbe63665adb..eeb43320baf63 100644
+--- a/AK/Utf16FlyString.h
++++ b/AK/Utf16FlyString.h
+@@ -136,6 +136,13 @@ class [[nodiscard]] Utf16FlyString {
+     [[nodiscard]] ALWAYS_INLINE size_t code_unit_offset_of(size_t code_point_offset) const { return m_data.code_unit_offset_of(code_point_offset); }
+     [[nodiscard]] ALWAYS_INLINE size_t code_point_offset_of(size_t code_unit_offset) const { return m_data.code_point_offset_of(code_unit_offset); }
+ 
++    constexpr Utf16FlyString(Badge<Optional<Utf16FlyString>>, nullptr_t)
++        : m_data(Badge<Utf16FlyString> {}, nullptr)
++    {
++    }
++
++    [[nodiscard]] constexpr bool is_invalid(Badge<Optional<Utf16FlyString>>) const { return m_data.raw({}) == 0; }
++
+     // This is primarily interesting to unit tests.
+     [[nodiscard]] static size_t number_of_utf16_fly_strings();
+ 
+@@ -151,6 +158,96 @@ class [[nodiscard]] Utf16FlyString {
+     Detail::Utf16StringBase m_data;
+ };
+ 
++template<>
++class Optional<Utf16FlyString> : public OptionalBase<Utf16FlyString> {
++    template<typename U>
++    friend class Optional;
++
++public:
++    using ValueType = Utf16FlyString;
++
++    constexpr Optional() = default;
++
++    template<SameAs<OptionalNone> V>
++    constexpr Optional(V) { }
++
++    constexpr Optional(Optional<Utf16FlyString> const& other)
++        : m_value(other.m_value)
++    {
++    }
++
++    constexpr Optional(Optional&& other)
++        : m_value(move(other.m_value))
++    {
++    }
++
++    template<typename U = Utf16FlyString>
++    requires(!IsSame<OptionalNone, RemoveCVReference<U>>)
++    explicit(!IsConvertible<U&&, Utf16FlyString>) constexpr Optional(U&& value)
++    requires(!IsSame<RemoveCVReference<U>, Optional<Utf16FlyString>> && IsConstructible<Utf16FlyString, U &&>)
++        : m_value(forward<U>(value))
++    {
++    }
++
++    template<SameAs<OptionalNone> V>
++    constexpr Optional& operator=(V)
++    {
++        clear();
++        return *this;
++    }
++
++    constexpr Optional& operator=(Optional const& other)
++    {
++        if (this != &other)
++            m_value = other.m_value;
++        return *this;
++    }
++
++    constexpr Optional& operator=(Optional&& other)
++    {
++        if (this != &other)
++            m_value = other.m_value;
++        return *this;
++    }
++
++    constexpr void clear()
++    {
++        m_value = empty_value;
++    }
++
++    [[nodiscard]] constexpr bool has_value() const
++    {
++        return !m_value.is_invalid({});
++    }
++
++    [[nodiscard]] constexpr Utf16FlyString& value() &
++    {
++        VERIFY(has_value());
++        return m_value;
++    }
++
++    [[nodiscard]] constexpr Utf16FlyString const& value() const&
++    {
++        VERIFY(has_value());
++        return m_value;
++    }
++
++    [[nodiscard]] constexpr Utf16FlyString value() &&
++    {
++        return release_value();
++    }
++
++    [[nodiscard]] constexpr Utf16FlyString release_value()
++    {
++        VERIFY(has_value());
++        return exchange(m_value, empty_value);
++    }
++
++private:
++    static constexpr Utf16FlyString empty_value { {}, nullptr };
++    Utf16FlyString m_value { empty_value };
++};
++
+ template<>
+ struct Traits<Utf16FlyString> : public DefaultTraits<Utf16FlyString> {
+     static unsigned hash(Utf16FlyString const& string) { return string.hash(); }
+diff --git a/AK/Utf16String.h b/AK/Utf16String.h
+index 12c2ffdf218bf..5d3b52f79a94b 100644
+--- a/AK/Utf16String.h
++++ b/AK/Utf16String.h
+@@ -204,6 +204,13 @@ class [[nodiscard]] Utf16String : public Detail::Utf16StringBase {
+     static Utf16String from_string_builder(Badge<StringBuilder>, StringBuilder& builder);
+     static ErrorOr<Utf16String> from_ipc_stream(Stream&, size_t length_in_code_units, bool is_ascii);
+ 
++    constexpr Utf16String(Badge<Optional<Utf16String>>, nullptr_t)
++        : Detail::Utf16StringBase(Badge<Utf16String> {}, nullptr)
++    {
++    }
++
++    [[nodiscard]] constexpr bool is_invalid(Badge<Optional<Utf16String>>) const { return raw() == 0; }
++
+ private:
+     ALWAYS_INLINE explicit Utf16String(NonnullRefPtr<Detail::Utf16StringData const> value)
+         : Utf16StringBase(move(value))
+@@ -211,6 +218,96 @@ class [[nodiscard]] Utf16String : public Detail::Utf16StringBase {
+     }
+ };
+ 
++template<>
++class [[nodiscard]] Optional<Utf16String> : public OptionalBase<Utf16String> {
++    template<typename U>
++    friend class Optional;
++
++public:
++    using ValueType = Utf16String;
++
++    constexpr Optional() = default;
++
++    template<SameAs<OptionalNone> V>
++    constexpr Optional(V) { }
++
++    constexpr Optional(Optional<Utf16String> const& other)
++        : m_value(other.m_value)
++    {
++    }
++
++    constexpr Optional(Optional&& other)
++        : m_value(move(other.m_value))
++    {
++    }
++
++    template<typename U = Utf16String>
++    requires(!IsSame<OptionalNone, RemoveCVReference<U>>)
++    explicit(!IsConvertible<U&&, Utf16String>) constexpr Optional(U&& value)
++    requires(!IsSame<RemoveCVReference<U>, Optional<Utf16String>> && IsConstructible<Utf16String, U &&>)
++        : m_value(forward<U>(value))
++    {
++    }
++
++    template<SameAs<OptionalNone> V>
++    constexpr Optional& operator=(V)
++    {
++        clear();
++        return *this;
++    }
++
++    constexpr Optional& operator=(Optional const& other)
++    {
++        if (this != &other)
++            m_value = other.m_value;
++        return *this;
++    }
++
++    constexpr Optional& operator=(Optional&& other)
++    {
++        if (this != &other)
++            m_value = move(other.m_value);
++        return *this;
++    }
++
++    constexpr void clear()
++    {
++        m_value = empty_value;
++    }
++
++    [[nodiscard]] constexpr bool has_value() const
++    {
++        return !m_value.is_invalid({});
++    }
++
++    [[nodiscard]] constexpr Utf16String& value() &
++    {
++        VERIFY(has_value());
++        return m_value;
++    }
++
++    [[nodiscard]] constexpr Utf16String const& value() const&
++    {
++        VERIFY(has_value());
++        return m_value;
++    }
++
++    [[nodiscard]] constexpr Utf16String value() &&
++    {
++        return release_value();
++    }
++
++    [[nodiscard]] constexpr Utf16String release_value()
++    {
++        VERIFY(has_value());
++        return exchange(m_value, empty_value);
++    }
++
++private:
++    static constexpr Utf16String empty_value { Badge<Optional<Utf16String>> {}, nullptr };
++    Utf16String m_value { empty_value };
++};
++
+ template<>
+ struct Formatter<Utf16String> : Formatter<FormatString> {
+     ErrorOr<void> format(FormatBuilder&, Utf16String const&);
+diff --git a/AK/Utf16StringBase.h b/AK/Utf16StringBase.h
+index b2e5a37f10876..5957bdb919fad 100644
+--- a/AK/Utf16StringBase.h
++++ b/AK/Utf16StringBase.h
+@@ -330,9 +330,17 @@ class Utf16StringBase {
+         (*this_data)->ref();
+     }
+ 
+-    [[nodiscard]] constexpr FlatPtr raw(Badge<Utf16FlyString>) const { return bit_cast<FlatPtr>(m_value); }
++    template<OneOf<Utf16String, Utf16FlyString> T>
++    constexpr Utf16StringBase(Badge<T>, nullptr_t)
++        : m_value { .data = nullptr }
++    {
++    }
++
++    [[nodiscard]] constexpr FlatPtr raw(Badge<Utf16FlyString>) const { return raw(); }
+ 
+ protected:
++    [[nodiscard]] constexpr FlatPtr raw() const { return bit_cast<FlatPtr>(m_value); }
++
+     ALWAYS_INLINE void destroy_string() const
+     {
+         if (has_long_storage()) {
+diff --git a/Tests/AK/TestUtf16FlyString.cpp b/Tests/AK/TestUtf16FlyString.cpp
+index 770619b6ed185..1f7d6ccb8d87d 100644
+--- a/Tests/AK/TestUtf16FlyString.cpp
++++ b/Tests/AK/TestUtf16FlyString.cpp
+@@ -146,3 +146,27 @@ TEST_CASE(is_one_of)
+     EXPECT(bar.is_one_of("bar"sv, "foo"sv));
+     EXPECT(bar.is_one_of("bar"sv));
+ }
++
++TEST_CASE(optional)
++{
++    static_assert(AssertSize<Optional<Utf16FlyString>, sizeof(Utf16FlyString)>());
++
++    Optional<Utf16FlyString> string;
++    EXPECT(!string.has_value());
++
++    string = "ascii"_utf16_fly_string;
++    EXPECT(string.has_value());
++    EXPECT_EQ(string.value(), "ascii"sv);
++
++    auto released = string.release_value();
++    EXPECT(!string.has_value());
++    EXPECT_EQ(released, "ascii"sv);
++
++    string = u"well 😀 hello"_utf16_fly_string;
++    EXPECT(string.has_value());
++    EXPECT_EQ(string.value(), u"well 😀 hello"sv);
++
++    released = string.release_value();
++    EXPECT(!string.has_value());
++    EXPECT_EQ(released, u"well 😀 hello"sv);
++}
+diff --git a/Tests/AK/TestUtf16String.cpp b/Tests/AK/TestUtf16String.cpp
+index 3d21098c85974..66e1cdcd59dcf 100644
+--- a/Tests/AK/TestUtf16String.cpp
++++ b/Tests/AK/TestUtf16String.cpp
+@@ -1271,3 +1271,27 @@ TEST_CASE(code_point_at)
+     test(u"😀"sv, 1);
+     test(u"hello 😀 there!"sv, 14);
+ }
++
++TEST_CASE(optional)
++{
++    static_assert(AssertSize<Optional<Utf16String>, sizeof(Utf16String)>());
++
++    Optional<Utf16String> string;
++    EXPECT(!string.has_value());
++
++    string = "ascii"_utf16;
++    EXPECT(string.has_value());
++    EXPECT_EQ(string.value(), "ascii"sv);
++
++    auto released = string.release_value();
++    EXPECT(!string.has_value());
++    EXPECT_EQ(released, "ascii"sv);
++
++    string = u"well 😀 hello"_utf16;
++    EXPECT(string.has_value());
++    EXPECT_EQ(string.value(), u"well 😀 hello"sv);
++
++    released = string.release_value();
++    EXPECT(!string.has_value());
++    EXPECT_EQ(released, u"well 😀 hello"sv);
++}

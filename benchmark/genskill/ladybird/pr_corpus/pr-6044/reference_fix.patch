@@ -1,0 +1,54 @@
+From 52e9dc4a50d4bbb0862f31e51a8302e69fcf30fd Mon Sep 17 00:00:00 2001
+From: Luke Wilde <luke@ladybird.org>
+Date: Mon, 1 Sep 2025 15:38:42 +0100
+Subject: [PATCH] LibJS: Copy base object of LHS of assignment to preserve eval
+ order
+
+Previously, the given test would create an object with the test
+property that pointed to itself.
+
+This is because `temp = temp.test || {}` overwrote the `temp` local
+register, and `temp.test = temp` used the new object instead of the
+original one it fetched.
+
+Allows https://www.yorkshiretea.co.uk/ to load, which was failing in
+Gsap library initialization.
+---
+ Libraries/LibJS/Bytecode/ASTCodegen.cpp              |  3 ++-
+ Libraries/LibJS/Tests/assignment-evaluation-order.js | 12 ++++++++++++
+ 2 files changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/Libraries/LibJS/Bytecode/ASTCodegen.cpp b/Libraries/LibJS/Bytecode/ASTCodegen.cpp
+index 66d2637d68e37..1a714de28f693 100644
+--- a/Libraries/LibJS/Bytecode/ASTCodegen.cpp
++++ b/Libraries/LibJS/Bytecode/ASTCodegen.cpp
+@@ -568,7 +568,8 @@ Bytecode::CodeGenerationErrorOr<Optional<ScopedOperand>> AssignmentExpression::g
+                     lhs_is_super_expression = is<SuperExpression>(expression.object());
+ 
+                     if (!lhs_is_super_expression) {
+-                        base = TRY(expression.object().generate_bytecode(generator)).value();
++                        auto generated_base = TRY(expression.object().generate_bytecode(generator)).value();
++                        base = generator.copy_if_needed_to_preserve_evaluation_order(generated_base);
+                     } else {
+                         // https://tc39.es/ecma262/#sec-super-keyword-runtime-semantics-evaluation
+                         // 1. Let env be GetThisEnvironment().
+diff --git a/Libraries/LibJS/Tests/assignment-evaluation-order.js b/Libraries/LibJS/Tests/assignment-evaluation-order.js
+index 6e1e156d37528..6e41ea3952038 100644
+--- a/Libraries/LibJS/Tests/assignment-evaluation-order.js
++++ b/Libraries/LibJS/Tests/assignment-evaluation-order.js
+@@ -19,3 +19,15 @@ test("Binary assignment should always evaluate LHS first", () => {
+     go(a);
+     expect(a).toEqual([3, 2]);
+ });
++
++test("Base object of lhs of assignment is copied to preserve evaluation order", () => {
++    let topLevel = {};
++    function go() {
++        let temp = topLevel;
++        temp.test = temp = temp.test || {};
++    }
++
++    go();
++    expect(topLevel.test).not.toBeUndefined();
++    expect(topLevel.test).toEqual({});
++});

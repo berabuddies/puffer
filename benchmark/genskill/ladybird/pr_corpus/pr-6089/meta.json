@@ -1,0 +1,15 @@
+{
+  "pr_number": 6089,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/6089",
+  "title": "LibWasm: Fix memory.fill ignoring memory index and unsafe bounds check",
+  "merged_at": "2025-09-06T06:51:11Z",
+  "base_commit": "9e11fa0ac6131a60941dc6a0da91b30e127c4cd2",
+  "merge_commit": "a125bc97c459915b075dfd57752c2f34185b95cb",
+  "area": "libwasm",
+  "files_changed": [
+    "Libraries/LibWasm/AbstractMachine/BytecodeInterpreter.cpp",
+    "Libraries/LibWasm/Tests/Executor/test-memfill-memidx.js",
+    "Libraries/LibWasm/Tests/Fixtures/Modules/memfill-memidx.wasm"
+  ],
+  "task_prompt": "Fix the failing LibWasm memory.fill memory-index regression covered by Libraries/LibWasm/Tests/Executor/test-memfill-memidx.js. Ensure bounds and memory selection are handled correctly."
+}

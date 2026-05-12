@@ -1,0 +1,17 @@
+{
+  "pr_number": 5904,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/5904",
+  "title": "AK: Specialize Optional for Utf16String and Utf16FlyString",
+  "merged_at": "2025-08-19T10:24:09Z",
+  "base_commit": "8fd1df4f8bbfa0820c5eff1c759c7afd0f0fe463",
+  "merge_commit": "1869399fd14e40394e77eab945e5c910f3dfde1d",
+  "area": "ak",
+  "files_changed": [
+    "AK/Utf16FlyString.h",
+    "AK/Utf16String.h",
+    "AK/Utf16StringBase.h",
+    "Tests/AK/TestUtf16FlyString.cpp",
+    "Tests/AK/TestUtf16String.cpp"
+  ],
+  "task_prompt": "Fix the failing AK UTF-16 Optional regression in Tests/AK/TestUtf16String.cpp and Tests/AK/TestUtf16FlyString.cpp. Preserve Optional semantics for Utf16String and Utf16FlyString."
+}

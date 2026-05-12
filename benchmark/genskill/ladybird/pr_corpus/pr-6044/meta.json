@@ -1,0 +1,14 @@
+{
+  "pr_number": 6044,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/6044",
+  "title": "LibJS: Copy base object of LHS of assignment to preserve eval order",
+  "merged_at": "2025-09-02T11:59:52Z",
+  "base_commit": "7dade36d96bd621df6da0e93af45e01414739364",
+  "merge_commit": "18c0739bbbdb91b4d95dc5c9b7c008c67865ebd5",
+  "area": "libjs",
+  "files_changed": [
+    "Libraries/LibJS/Bytecode/ASTCodegen.cpp",
+    "Libraries/LibJS/Tests/assignment-evaluation-order.js"
+  ],
+  "task_prompt": "Fix the failing LibJS assignment evaluation order regression in Libraries/LibJS/Tests/assignment-evaluation-order.js. Preserve the base object of the left-hand side before assignment side effects."
+}

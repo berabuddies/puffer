@@ -1,0 +1,6 @@
+# Run only the CMYK/YCCK regression cases added by this PR. The full
+# TestImageDecoder binary expects many image fixtures that are intentionally
+# not part of the minimized corpus.
+Tests/LibGfx/TestImageDecoder.cpp:test_jpeg_cmyk_no_adobe_marker
+Tests/LibGfx/TestImageDecoder.cpp:test_jpeg_cmyk_adobe_transform_0
+Tests/LibGfx/TestImageDecoder.cpp:test_jpeg_ycck_adobe_transform_2

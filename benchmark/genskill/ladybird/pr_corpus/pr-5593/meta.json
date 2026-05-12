@@ -1,0 +1,14 @@
+{
+  "pr_number": 5593,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/5593",
+  "title": "LibRegex: Use code unit length in more places that apply",
+  "merged_at": "2025-07-24T21:09:01Z",
+  "base_commit": "66e1d599f8c1f54265930068c8ba74856d3f4dfa",
+  "merge_commit": "c7ad6cd5083c6e29741fc75a3577f40e585b085e",
+  "area": "libregex",
+  "files_changed": [
+    "Libraries/LibRegex/RegexByteCode.cpp",
+    "Tests/LibRegex/TestRegex.cpp"
+  ],
+  "task_prompt": "Fix the failing LibRegex code-unit length regression in Tests/LibRegex/TestRegex.cpp. Use code unit length consistently in regex bytecode behavior."
+}

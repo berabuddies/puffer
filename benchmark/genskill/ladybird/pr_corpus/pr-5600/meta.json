@@ -1,0 +1,21 @@
+{
+  "pr_number": 5600,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/5600",
+  "title": "AK: Add and use HashMap::update()",
+  "merged_at": "2025-07-25T14:22:06Z",
+  "base_commit": "76ee1ce04cdef8785761f3c25200515ef67d9bb1",
+  "merge_commit": "73967ee90cfcfa4cad0fcb833c702b6a1fcfa099",
+  "area": "ak",
+  "files_changed": [
+    "AK/HashMap.h",
+    "Libraries/LibIDL/IDLParser.cpp",
+    "Libraries/LibIDL/Types.cpp",
+    "Libraries/LibRegex/RegexByteCode.h",
+    "Libraries/LibWeb/Animations/KeyframeEffect.cpp",
+    "Libraries/LibWeb/CSS/StyleComputer.cpp",
+    "Libraries/LibWeb/HTML/XMLSerializer.cpp",
+    "Libraries/LibWeb/Layout/InlineLevelIterator.cpp",
+    "Tests/AK/TestHashMap.cpp"
+  ],
+  "task_prompt": "Fix the failing AK HashMap regression in Tests/AK/TestHashMap.cpp. Add the missing update behavior while preserving existing insertion and lookup semantics."
+}

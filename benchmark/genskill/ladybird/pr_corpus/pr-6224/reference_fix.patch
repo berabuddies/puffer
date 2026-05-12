@@ -1,0 +1,85 @@
+From 0d6d837b1f78047d2d471db8e2434cd373da1d1d Mon Sep 17 00:00:00 2001
+From: Aliaksandr Kalenik <kalenik.aliaksandr@gmail.com>
+Date: Thu, 18 Sep 2025 02:28:52 +0200
+Subject: [PATCH] LibJS: Capture PrototypeChainValidity before executing
+ `internal_get()`
+
+- Capture PrototypeChainValidity before invoking `internal_get()`. A
+  getter may mutate the prototype chain (e.g., delete itself). Capturing
+  earlier ensures such mutations invalidate the cached entry and prevent
+  stale GetById hits.
+- When caching, take PrototypeChainValidity from the base object
+  (receiver), not from the prototype where the property was found.
+  Otherwise, changes to an intermediate prototype between the base
+  object and the cached prototype object go unnoticed, leading to
+  incorrect cache hits.
+---
+ Libraries/LibJS/Bytecode/Interpreter.cpp      |  6 +++-
+ .../LibJS/Tests/regress/inline-caching.js     | 34 +++++++++++++++++++
+ 2 files changed, 39 insertions(+), 1 deletion(-)
+ create mode 100644 Libraries/LibJS/Tests/regress/inline-caching.js
+
+diff --git a/Libraries/LibJS/Bytecode/Interpreter.cpp b/Libraries/LibJS/Bytecode/Interpreter.cpp
+index e44534b8b7d9e..b334ef9abdc2c 100644
+--- a/Libraries/LibJS/Bytecode/Interpreter.cpp
++++ b/Libraries/LibJS/Bytecode/Interpreter.cpp
+@@ -996,6 +996,10 @@ inline ThrowCompletionOr<Value> get_by_id(VM& vm, Optional<IdentifierTableIndex>
+ 
+     auto& shape = base_obj->shape();
+ 
++    GC::Ptr<PrototypeChainValidity> prototype_chain_validity;
++    if (shape.prototype())
++        prototype_chain_validity = shape.prototype()->shape().prototype_chain_validity();
++
+     for (auto& cache_entry : cache.entries) {
+         if (cache_entry.prototype) {
+             // OPTIMIZATION: If the prototype chain hasn't been mutated in a way that would invalidate the cache, we can use it.
+@@ -1046,7 +1050,7 @@ inline ThrowCompletionOr<Value> get_by_id(VM& vm, Optional<IdentifierTableIndex>
+             entry.shape = &base_obj->shape();
+             entry.property_offset = cacheable_metadata.property_offset.value();
+             entry.prototype = *cacheable_metadata.prototype;
+-            entry.prototype_chain_validity = *cacheable_metadata.prototype->shape().prototype_chain_validity();
++            entry.prototype_chain_validity = *prototype_chain_validity;
+         }
+     }
+ 
+diff --git a/Libraries/LibJS/Tests/regress/inline-caching.js b/Libraries/LibJS/Tests/regress/inline-caching.js
+new file mode 100644
+index 0000000000000..40156255f62ac
+--- /dev/null
++++ b/Libraries/LibJS/Tests/regress/inline-caching.js
+@@ -0,0 +1,34 @@
++test("Accessor removal during getter execution should bust GetById cache", () => {
++    function f(obj, expected) {
++        expect(obj.hm).toBe(expected);
++    }
++
++    const proto = {
++        get hm() {
++            delete proto.hm;
++            return 123;
++        },
++    };
++    const obj = Object.create(proto);
++
++    f(obj, 123);
++    f(obj, undefined);
++});
++
++test("Overriding an inherited getter with a data property on an intermediate prototype invalidates prototype-chain cache", () => {
++    function f(obj, expected) {
++        expect(obj.hm).toBe(expected);
++    }
++
++    const proto = {};
++    proto.__proto__ = {
++        get hm() {
++            return 123;
++        },
++    };
++    const obj = Object.create(proto);
++
++    f(obj, 123);
++    Object.defineProperty(proto, "hm", { value: 321 });
++    f(obj, 321);
++});

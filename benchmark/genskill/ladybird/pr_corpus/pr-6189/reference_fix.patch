@@ -1,0 +1,60 @@
+From f5ff473b430f339930882f135154b493b8450fef Mon Sep 17 00:00:00 2001
+From: me-it-is <188520719+me-it-is@users.noreply.github.com>
+Date: Sat, 13 Sep 2025 16:41:10 -0700
+Subject: [PATCH] AK: Fix is_within_range when converting from float
+
+Within range now uses the max capacity of a type rather than its size.
+This fixes some subtests in
+https://wpt.fyi/results/wasm/core/conversions.wast.js.html?product=ladybird
+---
+ AK/Checked.h             |  4 ++--
+ Tests/AK/TestChecked.cpp | 17 +++++++++++++++++
+ 2 files changed, 19 insertions(+), 2 deletions(-)
+
+diff --git a/AK/Checked.h b/AK/Checked.h
+index 13090e6b1a859..84aea2c3df6a3 100644
+--- a/AK/Checked.h
++++ b/AK/Checked.h
+@@ -34,7 +34,7 @@
+ 
+ namespace AK {
+ 
+-template<typename Destination, typename Source, bool destination_is_wider = (sizeof(Destination) >= sizeof(Source)), bool destination_is_signed = NumericLimits<Destination>::is_signed(), bool source_is_signed = NumericLimits<Source>::is_signed()>
++template<typename Destination, typename Source, bool destination_is_wider = (NumericLimits<Destination>::max() >= NumericLimits<Source>::max()), bool destination_is_signed = NumericLimits<Destination>::is_signed(), bool source_is_signed = NumericLimits<Source>::is_signed()>
+ struct TypeBoundsChecker;
+ 
+ template<typename Destination, typename Source>
+@@ -98,7 +98,7 @@ template<typename Destination, typename Source>
+ struct TypeBoundsChecker<Destination, Source, true, true, false> {
+     static constexpr bool is_within_range(Source value)
+     {
+-        if (sizeof(Destination) > sizeof(Source))
++        if (NumericLimits<Destination>::max() > NumericLimits<Source>::max())
+             return true;
+         return value <= static_cast<Source>(NumericLimits<Destination>::max());
+     }
+diff --git a/Tests/AK/TestChecked.cpp b/Tests/AK/TestChecked.cpp
+index 452b1eb46e96d..34562a2ac2df1 100644
+--- a/Tests/AK/TestChecked.cpp
++++ b/Tests/AK/TestChecked.cpp
+@@ -445,3 +445,20 @@ TEST_CASE(should_constexpr_make_via_factory)
+ {
+     [[maybe_unused]] constexpr auto value = make_checked(42);
+ }
++
++TEST_CASE(is_within_range_float_to_int)
++{
++    static_assert(AK::is_within_range<int>(0.0));
++    static_assert(AK::is_within_range<int>(0.0f));
++    static_assert(AK::is_within_range<int>(((long double)0.0)));
++
++    static_assert(!AK::is_within_range<int>(NumericLimits<float>::max()));
++    static_assert(!AK::is_within_range<int>(NumericLimits<double>::max()));
++    static_assert(!AK::is_within_range<int>(NumericLimits<long double>::max()));
++    static_assert(!AK::is_within_range<int>(NumericLimits<float>::lowest()));
++
++    static_assert(AK::is_within_range<long>(0.0));
++    static_assert(AK::is_within_range<long long>(0.0));
++
++    static_assert(!AK::is_within_range<int>(NAN));
++}
