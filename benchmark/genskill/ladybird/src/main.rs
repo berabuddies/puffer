@@ -45,6 +45,9 @@ enum Cmd {
         pr: String,
         /// Replay arm: no-skill | direct | gepa.
         arm: String,
+        /// Run date directory under reports/. Defaults to today's UTC date.
+        #[arg(long)]
+        run_date: Option<String>,
     },
     /// Aggregate completed replays into a single report.
     Aggregate {
@@ -72,7 +75,7 @@ async fn main() -> Result<()> {
             println!("Wrote {}", output.display());
             Ok(())
         }
-        Cmd::Replay { pr, arm } => {
+        Cmd::Replay { pr, arm, run_date } => {
             let arm = replay::Arm::parse(&arm)?;
             let entries = pr_corpus::load_corpus(std::path::Path::new(
                 "benchmark/genskill/ladybird/pr_corpus",
@@ -81,7 +84,8 @@ async fn main() -> Result<()> {
                 .iter()
                 .find(|e| e.id == pr)
                 .ok_or_else(|| anyhow::anyhow!("pr {pr} not in corpus"))?;
-            let run_date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+            let run_date =
+                run_date.unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d").to_string());
             let cfg = replay::ReplayConfig {
                 corpus_entry: entry,
                 arm,
