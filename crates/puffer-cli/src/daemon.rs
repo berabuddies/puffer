@@ -2290,12 +2290,15 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
             }
             Err(err) => {
                 eprintln!("turn {turn_id_thread} failed: {err:#}");
+                let (friendly, category) = classify_turn_error(&err);
                 setup_state.publish_event(ServerEnvelope::Event {
                     event: channel_thread.clone(),
                     payload: json!({
                         "type": "turn-error",
                         "turnId": turn_id_thread,
-                        "error": format!("{err:#}"),
+                        "error": friendly,
+                        "errorRaw": format!("{err:#}"),
+                        "category": category,
                     }),
                 });
             }
@@ -2309,6 +2312,49 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     });
 
     Ok(json!({"turnId": turn_id_resp}))
+}
+
+/// Translates a raw `anyhow::Error` from `execute_user_turn_streaming_*`
+/// into a `(friendly-message, category)` pair for the SSE `turn-error`
+/// event. Frontends switch on `category` to surface UX-friendly affordances
+/// (e.g. an automatic "retry" button for transient runner-unreachable
+/// failures), and the raw error stays available as `errorRaw` for debug.
+///
+/// Categories we currently distinguish:
+///   * `runner_unreachable` — gRPC channel to `remote_runner` returned
+///     `tcp connect error` / `Connection refused`. On agentenv this is the
+///     wake-after-sleep stale-`host_port` bug (issue agentenv/monorepo#401):
+///     `config.toml`'s `remote_runner.endpoint` carries the host_port from
+///     a prior session, but the hypervisor allocates a fresh port on
+///     restore — the daemon then dials the old port and gets refused. The
+///     bug is fixed in api-server (refresh sandbox metadata before passing
+///     `runnerEndpoint` to `wakePuffer`); this categorisation is the
+///     puffer-side belt-and-suspenders so the user-visible failure mode is
+///     "the sandbox is still warming up, retry in a moment" instead of a
+///     cryptic transport-level message.
+///   * `cancelled` — agent loop bailed because `CancelToken::cancel`
+///     fired. Mirrors the bail string `"cancelled"`.
+///   * `other` — anything we haven't classified.
+fn classify_turn_error(err: &anyhow::Error) -> (String, &'static str) {
+    // anyhow walks the chain via Display when you `format!("{:#}", err)`
+    let chain = format!("{err:#}");
+    let lower = chain.to_ascii_lowercase();
+    if lower.contains("tcp connect error")
+        || lower.contains("connection refused")
+        || lower.contains("connect: connection refused")
+    {
+        return (
+            "the tool runner is not reachable yet — this can happen when the sandbox \
+             just resumed from sleep and its runtime port has not been re-mapped. \
+             retry in a few seconds."
+                .to_string(),
+            "runner_unreachable",
+        );
+    }
+    if lower == "cancelled" || lower.contains(": cancelled") {
+        return (chain, "cancelled");
+    }
+    (chain, "other")
 }
 
 fn apply_turn_model_override(
@@ -2446,6 +2492,34 @@ mod tests {
         );
         assert_eq!(state.effort_level, "off");
         assert!(state.fast_mode);
+    }
+
+    #[test]
+    fn classify_turn_error_distinguishes_runner_unreachable() {
+        use super::classify_turn_error;
+
+        // Real shape from a sleeping puffer agent's first tool call after
+        // wake (production trace, agentenv issue #401): the
+        // RemoteToolRunner returns `tonic::Code::Unavailable` because the
+        // host_port `config.toml` carried is stale, surfacing as the wrapped
+        // error string `transport error: tcp connect error`.
+        let err = anyhow::anyhow!("transport error: tcp connect error: Connection refused");
+        let (msg, cat) = classify_turn_error(&err);
+        assert_eq!(cat, "runner_unreachable", "{msg}");
+        assert!(msg.contains("retry"), "{msg}");
+
+        // Cancel path keeps the lowercase canonical bail string so PR #109
+        // and downstream consumers that key on `cancelled` still work.
+        let err = anyhow::anyhow!("cancelled");
+        let (msg, cat) = classify_turn_error(&err);
+        assert_eq!(cat, "cancelled");
+        assert_eq!(msg, "cancelled");
+
+        // Anything else falls through with the raw chain preserved.
+        let err = anyhow::anyhow!("HTTP 503 from upstream");
+        let (msg, cat) = classify_turn_error(&err);
+        assert_eq!(cat, "other");
+        assert!(msg.contains("HTTP 503"));
     }
 
     #[test]
