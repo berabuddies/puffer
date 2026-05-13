@@ -1984,6 +1984,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     let message_for_thread = message.clone();
     let session_id_for_thread = session_id.clone();
     let model_override_for_thread = model_override.clone();
+    let cancel_for_thread = cancel.clone();
     std::thread::spawn(move || {
         setup_state.publish_event(ServerEnvelope::Event {
             event: channel_thread.clone(),
@@ -2290,7 +2291,8 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
             }
             Err(err) => {
                 eprintln!("turn {turn_id_thread} failed: {err:#}");
-                let (friendly, category) = classify_turn_error(&err);
+                let (friendly, category) =
+                    classify_turn_error(&err, cancel_for_thread.is_cancelled());
                 setup_state.publish_event(ServerEnvelope::Event {
                     event: channel_thread.clone(),
                     payload: json!({
@@ -2321,6 +2323,13 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
 /// failures), and the raw error stays available as `errorRaw` for debug.
 ///
 /// Categories we currently distinguish:
+///   * `cancelled` — the turn's [`CancelToken`] was fired before the agent
+///     loop returned an error. Takes precedence over all other classes:
+///     a cancel can interrupt a tool-runner stream mid-flight and surface
+///     as `transport error` rather than the canonical `cancelled` bail
+///     string, and we don't want the user-facing message to claim the
+///     runner was unreachable when in fact the user pressed cancel. The
+///     raw error chain is preserved as `errorRaw` for debug.
 ///   * `runner_unreachable` — gRPC channel to `remote_runner` returned
 ///     `tcp connect error` / `Connection refused`. On agentenv this is the
 ///     wake-after-sleep stale-`host_port` bug (issue agentenv/monorepo#401):
@@ -2332,12 +2341,13 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
 ///     puffer-side belt-and-suspenders so the user-visible failure mode is
 ///     "the sandbox is still warming up, retry in a moment" instead of a
 ///     cryptic transport-level message.
-///   * `cancelled` — agent loop bailed because `CancelToken::cancel`
-///     fired. Mirrors the bail string `"cancelled"`.
 ///   * `other` — anything we haven't classified.
-fn classify_turn_error(err: &anyhow::Error) -> (String, &'static str) {
+fn classify_turn_error(err: &anyhow::Error, was_cancelled: bool) -> (String, &'static str) {
     // anyhow walks the chain via Display when you `format!("{:#}", err)`
     let chain = format!("{err:#}");
+    if was_cancelled {
+        return (chain, "cancelled");
+    }
     let lower = chain.to_ascii_lowercase();
     if lower.contains("tcp connect error")
         || lower.contains("connection refused")
@@ -2504,22 +2514,51 @@ mod tests {
         // host_port `config.toml` carried is stale, surfacing as the wrapped
         // error string `transport error: tcp connect error`.
         let err = anyhow::anyhow!("transport error: tcp connect error: Connection refused");
-        let (msg, cat) = classify_turn_error(&err);
+        let (msg, cat) = classify_turn_error(&err, false);
         assert_eq!(cat, "runner_unreachable", "{msg}");
         assert!(msg.contains("retry"), "{msg}");
 
         // Cancel path keeps the lowercase canonical bail string so PR #109
         // and downstream consumers that key on `cancelled` still work.
         let err = anyhow::anyhow!("cancelled");
-        let (msg, cat) = classify_turn_error(&err);
+        let (msg, cat) = classify_turn_error(&err, false);
         assert_eq!(cat, "cancelled");
         assert_eq!(msg, "cancelled");
 
         // Anything else falls through with the raw chain preserved.
         let err = anyhow::anyhow!("HTTP 503 from upstream");
-        let (msg, cat) = classify_turn_error(&err);
+        let (msg, cat) = classify_turn_error(&err, false);
         assert_eq!(cat, "other");
         assert!(msg.contains("HTTP 503"));
+    }
+
+    #[test]
+    fn classify_turn_error_cancel_shadows_transport_when_token_fired() {
+        use super::classify_turn_error;
+
+        // Real shape from Test B on the hv5 test stack: pressing cancel
+        // during a tool call causes the runner WebSocket to be dropped
+        // mid-stream, and the agent loop bubbles the resulting transport
+        // error up the `?` chain. Without cancel-awareness, the chain
+        // would be classified as `runner_unreachable` and the SSE turn-error
+        // would tell the user "retry, the sandbox is still warming up" —
+        // misleading, because the user just pressed cancel on purpose.
+        // With `was_cancelled=true` we surface the user's actual action.
+        let err = anyhow::anyhow!("internal runner error: transport error");
+        let (msg, cat) = classify_turn_error(&err, true);
+        assert_eq!(
+            cat, "cancelled",
+            "cancel takes precedence over a runner-unreachable-shaped chain: {msg}"
+        );
+        // raw chain is preserved (errorRaw still carries the transport
+        // detail for debug); only the category is upgraded.
+        assert!(msg.contains("transport error"), "{msg}");
+
+        // And of course the canonical `cancelled` bail still works under
+        // both flag values.
+        let err = anyhow::anyhow!("cancelled");
+        let (_, cat) = classify_turn_error(&err, true);
+        assert_eq!(cat, "cancelled");
     }
 
     #[test]
