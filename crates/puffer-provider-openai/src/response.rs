@@ -107,6 +107,11 @@ pub struct OpenAIChatChoiceMessage {
 ///    under `message.reasoning.summary` or `message.reasoning.content`).
 /// 3. A `<think>…</think>` block inside `message.content` (the
 ///    open-source / DeepSeek-R1 distill convention).
+///
+/// The returned text is sanitized via [`sanitize_reasoning_text`] so a
+/// stray NUL or C0 control byte in the vendor's chain-of-thought
+/// doesn't round-trip into the next request and get rejected by the
+/// vendor's own validator.
 pub fn extract_chat_completions_reasoning(
     response: &OpenAIChatCompletionsResponse,
 ) -> Option<String> {
@@ -119,7 +124,7 @@ pub fn extract_chat_completions_reasoning(
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        return Some(value.to_string());
+        return Some(sanitize_reasoning_text(value));
     }
 
     // (3) <think>…</think> inside content. Catches DeepSeek-R1-style
@@ -128,11 +133,34 @@ pub fn extract_chat_completions_reasoning(
     if let Some(content) = message.content.as_ref() {
         let raw = content_to_text(content);
         if let Some(thinking) = extract_think_block(&raw) {
-            return Some(thinking);
+            return Some(sanitize_reasoning_text(&thinking));
         }
     }
 
     None
+}
+
+/// Strips NUL (`\x00`) and other C0 control bytes from `text`, keeping
+/// `\t`, `\n`, `\r` and DEL untouched-as-original (DEL is dropped).
+///
+/// Kimi K2.6 has been observed emitting a stray `\x00` inside its own
+/// `reasoning_content` chain-of-thought, then refusing the same string
+/// on replay the next turn with `400 "reasoning_content at position N
+/// must be a valid UTF-8 string: string contains \x00"`. Filtering at
+/// extraction time keeps the multi-turn round-trip clean for every
+/// downstream consumer (request serializer, session_store, trace
+/// emitter) without needing per-call-site guards.
+pub fn sanitize_reasoning_text(text: &str) -> String {
+    text.chars()
+        .filter(|c| {
+            let cp = *c as u32;
+            if cp < 0x20 {
+                matches!(*c, '\t' | '\n' | '\r')
+            } else {
+                cp != 0x7f
+            }
+        })
+        .collect()
 }
 
 /// Returns the visible-to-user portion of the assistant message,

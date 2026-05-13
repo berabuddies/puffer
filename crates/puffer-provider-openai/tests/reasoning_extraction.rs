@@ -1,6 +1,6 @@
 use puffer_provider_openai::{
     extract_chat_completions_reasoning, extract_chat_completions_visible_text,
-    parse_chat_completions_response,
+    parse_chat_completions_response, sanitize_reasoning_text,
 };
 
 #[test]
@@ -65,4 +65,37 @@ fn empty_reasoning_content_returns_none() {
     let payload = r#"{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"answer","reasoning_content":""},"finish_reason":"stop"}]}"#;
     let parsed = parse_chat_completions_response(payload).unwrap();
     assert_eq!(extract_chat_completions_reasoning(&parsed), None);
+}
+
+#[test]
+fn strips_nul_byte_from_reasoning_content() {
+    // Kimi K2.6 has been observed emitting a stray \x00 mid-reasoning,
+    // then refusing the same string on replay with HTTP 400. Verify
+    // the NUL is filtered while \t \n \r survive.
+    let payload = "{\"id\":\"x\",\"object\":\"chat.completion\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"answer\",\"reasoning_content\":\"first line\\nsecond\\u0000third\\tfourth\"},\"finish_reason\":\"stop\"}]}";
+    let parsed = parse_chat_completions_response(payload).unwrap();
+    let got = extract_chat_completions_reasoning(&parsed).expect("reasoning");
+    assert!(!got.contains('\u{0000}'), "NUL leaked: {got:?}");
+    assert!(got.contains('\n'), "newline got stripped: {got:?}");
+    assert!(got.contains('\t'), "tab got stripped: {got:?}");
+    assert!(got.contains("secondthird"), "NUL boundary not spliced: {got:?}");
+}
+
+#[test]
+fn strips_control_bytes_from_think_block() {
+    // The <think> fallback path should also sanitize so DeepSeek-R1
+    // distill outputs round-trip cleanly when the reasoning leaks a
+    // C0 byte.
+    let payload = "{\"id\":\"x\",\"object\":\"chat.completion\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"<think>good\\u0000bad\\u0001end</think>visible\"},\"finish_reason\":\"stop\"}]}";
+    let parsed = parse_chat_completions_response(payload).unwrap();
+    let got = extract_chat_completions_reasoning(&parsed).expect("reasoning");
+    assert_eq!(got, "goodbadend");
+}
+
+#[test]
+fn sanitize_preserves_whitespace_and_strips_del() {
+    assert_eq!(
+        sanitize_reasoning_text("a\tb\nc\rd\u{0000}e\u{007f}f"),
+        "a\tb\nc\rdef"
+    );
 }

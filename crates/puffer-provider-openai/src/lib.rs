@@ -162,6 +162,13 @@ pub fn extract_chat_completions_visible_text(response: &OpenAIChatCompletionsRes
     response::extract_chat_completions_visible_text(response)
 }
 
+/// Re-export of the reasoning-text sanitizer applied to
+/// `reasoning_content` and `<think>` blocks before they round-trip into
+/// the next request. Exposed so other crates (request serializers,
+/// session-store writers) can apply the same filter on data that
+/// arrived from somewhere other than `extract_chat_completions_reasoning`.
+pub use response::sanitize_reasoning_text;
+
 /// Extracts tool calls from a parsed OpenAI Responses API payload.
 pub fn extract_responses_tool_calls(
     response: &OpenAIResponsesResponse,
