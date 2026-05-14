@@ -105,6 +105,14 @@ pub(crate) fn run_non_interactive_command(
     );
     let started = std::time::Instant::now();
     let turn_result = if let Some(command) = args.run_command.as_deref() {
+        if let Some(message) = args
+            .user_message
+            .as_deref()
+            .map(str::trim)
+            .filter(|message| !message.is_empty())
+        {
+            append_user_message(&mut state, &session_store, message)?;
+        }
         run_slash_command(
             command,
             &mut state,
@@ -154,6 +162,21 @@ pub(crate) fn run_non_interactive_command(
         }
     }
     write_transcript(&session_store, session.id, &args.transcript_out)?;
+    Ok(())
+}
+
+fn append_user_message(
+    state: &mut AppState,
+    session_store: &SessionStore,
+    message: &str,
+) -> Result<()> {
+    state.push_message(MessageRole::User, message.to_string());
+    session_store.append_event(
+        state.session.id,
+        TranscriptEvent::UserMessage {
+            text: message.to_string(),
+        },
+    )?;
     Ok(())
 }
 

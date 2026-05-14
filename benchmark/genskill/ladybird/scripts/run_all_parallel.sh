@@ -41,24 +41,25 @@ bash "$ROOT/scripts/build_linux_puffer.sh"
 export PUFFER_REPLAY_BIN="${PUFFER_REPLAY_BIN:-$ROOT/.bin/puffer-linux}"
 cargo run --release -p puffer-genskill-eval -- validate
 
-task_file=$(mktemp "${TMPDIR:-/tmp}/puffer-genskill-tasks.XXXXXX")
+task_file=$(mktemp "${TMPDIR:-/tmp}/puffer-genskill-prs.XXXXXX")
 trap 'rm -f "$task_file"' EXIT
 
 for pr_dir in "$ROOT"/pr_corpus/pr-*/; do
   pr=$(basename "${pr_dir%/}")
-  for arm in no-skill direct gepa; do
-    printf '%s\t%s\n' "$pr" "$arm" >> "$task_file"
-  done
+  printf '%s\n' "$pr" >> "$task_file"
 done
 
-echo "Running $(wc -l < "$task_file" | tr -d ' ') replays with JOBS=$JOBS into $REPORT_DIR"
+pr_count=$(wc -l < "$task_file" | tr -d ' ')
+echo "Running $((pr_count * 3)) replays across $pr_count PRs with JOBS=$JOBS into $REPORT_DIR"
+echo "Each PR runs no-skill, direct, and gepa serially to avoid triple-building the same Ladybird target."
 
-xargs -P "$JOBS" -n 2 sh -c '
+xargs -P "$JOBS" -n 1 sh -c '
   pr="$1"
-  arm="$2"
-  echo "=== $pr / $arm ==="
-  cargo run --release -p puffer-genskill-eval -- replay "$pr" "$arm" --run-date "$RUN_DATE" \
-    || echo "(replay failed; continuing): $pr / $arm" >&2
+  for arm in no-skill direct gepa; do
+    echo "=== $pr / $arm ==="
+    cargo run --release -p puffer-genskill-eval -- replay "$pr" "$arm" --run-date "$RUN_DATE" \
+      || echo "(replay failed; continuing): $pr / $arm" >&2
+  done
 ' sh < "$task_file"
 
 cargo run --release -p puffer-genskill-eval -- aggregate "$RUN_DATE"

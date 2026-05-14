@@ -63,7 +63,12 @@ pub(crate) fn handle_genskill_command(
         .iter()
         .filter(|message| matches!(message.role, MessageRole::ToolCall))
         .count();
-    if tool_call_count < 5 {
+    let has_reference_solution_context = state.transcript.iter().any(|message| {
+        matches!(message.role, MessageRole::User)
+            && message.text.contains("Reference solution context")
+            && message.text.contains("Reference fix patch:")
+    });
+    if tool_call_count < 5 && !has_reference_solution_context {
         return Ok(
             "/genskill needs a substantive transcript (at least 5 tool calls). Use it after a non-trivial task."
                 .to_string(),
