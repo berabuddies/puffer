@@ -268,6 +268,32 @@
   // ─────────────────────────────────────────────────────────────
   // Init
   // ─────────────────────────────────────────────────────────────
+  // Auto-recap: when the window loses focus for `RECAP_IDLE_MS`, submit
+  // `/recap` so the session shows a 1-2 sentence summary by the time the
+  // user comes back. Matches the TUI's idle-timer auto-trigger; mirrors
+  // claude-code's `tengu_sedge_lantern` blur path. The slash command
+  // dispatcher inside puffer-core decides whether to actually run (gates
+  // on `config.recap.enabled` + skip checks); this layer just deals with
+  // "is the window away long enough to be worth asking."
+  const RECAP_IDLE_MS = 180_000;
+  let recapBlurTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function armRecapBlurTimer() {
+    if (recapBlurTimer != null) return;
+    recapBlurTimer = setTimeout(() => {
+      recapBlurTimer = null;
+      if (!selectedSession) return;
+      void submitMessage("/recap", {});
+    }, RECAP_IDLE_MS);
+  }
+
+  function cancelRecapBlurTimer() {
+    if (recapBlurTimer != null) {
+      clearTimeout(recapBlurTimer);
+      recapBlurTimer = null;
+    }
+  }
+
   onMount(() => {
     tweaks = loadTweaks();
     applyTweaksToDocument(tweaks);
@@ -276,7 +302,14 @@
     } else if (skipOnboarding) {
       onboarding = false;
     }
+    window.addEventListener("blur", armRecapBlurTimer);
+    window.addEventListener("focus", cancelRecapBlurTimer);
     void init();
+    return () => {
+      cancelRecapBlurTimer();
+      window.removeEventListener("blur", armRecapBlurTimer);
+      window.removeEventListener("focus", cancelRecapBlurTimer);
+    };
   });
 
   $effect(() => {
