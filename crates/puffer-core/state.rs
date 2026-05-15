@@ -9,7 +9,7 @@ use puffer_session_store::{
 };
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -259,6 +259,18 @@ impl AppState {
         } else {
             None
         };
+        // The Skill(project-memory) flow tells the model to call Read on the
+        // memory file. The Read tool is sandboxed to working_dirs, so the
+        // memory file's parent has to be reachable on the main turn — the
+        // side-turn already does this in `prepare_project_memory_side_turn`,
+        // but without this the documented Skill+Read flow fails on the main
+        // turn and the model falls back to `Bash cat` (which bypasses the
+        // sandbox entirely).
+        let working_dirs = project_memory
+            .as_ref()
+            .and_then(|ctx| ctx.memory_file.parent().map(Path::to_path_buf))
+            .map(|parent| vec![parent])
+            .unwrap_or_default();
         let vim_mode = config.editor_mode == "vim";
         Self {
             current_model,
@@ -267,7 +279,7 @@ impl AppState {
             fast_mode,
             config,
             cwd,
-            working_dirs: Vec::new(),
+            working_dirs,
             session,
             prompt_cache_key_override: None,
             transcript: Vec::new(),
@@ -538,6 +550,19 @@ impl AppState {
         } else {
             None
         };
+        // Mirror the parent-dir push from `AppState::new`: when memory is
+        // (re)enabled or the project changes, the model needs Read access to
+        // the memory file from the main turn.
+        if let Some(parent) = self
+            .project_memory
+            .as_ref()
+            .and_then(|ctx| ctx.memory_file.parent())
+        {
+            let parent = parent.to_path_buf();
+            if !self.working_dirs.iter().any(|p| p == &parent) {
+                self.working_dirs.push(parent);
+            }
+        }
     }
 
     /// Records one completed or failed task in the current runtime session state.
