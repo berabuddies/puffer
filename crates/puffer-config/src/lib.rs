@@ -40,6 +40,8 @@ pub struct PufferConfig {
     pub copy_full_response: bool,
     #[serde(default)]
     pub memory: MemoryConfig,
+    #[serde(default)]
+    pub recap: RecapConfig,
     pub mascot: MascotConfig,
     pub ui: UiConfig,
     /// When set, the runtime constructs a remote `RemoteToolRunner` against
@@ -142,6 +144,45 @@ impl Default for MemoryConfig {
     }
 }
 
+/// Session recap (away-summary) configuration. Mirrors Anthropic's
+/// claude-code `/recap` semantics: a short, model-generated one-liner that
+/// surfaces in the UI when the user comes back after stepping away.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecapConfig {
+    /// Master switch. When false, both `/recap` slash command and auto
+    /// trigger are no-ops.
+    #[serde(default = "default_recap_enabled")]
+    pub enabled: bool,
+    /// Whether auto-trigger (TUI idle timer / GUI window blur) fires
+    /// recaps. The slash command is unaffected. Default true.
+    #[serde(default = "default_recap_auto")]
+    pub auto: bool,
+    /// Minimum idle seconds before the auto-trigger fires. Matches
+    /// claude-code's `on8 = 180_000` (3 min) default.
+    #[serde(default = "default_recap_idle_secs")]
+    pub idle_secs: u64,
+    /// Minimum number of real user messages before any recap can fire.
+    /// Matches claude-code's `Ls3 = 3`.
+    #[serde(default = "default_recap_min_user_messages")]
+    pub min_user_messages: usize,
+    /// Minimum number of new user messages required between successive
+    /// auto-recaps (cooldown). Matches claude-code's `ks3 = 2`.
+    #[serde(default = "default_recap_cooldown_messages")]
+    pub cooldown_messages: usize,
+}
+
+impl Default for RecapConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_recap_enabled(),
+            auto: default_recap_auto(),
+            idle_secs: default_recap_idle_secs(),
+            min_user_messages: default_recap_min_user_messages(),
+            cooldown_messages: default_recap_cooldown_messages(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ProjectRegistry {
     #[serde(default)]
@@ -176,6 +217,7 @@ impl Default for PufferConfig {
             effort_level: None,
             copy_full_response: false,
             memory: MemoryConfig::default(),
+            recap: RecapConfig::default(),
             mascot: MascotConfig {
                 id: "clawd".to_string(),
                 display_name: "Clawd".to_string(),
@@ -221,6 +263,26 @@ fn default_background_review() -> bool {
 
 fn default_flush_on_compact() -> bool {
     true
+}
+
+fn default_recap_enabled() -> bool {
+    true
+}
+
+fn default_recap_auto() -> bool {
+    true
+}
+
+fn default_recap_idle_secs() -> u64 {
+    180
+}
+
+fn default_recap_min_user_messages() -> usize {
+    3
+}
+
+fn default_recap_cooldown_messages() -> usize {
+    2
 }
 
 #[derive(Debug, Clone)]
