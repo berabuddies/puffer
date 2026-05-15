@@ -445,6 +445,10 @@ fn execute_user_prompt_with_options(
     if options.observability.is_none() {
         options.observability = observability_handle();
     }
+    // Side-turns (memory review/flush, reflection sub-agent, etc.) pass a
+    // tool_filter — skip the post-turn memory hook for those, otherwise we
+    // recurse forever.
+    let is_side_turn = options.tool_filter.is_some();
     let (provider, model_id) = resolve_provider_and_model(state, providers)?;
     let api = resolve_model_api(state, providers, provider, &model_id);
     let Some(adapter) = provider_adapter::adapter_for_api(&api) else {
@@ -453,9 +457,29 @@ fn execute_user_prompt_with_options(
             provider.id
         );
     };
-    adapter.execute_turn(
+    let result = adapter.execute_turn(
         state, resources, providers, provider, model_id, auth_store, input, options,
-    )
+    );
+    if !is_side_turn && result.is_ok() {
+        maybe_run_project_memory_review(state, resources, providers, auth_store);
+    }
+    result
+}
+
+/// After a main-turn completes, fire the side-turn memory review if the
+/// turn-counter crossed the configured nudge interval. Lives in runtime —
+/// not in any single front-end — so daemon/CLI/streaming/blocking paths all
+/// behave the same. The side-turn itself sets `tool_filter`, so the recursion
+/// guard in `execute_user_prompt_with_options` prevents loops.
+fn maybe_run_project_memory_review(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    providers: &ProviderRegistry,
+    auth_store: &mut AuthStore,
+) {
+    if crate::memory::project_memory_turn_completed(state) {
+        crate::memory::spawn_project_memory_review(state, resources, providers, auth_store);
+    }
 }
 
 /// If the caller did not pass an explicit reflection policy, inherit the
@@ -698,8 +722,10 @@ where
     if options.observability.is_none() {
         options.observability = observability_handle();
     }
+    let is_side_turn = options.tool_filter.is_some();
     let suppress_tools = suppress_tools_for_simple_turn(input);
     if suppress_tools && local_reply_for_simple_turns_enabled() {
+        // simple-turn shortcut: no provider call, no memory review.
         let assistant_text = local_simple_turn_reply(input);
         on_event(TurnStreamEvent::TextDelta(assistant_text.to_string()));
         return Ok(TurnExecution {
@@ -713,6 +739,7 @@ where
     let Some(adapter) = provider_adapter::adapter_for_api(&api) else {
         // Adapter unknown → fall through to non-streaming dispatch which
         // emits the canonical "not executable yet" error message.
+        // The delegate fires its own post-turn memory hook; nothing to do here.
         if suppress_tools {
             options.tool_filter = Some(RequestToolFilter::empty_static());
             options.lightweight_context = true;
@@ -725,9 +752,13 @@ where
         options.tool_filter = Some(RequestToolFilter::empty_static());
         options.lightweight_context = true;
     }
-    adapter.execute_turn_streaming(
+    let result = adapter.execute_turn_streaming(
         state, resources, providers, provider, model_id, auth_store, input, options, on_event,
-    )
+    );
+    if !is_side_turn && result.is_ok() {
+        maybe_run_project_memory_review(state, resources, providers, auth_store);
+    }
+    result
 }
 
 fn suppress_tools_for_simple_turn(input: &str) -> bool {
