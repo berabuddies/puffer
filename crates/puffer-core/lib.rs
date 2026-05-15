@@ -5,7 +5,7 @@ mod command_summary;
 mod config_settings;
 mod hooks;
 mod memory;
-mod recap;
+pub mod recap;
 mod model_preferences;
 mod permissions;
 mod plan_mode;
