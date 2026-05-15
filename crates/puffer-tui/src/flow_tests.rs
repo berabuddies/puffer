@@ -209,6 +209,7 @@ fn poll_pending_submit_syncs_project_memory_review_turns_back_to_main_state() {
         started_at: std::time::Instant::now(),
         thinking_active: false,
         status_hint: None,
+        cancel: puffer_core::CancelToken::new(),
     });
     sender
         .send(PendingSubmitEvent::Finished(PendingSubmitResult {
@@ -218,7 +219,7 @@ fn poll_pending_submit_syncs_project_memory_review_turns_back_to_main_state() {
                 reflection_traces: Vec::new(),
             }),
             auth_store: auth_store.clone(),
-            session_tool_permissions: Default::default(),
+            session_permission_state: Default::default(),
             session_allow_all: false,
             project_memory_review_turns: 1,
         }))
@@ -400,6 +401,7 @@ fn poll_pending_submit_preserves_browser_category_session_grants() {
             auth_store: auth_store.clone(),
             session_permission_state: worker_permission_state,
             session_allow_all: false,
+            project_memory_review_turns: 0,
         }))
         .unwrap();
 
