@@ -19,7 +19,7 @@ use uuid::Uuid;
 /// `AppState::effective_working_dirs` both call this so the path the
 /// system prompt advertises and the path the path sandbox accepts are
 /// always the same string.
-pub fn session_scratchpad_dir(session_id: &Uuid) -> Option<PathBuf> {
+pub(crate) fn session_scratchpad_dir(session_id: &Uuid) -> Option<PathBuf> {
     let home = env::var_os("HOME")?;
     let dir = Path::new(&home)
         .join(".puffer")
