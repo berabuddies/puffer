@@ -36,6 +36,7 @@ const TODO_WRITE_DESCRIPTION: &str = "Use this tool to create and manage a struc
 
 #[test]
 fn sleep_tool_is_visible_to_anthropic_and_openai_tool_builders() {
+    require_claude_reference!();
     let resources = bundled_resources();
     let registry = ToolRegistry::from_resources(&resources);
     let expected = reference_sleep_prompt();
@@ -65,6 +66,7 @@ fn sleep_tool_is_visible_to_anthropic_and_openai_tool_builders() {
 
 #[test]
 fn bundled_resources_register_sleep_tool() {
+    require_claude_reference!();
     let resources = bundled_resources();
     let registry = ToolRegistry::from_resources(&resources);
     let definition = registry.definition("Sleep").expect("Sleep tool definition");
@@ -255,6 +257,7 @@ fn config_tool_description_is_rendered_for_anthropic_and_openai() {
 
 #[test]
 fn lsp_tool_description_matches_claude_reference_for_anthropic_and_openai() {
+    require_claude_reference!();
     let resources = bundled_resources();
     let registry = ToolRegistry::from_resources(&resources);
     assert_tool_description_matches_expected(&registry, "LSP", reference_lsp_prompt().as_str());
@@ -262,6 +265,7 @@ fn lsp_tool_description_matches_claude_reference_for_anthropic_and_openai() {
 
 #[test]
 fn powershell_tool_description_matches_claude_reference_for_anthropic_and_openai() {
+    require_claude_reference!();
     let resources = bundled_resources();
     let registry = ToolRegistry::from_resources(&resources);
     let expected = reference_powershell_prompt();
@@ -330,6 +334,7 @@ fn powershell_tool_description_matches_claude_reference_for_anthropic_and_openai
 
 #[test]
 fn web_search_tool_prompt_matches_claude_reference_for_anthropic_and_openai() {
+    require_claude_reference!();
     let reference = read_repo_file("references/claude-code/src/tools/WebSearchTool/prompt.ts");
     let expected =
         normalize_reference_template(&extract_template_literal(&reference, "  return `"))
@@ -364,6 +369,7 @@ fn web_search_tool_prompt_matches_claude_reference_for_anthropic_and_openai() {
 
 #[test]
 fn selected_tool_prompts_match_claude_reference_for_anthropic_and_openai() {
+    require_claude_reference!();
     let resources = bundled_resources();
     let registry = ToolRegistry::from_resources(&resources);
     let anthropic = anthropic_tool_definitions(&registry, None).unwrap();
@@ -418,6 +424,7 @@ fn selected_tool_prompts_match_claude_reference_for_anthropic_and_openai() {
 
 #[test]
 fn built_in_agent_resources_match_claude_reference_prompts() {
+    require_claude_reference!();
     let resources = bundled_resources();
 
     for (agent_id, expected_description, expected_prompt) in [
@@ -468,6 +475,7 @@ fn built_in_agent_resources_match_claude_reference_prompts() {
 
 #[test]
 fn file_tool_prompts_and_schemas_match_claude_reference_for_anthropic_and_openai() {
+    require_claude_reference!();
     let resources = bundled_resources();
     let registry = ToolRegistry::from_resources(&resources);
     let anthropic = anthropic_tool_definitions(&registry, None).unwrap();
