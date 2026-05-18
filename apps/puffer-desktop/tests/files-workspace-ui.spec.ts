@@ -29,6 +29,62 @@ test("Files tab close button works from the keyboard", async ({ page }) => {
   await expect(page.getByRole("tab", { name: /lib\.rs/ })).toHaveCount(0);
 });
 
+test("Files tab saves text edits through the daemon", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openFilesPanel(page);
+
+  const editor = page.getByLabel("Edit file contents");
+  await expect(editor).toHaveValue("fn main() {}\n");
+
+  const saved = "fn main() {\n    println!(\"saved\");\n}\n";
+  await editor.fill(saved);
+  await expect(page.locator(".file-tab.active .dirty-dot")).toBeVisible();
+
+  await page.getByRole("button", { name: "Save" }).click();
+  const request = await daemon.waitForRequest(
+    "write_file",
+    (candidate) => candidate.params.path === "/tmp/puffer/src/main.rs"
+  );
+  expect(request.params).toMatchObject({
+    path: "/tmp/puffer/src/main.rs",
+    content: saved
+  });
+
+  await expect(page.getByRole("button", { name: "Save" })).toHaveCount(0);
+  await expect(page.locator(".file-tab.active .dirty-dot")).toHaveCount(0);
+  await expect(editor).toHaveValue(saved);
+});
+
+test("Files tab keeps dirty edits visible after save failure", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openFilesPanel(page);
+
+  const editor = page.getByLabel("Edit file contents");
+  await expect(editor).toHaveValue("fn main() {}\n");
+
+  const draft = "fn main() {\n    println!(\"retry me\");\n}\n";
+  await editor.fill(draft);
+  daemon.failNext("write_file", "disk full");
+  await page.getByRole("button", { name: "Save" }).click();
+
+  await daemon.waitForRequest(
+    "write_file",
+    (candidate) => candidate.params.path === "/tmp/puffer/src/main.rs"
+  );
+  await expect(page.locator(".save-error")).toContainText("disk full");
+  await expect(page.getByRole("button", { name: "Save" })).toBeVisible();
+  await expect(page.locator(".file-tab.active .dirty-dot")).toBeVisible();
+  await expect(editor).toHaveValue(draft);
+});
+
 test("New agent modal closes with Escape", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

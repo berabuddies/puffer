@@ -145,6 +145,10 @@ const fileTabs = [
   { path: "/tmp/puffer/src/lib.rs", pinned: true }
 ];
 
+function defaultFileContent(path: string): string {
+  return path.endsWith("lib.rs") ? "pub fn fixture() {}\n" : "fn main() {}\n";
+}
+
 function response(id: number | string, result: unknown): string {
   return JSON.stringify({ type: "response", id, ok: true, result });
 }
@@ -214,6 +218,7 @@ export class FakeDaemon {
   private readonly sessions = new Map<string, JsonRecord>();
   private readonly timelines = new Map<string, JsonRecord[]>();
   private readonly details = new Map<string, SessionDetailOverrides>();
+  private readonly files = new Map<string, string>();
   private readonly providerModels: Record<string, JsonRecord[]>;
   private workspaceRoot = "/tmp/puffer";
   private authStatuses: JsonRecord[];
@@ -539,6 +544,8 @@ export class FakeDaemon {
         return { tabs: request.params.tabs ?? [], activePath: request.params.activePath ?? null };
       case "read_file":
         return this.readFile(request.params);
+      case "write_file":
+        return this.writeFile(request.params);
       case "fs_watch":
         return { watchId: "watch-fixture" };
       case "fs_unwatch":
@@ -1003,11 +1010,26 @@ export class FakeDaemon {
 
   private readFile(params: JsonRecord): JsonRecord {
     const path = String(params.path ?? "");
+    const content = this.files.get(path) ?? defaultFileContent(path);
+    this.files.set(path, content);
     return {
       path,
       encoding: "utf8",
-      content: path.endsWith("lib.rs") ? "pub fn fixture() {}\n" : "fn main() {}\n",
-      size: path.endsWith("lib.rs") ? 19 : 13,
+      content,
+      size: content.length,
+      truncated: false
+    };
+  }
+
+  private writeFile(params: JsonRecord): JsonRecord {
+    const path = String(params.path ?? "");
+    const content = String(params.content ?? "");
+    this.files.set(path, content);
+    return {
+      path,
+      encoding: "utf8",
+      content,
+      size: content.length,
       truncated: false
     };
   }
