@@ -762,6 +762,7 @@
   }
 
   function paste(event: ClipboardEvent) {
+    if (!connected || !activeTabId) return;
     const text = event.clipboardData?.getData("text/plain") ?? "";
     if (!text) return;
     event.preventDefault();

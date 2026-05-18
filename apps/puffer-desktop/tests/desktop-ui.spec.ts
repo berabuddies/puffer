@@ -168,6 +168,31 @@ test("Browser tab list event can clear stale tabs", async ({ page }) => {
   await expect(page.locator(".pf-browser-status")).toHaveText("No pages");
 });
 
+test("Browser paste does not send input after tabs are cleared", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1"
+  );
+
+  daemon.emit("browser:session-browser:tabs", { activeTabId: null, tabs: [] });
+  await expect(page.locator(".pf-browser-status")).toHaveText("No pages");
+
+  await page.evaluate(() => {
+    const data = new DataTransfer();
+    data.setData("text/plain", "orphan paste");
+    const canvas = document.querySelector(".pf-browser-canvas");
+    canvas?.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: data }));
+  });
+  await page.waitForTimeout(20);
+
+  expect(daemon.requests.filter((request) => request.method === "browser_input")).toHaveLength(0);
+});
+
 test("Browser tab list event reconnects when active tab changes", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
