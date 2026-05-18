@@ -49,6 +49,7 @@
   // Remote mode
   let sshTarget = $state("");
   let remoteWorkspace = $state("~");
+  let remoteBinary = $state("");
   let remoteDest = $state("");
   let remoteGitUrl = $state("");
 
@@ -194,7 +195,8 @@
     status = `Connecting to ${sshTarget}…`;
     try {
       await connectSshDaemon(sshTarget, {
-        remoteWorkspace: remoteWorkspace.trim() || undefined
+        remoteWorkspace: remoteWorkspace.trim() || undefined,
+        remoteBinary: remoteBinary.trim() || undefined
       });
     } catch (e) {
       sshErrorHint = deriveSshHint(String(e instanceof Error ? e.message : e), sshTarget);
@@ -228,7 +230,7 @@
       return `Host key verification failed. Run \`ssh ${target}\` once from a terminal to accept the fingerprint.`;
     }
     if (m.includes("command not found") || m.includes("not found")) {
-      return "`puffer` binary not found on the remote. Install it, or pass `remoteBinary` if it lives elsewhere.";
+      return "`puffer` binary not found on the remote. Install it, or set the Remote binary field if it lives elsewhere.";
     }
     if (m.includes("could not resolve") || m.includes("name or service not known")) {
       return "Couldn't resolve the SSH hostname. Check your `~/.ssh/config` and DNS.";
@@ -439,6 +441,24 @@
               spellcheck="false"
               disabled={busy}
             />
+          </div>
+        </div>
+        <div class="pf-field">
+          <label class="pf-field-label" for="pf-remote-binary">
+            Remote binary <span class="pf-field-label-opt">advanced</span>
+          </label>
+          <div class="pf-field-input">
+            <Icon name="terminal" size={12} />
+            <input
+              id="pf-remote-binary"
+              bind:value={remoteBinary}
+              placeholder="puffer"
+              spellcheck="false"
+              disabled={busy}
+            />
+          </div>
+          <div class="pf-field-hint">
+            Set this only when <span class="pf-mono">puffer</span> is installed outside the remote's $PATH.
           </div>
         </div>
         <div class="pf-field">

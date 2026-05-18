@@ -112,3 +112,17 @@ test("connect project provider choice includes Anthropic", async ({ page }) => {
     providerId: "anthropic"
   });
 });
+
+test("connect project remote mode exposes binary override", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Connect project" }).click();
+  const dialog = page.getByRole("dialog", { name: "Connect project" });
+  await dialog.getByRole("tab", { name: /Remote/ }).click();
+
+  await expect(dialog.getByLabel("Remote binary")).toBeVisible();
+  await dialog.getByLabel("Remote binary").fill("/opt/puffer/bin/puffer");
+  await expect(dialog.getByLabel("Remote binary")).toHaveValue("/opt/puffer/bin/puffer");
+});
