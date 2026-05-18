@@ -291,6 +291,14 @@ pub(crate) fn handle_prompt_submit(
     if tui.has_pending_submit() {
         return Ok(());
     }
+    if providers.providers().next().is_some() {
+        if let Some(overlay) = onboarding::prompt_submission_overlay(state, providers, auth_store)?
+        {
+            tui.defer_prompt(Some(submitted));
+            tui.overlay = Some(overlay);
+            return Ok(());
+        }
+    }
 
     state.push_message(MessageRole::User, submitted.clone());
     session_store.append_event(

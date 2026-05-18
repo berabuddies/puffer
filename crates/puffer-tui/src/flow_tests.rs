@@ -178,6 +178,64 @@ fn queued_startup_session_overlay_opens_before_missing_auth_onboarding() {
 }
 
 #[test]
+fn provider_prompt_after_startup_overlay_reenters_missing_auth_onboarding() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = sample_state(session, tempdir.path());
+    state.current_provider = Some("anthropic".to_string());
+    state.current_model = Some("anthropic/claude-sonnet-4-5".to_string());
+    let mut resources = LoadedResources::default();
+    let mut providers = auth_required_provider_registry();
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let mut auth_store = AuthStore::default();
+    let mut tui = TuiState::default();
+
+    handle_startup_bypass_prompt(
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        "/help".to_string(),
+        true,
+    )
+    .unwrap();
+    assert!(matches!(tui.overlay, Some(OverlayState::Help)));
+    tui.overlay = None;
+
+    handle_prompt_submit(
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        "hello after help".to_string(),
+        true,
+    )
+    .unwrap();
+
+    assert!(!tui.has_pending_submit());
+    assert_eq!(tui.deferred_prompt.as_deref(), Some("hello after help"));
+    assert!(matches!(
+        tui.overlay,
+        Some(OverlayState::AuthPicker {
+            onboarding: true,
+            ..
+        })
+    ));
+    assert!(state.transcript.is_empty());
+}
+
+#[test]
 fn handle_prompt_submit_starts_async_provider_turn_and_polls_result() {
     let tempdir = tempdir().unwrap();
     let paths = ConfigPaths::discover(tempdir.path());

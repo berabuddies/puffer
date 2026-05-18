@@ -57,6 +57,23 @@ pub(crate) fn initial_overlay(
     Ok(provider_picker(providers, true))
 }
 
+/// Builds the setup overlay needed before an interactive provider prompt can run.
+pub(crate) fn prompt_submission_overlay(
+    state: &AppState,
+    providers: &mut ProviderRegistry,
+    auth_store: &AuthStore,
+) -> Result<Option<OverlayState>> {
+    if let Some(provider_id) = state.current_provider.as_deref() {
+        let selected_provider_needs_setup = providers
+            .provider(provider_id)
+            .is_some_and(|_| needs_initial_provider_setup(state, providers));
+        if selected_provider_needs_setup || missing_required_auth(state, providers, auth_store) {
+            return provider_setup_overlay(providers, auth_store, provider_id);
+        }
+    }
+    initial_overlay(state, providers, auth_store)
+}
+
 /// Builds a command-driven picker overlay, including provider-scoped model selection.
 pub(crate) fn overlay_from_command(
     state: &AppState,
