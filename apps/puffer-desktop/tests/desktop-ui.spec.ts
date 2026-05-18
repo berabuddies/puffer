@@ -253,6 +253,57 @@ test("Browser tab list event reopens disconnected active tab", async ({ page }) 
   });
 });
 
+test("late Browser open responses do not overwrite the active tab", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await page.addInitScript(() => {
+    window.localStorage.setItem(
+      "puffer-browser-tabs:session-browser",
+      JSON.stringify({
+        tabs: [
+          {
+            id: "tab-1",
+            label: "Slow tab",
+            url: "https://slow.example",
+            title: "Slow tab",
+            favicon: ""
+          },
+          {
+            id: "tab-2",
+            label: "Fast tab",
+            url: "https://fast.example",
+            title: "Fast tab",
+            favicon: ""
+          }
+        ]
+      })
+    );
+  });
+  daemon.delayResponse(
+    "browser_open",
+    (request) => request.params.sessionId === "session-browser:browser:tab-1",
+    120
+  );
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest(
+    "browser_open",
+    (request) => request.params.sessionId === "session-browser:browser:tab-1"
+  );
+
+  await page.getByRole("tab", { name: /Fast tab/ }).click();
+  await daemon.waitForRequest(
+    "browser_open",
+    (request) => request.params.sessionId === "session-browser:browser:tab-2"
+  );
+  await expect(page.getByLabel("URL")).toHaveValue("https://fast.example");
+
+  await page.waitForTimeout(160);
+  await expect(page.getByLabel("URL")).toHaveValue("https://fast.example");
+});
+
 test("Files tab close controls are native buttons", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

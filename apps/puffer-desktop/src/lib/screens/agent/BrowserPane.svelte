@@ -327,7 +327,7 @@
           if (activeEventSessionId === eventSessionId) drawFrame(frame);
         }),
         client.on<BrowserState>(`browser:${eventSessionId}:state`, (next) => {
-          if (activeEventSessionId === eventSessionId) applyState(next);
+          if (activeEventSessionId === eventSessionId) applyState(next, tabId);
         }),
         client.on<BrowserDevtoolsEvent>(`browser:${eventSessionId}:devtools`, (item) => {
           addDevtoolsEvent(tabId, item);
@@ -336,21 +336,33 @@
       const size = measureViewport() ?? lastResize;
       lastResize = size;
       if (shouldOpen) {
-        applyState(await browserOpen({ sessionId: eventSessionId, url: activeTab.url, ...size }));
+        applyState(
+          await browserOpen({ sessionId: eventSessionId, url: activeTab.url, ...size }),
+          tabId
+        );
       } else {
         try {
           await browserResize(eventSessionId, size.width, size.height);
         } catch {
-          applyState(await browserOpen({ sessionId: eventSessionId, url: activeTab.url, ...size }));
+          applyState(
+            await browserOpen({ sessionId: eventSessionId, url: activeTab.url, ...size }),
+            tabId
+          );
         }
       }
-      connected = true;
-      status = "Connected";
       updateTab(tabId, { connected: true, status: "Connected", error: null });
+      if (activeTabId === tabId && activeEventSessionId === eventSessionId) {
+        connected = true;
+        status = "Connected";
+        error = null;
+      }
     } catch (err) {
-      error = String(err);
-      status = "Chrome failed to start";
-      updateTab(tabId, { connected: false, status, error });
+      const message = String(err);
+      updateTab(tabId, { connected: false, status: "Chrome failed to start", error: message });
+      if (activeTabId === tabId && activeEventSessionId === eventSessionId) {
+        error = message;
+        status = "Chrome failed to start";
+      }
     }
   }
 
@@ -375,25 +387,29 @@
     };
   }
 
-  function applyState(next: BrowserState) {
-    if (disposed) return;
-    if (next.url) {
-      currentUrl = next.url;
-      urlDraft = next.url;
-    }
-    title = next.title ?? "";
-    loading = next.loading;
-    error = next.error ?? null;
-    status = next.error ? "Chrome error" : next.loading ? "Loading" : "Connected";
-    updateTab(activeTabId, {
-      url: currentUrl,
-      title,
-      loading,
-      error,
-      status,
-      connected: !next.error,
-      favicon: faviconFor(currentUrl)
+  function applyState(next: BrowserState, tabId = activeTabId) {
+    if (disposed || !tabId) return;
+    const existing = tabs.find((tab) => tab.id === tabId);
+    const nextUrl = next.url || existing?.url || "about:blank";
+    const nextTitle = next.title ?? "";
+    const nextError = next.error ?? null;
+    const nextStatus = nextError ? "Chrome error" : next.loading ? "Loading" : "Connected";
+    updateTab(tabId, {
+      url: nextUrl,
+      title: nextTitle,
+      loading: next.loading,
+      error: nextError,
+      status: nextStatus,
+      connected: !nextError,
+      favicon: faviconFor(nextUrl)
     });
+    if (tabId !== activeTabId) return;
+    currentUrl = nextUrl;
+    urlDraft = nextUrl;
+    title = nextTitle;
+    loading = next.loading;
+    error = nextError;
+    status = nextStatus;
   }
 
   function drawFrame(frame: BrowserFrameEvent) {

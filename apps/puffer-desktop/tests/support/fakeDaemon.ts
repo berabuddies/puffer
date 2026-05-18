@@ -16,6 +16,12 @@ type Waiter = {
   resolve: (request: DaemonRequest) => void;
 };
 
+type ResponseDelay = {
+  method: string;
+  predicate: (request: DaemonRequest) => boolean;
+  ms: number;
+};
+
 type TabSet = {
   activeTabId: string | null;
   tabs: JsonRecord[];
@@ -86,6 +92,7 @@ export class FakeDaemon {
   readonly requests: DaemonRequest[] = [];
   private readonly sockets = new Set<WebSocketRoute>();
   private readonly waiters: Waiter[] = [];
+  private readonly responseDelays: ResponseDelay[] = [];
   private readonly browserTabs = new Map<string, TabSet>();
   private nextTab = 2;
 
@@ -121,6 +128,14 @@ export class FakeDaemon {
     });
   }
 
+  delayResponse(
+    method: string,
+    predicate: (request: DaemonRequest) => boolean,
+    ms: number
+  ): void {
+    this.responseDelays.push({ method, predicate, ms });
+  }
+
   private handleMessage(socket: WebSocketRoute, raw: string): void {
     let message: JsonRecord;
     try {
@@ -140,10 +155,25 @@ export class FakeDaemon {
     this.record(request);
 
     try {
-      socket.send(response(request.id, this.dispatch(request)));
+      const outbound = response(request.id, this.dispatch(request));
+      const delay = this.takeResponseDelay(request);
+      if (delay === null) {
+        socket.send(outbound);
+      } else {
+        setTimeout(() => socket.send(outbound), delay);
+      }
     } catch (error) {
       socket.send(failure(request.id, String(error)));
     }
+  }
+
+  private takeResponseDelay(request: DaemonRequest): number | null {
+    const index = this.responseDelays.findIndex(
+      (delay) => delay.method === request.method && delay.predicate(request)
+    );
+    if (index === -1) return null;
+    const [delay] = this.responseDelays.splice(index, 1);
+    return delay.ms;
   }
 
   private record(request: DaemonRequest): void {
