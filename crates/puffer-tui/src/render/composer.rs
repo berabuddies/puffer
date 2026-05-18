@@ -138,7 +138,7 @@ fn inline_dropdown_text(
         }
         return None;
     }
-    if input.starts_with('/') {
+    if input.starts_with('/') && !input.contains(' ') {
         return Some(Text::from(command_dropdown_lines(
             input,
             slash_selection,

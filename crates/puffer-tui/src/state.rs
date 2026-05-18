@@ -568,7 +568,7 @@ impl TuiState {
     }
 
     fn matching_rows<'a>(&self, commands: &'a [CommandSpec]) -> Vec<&'a CommandSpec> {
-        if self.input.starts_with('/') {
+        if self.input.starts_with('/') && !self.input.contains(' ') {
             popup_rows(&self.input, commands)
         } else {
             Vec::new()

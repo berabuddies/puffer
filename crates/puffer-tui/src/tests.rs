@@ -79,6 +79,35 @@ fn slash_completion_appends_argument_space_for_commands_with_args() {
 }
 
 #[test]
+fn render_hides_slash_popup_after_argument_command_completion() {
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let state = sample_state();
+    let resources = sample_resources();
+    let providers = sample_providers();
+    let auth_store = sample_auth_store();
+    terminal
+        .draw(|frame| {
+            render::render(
+                frame,
+                &state,
+                &resources,
+                &providers,
+                &auth_store,
+                "/model ",
+                7,
+                0,
+                0,
+                &supported_commands(),
+            )
+        })
+        .unwrap();
+    let rendered = buffer_to_string(terminal.backend().buffer());
+    assert!(!rendered.contains("no matches"));
+    assert!(!rendered.contains("Select the model"));
+}
+
+#[test]
 fn enter_completion_prefers_selected_slash_command() {
     let commands = supported_commands();
     let mut tui = TuiState::default();
