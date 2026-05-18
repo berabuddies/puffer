@@ -190,10 +190,18 @@
     ...submittedMessages,
     ...liveStreamItems
   ]);
+  function isPendingPermission(item: PermissionTimelineItem): boolean {
+    const status = item.status?.toLowerCase() ?? "";
+    const state = item.permissionDialog.state?.toLowerCase() ?? "";
+    return status === "pending" || state === "pending";
+  }
+
   let pendingPermissions = $derived<PermissionTimelineItem[]>(
     combinedTimeline.filter(
       (t): t is PermissionTimelineItem =>
-        t.kind === "permission" && !dismissedPermissionIds.includes(t.id)
+        t.kind === "permission" &&
+        isPendingPermission(t) &&
+        !dismissedPermissionIds.includes(t.id)
     )
   );
   let pendingQuestions = $derived<UserQuestionTimelineItem[]>(

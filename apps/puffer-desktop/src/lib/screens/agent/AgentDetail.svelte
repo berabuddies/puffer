@@ -89,7 +89,11 @@
   let displayProject = $derived(session?.folderPath?.split("/").pop() ?? "");
   let projectCwd = $derived(sessionDetail?.repoStatus?.cwd ?? session?.cwd ?? "");
   let displayWorktree = $derived("");
-  let status = $derived<AgentStatus>(inferStatusFromSession(sessionDetail));
+  let status = $derived<AgentStatus>(
+    pendingPermissions.length > 0 || pendingQuestions.length > 0
+      ? "awaiting"
+      : inferStatusFromSession(sessionDetail)
+  );
   let editingTitle = $state(false);
   let titleDraft = $state("");
   let titleSaving = $state(false);
@@ -100,8 +104,6 @@
 
   function inferStatusFromSession(d: SessionDetail | null): AgentStatus {
     if (!d) return "idle";
-    const hasPending = d.timeline.some((t) => t.kind === "permission");
-    if (hasPending) return "awaiting";
     if (d.repoStatus?.pullRequest) return "review";
     if (d.repoStatus?.hasUncommittedChanges) return "running";
     return "idle";
