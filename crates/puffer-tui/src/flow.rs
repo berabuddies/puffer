@@ -47,6 +47,24 @@ use flow_shell::{
     execute_shell_shortcut, execute_shell_shortcut_inline, finalize_shell_shortcut_result,
 };
 
+fn parsed_slash_command(submitted: &str) -> (&str, &str) {
+    let trimmed = submitted.trim();
+    let without_slash = trimmed.strip_prefix('/').unwrap_or(trimmed);
+    without_slash
+        .split_once(char::is_whitespace)
+        .map(|(name, args)| (name, args.trim()))
+        .unwrap_or((without_slash, ""))
+}
+
+fn canonical_overlay_command_name(name: &str) -> &str {
+    match name {
+        "settings" => "config",
+        "bashes" => "tasks",
+        "checkpoint" => "rewind",
+        _ => name,
+    }
+}
+
 /// Opens a TUI overlay for slash commands that map to picker UI.
 pub(crate) fn try_open_overlay(
     state: &AppState,
@@ -57,11 +75,8 @@ pub(crate) fn try_open_overlay(
     tui: &mut TuiState,
     submitted: &str,
 ) -> Result<bool> {
-    let without_slash = submitted.trim_start_matches('/');
-    let (name, args) = without_slash
-        .split_once(' ')
-        .map(|(name, args)| (name, args.trim()))
-        .unwrap_or((without_slash, ""));
+    let (name, args) = parsed_slash_command(submitted);
+    let name = canonical_overlay_command_name(name);
     if name == "btw" && !args.is_empty() {
         set_overlay_state(
             tui,
@@ -791,11 +806,8 @@ fn is_auth_command_input(submitted: &str) -> bool {
 }
 
 fn is_read_only_pending_slash_command(submitted: &str) -> bool {
-    let without_slash = submitted.trim().trim_start_matches('/');
-    let (name, args) = without_slash
-        .split_once(' ')
-        .map(|(name, args)| (name, args.trim()))
-        .unwrap_or((without_slash, ""));
+    let (name, args) = parsed_slash_command(submitted);
+    let name = canonical_overlay_command_name(name);
     if name == "tasks" {
         return is_read_only_tasks_command(args);
     }
@@ -808,11 +820,22 @@ fn is_read_only_pending_slash_command(submitted: &str) -> bool {
             | "status"
             | "usage"
             | "cost"
+            | "config"
             | "context"
             | "debug"
             | "diff"
             | "doctor"
             | "files"
+            | "hooks"
+            | "ide"
+            | "marketplace"
+            | "mcp"
+            | "memory"
+            | "permissions"
+            | "allowed-tools"
+            | "plugin"
+            | "plugins"
+            | "sandbox"
             | "skills"
             | "session"
             | "remote"
@@ -886,12 +909,8 @@ fn finalize_assistant_text(
 }
 
 fn submit_command_name(submitted: &str) -> &str {
-    submitted
-        .trim()
-        .trim_start_matches('/')
-        .split_once(' ')
-        .map(|(name, _)| name)
-        .unwrap_or_else(|| submitted.trim().trim_start_matches('/'))
+    let (name, _) = parsed_slash_command(submitted);
+    name
 }
 
 /// Persists the selected provider and clears any selected model until the user chooses one.
@@ -1134,13 +1153,11 @@ pub(crate) fn append_tool_messages(
 /// Returns true for slash commands that should bypass startup onboarding.
 pub(crate) fn allow_prompt_before_onboarding(prompt: &str) -> bool {
     let trimmed = prompt.trim();
-    let Some(without_slash) = trimmed.strip_prefix('/') else {
+    if !trimmed.starts_with('/') {
         return false;
-    };
-    let (name, args) = without_slash
-        .split_once(char::is_whitespace)
-        .map(|(name, args)| (name, args.trim()))
-        .unwrap_or((without_slash, ""));
+    }
+    let (name, args) = parsed_slash_command(trimmed);
+    let name = canonical_overlay_command_name(name);
     args.is_empty()
         && matches!(
             name,

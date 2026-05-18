@@ -79,6 +79,7 @@ fn picker_entry<'a>(entries: &'a [ModelPickerEntry], selector: &str) -> &'a Mode
 #[test]
 fn try_open_overlay_builds_config_panel() {
     assert!(matches!(open_panel("/config"), OverlayState::Text(..)));
+    assert!(matches!(open_panel("/settings"), OverlayState::Text(..)));
 }
 
 #[test]
@@ -356,6 +357,8 @@ fn try_open_overlay_builds_tasks_panel() {
             .as_deref()
             .is_some_and(|command| !command.starts_with("/tasks output "))
     }));
+    let (title, _, _) = open_command_picker_panel("/bashes");
+    assert_eq!(title, "Background Tasks");
 }
 
 #[test]
@@ -365,85 +368,128 @@ fn try_open_overlay_builds_task_dashboard_panel() {
 
 #[test]
 fn pending_turn_opens_tasks_overlay_instead_of_queueing() {
-    let tempdir = tempdir().unwrap();
-    let paths = ConfigPaths::discover(tempdir.path());
-    ensure_workspace_dirs(&paths).unwrap();
-    let session_store = SessionStore::from_paths(&paths).unwrap();
-    let mut state = sample_state();
-    state.cwd = tempdir.path().to_path_buf();
-    state.session.cwd = tempdir.path().to_path_buf();
-    let mut resources = sample_resources();
-    let mut providers = sample_providers();
-    let mut auth_store = sample_auth_store();
-    let auth_path = paths.user_config_dir.join("auth.json");
-    let commands = supported_commands();
-    let mut tui = TuiState::default();
-    set_pending_turn(&mut tui);
-    tui.input = "/tasks".to_string();
-    tui.cursor = tui.input.len();
+    for command in ["/tasks", "/bashes"] {
+        let tempdir = tempdir().unwrap();
+        let paths = ConfigPaths::discover(tempdir.path());
+        ensure_workspace_dirs(&paths).unwrap();
+        let session_store = SessionStore::from_paths(&paths).unwrap();
+        let mut state = sample_state();
+        state.cwd = tempdir.path().to_path_buf();
+        state.session.cwd = tempdir.path().to_path_buf();
+        let mut resources = sample_resources();
+        let mut providers = sample_providers();
+        let mut auth_store = sample_auth_store();
+        let auth_path = paths.user_config_dir.join("auth.json");
+        let commands = supported_commands();
+        let mut tui = TuiState::default();
+        set_pending_turn(&mut tui);
+        tui.input = command.to_string();
+        tui.cursor = tui.input.len();
 
-    handle_key(
-        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        &mut state,
-        &mut resources,
-        &mut providers,
-        &mut auth_store,
-        &auth_path,
-        &session_store,
-        &commands,
-        &mut tui,
-        true,
-    )
-    .unwrap();
+        handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+            &mut resources,
+            &mut providers,
+            &mut auth_store,
+            &auth_path,
+            &session_store,
+            &commands,
+            &mut tui,
+            true,
+        )
+        .unwrap();
 
-    assert!(matches!(
-        tui.overlay,
-        Some(OverlayState::CommandPicker {
-            ref title,
-            ..
-        }) if title == "Background Tasks"
-    ));
-    assert!(tui.queued_prompts.is_empty());
+        assert!(matches!(
+            tui.overlay,
+            Some(OverlayState::CommandPicker {
+                ref title,
+                ..
+            }) if title == "Background Tasks"
+        ));
+        assert!(tui.queued_prompts.is_empty());
+    }
 }
 
 #[test]
 fn pending_turn_queues_task_stop_instead_of_opening_overlay() {
-    let tempdir = tempdir().unwrap();
-    let paths = ConfigPaths::discover(tempdir.path());
-    ensure_workspace_dirs(&paths).unwrap();
-    let session_store = SessionStore::from_paths(&paths).unwrap();
-    let mut state = sample_state();
-    state.cwd = tempdir.path().to_path_buf();
-    state.session.cwd = tempdir.path().to_path_buf();
-    let mut resources = sample_resources();
-    let mut providers = sample_providers();
-    let mut auth_store = sample_auth_store();
-    let auth_path = paths.user_config_dir.join("auth.json");
-    let commands = supported_commands();
-    let mut tui = TuiState::default();
-    set_pending_turn(&mut tui);
-    tui.input = "/tasks stop task-1".to_string();
-    tui.cursor = tui.input.len();
+    for command in ["/tasks stop task-1", "/bashes stop task-1"] {
+        let tempdir = tempdir().unwrap();
+        let paths = ConfigPaths::discover(tempdir.path());
+        ensure_workspace_dirs(&paths).unwrap();
+        let session_store = SessionStore::from_paths(&paths).unwrap();
+        let mut state = sample_state();
+        state.cwd = tempdir.path().to_path_buf();
+        state.session.cwd = tempdir.path().to_path_buf();
+        let mut resources = sample_resources();
+        let mut providers = sample_providers();
+        let mut auth_store = sample_auth_store();
+        let auth_path = paths.user_config_dir.join("auth.json");
+        let commands = supported_commands();
+        let mut tui = TuiState::default();
+        set_pending_turn(&mut tui);
+        tui.input = command.to_string();
+        tui.cursor = tui.input.len();
 
-    handle_key(
-        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        &mut state,
-        &mut resources,
-        &mut providers,
-        &mut auth_store,
-        &auth_path,
-        &session_store,
-        &commands,
-        &mut tui,
-        true,
-    )
-    .unwrap();
+        handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+            &mut resources,
+            &mut providers,
+            &mut auth_store,
+            &auth_path,
+            &session_store,
+            &commands,
+            &mut tui,
+            true,
+        )
+        .unwrap();
 
-    assert!(tui.overlay.is_none());
-    assert_eq!(
-        tui.queued_prompts.front().map(String::as_str),
-        Some("/tasks stop task-1")
-    );
+        assert!(tui.overlay.is_none());
+        assert_eq!(
+            tui.queued_prompts.front().map(String::as_str),
+            Some(command)
+        );
+    }
+}
+
+#[test]
+fn pending_turn_opens_config_aliases_instead_of_queueing() {
+    for command in ["/config", "/settings"] {
+        let tempdir = tempdir().unwrap();
+        let paths = ConfigPaths::discover(tempdir.path());
+        ensure_workspace_dirs(&paths).unwrap();
+        let session_store = SessionStore::from_paths(&paths).unwrap();
+        let mut state = sample_state();
+        state.cwd = tempdir.path().to_path_buf();
+        state.session.cwd = tempdir.path().to_path_buf();
+        let mut resources = sample_resources();
+        let mut providers = sample_providers();
+        let mut auth_store = sample_auth_store();
+        let auth_path = paths.user_config_dir.join("auth.json");
+        let commands = supported_commands();
+        let mut tui = TuiState::default();
+        set_pending_turn(&mut tui);
+        tui.input = command.to_string();
+        tui.cursor = tui.input.len();
+
+        handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+            &mut resources,
+            &mut providers,
+            &mut auth_store,
+            &auth_path,
+            &session_store,
+            &commands,
+            &mut tui,
+            true,
+        )
+        .unwrap();
+
+        assert!(matches!(tui.overlay, Some(OverlayState::Text(..))));
+        assert!(tui.queued_prompts.is_empty());
+    }
 }
 
 #[test]
@@ -467,62 +513,66 @@ fn try_open_overlay_builds_rewind_picker() {
     let resources = sample_resources();
     let mut providers = sample_providers();
     let auth_store = sample_auth_store();
-    let mut tui = TuiState::default();
-    let opened = try_open_overlay(
-        &state,
-        &resources,
-        &mut providers,
-        &auth_store,
-        &session_store,
-        &mut tui,
-        "/rewind",
-    )
-    .unwrap();
+    for command in ["/rewind", "/checkpoint"] {
+        let mut tui = TuiState::default();
+        let opened = try_open_overlay(
+            &state,
+            &resources,
+            &mut providers,
+            &auth_store,
+            &session_store,
+            &mut tui,
+            command,
+        )
+        .unwrap();
 
-    assert!(opened);
-    assert!(matches!(
-        tui.overlay,
-        Some(OverlayState::CommandPicker { .. })
-    ));
+        assert!(opened);
+        assert!(matches!(
+            tui.overlay,
+            Some(OverlayState::CommandPicker { .. })
+        ));
+    }
 }
 
 #[test]
 fn pending_turn_queues_rewind_instead_of_opening_picker() {
-    let tempdir = tempdir().unwrap();
-    let paths = ConfigPaths::discover(tempdir.path());
-    ensure_workspace_dirs(&paths).unwrap();
-    let session_store = SessionStore::from_paths(&paths).unwrap();
-    let mut state = rewind_test_state(&tempdir, &session_store);
-    let mut resources = sample_resources();
-    let mut providers = sample_providers();
-    let mut auth_store = sample_auth_store();
-    let auth_path = paths.user_config_dir.join("auth.json");
-    let commands = supported_commands();
-    let mut tui = TuiState::default();
-    set_pending_turn(&mut tui);
-    tui.input = "/rewind".to_string();
-    tui.cursor = tui.input.len();
+    for command in ["/rewind", "/checkpoint"] {
+        let tempdir = tempdir().unwrap();
+        let paths = ConfigPaths::discover(tempdir.path());
+        ensure_workspace_dirs(&paths).unwrap();
+        let session_store = SessionStore::from_paths(&paths).unwrap();
+        let mut state = rewind_test_state(&tempdir, &session_store);
+        let mut resources = sample_resources();
+        let mut providers = sample_providers();
+        let mut auth_store = sample_auth_store();
+        let auth_path = paths.user_config_dir.join("auth.json");
+        let commands = supported_commands();
+        let mut tui = TuiState::default();
+        set_pending_turn(&mut tui);
+        tui.input = command.to_string();
+        tui.cursor = tui.input.len();
 
-    handle_key(
-        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        &mut state,
-        &mut resources,
-        &mut providers,
-        &mut auth_store,
-        &auth_path,
-        &session_store,
-        &commands,
-        &mut tui,
-        true,
-    )
-    .unwrap();
+        handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+            &mut resources,
+            &mut providers,
+            &mut auth_store,
+            &auth_path,
+            &session_store,
+            &commands,
+            &mut tui,
+            true,
+        )
+        .unwrap();
 
-    assert!(tui.overlay.is_none());
-    assert_eq!(
-        tui.queued_prompts.front().map(String::as_str),
-        Some("/rewind")
-    );
-    assert_eq!(state.transcript.len(), 3);
+        assert!(tui.overlay.is_none());
+        assert_eq!(
+            tui.queued_prompts.front().map(String::as_str),
+            Some(command)
+        );
+        assert_eq!(state.transcript.len(), 3);
+    }
 }
 
 #[test]
