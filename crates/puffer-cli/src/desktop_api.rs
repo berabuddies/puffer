@@ -200,6 +200,8 @@ pub(crate) fn list_grouped_sessions(session_store: &SessionStore) -> Result<Vec<
                 tags: session.tags.clone(),
                 note: session.note.clone(),
                 parent_session_id: session.parent_session_id.map(|value| value.to_string()),
+                provider_id: None,
+                model_id: None,
             });
     }
     let mut folders = groups
@@ -271,6 +273,8 @@ pub(crate) fn load_session_detail(
             .metadata
             .parent_session_id
             .map(|value| value.to_string()),
+        provider_id: None,
+        model_id: None,
         timeline: timeline_items(&record),
         latest_diff,
         diff_history,

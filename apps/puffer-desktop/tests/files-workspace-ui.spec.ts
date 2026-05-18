@@ -42,3 +42,33 @@ test("New agent modal closes with Escape", async ({ page }) => {
 
   await expect(dialog).toHaveCount(0);
 });
+
+test("new agent provider choice is used for the first turn", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "New agent in puffer" }).click();
+  const dialog = page.getByRole("dialog", { name: "New agent" });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("radio", { name: /Anthropic/ }).click();
+  await dialog.getByRole("button", { name: "Start agent" }).click();
+
+  const createRequest = await daemon.waitForRequest("create_session");
+  expect(createRequest.params).toMatchObject({
+    providerId: "anthropic"
+  });
+
+  await expect(page.locator(".pf-composer textarea")).toBeVisible();
+  await page.locator(".pf-composer textarea").fill("Hello from Anthropic");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  const turnRequest = await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.message === "Hello from Anthropic"
+  );
+  expect(turnRequest.params).toMatchObject({
+    providerId: "anthropic",
+    modelId: "test-model"
+  });
+});

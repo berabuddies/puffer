@@ -300,6 +300,8 @@ export class FakeDaemon {
         return this.groupedSessions();
       case "load_session_detail":
         return this.sessionDetail(String(request.params.sessionId ?? session.sessionId));
+      case "create_session":
+        return this.createSession(request.params);
       case "run_agent_turn":
         return { turnId: `turn-${String(request.params.sessionId ?? session.sessionId)}` };
       case "resolve_permission":
@@ -401,6 +403,39 @@ export class FakeDaemon {
     ];
   }
 
+  private createSession(params: JsonRecord): JsonRecord {
+    const sessionId = `session-created-${this.sessions.size + 1}`;
+    const providerId = typeof params.providerId === "string" ? params.providerId : "codex";
+    const modelId = typeof params.modelId === "string" ? params.modelId : "test-model";
+    const cwd = typeof params.cwd === "string" ? params.cwd : session.cwd;
+    const created = sessionMeta({
+      sessionId,
+      displayName: "New Session",
+      title: "New Session",
+      cwd,
+      folderPath: cwd,
+      createdAtMs: Date.now(),
+      updatedAtMs: Date.now(),
+      eventCount: 0,
+      providerId,
+      modelId,
+      timeline: []
+    });
+    this.sessions.set(sessionId, created);
+    this.timelines.set(sessionId, []);
+    return {
+      sessionId,
+      displayName: created.displayName,
+      generatedTitle: created.generatedTitle,
+      cwd,
+      createdAtMs: created.createdAtMs,
+      updatedAtMs: created.updatedAtMs,
+      slug: created.slug,
+      providerId,
+      modelId
+    };
+  }
+
   private settingsSnapshot(): JsonRecord {
     return {
       workspaceRoot: "/tmp/puffer",
@@ -421,7 +456,7 @@ export class FakeDaemon {
         uiTmuxGoldenMode: false
       },
       resources: {
-        providers: 1,
+        providers: 2,
         tools: 1,
         agents: 0,
         prompts: 0,
@@ -442,6 +477,15 @@ export class FakeDaemon {
           scopes: [],
           planType: "test",
           organizationName: null
+        },
+        {
+          providerId: "anthropic",
+          kind: "api_key",
+          email: null,
+          expiresAtMs: null,
+          scopes: [],
+          planType: null,
+          organizationName: null
         }
       ],
       providers: [
@@ -452,6 +496,16 @@ export class FakeDaemon {
           defaultApi: "responses",
           modelCount: 1,
           authModes: ["oauth"],
+          sourceKind: "test",
+          sourcePath: null
+        },
+        {
+          id: "anthropic",
+          displayName: "Anthropic",
+          baseUrl: "",
+          defaultApi: "anthropic-messages",
+          modelCount: 1,
+          authModes: ["api_key"],
           sourceKind: "test",
           sourcePath: null
         }

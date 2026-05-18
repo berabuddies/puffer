@@ -45,7 +45,9 @@ use puffer_provider_openai::{
     exchange_authorization_code as exchange_openai_authorization_code,
     parse_authorization_input as parse_openai_authorization_input,
 };
-use puffer_provider_registry::{AuthStore, ModelDescriptor, ProviderRegistry, StoredCredential};
+use puffer_provider_registry::{
+    AuthStore, ModelDescriptor, ProviderDescriptor, ProviderRegistry, StoredCredential,
+};
 use puffer_resources::{load_resources, LoadedResources, McpServerSpec};
 use puffer_session_store::{MessageActor, SessionStore, TranscriptEvent};
 use puffer_transport_anthropic::{
@@ -78,8 +80,9 @@ use crate::daemon_browser::BrowserRegistry;
 use crate::daemon_fs_watch::FsWatchRegistry;
 use crate::daemon_pty::PtyRegistry;
 use crate::daemon_ui_state::{
-    load_file_tabs_state, load_pin_state, set_file_tabs_state, set_pin_state, DesktopFileTab,
-    DesktopFileTabsState, DesktopPinState,
+    load_file_tabs_state, load_pin_state, load_session_routing_state, set_file_tabs_state,
+    set_pin_state, set_session_routing_state, DesktopFileTab, DesktopFileTabsState,
+    DesktopPinState, DesktopSessionRouting,
 };
 use crate::desktop_api;
 use crate::desktop_api_types::{
@@ -781,8 +784,34 @@ async fn dispatch_request(
 
 fn handle_list_grouped_sessions(state: &DaemonState) -> Result<Value> {
     let session_store = SessionStore::from_paths(&state.paths)?;
-    let groups: Vec<FolderGroupDto> = desktop_api::list_grouped_sessions(&session_store)?;
+    let mut groups: Vec<FolderGroupDto> = desktop_api::list_grouped_sessions(&session_store)?;
+    apply_session_routing_to_groups(state, &mut groups)?;
     Ok(serde_json::to_value(groups)?)
+}
+
+fn apply_session_routing_to_groups(
+    state: &DaemonState,
+    groups: &mut [FolderGroupDto],
+) -> Result<()> {
+    for group in groups {
+        for session in &mut group.sessions {
+            let routing =
+                load_session_routing_state(&state.paths.user_config_dir, &session.session_id)?;
+            session.provider_id = routing.provider_id;
+            session.model_id = routing.model_id;
+        }
+    }
+    Ok(())
+}
+
+fn apply_session_routing_to_detail(
+    state: &DaemonState,
+    detail: &mut SessionDetailDto,
+) -> Result<()> {
+    let routing = load_session_routing_state(&state.paths.user_config_dir, &detail.session_id)?;
+    detail.provider_id = routing.provider_id;
+    detail.model_id = routing.model_id;
+    Ok(())
 }
 
 fn handle_load_desktop_pins(state: &DaemonState) -> Result<Value> {
@@ -886,7 +915,9 @@ fn handle_load_session_detail(state: &DaemonState, params: &Value) -> Result<Val
         .and_then(|v| v.as_str())
         .context("missing sessionId")?;
     let session_store = SessionStore::from_paths(&state.paths)?;
-    let detail: SessionDetailDto = desktop_api::load_session_detail(&session_store, session_id)?;
+    let mut detail: SessionDetailDto =
+        desktop_api::load_session_detail(&session_store, session_id)?;
+    apply_session_routing_to_detail(state, &mut detail)?;
     Ok(serde_json::to_value(detail)?)
 }
 
@@ -915,7 +946,9 @@ fn handle_rename_session(state: &DaemonState, params: &Value) -> Result<Value> {
             "sessionId": session_id,
         }),
     });
-    let detail: SessionDetailDto = desktop_api::load_session_detail(&session_store, session_id)?;
+    let mut detail: SessionDetailDto =
+        desktop_api::load_session_detail(&session_store, session_id)?;
+    apply_session_routing_to_detail(state, &mut detail)?;
     Ok(serde_json::to_value(detail)?)
 }
 
@@ -1542,6 +1575,11 @@ fn handle_create_session(state: &DaemonState, params: &Value) -> Result<Value> {
         .and_then(|v| v.as_str())
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| state.cwd.clone());
+    let routing = resolve_create_session_routing(
+        state,
+        optional_trimmed_value(params, &["providerId", "provider_id"]),
+        optional_trimmed_value(params, &["modelId", "model_id"]),
+    )?;
     let display_name = params
         .get("displayName")
         .or_else(|| params.get("display_name"))
@@ -1553,6 +1591,13 @@ fn handle_create_session(state: &DaemonState, params: &Value) -> Result<Value> {
     let session = session_store.create_session(cwd)?;
     if let Some(display_name) = display_name {
         session_store.set_display_name(session.id, Some(display_name))?;
+    }
+    if routing.provider_id.is_some() || routing.model_id.is_some() {
+        set_session_routing_state(
+            &state.paths.user_config_dir,
+            &session.id.to_string(),
+            routing.clone(),
+        )?;
     }
     let session = session_store.load_session(session.id)?.metadata;
     // Broadcast so connected UIs can refresh their workspace board without
@@ -1572,7 +1617,84 @@ fn handle_create_session(state: &DaemonState, params: &Value) -> Result<Value> {
         "createdAtMs": session.created_at_ms,
         "updatedAtMs": session.updated_at_ms,
         "slug": session.slug,
+        "providerId": routing.provider_id,
+        "modelId": routing.model_id,
     }))
+}
+
+fn resolve_create_session_routing(
+    state: &DaemonState,
+    provider_id: Option<String>,
+    model_id: Option<String>,
+) -> Result<DesktopSessionRouting> {
+    if provider_id.is_none() && model_id.is_none() {
+        return Ok(DesktopSessionRouting::default());
+    }
+
+    let inputs = state.build_runtime_inputs()?;
+    if let Some(provider_id) = provider_id {
+        let provider = inputs
+            .providers
+            .provider(&provider_id)
+            .with_context(|| format!("unknown provider `{provider_id}`"))?;
+        let model_id = resolve_create_session_model_id(
+            &state.config.lock().unwrap(),
+            provider,
+            model_id.as_deref(),
+        )?;
+        return Ok(DesktopSessionRouting {
+            provider_id: Some(provider_id),
+            model_id,
+        });
+    }
+
+    let Some(requested_model) = model_id else {
+        return Ok(DesktopSessionRouting::default());
+    };
+    let (provider_id, model_id) = resolve_turn_model(&inputs.providers, &requested_model)?;
+    Ok(DesktopSessionRouting {
+        provider_id: Some(provider_id),
+        model_id: Some(model_id),
+    })
+}
+
+fn resolve_create_session_model_id(
+    config: &PufferConfig,
+    provider: &ProviderDescriptor,
+    requested_model: Option<&str>,
+) -> Result<Option<String>> {
+    let selected = requested_model
+        .and_then(|model| normalize_provider_model_id(&provider.id, model))
+        .or_else(|| {
+            config
+                .default_model
+                .as_deref()
+                .filter(|_| config.default_provider.as_deref() == Some(provider.id.as_str()))
+                .and_then(|model| normalize_provider_model_id(&provider.id, model))
+        })
+        .or_else(|| provider.models.first().map(|model| model.id.clone()));
+
+    let Some(model_id) = selected else {
+        return Ok(None);
+    };
+    if provider.models.iter().any(|model| model.id == model_id) {
+        return Ok(Some(model_id));
+    }
+    anyhow::bail!("unknown model `{model_id}` for provider `{}`", provider.id)
+}
+
+fn normalize_provider_model_id(provider_id: &str, model_id: &str) -> Option<String> {
+    let trimmed = model_id.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some((prefix, model)) = trimmed.split_once('/') {
+        if prefix == provider_id && !model.trim().is_empty() {
+            return Some(model.trim().to_string());
+        }
+        return None;
+    }
+    Some(trimmed.to_string())
 }
 
 /// Reports the daemon's default workspace — the cwd it booted in, which is
@@ -2597,7 +2719,8 @@ fn apply_daemon_yolo_mode(app_state: &mut AppState) {
 mod tests {
     use super::{
         apply_daemon_yolo_mode, apply_turn_model_override, apply_turn_request_options,
-        handle_create_session, model_descriptor_dto, DaemonState, TurnRequestOptions,
+        handle_create_session, model_descriptor_dto, resolve_create_session_model_id, DaemonState,
+        TurnRequestOptions,
     };
     use indexmap::IndexMap;
     use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
@@ -2773,6 +2896,22 @@ mod tests {
         let dto = model_descriptor_dto(ModelPreferenceFamily::Anthropic, &no_reasoning);
         assert!(dto.thinking_options.is_empty());
         assert_eq!(dto.default_thinking_option_id, None);
+    }
+
+    #[test]
+    fn create_session_model_routing_resolves_provider_default() {
+        let mut config = PufferConfig::default();
+        config.default_provider = Some("anthropic".to_string());
+        config.default_model = Some("anthropic/claude-sonnet-4-5".to_string());
+        let provider = provider("anthropic", &["claude-sonnet-4-5", "claude-haiku"]);
+
+        let model_id =
+            resolve_create_session_model_id(&config, &provider, None).expect("default model");
+        assert_eq!(model_id.as_deref(), Some("claude-sonnet-4-5"));
+
+        let model_id = resolve_create_session_model_id(&config, &provider, Some("claude-haiku"))
+            .expect("requested model");
+        assert_eq!(model_id.as_deref(), Some("claude-haiku"));
     }
 
     #[test]

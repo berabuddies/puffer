@@ -614,7 +614,11 @@
       const newSession =
         groups.flatMap((g) => g.sessions).find((s) => s.id === created.sessionId) ?? null;
       if (newSession) {
-        await openSession(newSession);
+        await openSession({
+          ...newSession,
+          providerId: created.providerId ?? providerId ?? newSession.providerId,
+          modelId: created.modelId ?? newSession.modelId
+        });
       } else {
         // Fall back to a synthetic SessionListItem so the AgentDetail can
         // still open; reloading later will pick up the real record.

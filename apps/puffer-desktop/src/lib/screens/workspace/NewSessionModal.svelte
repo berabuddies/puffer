@@ -45,10 +45,11 @@
       sourcePath: null
     }
   ];
+  const personalProviderIds = new Set(["codex", "openai", "claude", "anthropic", "puffer"]);
 
   let providerOptions = $derived(
     (snapshot?.providers?.length ? snapshot.providers : fallbackProviders).filter((provider) =>
-      ["codex", "claude", "puffer"].includes(provider.id)
+      personalProviderIds.has(provider.id)
     )
   );
 
@@ -67,8 +68,8 @@
   });
 
   function providerDetail(provider: ProviderSummary): string {
-    if (provider.id === "codex") return "OpenAI Codex CLI";
-    if (provider.id === "claude") return "Claude Code CLI";
+    if (provider.id === "codex" || provider.id === "openai") return "OpenAI Codex CLI";
+    if (provider.id === "claude" || provider.id === "anthropic") return "Claude Code CLI";
     return "Puffer CLI";
   }
 

@@ -18,6 +18,10 @@ pub(crate) struct SessionListItemDto {
     pub(crate) tags: Vec<String>,
     pub(crate) note: Option<String>,
     pub(crate) parent_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) provider_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) model_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -158,6 +162,10 @@ pub(crate) struct SessionDetailDto {
     pub(crate) tags: Vec<String>,
     pub(crate) note: Option<String>,
     pub(crate) parent_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) provider_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) model_id: Option<String>,
     pub(crate) timeline: Vec<TimelineItemDto>,
     pub(crate) latest_diff: Option<DiffSummaryDto>,
     pub(crate) diff_history: Vec<DiffSummaryDto>,
