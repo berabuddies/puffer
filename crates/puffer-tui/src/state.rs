@@ -127,6 +127,7 @@ pub(crate) enum PendingSubmitEvent {
         UserQuestionPromptRequest,
         Sender<UserQuestionPromptResponse>,
     ),
+    ShellShortcutFinished(ShellShortcutResult),
     Finished(PendingSubmitResult),
 }
 
@@ -147,6 +148,14 @@ pub(crate) struct PendingSubmit {
     /// worker keeps running (burning tokens) until the LLM and tool
     /// calls finish on their own.
     pub(crate) cancel: puffer_core::CancelToken,
+}
+
+/// Carries an asynchronously completed `!cmd` shell shortcut back to the UI.
+pub(crate) struct ShellShortcutResult {
+    pub(crate) command: String,
+    pub(crate) success: bool,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
 }
 
 /// Stores the response channel for the currently visible permission prompt.

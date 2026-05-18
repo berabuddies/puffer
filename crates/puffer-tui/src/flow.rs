@@ -7,7 +7,7 @@ use puffer_core::{
     execute_user_turn_streaming_with_permissions_and_cancel, reload_runtime_resources,
     render_config_summary, render_context_panel, render_copy_actions, render_doctor_report,
     render_hooks_actions, render_ide_actions, render_mcp_actions, render_permissions_panel,
-    render_plugin_actions, render_sandbox_actions, render_skills_panel, run_resource_hooks,
+    render_plugin_actions, render_sandbox_actions, render_skills_panel,
     with_user_question_prompt_handler, AppState, MessageRole, PermissionPromptAction,
     PermissionPromptRequest, ToolInvocation, TurnStreamEvent, UserQuestionPromptRequest,
     UserQuestionPromptResponse,
@@ -15,7 +15,6 @@ use puffer_core::{
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use puffer_resources::LoadedResources;
 use puffer_session_store::{SessionStore, TranscriptEvent};
-use puffer_tools::{ToolInput, ToolRegistry};
 use std::io;
 use std::path::Path;
 use std::sync::mpsc::{self, TryRecvError};
@@ -41,6 +40,12 @@ pub(crate) use flow_auth::{handle_auth_command, run_embedded_auth_login};
 mod flow_loop;
 use flow_loop::try_handle_loop_command;
 pub(crate) use flow_loop::{advance_loop_after_turn, check_loop_interval};
+#[path = "flow_shell.rs"]
+mod flow_shell;
+pub(crate) use flow_shell::parse_shell_shortcut;
+use flow_shell::{
+    execute_shell_shortcut, execute_shell_shortcut_inline, finalize_shell_shortcut_result,
+};
 
 /// Opens a TUI overlay for slash commands that map to picker UI.
 pub(crate) fn try_open_overlay(
@@ -258,6 +263,10 @@ pub(crate) fn handle_prompt_submit(
         return Ok(());
     }
     if try_handle_loop_command(state, session_store, tui, &submitted)? {
+        return Ok(());
+    }
+    if let Some(shell_command) = parse_shell_shortcut(&submitted) {
+        execute_shell_shortcut(state, resources, session_store, tui, shell_command)?;
         return Ok(());
     }
     if !is_provider_prompt_input(&submitted) {
@@ -556,6 +565,11 @@ pub(crate) fn poll_pending_submit(
                     }
                 }
             }
+            PendingSubmitEvent::ShellShortcutFinished(result) => {
+                completed = true;
+                finalize_shell_shortcut_result(state, session_store, result)?;
+                break;
+            }
             PendingSubmitEvent::Finished(result) => {
                 completed = true;
                 let rendered_tool_invocations = pending.rendered_tool_invocations;
@@ -715,7 +729,7 @@ pub(crate) fn handle_submit(
     }
 
     if let Some(shell_command) = parse_shell_shortcut(&submitted) {
-        execute_shell_shortcut(state, resources, session_store, shell_command)?;
+        execute_shell_shortcut_inline(state, resources, session_store, shell_command)?;
         return Ok(());
     }
 
@@ -1094,110 +1108,6 @@ pub(crate) fn append_tool_messages(
         )?;
     }
     Ok(())
-}
-
-/// Executes a `!cmd` shell shortcut and records the result into the transcript.
-pub(crate) fn execute_shell_shortcut(
-    state: &mut AppState,
-    resources: &LoadedResources,
-    session_store: &SessionStore,
-    shell_command: &str,
-) -> Result<()> {
-    let rendered_command = format!("!{shell_command}");
-    state.push_message(MessageRole::User, rendered_command.clone());
-    session_store.append_event(
-        state.session.id,
-        TranscriptEvent::UserMessage {
-            text: rendered_command,
-            actor: Some(state.user_actor()),
-        },
-    )?;
-
-    let registry = ToolRegistry::from_resources(resources);
-    run_resource_hooks(
-        resources,
-        &state.cwd,
-        "tool_start",
-        &[
-            ("PUFFER_TOOL_ID", "bash".to_string()),
-            (
-                "PUFFER_TOOL_INPUT",
-                format!("{{\"command\":\"{}\"}}", shell_command.replace('"', "\\\"")),
-            ),
-            ("PUFFER_TOOL_SUCCESS", String::new()),
-            ("PUFFER_TOOL_STDOUT", String::new()),
-            ("PUFFER_TOOL_STDERR", String::new()),
-        ],
-    );
-    let result = registry.execute(
-        "bash",
-        &state.cwd,
-        ToolInput::Bash {
-            command: shell_command.to_string(),
-            timeout: None,
-            run_in_background: false,
-            dangerously_disable_sandbox: false,
-        },
-    )?;
-    state.record_task("bash", shell_command.to_string(), result.success);
-    run_resource_hooks(
-        resources,
-        &state.cwd,
-        "tool_end",
-        &[
-            ("PUFFER_TOOL_ID", "bash".to_string()),
-            (
-                "PUFFER_TOOL_INPUT",
-                format!("{{\"command\":\"{}\"}}", shell_command.replace('"', "\\\"")),
-            ),
-            (
-                "PUFFER_TOOL_SUCCESS",
-                if result.success { "true" } else { "false" }.to_string(),
-            ),
-            ("PUFFER_TOOL_STDOUT", result.output.stdout.clone()),
-            ("PUFFER_TOOL_STDERR", result.output.stderr.clone()),
-        ],
-    );
-
-    let reply = if result.output.stderr.is_empty() {
-        result.output.stdout
-    } else if result.output.stdout.is_empty() {
-        result.output.stderr
-    } else {
-        format!("{}\n{}", result.output.stdout, result.output.stderr)
-    };
-    let role = if result.success {
-        MessageRole::Assistant
-    } else {
-        MessageRole::System
-    };
-    state.push_message(role, reply.clone());
-    let event = if result.success {
-        TranscriptEvent::AssistantMessage {
-            text: reply,
-            actor: Some(state.assistant_actor()),
-        }
-    } else {
-        TranscriptEvent::SystemMessage {
-            text: reply,
-            actor: Some(state.system_actor()),
-        }
-    };
-    session_store.append_event(state.session.id, event)?;
-    Ok(())
-}
-
-/// Parses the `!cmd` shell shortcut form used by Claude/Codex-style CLIs.
-pub(crate) fn parse_shell_shortcut(input: &str) -> Option<&str> {
-    let command = input
-        .strip_prefix("!!")
-        .or_else(|| input.strip_prefix('!'))?;
-    let trimmed = command.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
 }
 
 /// Returns true for slash commands that should bypass startup onboarding.

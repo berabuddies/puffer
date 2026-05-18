@@ -6,6 +6,7 @@ use puffer_config::{
 };
 use puffer_core::TurnExecution;
 use puffer_provider_registry::{AuthMode, ModelDescriptor, ProviderDescriptor};
+use puffer_resources::{LoadedItem, SourceInfo, SourceKind, ToolSpec};
 use puffer_session_store::SessionMetadata;
 use std::sync::mpsc;
 use tempfile::tempdir;
@@ -40,6 +41,33 @@ fn auth_required_provider_registry() -> ProviderRegistry {
         chat_completions_path: None,
     });
     providers
+}
+
+fn resources_with_bash_tool() -> LoadedResources {
+    LoadedResources {
+        tools: vec![LoadedItem {
+            value: ToolSpec {
+                id: "bash".to_string(),
+                name: "bash".to_string(),
+                description: "Run shell commands".to_string(),
+                handler: "bash".to_string(),
+                aliases: Vec::new(),
+                handler_args: Vec::new(),
+                approval_policy: Some("on-request".to_string()),
+                sandbox_policy: Some("workspace-write".to_string()),
+                shared_lib: None,
+                enabled_if: None,
+                input_schema: None,
+                metadata: Default::default(),
+                display: Default::default(),
+            },
+            source_info: SourceInfo {
+                path: "tools/bash.yaml".into(),
+                kind: SourceKind::Builtin,
+            },
+        }],
+        ..LoadedResources::default()
+    }
 }
 
 #[test]
@@ -126,7 +154,7 @@ fn queued_startup_session_overlay_opens_before_missing_auth_onboarding() {
     let mut state = sample_state(session, tempdir.path());
     state.current_provider = Some("anthropic".to_string());
     state.current_model = Some("anthropic/claude-sonnet-4-5".to_string());
-    let mut resources = LoadedResources::default();
+    let mut resources = resources_with_bash_tool();
     let mut providers = auth_required_provider_registry();
     let auth_path = paths.user_config_dir.join("auth.json");
     let mut auth_store = AuthStore::default();
@@ -310,6 +338,58 @@ fn handle_prompt_submit_queues_mutating_slash_while_turn_is_running() {
         .transcript
         .iter()
         .any(|message| message.text == "Transcript cleared."));
+}
+
+#[test]
+fn handle_prompt_submit_queues_shell_shortcut_while_turn_is_running() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = sample_state(session, tempdir.path());
+    let mut resources = LoadedResources::default();
+    let mut providers = ProviderRegistry::new();
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let mut auth_store = AuthStore::default();
+    let mut tui = TuiState::default();
+
+    handle_prompt_submit(
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        "first".to_string(),
+        true,
+    )
+    .unwrap();
+    handle_prompt_submit(
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        "!printf queued-shell".to_string(),
+        true,
+    )
+    .unwrap();
+
+    assert!(tui.has_pending_submit());
+    assert_eq!(
+        tui.queued_prompts.front().map(String::as_str),
+        Some("!printf queued-shell")
+    );
+    assert!(!state
+        .transcript
+        .iter()
+        .any(|message| message.text.contains("queued-shell")));
 }
 
 #[test]
@@ -607,6 +687,68 @@ fn submit_next_queued_prompt_waits_for_open_overlay() {
         .transcript
         .iter()
         .any(|message| { message.role == MessageRole::User && message.text == "second" }));
+}
+
+#[test]
+fn submit_next_queued_prompt_starts_shell_shortcut_as_pending_submit() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = sample_state(session, tempdir.path());
+    let mut resources = resources_with_bash_tool();
+    let mut providers = ProviderRegistry::new();
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let mut auth_store = AuthStore::default();
+    let mut tui = TuiState::default();
+    tui.enqueue_prompt("!printf queued-shell".to_string());
+
+    assert!(submit_next_queued_prompt(
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        true,
+    )
+    .unwrap());
+    assert!(tui.has_pending_submit());
+    assert!(tui.queued_prompts.is_empty());
+    assert!(state.transcript.iter().any(|message| {
+        message.role == MessageRole::User && message.text == "!printf queued-shell"
+    }));
+    assert!(!state
+        .transcript
+        .iter()
+        .any(|message| message.text == "queued-shell"));
+
+    let mut completed = false;
+    for _ in 0..100 {
+        if poll_pending_submit(
+            &mut state,
+            &mut auth_store,
+            &auth_path,
+            &session_store,
+            &mut tui,
+        )
+        .unwrap()
+        {
+            completed = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    assert!(completed);
+    assert!(!tui.has_pending_submit());
+    assert!(state.transcript.iter().any(|message| {
+        message.role == MessageRole::Assistant && message.text == "queued-shell"
+    }));
 }
 
 #[test]
