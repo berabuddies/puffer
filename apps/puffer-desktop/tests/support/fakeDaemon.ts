@@ -5,7 +5,7 @@ export const FAKE_DAEMON_URL = "ws://127.0.0.1:17777/ws";
 type JsonRecord = Record<string, unknown>;
 
 type DaemonRequest = {
-  id: number;
+  id: number | string;
   method: string;
   params: JsonRecord;
 };
@@ -120,11 +120,11 @@ const fileTabs = [
   { path: "/tmp/puffer/src/lib.rs", pinned: true }
 ];
 
-function response(id: number, result: unknown): string {
+function response(id: number | string, result: unknown): string {
   return JSON.stringify({ type: "response", id, ok: true, result });
 }
 
-function failure(id: number, error: string): string {
+function failure(id: number | string, error: string): string {
   return JSON.stringify({ type: "response", id, ok: false, error });
 }
 
@@ -155,6 +155,7 @@ function browserState(url = "about:blank"): JsonRecord {
 
 export class FakeDaemon {
   readonly requests: DaemonRequest[] = [];
+  readonly socketUrls: string[] = [];
   private readonly sockets = new Set<WebSocketRoute>();
   private readonly waiters: Waiter[] = [];
   private readonly responseDelays: ResponseDelay[] = [];
@@ -168,10 +169,16 @@ export class FakeDaemon {
     defaultProvider: "codex",
     defaultModel: "test-model"
   };
+  private readonly protocol: "legacy" | "real";
   private nextTab = 2;
   private nextPty = 1;
 
-  constructor(options: { sessions?: FakeDaemonSessionInput[]; providerModels?: Record<string, JsonRecord[]> } = {}) {
+  constructor(options: {
+    sessions?: FakeDaemonSessionInput[];
+    providerModels?: Record<string, JsonRecord[]>;
+    protocol?: "legacy" | "real";
+  } = {}) {
+    this.protocol = options.protocol ?? "legacy";
     const sessions = options.sessions ?? [{ ...session, timeline: defaultTimeline() }];
     for (const input of sessions) {
       const metadata = sessionMeta(input);
@@ -183,8 +190,18 @@ export class FakeDaemon {
   }
 
   async install(page: Page): Promise<void> {
-    await page.routeWebSocket(FAKE_DAEMON_URL, (socket) => {
+    await page.routeWebSocket((url) => {
+      const matches = url.origin === "ws://127.0.0.1:17777" && url.pathname === "/ws";
+      if (matches) this.socketUrls.push(url.toString());
+      return matches;
+    }, (socket) => {
       this.sockets.add(socket);
+      if (this.protocol === "real") {
+        socket.send(JSON.stringify({
+          event: "hello",
+          payload: { protocolVersion: "1", workspaceRoot: "/tmp/puffer" }
+        }));
+      }
       socket.onMessage((message) => this.handleMessage(socket, String(message)));
       socket.onClose(() => {
         this.sockets.delete(socket);
@@ -199,7 +216,9 @@ export class FakeDaemon {
   }
 
   emit(event: string, payload: unknown): void {
-    const message = JSON.stringify({ type: "event", event, payload });
+    const message = this.protocol === "real"
+      ? JSON.stringify({ event, payload })
+      : JSON.stringify({ type: "event", event, payload });
     for (const socket of this.sockets) socket.send(message);
   }
 
@@ -244,7 +263,10 @@ export class FakeDaemon {
     } catch {
       return;
     }
-    if (message.type !== "request" || typeof message.id !== "number") return;
+    if (
+      (message.type !== "request" && typeof message.method !== "string") ||
+      (typeof message.id !== "number" && typeof message.id !== "string")
+    ) return;
 
     const request: DaemonRequest = {
       id: message.id,
@@ -256,7 +278,7 @@ export class FakeDaemon {
     this.record(request);
 
     try {
-      const outbound = response(request.id, this.dispatch(request));
+      const outbound = this.response(request.id, this.dispatch(request));
       const delay = this.takeResponseDelay(request);
       if (delay === null) {
         socket.send(outbound);
@@ -264,8 +286,20 @@ export class FakeDaemon {
         setTimeout(() => socket.send(outbound), delay);
       }
     } catch (error) {
-      socket.send(failure(request.id, String(error)));
+      socket.send(this.failure(request.id, String(error)));
     }
+  }
+
+  private response(id: number | string, result: unknown): string {
+    return this.protocol === "real"
+      ? JSON.stringify({ id: String(id), result })
+      : response(id, result);
+  }
+
+  private failure(id: number | string, error: string): string {
+    return this.protocol === "real"
+      ? JSON.stringify({ id: String(id), error: { code: "fixture-error", message: error } })
+      : failure(id, error);
   }
 
   private takeResponseDelay(request: DaemonRequest): number | null {

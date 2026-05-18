@@ -41,6 +41,7 @@ const REGISTERED_TAURI_COMMANDS: &[&str] = &[
     "run_remote_bash",
     "read_remote_file",
     "write_remote_file",
+    "ensure_local_daemon",
     "restart_local_daemon",
     "start_ssh_daemon",
     "run_agent_turn",
@@ -285,6 +286,15 @@ fn write_remote_file(
 }
 
 #[tauri::command]
+fn ensure_local_daemon(
+    launcher: State<'_, SharedDaemonLauncher>,
+) -> Result<daemon_launcher::DaemonHandshake, String> {
+    launcher
+        .ensure_started()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn restart_local_daemon(
     launcher: State<'_, SharedDaemonLauncher>,
     cwd: String,
@@ -394,6 +404,7 @@ pub fn run() {
             run_remote_bash,
             read_remote_file,
             write_remote_file,
+            ensure_local_daemon,
             restart_local_daemon,
             start_ssh_daemon,
             run_agent_turn,
