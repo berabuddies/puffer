@@ -745,11 +745,9 @@ impl OverlayState {
             Self::Session(overlay) => overlay.scroll_up(),
             Self::Status(overlay) => overlay.scroll_up(),
             Self::Text(overlay) => overlay.scroll_up(),
+            Self::Usage(overlay) => overlay.scroll_up(),
             Self::UserQuestionPrompt { overlay } => overlay.select_previous(),
-            Self::Help
-            | Self::ApiKeyPrompt { .. }
-            | Self::Usage(..)
-            | Self::OnboardingApiKey { .. } => {}
+            Self::Help | Self::ApiKeyPrompt { .. } | Self::OnboardingApiKey { .. } => {}
         }
     }
 
@@ -801,11 +799,9 @@ impl OverlayState {
             Self::Session(overlay) => overlay.scroll_down(),
             Self::Status(overlay) => overlay.scroll_down(),
             Self::Text(overlay) => overlay.scroll_down(),
+            Self::Usage(overlay) => overlay.scroll_down(),
             Self::UserQuestionPrompt { overlay } => overlay.select_next(),
-            Self::Help
-            | Self::ApiKeyPrompt { .. }
-            | Self::Usage(..)
-            | Self::OnboardingApiKey { .. } => {}
+            Self::Help | Self::ApiKeyPrompt { .. } | Self::OnboardingApiKey { .. } => {}
         }
     }
 
@@ -817,6 +813,7 @@ impl OverlayState {
             Self::Session(overlay) => overlay.page_up(),
             Self::Status(overlay) => overlay.page_up(),
             Self::Text(overlay) => overlay.page_up(),
+            Self::Usage(overlay) => overlay.page_up(),
             Self::UserQuestionPrompt { overlay } => overlay.page_up(),
             _ => {
                 for _ in 0..10 {
@@ -834,6 +831,7 @@ impl OverlayState {
             Self::Session(overlay) => overlay.page_down(),
             Self::Status(overlay) => overlay.page_down(),
             Self::Text(overlay) => overlay.page_down(),
+            Self::Usage(overlay) => overlay.page_down(),
             Self::UserQuestionPrompt { overlay } => overlay.page_down(),
             _ => {
                 for _ in 0..10 {

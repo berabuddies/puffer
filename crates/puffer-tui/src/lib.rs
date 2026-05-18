@@ -1288,6 +1288,12 @@ fn handle_overlay_key(
                 )?;
             }
         }
+        KeyCode::Char('r' | 'R') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(OverlayState::Usage(overlay)) = tui.overlay.as_ref() {
+                overlay.retry();
+                return Ok(false);
+            }
+        }
         KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             // Vim-style keys for text overlays (j/k/g/G/H/L).
             if let Some(overlay) = tui.overlay.as_mut() {
