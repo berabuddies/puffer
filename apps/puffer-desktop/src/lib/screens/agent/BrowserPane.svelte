@@ -687,17 +687,13 @@
       return;
     }
     event.preventDefault();
-    if (event.key.length === 1 && !event.metaKey && !event.ctrlKey) {
-      void browserInput(activeBackendSessionId(), { kind: "text", text: event.key }).catch((err) => {
-        error = String(err);
-      });
-      return;
-    }
+    const text = event.key.length === 1 && !event.metaKey && !event.ctrlKey ? event.key : undefined;
     void browserInput(activeBackendSessionId(), {
       kind: "key",
       eventType: keyType(event),
       key: event.key,
       code: event.code,
+      ...(text ? { text } : {}),
       modifiers: modifiers(event)
     }).catch((err) => {
       error = String(err);
