@@ -125,7 +125,7 @@
       client.on<BrowserTabsState>(`browser:${sessionId}:tabs`, (next) => {
         const previousActiveTabId = activeTabId;
         applyTabsState(next, { allowEmpty: true });
-        if (activeTabId && activeTabId !== previousActiveTabId) {
+        if (activeTabId && (activeTabId !== previousActiveTabId || !connected)) {
           void connectActiveTab();
         }
       })

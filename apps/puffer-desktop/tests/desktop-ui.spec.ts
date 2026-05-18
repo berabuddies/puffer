@@ -203,3 +203,41 @@ test("Browser tab list event reconnects when active tab changes", async ({ page 
   );
   await expect(page.getByLabel("URL")).toHaveValue("https://example.com");
 });
+
+test("Browser tab list event reopens disconnected active tab", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: /Browser regression/ }).click();
+  await page.getByRole("button", { name: "Browser" }).click();
+  const firstOpen = await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1"
+  );
+
+  daemon.emit("browser:session-browser:tabs", {
+    activeTabId: "tab-1",
+    tabs: [
+      {
+        tabId: "tab-1",
+        label: "Recovered tab",
+        url: "https://example.com",
+        title: "Recovered tab",
+        loading: false,
+        connected: false,
+        active: true,
+        backendSessionId: "session-browser:browser:tab-1",
+        createdAtMs: Date.now(),
+        updatedAtMs: Date.now()
+      }
+    ]
+  });
+
+  const reopen = await daemon.waitForRequest("browser_open", (request) =>
+    request.id !== firstOpen.id && request.params.sessionId === "session-browser:browser:tab-1"
+  );
+  expect(reopen.params).toMatchObject({
+    sessionId: "session-browser:browser:tab-1",
+    url: "https://example.com"
+  });
+});
