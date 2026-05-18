@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AgentActivityStatus,
   AuthProviderStatus,
   AskUserQuestionItem,
   DesktopPinState,
@@ -59,6 +60,7 @@ type BackendSessionListItem = {
   parentSessionId: string | null;
   providerId?: string | null;
   modelId?: string | null;
+  activityStatus?: string | null;
 };
 
 type BackendDiff = {
@@ -386,6 +388,7 @@ function normalizeSessionListItem(value: BackendSessionListItem): SessionListIte
     updatedAtMs: value.updatedAtMs,
     createdAtMs: value.createdAtMs,
     eventCount: value.eventCount,
+    activityStatus: normalizeActivityStatus(value.activityStatus),
     slug: value.slug,
     tags: value.tags,
     note: value.note,
@@ -393,6 +396,17 @@ function normalizeSessionListItem(value: BackendSessionListItem): SessionListIte
     providerId: value.providerId ?? "codex",
     modelId: value.modelId ?? null
   };
+}
+
+function normalizeActivityStatus(value: string | null | undefined): AgentActivityStatus {
+  switch (value) {
+    case "running":
+    case "awaiting":
+    case "review":
+      return value;
+    default:
+      return "idle";
+  }
 }
 
 function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {

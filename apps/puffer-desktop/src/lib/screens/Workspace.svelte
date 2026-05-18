@@ -95,7 +95,7 @@
       title: sessionDisplayTitle(session),
       worktree: "",
       branch: "",
-      status: "idle",
+      status: session.activityStatus,
       progress: 0,
       step: session.note ?? (session.eventCount > 0 ? `${session.eventCount} transcript events` : "Ready to start"),
       tools: session.eventCount,

@@ -66,6 +66,7 @@
   import type {
     DesktopPreferences,
     DesktopPinState,
+    AgentActivityStatus,
     ExternalCredential,
     FolderGroup,
     AskUserQuestionItem,
@@ -221,6 +222,12 @@
   );
   let turnRunning = $derived(currentTurnId !== null || turnStartedAtMs !== null);
 
+  function sidebarAgentState(status: AgentActivityStatus): AgentState {
+    if (status === "awaiting") return "awaiting";
+    if (status === "running") return "running";
+    return "idle";
+  }
+
   function latestGroupMs(group: FolderGroup): number {
     return group.sessions.reduce((latest, session) => Math.max(latest, session.updatedAtMs), 0);
   }
@@ -255,7 +262,7 @@
         title: sessionDisplayTitle(s),
         project: g.label,
         branch: "",
-        state: "idle" as AgentState,
+        state: sidebarAgentState(s.activityStatus),
         updatedAtMs: s.updatedAtMs,
         pinned: desktopPins.pinnedAgentIds.includes(s.id)
       }))
@@ -791,6 +798,7 @@
           updatedAtMs: created.createdAtMs,
           createdAtMs: created.createdAtMs,
           eventCount: 0,
+          activityStatus: "idle",
           slug: null,
           tags: [],
           note: null,

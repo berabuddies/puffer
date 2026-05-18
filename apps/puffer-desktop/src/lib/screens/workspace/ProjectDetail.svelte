@@ -4,7 +4,7 @@
   import Icon from "../../design/Icon.svelte";
   import Puffer from "../../design/Puffer.svelte";
   import { sessionDisplayName, sessionDisplayTitle } from "../../sessionDisplay";
-  import type { AgentStatus, MockAgent } from "../../data/mockProjects";
+  import { agentPufferState, type MockAgent } from "../../data/mockProjects";
   import type { FolderGroup, SessionListItem } from "../../types";
 
   type BoardColumn = {
@@ -48,11 +48,6 @@
     return `${days}d`;
   }
 
-  function agentStatus(session: SessionListItem): AgentStatus {
-    if (session.eventCount === 0) return "idle";
-    return "idle";
-  }
-
   function agentFromSession(session: SessionListItem): MockAgent {
     const title = sessionDisplayTitle(session);
     return {
@@ -62,7 +57,7 @@
       title,
       worktree: "",
       branch: "",
-      status: agentStatus(session),
+      status: session.activityStatus,
       progress: 0,
       step: session.note ?? (session.eventCount > 0 ? `${session.eventCount} transcript events` : "Ready to start"),
       tools: session.eventCount,
@@ -193,7 +188,7 @@
                 onclick={() => onOpenAgent?.(agent.id)}
               >
                 <div class="row">
-                  <Puffer size={15} state={agent.status === "running" ? "running" : "idle"} />
+                  <Puffer size={15} state={agentPufferState(agent.status)} />
                   <span class="agent-name">{agent.name}</span>
                   <span class="elapsed">{agent.elapsed}</span>
                 </div>

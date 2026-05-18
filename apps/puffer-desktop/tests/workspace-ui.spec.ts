@@ -48,6 +48,66 @@ test("workspace search filters projects and agents", async ({ page }) => {
   await expect(workspace.getByText("Beta browser audit")).toBeVisible();
 });
 
+test("workspace board renders daemon session activity states", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-running",
+        displayName: "Running checkout fix",
+        title: "Running checkout fix",
+        cwd: "/tmp/puffer-active",
+        folderPath: "/tmp/puffer-active",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 3,
+        activityStatus: "running"
+      },
+      {
+        sessionId: "session-awaiting",
+        displayName: "Awaiting deploy approval",
+        title: "Awaiting deploy approval",
+        cwd: "/tmp/puffer-active",
+        folderPath: "/tmp/puffer-active",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 5,
+        activityStatus: "awaiting"
+      },
+      {
+        sessionId: "session-idle",
+        displayName: "Idle docs followup",
+        title: "Idle docs followup",
+        cwd: "/tmp/puffer-active",
+        folderPath: "/tmp/puffer-active",
+        updatedAtMs: baseTime - 2_000,
+        createdAtMs: baseTime - 180_000,
+        eventCount: 2,
+        activityStatus: "idle"
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const project = page.locator(".pf-pw-project").filter({ hasText: "puffer-active" });
+  await expect(project).toContainText("2 active");
+
+  await expect(
+    page.locator(".pf-sidebar-agent-row").filter({ hasText: "Running checkout fix" })
+  ).toContainText("running");
+  await expect(
+    page.locator(".pf-sidebar-agent-row").filter({ hasText: "Awaiting deploy approval" })
+  ).toContainText("awaiting");
+
+  await project.getByRole("button", { name: "Details" }).click();
+  const runningColumn = page.locator(".pf-fpb-col").filter({ hasText: "Running" });
+  await expect(runningColumn.getByText("Running checkout fix")).toBeVisible();
+  await expect(runningColumn.getByText("Awaiting deploy approval")).toBeVisible();
+
+  const queuedColumn = page.locator(".pf-fpb-col").filter({ hasText: "Queued" });
+  await expect(queuedColumn.getByText("Idle docs followup")).toBeVisible();
+});
+
 test("project memory edit control is disabled until file editing is wired", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

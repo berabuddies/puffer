@@ -343,6 +343,8 @@ impl BackendState {
             folder_path: record.cwd.clone(),
             updated_at_ms: record.updated_at_ms,
             created_at_ms: record.created_at_ms,
+            event_count: record.events.len(),
+            activity_status: stored_session_activity_status(&record.events).to_string(),
             slug: record.slug.clone(),
             tags: record.tags.clone(),
             note: record.note.clone(),
@@ -450,6 +452,7 @@ impl BackendState {
             updated_at_ms: record.updated_at_ms,
             created_at_ms: record.created_at_ms,
             event_count: record.events.len(),
+            activity_status: stored_session_activity_status(&record.events).to_string(),
             slug: record.slug.clone(),
             tags: record.tags.clone(),
             note: record.note.clone(),
@@ -2381,6 +2384,58 @@ fn optional_trimmed_string_param(params: &Value, names: &[&str]) -> Option<Strin
 
 fn serde_value<T: Serialize>(value: T) -> Result<Value> {
     Ok(serde_json::to_value(value)?)
+}
+
+fn stored_session_activity_status(events: &[StoredEvent]) -> &'static str {
+    if latest_stored_action_requires_permission(events) {
+        return "awaiting";
+    }
+    if latest_stored_action_is_unanswered(events) {
+        return "running";
+    }
+    "idle"
+}
+
+fn latest_stored_action_requires_permission(events: &[StoredEvent]) -> bool {
+    for event in events.iter().rev() {
+        match event {
+            StoredEvent::System { text, .. } => return text_requires_permission(text),
+            StoredEvent::Tool { output, .. } => return output_requires_permission(output),
+            StoredEvent::User { .. } | StoredEvent::Assistant { .. } => return false,
+        }
+    }
+    false
+}
+
+fn latest_stored_action_is_unanswered(events: &[StoredEvent]) -> bool {
+    for event in events.iter().rev() {
+        match event {
+            StoredEvent::User { .. } => return true,
+            StoredEvent::Assistant { .. }
+            | StoredEvent::System { .. }
+            | StoredEvent::Tool { .. } => {
+                return false;
+            }
+        }
+    }
+    false
+}
+
+fn text_requires_permission(text: &str) -> bool {
+    output_requires_permission(text)
+        || text
+            .split_once('\n')
+            .and_then(|(_, rest)| rest.strip_prefix("input: "))
+            .and_then(|input| {
+                input
+                    .split_once('\n')
+                    .map(|(_, output)| output_requires_permission(output))
+            })
+            .unwrap_or(false)
+}
+
+fn output_requires_permission(output: &str) -> bool {
+    output.trim().strip_prefix("Permission required:").is_some()
 }
 
 fn read_json_or_default<T>(path: &Path) -> Result<T>

@@ -15,7 +15,7 @@
 
   let { project, agents, pinned = false, onOpenAgent, onOpenBoard, onNewAgent, onTogglePin }: Props = $props();
 
-  let running = $derived(agents.filter((a) => a.status === "running").length);
+  let active = $derived(agents.filter((a) => a.status === "running" || a.status === "awaiting").length);
   let review = $derived(agents.filter((a) => a.status === "review").length);
 </script>
 
@@ -35,7 +35,7 @@
     <div class="pf-pw-project-counts">
       <span class="count">{agents.length} agents</span>
       <span class="sep">·</span>
-      <span class="count running">{running} running</span>
+      <span class="count running">{active} active</span>
       <span class="sep">·</span>
       <span class="count review">{review} review</span>
     </div>

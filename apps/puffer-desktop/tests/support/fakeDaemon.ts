@@ -43,6 +43,7 @@ export type FakeDaemonSessionInput = {
   updatedAtMs?: number;
   createdAtMs?: number;
   eventCount?: number;
+  activityStatus?: "idle" | "running" | "awaiting" | "review" | null;
   slug?: string | null;
   tags?: string[];
   note?: string | null;
@@ -67,6 +68,7 @@ const session = {
   updatedAtMs: now,
   createdAtMs: now - 60_000,
   eventCount: 3,
+  activityStatus: "idle",
   slug: "browser-regression",
   tags: ["desktop", "browser"],
   note: "Automated desktop browser regression fixture",
@@ -107,6 +109,7 @@ function sessionMeta(input: FakeDaemonSessionInput): JsonRecord {
     updatedAtMs: input.updatedAtMs ?? session.updatedAtMs,
     createdAtMs: input.createdAtMs ?? session.createdAtMs,
     eventCount: input.eventCount ?? input.timeline?.length ?? session.eventCount,
+    activityStatus: input.activityStatus ?? session.activityStatus,
     tags: input.tags ?? session.tags,
     note: input.note ?? null,
     parentSessionId: input.parentSessionId ?? null,

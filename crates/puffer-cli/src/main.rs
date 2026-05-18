@@ -15,6 +15,7 @@ mod daemon_lsp;
 mod daemon_pty;
 mod daemon_title;
 mod daemon_ui_state;
+mod desktop_activity;
 mod desktop_api;
 mod desktop_api_types;
 mod heartbeat;
