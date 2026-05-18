@@ -44,6 +44,11 @@ const session = {
   modelId: "test-model"
 };
 
+const fileTabs = [
+  { path: "/tmp/puffer/src/main.rs", pinned: true },
+  { path: "/tmp/puffer/src/lib.rs", pinned: true }
+];
+
 function response(id: number, result: unknown): string {
   return JSON.stringify({ type: "response", id, ok: true, result });
 }
@@ -194,6 +199,18 @@ export class FakeDaemon {
         return {};
       case "browser_recording":
         return { frames: [] };
+      case "list_dir":
+        return this.listDir(request.params);
+      case "load_file_tabs":
+        return { tabs: fileTabs, activePath: fileTabs[0].path };
+      case "save_file_tabs":
+        return { tabs: request.params.tabs ?? [], activePath: request.params.activePath ?? null };
+      case "read_file":
+        return this.readFile(request.params);
+      case "fs_watch":
+        return { watchId: "watch-fixture" };
+      case "fs_unwatch":
+        return {};
       default:
         throw new Error(`Unhandled fake daemon method: ${request.method}`);
     }
@@ -391,5 +408,36 @@ export class FakeDaemon {
       this.emit(`browser:${sessionId}:state`, browserState(url));
     });
     return {};
+  }
+
+  private listDir(params: JsonRecord): JsonRecord {
+    const path = String(params.path ?? "");
+    if (path === "/tmp/puffer") {
+      return {
+        entries: [
+          { name: "src", kind: "directory", size: 0, modifiedMs: now }
+        ]
+      };
+    }
+    if (path === "/tmp/puffer/src") {
+      return {
+        entries: [
+          { name: "main.rs", kind: "file", size: 42, modifiedMs: now },
+          { name: "lib.rs", kind: "file", size: 41, modifiedMs: now }
+        ]
+      };
+    }
+    return { entries: [] };
+  }
+
+  private readFile(params: JsonRecord): JsonRecord {
+    const path = String(params.path ?? "");
+    return {
+      path,
+      encoding: "utf8",
+      content: path.endsWith("lib.rs") ? "pub fn fixture() {}\n" : "fn main() {}\n",
+      size: path.endsWith("lib.rs") ? 19 : 13,
+      truncated: false
+    };
   }
 }

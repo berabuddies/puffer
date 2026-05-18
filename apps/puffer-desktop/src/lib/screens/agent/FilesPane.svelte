@@ -1003,9 +1003,9 @@
     {:else}
       <div class="file-tabs" role="tablist" aria-label="Open files">
         {#each openTabs as tab (tab.path)}
-          <button
-            type="button"
+          <div
             role="tab"
+            tabindex="0"
             aria-selected={activePath === tab.path}
             class="file-tab"
             class:active={activePath === tab.path}
@@ -1014,27 +1014,26 @@
             title={tab.path}
             onclick={() => void activateFile(tab.path, tab.size)}
             ondblclick={() => pinTab(tab.path)}
+            onkeydown={(event) => {
+              if (event.key !== "Enter" && event.key !== " ") return;
+              event.preventDefault();
+              void activateFile(tab.path, tab.size);
+            }}
           >
             <Icon name="file" size={11} color="var(--muted-foreground)" />
             <span class="tab-title">{tab.name}</span>
             {#if isTabDirty(tab.path)}
               <span class="dirty-dot" aria-label="Unsaved changes"></span>
             {/if}
-            <span
-              role="button"
-              tabindex="0"
+            <button
+              type="button"
               class="tab-close"
               aria-label="Close {tab.name}"
               onclick={(event) => void closeTab(event, tab.path)}
-              onkeydown={(event) => {
-                if (event.key !== "Enter" && event.key !== " ") return;
-                event.preventDefault();
-                void closeTab(event, tab.path);
-              }}
             >
               <Icon name="x" size={11} />
-            </span>
-          </button>
+            </button>
+          </div>
         {/each}
       </div>
       <header class="viewer-head">
@@ -1344,12 +1343,16 @@
   .tab-close {
     width: 18px;
     height: 18px;
+    padding: 0;
+    border: 0;
+    background: transparent;
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     border-radius: 4px;
     color: var(--muted-foreground);
+    cursor: pointer;
   }
   .tab-close:hover,
   .tab-close:focus-visible {

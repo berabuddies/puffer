@@ -241,3 +241,20 @@ test("Browser tab list event reopens disconnected active tab", async ({ page }) 
     url: "https://example.com"
   });
 });
+
+test("Files tab close controls are native buttons", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: /Browser regression/ }).click();
+  await page.getByRole("button", { name: "Files" }).click();
+
+  await expect(page.getByRole("tab", { name: /main\.rs/ })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /lib\.rs/ })).toBeVisible();
+
+  const closeControls = page.getByRole("button", { name: /Close .*\.rs/ });
+  await expect(closeControls.first()).toHaveJSProperty("tagName", "BUTTON");
+  await closeControls.nth(1).click();
+  await expect(page.getByRole("tab", { name: /lib\.rs/ })).toHaveCount(0);
+});
