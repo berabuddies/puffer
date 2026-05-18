@@ -169,6 +169,22 @@ export class FakeDaemon {
     defaultProvider: "codex",
     defaultModel: "test-model"
   };
+  private permissions: JsonRecord = {
+    path: "/tmp/puffer/.puffer/permissions.json",
+    tools: { bash: "ask" }
+  };
+  private mcpServers: JsonRecord[] = [
+    {
+      id: "playwright",
+      displayName: "Playwright",
+      description: "Browser automation",
+      transport: "stdio",
+      endpoint: "",
+      target: "npx @playwright/mcp",
+      sourceKind: "builtin",
+      sourcePath: null
+    }
+  ];
   private readonly protocol: "legacy" | "real";
   private nextTab = 2;
   private nextPty = 1;
@@ -352,6 +368,14 @@ export class FakeDaemon {
         };
       case "update_config":
         return this.updateConfig(request.params);
+      case "list_permissions":
+        return this.permissions;
+      case "save_permissions":
+        return this.savePermissions(request.params);
+      case "list_mcp_servers":
+        return { servers: this.mcpServers };
+      case "add_mcp_server":
+        return this.addMcpServer(request.params);
       case "pty_list":
         return this.ptyState(String(request.params.sessionId ?? session.sessionId));
       case "pty_open":
@@ -486,6 +510,36 @@ export class FakeDaemon {
         typeof params.defaultModel === "string" ? params.defaultModel : null;
     }
     return this.settingsSnapshot();
+  }
+
+  private savePermissions(params: JsonRecord): JsonRecord {
+    this.permissions = {
+      path: this.permissions.path,
+      tools:
+        typeof params.tools === "object" && params.tools !== null
+          ? { ...(params.tools as JsonRecord) }
+          : {}
+    };
+    return this.permissions;
+  }
+
+  private addMcpServer(params: JsonRecord): JsonRecord {
+    const id = String(params.id ?? "");
+    const server = {
+      id,
+      displayName: String(params.displayName ?? id),
+      description: String(params.description ?? ""),
+      transport: String(params.transport ?? "stdio"),
+      endpoint: String(params.endpoint ?? ""),
+      target: String(params.target ?? ""),
+      sourceKind: String(params.scope ?? "local"),
+      sourcePath: `/tmp/puffer/.puffer/mcp_servers/${id}.json`
+    };
+    this.mcpServers = [
+      ...this.mcpServers.filter((item) => item.id !== id),
+      server
+    ];
+    return { servers: this.mcpServers };
   }
 
   private settingsSnapshot(): JsonRecord {

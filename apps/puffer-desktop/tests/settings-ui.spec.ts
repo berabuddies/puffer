@@ -34,3 +34,53 @@ test("default model cannot be saved before provider models load", async ({ page 
     defaultModel: "test-model"
   });
 });
+
+test("permissions settings save tool policies through the daemon", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Permissions" }).click();
+  await expect(page.getByText("Stored at")).toBeVisible();
+
+  await page.getByRole("button", { name: "Add rule" }).click();
+  const row = page.locator(".pf-perm-row").last();
+  await row.locator("input").fill("browser_open");
+  await row.locator("select").selectOption("deny");
+  await page.getByRole("button", { name: "Save" }).click();
+
+  const request = await daemon.waitForRequest("save_permissions");
+  expect(request.params.tools).toMatchObject({
+    bash: "ask",
+    browser_open: "deny"
+  });
+});
+
+test("MCP settings add server through the daemon", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "MCP Servers" }).click();
+  await expect(page.locator(".pf-mcp-card .title").filter({ hasText: "Playwright" })).toBeVisible();
+
+  await page.getByLabel("ID").fill("github");
+  await page.getByLabel("Name").fill("GitHub");
+  await page.getByLabel("Command").fill("npx");
+  await page.getByLabel("Arguments").fill("@modelcontextprotocol/server-github");
+  await page.getByLabel("Description").fill("GitHub issue and PR tools");
+  await page.getByRole("button", { name: "Add server" }).click();
+
+  const request = await daemon.waitForRequest("add_mcp_server");
+  expect(request.params).toMatchObject({
+    id: "github",
+    displayName: "GitHub",
+    description: "GitHub issue and PR tools",
+    transport: "stdio",
+    target: "npx @modelcontextprotocol/server-github",
+    scope: "local"
+  });
+  await expect(page.getByText("Added github")).toBeVisible();
+});
