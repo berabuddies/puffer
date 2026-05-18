@@ -939,9 +939,14 @@ mod tests {
     fn benchmark_tool_permission_uses_curated_allowlist() {
         assert_eq!(benchmark_tool_permission("Bash", &[]), "allow");
         assert_eq!(benchmark_tool_permission("AskUserQuestion", &[]), "deny");
-        assert_eq!(benchmark_tool_permission("WebSearch", &[]), "deny");
+        assert_eq!(benchmark_tool_permission("WebSearch", &[]), "allow");
+        assert_eq!(benchmark_tool_permission("WebFetch", &[]), "allow");
         assert_eq!(
             benchmark_tool_permission("Bash", &[String::from("Bash")]),
+            "deny"
+        );
+        assert_eq!(
+            benchmark_tool_permission("WebSearch", &[String::from("WebSearch")]),
             "deny"
         );
     }
