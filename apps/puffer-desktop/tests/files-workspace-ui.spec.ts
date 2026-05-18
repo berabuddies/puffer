@@ -12,6 +12,18 @@ async function openFilesPanel(page: Page): Promise<void> {
   await page.locator(".pf-agent-tabs").getByRole("button", { name: "Files", exact: true }).click();
 }
 
+const codexAuth = [
+  {
+    providerId: "codex",
+    kind: "oauth",
+    email: "tester@example.com",
+    expiresAtMs: null,
+    scopes: [],
+    planType: "test",
+    organizationName: null
+  }
+];
+
 test("Files tab close button works from the keyboard", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
@@ -186,6 +198,24 @@ test("new agent provider choice is used for the first turn", async ({ page }) =>
   });
 });
 
+test("new agent provider picker only shows authenticated providers", async ({ page }) => {
+  const daemon = new FakeDaemon({ auth: codexAuth });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "New agent in puffer" }).click();
+  const dialog = page.getByRole("dialog", { name: "New agent" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("radio", { name: /Codex/ })).toBeVisible();
+  await expect(dialog.getByRole("radio", { name: /Anthropic/ })).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Start agent" }).click();
+
+  const createRequest = await daemon.waitForRequest("create_session");
+  expect(createRequest.params).toMatchObject({
+    providerId: "codex"
+  });
+});
+
 test("empty workspace can start a new agent in the default workspace", async ({ page }) => {
   const daemon = new FakeDaemon({ sessions: [] });
   await daemon.install(page);
@@ -223,6 +253,27 @@ test("connect project provider choice includes Anthropic", async ({ page }) => {
   expect(createRequest.params).toMatchObject({
     cwd: "/tmp/puffer-new-project",
     providerId: "anthropic"
+  });
+});
+
+test("connect project provider picker only shows authenticated providers", async ({ page }) => {
+  const daemon = new FakeDaemon({ auth: codexAuth });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Connect project" }).click();
+  const dialog = page.getByRole("dialog", { name: "Connect project" });
+  await expect(dialog).toBeVisible();
+
+  await expect(dialog.getByRole("radio", { name: "Codex" })).toBeVisible();
+  await expect(dialog.getByRole("radio", { name: "Anthropic" })).toHaveCount(0);
+  await dialog.getByLabel("Directory").fill("/tmp/puffer-new-project");
+  await dialog.getByRole("button", { name: "Start agent" }).click();
+
+  const createRequest = await daemon.waitForRequest("create_session");
+  expect(createRequest.params).toMatchObject({
+    cwd: "/tmp/puffer-new-project",
+    providerId: "codex"
   });
 });
 

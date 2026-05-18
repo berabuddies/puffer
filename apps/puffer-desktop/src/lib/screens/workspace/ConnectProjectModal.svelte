@@ -98,10 +98,14 @@
   ];
 
   const personalProviderIds = new Set(["codex", "openai", "claude", "anthropic", "puffer"]);
+  let authenticatedProviderIds = $derived(
+    new Set((snapshot?.auth ?? []).map((entry) => entry.providerId))
+  );
 
   let providerOptions = $derived(
     (snapshot?.providers?.length ? snapshot.providers : fallbackProviders).filter((provider) =>
-      personalProviderIds.has(provider.id)
+      personalProviderIds.has(provider.id) &&
+      (snapshot === null || authenticatedProviderIds.has(provider.id))
     )
   );
 
