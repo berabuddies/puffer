@@ -53,11 +53,18 @@ mod tests {
 
     #[test]
     fn popup_prefers_prefix_matches() {
-        let commands = supported_commands();
+        let commands = vec![
+            visible_command("xreview"),
+            visible_command("reflect"),
+            visible_command("reload-plugins"),
+            visible_command("feature"),
+        ];
         let rows = popup_rows("/re", &commands);
         let names = rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>();
-        assert!(names.starts_with(&["reload-plugins", "remote-control", "remote-env"]));
-        assert!(names.contains(&"review"));
+        assert_eq!(
+            names,
+            ["reflect", "reload-plugins", "feature", "xreview"]
+        );
     }
 
     #[test]
@@ -91,5 +98,16 @@ mod tests {
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "test");
+    }
+
+    fn visible_command(name: &str) -> CommandSpec {
+        CommandSpec {
+            name: name.to_string(),
+            aliases: Vec::new(),
+            description: "Visible command".to_string(),
+            argument_hint: None,
+            kind: CommandKind::Local,
+            hidden: false,
+        }
     }
 }
