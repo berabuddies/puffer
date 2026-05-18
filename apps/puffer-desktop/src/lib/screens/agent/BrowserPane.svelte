@@ -202,6 +202,7 @@
       title = "";
       currentUrl = "about:blank";
       urlDraft = "about:blank";
+      resetPointer(activePointerId ?? undefined);
       disposeActiveSubscriptions();
       clearCanvas();
       return;
@@ -216,6 +217,7 @@
     nextTabNumber = nextTabIndex(nextTabs);
     saveTabs(nextTabs);
     syncFromActiveTab();
+    if (!connected) resetPointer(activePointerId ?? undefined);
   }
 
   async function syncDaemonTabs() {
@@ -581,7 +583,10 @@
   }
 
   function sendMouse(event: PointerEvent, eventType: "mousePressed" | "mouseReleased" | "mouseMoved") {
-    if (!connected) return;
+    if (!connected || !activeTabId) {
+      if (eventType === "mouseReleased") resetPointer(event.pointerId);
+      return;
+    }
     event.preventDefault();
     canvas?.focus();
     const point = canvasPoint(event);

@@ -253,6 +253,76 @@ test("Browser cursor probe does not run after tabs are cleared", async ({ page }
   expect(daemon.requests.filter((request) => request.method === "browser_cursor")).toHaveLength(0);
 });
 
+test("Browser pointer state resets when tabs clear mid-drag", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1"
+  );
+
+  const canvas = page.locator(".pf-browser-canvas");
+  await canvas.dispatchEvent("pointerdown", {
+    clientX: 20,
+    clientY: 20,
+    pointerId: 7,
+    button: 0,
+    buttons: 1,
+    pointerType: "mouse"
+  });
+  await daemon.waitForRequest("browser_input", (request) => {
+    const event = request.params.event as Record<string, unknown> | undefined;
+    return event?.kind === "mouse" && event.eventType === "mousePressed";
+  });
+
+  daemon.emit("browser:session-browser:tabs", { activeTabId: null, tabs: [] });
+  await expect(page.locator(".pf-browser-status")).toHaveText("No pages");
+  await page.evaluate(() => {
+    window.dispatchEvent(new PointerEvent("pointerup", {
+      clientX: 22,
+      clientY: 22,
+      pointerId: 7,
+      button: 0,
+      buttons: 0,
+      pointerType: "mouse"
+    }));
+  });
+
+  const tab = browserTab("tab-1", "https://restored.example");
+  daemon.emit("browser:session-browser:tabs", { activeTabId: "tab-1", tabs: [{ ...tab, active: true }] });
+  await daemon.waitForRequest("browser_resize", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1"
+  );
+  const previousRequestCount = daemon.requests.length;
+
+  await canvas.dispatchEvent("pointermove", {
+    clientX: 42,
+    clientY: 42,
+    pointerId: 7,
+    button: -1,
+    buttons: 0,
+    pointerType: "mouse"
+  });
+  await page.waitForTimeout(90);
+
+  const newRequests = daemon.requests.slice(previousRequestCount);
+  expect(newRequests.some((request) =>
+    request.method === "browser_cursor" &&
+    request.params.sessionId === "session-browser:browser:tab-1"
+  )).toBe(true);
+  const staleDragMoves = newRequests.filter((request) => {
+    const event = request.params.event as Record<string, unknown> | undefined;
+    return request.method === "browser_input" &&
+      event?.kind === "mouse" &&
+      event.eventType === "mouseMoved" &&
+      event.buttons === 1;
+  });
+  expect(staleDragMoves).toHaveLength(0);
+});
+
 test("Browser fuzz click storm keeps daemon session ids valid", async ({ page }) => {
   const daemon = new FakeDaemon();
   const consoleErrors: string[] = [];
