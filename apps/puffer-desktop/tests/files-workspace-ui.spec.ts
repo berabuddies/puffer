@@ -85,6 +85,45 @@ test("Files tab keeps dirty edits visible after save failure", async ({ page }) 
   await expect(editor).toHaveValue(draft);
 });
 
+test("Files tab opens symbol context from the editor cursor", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openFilesPanel(page);
+
+  await page.getByRole("tab", { name: /lib\.rs/ }).click();
+  const editor = page.getByLabel("Edit file contents");
+  await expect(editor).toHaveValue("pub fn fixture() {}\n");
+  await editor.evaluate((node) => {
+    const textarea = node as HTMLTextAreaElement;
+    textarea.focus();
+    textarea.setSelectionRange(9, 9);
+  });
+  await editor.press("ArrowRight");
+
+  const inspect = await daemon.waitForRequest(
+    "lsp_inspect",
+    (candidate) => candidate.params.path === "/tmp/puffer/src/lib.rs"
+  );
+  expect(inspect.params).toMatchObject({
+    path: "/tmp/puffer/src/lib.rs",
+    cwd: "/tmp/puffer",
+    line: 0
+  });
+
+  const popup = page.getByLabel("Symbol references");
+  await expect(popup).toBeVisible();
+  await expect(popup.locator(".symbol")).toContainText("fixture");
+  await expect(popup.getByText("fixture() -> demo value")).toBeVisible();
+  await expect(popup.locator(".lsp-location")).toHaveCount(2);
+  await expect(popup.locator(".lsp-location").first()).toContainText("src/lib.rs:1:8");
+
+  await popup.getByRole("button", { name: "Close symbol popup" }).click();
+  await expect(popup).toHaveCount(0);
+});
+
 test("New agent modal closes with Escape", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

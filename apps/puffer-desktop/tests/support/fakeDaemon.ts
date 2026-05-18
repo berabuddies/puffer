@@ -546,6 +546,8 @@ export class FakeDaemon {
         return this.readFile(request.params);
       case "write_file":
         return this.writeFile(request.params);
+      case "lsp_inspect":
+        return this.lspInspect(request.params);
       case "fs_watch":
         return { watchId: "watch-fixture" };
       case "fs_unwatch":
@@ -1031,6 +1033,40 @@ export class FakeDaemon {
       content,
       size: content.length,
       truncated: false
+    };
+  }
+
+  private lspInspect(params: JsonRecord): JsonRecord {
+    const path = String(params.path ?? "/tmp/puffer/src/lib.rs");
+    const cwd = String(params.cwd ?? "/tmp/puffer");
+    const line = Number(params.line ?? 0);
+    const character = Number(params.character ?? 0);
+    return {
+      path,
+      cwd,
+      line,
+      character,
+      operations: {
+        hover: {
+          operation: "hover",
+          filePath: path,
+          result: "fixture() -> demo value"
+        },
+        goToDefinition: {
+          operation: "goToDefinition",
+          filePath: path,
+          result: "- src/lib.rs:1:8",
+          resultCount: 1,
+          fileCount: 1
+        },
+        findReferences: {
+          operation: "findReferences",
+          filePath: path,
+          result: "src/lib.rs:\n  - line 1:8",
+          resultCount: 1,
+          fileCount: 1
+        }
+      }
     };
   }
 }
