@@ -96,6 +96,7 @@
   // Per-provider model listings cached by providerId. Populated on demand
   // when the user expands the Providers pane.
   let providerModels = $state<Record<string, ModelDescriptorInfo[]>>({});
+  let modelLoadingByProvider = $state<Record<string, boolean>>({});
   let modelPickerProvider = $state<string>("");
   let modelPickerModel = $state<string>("");
   let modelSaving = $state(false);
@@ -186,11 +187,19 @@
   }
 
   async function loadModelsForProvider(providerId: string) {
-    if (!providerId || providerModels[providerId]) return;
+    if (!providerId || providerModels[providerId] || modelLoadingByProvider[providerId]) return;
+    modelLoadingByProvider = { ...modelLoadingByProvider, [providerId]: true };
+    modelError = null;
     try {
-      providerModels = { ...providerModels, [providerId]: await listProviderModels(providerId) };
+      const models = await listProviderModels(providerId);
+      providerModels = { ...providerModels, [providerId]: models };
+      if (modelPickerProvider === providerId && !modelPickerModel) {
+        modelPickerModel = (models.find((model) => model.isDefault) ?? models[0])?.id ?? "";
+      }
     } catch (e) {
       modelError = (e as Error).message ?? String(e);
+    } finally {
+      modelLoadingByProvider = { ...modelLoadingByProvider, [providerId]: false };
     }
   }
 
@@ -235,7 +244,7 @@
   }
 
   async function saveDefaultModel() {
-    if (!modelPickerProvider) return;
+    if (!modelPickerProvider || !modelPickerModel || modelPickerLoading) return;
     modelSaving = true;
     modelError = null;
     try {
@@ -307,6 +316,18 @@
   // static panes with a friendly "connect daemon" banner instead of a red
   // error. In Tauri the singleton connects on first `ensureLocalDaemonClient`.
   let daemonReachable = isDaemonReachable();
+  let modelPickerLoading = $derived(
+    Boolean(modelPickerProvider && modelLoadingByProvider[modelPickerProvider])
+  );
+  let canSaveDefaultModel = $derived(
+    Boolean(
+      daemonReachable &&
+        modelPickerProvider &&
+        modelPickerModel &&
+        !modelPickerLoading &&
+        !modelSaving
+    )
+  );
 
   // Lazy-load per-pane data when the user actually opens the tab so the
   // initial settings render stays a single RPC (the snapshot).
@@ -476,9 +497,9 @@
               class="sc-input"
               value={modelPickerModel}
               onchange={(e) => (modelPickerModel = (e.currentTarget as HTMLSelectElement).value)}
-              disabled={!modelPickerProvider}
+              disabled={!modelPickerProvider || modelPickerLoading}
             >
-              <option value="">— pick a model —</option>
+              <option value="">{modelPickerLoading ? "Loading models..." : "— pick a model —"}</option>
               {#each (providerModels[modelPickerProvider] ?? []) as m (m.id)}
                 <option value={m.id}>{m.displayName} ({m.id})</option>
               {/each}
@@ -493,7 +514,7 @@
               class="sc-btn"
               data-variant="default"
               data-size="sm"
-              disabled={modelSaving || !modelPickerProvider || !daemonReachable}
+              disabled={!canSaveDefaultModel}
               onclick={saveDefaultModel}
             >
               {modelSaving ? "Saving…" : "Save default"}

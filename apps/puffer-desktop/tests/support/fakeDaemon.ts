@@ -164,6 +164,10 @@ export class FakeDaemon {
   private readonly sessions = new Map<string, JsonRecord>();
   private readonly timelines = new Map<string, JsonRecord[]>();
   private readonly providerModels: Record<string, JsonRecord[]>;
+  private settingsConfig: { defaultProvider: string | null; defaultModel: string | null } = {
+    defaultProvider: "codex",
+    defaultModel: "test-model"
+  };
   private nextTab = 2;
   private nextPty = 1;
 
@@ -312,6 +316,8 @@ export class FakeDaemon {
           providerId: String(request.params.providerId ?? "codex"),
           models: this.modelsForProvider(String(request.params.providerId ?? "codex"))
         };
+      case "update_config":
+        return this.updateConfig(request.params);
       case "pty_list":
         return this.ptyState(String(request.params.sessionId ?? session.sessionId));
       case "pty_open":
@@ -436,6 +442,18 @@ export class FakeDaemon {
     };
   }
 
+  private updateConfig(params: JsonRecord): JsonRecord {
+    if ("defaultProvider" in params) {
+      this.settingsConfig.defaultProvider =
+        typeof params.defaultProvider === "string" ? params.defaultProvider : null;
+    }
+    if ("defaultModel" in params) {
+      this.settingsConfig.defaultModel =
+        typeof params.defaultModel === "string" ? params.defaultModel : null;
+    }
+    return this.settingsSnapshot();
+  }
+
   private settingsSnapshot(): JsonRecord {
     return {
       workspaceRoot: "/tmp/puffer",
@@ -445,8 +463,8 @@ export class FakeDaemon {
       builtinResourcesDir: "/tmp/puffer/resources",
       config: {
         appName: "Puffer Code",
-        defaultProvider: "codex",
-        defaultModel: "test-model",
+        defaultProvider: this.settingsConfig.defaultProvider,
+        defaultModel: this.settingsConfig.defaultModel,
         openaiBaseUrl: null,
         theme: "system",
         mascotId: "puffer",
