@@ -1102,6 +1102,9 @@
             showLoading: false,
             resetLiveState: false
           }).then(() => {
+            if (selectedSession?.id !== sessionToRefresh.id) {
+              return;
+            }
             // Preserve a turn-error placeholder so the user can still
             // read the failure after the persisted transcript reloads.
             const persistedTimeline = sessionDetail?.timeline ?? [];

@@ -27,6 +27,25 @@ type TabSet = {
   tabs: JsonRecord[];
 };
 
+export type FakeDaemonSessionInput = {
+  sessionId: string;
+  displayName?: string | null;
+  generatedTitle?: string | null;
+  title?: string;
+  cwd?: string;
+  folderPath?: string;
+  updatedAtMs?: number;
+  createdAtMs?: number;
+  eventCount?: number;
+  slug?: string | null;
+  tags?: string[];
+  note?: string | null;
+  parentSessionId?: string | null;
+  providerId?: string | null;
+  modelId?: string | null;
+  timeline?: JsonRecord[];
+};
+
 const ONE_PIXEL_PNG =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lzTnGQAAAABJRU5ErkJggg==";
 
@@ -49,6 +68,46 @@ const session = {
   providerId: "codex",
   modelId: "test-model"
 };
+
+function defaultTimeline(): JsonRecord[] {
+  return [
+    {
+      kind: "user_message",
+      id: "msg-user",
+      text: "Open the browser tab.",
+      createdAtMs: now - 30_000
+    },
+    {
+      kind: "assistant_message",
+      id: "msg-assistant",
+      text: "Ready to exercise the managed browser.",
+      createdAtMs: now - 20_000
+    }
+  ];
+}
+
+function sessionMeta(input: FakeDaemonSessionInput): JsonRecord {
+  const title = input.title ?? input.displayName ?? session.title;
+  const cwd = input.cwd ?? session.cwd;
+  const folderPath = input.folderPath ?? cwd;
+  return {
+    ...session,
+    ...input,
+    sessionId: input.sessionId,
+    displayName: input.displayName ?? title,
+    title,
+    cwd,
+    folderPath,
+    updatedAtMs: input.updatedAtMs ?? session.updatedAtMs,
+    createdAtMs: input.createdAtMs ?? session.createdAtMs,
+    eventCount: input.eventCount ?? input.timeline?.length ?? session.eventCount,
+    tags: input.tags ?? session.tags,
+    note: input.note ?? null,
+    parentSessionId: input.parentSessionId ?? null,
+    providerId: input.providerId ?? session.providerId,
+    modelId: input.modelId ?? session.modelId
+  };
+}
 
 const fileTabs = [
   { path: "/tmp/puffer/src/main.rs", pinned: true },
@@ -94,7 +153,19 @@ export class FakeDaemon {
   private readonly waiters: Waiter[] = [];
   private readonly responseDelays: ResponseDelay[] = [];
   private readonly browserTabs = new Map<string, TabSet>();
+  private readonly sessions = new Map<string, JsonRecord>();
+  private readonly timelines = new Map<string, JsonRecord[]>();
   private nextTab = 2;
+
+  constructor(options: { sessions?: FakeDaemonSessionInput[] } = {}) {
+    const sessions = options.sessions ?? [{ ...session, timeline: defaultTimeline() }];
+    for (const input of sessions) {
+      const metadata = sessionMeta(input);
+      const sessionId = String(metadata.sessionId);
+      this.sessions.set(sessionId, metadata);
+      this.timelines.set(sessionId, input.timeline ?? defaultTimeline());
+    }
+  }
 
   async install(page: Page): Promise<void> {
     await page.routeWebSocket(FAKE_DAEMON_URL, (socket) => {
@@ -134,6 +205,15 @@ export class FakeDaemon {
     ms: number
   ): void {
     this.responseDelays.push({ method, predicate, ms });
+  }
+
+  setSessionTimeline(sessionId: string, timeline: JsonRecord[]): void {
+    this.timelines.set(sessionId, timeline);
+    const metadata = this.sessions.get(sessionId);
+    if (metadata) {
+      metadata.eventCount = timeline.length;
+      metadata.updatedAtMs = Date.now();
+    }
   }
 
   private handleMessage(socket: WebSocketRoute, raw: string): void {
@@ -199,17 +279,27 @@ export class FakeDaemon {
       case "load_desktop_pins":
         return { pinnedAgentIds: [], pinnedWorkspacePaths: [] };
       case "list_grouped_sessions":
-        return [
-          {
-            folderId: "/tmp/puffer",
-            folderLabel: "puffer",
-            folderPath: "/tmp/puffer",
-            sessionCount: 1,
-            sessions: [session]
-          }
-        ];
+        return this.groupedSessions();
       case "load_session_detail":
-        return this.sessionDetail();
+        return this.sessionDetail(String(request.params.sessionId ?? session.sessionId));
+      case "run_agent_turn":
+        return { turnId: `turn-${String(request.params.sessionId ?? session.sessionId)}` };
+      case "list_provider_models":
+        return {
+          providerId: String(request.params.providerId ?? "codex"),
+          models: [
+            {
+              id: "test-model",
+              displayName: "Test model",
+              providerId: String(request.params.providerId ?? "codex"),
+              family: "test",
+              contextWindow: 128000,
+              maxOutputTokens: 4096,
+              supportsReasoning: false,
+              isDefault: true
+            }
+          ]
+        };
       case "browser_agent":
         return this.browserAgent(request.params);
       case "browser_open":
@@ -304,29 +394,42 @@ export class FakeDaemon {
     };
   }
 
-  private sessionDetail(): JsonRecord {
+  private groupedSessions(): JsonRecord[] {
+    const groups = new Map<string, JsonRecord>();
+    for (const metadata of this.sessions.values()) {
+      const folderPath = String(metadata.folderPath ?? metadata.cwd ?? "/tmp/puffer");
+      const group = groups.get(folderPath) ?? {
+        folderId: folderPath,
+        folderLabel: folderPath.split("/").filter(Boolean).at(-1) ?? folderPath,
+        folderPath,
+        sessionCount: 0,
+        sessions: []
+      };
+      (group.sessions as JsonRecord[]).push(metadata);
+      group.sessionCount = (group.sessions as JsonRecord[]).length;
+      groups.set(folderPath, group);
+    }
+    for (const group of groups.values()) {
+      (group.sessions as JsonRecord[]).sort(
+        (left, right) => Number(right.updatedAtMs ?? 0) - Number(left.updatedAtMs ?? 0)
+      );
+    }
+    return Array.from(groups.values());
+  }
+
+  private sessionDetail(sessionId: string): JsonRecord {
+    const metadata = this.sessions.get(sessionId) ?? session;
+    const timeline = this.timelines.get(sessionId) ?? defaultTimeline();
     return {
-      ...session,
-      timeline: [
-        {
-          kind: "user_message",
-          id: "msg-user",
-          text: "Open the browser tab.",
-          createdAtMs: now - 30_000
-        },
-        {
-          kind: "assistant_message",
-          id: "msg-assistant",
-          text: "Ready to exercise the managed browser.",
-          createdAtMs: now - 20_000
-        }
-      ],
+      ...metadata,
+      eventCount: timeline.length,
+      timeline,
       latestDiff: null,
       diffHistory: [],
       repoStatus: {
-        sessionId: session.sessionId,
-        cwd: session.cwd,
-        repoRoot: session.folderPath,
+        sessionId,
+        cwd: String(metadata.cwd ?? session.cwd),
+        repoRoot: String(metadata.folderPath ?? session.folderPath),
         branch: "codex/desktop-gui-e2e-fixes",
         headSha: "abcdef0",
         isClean: true,
