@@ -236,7 +236,14 @@
           <div class="pf-pmem-detail-head">
             <span class="pf-pmem-kind" data-kind={selectedMemory.kind}>{selectedMemory.kind}</span>
             <span class="path">{selectedMemory.path}</span>
-            <button type="button" class="sc-btn" data-variant="ghost" data-size="sm">
+            <button
+              type="button"
+              class="sc-btn"
+              data-variant="ghost"
+              data-size="sm"
+              disabled
+              title="Memory editing is not available yet"
+            >
               <Icon name="edit" size={12} />Edit
             </button>
           </div>

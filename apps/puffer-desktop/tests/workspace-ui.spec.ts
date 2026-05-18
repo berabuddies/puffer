@@ -47,3 +47,15 @@ test("workspace search filters projects and agents", async ({ page }) => {
   await expect(workspace.getByText("Alpha planner")).toBeVisible();
   await expect(workspace.getByText("Beta browser audit")).toBeVisible();
 });
+
+test("project memory edit control is disabled until file editing is wired", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-pw-project").getByRole("button", { name: "Details" }).click();
+  await page.getByRole("button", { name: /Memory/ }).click();
+
+  const memoryDetail = page.locator(".pf-pmem-detail");
+  await expect(memoryDetail.getByRole("button", { name: "Edit" })).toBeDisabled();
+});
