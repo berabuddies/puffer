@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount, tick } from "svelte";
+  import { onDestroy, tick, untrack } from "svelte";
   import { Terminal } from "@xterm/xterm";
   import { FitAddon } from "@xterm/addon-fit";
   import "@xterm/xterm/css/xterm.css";
@@ -44,11 +44,21 @@
   let inputDisposer: { dispose: () => void } | null = null;
   let resizeObserver: ResizeObserver | null = null;
   let seenSeqByPty = new Map<string, number>();
+  let restoreGeneration = 0;
   const previewMode = !isDaemonReachable();
 
-  onMount(() => {
-    if (previewMode) return;
-    void restoreOrCreateTerminal();
+  $effect(() => {
+    const targetSessionId = sessionId;
+    const targetCwd = cwd;
+    if (previewMode || targetSessionId === "preview") return;
+    untrack(() => {
+      const generation = ++restoreGeneration;
+      activePtyId = null;
+      ptyTabs = [];
+      seenSeqByPty = new Map();
+      cleanupTerminalAttach();
+      void restoreOrCreateTerminal(targetSessionId, targetCwd, generation);
+    });
   });
 
   onDestroy(() => {
@@ -56,48 +66,48 @@
     cleanupTerminalAttach();
   });
 
-  async function restoreOrCreateTerminal() {
-    if (sessionId === "preview") return;
+  async function restoreOrCreateTerminal(targetSessionId: string, targetCwd: string, generation: number) {
+    if (targetSessionId === "preview") return;
     loading = true;
     error = null;
     try {
-      const info = await listPtys(sessionId);
-      if (disposed) return;
+      const info = await listPtys(targetSessionId);
+      if (disposed || generation !== restoreGeneration || targetSessionId !== sessionId || targetCwd !== cwd) return;
       ptyTabs = info.tabs;
       const active = info.tabs.find((tab) => tab.active) ?? info.tabs[0];
       if (active) {
         await activatePty(active.ptyId);
       } else if (!info.initialized) {
-        await createTerminalTab();
+        await createTerminalTab(targetSessionId, targetCwd, generation);
       }
     } catch (err) {
-      error = err instanceof Error ? err.message : String(err);
+      if (generation === restoreGeneration) error = err instanceof Error ? err.message : String(err);
     } finally {
-      loading = false;
+      if (generation === restoreGeneration) loading = false;
     }
   }
 
-  async function createTerminalTab() {
-    if (previewMode || sessionId === "preview") return;
+  async function createTerminalTab(targetSessionId = sessionId, targetCwd = cwd, generation = restoreGeneration) {
+    if (previewMode || targetSessionId === "preview") return;
     loading = true;
     error = null;
     try {
       const title = nextTerminalTitle();
       const { ptyId } = await openPty({
-        sessionId,
-        cwd,
+        sessionId: targetSessionId,
+        cwd: targetCwd,
         cols: term?.cols ?? 80,
         rows: term?.rows ?? 24,
         title
       });
-      const info = await listPtys(sessionId);
-      if (disposed) return;
+      const info = await listPtys(targetSessionId);
+      if (disposed || generation !== restoreGeneration || targetSessionId !== sessionId || targetCwd !== cwd) return;
       ptyTabs = info.tabs;
       await activatePty(ptyId);
     } catch (err) {
-      error = err instanceof Error ? err.message : String(err);
+      if (generation === restoreGeneration) error = err instanceof Error ? err.message : String(err);
     } finally {
-      loading = false;
+      if (generation === restoreGeneration) loading = false;
     }
   }
 

@@ -27,6 +27,12 @@ type TabSet = {
   tabs: JsonRecord[];
 };
 
+type PtySet = {
+  initialized: boolean;
+  activePtyId: string | null;
+  tabs: JsonRecord[];
+};
+
 export type FakeDaemonSessionInput = {
   sessionId: string;
   displayName?: string | null;
@@ -153,9 +159,11 @@ export class FakeDaemon {
   private readonly waiters: Waiter[] = [];
   private readonly responseDelays: ResponseDelay[] = [];
   private readonly browserTabs = new Map<string, TabSet>();
+  private readonly ptys = new Map<string, PtySet>();
   private readonly sessions = new Map<string, JsonRecord>();
   private readonly timelines = new Map<string, JsonRecord[]>();
   private nextTab = 2;
+  private nextPty = 1;
 
   constructor(options: { sessions?: FakeDaemonSessionInput[] } = {}) {
     const sessions = options.sessions ?? [{ ...session, timeline: defaultTimeline() }];
@@ -300,6 +308,19 @@ export class FakeDaemon {
             }
           ]
         };
+      case "pty_list":
+        return this.ptyState(String(request.params.sessionId ?? session.sessionId));
+      case "pty_open":
+        return this.openPty(request.params);
+      case "pty_focus":
+        return this.focusPty(String(request.params.ptyId ?? ""));
+      case "pty_replay":
+        return { chunks: [] };
+      case "pty_resize":
+      case "pty_write":
+        return {};
+      case "pty_close":
+        return this.closePty(String(request.params.ptyId ?? ""));
       case "browser_agent":
         return this.browserAgent(request.params);
       case "browser_open":
@@ -531,6 +552,79 @@ export class FakeDaemon {
     const tabId = backendSessionId.slice(markerIndex + marker.length);
     if (!rootSessionId || !tabId) return;
     this.upsertTab(rootSessionId, browserTabInfo(tabId, url));
+  }
+
+  private ptySet(sessionId: string): PtySet {
+    const existing = this.ptys.get(sessionId);
+    if (existing) return existing;
+    const created: PtySet = { initialized: false, activePtyId: null, tabs: [] };
+    this.ptys.set(sessionId, created);
+    return created;
+  }
+
+  private ptyState(sessionId: string): JsonRecord {
+    const set = this.ptySet(sessionId);
+    this.refreshPtyActiveFlags(set);
+    return {
+      initialized: set.initialized,
+      tabs: set.tabs
+    };
+  }
+
+  private openPty(params: JsonRecord): JsonRecord {
+    const sessionId = String(params.sessionId ?? session.sessionId);
+    const set = this.ptySet(sessionId);
+    const ptyId = `pty-${this.nextPty++}`;
+    const title = String(params.title ?? `Terminal ${set.tabs.length + 1}`);
+    const tab = {
+      ptyId,
+      sessionId,
+      title,
+      cwd: String(params.cwd ?? "/tmp/puffer"),
+      cols: Number(params.cols ?? 80),
+      rows: Number(params.rows ?? 24),
+      createdAtMs: Date.now(),
+      active: true
+    };
+    set.initialized = true;
+    set.activePtyId = ptyId;
+    set.tabs = [...set.tabs, tab];
+    this.refreshPtyActiveFlags(set);
+    return { ptyId };
+  }
+
+  private focusPty(ptyId: string): JsonRecord {
+    for (const set of this.ptys.values()) {
+      if (set.tabs.some((tab) => tab.ptyId === ptyId)) {
+        set.activePtyId = ptyId;
+        this.refreshPtyActiveFlags(set);
+        break;
+      }
+    }
+    return {};
+  }
+
+  private closePty(ptyId: string): JsonRecord {
+    for (const set of this.ptys.values()) {
+      if (!set.tabs.some((tab) => tab.ptyId === ptyId)) continue;
+      set.tabs = set.tabs.filter((tab) => tab.ptyId !== ptyId);
+      if (set.activePtyId === ptyId) {
+        set.activePtyId = set.tabs.length > 0 ? String(set.tabs[0].ptyId) : null;
+      }
+      this.refreshPtyActiveFlags(set);
+      break;
+    }
+    return {};
+  }
+
+  private refreshPtyActiveFlags(set: PtySet): void {
+    if (!set.activePtyId && set.tabs.length > 0) {
+      set.activePtyId = String(set.tabs[0].ptyId);
+    }
+    set.tabs = set.tabs.map((tab) => ({
+      ...tab,
+      active: tab.ptyId === set.activePtyId
+    }));
   }
 
   private navigateBrowser(params: JsonRecord): unknown {
