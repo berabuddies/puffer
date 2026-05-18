@@ -327,6 +327,15 @@ pub(crate) struct McpServerDto {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct ThinkingOptionDto {
+    pub(crate) id: String,
+    pub(crate) label: String,
+    pub(crate) description: String,
+    pub(crate) is_default: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ModelDescriptorDto {
     pub(crate) id: String,
     pub(crate) display_name: String,
@@ -335,4 +344,8 @@ pub(crate) struct ModelDescriptorDto {
     pub(crate) context_window: u32,
     pub(crate) max_output_tokens: u32,
     pub(crate) supports_reasoning: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) thinking_options: Vec<ThinkingOptionDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) default_thinking_option_id: Option<String>,
 }

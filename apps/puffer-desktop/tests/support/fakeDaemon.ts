@@ -163,10 +163,11 @@ export class FakeDaemon {
   private readonly ptys = new Map<string, PtySet>();
   private readonly sessions = new Map<string, JsonRecord>();
   private readonly timelines = new Map<string, JsonRecord[]>();
+  private readonly providerModels: Record<string, JsonRecord[]>;
   private nextTab = 2;
   private nextPty = 1;
 
-  constructor(options: { sessions?: FakeDaemonSessionInput[] } = {}) {
+  constructor(options: { sessions?: FakeDaemonSessionInput[]; providerModels?: Record<string, JsonRecord[]> } = {}) {
     const sessions = options.sessions ?? [{ ...session, timeline: defaultTimeline() }];
     for (const input of sessions) {
       const metadata = sessionMeta(input);
@@ -174,6 +175,7 @@ export class FakeDaemon {
       this.sessions.set(sessionId, metadata);
       this.timelines.set(sessionId, input.timeline ?? defaultTimeline());
     }
+    this.providerModels = options.providerModels ?? {};
   }
 
   async install(page: Page): Promise<void> {
@@ -306,18 +308,7 @@ export class FakeDaemon {
       case "list_provider_models":
         return {
           providerId: String(request.params.providerId ?? "codex"),
-          models: [
-            {
-              id: "test-model",
-              displayName: "Test model",
-              providerId: String(request.params.providerId ?? "codex"),
-              family: "test",
-              contextWindow: 128000,
-              maxOutputTokens: 4096,
-              supportsReasoning: false,
-              isDefault: true
-            }
-          ]
+          models: this.modelsForProvider(String(request.params.providerId ?? "codex"))
         };
       case "pty_list":
         return this.ptyState(String(request.params.sessionId ?? session.sessionId));
@@ -378,6 +369,36 @@ export class FakeDaemon {
       this.methodFailures.set(method, rest);
     }
     throw new Error(error);
+  }
+
+  private modelsForProvider(providerId: string): JsonRecord[] {
+    return this.providerModels[providerId] ?? [
+      {
+        id: "test-model",
+        displayName: "Test model",
+        provider: providerId,
+        api: "openai-responses",
+        contextWindow: 128000,
+        maxOutputTokens: 4096,
+        supportsReasoning: true,
+        thinkingOptions: [
+          {
+            id: "low",
+            label: "Low",
+            description: "Use low reasoning effort for this turn.",
+            isDefault: true
+          },
+          {
+            id: "high",
+            label: "High",
+            description: "Use high reasoning effort for this turn.",
+            isDefault: false
+          }
+        ],
+        defaultThinkingOptionId: "low",
+        isDefault: true
+      }
+    ];
   }
 
   private settingsSnapshot(): JsonRecord {

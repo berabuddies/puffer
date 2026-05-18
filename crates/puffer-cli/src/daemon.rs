@@ -35,16 +35,17 @@ use puffer_config::{
     ensure_workspace_dirs, load_config, save_user_config, ConfigPaths, PufferConfig,
 };
 use puffer_core::{
-    apply_model_preferences, execute_user_turn_streaming_with_permissions_and_cancel,
-    with_user_question_prompt_handler, AppState, CancelToken, MessageRole, PermissionPromptAction,
-    PermissionPromptRequest, TurnStreamEvent, UserQuestionPromptRequest,
-    UserQuestionPromptResponse,
+    apply_model_preferences, default_effort_level,
+    execute_user_turn_streaming_with_permissions_and_cancel, provider_preference_family,
+    supported_effort_levels, with_user_question_prompt_handler, AppState, CancelToken, MessageRole,
+    ModelPreferenceFamily, PermissionPromptAction, PermissionPromptRequest, TurnStreamEvent,
+    UserQuestionPromptRequest, UserQuestionPromptResponse,
 };
 use puffer_provider_openai::{
     exchange_authorization_code as exchange_openai_authorization_code,
     parse_authorization_input as parse_openai_authorization_input,
 };
-use puffer_provider_registry::{AuthStore, ProviderRegistry, StoredCredential};
+use puffer_provider_registry::{AuthStore, ModelDescriptor, ProviderRegistry, StoredCredential};
 use puffer_resources::{load_resources, LoadedResources, McpServerSpec};
 use puffer_session_store::{MessageActor, SessionStore, TranscriptEvent};
 use puffer_transport_anthropic::{
@@ -83,7 +84,7 @@ use crate::daemon_ui_state::{
 use crate::desktop_api;
 use crate::desktop_api_types::{
     ExternalCredentialDto, FolderGroupDto, McpServerDto, ModelDescriptorDto, RepoActionResultDto,
-    RepoStatusDto, SessionDetailDto, SettingsSnapshotDto,
+    RepoStatusDto, SessionDetailDto, SettingsSnapshotDto, ThinkingOptionDto,
 };
 
 const PROTOCOL_VERSION: &str = "1";
@@ -1306,21 +1307,67 @@ fn handle_list_provider_models(state: &DaemonState, params: &Value) -> Result<Va
         .provider_entries()
         .find(|p| p.descriptor.id == provider_id)
         .with_context(|| format!("unknown provider `{provider_id}`"))?;
+    let family = provider_preference_family(&inputs.providers, provider_id);
     let models: Vec<ModelDescriptorDto> = entry
         .descriptor
         .models
         .iter()
-        .map(|m| ModelDescriptorDto {
-            id: m.id.clone(),
-            display_name: m.display_name.clone(),
-            provider: m.provider.clone(),
-            api: m.api.clone(),
-            context_window: m.context_window,
-            max_output_tokens: m.max_output_tokens,
-            supports_reasoning: m.supports_reasoning,
-        })
+        .map(|model| model_descriptor_dto(family, model))
         .collect();
     Ok(json!({ "providerId": provider_id, "models": models }))
+}
+
+fn model_descriptor_dto(
+    family: ModelPreferenceFamily,
+    model: &ModelDescriptor,
+) -> ModelDescriptorDto {
+    let thinking_options = thinking_options_for_model(family, model);
+    let default_thinking_option_id = thinking_options
+        .iter()
+        .find(|option| option.is_default)
+        .map(|option| option.id.clone());
+    ModelDescriptorDto {
+        id: model.id.clone(),
+        display_name: model.display_name.clone(),
+        provider: model.provider.clone(),
+        api: model.api.clone(),
+        context_window: model.context_window,
+        max_output_tokens: model.max_output_tokens,
+        supports_reasoning: model.supports_reasoning,
+        thinking_options,
+        default_thinking_option_id,
+    }
+}
+
+fn thinking_options_for_model(
+    family: ModelPreferenceFamily,
+    model: &ModelDescriptor,
+) -> Vec<ThinkingOptionDto> {
+    if !model.supports_reasoning {
+        return Vec::new();
+    }
+    let default_effort = default_effort_level(family);
+    supported_effort_levels(family)
+        .iter()
+        .map(|effort| ThinkingOptionDto {
+            id: (*effort).to_string(),
+            label: effort_label(effort).to_string(),
+            description: format!("Use {effort} reasoning effort for this turn."),
+            is_default: *effort == default_effort,
+        })
+        .collect()
+}
+
+fn effort_label(effort: &str) -> &'static str {
+    match effort {
+        "minimal" => "Minimal",
+        "low" => "Low",
+        "medium" => "Medium",
+        "high" => "High",
+        "xhigh" => "X-high",
+        "max" => "Max",
+        _ => "Custom",
+    }
 }
 
 /// Workspace permissions are stored as a TOML map of `tool_id → policy`
@@ -2431,11 +2478,7 @@ fn apply_turn_request_options(
 
     if let Some(requested) = options.model_override.as_deref() {
         apply_turn_model_override_with_preferences(
-            app_state,
-            providers,
-            requested,
-            &effort,
-            fast_mode,
+            app_state, providers, requested, &effort, fast_mode,
         )?;
     } else if let Some(model_id) = options.model_id.as_deref() {
         apply_turn_model_selection(
@@ -2554,11 +2597,11 @@ fn apply_daemon_yolo_mode(app_state: &mut AppState) {
 mod tests {
     use super::{
         apply_daemon_yolo_mode, apply_turn_model_override, apply_turn_request_options,
-        handle_create_session, DaemonState, TurnRequestOptions,
+        handle_create_session, model_descriptor_dto, DaemonState, TurnRequestOptions,
     };
     use indexmap::IndexMap;
     use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
-    use puffer_core::AppState;
+    use puffer_core::{AppState, ModelPreferenceFamily};
     use puffer_provider_registry::{
         Modality, ModelDescriptor, ProviderDescriptor, ProviderRegistry,
     };
@@ -2706,6 +2749,30 @@ mod tests {
         assert_eq!(state.effort_level, "high");
         assert!(!state.fast_mode);
         assert_eq!(state.sandbox_mode, "read-only");
+    }
+
+    #[test]
+    fn model_descriptor_dto_exposes_family_thinking_options() {
+        let provider = provider("anthropic", &["claude-sonnet-4-5"]);
+        let dto = model_descriptor_dto(ModelPreferenceFamily::Anthropic, &provider.models[0]);
+
+        let option_ids: Vec<&str> = dto
+            .thinking_options
+            .iter()
+            .map(|option| option.id.as_str())
+            .collect();
+        assert_eq!(option_ids, vec!["low", "medium", "high", "max"]);
+        assert_eq!(dto.default_thinking_option_id.as_deref(), Some("high"));
+        assert!(dto
+            .thinking_options
+            .iter()
+            .any(|option| option.id == "high" && option.is_default));
+
+        let mut no_reasoning = provider.models[0].clone();
+        no_reasoning.supports_reasoning = false;
+        let dto = model_descriptor_dto(ModelPreferenceFamily::Anthropic, &no_reasoning);
+        assert!(dto.thinking_options.is_empty());
+        assert_eq!(dto.default_thinking_option_id, None);
     }
 
     #[test]

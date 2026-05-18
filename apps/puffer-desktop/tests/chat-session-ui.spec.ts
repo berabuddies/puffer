@@ -202,3 +202,28 @@ test("failed question responses keep the question prompt retryable", async ({ pa
   await expect(page.getByText("Which path should I use?")).toBeVisible();
   await expect(page.getByRole("button", { name: "Send answer" })).toBeEnabled();
 });
+
+test("composer sends selected thinking option with the turn request", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /^Browser regression\b/);
+  const thinkingSelect = page.getByLabel("Thinking level");
+  await expect(thinkingSelect).toBeEnabled();
+  await expect(thinkingSelect).toHaveValue("low");
+  await thinkingSelect.selectOption("high");
+
+  await page.locator(".pf-composer textarea").fill("Use high reasoning");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  const request = await daemon.waitForRequest(
+    "run_agent_turn",
+    (item) => item.params.message === "Use high reasoning"
+  );
+  expect(request.params).toMatchObject({
+    providerId: "codex",
+    modelId: "test-model",
+    thinkingOptionId: "high"
+  });
+});
