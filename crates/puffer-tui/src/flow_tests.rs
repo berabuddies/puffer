@@ -553,6 +553,63 @@ fn cancel_pending_submit_records_interrupt_and_starts_next_queued_prompt() {
 }
 
 #[test]
+fn submit_next_queued_prompt_waits_for_open_overlay() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = sample_state(session, tempdir.path());
+    let mut resources = LoadedResources::default();
+    let mut providers = ProviderRegistry::new();
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let mut auth_store = AuthStore::default();
+    let mut tui = TuiState {
+        overlay: Some(OverlayState::Help),
+        ..TuiState::default()
+    };
+    tui.enqueue_prompt("second".to_string());
+
+    assert!(!submit_next_queued_prompt(
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        true,
+    )
+    .unwrap());
+    assert!(!tui.has_pending_submit());
+    assert_eq!(
+        tui.queued_prompts.front().map(String::as_str),
+        Some("second")
+    );
+
+    tui.overlay = None;
+    assert!(submit_next_queued_prompt(
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        true,
+    )
+    .unwrap());
+    assert!(tui.has_pending_submit());
+    assert!(tui.queued_prompts.is_empty());
+    assert!(state
+        .transcript
+        .iter()
+        .any(|message| { message.role == MessageRole::User && message.text == "second" }));
+}
+
+#[test]
 fn poll_pending_submit_preserves_browser_category_session_grants() {
     let tempdir = tempdir().unwrap();
     let paths = ConfigPaths::discover(tempdir.path());

@@ -437,7 +437,7 @@ pub(crate) fn cancel_pending_submit(
     Ok(true)
 }
 
-/// Starts the next queued prompt when no turn is currently running.
+/// Starts the next queued prompt when no turn or overlay is currently active.
 pub(crate) fn submit_next_queued_prompt(
     state: &mut AppState,
     resources: &mut LoadedResources,
@@ -448,6 +448,9 @@ pub(crate) fn submit_next_queued_prompt(
     tui: &mut TuiState,
     no_alt_screen: bool,
 ) -> Result<bool> {
+    if tui.has_pending_submit() || tui.overlay.is_some() {
+        return Ok(false);
+    }
     let Some(prompt) = tui.dequeue_prompt() else {
         return Ok(false);
     };
