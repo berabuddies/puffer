@@ -606,6 +606,7 @@ where
                 cancel: Some(cancel),
                 max_turns: None,
                 observability: None,
+                lightweight_context: false,
             },
             &mut on_event,
         )
