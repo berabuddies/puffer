@@ -48,12 +48,11 @@
 
   let { sessionId }: Props = $props();
 
-  const initialTabs = loadSavedTabs();
   let viewport: HTMLDivElement | null = $state(null);
   let canvas: HTMLCanvasElement | null = $state(null);
-  let tabs = $state<BrowserTab[]>(initialTabs);
-  let activeTabId = $state(initialTabs[0]?.id ?? "");
-  let nextTabNumber = nextTabIndex(initialTabs);
+  let tabs = $state<BrowserTab[]>([]);
+  let activeTabId = $state("");
+  let nextTabNumber = 2;
   let urlDraft = $state("about:blank");
   let currentUrl = $state("about:blank");
   let title = $state("");
@@ -72,7 +71,9 @@
   let resizeObserver: ResizeObserver | null = null;
   let disposed = false;
   let mounted = false;
+  let activeRootSessionId = "";
   let activeEventSessionId = "";
+  let sessionGeneration = 0;
   let lastResize = { width: 960, height: 720 };
   let activePointerId: number | null = null;
   let activeButton: "left" | "middle" | "right" | "none" = "none";
@@ -122,19 +123,7 @@
     window.addEventListener("pointerup", globalPointerUp);
     window.addEventListener("pointercancel", globalPointerCancel);
 
-    await syncDaemonTabs();
-    const client = await ensureLocalDaemonClient();
-    disposers.push(
-      client.on<BrowserTabsState>(`browser:${sessionId}:tabs`, (next) => {
-        const previousActiveTabId = activeTabId;
-        applyTabsState(next, { allowEmpty: true });
-        if (activeTabId && (activeTabId !== previousActiveTabId || !connected)) {
-          void connectActiveTab();
-        }
-      })
-    );
-
-    if (activeTabId) await connectActiveTab();
+    void activateSession(sessionId);
   });
 
   onDestroy(() => {
@@ -154,6 +143,11 @@
       }
     }
     disposers = [];
+  });
+
+  $effect(() => {
+    if (!mounted || disposed || activeRootSessionId === sessionId) return;
+    void activateSession(sessionId);
   });
 
   function newBrowserTab(id: string, label: string): BrowserTab {
@@ -223,23 +217,76 @@
     if (!connected) resetPointer(activePointerId ?? undefined);
   }
 
-  async function syncDaemonTabs() {
+  async function activateSession(nextSessionId: string) {
+    const generation = ++sessionGeneration;
+    activeRootSessionId = nextSessionId;
+    activeEventSessionId = "";
+    disposeSessionSubscriptions();
+    clearCursorTimer();
+    resetPointer(activePointerId ?? undefined);
+    const restored = loadSavedTabsFor(nextSessionId);
+    tabs = restored;
+    activeTabId = restored[0]?.id ?? "";
+    nextTabNumber = nextTabIndex(restored);
+    tabStateVersion += 1;
+    syncFromActiveTab();
+    if (activeTab?.frame) {
+      renderFrame(activeTab.frame);
+    } else {
+      clearCanvas();
+    }
+    await syncDaemonTabs(generation, nextSessionId);
+    if (generation !== sessionGeneration || disposed) return;
+    const client = await ensureLocalDaemonClient();
+    if (generation !== sessionGeneration || disposed) return;
+    disposers.push(
+      client.on<BrowserTabsState>(`browser:${nextSessionId}:tabs`, (next) => {
+        if (generation !== sessionGeneration || activeRootSessionId !== nextSessionId) return;
+        const previousActiveTabId = activeTabId;
+        applyTabsState(next, { allowEmpty: true });
+        if (activeTabId && (activeTabId !== previousActiveTabId || !connected)) {
+          void connectActiveTab(generation);
+        }
+      })
+    );
+
+    if (activeTabId) await connectActiveTab(generation);
+  }
+
+  function disposeSessionSubscriptions() {
+    disposeActiveSubscriptions();
+    for (const dispose of disposers) {
+      try {
+        dispose();
+      } catch {
+        /* ignore */
+      }
+    }
+    disposers = [];
+  }
+
+  async function syncDaemonTabs(generation = sessionGeneration, targetSessionId = sessionId) {
     try {
-      const state = await browserTabsList(sessionId);
+      const state = await browserTabsList(targetSessionId);
+      if (generation !== sessionGeneration || activeRootSessionId !== targetSessionId) return;
       applyTabsState(state);
     } catch {
       /* Local saved tabs remain the migration fallback. */
     }
   }
 
-  function storageKey(): string {
-    return `puffer-browser-tabs:${sessionId}`;
+  function storageKeyFor(value: string): string {
+    return `puffer-browser-tabs:${value}`;
   }
 
-  function loadSavedTabs(): BrowserTab[] {
+  function storageKey(): string {
+    return storageKeyFor(sessionId);
+  }
+
+  function loadSavedTabsFor(value: string): BrowserTab[] {
     if (typeof window === "undefined") return [newBrowserTab("tab-1", "New tab")];
     try {
-      const raw = window.localStorage.getItem(storageKey());
+      const raw = window.localStorage.getItem(storageKeyFor(value));
       const saved = raw ? JSON.parse(raw) : null;
       if (!Array.isArray(saved?.tabs)) return [newBrowserTab("tab-1", "New tab")];
       const restored = saved.tabs
@@ -316,7 +363,7 @@
     connected = tab.connected;
   }
 
-  async function connectActiveTab() {
+  async function connectActiveTab(generation = sessionGeneration) {
     if (!mounted || !viewport || !canvas || disposed || !activeTabId || !activeTab) return;
     disposeActiveSubscriptions();
     syncFromActiveTab();
@@ -333,6 +380,7 @@
     activeEventSessionId = eventSessionId;
     try {
       const client = await ensureLocalDaemonClient();
+      if (generation !== sessionGeneration || activeEventSessionId !== eventSessionId) return;
       activeDisposers = [
         client.on<BrowserFrameEvent>(`browser:${eventSessionId}:frame`, (frame) => {
           if (activeEventSessionId === eventSessionId) drawFrame(frame);
@@ -347,20 +395,23 @@
       const size = measureViewport() ?? lastResize;
       lastResize = size;
       if (shouldOpen) {
-        applyState(
-          await browserOpen({ sessionId: eventSessionId, url: activeTab.url, ...size }),
-          tabId
-        );
+        const next = await browserOpen({ sessionId: eventSessionId, url: activeTab.url, ...size });
+        if (generation !== sessionGeneration || activeEventSessionId !== eventSessionId) return;
+        applyState(next, tabId);
       } else {
         try {
           await browserResize(eventSessionId, size.width, size.height);
         } catch {
-          applyState(
-            await browserOpen({ sessionId: eventSessionId, url: activeTab.url, ...size }),
-            tabId
-          );
+          const next = await browserOpen({
+            sessionId: eventSessionId,
+            url: activeTab.url,
+            ...size
+          });
+          if (generation !== sessionGeneration || activeEventSessionId !== eventSessionId) return;
+          applyState(next, tabId);
         }
       }
+      if (generation !== sessionGeneration || activeEventSessionId !== eventSessionId) return;
       updateTab(tabId, { connected: true, status: "Connected", error: null });
       if (activeTabId === tabId && activeEventSessionId === eventSessionId) {
         connected = true;
@@ -368,6 +419,7 @@
         error = null;
       }
     } catch (err) {
+      if (generation !== sessionGeneration || activeEventSessionId !== eventSessionId) return;
       const message = String(err);
       updateTab(tabId, { connected: false, status: "Chrome failed to start", error: message });
       if (activeTabId === tabId && activeEventSessionId === eventSessionId) {
@@ -482,6 +534,7 @@
     const tabId = `tab-${nextTabNumber}`;
     nextTabNumber += 1;
     const requestedAtVersion = tabStateVersion;
+    const requestedAtGeneration = sessionGeneration;
     try {
       const info = await browserTabOpen({
         sessionId,
@@ -491,14 +544,18 @@
         height: size.height,
         activate: true
       });
-      if (disposed || requestedAtVersion !== tabStateVersion) return;
+      if (
+        disposed ||
+        requestedAtVersion !== tabStateVersion ||
+        requestedAtGeneration !== sessionGeneration
+      ) return;
       const tab = tabFromInfo(info);
       tabs = [...tabs.filter((item) => item.id !== tab.id), tab];
       activeTabId = tab.id;
       nextTabNumber = nextTabIndex(tabs);
       saveTabs();
       syncFromActiveTab();
-      void connectActiveTab();
+      void connectActiveTab(requestedAtGeneration);
     } catch (err) {
       error = String(err);
     }

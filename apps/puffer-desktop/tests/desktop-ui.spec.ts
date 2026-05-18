@@ -27,6 +27,18 @@ function browserTab(tabId: string, url = `https://${tabId}.example`, connected =
   };
 }
 
+function browserTabForSession(
+  sessionId: string,
+  tabId: string,
+  url = `https://${tabId}.example`,
+  connected = true
+): Record<string, unknown> {
+  return {
+    ...browserTab(tabId, url, connected),
+    backendSessionId: `${sessionId}:browser:${tabId}`
+  };
+}
+
 async function pasteText(page: Page, text: string): Promise<void> {
   await page.evaluate((value) => {
     const data = new DataTransfer();
@@ -451,6 +463,95 @@ test("Browser fuzz click storm keeps daemon session ids valid", async ({ page })
   expect(invalidBrowserSessionRequests(daemon)).toEqual([]);
   await expect(page.locator(".pf-browser-error")).toHaveCount(0);
   expect(consoleErrors).toEqual([]);
+});
+
+test("Browser pane resets daemon tabs when switching agents", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-alpha-browser",
+        displayName: "Alpha browser",
+        title: "Alpha browser",
+        cwd: "/tmp/puffer-alpha",
+        folderPath: "/tmp/puffer-alpha",
+        updatedAtMs: Date.now(),
+        createdAtMs: Date.now() - 60_000,
+        timeline: []
+      },
+      {
+        sessionId: "session-beta-browser",
+        displayName: "Beta browser",
+        title: "Beta browser",
+        cwd: "/tmp/puffer-beta",
+        folderPath: "/tmp/puffer-beta",
+        updatedAtMs: Date.now() - 1_000,
+        createdAtMs: Date.now() - 120_000,
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page
+    .locator(".pf-sidebar-agents-list")
+    .getByRole("button", { name: /^Alpha browser\b/ })
+    .click();
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-alpha-browser:browser:tab-1"
+  );
+
+  daemon.emit("browser:session-alpha-browser:tabs", {
+    activeTabId: "tab-alpha",
+    tabs: [
+      {
+        ...browserTabForSession(
+          "session-alpha-browser",
+          "tab-alpha",
+          "https://alpha-only.example"
+        ),
+        active: true
+      }
+    ]
+  });
+  await expect(page.getByLabel("URL")).toHaveValue("https://alpha-only.example");
+
+  await page
+    .locator(".pf-sidebar-agents-list")
+    .getByRole("button", { name: /^Beta browser\b/ })
+    .click();
+  await daemon.waitForRequest("browser_agent", (request) =>
+    request.params.action === "list" &&
+    request.params.sessionId === "session-beta-browser"
+  );
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-beta-browser:browser:tab-1"
+  );
+  await expect(page.getByLabel("URL")).toHaveValue("about:blank");
+
+  daemon.emit("browser:session-alpha-browser:tabs", {
+    activeTabId: "tab-late-alpha",
+    tabs: [
+      {
+        ...browserTabForSession(
+          "session-alpha-browser",
+          "tab-late-alpha",
+          "https://late-alpha.example"
+        ),
+        active: true
+      }
+    ]
+  });
+  await page.waitForTimeout(80);
+  await expect(page.getByLabel("URL")).toHaveValue("about:blank");
+
+  await page.getByLabel("URL").fill("beta.example");
+  await page.getByLabel("URL").press("Enter");
+  await daemon.waitForRequest("browser_navigate", (request) =>
+    request.params.sessionId === "session-beta-browser:browser:tab-1" &&
+    request.params.url === "beta.example"
+  );
 });
 
 test("streamed assistant text stays visible when completion reload is stale", async ({ page }) => {
