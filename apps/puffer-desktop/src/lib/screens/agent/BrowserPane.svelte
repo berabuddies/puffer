@@ -91,6 +91,7 @@
   let pendingCursorPoint: { x: number; y: number } | null = null;
 
   let activeTab = $derived(tabs.find((tab) => tab.id === activeTabId) ?? tabs[0]);
+  let browserControlsEnabled = $derived(Boolean(activeTab && connected));
   let activeDevtools = $derived(activeTab?.devtools ?? []);
   let consoleEvents = $derived(activeDevtools.filter((item) => item.kind === "console"));
   let networkEvents = $derived(activeDevtools.filter((item) => item.kind === "network"));
@@ -443,6 +444,7 @@
 
   async function submitUrl(event: SubmitEvent) {
     event.preventDefault();
+    if (!connected || !activeTabId) return;
     error = null;
     try {
       updateTab(activeTabId, {
@@ -845,7 +847,7 @@
       class="pf-browser-icon"
       type="button"
       title="Back"
-      disabled={!activeTab}
+      disabled={!browserControlsEnabled}
       onclick={() => browserHistory(activeBackendSessionId(), "back").catch((err) => (error = String(err)))}
     >
       <Icon name="chevL" size={14} />
@@ -854,7 +856,7 @@
       class="pf-browser-icon"
       type="button"
       title="Forward"
-      disabled={!activeTab}
+      disabled={!browserControlsEnabled}
       onclick={() => browserHistory(activeBackendSessionId(), "forward").catch((err) => (error = String(err)))}
     >
       <Icon name="chevR" size={14} />
@@ -863,7 +865,7 @@
       class="pf-browser-icon"
       type="button"
       title="Reload"
-      disabled={!activeTab}
+      disabled={!browserControlsEnabled}
       onclick={() => browserReload(activeBackendSessionId()).catch((err) => (error = String(err)))}
     >
       <Icon name="refresh" size={14} />
@@ -872,7 +874,7 @@
       class="pf-browser-address"
       aria-label="URL"
       spellcheck="false"
-      disabled={!activeTab}
+      disabled={!browserControlsEnabled}
       bind:value={urlDraft}
     />
     <button

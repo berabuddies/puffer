@@ -278,6 +278,48 @@ test("Browser tab list event reopens disconnected active tab", async ({ page }) 
   });
 });
 
+test("Browser navigation controls are disabled while reconnecting", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
+  const firstOpen = await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1"
+  );
+
+  daemon.delayResponse(
+    "browser_open",
+    (request) => request.id !== firstOpen.id && request.params.sessionId === "session-browser:browser:tab-1",
+    1000
+  );
+  daemon.emit("browser:session-browser:tabs", {
+    activeTabId: "tab-1",
+    tabs: [
+      {
+        tabId: "tab-1",
+        label: "Recovered tab",
+        url: "https://example.com",
+        title: "Recovered tab",
+        loading: false,
+        connected: false,
+        active: true,
+        backendSessionId: "session-browser:browser:tab-1",
+        createdAtMs: Date.now(),
+        updatedAtMs: Date.now()
+      }
+    ]
+  });
+
+  await expect(page.locator(".pf-browser-status")).toHaveText("Disconnected");
+  const toolbar = page.locator(".pf-browser-toolbar");
+  await expect(toolbar.getByRole("button", { name: "Back" })).toBeDisabled({ timeout: 250 });
+  await expect(toolbar.getByRole("button", { name: "Forward" })).toBeDisabled({ timeout: 250 });
+  await expect(toolbar.getByRole("button", { name: "Reload" })).toBeDisabled({ timeout: 250 });
+  await expect(page.getByLabel("URL")).toBeDisabled({ timeout: 250 });
+});
+
 test("late Browser open responses do not overwrite the active tab", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
