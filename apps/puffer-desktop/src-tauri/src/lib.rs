@@ -8,12 +8,14 @@ mod files;
 mod fs_watch;
 mod lsp;
 mod pty;
+mod remote_client;
 mod repo_actions;
 mod websocket;
 
 use backend::BackendState;
 use daemon_launcher::DaemonLauncher;
 use events::EventEmitter;
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -56,6 +58,18 @@ fn backend_call(
     state
         .handle(EventEmitter::new(app), method, params)
         .map_err(|error| error.to_string())
+}
+
+fn json_value<T: Serialize>(value: T) -> Result<Value, String> {
+    serde_json::to_value(value).map_err(|error| error.to_string())
+}
+
+fn required_remote_target(remote_target: String) -> Result<String, String> {
+    let trimmed = remote_target.trim();
+    if trimmed.is_empty() {
+        return Err("remote target is required".to_string());
+    }
+    Ok(trimmed.to_string())
 }
 
 #[tauri::command]
@@ -213,34 +227,60 @@ fn import_external_credential(
 
 #[tauri::command]
 fn run_remote_bash(
-    app: AppHandle,
-    state: State<'_, SharedBackend>,
+    remote_target: String,
+    remote_cwd: Option<String>,
+    remote_password: Option<String>,
     command: String,
 ) -> Result<Value, String> {
-    backend_call(app, state, "run_remote_bash", json!({ "command": command }))
+    let target = required_remote_target(remote_target)?;
+    json_value(
+        remote_client::run_remote_shell(
+            &target,
+            remote_cwd.as_deref(),
+            remote_password.as_deref(),
+            &command,
+        )
+        .map_err(|error| error.to_string())?,
+    )
 }
 
 #[tauri::command]
 fn read_remote_file(
-    app: AppHandle,
-    state: State<'_, SharedBackend>,
+    remote_target: String,
+    remote_cwd: Option<String>,
+    remote_password: Option<String>,
     path: String,
 ) -> Result<Value, String> {
-    backend_call(app, state, "read_remote_file", json!({ "path": path }))
+    let target = required_remote_target(remote_target)?;
+    json_value(
+        remote_client::read_remote_file(
+            &target,
+            remote_cwd.as_deref(),
+            remote_password.as_deref(),
+            &path,
+        )
+        .map_err(|error| error.to_string())?,
+    )
 }
 
 #[tauri::command]
 fn write_remote_file(
-    app: AppHandle,
-    state: State<'_, SharedBackend>,
+    remote_target: String,
+    remote_cwd: Option<String>,
+    remote_password: Option<String>,
     path: String,
     contents_base64: String,
 ) -> Result<Value, String> {
-    backend_call(
-        app,
-        state,
-        "write_remote_file",
-        json!({ "path": path, "contentsBase64": contents_base64 }),
+    let target = required_remote_target(remote_target)?;
+    json_value(
+        remote_client::write_remote_file(
+            &target,
+            remote_cwd.as_deref(),
+            remote_password.as_deref(),
+            &path,
+            &contents_base64,
+        )
+        .map_err(|error| error.to_string())?,
     )
 }
 
@@ -420,6 +460,14 @@ mod tests {
         assert!(
             missing.is_empty(),
             "frontend invokes missing Tauri command registration: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn remote_scratchpad_rejects_empty_target() {
+        assert_eq!(
+            super::required_remote_target("  ".to_string()).unwrap_err(),
+            "remote target is required"
         );
     }
 }

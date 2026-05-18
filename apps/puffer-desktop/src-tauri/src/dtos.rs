@@ -308,3 +308,12 @@ pub(crate) struct ExternalCredentialDto {
     pub description: String,
     pub source_path: String,
 }
+
+/// Describes one remote scratchpad command or file operation result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RemoteOperationDto {
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
+}
