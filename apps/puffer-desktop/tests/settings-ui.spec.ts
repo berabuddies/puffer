@@ -121,6 +121,49 @@ test("permissions settings keep edits after a late list response", async ({ page
   });
 });
 
+test("settings panes follow refreshed workspace state", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Providers" }).click();
+  await expect(page.locator(".pf-settings-pane").getByLabel("Provider")).toHaveValue("codex");
+
+  await page.getByRole("button", { name: "Permissions" }).click();
+  await expect(page.getByText("Stored at")).toContainText("/tmp/puffer/.puffer/permissions.json");
+  const permissionRequestsBefore = daemon.requests.filter(
+    (request) => request.method === "list_permissions"
+  ).length;
+
+  daemon.setWorkspaceRoot("/tmp/puffer-next");
+  daemon.setSettingsConfig({
+    defaultProvider: "anthropic",
+    defaultModel: "test-model"
+  });
+  daemon.setPermissions({ browser_open: "deny" });
+
+  await page.getByRole("button", { name: "General" }).click();
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await expect(page.locator(".pf-settings-row").filter({ hasText: "Workspace root" })).toContainText(
+    "/tmp/puffer-next"
+  );
+
+  await page.getByRole("button", { name: "Providers" }).click();
+  await expect(page.locator(".pf-settings-pane").getByLabel("Provider")).toHaveValue("anthropic");
+
+  await page.getByRole("button", { name: "Permissions" }).click();
+  await expect.poll(() =>
+    daemon.requests.filter((request) => request.method === "list_permissions").length
+  ).toBe(permissionRequestsBefore + 1);
+  await expect(page.getByText("Stored at")).toContainText(
+    "/tmp/puffer-next/.puffer/permissions.json"
+  );
+  const refreshedRow = page.locator(".pf-perm-row").last();
+  await expect(refreshedRow.locator("input")).toHaveValue("browser_open");
+  await expect(refreshedRow.locator("select")).toHaveValue("deny");
+});
+
 test("MCP settings add server through the daemon", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

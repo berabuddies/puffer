@@ -165,6 +165,7 @@ export class FakeDaemon {
   private readonly sessions = new Map<string, JsonRecord>();
   private readonly timelines = new Map<string, JsonRecord[]>();
   private readonly providerModels: Record<string, JsonRecord[]>;
+  private workspaceRoot = "/tmp/puffer";
   private settingsConfig: { defaultProvider: string | null; defaultModel: string | null } = {
     defaultProvider: "codex",
     defaultModel: "test-model"
@@ -194,8 +195,14 @@ export class FakeDaemon {
     providerModels?: Record<string, JsonRecord[]>;
     mcpServers?: JsonRecord[];
     protocol?: "legacy" | "real";
+    workspaceRoot?: string;
   } = {}) {
     this.protocol = options.protocol ?? "legacy";
+    this.workspaceRoot = options.workspaceRoot ?? this.workspaceRoot;
+    this.permissions = {
+      ...this.permissions,
+      path: `${this.workspaceRoot}/.puffer/permissions.json`
+    };
     const sessions = options.sessions ?? [{ ...session, timeline: defaultTimeline() }];
     for (const input of sessions) {
       const metadata = sessionMeta(input);
@@ -205,6 +212,28 @@ export class FakeDaemon {
     }
     this.providerModels = options.providerModels ?? {};
     this.mcpServers = options.mcpServers ?? this.mcpServers;
+  }
+
+  setWorkspaceRoot(workspaceRoot: string): void {
+    this.workspaceRoot = workspaceRoot;
+    this.permissions = {
+      ...this.permissions,
+      path: `${workspaceRoot}/.puffer/permissions.json`
+    };
+  }
+
+  setSettingsConfig(config: Partial<{ defaultProvider: string | null; defaultModel: string | null }>): void {
+    this.settingsConfig = {
+      ...this.settingsConfig,
+      ...config
+    };
+  }
+
+  setPermissions(tools: Record<string, string>): void {
+    this.permissions = {
+      path: `${this.workspaceRoot}/.puffer/permissions.json`,
+      tools: { ...tools }
+    };
   }
 
   async install(page: Page): Promise<void> {
@@ -355,7 +384,7 @@ export class FakeDaemon {
     this.throwQueuedFailure(request.method);
     switch (request.method) {
       case "default_workspace":
-        return { cwd: "/tmp/puffer", workspaceRoot: "/tmp/puffer" };
+        return { cwd: this.workspaceRoot, workspaceRoot: this.workspaceRoot };
       case "load_settings_snapshot":
         return this.settingsSnapshot();
       case "login_with_api_key":
@@ -558,11 +587,11 @@ export class FakeDaemon {
 
   private settingsSnapshot(): JsonRecord {
     return {
-      workspaceRoot: "/tmp/puffer",
-      workspaceConfigFile: "/tmp/puffer/.puffer/config.json",
+      workspaceRoot: this.workspaceRoot,
+      workspaceConfigFile: `${this.workspaceRoot}/.puffer/config.json`,
       userConfigFile: "/tmp/home/.puffer/config.json",
-      authStoreFile: "/tmp/puffer/.puffer/auth.json",
-      builtinResourcesDir: "/tmp/puffer/resources",
+      authStoreFile: `${this.workspaceRoot}/.puffer/auth.json`,
+      builtinResourcesDir: `${this.workspaceRoot}/resources`,
       config: {
         appName: "Puffer Code",
         defaultProvider: this.settingsConfig.defaultProvider,

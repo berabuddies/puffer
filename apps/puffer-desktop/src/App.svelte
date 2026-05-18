@@ -58,6 +58,7 @@
   import {
     currentDaemonClient,
     ensureLocalDaemonClient,
+    type DaemonClient,
     type ConnectionState
   } from "./lib/api/daemonClient";
   import { sessionDisplayName, sessionDisplayTitle } from "./lib/sessionDisplay";
@@ -137,6 +138,9 @@
   let sessionEventUnlisten: UnlistenFn | null = null;
   let subscribedSessionId: string | null = null;
   let connectionState = $state<ConnectionState>("idle");
+  let daemonUrl = $state<string | null>(null);
+  let daemonWorkspaceRoot = $state<string | null>(null);
+  let daemonClientUnlisteners: Array<() => void> = [];
   let sessionLoadGeneration = 0;
   let desktopPins = $state<DesktopPinState>({ pinnedAgentIds: [], pinnedWorkspacePaths: [] });
 
@@ -304,6 +308,56 @@
     }
   }
 
+  function updateDaemonIdentity(client: DaemonClient | null = currentDaemonClient()) {
+    daemonUrl = client?.handshake.url ?? null;
+    daemonWorkspaceRoot = client?.handshake.workspaceRoot ?? null;
+  }
+
+  function clearDaemonClientListeners() {
+    for (const unlisten of daemonClientUnlisteners) {
+      unlisten();
+    }
+    daemonClientUnlisteners = [];
+  }
+
+  function attachDaemonClient(client: DaemonClient) {
+    clearDaemonClientListeners();
+    updateDaemonIdentity(client);
+    daemonClientUnlisteners = [
+      client.onConnectionChange((s) => {
+        connectionState = s;
+        updateDaemonIdentity(client);
+        // When we reconnect after a drop, refresh groups + re-open the
+        // selected session so the UI catches up.
+        if (s === "open" && !onboarding) {
+          void refreshPins();
+          void refreshSettings();
+          void refreshGroups();
+          if (selectedSession) void openSession(selectedSession);
+        }
+      }),
+      // Any time a session is created or a turn finishes, refresh the
+      // workspace board + sidebar. Coalesced by `refreshGroups`'s own
+      // loading guard.
+      client.on<{ sessionId?: string; reason?: string }>("workspace:sessions:changed", (event) => {
+        void refreshGroups();
+        if (
+          selectedSession &&
+          event?.sessionId === selectedSession.id &&
+          (event.reason === "generated_title" || event.reason === "rename_session")
+        ) {
+          void openSession(selectedSession, { showLoading: false, resetLiveState: false });
+        }
+      }),
+      client.on<DesktopPinState>("desktop:pins:changed", (pins) => {
+        desktopPins = {
+          pinnedAgentIds: Array.isArray(pins?.pinnedAgentIds) ? pins.pinnedAgentIds : [],
+          pinnedWorkspacePaths: Array.isArray(pins?.pinnedWorkspacePaths) ? pins.pinnedWorkspacePaths : []
+        };
+      })
+    ];
+  }
+
   onMount(() => {
     tweaks = loadTweaks();
     applyTweaksToDocument(tweaks);
@@ -317,6 +371,11 @@
     void init();
     return () => {
       cancelRecapBlurTimer();
+      clearDaemonClientListeners();
+      if (sessionEventUnlisten) {
+        sessionEventUnlisten();
+        sessionEventUnlisten = null;
+      }
       window.removeEventListener("blur", armRecapBlurTimer);
       window.removeEventListener("focus", cancelRecapBlurTimer);
     };
@@ -338,35 +397,7 @@
     // Observe daemon connection state so the banner reflects reality.
     void ensureLocalDaemonClient()
       .then((client) => {
-        client.onConnectionChange((s) => {
-          connectionState = s;
-          // When we reconnect after a drop, refresh groups + re-open the
-          // selected session so the UI catches up.
-          if (s === "open" && !onboarding) {
-            void refreshPins();
-            void refreshGroups();
-            if (selectedSession) void openSession(selectedSession);
-          }
-        });
-        // Any time a session is created or a turn finishes, refresh the
-        // workspace board + sidebar. Coalesced by `refreshGroups`'s own
-        // loading guard.
-        client.on<{ sessionId?: string; reason?: string }>("workspace:sessions:changed", (event) => {
-          void refreshGroups();
-          if (
-            selectedSession &&
-            event?.sessionId === selectedSession.id &&
-            (event.reason === "generated_title" || event.reason === "rename_session")
-          ) {
-            void openSession(selectedSession, { showLoading: false, resetLiveState: false });
-          }
-        });
-        client.on<DesktopPinState>("desktop:pins:changed", (pins) => {
-          desktopPins = {
-            pinnedAgentIds: Array.isArray(pins?.pinnedAgentIds) ? pins.pinnedAgentIds : [],
-            pinnedWorkspacePaths: Array.isArray(pins?.pinnedWorkspacePaths) ? pins.pinnedWorkspacePaths : []
-          };
-        });
+        attachDaemonClient(client);
       })
       .catch(() => {
         /* connection may be unavailable (web preview); stay idle */
@@ -688,6 +719,50 @@
       userName: defaultTweaks.userName
     };
     statusMessage = "Appearance reset.";
+  }
+
+  function resetDaemonScopedSessionState() {
+    selectedSession = null;
+    sessionDetail = null;
+    openAgentSessionId = null;
+    openProjectId = null;
+    submittedMessages = [];
+    dismissedPermissionIds = [];
+    dismissedQuestionIds = [];
+    liveStreamItems = [];
+    turnPermissionLookup = {};
+    turnQuestionLookup = {};
+    currentTurnId = null;
+    turnStartedAtMs = null;
+    turnThinking = false;
+    turnStatusHint = null;
+    settledTurnIds = new Set();
+    sessionLoadGeneration += 1;
+    if (sessionEventUnlisten) {
+      sessionEventUnlisten();
+      sessionEventUnlisten = null;
+    }
+    subscribedSessionId = null;
+  }
+
+  async function handleWorkspaceSwitched(hs: {
+    url: string;
+    workspaceRoot: string;
+  }) {
+    showWorkspacePicker = false;
+    defaultWorkspaceCwd = hs.workspaceRoot;
+    resetDaemonScopedSessionState();
+    const client = currentDaemonClient();
+    if (client) {
+      attachDaemonClient(client);
+    } else {
+      daemonUrl = hs.url;
+      daemonWorkspaceRoot = hs.workspaceRoot;
+    }
+    await refreshSettings();
+    await refreshPins();
+    await refreshGroups();
+    statusMessage = `Switched workspace to ${hs.workspaceRoot}.`;
   }
 
   async function handleRemoteBash(command: string) {
@@ -1355,6 +1430,8 @@
               loading={settingsLoading}
               tweaks={tweaks}
               preferences={desktopPreferences}
+              daemonUrl={daemonUrl}
+              daemonWorkspaceRoot={daemonWorkspaceRoot}
               remoteEnabled={remoteConnection.enabled}
               remotePassword={remotePassword}
               remoteBusy={remoteBusy}
@@ -1389,27 +1466,7 @@
 {#if showWorkspacePicker}
   <WorkspacePicker
     onClose={() => (showWorkspacePicker = false)}
-    onSwitched={async (hs) => {
-      showWorkspacePicker = false;
-      // Daemon has swapped — reload the default workspace + groups so the
-      // UI reflects the new session store.
-      defaultWorkspaceCwd = hs.workspaceRoot;
-      selectedSession = null;
-      sessionDetail = null;
-      openAgentSessionId = null;
-      openProjectId = null;
-      submittedMessages = [];
-      liveStreamItems = [];
-      turnPermissionLookup = {};
-      turnQuestionLookup = {};
-      currentTurnId = null;
-      turnStartedAtMs = null;
-      turnThinking = false;
-      turnStatusHint = null;
-      await refreshPins();
-      await refreshGroups();
-      statusMessage = `Switched workspace to ${hs.workspaceRoot}.`;
-    }}
+    onSwitched={handleWorkspaceSwitched}
   />
 {/if}
 

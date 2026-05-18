@@ -3,7 +3,6 @@
 
   import Icon, { type IconName } from "../design/Icon.svelte";
   import LoginView from "../components/LoginView.svelte";
-  import { currentDaemonClient } from "../api/daemonClient";
   import type { AccentKey, DensityKey, FontMixKey, ThemeKey, Tweaks } from "../shell/tweaks";
   import {
     addMcpServer,
@@ -29,6 +28,8 @@
     loading: boolean;
     tweaks: Tweaks;
     preferences: DesktopPreferences;
+    daemonUrl: string | null;
+    daemonWorkspaceRoot: string | null;
     remoteEnabled: boolean;
     remotePassword: string;
     remoteBusy: boolean;
@@ -282,16 +283,6 @@
 
   let authedProviderIds = $derived(new Set((props.snapshot?.auth ?? []).map((a) => a.providerId)));
 
-  // The shared daemon client's handshake — shows the actual URL + workspace
-  // root the frontend is talking to. Undefined until the first connect.
-  let daemonUrl = $state<string | null>(null);
-  let daemonWorkspaceRoot = $state<string | null>(null);
-  $effect(() => {
-    const client = currentDaemonClient();
-    daemonUrl = client?.handshake.url ?? null;
-    daemonWorkspaceRoot = client?.handshake.workspaceRoot ?? null;
-  });
-
   // Shortcuts the app actually wires up today. Keep this honest — when we
   // add more we'll add them here, not before.
   const shortcuts: { combo: string; action: string }[] = [
@@ -319,15 +310,38 @@
   ];
   const densities: DensityKey[] = ["compact", "comfortable", "airy"];
 
-  // Seed the model-picker from the snapshot so switching to the Providers tab
-  // shows the currently-persisted default without a refetch.
+  // Reset daemon-scoped local pane state when the parent refreshes to a
+  // different daemon/workspace/config source. Otherwise Settings can show
+  // permissions, MCP servers, or default model choices from the prior daemon.
+  let settingsSourceKey = $state("");
   $effect(() => {
-    if (!modelPickerProvider) {
-      modelPickerProvider = props.snapshot?.config.defaultProvider ?? "";
-    }
-    if (!modelPickerModel) {
-      modelPickerModel = props.snapshot?.config.defaultModel ?? "";
-    }
+    const nextKey = [
+      props.daemonUrl ?? "",
+      props.snapshot?.workspaceRoot ?? "",
+      props.snapshot?.config.defaultProvider ?? "",
+      props.snapshot?.config.defaultModel ?? ""
+    ].join("\0");
+    if (nextKey === settingsSourceKey) return;
+    settingsSourceKey = nextKey;
+
+    permissionLoadGeneration += 1;
+    permissionSnapshot = null;
+    permissionRows = [];
+    permissionLoading = false;
+    permissionError = null;
+    permissionDirty = false;
+
+    mcpServers = [];
+    mcpLoaded = false;
+    mcpLoading = false;
+    mcpError = null;
+    mcpSaved = null;
+
+    providerModels = {};
+    modelLoadingByProvider = {};
+    modelPickerProvider = props.snapshot?.config.defaultProvider ?? "";
+    modelPickerModel = props.snapshot?.config.defaultModel ?? "";
+    modelError = null;
   });
 
   // Skip RPC calls when the daemon isn't reachable — web previews render
@@ -402,12 +416,12 @@
           <div class="label">Daemon</div>
           <div class="desc">The WebSocket endpoint this window is connected to.</div>
         </div>
-        <div class="pf-path" title={daemonUrl ?? ""}>
-          {#if daemonUrl}
-            <span style="color: var(--foreground);">{daemonUrl}</span>
-            {#if daemonWorkspaceRoot && daemonWorkspaceRoot !== props.snapshot?.workspaceRoot}
+        <div class="pf-path" title={props.daemonUrl ?? ""}>
+          {#if props.daemonUrl}
+            <span style="color: var(--foreground);">{props.daemonUrl}</span>
+            {#if props.daemonWorkspaceRoot && props.daemonWorkspaceRoot !== props.snapshot?.workspaceRoot}
               <div style="color: var(--muted-foreground); font-size: 11px; margin-top: 2px;">
-                → {daemonWorkspaceRoot}
+                -> {props.daemonWorkspaceRoot}
               </div>
             {/if}
           {:else}
