@@ -358,6 +358,8 @@ export class FakeDaemon {
         return { cwd: "/tmp/puffer", workspaceRoot: "/tmp/puffer" };
       case "load_settings_snapshot":
         return this.settingsSnapshot();
+      case "login_with_api_key":
+        return this.settingsSnapshot();
       case "list_external_credentials":
         return [];
       case "load_desktop_pins":

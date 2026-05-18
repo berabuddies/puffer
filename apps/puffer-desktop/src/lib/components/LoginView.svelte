@@ -21,8 +21,14 @@
     apiKeys = { ...apiKeys, [providerId]: value };
   }
 
+  function apiKeyValue(providerId: string): string {
+    return apiKeys[providerId] ?? "";
+  }
+
   function submitApiKey(providerId: string) {
-    onLoginApiKey(providerId, apiKeys[providerId] ?? "");
+    const apiKey = apiKeyValue(providerId).trim();
+    if (!apiKey) return;
+    onLoginApiKey(providerId, apiKey);
   }
 
   function supports(provider: ProviderSummary, mode: string): boolean {
@@ -146,6 +152,7 @@
               <div class="api-key-row">
                 <input
                   type="password"
+                  aria-label={`API key for ${provider.displayName}`}
                   value={apiKeys[provider.id] ?? ""}
                   placeholder="Paste API key"
                   on:input={(event) =>
@@ -156,7 +163,7 @@
                 />
                 <button
                   class="apikey-btn"
-                  disabled={busyProviderId === provider.id}
+                  disabled={busyProviderId === provider.id || !(apiKeys[provider.id] ?? "").trim()}
                   on:click={() => submitApiKey(provider.id)}
                 >
                   Connect

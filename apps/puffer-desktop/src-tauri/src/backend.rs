@@ -582,10 +582,9 @@ impl BackendState {
     }
 
     fn store_api_key(&self, provider_id: &str, api_key: &str) -> Result<()> {
+        let (provider_id, api_key) = validate_api_key_login(provider_id, api_key)?;
         let mut credentials = self.load_credentials()?;
-        credentials
-            .api_keys
-            .insert(provider_id.to_string(), api_key.to_string());
+        credentials.api_keys.insert(provider_id, api_key);
         self.save_credentials(&credentials)
     }
 
@@ -1890,6 +1889,25 @@ mod tests {
     }
 
     #[test]
+    fn validate_api_key_login_rejects_empty_values() {
+        let empty_provider = validate_api_key_login("  ", "sk-test").unwrap_err();
+        assert!(empty_provider
+            .to_string()
+            .contains("provider id cannot be empty"));
+
+        let empty_key = validate_api_key_login("anthropic", "  ").unwrap_err();
+        assert!(empty_key.to_string().contains("api key cannot be empty"));
+    }
+
+    #[test]
+    fn validate_api_key_login_trims_values() {
+        let (provider, api_key) = validate_api_key_login("  anthropic  ", "  sk-test  ").unwrap();
+
+        assert_eq!(provider, "anthropic");
+        assert_eq!(api_key, "sk-test");
+    }
+
+    #[test]
     fn validate_remote_write_rejects_paths_outside_allowed_roots() {
         let allowed = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
@@ -2182,6 +2200,18 @@ fn validate_provider_id(provider: &str) -> Result<()> {
         "puffer" | "codex" | "claude" => Ok(()),
         other => bail!("unknown provider `{other}`"),
     }
+}
+
+fn validate_api_key_login(provider_id: &str, api_key: &str) -> Result<(String, String)> {
+    let provider_id = provider_id.trim();
+    if provider_id.is_empty() {
+        bail!("provider id cannot be empty");
+    }
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        bail!("api key cannot be empty");
+    }
+    Ok((provider_id.to_string(), api_key.to_string()))
 }
 
 fn provider_command(provider: &str) -> String {

@@ -35,6 +35,40 @@ test("default model cannot be saved before provider models load", async ({ page 
   });
 });
 
+test("provider API key connect requires a non-empty key", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Providers" }).click();
+
+  const input = page.getByLabel("API key for Anthropic");
+  const connect = page
+    .locator(".provider-card")
+    .filter({ hasText: "Anthropic" })
+    .getByRole("button", { name: "Connect" });
+
+  await expect(connect).toBeDisabled();
+  await input.fill("   ");
+  await expect(connect).toBeDisabled();
+  await input.press("Enter");
+  await page.waitForTimeout(50);
+  expect(
+    daemon.requests.filter((request) => request.method === "login_with_api_key")
+  ).toHaveLength(0);
+
+  await input.fill("  sk-test  ");
+  await expect(connect).toBeEnabled();
+  await connect.click();
+
+  const request = await daemon.waitForRequest("login_with_api_key");
+  expect(request.params).toMatchObject({
+    providerId: "anthropic",
+    apiKey: "sk-test"
+  });
+});
+
 test("permissions settings save tool policies through the daemon", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
