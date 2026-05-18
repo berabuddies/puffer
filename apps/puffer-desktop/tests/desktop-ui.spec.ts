@@ -1,13 +1,24 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 import { FakeDaemon } from "./support/fakeDaemon";
+
+async function openRegressionAgent(page: Page): Promise<void> {
+  await page
+    .locator(".pf-sidebar-agents-list")
+    .getByRole("button", { name: /^Browser regression\b/ })
+    .click();
+}
+
+async function openAgentPanel(page: Page, name: "Browser" | "Files"): Promise<void> {
+  await page.locator(".pf-agent-tabs").getByRole("button", { name, exact: true }).click();
+}
 
 test("opens the Browser tab against a mocked desktop daemon", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.getByRole("button", { name: /Browser regression/ }).click();
-  await page.getByRole("button", { name: "Browser" }).click();
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
 
   await daemon.waitForRequest("browser_open", (request) =>
     request.params.sessionId === "session-browser:browser:tab-1"
@@ -24,8 +35,8 @@ test("sends Browser tab navigation through the daemon bridge", async ({ page }) 
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.getByRole("button", { name: /Browser regression/ }).click();
-  await page.getByRole("button", { name: "Browser" }).click();
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
   await daemon.waitForRequest("browser_open");
 
   await page.getByLabel("URL").fill("example.com");
@@ -44,8 +55,8 @@ test("renders Browser devtools events from the daemon stream", async ({ page }) 
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.getByRole("button", { name: /Browser regression/ }).click();
-  await page.getByRole("button", { name: "Browser" }).click();
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
   await daemon.waitForRequest("browser_open");
 
   await page.getByRole("button", { name: "DevTools" }).click();
@@ -63,8 +74,8 @@ test("dispatches printable Browser keyboard input as key events", async ({ page 
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.getByRole("button", { name: /Browser regression/ }).click();
-  await page.getByRole("button", { name: "Browser" }).click();
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
   await daemon.waitForRequest("browser_open");
 
   await page.locator(".pf-browser-canvas").click({ position: { x: 20, y: 20 } });
@@ -98,8 +109,8 @@ test("new Browser tab button creates a distinct daemon tab", async ({ page }) =>
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.getByRole("button", { name: /Browser regression/ }).click();
-  await page.getByRole("button", { name: "Browser" }).click();
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
   await daemon.waitForRequest("browser_open", (request) =>
     request.params.sessionId === "session-browser:browser:tab-1"
   );
@@ -123,8 +134,8 @@ test("Browser tab close control is a native button", async ({ page }) => {
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.getByRole("button", { name: /Browser regression/ }).click();
-  await page.getByRole("button", { name: "Browser" }).click();
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
   await daemon.waitForRequest("browser_open", (request) =>
     request.params.sessionId === "session-browser:browser:tab-1"
   );
@@ -144,8 +155,8 @@ test("Browser tab list event can clear stale tabs", async ({ page }) => {
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.getByRole("button", { name: /Browser regression/ }).click();
-  await page.getByRole("button", { name: "Browser" }).click();
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
   await daemon.waitForRequest("browser_open", (request) =>
     request.params.sessionId === "session-browser:browser:tab-1"
   );
@@ -162,8 +173,8 @@ test("Browser tab list event reconnects when active tab changes", async ({ page 
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.getByRole("button", { name: /Browser regression/ }).click();
-  await page.getByRole("button", { name: "Browser" }).click();
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
   await daemon.waitForRequest("browser_open", (request) =>
     request.params.sessionId === "session-browser:browser:tab-1"
   );
@@ -209,8 +220,8 @@ test("Browser tab list event reopens disconnected active tab", async ({ page }) 
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.getByRole("button", { name: /Browser regression/ }).click();
-  await page.getByRole("button", { name: "Browser" }).click();
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
   const firstOpen = await daemon.waitForRequest("browser_open", (request) =>
     request.params.sessionId === "session-browser:browser:tab-1"
   );
@@ -247,8 +258,8 @@ test("Files tab close controls are native buttons", async ({ page }) => {
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.getByRole("button", { name: /Browser regression/ }).click();
-  await page.getByRole("button", { name: "Files" }).click();
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Files");
 
   await expect(page.getByRole("tab", { name: /main\.rs/ })).toBeVisible();
   await expect(page.getByRole("tab", { name: /lib\.rs/ })).toBeVisible();
