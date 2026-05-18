@@ -800,11 +800,11 @@ mod tests {
     }
 
     #[test]
-    fn read_rejects_files_outside_working_directories() {
+    fn read_rejects_files_outside_default_writable_roots() {
+        // Path outside cwd, /tmp, $TMPDIR, /add-dir. Codex-style default
+        // writable set; this exercises the gate's reject branch.
         let temp = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let path = outside.path().join("secret.txt");
-        fs::write(&path, "secret\n").unwrap();
+        let path = std::path::PathBuf::from("/__puffer_test_outside_writable_set__/secret.txt");
 
         let error = execute_claude_read_tool(
             temp.path(),

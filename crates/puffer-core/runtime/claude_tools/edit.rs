@@ -411,11 +411,12 @@ mod tests {
     }
 
     #[test]
-    fn edit_rejects_paths_outside_working_directories() {
+    fn edit_rejects_paths_outside_default_writable_roots() {
+        // Path outside cwd, /tmp, $TMPDIR, /add-dir. Codex-style default
+        // writable set; this exercises the gate's reject branch.
         let temp = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let file = outside.path().join("sample.txt");
-        fs::write(&file, "alpha\nbeta\n").unwrap();
+        let file =
+            std::path::PathBuf::from("/__puffer_test_outside_writable_set__/sample.txt");
         let input = json!({
             "file_path": file.display().to_string(),
             "old_string": "beta",

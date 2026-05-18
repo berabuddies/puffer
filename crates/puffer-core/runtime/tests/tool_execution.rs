@@ -167,10 +167,12 @@ fn execute_openai_tool_calls_return_permission_denials_as_tool_results() {
 
 #[test]
 fn execute_openai_tool_calls_enforce_working_directory_access_for_claude_file_tools() {
+    // Path outside cwd, /tmp, $TMPDIR, /add-dir under the codex-style
+    // default writable set; the gate should still reject this from the
+    // OpenAI tool-call dispatch path.
     let mut state = temp_state();
-    let outside = tempfile::tempdir().unwrap();
-    let outside_file = outside.path().join("secret.txt");
-    fs::write(&outside_file, "secret\n").unwrap();
+    let outside_file =
+        std::path::PathBuf::from("/__puffer_test_outside_writable_set__/secret.txt");
     let resources = LoadedResources {
         tools: vec![loaded_tool("Read", "Read file", "runtime:claude_read")],
         ..LoadedResources::default()
