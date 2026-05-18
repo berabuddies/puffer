@@ -164,6 +164,34 @@ test("new Browser tab button creates a distinct daemon tab", async ({ page }) =>
   await expect(page.locator(".pf-browser-tab")).toHaveCount(2);
 });
 
+test("late Browser new-tab responses do not resurrect cleared tabs", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.delayResponse(
+    "browser_agent",
+    (request) => request.params.action === "open" && request.params.tabId === "tab-2",
+    120
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1"
+  );
+
+  await page.getByRole("button", { name: "New tab" }).click();
+  await daemon.waitForRequest("browser_agent", (request) =>
+    request.params.action === "open" && request.params.tabId === "tab-2"
+  );
+  daemon.emit("browser:session-browser:tabs", { activeTabId: null, tabs: [] });
+  await expect(page.locator(".pf-browser-status")).toHaveText("No pages");
+
+  await page.waitForTimeout(170);
+  await expect(page.locator(".pf-browser-tab")).toHaveCount(0);
+  await expect(page.locator(".pf-browser-status")).toHaveText("No pages");
+});
+
 test("Browser tab close control is a native button", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

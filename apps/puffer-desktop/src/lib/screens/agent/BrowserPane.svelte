@@ -90,6 +90,7 @@
   let cursorRequest = 0;
   let pendingCursorPoint: { x: number; y: number } | null = null;
   let pendingCursorSessionId: string | null = null;
+  let tabStateVersion = 0;
 
   let activeTab = $derived(tabs.find((tab) => tab.id === activeTabId) ?? tabs[0]);
   let browserControlsEnabled = $derived(Boolean(activeTab && connected));
@@ -191,6 +192,7 @@
     if (!Array.isArray(state.tabs)) return;
     if (state.tabs.length === 0) {
       if (!options.allowEmpty) return;
+      tabStateVersion += 1;
       tabs = [];
       activeTabId = "";
       nextTabNumber = 2;
@@ -207,6 +209,7 @@
       clearCanvas();
       return;
     }
+    tabStateVersion += 1;
     const nextTabs = state.tabs.map(tabFromInfo);
     const connectedTabId = nextTabs.find((tab) => tab.connected)?.id;
     const validActiveTabId = state.activeTabId && nextTabs.some((tab) => tab.id === state.activeTabId)
@@ -477,6 +480,7 @@
   async function addTab() {
     const size = measureViewport() ?? lastResize;
     const tabId = `tab-${nextTabNumber}`;
+    const requestedAtVersion = tabStateVersion;
     try {
       const info = await browserTabOpen({
         sessionId,
@@ -486,7 +490,9 @@
         height: size.height,
         activate: true
       });
+      if (disposed || requestedAtVersion !== tabStateVersion) return;
       const tab = tabFromInfo(info);
+      tabStateVersion += 1;
       tabs = [...tabs.filter((item) => item.id !== tab.id), tab];
       activeTabId = tab.id;
       nextTabNumber = nextTabIndex(tabs);
@@ -518,6 +524,7 @@
       .catch(() => browserClose(backendSessionId(tabId)).catch(() => {}));
     const index = tabs.findIndex((tab) => tab.id === tabId);
     const nextTabs = tabs.filter((tab) => tab.id !== tabId);
+    tabStateVersion += 1;
     tabs = nextTabs;
     saveTabs(nextTabs);
     if (nextTabs.length === 0) {
