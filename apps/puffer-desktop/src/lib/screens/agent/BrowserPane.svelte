@@ -89,6 +89,7 @@
   let cursorTimer: ReturnType<typeof setTimeout> | null = null;
   let cursorRequest = 0;
   let pendingCursorPoint: { x: number; y: number } | null = null;
+  let pendingCursorSessionId: string | null = null;
 
   let activeTab = $derived(tabs.find((tab) => tab.id === activeTabId) ?? tabs[0]);
   let browserControlsEnabled = $derived(Boolean(activeTab && connected));
@@ -666,21 +667,32 @@
 
   function scheduleCursorProbe(point: { x: number; y: number }) {
     pendingCursorPoint = point;
+    pendingCursorSessionId = connected && activeTabId ? activeBackendSessionId() : null;
     if (cursorTimer) return;
     cursorTimer = setTimeout(() => {
       cursorTimer = null;
       const next = pendingCursorPoint;
+      const sessionId = pendingCursorSessionId;
       pendingCursorPoint = null;
-      if (!next || disposed || activeButtons > 0) return;
-      void probeCursor(next);
+      pendingCursorSessionId = null;
+      if (!next || !sessionId || disposed || activeButtons > 0) return;
+      if (!connected || !activeTabId || activeBackendSessionId() !== sessionId) return;
+      void probeCursor(sessionId, next);
     }, 60);
   }
 
-  async function probeCursor(point: { x: number; y: number }) {
+  async function probeCursor(sessionId: string, point: { x: number; y: number }) {
     const request = ++cursorRequest;
     try {
-      const result = await browserCursor(activeBackendSessionId(), point.x, point.y);
-      if (disposed || request !== cursorRequest || activeButtons > 0) return;
+      const result = await browserCursor(sessionId, point.x, point.y);
+      if (
+        disposed ||
+        request !== cursorRequest ||
+        activeButtons > 0 ||
+        !connected ||
+        !activeTabId ||
+        activeBackendSessionId() !== sessionId
+      ) return;
       browserCursorStyle = result.cursor || "default";
     } catch {
       if (request === cursorRequest) browserCursorStyle = "default";
@@ -693,6 +705,7 @@
       cursorTimer = null;
     }
     pendingCursorPoint = null;
+    pendingCursorSessionId = null;
   }
 
   function sendWheel(event: WheelEvent) {

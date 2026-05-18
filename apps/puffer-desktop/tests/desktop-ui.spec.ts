@@ -193,6 +193,31 @@ test("Browser paste does not send input after tabs are cleared", async ({ page }
   expect(daemon.requests.filter((request) => request.method === "browser_input")).toHaveLength(0);
 });
 
+test("Browser cursor probe does not run after tabs are cleared", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1"
+  );
+
+  await page.locator(".pf-browser-canvas").dispatchEvent("pointermove", {
+    clientX: 20,
+    clientY: 20,
+    pointerId: 1,
+    button: -1,
+    buttons: 0,
+    pointerType: "mouse"
+  });
+  daemon.emit("browser:session-browser:tabs", { activeTabId: null, tabs: [] });
+  await page.waitForTimeout(90);
+
+  expect(daemon.requests.filter((request) => request.method === "browser_cursor")).toHaveLength(0);
+});
+
 test("Browser tab list event reconnects when active tab changes", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
