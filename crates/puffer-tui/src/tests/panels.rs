@@ -1,5 +1,6 @@
 use super::*;
-use crate::state::{LoopKind, LoopState, LoopStatus};
+use crate::state::{LoopKind, LoopState, LoopStatus, PendingSubmit};
+use std::sync::mpsc;
 
 fn open_panel(command: &str) -> OverlayState {
     let tempdir = tempdir().unwrap();
@@ -26,6 +27,35 @@ fn open_panel(command: &str) -> OverlayState {
     .unwrap();
     assert!(opened);
     tui.overlay.expect("panel overlay")
+}
+
+fn set_pending_turn(tui: &mut TuiState) {
+    let (_sender, receiver) = mpsc::channel();
+    tui.pending_submit = Some(PendingSubmit {
+        prompt: "first".to_string(),
+        receiver,
+        pending_tool_calls: Vec::new(),
+        rendered_tool_invocations: 0,
+        started_at: std::time::Instant::now(),
+        thinking_active: false,
+        status_hint: None,
+        cancel: puffer_core::CancelToken::new(),
+    });
+}
+
+fn rewind_test_state(tempdir: &tempfile::TempDir, session_store: &SessionStore) -> AppState {
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = AppState::new(
+        PufferConfig::default(),
+        tempdir.path().to_path_buf(),
+        session,
+    );
+    state.push_message(MessageRole::User, "first");
+    state.push_message(MessageRole::Assistant, "reply");
+    state.push_message(MessageRole::User, "second");
+    state
 }
 
 fn open_command_picker_panel(command: &str) -> (String, Vec<ModelPickerEntry>, usize) {
@@ -371,6 +401,93 @@ fn try_open_overlay_builds_rewind_picker() {
         tui.overlay,
         Some(OverlayState::CommandPicker { .. })
     ));
+}
+
+#[test]
+fn pending_turn_queues_rewind_instead_of_opening_picker() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let mut state = rewind_test_state(&tempdir, &session_store);
+    let mut resources = sample_resources();
+    let mut providers = sample_providers();
+    let mut auth_store = sample_auth_store();
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let commands = supported_commands();
+    let mut tui = TuiState::default();
+    set_pending_turn(&mut tui);
+    tui.input = "/rewind".to_string();
+    tui.cursor = tui.input.len();
+
+    handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &commands,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+
+    assert!(tui.overlay.is_none());
+    assert_eq!(
+        tui.queued_prompts.front().map(String::as_str),
+        Some("/rewind")
+    );
+    assert_eq!(state.transcript.len(), 3);
+}
+
+#[test]
+fn pending_turn_queues_rewind_picker_selection_instead_of_rewinding() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let mut state = rewind_test_state(&tempdir, &session_store);
+    let mut resources = sample_resources();
+    let mut providers = sample_providers();
+    let mut auth_store = sample_auth_store();
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let commands = supported_commands();
+    let mut tui = TuiState::default();
+
+    assert!(try_open_overlay(
+        &state,
+        &resources,
+        &mut providers,
+        &auth_store,
+        &session_store,
+        &mut tui,
+        "/rewind",
+    )
+    .unwrap());
+    set_pending_turn(&mut tui);
+
+    handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &commands,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+
+    assert!(tui.overlay.is_none());
+    assert_eq!(
+        tui.queued_prompts.front().map(String::as_str),
+        Some("/rewind")
+    );
+    assert_eq!(state.transcript.len(), 3);
 }
 
 #[test]

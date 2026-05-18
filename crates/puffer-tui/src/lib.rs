@@ -28,8 +28,8 @@ use crate::flow::{
     builtin_openai_base_url, builtin_openai_headers, builtin_openai_query_params,
     cancel_pending_submit, check_loop_interval, emit_system_message, handle_prompt_submit,
     handle_submit, maybe_apply_requested_reload, persist_user_config, poll_pending_submit,
-    run_embedded_auth_login, set_overlay_state, submit_next_queued_prompt,
-    submit_queued_prompt_if_ready, try_open_overlay,
+    run_embedded_auth_login, set_overlay_state, should_defer_while_turn_is_running,
+    submit_next_queued_prompt, submit_queued_prompt_if_ready, try_open_overlay,
 };
 use crate::permission_prompt_flow::handle_permission_prompt_key;
 use crate::render::initialize_top_panel_image_state;
@@ -672,15 +672,19 @@ fn handle_key(
                 return Ok(false);
             }
             let current_input = tui.input.clone();
-            if try_open_overlay(
-                state,
-                resources,
-                providers,
-                auth_store,
-                session_store,
-                tui,
-                &current_input,
-            )? {
+            let defer_current_input =
+                tui.has_pending_submit() && should_defer_while_turn_is_running(&current_input);
+            if !defer_current_input
+                && try_open_overlay(
+                    state,
+                    resources,
+                    providers,
+                    auth_store,
+                    session_store,
+                    tui,
+                    &current_input,
+                )?
+            {
                 return Ok(false);
             }
             let submitted = tui.take_input();
@@ -1171,16 +1175,22 @@ fn handle_overlay_key(
                     _ => {
                         if let Some(command) = overlay_snapshot.selected_command() {
                             set_overlay_state(tui, None);
-                            handle_submit(
-                                state,
-                                resources,
-                                providers,
-                                auth_store,
-                                auth_path,
-                                session_store,
-                                command,
-                                no_alt_screen,
-                            )?;
+                            if tui.has_pending_submit()
+                                && should_defer_while_turn_is_running(&command)
+                            {
+                                tui.enqueue_prompt(command);
+                            } else {
+                                handle_submit(
+                                    state,
+                                    resources,
+                                    providers,
+                                    auth_store,
+                                    auth_path,
+                                    session_store,
+                                    command,
+                                    no_alt_screen,
+                                )?;
+                            }
                         } else {
                             set_overlay_state(tui, None);
                         }
@@ -1215,16 +1225,20 @@ fn handle_overlay_key(
                     return Ok(false);
                 }
                 set_overlay_state(tui, None);
-                handle_submit(
-                    state,
-                    resources,
-                    providers,
-                    auth_store,
-                    auth_path,
-                    session_store,
-                    command,
-                    no_alt_screen,
-                )?;
+                if tui.has_pending_submit() && should_defer_while_turn_is_running(&command) {
+                    tui.enqueue_prompt(command);
+                } else {
+                    handle_submit(
+                        state,
+                        resources,
+                        providers,
+                        auth_store,
+                        auth_path,
+                        session_store,
+                        command,
+                        no_alt_screen,
+                    )?;
+                }
             } else {
                 set_overlay_state(tui, None);
             }
