@@ -677,7 +677,11 @@ async fn dispatch_request(
         "update_config" => respond!(detached!(|s, p| handle_update_config(&s, &p))),
         "create_pull_request" => respond!(handle_create_pull_request(&state, &params)),
         "merge_pull_request" => respond!(handle_merge_pull_request(&state, &params)),
-        "create_session" => respond!(handle_create_session(&state, &params)),
+        "create_session" => {
+            // Provider-specific sessions resolve runtime inputs, which may run
+            // model discovery through reqwest::blocking; keep that off tokio.
+            respond!(detached!(|s, p| handle_create_session(&s, &p)))
+        }
         "default_workspace" => respond!(handle_default_workspace(&state)),
         "git_clone" => respond!(handle_git_clone(&state, &params)),
         "pty_list" => respond!(handle_pty_list(&state, &params)),
@@ -2757,8 +2761,8 @@ fn apply_daemon_yolo_mode(app_state: &mut AppState) {
 mod tests {
     use super::{
         apply_daemon_yolo_mode, apply_turn_model_override, apply_turn_request_options,
-        handle_create_session, model_descriptor_dto, resolve_create_session_model_id, DaemonState,
-        TurnRequestOptions,
+        handle_create_session, model_descriptor_dto, resolve_create_session_model_id,
+        run_off_runtime, DaemonState, TurnRequestOptions,
     };
     use indexmap::IndexMap;
     use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
@@ -2768,7 +2772,93 @@ mod tests {
     };
     use puffer_session_store::{SessionMetadata, SessionStore};
     use serde_json::json;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
     use uuid::Uuid;
+
+    fn discovery_cache_env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    struct DiscoveryCacheEnvGuard {
+        cache_path: std::path::PathBuf,
+        previous: Option<std::ffi::OsString>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl DiscoveryCacheEnvGuard {
+        fn set() -> Self {
+            let lock = discovery_cache_env_lock();
+            let previous = std::env::var_os("PUFFER_DISCOVERY_CACHE_PATH");
+            let temp = tempfile::NamedTempFile::new().expect("cache file");
+            let cache_path = temp.path().to_path_buf();
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_millis() as u64;
+            let cache = json!({
+                "entries": {
+                    "llama-cpp": {"models": [], "cached_at_ms": now_ms},
+                    "lmstudio": {"models": [], "cached_at_ms": now_ms},
+                    "ollama": {"models": [], "cached_at_ms": now_ms},
+                    "vllm": {"models": [], "cached_at_ms": now_ms}
+                }
+            });
+            std::fs::write(&cache_path, cache.to_string()).expect("seed discovery cache");
+            let (_, path) = temp.keep().expect("persist cache file");
+            std::env::set_var("PUFFER_DISCOVERY_CACHE_PATH", path);
+            Self {
+                cache_path,
+                previous,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for DiscoveryCacheEnvGuard {
+        fn drop(&mut self) {
+            match self.previous.as_ref() {
+                Some(value) => std::env::set_var("PUFFER_DISCOVERY_CACHE_PATH", value),
+                None => std::env::remove_var("PUFFER_DISCOVERY_CACHE_PATH"),
+            }
+            let _ = std::fs::remove_file(&self.cache_path);
+        }
+    }
+
+    fn spawn_openai_discovery_server() -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind discovery server");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking discovery server");
+        let address = listener.local_addr().expect("discovery server address");
+        let handle = std::thread::spawn(move || {
+            for _ in 0..100 {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut buf = [0_u8; 1024];
+                        let _ = std::io::Read::read(&mut stream, &mut buf);
+                        let body = r#"{"data":[{"id":"gpt-local-discovered","name":"GPT Local"}]}"#;
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        std::io::Write::write_all(&mut stream, response.as_bytes())
+                            .expect("write discovery response");
+                        return;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept discovery request: {error}"),
+                }
+            }
+            panic!("discovery server was not contacted");
+        });
+        (format!("http://{address}"), handle)
+    }
 
     #[test]
     fn create_session_accepts_display_name() {
@@ -2850,6 +2940,49 @@ mod tests {
         let session_id = uuid::Uuid::parse_str(session_id).expect("valid session id");
         let session = store.load_session(session_id).expect("stored session");
         assert_eq!(session.metadata.cwd, missing);
+    }
+
+    #[test]
+    fn create_session_provider_routing_runs_off_tokio_runtime() {
+        let _cache_guard = DiscoveryCacheEnvGuard::set();
+        let (openai_base_url, server) = spawn_openai_discovery_server();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(
+            workspace_root.clone(),
+            paths,
+            "token".into(),
+            true,
+            false,
+            false,
+        )
+        .expect("daemon state");
+        state.config.lock().unwrap().openai_base_url = Some(openai_base_url);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let response = runtime
+            .block_on(async move {
+                let params = json!({
+                    "cwd": workspace_root.display().to_string(),
+                    "providerId": "openai",
+                });
+                run_off_runtime(move || handle_create_session(&state, &params)).await
+            })
+            .expect("create session");
+
+        server.join().expect("discovery server");
+        assert_eq!(response["providerId"], "openai");
+        assert_eq!(response["modelId"], "gpt-5");
     }
 
     #[test]
