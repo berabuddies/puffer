@@ -114,19 +114,25 @@ pub(crate) fn render_session_overlay(
         height: viewport.height.saturating_sub(2).max(8),
     };
     frame.render_widget(Clear, area);
+    let body = session_overlay_text(&snapshot.view);
+    let visible_rows = usize::from(area.height.saturating_sub(2));
+    let max_scroll = body
+        .lines
+        .len()
+        .saturating_sub(visible_rows)
+        .min(u16::MAX as usize) as u16;
+    let scroll = snapshot.scroll.min(max_scroll);
     frame.render_widget(
-        Paragraph::new(session_overlay_text(&snapshot.view))
-            .scroll((snapshot.scroll, 0))
-            .block(
-                Block::default()
-                    .title("Session")
-                    .borders(Borders::ALL)
-                    .border_style(
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-            ),
+        Paragraph::new(body).scroll((scroll, 0)).block(
+            Block::default()
+                .title("Session")
+                .borders(Borders::ALL)
+                .border_style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+        ),
         area,
     );
 }
@@ -178,4 +184,53 @@ fn session_overlay_text(view: &SessionOverlayView) -> Text<'static> {
         Style::default().add_modifier(Modifier::DIM),
     )));
     Text::from(lines)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    #[test]
+    fn render_session_overlay_clamps_overscroll() {
+        let backend = TestBackend::new(72, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let overlay = SessionOverlay {
+            shared: Arc::new(Mutex::new(SessionOverlayState {
+                view: SessionOverlayView {
+                    remote_url: Some("https://puffer.local/session".to_string()),
+                    remote_status: Some("online".to_string()),
+                    qr: Some(
+                        (0..20)
+                            .map(|index| format!("qr-line-{index:02}"))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ),
+                    notice: None,
+                },
+                scroll: 0,
+            })),
+        };
+
+        for _ in 0..100 {
+            overlay.page_down();
+        }
+
+        terminal
+            .draw(|frame| {
+                render_session_overlay(frame, frame.area(), &overlay);
+            })
+            .unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Session"));
+        assert!(rendered.contains("qr-line-19"));
+    }
 }
