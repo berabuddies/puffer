@@ -3,6 +3,10 @@ use super::*;
 #[test]
 fn branch_forks_and_switches_current_session() {
     let tempdir = tempdir().unwrap();
+    let _lock = lock_puffer_home();
+    let home = tempdir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let _home = ScopedPufferHome::set(&home);
     let paths = ConfigPaths::discover(tempdir.path());
     ensure_workspace_dirs(&paths).unwrap();
     let session_store = SessionStore::from_paths(&paths).unwrap();
@@ -49,6 +53,10 @@ fn branch_forks_and_switches_current_session() {
 #[test]
 fn branch_without_explicit_name_derives_branch_title_from_first_user_message() {
     let tempdir = tempdir().unwrap();
+    let _lock = lock_puffer_home();
+    let home = tempdir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let _home = ScopedPufferHome::set(&home);
     let paths = ConfigPaths::discover(tempdir.path());
     ensure_workspace_dirs(&paths).unwrap();
     let session_store = SessionStore::from_paths(&paths).unwrap();
@@ -93,6 +101,10 @@ fn branch_without_explicit_name_derives_branch_title_from_first_user_message() {
 #[test]
 fn branch_refuses_to_fork_empty_conversations() {
     let tempdir = tempdir().unwrap();
+    let _lock = lock_puffer_home();
+    let home = tempdir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let _home = ScopedPufferHome::set(&home);
     let paths = ConfigPaths::discover(tempdir.path());
     ensure_workspace_dirs(&paths).unwrap();
     let session_store = SessionStore::from_paths(&paths).unwrap();
