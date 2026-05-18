@@ -346,3 +346,69 @@ test("replayed turn-start does not clear visible streamed text", async ({ page }
 
   await expect(page.getByText("Visible text before replay.")).toBeVisible();
 });
+
+test("stale turn reloads do not clear the active streamed answer", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-overlap",
+        displayName: "Overlap session",
+        title: "Overlap session",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Overlap session/);
+  daemon.delayResponse(
+    "load_session_detail",
+    (request) => request.params.sessionId === "session-overlap",
+    180
+  );
+  daemon.setSessionTimeline("session-overlap", [
+    {
+      kind: "assistant_message",
+      id: "persisted-old",
+      text: "Persisted old answer.",
+      createdAtMs: baseTime + 1
+    }
+  ]);
+
+  daemon.emit("session:session-overlap:event", { type: "turn-start", turnId: "turn-old" });
+  daemon.emit("session:session-overlap:event", {
+    type: "text-delta",
+    turnId: "turn-old",
+    delta: "Transient old answer."
+  });
+  daemon.emit("session:session-overlap:event", {
+    type: "turn-complete",
+    turnId: "turn-old",
+    assistantText: "Persisted old answer."
+  });
+
+  daemon.emit("session:session-overlap:event", { type: "turn-start", turnId: "turn-new" });
+  daemon.emit("session:session-overlap:event", {
+    type: "text-delta",
+    turnId: "turn-new",
+    delta: "Current answer must stay visible."
+  });
+  await expect(page.getByText("Current answer must stay visible.")).toBeVisible();
+
+  await page.waitForTimeout(260);
+  await expect(page.getByText("Current answer must stay visible.")).toBeVisible();
+
+  daemon.emit("session:session-overlap:event", {
+    type: "text-delta",
+    turnId: "turn-old",
+    delta: "Late stale text should be ignored."
+  });
+  await expect(page.getByText("Late stale text should be ignored.")).toHaveCount(0);
+  await expect(page.getByText("Current answer must stay visible.")).toBeVisible();
+});
