@@ -256,6 +256,109 @@ fn handle_prompt_submit_queues_prompt_while_turn_is_running() {
 }
 
 #[test]
+fn handle_prompt_submit_queues_mutating_slash_while_turn_is_running() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = sample_state(session, tempdir.path());
+    let mut resources = LoadedResources::default();
+    let mut providers = ProviderRegistry::new();
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let mut auth_store = AuthStore::default();
+    let mut tui = TuiState::default();
+
+    handle_prompt_submit(
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        "first".to_string(),
+        true,
+    )
+    .unwrap();
+    handle_prompt_submit(
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        "/clear".to_string(),
+        true,
+    )
+    .unwrap();
+
+    assert!(tui.has_pending_submit());
+    assert_eq!(tui.queued_prompts.len(), 1);
+    assert_eq!(
+        tui.queued_prompts.front().map(String::as_str),
+        Some("/clear")
+    );
+    assert!(state
+        .transcript
+        .iter()
+        .any(|message| message.role == MessageRole::User && message.text == "first"));
+    assert!(!state
+        .transcript
+        .iter()
+        .any(|message| message.text == "Transcript cleared."));
+}
+
+#[test]
+fn handle_prompt_submit_allows_read_only_slash_while_turn_is_running() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = sample_state(session, tempdir.path());
+    let mut resources = LoadedResources::default();
+    let mut providers = ProviderRegistry::new();
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let mut auth_store = AuthStore::default();
+    let mut tui = TuiState::default();
+
+    handle_prompt_submit(
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        "first".to_string(),
+        true,
+    )
+    .unwrap();
+    assert!(!should_defer_while_turn_is_running("/status"));
+    let opened = try_open_overlay(
+        &state,
+        &resources,
+        &mut providers,
+        &auth_store,
+        &session_store,
+        &mut tui,
+        "/status",
+    )
+    .unwrap();
+
+    assert!(opened);
+    assert!(tui.has_pending_submit());
+    assert!(tui.queued_prompts.is_empty());
+    assert!(matches!(tui.overlay, Some(OverlayState::Status(..))));
+}
+
+#[test]
 fn poll_pending_submit_syncs_project_memory_review_turns_back_to_main_state() {
     let tempdir = tempdir().unwrap();
     let _home = crate::test_env::ScopedPufferHome::new("memory-review-turn-sync");

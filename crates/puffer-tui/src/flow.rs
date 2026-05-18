@@ -225,6 +225,18 @@ pub(crate) fn is_provider_prompt_input(submitted: &str) -> bool {
         && !is_auth_command_input(submitted)
 }
 
+/// Returns true when input should wait for the active provider turn to finish.
+pub(crate) fn should_defer_while_turn_is_running(submitted: &str) -> bool {
+    let submitted = submitted.trim();
+    if submitted.is_empty() {
+        return false;
+    }
+    if is_provider_prompt_input(submitted) || parse_shell_shortcut(submitted).is_some() {
+        return true;
+    }
+    submitted.starts_with('/') && !is_read_only_pending_slash_command(submitted)
+}
+
 /// Handles one prompt submission from the interactive composer.
 pub(crate) fn handle_prompt_submit(
     state: &mut AppState,
@@ -241,11 +253,11 @@ pub(crate) fn handle_prompt_submit(
     if submitted.is_empty() {
         return Ok(());
     }
-    if try_handle_loop_command(state, session_store, tui, &submitted)? {
+    if tui.has_pending_submit() && should_defer_while_turn_is_running(&submitted) {
+        tui.enqueue_prompt(submitted);
         return Ok(());
     }
-    if tui.has_pending_submit() && is_provider_prompt_input(&submitted) {
-        tui.enqueue_prompt(submitted);
+    if try_handle_loop_command(state, session_store, tui, &submitted)? {
         return Ok(());
     }
     if !is_provider_prompt_input(&submitted) {
@@ -746,6 +758,32 @@ pub(crate) fn handle_submit(
 
 fn is_auth_command_input(submitted: &str) -> bool {
     matches!(submit_command_name(submitted), "login" | "logout")
+}
+
+fn is_read_only_pending_slash_command(submitted: &str) -> bool {
+    let without_slash = submitted.trim().trim_start_matches('/');
+    let (name, args) = without_slash
+        .split_once(' ')
+        .map(|(name, args)| (name, args.trim()))
+        .unwrap_or((without_slash, ""));
+    if !args.is_empty() {
+        return false;
+    }
+    matches!(
+        name,
+        "?" | "help"
+            | "status"
+            | "usage"
+            | "cost"
+            | "context"
+            | "debug"
+            | "diff"
+            | "doctor"
+            | "files"
+            | "skills"
+            | "session"
+            | "remote"
+    )
 }
 
 fn append_thinking_delta(state: &mut AppState, delta: &str) {
