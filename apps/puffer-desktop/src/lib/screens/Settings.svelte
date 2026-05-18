@@ -69,9 +69,12 @@
 
   // Live permissions loaded from the daemon. `permissionRows` is the
   // editable working copy — changes are staged in memory and flushed on
-  // Save. `permissionSaving` blocks the Save button during the round-trip.
+  // Save. Loading state and generation guards keep late responses from
+  // clobbering in-progress edits.
   let permissionSnapshot = $state<PermissionsSnapshot | null>(null);
   let permissionRows = $state<{ tool: string; mode: string }[]>([]);
+  let permissionLoading = $state(false);
+  let permissionLoadGeneration = 0;
   let permissionSaving = $state(false);
   let permissionError = $state<string | null>(null);
   let permissionDirty = $state(false);
@@ -177,15 +180,27 @@
   }
 
   async function loadPermissionSnapshot() {
+    const generation = ++permissionLoadGeneration;
+    permissionLoading = true;
+    permissionError = null;
     try {
       const snap = await listPermissions();
+      if (generation !== permissionLoadGeneration) return;
       permissionSnapshot = snap;
-      permissionRows = Object.entries(snap.tools)
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([tool, mode]) => ({ tool, mode }));
-      permissionDirty = false;
+      if (!permissionDirty && !permissionSaving) {
+        permissionRows = Object.entries(snap.tools)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([tool, mode]) => ({ tool, mode }));
+        permissionDirty = false;
+      }
     } catch (e) {
-      permissionError = (e as Error).message ?? String(e);
+      if (generation === permissionLoadGeneration) {
+        permissionError = (e as Error).message ?? String(e);
+      }
+    } finally {
+      if (generation === permissionLoadGeneration) {
+        permissionLoading = false;
+      }
     }
   }
 
@@ -336,7 +351,7 @@
   // initial settings render stays a single RPC (the snapshot).
   $effect(() => {
     if (!daemonReachable) return;
-    if (section === "permissions" && permissionSnapshot === null) {
+    if (section === "permissions" && permissionSnapshot === null && !permissionLoading) {
       void loadPermissionSnapshot();
     }
     if (section === "mcp" && !mcpLoaded && !mcpLoading) {
@@ -551,6 +566,10 @@
         <div class="pf-settings-note">
           Preview mode — launch Puffer in the desktop app to edit workspace permissions.
         </div>
+      {:else if permissionLoading}
+        <div class="pf-settings-note">
+          Loading permissions...
+        </div>
       {:else if permissionSnapshot}
         <div class="pf-settings-note">
           Stored at <code>{permissionSnapshot.path}</code>.
@@ -610,7 +629,7 @@
           class="sc-btn"
           data-variant="outline"
           data-size="sm"
-          disabled={!daemonReachable}
+          disabled={!daemonReachable || permissionLoading}
           onclick={addPermissionRow}
         >
           <Icon name="plus" size={12} />Add rule
@@ -620,7 +639,7 @@
           class="sc-btn"
           data-variant="default"
           data-size="sm"
-          disabled={!permissionDirty || permissionSaving || !daemonReachable}
+          disabled={!permissionDirty || permissionSaving || permissionLoading || !daemonReachable}
           onclick={savePermissionRows}
         >
           {permissionSaving ? "Saving…" : "Save"}

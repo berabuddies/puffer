@@ -57,6 +57,36 @@ test("permissions settings save tool policies through the daemon", async ({ page
   });
 });
 
+test("permissions settings keep edits after a late list response", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.delayResponse("list_permissions", () => true, 220);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Permissions" }).click();
+
+  const addRule = page.getByRole("button", { name: "Add rule" });
+  await expect(addRule).toBeDisabled();
+  await expect(page.getByText("Loading permissions...")).toBeVisible();
+  await expect(page.getByText("Stored at")).toBeVisible();
+
+  await addRule.click();
+  const row = page.locator(".pf-perm-row").last();
+  await row.locator("input").fill("browser_open");
+  await row.locator("select").selectOption("deny");
+
+  await expect(row.locator("input")).toHaveValue("browser_open");
+  await expect(row.locator("select")).toHaveValue("deny");
+
+  await page.getByRole("button", { name: "Save" }).click();
+  const request = await daemon.waitForRequest("save_permissions");
+  expect(request.params.tools).toMatchObject({
+    bash: "ask",
+    browser_open: "deny"
+  });
+});
+
 test("MCP settings add server through the daemon", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
