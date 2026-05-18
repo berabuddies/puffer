@@ -376,4 +376,39 @@ mod tests {
 
         assert_eq!(resolved, outside);
     }
+
+    #[test]
+    fn session_scratchpad_dir_creates_per_session_dir_under_home_and_returns_none_without_home() {
+        use super::session_scratchpad_dir;
+        use uuid::Uuid;
+
+        let _guard = crate::test_locks::env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let old_home = std::env::var_os("HOME");
+
+        let temp = tempdir().unwrap();
+        std::env::set_var("HOME", temp.path());
+
+        let session = Uuid::new_v4();
+        let path = session_scratchpad_dir(&session).expect("scratchpad dir with HOME set");
+        let expected = temp
+            .path()
+            .join(".puffer")
+            .join("scratchpad")
+            .join(session.to_string());
+        assert_eq!(path, expected);
+        assert!(path.is_dir(), "scratchpad dir was not created on disk");
+
+        std::env::remove_var("HOME");
+        assert!(
+            session_scratchpad_dir(&Uuid::new_v4()).is_none(),
+            "expected None when HOME is unset"
+        );
+
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+    }
 }
