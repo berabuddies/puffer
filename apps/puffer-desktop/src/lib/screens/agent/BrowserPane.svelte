@@ -480,6 +480,7 @@
   async function addTab() {
     const size = measureViewport() ?? lastResize;
     const tabId = `tab-${nextTabNumber}`;
+    nextTabNumber += 1;
     const requestedAtVersion = tabStateVersion;
     try {
       const info = await browserTabOpen({
@@ -492,7 +493,6 @@
       });
       if (disposed || requestedAtVersion !== tabStateVersion) return;
       const tab = tabFromInfo(info);
-      tabStateVersion += 1;
       tabs = [...tabs.filter((item) => item.id !== tab.id), tab];
       activeTabId = tab.id;
       nextTabNumber = nextTabIndex(tabs);

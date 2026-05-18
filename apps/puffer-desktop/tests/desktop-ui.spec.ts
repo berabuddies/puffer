@@ -164,6 +164,39 @@ test("new Browser tab button creates a distinct daemon tab", async ({ page }) =>
   await expect(page.locator(".pf-browser-tab")).toHaveCount(2);
 });
 
+test("rapid Browser new-tab clicks allocate unique tab ids", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.delayResponse(
+    "browser_agent",
+    (request) => request.params.action === "open" && typeof request.params.tabId === "string",
+    120
+  );
+  daemon.delayResponse(
+    "browser_agent",
+    (request) => request.params.action === "open" && typeof request.params.tabId === "string",
+    120
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1"
+  );
+
+  const newTab = page.getByRole("button", { name: "New tab" });
+  await newTab.click();
+  await newTab.click();
+
+  await expect.poll(() =>
+    daemon.requests
+      .filter((request) => request.method === "browser_agent" && request.params.action === "open")
+      .map((request) => request.params.tabId)
+  ).toEqual(["tab-2", "tab-3"]);
+  await expect(page.locator(".pf-browser-tab")).toHaveCount(3);
+});
+
 test("late Browser new-tab responses do not resurrect cleared tabs", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayResponse(
