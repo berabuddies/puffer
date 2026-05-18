@@ -72,3 +72,22 @@ test("new agent provider choice is used for the first turn", async ({ page }) =>
     modelId: "test-model"
   });
 });
+
+test("empty workspace can start a new agent in the default workspace", async ({ page }) => {
+  const daemon = new FakeDaemon({ sessions: [] });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await expect(page.getByRole("heading", { name: "No sessions yet" })).toBeVisible();
+  await page.getByRole("button", { name: "New agent in default workspace" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "New agent" });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "Start agent" }).click();
+
+  const createRequest = await daemon.waitForRequest("create_session");
+  expect(createRequest.params).toMatchObject({
+    cwd: "/tmp/puffer",
+    providerId: "codex"
+  });
+});

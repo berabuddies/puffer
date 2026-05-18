@@ -180,6 +180,17 @@
             {#if defaultWorkspaceCwd}<code>{defaultWorkspaceCwd}</code>{/if}
             — you'll choose Codex, Claude, or Puffer before the chat opens.
           </p>
+          <button
+            type="button"
+            class="sc-btn"
+            data-variant="default"
+            data-size="sm"
+            onclick={() => handleNewAgent(defaultWorkspaceCwd)}
+            disabled={!onNewAgent || !defaultWorkspaceCwd}
+            aria-label="New agent in default workspace"
+          >
+            <Icon name="plus" size={13} />New agent
+          </button>
         </div>
       </div>
     {/if}
