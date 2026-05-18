@@ -117,3 +117,24 @@ test("new Browser tab button creates a distinct daemon tab", async ({ page }) =>
   });
   await expect(page.locator(".pf-browser-tab")).toHaveCount(2);
 });
+
+test("Browser tab close control is a native button", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: /Browser regression/ }).click();
+  await page.getByRole("button", { name: "Browser" }).click();
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1"
+  );
+  await page.getByRole("button", { name: "New tab" }).click();
+  await daemon.waitForRequest("browser_agent", (candidate) =>
+    candidate.params.action === "open" && candidate.params.tabId === "tab-2"
+  );
+
+  const closeControls = page.getByRole("button", { name: "Close tab" });
+  await expect(closeControls.first()).toHaveJSProperty("tagName", "BUTTON");
+  await closeControls.nth(1).click();
+  await expect(page.locator(".pf-browser-tab")).toHaveCount(1);
+});

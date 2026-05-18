@@ -760,14 +760,22 @@
 </script>
 
 <div class="pf-browser-pane">
-  <div class="pf-browser-tabs">
+  <div class="pf-browser-tabs" role="tablist" aria-label="Browser tabs">
     {#each tabs as tab (tab.id)}
-      <button
+      <div
         class="pf-browser-tab"
         class:active={tab.id === activeTabId}
-        type="button"
+        role="tab"
+        tabindex="0"
+        aria-selected={tab.id === activeTabId}
         title={tab.title || tab.url}
         onclick={() => selectTab(tab.id)}
+        onkeydown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            selectTab(tab.id);
+          }
+        }}
       >
         {#if tab.favicon}
           <img class="favicon" src={tab.favicon} alt="" onerror={(event) => ((event.currentTarget as HTMLImageElement).style.display = "none")} />
@@ -775,19 +783,16 @@
           <span class="dot" class:loading={tab.loading}></span>
         {/if}
         <span class="label">{tabTitle(tab)}</span>
-        <span
+        <button
           class="close"
-          role="button"
-          tabindex="0"
+          type="button"
           title="Close tab"
+          aria-label="Close tab"
           onclick={(event) => closeTab(tab.id, event)}
-          onkeydown={(event) => {
-            if (event.key === "Enter" || event.key === " ") closeTab(tab.id, event);
-          }}
         >
           <Icon name="x" size={11} />
-        </span>
-      </button>
+        </button>
+      </div>
     {/each}
     <button class="pf-browser-tab-add" type="button" title="New tab" onclick={() => void addTab()}>
       <Icon name="plus" size={13} />
@@ -1006,12 +1011,16 @@
   .pf-browser-tab .close {
     width: 18px;
     height: 18px;
+    padding: 0;
+    border: 0;
     border-radius: 4px;
+    background: transparent;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     margin-left: auto;
     color: var(--muted-foreground);
+    cursor: pointer;
   }
 
   .pf-browser-tab .close:hover,
