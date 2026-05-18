@@ -983,7 +983,9 @@
         turnStartedAtMs = Date.now();
         turnThinking = true;
         turnStatusHint = "Thinking";
-        liveStreamItems = [];
+        if (!ev.replay) {
+          liveStreamItems = [];
+        }
         break;
       case "thinking-delta":
         currentTurnId = ev.turnId;

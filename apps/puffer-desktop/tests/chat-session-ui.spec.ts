@@ -324,3 +324,25 @@ test("streamed assistant text stays visible through transcript reload", async ({
   expect(samples.slice(firstVisible)).not.toContain(0);
   expect(Math.max(...samples.slice(firstVisible))).toBe(1);
 });
+
+test("replayed turn-start does not clear visible streamed text", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /^Browser regression\b/);
+  daemon.emit("session:session-browser:event", {
+    type: "text-delta",
+    turnId: "turn-replay",
+    delta: "Visible text before replay."
+  });
+  await expect(page.getByText("Visible text before replay.")).toBeVisible();
+
+  daemon.emit("session:session-browser:event", {
+    type: "turn-start",
+    turnId: "turn-replay",
+    replay: true
+  });
+
+  await expect(page.getByText("Visible text before replay.")).toBeVisible();
+});
