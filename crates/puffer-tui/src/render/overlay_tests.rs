@@ -1,4 +1,5 @@
 use super::*;
+use crate::text_overlay::{render_text_overlay, TextOverlay};
 use crate::{ModelPickerEntry, OverlayState};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
@@ -110,4 +111,39 @@ fn render_command_picker_uses_custom_title() {
         .map(|cell| cell.symbol())
         .collect::<String>();
     assert!(rendered.contains("Remove Tag?"));
+}
+
+#[test]
+fn render_text_overlay_clamps_bottom_scroll() {
+    let backend = TestBackend::new(72, 10);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let overlay = TextOverlay::open(
+        "Config",
+        (0..30)
+            .map(|index| format!("line-{index:02}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+
+    if let OverlayState::Text(text) = &overlay {
+        text.scroll_to_bottom();
+    }
+
+    terminal
+        .draw(|frame| {
+            if let OverlayState::Text(text) = &overlay {
+                render_text_overlay(frame, frame.area(), text);
+            }
+        })
+        .unwrap();
+
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(rendered.contains("line-29"));
+    assert!(rendered.contains("Config"));
 }
