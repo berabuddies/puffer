@@ -123,7 +123,11 @@
     const client = await ensureLocalDaemonClient();
     disposers.push(
       client.on<BrowserTabsState>(`browser:${sessionId}:tabs`, (next) => {
+        const previousActiveTabId = activeTabId;
         applyTabsState(next, { allowEmpty: true });
+        if (activeTabId && activeTabId !== previousActiveTabId) {
+          void connectActiveTab();
+        }
       })
     );
 

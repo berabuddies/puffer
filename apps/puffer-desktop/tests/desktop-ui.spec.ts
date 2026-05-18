@@ -156,3 +156,50 @@ test("Browser tab list event can clear stale tabs", async ({ page }) => {
   await expect(page.locator(".pf-browser-tab")).toHaveCount(0);
   await expect(page.locator(".pf-browser-status")).toHaveText("No pages");
 });
+
+test("Browser tab list event reconnects when active tab changes", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: /Browser regression/ }).click();
+  await page.getByRole("button", { name: "Browser" }).click();
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1"
+  );
+
+  daemon.emit("browser:session-browser:tabs", {
+    activeTabId: "tab-2",
+    tabs: [
+      {
+        tabId: "tab-1",
+        label: "New tab",
+        url: "about:blank",
+        title: "",
+        loading: false,
+        connected: true,
+        active: false,
+        backendSessionId: "session-browser:browser:tab-1",
+        createdAtMs: Date.now(),
+        updatedAtMs: Date.now()
+      },
+      {
+        tabId: "tab-2",
+        label: "Remote tab",
+        url: "https://example.com",
+        title: "Remote tab",
+        loading: false,
+        connected: true,
+        active: true,
+        backendSessionId: "session-browser:browser:tab-2",
+        createdAtMs: Date.now(),
+        updatedAtMs: Date.now()
+      }
+    ]
+  });
+
+  await daemon.waitForRequest("browser_resize", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-2"
+  );
+  await expect(page.getByLabel("URL")).toHaveValue("https://example.com");
+});
