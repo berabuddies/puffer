@@ -443,10 +443,14 @@ export class FakeDaemon {
         return this.groupedSessions();
       case "load_session_detail":
         return this.sessionDetail(String(request.params.sessionId ?? session.sessionId));
+      case "rename_session":
+        return this.renameSession(request.params);
       case "create_session":
         return this.createSession(request.params);
       case "run_agent_turn":
         return { turnId: `turn-${String(request.params.sessionId ?? session.sessionId)}` };
+      case "cancel_turn":
+        return {};
       case "resolve_permission":
       case "resolve_user_question":
         return {};
@@ -587,6 +591,28 @@ export class FakeDaemon {
       providerId,
       modelId
     };
+  }
+
+  private renameSession(params: JsonRecord): JsonRecord {
+    const sessionId = String(params.sessionId ?? session.sessionId);
+    const title = String(params.title ?? "").trim();
+    const metadata = this.sessions.get(sessionId) ?? sessionMeta({ sessionId });
+    metadata.displayName = title || null;
+    metadata.updatedAtMs = Date.now();
+    this.sessions.set(sessionId, metadata);
+    if (title) {
+      const timeline = this.timelines.get(sessionId) ?? defaultTimeline();
+      this.timelines.set(sessionId, [
+        ...timeline,
+        {
+          kind: "system_message",
+          id: `rename-${Date.now()}`,
+          text: `Session renamed to ${title}.`,
+          createdAtMs: Date.now()
+        }
+      ]);
+    }
+    return this.sessionDetail(sessionId);
   }
 
   private updateConfig(params: JsonRecord): JsonRecord {

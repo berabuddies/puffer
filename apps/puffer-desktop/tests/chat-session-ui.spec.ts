@@ -228,6 +228,126 @@ test("composer sends selected thinking option with the turn request", async ({ p
   });
 });
 
+test("composer sends fast mode and permission mode with the turn request", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-fast-controls",
+        displayName: "Fast controls",
+        title: "Fast controls",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "gpt-5",
+        timeline: []
+      }
+    ],
+    providerModels: {
+      codex: [
+        {
+          id: "gpt-5",
+          displayName: "GPT-5",
+          provider: "codex",
+          api: "openai-responses",
+          contextWindow: 128000,
+          maxOutputTokens: 4096,
+          supportsReasoning: true,
+          thinkingOptions: [
+            {
+              id: "medium",
+              label: "Medium",
+              description: "Use medium reasoning effort.",
+              isDefault: true
+            }
+          ],
+          defaultThinkingOptionId: "medium",
+          isDefault: true
+        }
+      ]
+    }
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Fast controls/);
+  const fastToggle = page.locator(".pf-toggle-chip").filter({ hasText: "Fast" });
+  await expect(fastToggle.locator("input")).toBeEnabled();
+  await fastToggle.click();
+  await page.getByLabel("Codex permissions").selectOption("full-access");
+
+  await page.locator(".pf-composer textarea").fill("Use fast full access");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  const request = await daemon.waitForRequest(
+    "run_agent_turn",
+    (item) => item.params.message === "Use fast full access"
+  );
+  expect(request.params).toMatchObject({
+    providerId: "codex",
+    modelId: "gpt-5",
+    fastMode: true,
+    permissionMode: "full-access"
+  });
+});
+
+test("stop turn requests cancellation for the active turn", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /^Browser regression\b/);
+  await page.locator(".pf-composer textarea").fill("Cancel this turn");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.message === "Cancel this turn"
+  );
+  await expect(page.getByRole("button", { name: "Stop turn" })).toBeVisible();
+  await page.getByRole("button", { name: "Stop turn" }).click();
+
+  const cancelRequest = await daemon.waitForRequest("cancel_turn");
+  expect(cancelRequest.params).toMatchObject({
+    turnId: "turn-session-browser"
+  });
+});
+
+test("session title edit saves through the daemon", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-title-edit",
+        displayName: "Title edit",
+        title: "Title edit",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Title edit/);
+  await page.getByRole("button", { name: "Edit session title" }).click();
+  await page.getByLabel("Session title").fill("Renamed mission");
+  await page.getByRole("button", { name: "Save title" }).click();
+
+  const request = await daemon.waitForRequest("rename_session");
+  expect(request.params).toMatchObject({
+    sessionId: "session-title-edit",
+    title: "Renamed mission"
+  });
+  await expect(page.locator(".primary-title")).toHaveText("Renamed mission");
+  await expect(page.getByRole("button", { name: /Renamed mission/ }).first()).toBeVisible();
+});
+
 test("auto recap does not start a second turn while one is running", async ({ page }) => {
   await page.clock.install({ time: baseTime });
   const daemon = new FakeDaemon();
