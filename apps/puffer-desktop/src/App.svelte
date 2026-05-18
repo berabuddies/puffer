@@ -303,10 +303,11 @@
   let recapBlurTimer: ReturnType<typeof setTimeout> | null = null;
 
   function armRecapBlurTimer() {
+    if (turnRunning) return;
     if (recapBlurTimer != null) return;
     recapBlurTimer = setTimeout(() => {
       recapBlurTimer = null;
-      if (!selectedSession) return;
+      if (!selectedSession || turnRunning) return;
       void submitMessage("/recap", {});
     }, RECAP_IDLE_MS);
   }

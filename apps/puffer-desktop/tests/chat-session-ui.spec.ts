@@ -228,6 +228,33 @@ test("composer sends selected thinking option with the turn request", async ({ p
   });
 });
 
+test("auto recap does not start a second turn while one is running", async ({ page }) => {
+  await page.clock.install({ time: baseTime });
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /^Browser regression\b/);
+  await page.locator(".pf-composer textarea").fill("Keep this turn running");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.message === "Keep this turn running"
+  );
+  await expect(page.getByRole("button", { name: "Stop turn" })).toBeVisible();
+
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+  await page.clock.fastForward(180_001);
+  await page.evaluate(() => Promise.resolve());
+
+  expect(
+    daemon.requests.filter(
+      (request) => request.method === "run_agent_turn" && request.params.message === "/recap"
+    )
+  ).toHaveLength(0);
+});
+
 test("streamed assistant text stays visible through transcript reload", async ({ page }) => {
   const streamedText = "Streaming answer stays stable across reload.";
   const daemon = new FakeDaemon({
