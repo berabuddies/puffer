@@ -311,6 +311,47 @@ export function configuredBrowserDaemonHandshake(): DaemonHandshake | null {
   };
 }
 
+export function configuredBrowserRemoteDaemonHandshake(): DaemonHandshake | null {
+  if (typeof window === "undefined") return null;
+
+  const params = new URLSearchParams(window.location.search);
+  const viteEnv = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
+  const url =
+    params.get("pufferRemoteBackend") ||
+    params.get("corbinaRemoteBackend") ||
+    params.get("remoteBackendUrl") ||
+    window.localStorage.getItem("puffer.remoteBackendUrl") ||
+    window.localStorage.getItem("corbina.remoteBackendUrl") ||
+    viteEnv?.VITE_PUFFER_REMOTE_DAEMON_URL ||
+    viteEnv?.VITE_CORBINA_REMOTE_DAEMON_URL;
+
+  if (!url || (!url.startsWith("ws://") && !url.startsWith("wss://"))) return null;
+
+  return {
+    url,
+    token:
+      params.get("pufferRemoteToken") ||
+      params.get("corbinaRemoteToken") ||
+      params.get("remoteToken") ||
+      window.localStorage.getItem("puffer.remoteBackendToken") ||
+      window.localStorage.getItem("corbina.remoteBackendToken") ||
+      viteEnv?.VITE_PUFFER_REMOTE_DAEMON_TOKEN ||
+      viteEnv?.VITE_CORBINA_REMOTE_DAEMON_TOKEN ||
+      "dev",
+    protocolVersion:
+      params.get("pufferRemoteProtocolVersion") ||
+      params.get("remoteProtocolVersion") ||
+      "1",
+    workspaceRoot:
+      params.get("pufferRemoteWorkspaceRoot") ||
+      params.get("corbinaRemoteWorkspaceRoot") ||
+      params.get("remoteWorkspaceRoot") ||
+      window.localStorage.getItem("puffer.remoteWorkspaceRoot") ||
+      window.localStorage.getItem("corbina.remoteWorkspaceRoot") ||
+      ""
+  };
+}
+
 export function canReachDaemon(): boolean {
   return configuredBrowserDaemonHandshake() !== null || canInvokeTauri() || sharedClient !== null;
 }

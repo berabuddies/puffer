@@ -182,6 +182,7 @@ function defaultAuthStatuses(): JsonRecord[] {
 export class FakeDaemon {
   readonly requests: DaemonRequest[] = [];
   readonly socketUrls: string[] = [];
+  readonly url: string;
   private readonly sockets = new Set<WebSocketRoute>();
   private readonly waiters: Waiter[] = [];
   private readonly responseDelays: ResponseDelay[] = [];
@@ -224,7 +225,9 @@ export class FakeDaemon {
     protocol?: "legacy" | "real";
     workspaceRoot?: string;
     auth?: JsonRecord[];
+    url?: string;
   } = {}) {
+    this.url = options.url ?? FAKE_DAEMON_URL;
     this.protocol = options.protocol ?? "legacy";
     this.workspaceRoot = options.workspaceRoot ?? this.workspaceRoot;
     this.authStatuses = options.auth ?? defaultAuthStatuses();
@@ -270,8 +273,9 @@ export class FakeDaemon {
   }
 
   async install(page: Page): Promise<void> {
+    const expectedUrl = new URL(this.url);
     await page.routeWebSocket((url) => {
-      const matches = url.origin === "ws://127.0.0.1:17777" && url.pathname === "/ws";
+      const matches = url.origin === expectedUrl.origin && url.pathname === expectedUrl.pathname;
       if (matches) this.socketUrls.push(url.toString());
       return matches;
     }, (socket) => {
@@ -291,16 +295,23 @@ export class FakeDaemon {
 
   async open(
     page: Page,
-    options: { forceOnboarding?: boolean; skipOnboarding?: boolean } = {}
+    options: {
+      forceOnboarding?: boolean;
+      skipOnboarding?: boolean;
+      extraParams?: Record<string, string>;
+    } = {}
   ): Promise<void> {
     const params = new URLSearchParams({
-      corbinaBackend: FAKE_DAEMON_URL,
+      corbinaBackend: this.url,
       corbinaToken: "test"
     });
     if (options.forceOnboarding) {
       params.set("forceOnboarding", "1");
     } else if (options.skipOnboarding ?? true) {
       params.set("skipOnboarding", "1");
+    }
+    for (const [key, value] of Object.entries(options.extraParams ?? {})) {
+      params.set(key, value);
     }
     await page.goto(`/?${params.toString()}`);
   }

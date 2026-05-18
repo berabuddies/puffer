@@ -126,3 +126,33 @@ test("connect project remote mode exposes binary override", async ({ page }) => 
   await dialog.getByLabel("Remote binary").fill("/opt/puffer/bin/puffer");
   await expect(dialog.getByLabel("Remote binary")).toHaveValue("/opt/puffer/bin/puffer");
 });
+
+test("failed remote project creation restores the previous daemon", async ({ page }) => {
+  const localDaemon = new FakeDaemon();
+  localDaemon.failNext("create_session", "remote create failed");
+
+  await localDaemon.install(page);
+  await localDaemon.open(page, {
+    extraParams: {
+      pufferRemoteBackend: localDaemon.url,
+      pufferRemoteToken: "remote-token",
+      pufferRemoteWorkspaceRoot: "/tmp/puffer-remote"
+    }
+  });
+
+  await page.getByRole("button", { name: "Connect project" }).click();
+  const dialog = page.getByRole("dialog", { name: "Connect project" });
+  await dialog.getByRole("tab", { name: /Remote/ }).click();
+  await dialog.getByLabel("SSH target").fill("devbox");
+  await dialog.getByLabel("Destination directory").fill("/tmp/remote-project");
+  await dialog.getByRole("button", { name: "Start agent" }).click();
+
+  await localDaemon.waitForRequest("create_session");
+  await expect(dialog.locator(".pf-modal-status")).toContainText("remote create failed");
+
+  const activeToken = await page.evaluate(async () => {
+    const mod = await import("/src/lib/api/daemonClient.ts");
+    return mod.currentDaemonClient()?.handshake.token ?? null;
+  });
+  expect(activeToken).toBe("test");
+});

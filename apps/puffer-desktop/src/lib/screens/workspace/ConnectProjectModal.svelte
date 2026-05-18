@@ -7,7 +7,7 @@
     listDir,
     type DirEntry
   } from "../../api/desktop";
-  import { canInvokeTauri } from "../../api/daemonClient";
+  import { canInvokeTauri, currentDaemonClient, switchDaemonClient } from "../../api/daemonClient";
   import type { ProviderSummary, SettingsSnapshot } from "../../types";
 
   /** Native directory chooser — only works in Tauri. Silently becomes a
@@ -192,30 +192,44 @@
     // 1. Spin up / attach to the remote daemon over SSH. From this point
     //    the app's shared DaemonClient points at the remote. Subsequent
     //    RPCs (clone + create_session) run on that host's filesystem.
+    const previousHandshake = currentDaemonClient()?.handshake ?? null;
+    let switchedToRemote = false;
     status = `Connecting to ${sshTarget}…`;
     try {
       await connectSshDaemon(sshTarget, {
         remoteWorkspace: remoteWorkspace.trim() || undefined,
         remoteBinary: remoteBinary.trim() || undefined
       });
+      switchedToRemote = true;
     } catch (e) {
       sshErrorHint = deriveSshHint(String(e instanceof Error ? e.message : e), sshTarget);
       throw e;
     }
 
-    // 2. Optional clone on the remote.
-    let targetCwd = remoteDest.trim();
-    const url = remoteGitUrl.trim();
-    if (url) {
-      targetCwd = await runStreamingClone(url, targetCwd, `Cloning on ${sshTarget}`);
-    }
+    try {
+      // 2. Optional clone on the remote.
+      let targetCwd = remoteDest.trim();
+      const url = remoteGitUrl.trim();
+      if (url) {
+        targetCwd = await runStreamingClone(url, targetCwd, `Cloning on ${sshTarget}`);
+      }
 
-    // 3. Create a session on the remote and open it in the UI.
-    status = `Creating agent on ${sshTarget}…`;
-    const created = await createSession(targetCwd, selectedProvider || defaultProviderId());
-    status = `Ready — session ${created.sessionId.slice(0, 8)} on ${sshTarget}`;
-    await onConnected?.(created.sessionId);
-    onClose();
+      // 3. Create a session on the remote and open it in the UI.
+      status = `Creating agent on ${sshTarget}…`;
+      const created = await createSession(targetCwd, selectedProvider || defaultProviderId());
+      status = `Ready — session ${created.sessionId.slice(0, 8)} on ${sshTarget}`;
+      await onConnected?.(created.sessionId);
+      onClose();
+    } catch (e) {
+      if (switchedToRemote && previousHandshake) {
+        try {
+          await switchDaemonClient(previousHandshake);
+        } catch (rollbackError) {
+          console.warn("failed to restore previous daemon after remote connect failure", rollbackError);
+        }
+      }
+      throw e;
+    }
   }
 
   // SSH auth helper — when `start_ssh_daemon` surfaces a familiar failure
