@@ -46,6 +46,7 @@
   }: Props = $props();
 
   let showConnect = $state(false);
+  let searchQuery = $state("");
 
   // Stable palette so two renders of the same folder pick the same color.
   const PALETTE = [
@@ -108,15 +109,66 @@
     groups.flatMap((g) => g.sessions.slice(0, 6).map((s) => agentFromSession(s, g.id)))
   );
 
+  function normalizeSearch(value: string): string {
+    return value.trim().toLowerCase();
+  }
+
+  function includesNeedle(value: string | null | undefined, needle: string): boolean {
+    return Boolean(value?.toLowerCase().includes(needle));
+  }
+
+  function projectMatches(project: MockProject, needle: string): boolean {
+    return (
+      includesNeedle(project.name, needle) ||
+      includesNeedle(project.path, needle) ||
+      includesNeedle(project.branch, needle) ||
+      includesNeedle(project.remote, needle)
+    );
+  }
+
+  function agentMatches(agent: MockAgent, needle: string): boolean {
+    return (
+      includesNeedle(agent.name, needle) ||
+      includesNeedle(agent.title, needle) ||
+      includesNeedle(agent.branch, needle) ||
+      includesNeedle(agent.step, needle) ||
+      includesNeedle(agent.model, needle)
+    );
+  }
+
+  function projectAgents(projectId: string): MockAgent[] {
+    return agents.filter((a) => a.project === projectId);
+  }
+
+  function visibleAgentsFor(project: MockProject): MockAgent[] {
+    const projectScopedAgents = projectAgents(project.id);
+    const needle = searchNeedle;
+    if (!needle || projectMatches(project, needle)) return projectScopedAgents;
+    return projectScopedAgents.filter((a) => agentMatches(a, needle));
+  }
+
+  let searchNeedle = $derived(normalizeSearch(searchQuery));
+  let visibleProjects = $derived<MockProject[]>(
+    projects.filter((project) => {
+      if (!searchNeedle) return true;
+      return projectMatches(project, searchNeedle) || projectAgents(project.id).some((a) => agentMatches(a, searchNeedle));
+    })
+  );
+  let visibleAgentCount = $derived(
+    visibleProjects.reduce((count, project) => count + visibleAgentsFor(project).length, 0)
+  );
   let agentCount = $derived(agents.length);
   let projectCount = $derived(projects.length);
+  let visibleProjectCount = $derived(visibleProjects.length);
 
   let headerSubtitle = $derived(
     loading
       ? "loading…"
       : defaultWorkspaceCwd
         ? defaultWorkspaceCwd
-        : `${agentCount} active ${agentCount === 1 ? "agent" : "agents"}`
+        : searchNeedle
+          ? `${visibleAgentCount} matching ${visibleAgentCount === 1 ? "agent" : "agents"}`
+          : `${agentCount} active ${agentCount === 1 ? "agent" : "agents"}`
   );
 
   async function handleNewAgent(cwd: string) {
@@ -144,7 +196,11 @@
     <div class="pf-pw-top-right">
       <div class="pf-pw-search">
         <Icon name="search" size={12} />
-        <input placeholder="Search tasks, agents, branches…" />
+        <input
+          placeholder="Search tasks, agents, branches…"
+          aria-label="Search workspace"
+          bind:value={searchQuery}
+        />
       </div>
       <button
         type="button"
@@ -194,10 +250,27 @@
         </div>
       </div>
     {/if}
-    {#each projects as p (p.id)}
+    {#if searchNeedle && visibleProjectCount === 0 && !loading}
+      <div class="pf-pw-empty">
+        <div class="pf-pw-empty-inner">
+          <h2>No workspace results</h2>
+          <p>No projects or agents match <code>{searchQuery.trim()}</code>.</p>
+          <button
+            type="button"
+            class="sc-btn"
+            data-variant="outline"
+            data-size="sm"
+            onclick={() => (searchQuery = "")}
+          >
+            Clear search
+          </button>
+        </div>
+      </div>
+    {/if}
+    {#each visibleProjects as p (p.id)}
       <ProjectRow
         project={p}
-        agents={agents.filter((a) => a.project === p.id)}
+        agents={visibleAgentsFor(p)}
         pinned={pinnedWorkspacePaths.includes(p.path) || pinnedWorkspacePaths.includes(p.id)}
         {onOpenAgent}
         {onOpenBoard}
