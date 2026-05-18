@@ -17,6 +17,7 @@
     onLoginApiKey: (providerId: string, apiKey: string) => void;
     onImportExternal: (providerId: string, source: "claude" | "codex") => void;
     onRefresh: () => void;
+    onFinish: () => void;
     forceRepoStep?: boolean;
   };
 
@@ -110,8 +111,8 @@
         {/each}
       </div>
       <div style="display: flex; margin-top: 28px; gap: 10px; justify-content: flex-end;">
-        <button type="button" class="sc-btn" data-variant="ghost">Skip for now</button>
-        <button type="button" class="sc-btn" data-variant="default">
+        <button type="button" class="sc-btn" data-variant="ghost" onclick={props.onFinish}>Skip for now</button>
+        <button type="button" class="sc-btn" data-variant="default" onclick={props.onFinish}>
           Continue<Icon name="arrow" size={14} />
         </button>
       </div>

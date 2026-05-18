@@ -83,6 +83,7 @@
   // ─────────────────────────────────────────────────────────────
   let tweaks = $state<Tweaks>({ ...defaultTweaks });
   let onboarding = $state(true);
+  let onboardingCompleted = $state(false);
   // Dev bypass so we can screenshot every screen without live auth.
   const urlParams = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : new URLSearchParams();
   const skipOnboarding =
@@ -305,7 +306,7 @@
   onMount(() => {
     tweaks = loadTweaks();
     applyTweaksToDocument(tweaks);
-    if (forceOnboarding) {
+    if (forceOnboarding && !onboardingCompleted) {
       onboarding = true;
     } else if (skipOnboarding) {
       onboarding = false;
@@ -395,7 +396,7 @@
     settingsLoading = true;
     try {
       settingsSnapshot = await loadSettingsSnapshot(remoteConnection);
-      if (forceOnboarding) {
+      if (forceOnboarding && !onboardingCompleted) {
         onboarding = true;
       } else if (skipOnboarding) {
         onboarding = false;
@@ -426,6 +427,7 @@
     authError = null;
     try {
       settingsSnapshot = await importExternalCredential(providerId, source);
+      onboardingCompleted = true;
       onboarding = false;
       tweaks = { ...tweaks, screen: "workspace" };
       statusMessage = `Imported ${source} credential into ${providerId}.`;
@@ -443,11 +445,24 @@
     }
   }
 
+  async function finishOnboarding() {
+    onboardingCompleted = true;
+    onboarding = false;
+    tweaks = { ...tweaks, screen: "workspace" };
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("puffer-desktop:skip-onboarding", "1");
+    }
+    statusMessage = "Onboarding complete.";
+    await refreshPins();
+    await refreshGroups();
+  }
+
   async function handleOauthLogin(providerId: string) {
     authBusyProviderId = providerId;
     authError = null;
     try {
       settingsSnapshot = await loginWithOauth(providerId, remoteConnection);
+      onboardingCompleted = true;
       onboarding = false;
       tweaks = { ...tweaks, screen: "workspace" };
       statusMessage = `Connected to ${providerId}.`;
@@ -474,6 +489,7 @@
       } else {
         settingsSnapshot = await loginWithApiKeyViaDaemon(providerId, apiKey);
       }
+      onboardingCompleted = true;
       onboarding = false;
       tweaks = { ...tweaks, screen: "workspace" };
       statusMessage = `Stored API key for ${providerId}.`;
@@ -1235,6 +1251,7 @@
             onImportExternal={(providerId, source) =>
               void handleImportExternal(providerId, source)}
             onRefresh={() => void refreshSettings()}
+            onFinish={() => void finishOnboarding()}
             forceRepoStep={forceOnboarding}
           />
         </div>

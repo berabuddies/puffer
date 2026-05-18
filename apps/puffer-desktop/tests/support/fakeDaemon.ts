@@ -227,10 +227,20 @@ export class FakeDaemon {
     });
   }
 
-  async open(page: Page): Promise<void> {
-    await page.goto(
-      `/?skipOnboarding&corbinaBackend=${encodeURIComponent(FAKE_DAEMON_URL)}&corbinaToken=test`
-    );
+  async open(
+    page: Page,
+    options: { forceOnboarding?: boolean; skipOnboarding?: boolean } = {}
+  ): Promise<void> {
+    const params = new URLSearchParams({
+      corbinaBackend: FAKE_DAEMON_URL,
+      corbinaToken: "test"
+    });
+    if (options.forceOnboarding) {
+      params.set("forceOnboarding", "1");
+    } else if (options.skipOnboarding ?? true) {
+      params.set("skipOnboarding", "1");
+    }
+    await page.goto(`/?${params.toString()}`);
   }
 
   emit(event: string, payload: unknown): void {
