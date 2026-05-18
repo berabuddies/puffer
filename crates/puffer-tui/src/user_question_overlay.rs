@@ -182,6 +182,16 @@ impl UserQuestionOverlay {
         }
     }
 
+    /// Activates the option matching a numeric shortcut.
+    pub(crate) fn activate_shortcut(&mut self, key: char) -> Option<UserQuestionPromptResponse> {
+        self.current_list_mut()?.select_shortcut(key)?;
+        if self.current_question()?.multi_select {
+            self.toggle_current();
+            return None;
+        }
+        self.confirm_current()
+    }
+
     /// Confirms the active question and returns a response when all questions are answered.
     pub(crate) fn confirm_current(&mut self) -> Option<UserQuestionPromptResponse> {
         let question_index = self.question_index;

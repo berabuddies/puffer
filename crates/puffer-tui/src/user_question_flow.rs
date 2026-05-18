@@ -49,6 +49,12 @@ pub(crate) fn handle_user_question_key(key: KeyEvent, tui: &mut TuiState) -> boo
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(UserQuestionOverlay::empty_response())
         }
+        KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            tui.overlay.as_mut().and_then(|overlay| match overlay {
+                OverlayState::UserQuestionPrompt { overlay } => overlay.activate_shortcut(ch),
+                _ => None,
+            })
+        }
         _ => None,
     };
 

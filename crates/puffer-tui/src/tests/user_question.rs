@@ -22,6 +22,20 @@ fn sample_question_payload() -> serde_json::Value {
     ])
 }
 
+fn sample_multi_select_payload() -> serde_json::Value {
+    json!([
+        {
+            "header": "Review",
+            "question": "Choose checks",
+            "multiSelect": true,
+            "options": [
+                {"label": "Tests", "description": "Run focused tests"},
+                {"label": "Format", "description": "Check formatting"}
+            ]
+        }
+    ])
+}
+
 #[test]
 fn poll_pending_submit_opens_user_question_overlay() {
     let tempdir = tempdir().unwrap();
@@ -99,6 +113,53 @@ fn user_question_enter_sends_selected_answer() {
     let response = response_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     assert_eq!(response.answers["Pick one"], json!("Careful"));
     assert!(response.annotations.is_empty());
+    assert!(tui.overlay.is_none());
+    assert!(tui.pending_user_question_request.is_none());
+}
+
+#[test]
+fn user_question_number_shortcut_sends_single_select_answer() {
+    let (response_tx, response_rx) = mpsc::channel();
+    let mut tui = TuiState {
+        overlay: Some(OverlayState::UserQuestionPrompt {
+            overlay: UserQuestionOverlay::from_value(sample_question_payload()).unwrap(),
+        }),
+        pending_user_question_request: Some(PendingUserQuestionRequest { response_tx }),
+        ..TuiState::default()
+    };
+
+    assert!(handle_user_question_key(
+        KeyEvent::from(KeyCode::Char('2')),
+        &mut tui
+    ));
+    let response = response_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert_eq!(response.answers["Pick one"], json!("Careful"));
+    assert!(tui.overlay.is_none());
+    assert!(tui.pending_user_question_request.is_none());
+}
+
+#[test]
+fn user_question_number_shortcut_toggles_multi_select_answer() {
+    let (response_tx, response_rx) = mpsc::channel();
+    let mut tui = TuiState {
+        overlay: Some(OverlayState::UserQuestionPrompt {
+            overlay: UserQuestionOverlay::from_value(sample_multi_select_payload()).unwrap(),
+        }),
+        pending_user_question_request: Some(PendingUserQuestionRequest { response_tx }),
+        ..TuiState::default()
+    };
+
+    assert!(handle_user_question_key(
+        KeyEvent::from(KeyCode::Char('2')),
+        &mut tui
+    ));
+    assert!(response_rx.recv_timeout(Duration::from_millis(50)).is_err());
+    assert!(handle_user_question_key(
+        KeyEvent::from(KeyCode::Enter),
+        &mut tui
+    ));
+    let response = response_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert_eq!(response.answers["Choose checks"], json!(["Format"]));
     assert!(tui.overlay.is_none());
     assert!(tui.pending_user_question_request.is_none());
 }
