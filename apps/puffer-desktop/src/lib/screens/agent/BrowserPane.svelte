@@ -204,6 +204,7 @@
       return;
     }
     tabStateVersion += 1;
+    const previousActiveTabId = activeTabId;
     const nextTabs = state.tabs.map(tabFromInfo);
     const connectedTabId = nextTabs.find((tab) => tab.connected)?.id;
     const validActiveTabId = state.activeTabId && nextTabs.some((tab) => tab.id === state.activeTabId)
@@ -214,7 +215,9 @@
     nextTabNumber = nextTabIndex(nextTabs);
     saveTabs(nextTabs);
     syncFromActiveTab();
-    if (!connected) resetPointer(activePointerId ?? undefined);
+    if (!connected || activeTabId !== previousActiveTabId) {
+      resetPointer(activePointerId ?? undefined);
+    }
   }
 
   async function activateSession(nextSessionId: string) {

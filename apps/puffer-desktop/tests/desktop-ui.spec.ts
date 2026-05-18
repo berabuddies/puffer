@@ -459,6 +459,67 @@ test("Browser pointer state resets when tabs clear mid-drag", async ({ page }) =
   expect(staleDragMoves).toHaveLength(0);
 });
 
+test("Browser pointer release does not move to newly active tab mid drag", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1"
+  );
+
+  const canvas = page.locator(".pf-browser-canvas");
+  await canvas.dispatchEvent("pointerdown", {
+    clientX: 20,
+    clientY: 20,
+    pointerId: 9,
+    button: 0,
+    buttons: 1,
+    pointerType: "mouse"
+  });
+  await daemon.waitForRequest("browser_input", (request) => {
+    const event = request.params.event as Record<string, unknown> | undefined;
+    return request.params.sessionId === "session-browser:browser:tab-1" &&
+      event?.kind === "mouse" &&
+      event.eventType === "mousePressed";
+  });
+
+  const previousRequestCount = daemon.requests.length;
+  daemon.emit("browser:session-browser:tabs", {
+    activeTabId: "tab-2",
+    tabs: [
+      { ...browserTab("tab-1", "https://first.example"), active: false },
+      { ...browserTab("tab-2", "https://second.example"), active: true }
+    ]
+  });
+  await daemon.waitForRequest("browser_resize", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-2"
+  );
+
+  await page.evaluate(() => {
+    window.dispatchEvent(new PointerEvent("pointerup", {
+      clientX: 26,
+      clientY: 26,
+      pointerId: 9,
+      button: 0,
+      buttons: 0,
+      pointerType: "mouse"
+    }));
+  });
+
+  const newRequests = daemon.requests.slice(previousRequestCount);
+  const releasedIntoSecondTab = newRequests.filter((request) => {
+    const event = request.params.event as Record<string, unknown> | undefined;
+    return request.method === "browser_input" &&
+      request.params.sessionId === "session-browser:browser:tab-2" &&
+      event?.kind === "mouse" &&
+      event.eventType === "mouseReleased";
+  });
+  expect(releasedIntoSecondTab).toHaveLength(0);
+});
+
 test("Browser fuzz click storm keeps daemon session ids valid", async ({ page }) => {
   const daemon = new FakeDaemon();
   const consoleErrors: string[] = [];
