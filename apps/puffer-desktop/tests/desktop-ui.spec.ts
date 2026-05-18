@@ -322,6 +322,36 @@ test("Browser fuzz click storm keeps daemon session ids valid", async ({ page })
   expect(consoleErrors).toEqual([]);
 });
 
+test("streamed assistant text stays visible when completion reload is stale", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await expect(page.getByText("Ready to exercise the managed browser.")).toBeVisible();
+
+  daemon.emit("session:session-browser:event", { type: "turn-start", turnId: "turn-flash" });
+  daemon.emit("session:session-browser:event", {
+    type: "text-delta",
+    turnId: "turn-flash",
+    delta: "Streaming answer should not flash"
+  });
+  await expect(page.getByText("Streaming answer should not flash")).toBeVisible();
+
+  const previousRequestCount = daemon.requests.length;
+  daemon.emit("session:session-browser:event", {
+    type: "turn-complete",
+    turnId: "turn-flash",
+    assistantText: "Streaming answer should not flash"
+  });
+  await daemon.waitForRequest("load_session_detail", (request) =>
+    daemon.requests.indexOf(request) >= previousRequestCount
+  );
+  await page.waitForTimeout(50);
+
+  await expect(page.getByText("Streaming answer should not flash")).toBeVisible();
+});
+
 test("Browser tab list event reconnects when active tab changes", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

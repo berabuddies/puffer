@@ -880,6 +880,20 @@
     });
   }
 
+  function timelineItemBody(item: TimelineItem): string {
+    return "body" in item && typeof item.body === "string" ? item.body : "";
+  }
+
+  function timelineHasBody(items: TimelineItem[], kind: TimelineItem["kind"], body: string): boolean {
+    const trimmed = body.trim();
+    if (!trimmed) return true;
+    return items.some((item) => item.kind === kind && timelineItemBody(item).includes(trimmed));
+  }
+
+  function stillMissingFromPersisted(items: TimelineItem[], pending: TimelineItem[]): TimelineItem[] {
+    return pending.filter((item) => !timelineHasBody(items, item.kind, timelineItemBody(item)));
+  }
+
   function upsertStreamingAssistant(delta: string) {
     const last = liveStreamItems[liveStreamItems.length - 1];
     if (last && last.kind === "assistant" && last.id.startsWith("live-stream-assistant")) {
@@ -1061,7 +1075,10 @@
         // Reload the persisted transcript; then drop live items.
         if (selectedSession) {
           const sessionToRefresh = selectedSession;
-          const preservedErrorItems = liveStreamItems.filter(
+          const liveItemsAtCompletion = liveStreamItems;
+          const submittedAtCompletion = submittedMessages;
+          const turnEndedWithError = ev.type === "turn-error";
+          const preservedErrorItems = liveItemsAtCompletion.filter(
             (item) => item.kind === "system" && item.meta.includes("error")
           );
           void openSession(sessionToRefresh, {
@@ -1070,8 +1087,14 @@
           }).then(() => {
             // Preserve a turn-error placeholder so the user can still
             // read the failure after the persisted transcript reloads.
-            liveStreamItems = preservedErrorItems;
-            submittedMessages = [];
+            const persistedTimeline = sessionDetail?.timeline ?? [];
+            if (turnEndedWithError) {
+              liveStreamItems = stillMissingFromPersisted(persistedTimeline, preservedErrorItems);
+              submittedMessages = [];
+              return;
+            }
+            liveStreamItems = stillMissingFromPersisted(persistedTimeline, liveItemsAtCompletion);
+            submittedMessages = stillMissingFromPersisted(persistedTimeline, submittedAtCompletion);
           });
         }
         break;
