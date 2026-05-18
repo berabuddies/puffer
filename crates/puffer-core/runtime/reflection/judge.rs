@@ -195,6 +195,7 @@ fn run_llm_judge_single_call(
             // (claude-2.1.133 bundle line 2212).
             cancel,
             max_turns: None,
+            lightweight_context: false,
             observability: None,
         },
     ) {
@@ -335,6 +336,7 @@ fn run_llm_judge_subagent(
             // limit; this is the belt to that suspenders.
             max_turns: Some(max_iterations),
             observability: None,
+            lightweight_context: false,
         },
     ) {
         Ok(response) => LlmJudgeAttempt {

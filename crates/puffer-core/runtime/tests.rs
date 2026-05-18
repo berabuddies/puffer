@@ -11,7 +11,7 @@ use puffer_resources::{AgentSpec, LoadedItem, LoadedResources, SourceInfo, Sourc
 use puffer_session_store::SessionMetadata;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use uuid::Uuid;
 
@@ -39,6 +39,47 @@ fn provider() -> ProviderDescriptor {
         }],
         chat_completions_path: None,
     }
+}
+
+fn env_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[test]
+fn simple_turn_tool_suppression_is_env_gated() {
+    let _guard = env_lock();
+    std::env::remove_var(SUPPRESS_TOOLS_FOR_SIMPLE_TURNS_ENV);
+    assert!(!suppress_tools_for_simple_turn("hi"));
+
+    std::env::set_var(SUPPRESS_TOOLS_FOR_SIMPLE_TURNS_ENV, "1");
+    assert!(suppress_tools_for_simple_turn("hi"));
+    assert!(suppress_tools_for_simple_turn(" Hello "));
+    assert!(!suppress_tools_for_simple_turn("please read a file"));
+    std::env::remove_var(SUPPRESS_TOOLS_FOR_SIMPLE_TURNS_ENV);
+}
+
+#[test]
+fn local_simple_turn_reply_requires_both_env_flags() {
+    let _guard = env_lock();
+    std::env::remove_var(SUPPRESS_TOOLS_FOR_SIMPLE_TURNS_ENV);
+    std::env::remove_var(LOCAL_REPLY_FOR_SIMPLE_TURNS_ENV);
+    assert!(!suppress_tools_for_simple_turn("hi"));
+    assert!(!local_reply_for_simple_turns_enabled());
+
+    std::env::set_var(SUPPRESS_TOOLS_FOR_SIMPLE_TURNS_ENV, "1");
+    assert!(suppress_tools_for_simple_turn("hi"));
+    assert!(!local_reply_for_simple_turns_enabled());
+
+    std::env::set_var(LOCAL_REPLY_FOR_SIMPLE_TURNS_ENV, "1");
+    assert!(local_reply_for_simple_turns_enabled());
+    assert_eq!(local_simple_turn_reply("hi"), "Hi.");
+    assert_eq!(local_simple_turn_reply(" hey "), "Hey.");
+
+    std::env::remove_var(SUPPRESS_TOOLS_FOR_SIMPLE_TURNS_ENV);
+    std::env::remove_var(LOCAL_REPLY_FOR_SIMPLE_TURNS_ENV);
 }
 
 pub(super) fn state() -> AppState {

@@ -5,9 +5,10 @@
 use std::path::PathBuf;
 
 use puffer_runner_api::{
-    DirEntry, McpPrompt, McpPromptArgument, McpPromptContent, McpPromptMessage, McpResourceContent,
-    McpResourceContentPart, McpResourceRecord, McpResult, McpServerInfo, McpTool, OAuthStatus,
-    OAuthTokensPayload, ReadStateUpdate, RunnerCapabilities, RunnerError, ToolRequest, ToolResult,
+    DirEntry, FilesystemExecutionPolicy, FilesystemSandboxMode, McpPrompt, McpPromptArgument,
+    McpPromptContent, McpPromptMessage, McpResourceContent, McpResourceContentPart,
+    McpResourceRecord, McpResult, McpServerInfo, McpTool, OAuthStatus, OAuthTokensPayload,
+    ReadStateUpdate, RunnerCapabilities, RunnerError, ToolRequest, ToolResult,
 };
 
 use crate::proto;
@@ -23,7 +24,10 @@ pub(crate) fn to_proto_tool_request(req: &ToolRequest) -> proto::ToolRequest {
             .iter()
             .map(|p| p.display().to_string())
             .collect(),
-        allow_all_paths: req.allow_all_paths,
+        allow_all_paths: matches!(
+            req.filesystem.sandbox_mode,
+            FilesystemSandboxMode::DangerFullAccess
+        ),
         input_json: req.input.to_string(),
         session_id: req.session_id.clone(),
     }
@@ -40,7 +44,13 @@ pub(crate) fn from_proto_tool_request(req: proto::ToolRequest) -> Result<ToolReq
         tool_id: req.tool_id,
         cwd: PathBuf::from(req.cwd),
         working_dirs: req.working_dirs.into_iter().map(PathBuf::from).collect(),
-        allow_all_paths: req.allow_all_paths,
+        filesystem: FilesystemExecutionPolicy {
+            sandbox_mode: if req.allow_all_paths {
+                FilesystemSandboxMode::DangerFullAccess
+            } else {
+                FilesystemSandboxMode::WorkspaceWrite
+            },
+        },
         input,
         session_id: req.session_id,
     })

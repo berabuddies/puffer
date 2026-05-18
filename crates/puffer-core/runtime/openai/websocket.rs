@@ -6,9 +6,9 @@ use super::super::structured_output_support::{
 use super::super::system_prompt::render_runtime_system_prompt;
 use super::super::{run_turn_hooks, TurnStreamEvent};
 use super::conversation::{
-    append_reasoning_items, append_tool_results, compact_conversation, inject_post_compact_context,
-    insert_managed_system_prompt_1, items_to_responses_input, managed_system_prompt_1_from_env,
-    transcript_to_items, ConversationItem,
+    append_managed_system_prompt_1_to_instructions, append_reasoning_items, append_tool_results,
+    compact_conversation, inject_post_compact_context, items_to_responses_input,
+    managed_system_prompt_1_from_env, transcript_to_items, ConversationItem,
 };
 use super::support::{
     apply_previous_response_id, is_openai_structured_output_error, openai_model_supports_reasoning,
@@ -20,7 +20,7 @@ use super::{
     parse_openai_text, parse_openai_text_fallback, resolve_openai_execution_config,
     OpenAIExecutionConfig,
 };
-use crate::permissions::load_runtime_permission_context;
+use crate::permissions::{load_runtime_permission_context_with_inputs, RuntimePermissionInputs};
 use crate::AppState;
 use anyhow::Result;
 use puffer_provider_openai::{
@@ -192,14 +192,20 @@ where
     let mut execution = resolve_openai_execution_config(state, auth_store, provider)?;
     let registry =
         super::super::mcp_discovery::registry_with_mcp_tools(resources, state.tool_runner.as_ref());
-    let permission_context = load_runtime_permission_context(&state.cwd, resources, state)?;
+    let permission_context = load_runtime_permission_context_with_inputs(
+        &state.cwd,
+        resources,
+        state,
+        RuntimePermissionInputs {
+            request_tool_filter: options.tool_filter.cloned(),
+        },
+    )?;
     let text = openai_responses_text_config(structured_output, use_native);
     let tools = openai_tool_definitions_for_request(
         &registry,
         structured_output,
         use_native,
         Some(&permission_context),
-        options.tool_filter,
     )?;
     let system_prompt = render_runtime_system_prompt(
         state,
@@ -210,12 +216,15 @@ where
             .map(|tool| tool.name.clone())
             .collect::<std::collections::BTreeSet<_>>(),
     )?;
-    let instructions = openai_request_instructions(state, resources, Some(&system_prompt))?;
+    let mut instructions = openai_request_instructions(state, resources, Some(&system_prompt))?;
     let mut items = transcript_to_items(state, input);
     let managed_system_prompt_1 = managed_system_prompt_1_from_env();
-    insert_managed_system_prompt_1(&mut items, managed_system_prompt_1.as_deref());
+    append_managed_system_prompt_1_to_instructions(
+        &mut instructions,
+        managed_system_prompt_1.as_deref(),
+    );
 
-    let context_reminder = build_context_reminder_message();
+    let context_reminder = build_context_reminder_message(state);
     super::conversation::insert_context_reminder_preserving_legacy_leading_system(
         &mut items,
         &context_reminder,
@@ -506,7 +515,7 @@ where
         if compacted {
             previous_response_id = None;
             continuation_start = None;
-            inject_post_compact_context(&mut items, &cwd);
+            inject_post_compact_context(&mut items, state);
         }
     }
 }

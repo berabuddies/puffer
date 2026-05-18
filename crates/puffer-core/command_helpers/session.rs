@@ -499,13 +499,16 @@ pub(crate) fn handle_remote_env_command(
 
 fn render_memory_summary(state: &AppState) -> String {
     let files = memory_file_entries(state);
+    let project_status = crate::memory::project_memory_status(state)
+        .unwrap_or_else(|| "project=<unresolved>\nmemory_file=<unavailable>".to_string());
     format!(
-        "Memory files:\n{}\n\nSession memory summary:\nslug={}\nnote={}\ntags={}",
+        "Memory files:\n{}\n\nProject memory:\n{}\n\nSession memory summary:\nslug={}\nnote={}\ntags={}",
         files
             .iter()
             .map(format_memory_file_entry)
             .collect::<Vec<_>>()
             .join("\n"),
+        project_status,
         state.session.slug.as_deref().unwrap_or("<none>"),
         state.session.note.as_deref().unwrap_or("<none>"),
         if state.session.tags.is_empty() {
@@ -548,11 +551,10 @@ fn emit_memory_path(
         return emit_system(
             state,
             session_store,
-            format!(
-                "{} memory path: {}",
-                scope.label(),
-                memory_file_path(state, scope).display()
-            ),
+            match memory_file_path(state, scope) {
+                Some(path) => format!("{} memory path: {}", scope.label(), path.display()),
+                None => "No configured project matches the current working directory, so project memory is unavailable.".to_string(),
+            },
         );
     }
     let entries = memory_file_entries(state)
@@ -573,7 +575,13 @@ fn emit_memory_contents(
     scope: Option<MemoryScope>,
 ) -> Result<()> {
     let scope = scope.unwrap_or(MemoryScope::Project);
-    let path = memory_file_path(state, scope);
+    let Some(path) = memory_file_path(state, scope) else {
+        return emit_system(
+            state,
+            session_store,
+            "No configured project matches the current working directory, so project memory is unavailable.".to_string(),
+        );
+    };
     if !path.exists() {
         return emit_system(
             state,
@@ -609,7 +617,16 @@ fn open_memory_file(
     scope: Option<MemoryScope>,
 ) -> Result<()> {
     let scope = scope.unwrap_or(MemoryScope::Project);
-    let path = memory_file_path(state, scope);
+    let Some(path) = memory_file_path(state, scope) else {
+        return emit_system(
+            state,
+            session_store,
+            "No configured project matches the current working directory, so project memory is unavailable.".to_string(),
+        );
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
     match open_text_file_in_editor(&path) {
         Ok(status) => emit_system(
             state,
@@ -766,9 +783,11 @@ impl MemoryScope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use puffer_config::PufferConfig;
+    use crate::test_locks::env_lock;
+    use puffer_config::{ensure_workspace_dirs, PufferConfig};
     use puffer_session_store::SessionMetadata;
     use std::path::PathBuf;
+    use tempfile::tempdir;
     use uuid::Uuid;
 
     fn sample_state() -> AppState {
@@ -853,6 +872,45 @@ mod tests {
             Some("puffer://remote/00000000-0000-0000-0000-000000000000?name=buildbox&env=linux")
         );
     }
+
+    #[test]
+    fn project_memory_path_uses_registered_project_memory_file() {
+        let _guard = env_lock().lock().unwrap();
+        let old_home = std::env::var_os("PUFFER_HOME");
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        let workspace = temp.path().join("workspace");
+        let project_root = workspace.join("apps/demo");
+        let cwd = project_root.join("src");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::env::set_var("PUFFER_HOME", &home);
+
+        let paths = ConfigPaths::discover(&workspace);
+        ensure_workspace_dirs(&paths).unwrap();
+        std::fs::write(
+            paths.projects_file(),
+            format!(
+                "[[projects]]\nname = \"demo\"\npath = \"{}\"\n",
+                project_root.display()
+            ),
+        )
+        .unwrap();
+
+        let mut state = sample_state();
+        state.cwd = cwd.clone();
+        state.session.cwd = cwd;
+        state.refresh_project_memory();
+        let path = memory_file_path(&state, MemoryScope::Project).expect("project memory path");
+        assert!(path.ends_with("MEMORY.md"));
+        assert!(path.starts_with(paths.projects_memory_dir()));
+
+        if let Some(value) = old_home {
+            std::env::set_var("PUFFER_HOME", value);
+        } else {
+            std::env::remove_var("PUFFER_HOME");
+        }
+    }
 }
 
 fn parse_memory_scope_for_command(raw: &str) -> std::result::Result<Option<MemoryScope>, String> {
@@ -873,7 +931,7 @@ fn parse_memory_scope_for_command(raw: &str) -> std::result::Result<Option<Memor
 #[derive(Debug, Clone)]
 struct MemoryFileEntry {
     scope: MemoryScope,
-    path: PathBuf,
+    path: Option<PathBuf>,
     exists: bool,
     bytes: u64,
 }
@@ -888,9 +946,9 @@ fn memory_file_entries(state: &AppState) -> Vec<MemoryFileEntry> {
     .copied()
     .map(|scope| {
         let path = memory_file_path(state, scope);
-        let (exists, bytes) = match fs::metadata(&path) {
-            Ok(metadata) => (true, metadata.len()),
-            Err(_) => (false, 0),
+        let (exists, bytes) = match path.as_ref().and_then(|path| fs::metadata(path).ok()) {
+            Some(metadata) => (true, metadata.len()),
+            None => (false, 0),
         };
         MemoryFileEntry {
             scope,
@@ -903,20 +961,25 @@ fn memory_file_entries(state: &AppState) -> Vec<MemoryFileEntry> {
 }
 
 fn format_memory_file_entry(entry: &MemoryFileEntry) -> String {
+    let path = entry
+        .path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "<unavailable>".to_string());
     format!(
         "- {}: {} ({}, {} bytes)",
         entry.scope.label(),
-        entry.path.display(),
+        path,
         if entry.exists { "present" } else { "missing" },
         entry.bytes
     )
 }
 
-fn memory_file_path(state: &AppState, scope: MemoryScope) -> PathBuf {
+fn memory_file_path(state: &AppState, scope: MemoryScope) -> Option<PathBuf> {
     let paths = ConfigPaths::discover(&state.cwd);
     match scope {
-        MemoryScope::Project => state.cwd.join("CLAUDE.md"),
-        MemoryScope::Workspace => paths.workspace_config_dir.join("memory.md"),
-        MemoryScope::User => paths.user_config_dir.join("memory.md"),
+        MemoryScope::Project => crate::memory::project_memory_path(state),
+        MemoryScope::Workspace => Some(paths.workspace_config_dir.join("memory.md")),
+        MemoryScope::User => Some(paths.user_config_dir.join("memory.md")),
     }
 }

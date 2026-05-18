@@ -7,9 +7,9 @@
 
 use puffer_resources::McpServerSpec;
 use puffer_runner_api::{
-    check_read_freshness, ChunkKind, ChunkSink, FnChunkSink, McpResourceContentPart, NullChunkSink,
-    ReadStateSnapshot, ReadStateUpdate, RunnerError, StalenessRejection, ToolRequest, ToolResult,
-    ToolRunner,
+    check_read_freshness, ChunkKind, ChunkSink, FilesystemExecutionPolicy, FilesystemSandboxMode,
+    FnChunkSink, McpResourceContentPart, NullChunkSink, ReadStateSnapshot, ReadStateUpdate,
+    RunnerError, StalenessRejection, ToolRequest, ToolResult, ToolRunner,
 };
 use puffer_runner_local::LocalToolRunner;
 use std::collections::HashMap;
@@ -20,11 +20,20 @@ use std::time::UNIX_EPOCH;
 use tempfile::tempdir;
 
 fn make_request(tool_id: &str, cwd: &Path, input: serde_json::Value) -> ToolRequest {
+    make_request_with_mode(tool_id, cwd, FilesystemSandboxMode::WorkspaceWrite, input)
+}
+
+fn make_request_with_mode(
+    tool_id: &str,
+    cwd: &Path,
+    sandbox_mode: FilesystemSandboxMode,
+    input: serde_json::Value,
+) -> ToolRequest {
     ToolRequest {
         tool_id: tool_id.to_string(),
         cwd: cwd.to_path_buf(),
         working_dirs: Vec::new(),
-        allow_all_paths: false,
+        filesystem: FilesystemExecutionPolicy { sandbox_mode },
         input,
         session_id: Some(uuid::Uuid::new_v4().to_string()),
     }
@@ -276,6 +285,57 @@ fn dispatcher_rejects_edit_when_file_changed_after_read() {
     let rejection = check_read_freshness(snapshot.as_ref(), file_mtime_ms(&target))
         .expect_err("Edit must be rejected after external mutation");
     assert_eq!(rejection, StalenessRejection::StaleRead);
+}
+
+#[test]
+fn workspace_write_runner_request_rejects_filesystem_escape() {
+    let temp = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    let escaped = outside.path().join("secret.txt");
+    fs::write(&escaped, "secret\n").unwrap();
+
+    let runner: Arc<dyn ToolRunner> = Arc::new(LocalToolRunner::new());
+    let error = runner
+        .execute_tool(
+            make_request(
+                "Read",
+                temp.path(),
+                serde_json::json!({
+                    "file_path": escaped.display().to_string(),
+                }),
+            ),
+            &mut NullChunkSink,
+        )
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("outside the current working directories"));
+}
+
+#[test]
+fn danger_full_access_runner_request_allows_filesystem_escape() {
+    let temp = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    let escaped = outside.path().join("secret.txt");
+    fs::write(&escaped, "secret\n").unwrap();
+
+    let runner: Arc<dyn ToolRunner> = Arc::new(LocalToolRunner::new());
+    let result = runner
+        .execute_tool(
+            make_request_with_mode(
+                "Read",
+                temp.path(),
+                FilesystemSandboxMode::DangerFullAccess,
+                serde_json::json!({
+                    "file_path": escaped.display().to_string(),
+                }),
+            ),
+            &mut NullChunkSink,
+        )
+        .expect("danger-full-access should allow out-of-workspace paths");
+
+    assert!(result.success);
+    assert!(result.stdout.contains("secret"));
 }
 
 fn fixture_manifest() -> Vec<McpServerSpec> {

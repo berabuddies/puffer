@@ -111,16 +111,14 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "CLAUDE_SESSION_INGRESS_TOKEN_FILE",
-        description:
-            "Path to a file holding a session-ingress access token. Falls back to \
+        description: "Path to a file holding a session-ingress access token. Falls back to \
              `DEFAULT_SESSION_ACCESS_TOKEN_PATH` when unset.",
         default: Some("/home/claude/.claude/remote/.session_ingress_token"),
         source_files: &["puffer-transport-anthropic/src/auth.rs:47,395"],
     },
     EnvVar {
         name: "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
-        description:
-            "Overrides the `originator` header / user-agent prefix sent on OpenAI-codex \
+        description: "Overrides the `originator` header / user-agent prefix sent on OpenAI-codex \
              requests. Defaults to `codex_cli_rs`.",
         default: Some("codex_cli_rs"),
         source_files: &["puffer-provider-openai/src/codex.rs:4,8"],
@@ -135,8 +133,7 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "OPENAI_API_KEY",
-        description:
-            "OpenAI API key. In benchmark mode, takes priority over imported codex \
+        description: "OpenAI API key. In benchmark mode, takes priority over imported codex \
              credentials and is written into the in-memory auth store.",
         default: None,
         source_files: &["puffer-cli/src/benchmark_run.rs:487"],
@@ -165,7 +162,6 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
         default: None,
         source_files: &["puffer-core/runtime/openai/support.rs:291,346-355"],
     },
-
     // -----------------------------------------------------------------
     // HTTP retry & transport
     // -----------------------------------------------------------------
@@ -179,8 +175,7 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "PUFFER_HTTP_RETRY_DELAY_MS",
-        description:
-            "Linear-backoff base delay (ms) between HTTP retries. Clamped to [0, 30000]. \
+        description: "Linear-backoff base delay (ms) between HTTP retries. Clamped to [0, 30000]. \
              Effective delay = base * attempt index.",
         default: Some("1000"),
         source_files: &["puffer-core/runtime.rs:139,860-862"],
@@ -199,8 +194,7 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "PUFFER_OPENAI_HTTP_MAX_ATTEMPTS",
-        description:
-            "Max retry attempts for the OpenAI Responses transport (separate from \
+        description: "Max retry attempts for the OpenAI Responses transport (separate from \
              `PUFFER_HTTP_RETRY_ATTEMPTS`). Clamped to [1, 5].",
         default: Some("3"),
         source_files: &["puffer-core/runtime/openai/support.rs:122-128"],
@@ -223,8 +217,7 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "PUFFER_OPENAI_STREAM_READ_TIMEOUT_MS",
-        description:
-            "Per-read SSE idle timeout (ms) for the OpenAI Responses stream. Clamped to \
+        description: "Per-read SSE idle timeout (ms) for the OpenAI Responses stream. Clamped to \
              [1000, 300000].",
         default: Some("180000"),
         source_files: &["puffer-core/runtime/openai/support.rs:140-144"],
@@ -247,12 +240,10 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "PUFFER_OPENAI_WS_RETRY_DELAY_MS",
-        description:
-            "Delay (ms) between WebSocket reconnect attempts. Clamped to [0, 10000].",
+        description: "Delay (ms) between WebSocket reconnect attempts. Clamped to [0, 10000].",
         default: Some("1000"),
         source_files: &["puffer-core/runtime/openai/websocket.rs:599"],
     },
-
     // -----------------------------------------------------------------
     // OpenAI/Codex behavior toggles
     // -----------------------------------------------------------------
@@ -266,8 +257,7 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "PUFFER_OPENAI_DISABLE_PREVIOUS_RESPONSE_ID",
-        description:
-            "Legacy alias for `PUFFER_OPENAI_DISABLE_RESPONSE_THREADING`. Disables \
+        description: "Legacy alias for `PUFFER_OPENAI_DISABLE_RESPONSE_THREADING`. Disables \
              `previous_response_id` chaining on the OpenAI Responses API.",
         default: None,
         source_files: &["puffer-core/runtime/openai/support.rs:204-208"],
@@ -290,8 +280,7 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "PUFFER_OPENAI_ENABLE_CUSTOM_RESPONSE_THREADING",
-        description:
-            "When truthy, force-enables response threading for providers that aren't \
+        description: "When truthy, force-enables response threading for providers that aren't \
              auto-detected as supporting it. Overrides URL-based detection.",
         default: None,
         source_files: &["puffer-core/runtime/openai/support.rs:209-211"],
@@ -321,7 +310,6 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
         default: Some("live"),
         source_files: &["puffer-core/runtime/structured_output_support.rs:179"],
     },
-
     // -----------------------------------------------------------------
     // System prompts & reflection / judge
     // -----------------------------------------------------------------
@@ -349,7 +337,6 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
         default: None,
         source_files: &["puffer-core/runtime/openai/conversation.rs:482"],
     },
-
     // -----------------------------------------------------------------
     // Microcompact (PR #75 in-place context pruning)
     // -----------------------------------------------------------------
@@ -364,8 +351,7 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "PUFFER_MICROCOMPACT_GAP_MINUTES",
-        description:
-            "Time-gap trigger (minutes) for the microcompact pass.",
+        description: "Time-gap trigger (minutes) for the microcompact pass.",
         default: Some("60"),
         source_files: &["puffer-core/runtime/microcompact.rs:109"],
     },
@@ -385,7 +371,6 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
         default: None,
         source_files: &["puffer-core/runtime/microcompact.rs:114"],
     },
-
     // -----------------------------------------------------------------
     // Observability (OTel + Langfuse)
     // -----------------------------------------------------------------
@@ -399,23 +384,20 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "LANGFUSE_SECRET_KEY",
-        description:
-            "Langfuse secret key. See `LANGFUSE_PUBLIC_KEY`.",
+        description: "Langfuse secret key. See `LANGFUSE_PUBLIC_KEY`.",
         default: None,
         source_files: &["puffer-observability/src/lib.rs:345"],
     },
     EnvVar {
         name: "LANGFUSE_USER_ID",
-        description:
-            "Fallback user-id for the Langfuse Users tab when \
+        description: "Fallback user-id for the Langfuse Users tab when \
              `PUFFER_OBSERVABILITY_USER_ID` is unset.",
         default: None,
         source_files: &["puffer-observability/src/lib.rs:395"],
     },
     EnvVar {
         name: "OTEL_DEPLOYMENT_ENVIRONMENT",
-        description:
-            "Standard OTel deployment environment label. Used as fallback when \
+        description: "Standard OTel deployment environment label. Used as fallback when \
              `PUFFER_OBSERVABILITY_ENVIRONMENT` is unset.",
         default: None,
         source_files: &["puffer-observability/src/lib.rs:377"],
@@ -430,37 +412,32 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "OTEL_EXPORTER_OTLP_HEADERS",
-        description:
-            "Comma-separated `key=value` pairs forwarded as headers on OTLP exports.",
+        description: "Comma-separated `key=value` pairs forwarded as headers on OTLP exports.",
         default: None,
         source_files: &["puffer-observability/src/lib.rs:339"],
     },
     EnvVar {
         name: "OTEL_SERVICE_NAME",
-        description:
-            "Service name attribute on exported OTel resources. Defaults to `puffer`.",
+        description: "Service name attribute on exported OTel resources. Defaults to `puffer`.",
         default: Some("puffer"),
         source_files: &["puffer-observability/src/lib.rs:358"],
     },
     EnvVar {
         name: "PUFFER_OBSERVABILITY_ENVIRONMENT",
-        description:
-            "Deployment environment label (overrides `OTEL_DEPLOYMENT_ENVIRONMENT`).",
+        description: "Deployment environment label (overrides `OTEL_DEPLOYMENT_ENVIRONMENT`).",
         default: None,
         source_files: &["puffer-observability/src/lib.rs:375"],
     },
     EnvVar {
         name: "PUFFER_OBSERVABILITY_INCLUDE_CONTENT",
-        description:
-            "Legacy all-on toggle: when truthy, sets all three include_* flags to true. \
+        description: "Legacy all-on toggle: when truthy, sets all three include_* flags to true. \
              Truthy = `1`, `true`, or `yes`.",
         default: None,
         source_files: &["puffer-observability/src/lib.rs:363"],
     },
     EnvVar {
         name: "PUFFER_OBSERVABILITY_INCLUDE_OUTPUTS",
-        description:
-            "When truthy, includes model output text in OTel spans (off by default for \
+        description: "When truthy, includes model output text in OTel spans (off by default for \
              privacy). Truthy = `1`, `true`, or `yes`.",
         default: None,
         source_files: &["puffer-observability/src/lib.rs:372"],
@@ -475,16 +452,14 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "PUFFER_OBSERVABILITY_INCLUDE_TOOL_IO",
-        description:
-            "When truthy, includes tool input/output bodies in OTel spans. Truthy = `1`, \
+        description: "When truthy, includes tool input/output bodies in OTel spans. Truthy = `1`, \
              `true`, or `yes`.",
         default: None,
         source_files: &["puffer-observability/src/lib.rs:373"],
     },
     EnvVar {
         name: "PUFFER_OBSERVABILITY_RELEASE",
-        description:
-            "Release / version label attached to OTel resources for grouping in Langfuse.",
+        description: "Release / version label attached to OTel resources for grouping in Langfuse.",
         default: None,
         source_files: &["puffer-observability/src/lib.rs:374"],
     },
@@ -510,7 +485,6 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
         default: None,
         source_files: &["puffer-observability/src/lib.rs:393"],
     },
-
     // -----------------------------------------------------------------
     // Heartbeat (puffer-cli daemon health pings)
     // -----------------------------------------------------------------
@@ -524,26 +498,22 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "PUFFER_HEARTBEAT_INTERVAL_SECONDS",
-        description:
-            "Heartbeat ping interval (seconds). Floor is 5s; default 60s.",
+        description: "Heartbeat ping interval (seconds). Floor is 5s; default 60s.",
         default: Some("60"),
         source_files: &["puffer-cli/src/heartbeat.rs:10"],
     },
     EnvVar {
         name: "PUFFER_HEARTBEAT_URL",
-        description:
-            "URL the heartbeat worker POSTs to.",
+        description: "URL the heartbeat worker POSTs to.",
         default: None,
         source_files: &["puffer-cli/src/heartbeat.rs:9"],
     },
-
     // -----------------------------------------------------------------
     // Paths, config, & resources
     // -----------------------------------------------------------------
     EnvVar {
         name: "PUFFER_BIN",
-        description:
-            "Path to the `puffer` binary itself. Used by the subscriber supervisor when \
+        description: "Path to the `puffer` binary itself. Used by the subscriber supervisor when \
              spawning skill processes that re-invoke `puffer ...` as their command.",
         default: None,
         source_files: &["puffer-subscriber-runtime/src/supervisor.rs:279"],
@@ -561,24 +531,21 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "PUFFER_CHROME",
-        description:
-            "Override path to the Chrome / Chromium executable used by the managed-agent \
+        description: "Override path to the Chrome / Chromium executable used by the managed-agent \
              browser runtime. When unset, falls back to platform-specific candidate paths.",
         default: None,
         source_files: &["puffer-cli/src/daemon_browser/chrome.rs:122"],
     },
     EnvVar {
         name: "PUFFER_DISCOVERY_CACHE_PATH",
-        description:
-            "Override path for the model-discovery cache JSON. Defaults to \
+        description: "Override path for the model-discovery cache JSON. Defaults to \
              `~/.puffer/model_discovery_cache.json`.",
         default: Some("~/.puffer/model_discovery_cache.json"),
         source_files: &["puffer-provider-registry/src/registry.rs:364"],
     },
     EnvVar {
         name: "PUFFER_HOME",
-        description:
-            "Override for the user-config root (analogous to `CLAUDE_HOME`). Defaults to \
+        description: "Override for the user-config root (analogous to `CLAUDE_HOME`). Defaults to \
              `$HOME/.puffer`. Read in several places to keep test isolation possible.",
         default: Some("$HOME/.puffer"),
         source_files: &[
@@ -597,20 +564,17 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "PUFFER_RESOURCES_DIR",
-        description:
-            "Override path to the bundled-resources root used by `puffer subscriptions`. \
+        description: "Override path to the bundled-resources root used by `puffer subscriptions`. \
              Defaults to `./resources` relative to cwd.",
         default: Some("./resources"),
         source_files: &["puffer-cli/src/subscriptions.rs:266"],
     },
-
     // -----------------------------------------------------------------
     // Subscribers / skills
     // -----------------------------------------------------------------
     EnvVar {
         name: "PUFFER_SKILL_STATE_DIR",
-        description:
-            "Persistent state dir for a running subscriber/skill process. Set by the \
+        description: "Persistent state dir for a running subscriber/skill process. Set by the \
              supervisor; read inside subscriber binaries (email, telegram-user).",
         default: None,
         source_files: &[
@@ -620,8 +584,7 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "PUFFER_SKILL_TOPIC",
-        description:
-            "Event-bus topic for the running subscriber. Set by the supervisor; read by \
+        description: "Event-bus topic for the running subscriber. Set by the supervisor; read by \
              subscriber binaries when emitting envelopes.",
         default: None,
         source_files: &[
@@ -631,19 +594,16 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "PUFFER_TELEGRAM_API_HASH",
-        description:
-            "Telegram MTProto api_hash for the user-mode subscriber.",
+        description: "Telegram MTProto api_hash for the user-mode subscriber.",
         default: None,
         source_files: &["puffer-subscriber-telegram-user/src/state.rs:128"],
     },
     EnvVar {
         name: "PUFFER_TELEGRAM_API_ID",
-        description:
-            "Telegram MTProto api_id for the user-mode subscriber. Parsed as integer.",
+        description: "Telegram MTProto api_id for the user-mode subscriber. Parsed as integer.",
         default: None,
         source_files: &["puffer-subscriber-telegram-user/src/state.rs:125"],
     },
-
     // -----------------------------------------------------------------
     // Tooling auth / runner
     // -----------------------------------------------------------------
@@ -670,12 +630,10 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "PUFFER_STAINLESS_RUNTIME_VERSION",
-        description:
-            "Stainless `runtime` version reported in the Anthropic stainless header.",
+        description: "Stainless `runtime` version reported in the Anthropic stainless header.",
         default: Some("v24.3.0"),
         source_files: &["puffer-transport-anthropic/src/request.rs:286"],
     },
-
     // -----------------------------------------------------------------
     // OAuth storage / test escape hatches
     // -----------------------------------------------------------------
@@ -687,7 +645,6 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
         default: None,
         source_files: &["puffer-provider-registry/src/secure_oauth.rs:12,159"],
     },
-
     // -----------------------------------------------------------------
     // Benchmark
     // -----------------------------------------------------------------
@@ -699,7 +656,6 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
         default: None,
         source_files: &["puffer-cli/src/benchmark_run.rs:26,775,818"],
     },
-
     // -----------------------------------------------------------------
     // Generic Unix / shell / editor / terminal — reads only
     // -----------------------------------------------------------------
@@ -713,23 +669,20 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "COLORTERM",
-        description:
-            "Read by the TUI to decide whether the terminal supports truecolor (24-bit) \
+        description: "Read by the TUI to decide whether the terminal supports truecolor (24-bit) \
              output. Matched against `truecolor` / `24bit`.",
         default: None,
         source_files: &["puffer-tui/src/render/top_panel.rs:345"],
     },
     EnvVar {
         name: "COMSPEC",
-        description:
-            "Windows-only fallback for the daemon PTY when `$SHELL` is unset.",
+        description: "Windows-only fallback for the daemon PTY when `$SHELL` is unset.",
         default: None,
         source_files: &["puffer-cli/src/daemon_pty.rs:517"],
     },
     EnvVar {
         name: "CURSOR_TRACE_ID",
-        description:
-            "Presence-only check used by terminal-setup to detect the Cursor terminal.",
+        description: "Presence-only check used by terminal-setup to detect the Cursor terminal.",
         default: None,
         source_files: &["puffer-core/command_helpers/terminal_setup.rs:377"],
     },
@@ -747,15 +700,13 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "GHOSTTY_RESOURCES_DIR",
-        description:
-            "Presence-only check used by codex User-Agent generation to identify Ghostty.",
+        description: "Presence-only check used by codex User-Agent generation to identify Ghostty.",
         default: None,
         source_files: &["puffer-provider-openai/src/codex.rs:57"],
     },
     EnvVar {
         name: "HOME",
-        description:
-            "User home directory. Read in many path-resolution sites (config, sessions, \
+        description: "User home directory. Read in many path-resolution sites (config, sessions, \
              tilde-expansion, OAuth keychain hashing). Linux/macOS-canonical.",
         default: None,
         source_files: &[
@@ -777,29 +728,25 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "ITERM_PROFILE",
-        description:
-            "Presence-only check used by codex User-Agent generation to identify iTerm2.",
+        description: "Presence-only check used by codex User-Agent generation to identify iTerm2.",
         default: None,
         source_files: &["puffer-provider-openai/src/codex.rs:54"],
     },
     EnvVar {
         name: "ITERM_SESSION_ID",
-        description:
-            "Presence-only check used by codex User-Agent generation to identify iTerm2.",
+        description: "Presence-only check used by codex User-Agent generation to identify iTerm2.",
         default: None,
         source_files: &["puffer-provider-openai/src/codex.rs:54"],
     },
     EnvVar {
         name: "KITTY_PID",
-        description:
-            "Presence-only check used by codex User-Agent generation to identify Kitty.",
+        description: "Presence-only check used by codex User-Agent generation to identify Kitty.",
         default: None,
         source_files: &["puffer-provider-openai/src/codex.rs:51"],
     },
     EnvVar {
         name: "LOCALAPPDATA",
-        description:
-            "Windows: candidate base path when looking for Chrome / Chromium installs.",
+        description: "Windows: candidate base path when looking for Chrome / Chromium installs.",
         default: None,
         source_files: &["puffer-cli/src/daemon_browser/chrome.rs:160"],
     },
@@ -817,8 +764,7 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "PROGRAMFILES",
-        description:
-            "Windows: candidate base path when looking for Chrome / Chromium installs.",
+        description: "Windows: candidate base path when looking for Chrome / Chromium installs.",
         default: None,
         source_files: &["puffer-cli/src/daemon_browser/chrome.rs:160"],
     },
@@ -831,8 +777,7 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "SHELL",
-        description:
-            "User's preferred shell. Used by: bash builtin tool detection, system-prompt \
+        description: "User's preferred shell. Used by: bash builtin tool detection, system-prompt \
              shell-info line, daemon PTY shell resolution.",
         default: None,
         source_files: &[
@@ -843,8 +788,7 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "STY",
-        description:
-            "Presence-only check used by terminal-setup to identify GNU screen.",
+        description: "Presence-only check used by terminal-setup to identify GNU screen.",
         default: None,
         source_files: &["puffer-core/command_helpers/terminal_setup.rs:416"],
     },
@@ -873,16 +817,14 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "TERM_PROGRAM_VERSION",
-        description:
-            "Companion to `TERM_PROGRAM` — used in the codex User-Agent token \
+        description: "Companion to `TERM_PROGRAM` — used in the codex User-Agent token \
              (`<program>/<version>`).",
         default: None,
         source_files: &["puffer-provider-openai/src/codex.rs:42"],
     },
     EnvVar {
         name: "TMUX",
-        description:
-            "Presence-only check used by terminal-setup to identify tmux.",
+        description: "Presence-only check used by terminal-setup to identify tmux.",
         default: None,
         source_files: &["puffer-core/command_helpers/terminal_setup.rs:413"],
     },
@@ -898,8 +840,7 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "USERNAME",
-        description:
-            "Windows-canonical user name. Used as the last-fallback user-id for \
+        description: "Windows-canonical user name. Used as the last-fallback user-id for \
              observability spans.",
         default: None,
         source_files: &["puffer-observability/src/lib.rs:397"],
@@ -918,8 +859,7 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "VSCODE_GIT_ASKPASS_MAIN",
-        description:
-            "Read by terminal-setup to disambiguate VSCode-flavored terminals (Cursor, \
+        description: "Read by terminal-setup to disambiguate VSCode-flavored terminals (Cursor, \
              Windsurf, vscode-server) by looking at the askpass binary path.",
         default: None,
         source_files: &["puffer-core/command_helpers/terminal_setup.rs:381,470"],
@@ -934,8 +874,7 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "WT_SESSION",
-        description:
-            "Presence-only check used by codex User-Agent generation to identify Windows \
+        description: "Presence-only check used by codex User-Agent generation to identify Windows \
              Terminal.",
         default: None,
         source_files: &["puffer-provider-openai/src/codex.rs:48"],
@@ -970,14 +909,11 @@ mod tests {
             // Names are uppercase identifiers (allow digits, underscores,
             // and parentheses for `PROGRAMFILES(X86)`).
             assert!(
-                entry
-                    .name
-                    .chars()
-                    .all(|c| c.is_ascii_uppercase()
-                        || c.is_ascii_digit()
-                        || c == '_'
-                        || c == '('
-                        || c == ')'),
+                entry.name.chars().all(|c| c.is_ascii_uppercase()
+                    || c.is_ascii_digit()
+                    || c == '_'
+                    || c == '('
+                    || c == ')'),
                 "non-uppercase env var name: {}",
                 entry.name
             );

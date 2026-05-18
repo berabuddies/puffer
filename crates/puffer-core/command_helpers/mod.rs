@@ -13,6 +13,7 @@ mod pentest;
 mod plugins;
 pub(crate) mod prompt;
 mod reflect;
+mod recap;
 mod resume;
 mod session;
 mod tasks;
@@ -58,6 +59,7 @@ pub(crate) use plugins::{
     handle_plugin_command, reload_plugins_summary, render_plugin_actions, render_plugin_summary,
 };
 pub(crate) use prompt::handle_plan_command;
+pub(crate) use recap::handle_recap_command;
 pub(crate) use reflect::handle_reflect_command;
 pub(crate) use resume::handle_resume_command;
 pub(crate) use resume::resumable_sessions_for_picker;

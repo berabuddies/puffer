@@ -173,12 +173,22 @@ pub(crate) enum Command {
         /// + token without racing against the file write.
         #[arg(long = "print-handshake", default_value_t = false)]
         print_handshake: bool,
-        /// Disable Puffer's built-in Chrome browser RPCs for managed-agent runtimes.
+        /// Disable Puffer's built-in Chrome browser RPCs for daemon runtimes.
         #[arg(long = "no-browser", default_value_t = false)]
         no_browser: bool,
-        /// Additional managed-agent system prompt inserted after Puffer's base system prompt.
+        /// Additional daemon system prompt inserted after Puffer's base system prompt.
         #[arg(long = "system-prompt-1")]
         system_prompt_1: Option<String>,
+        /// Disable automatic first-message title generation for daemon runtimes.
+        #[arg(long = "disable-auto-title", default_value_t = false)]
+        disable_auto_title: bool,
+        /// Bypass permission prompts and filesystem sandboxing for daemon runtimes.
+        #[arg(
+            long = "yolo",
+            alias = "dangerously-bypass-approvals-and-sandbox",
+            default_value_t = false
+        )]
+        yolo: bool,
     },
     /// Internal: run a baked-in subscriber skill driver. Invoked by the
     /// subscriber supervisor; not intended for direct use.

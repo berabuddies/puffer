@@ -1,5 +1,6 @@
 use crate::AppState;
 use anyhow::{anyhow, Context, Result};
+use puffer_runner_api::FilesystemSandboxMode;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::ErrorKind;
@@ -182,6 +183,20 @@ pub(crate) fn resolve_path_for_session(
     path: &Path,
 ) -> Result<PathBuf> {
     if sandbox_allows_all_paths(sandbox_mode) {
+        return Ok(normalize_user_path(cwd, path.to_string_lossy().as_ref()));
+    }
+    resolve_path_in_workspaces(cwd, additional_roots, path)
+}
+
+/// Resolves one tool path, skipping workspace-root restrictions when the
+/// typed filesystem policy grants danger-full-access.
+pub(crate) fn resolve_path_for_filesystem_policy(
+    cwd: &Path,
+    additional_roots: &[PathBuf],
+    sandbox_mode: FilesystemSandboxMode,
+    path: &Path,
+) -> Result<PathBuf> {
+    if matches!(sandbox_mode, FilesystemSandboxMode::DangerFullAccess) {
         return Ok(normalize_user_path(cwd, path.to_string_lossy().as_ref()));
     }
     resolve_path_in_workspaces(cwd, additional_roots, path)

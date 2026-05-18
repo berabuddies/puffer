@@ -28,6 +28,10 @@ path = "tests/runner_mcp_oauth.rs"
 name = "runner_mcp_tool_advertising"
 path = "tests/runner_mcp_tool_advertising.rs"
 
+[[test]]
+name = "hot_reload"
+path = "tests/hot_reload.rs"
+
 [dependencies]
 anyhow.workspace = true
 arboard.workspace = true
@@ -37,6 +41,7 @@ fslock.workspace = true
 html2text.workspace = true
 indexmap.workspace = true
 jsonschema.workspace = true
+notify.workspace = true
 regex.workspace = true
 reqwest.workspace = true
 rmcp.workspace = true

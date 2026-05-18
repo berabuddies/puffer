@@ -21,6 +21,7 @@ mod misc;
 mod model_scope;
 mod parity;
 mod plugin;
+mod recap;
 mod remote_history;
 mod sandbox;
 mod session_local;

@@ -35,9 +35,10 @@ use puffer_config::{
     ensure_workspace_dirs, load_config, save_user_config, ConfigPaths, PufferConfig,
 };
 use puffer_core::{
-    execute_user_turn_streaming_with_permissions_and_cancel, with_user_question_prompt_handler,
-    AppState, CancelToken, MessageRole, PermissionPromptAction, PermissionPromptRequest,
-    TurnStreamEvent, UserQuestionPromptRequest, UserQuestionPromptResponse,
+    apply_model_preferences, execute_user_turn_streaming_with_permissions_and_cancel,
+    with_user_question_prompt_handler, AppState, CancelToken, MessageRole, PermissionPromptAction,
+    PermissionPromptRequest, TurnStreamEvent, UserQuestionPromptRequest,
+    UserQuestionPromptResponse,
 };
 use puffer_provider_openai::{
     exchange_authorization_code as exchange_openai_authorization_code,
@@ -105,6 +106,8 @@ pub(crate) struct DaemonOptions {
     pub print_handshake: bool,
     pub no_browser: bool,
     pub system_prompt_1: Option<String>,
+    pub disable_auto_title: bool,
+    pub yolo: bool,
 }
 
 pub(crate) fn run(options: DaemonOptions) -> Result<()> {
@@ -129,6 +132,8 @@ async fn run_async(options: DaemonOptions) -> Result<()> {
         paths.clone(),
         token.clone(),
         options.no_browser,
+        options.disable_auto_title,
+        options.yolo,
     )?;
     if let Some(prompt) = options
         .system_prompt_1
@@ -248,6 +253,8 @@ pub(crate) struct DaemonState {
     pub(crate) fs_watches: Arc<FsWatchRegistry>,
     /// Chrome-backed browser sessions used by the desktop Browser tab.
     pub(crate) browsers: Arc<BrowserRegistry>,
+    disable_auto_title: bool,
+    yolo: bool,
     /// Transcript replay buffer — a bounded ring of recent session / clone /
     /// workspace events. On a fresh WebSocket connection we replay these
     /// so UIs that disconnected mid-turn don't miss deltas. Size capped at
@@ -289,6 +296,8 @@ impl DaemonState {
         paths: ConfigPaths,
         token: String,
         no_browser: bool,
+        disable_auto_title: bool,
+        yolo: bool,
     ) -> Result<Self> {
         let config = load_config(&paths)?;
         let (events, _rx) = broadcast::channel::<ServerEnvelope>(256);
@@ -306,6 +315,8 @@ impl DaemonState {
             ptys,
             fs_watches: Arc::new(FsWatchRegistry::new()),
             browsers: Arc::new(BrowserRegistry::new(browser_profile_root, !no_browser)),
+            disable_auto_title,
+            yolo,
             recent_events: Arc::new(Mutex::new(VecDeque::with_capacity(RECENT_EVENT_CAPACITY))),
         })
     }
@@ -1477,8 +1488,19 @@ fn handle_create_session(state: &DaemonState, params: &Value) -> Result<Value> {
         .and_then(|v| v.as_str())
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| state.cwd.clone());
+    let display_name = params
+        .get("displayName")
+        .or_else(|| params.get("display_name"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
     let session_store = SessionStore::from_paths(&state.paths)?;
     let session = session_store.create_session(cwd)?;
+    if let Some(display_name) = display_name {
+        session_store.set_display_name(session.id, Some(display_name))?;
+    }
+    let session = session_store.load_session(session.id)?.metadata;
     // Broadcast so connected UIs can refresh their workspace board without
     // polling. Ignored silently if no one's listening.
     state.publish_event(ServerEnvelope::Event {
@@ -1913,6 +1935,13 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         .and_then(|v| v.as_str())
         .context("missing message")?
         .to_string();
+    let model_override = params
+        .get("modelOverride")
+        .or_else(|| params.get("model_override"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
 
     // Parse cheap, non-tokio-touching things synchronously so we can fail
     // fast with a clean error. Anything that builds a runtime (i.e. the
@@ -1954,6 +1983,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     let setup_state = state.clone();
     let message_for_thread = message.clone();
     let session_id_for_thread = session_id.clone();
+    let model_override_for_thread = model_override.clone();
     std::thread::spawn(move || {
         setup_state.publish_event(ServerEnvelope::Event {
             event: channel_thread.clone(),
@@ -1997,11 +2027,12 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
             .events
             .iter()
             .any(|event| matches!(event, TranscriptEvent::UserMessage { .. }));
-        let auto_title = if crate::daemon_title::should_auto_title(
-            record.metadata.display_name.as_deref(),
-            record.metadata.generated_title.as_deref(),
-            has_user_message,
-        ) {
+        let auto_title = if !setup_state.disable_auto_title
+            && crate::daemon_title::should_auto_title(
+                record.metadata.display_name.as_deref(),
+                record.metadata.generated_title.as_deref(),
+                has_user_message,
+            ) {
             match crate::daemon_title::generate_title_with_model(
                 &AppState::from_session_record(
                     setup_state.config.lock().unwrap().clone(),
@@ -2024,6 +2055,25 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         };
         let cfg_for_turn = setup_state.config.lock().unwrap().clone();
         let mut app_state = AppState::from_session_record(cfg_for_turn.clone(), record);
+        if setup_state.yolo {
+            apply_daemon_yolo_mode(&mut app_state);
+        }
+        if let Some(model_override) = model_override_for_thread.as_deref() {
+            if let Err(err) =
+                apply_turn_model_override(&mut app_state, &inputs.providers, model_override)
+            {
+                setup_state.publish_event(ServerEnvelope::Event {
+                    event: channel_thread.clone(),
+                    payload: json!({
+                        "type": "turn-error",
+                        "turnId": turn_id_thread,
+                        "error": format!("modelOverride: {err:#}"),
+                    }),
+                });
+                setup_state.turns.lock().unwrap().remove(&turn_id_thread);
+                return;
+            }
+        }
         let runner = crate::runner_selection::select_tool_runner(
             &cfg_for_turn,
             &inputs.resources,
@@ -2240,12 +2290,15 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
             }
             Err(err) => {
                 eprintln!("turn {turn_id_thread} failed: {err:#}");
+                let (friendly, category) = classify_turn_error(&err);
                 setup_state.publish_event(ServerEnvelope::Event {
                     event: channel_thread.clone(),
                     payload: json!({
                         "type": "turn-error",
                         "turnId": turn_id_thread,
-                        "error": format!("{err:#}"),
+                        "error": friendly,
+                        "errorRaw": format!("{err:#}"),
+                        "category": category,
                     }),
                 });
             }
@@ -2259,4 +2312,265 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     });
 
     Ok(json!({"turnId": turn_id_resp}))
+}
+
+/// Translates a raw `anyhow::Error` from `execute_user_turn_streaming_*`
+/// into a `(friendly-message, category)` pair for the SSE `turn-error`
+/// event. Frontends switch on `category` to surface UX-friendly affordances
+/// (e.g. an automatic "retry" button for transient runner-unreachable
+/// failures), and the raw error stays available as `errorRaw` for debug.
+///
+/// Categories we currently distinguish:
+///   * `runner_unreachable` — gRPC channel to `remote_runner` returned
+///     `tcp connect error` / `Connection refused`. On agentenv this is the
+///     wake-after-sleep stale-`host_port` bug (issue agentenv/monorepo#401):
+///     `config.toml`'s `remote_runner.endpoint` carries the host_port from
+///     a prior session, but the hypervisor allocates a fresh port on
+///     restore — the daemon then dials the old port and gets refused. The
+///     bug is fixed in api-server (refresh sandbox metadata before passing
+///     `runnerEndpoint` to `wakePuffer`); this categorisation is the
+///     puffer-side belt-and-suspenders so the user-visible failure mode is
+///     "the sandbox is still warming up, retry in a moment" instead of a
+///     cryptic transport-level message.
+///   * `cancelled` — agent loop bailed because `CancelToken::cancel`
+///     fired. Mirrors the bail string `"cancelled"`.
+///   * `other` — anything we haven't classified.
+fn classify_turn_error(err: &anyhow::Error) -> (String, &'static str) {
+    // anyhow walks the chain via Display when you `format!("{:#}", err)`
+    let chain = format!("{err:#}");
+    let lower = chain.to_ascii_lowercase();
+    if lower.contains("tcp connect error")
+        || lower.contains("connection refused")
+        || lower.contains("connect: connection refused")
+    {
+        return (
+            "the tool runner is not reachable yet — this can happen when the sandbox \
+             just resumed from sleep and its runtime port has not been re-mapped. \
+             retry in a few seconds."
+                .to_string(),
+            "runner_unreachable",
+        );
+    }
+    if lower == "cancelled" || lower.contains(": cancelled") {
+        return (chain, "cancelled");
+    }
+    (chain, "other")
+}
+
+fn apply_turn_model_override(
+    app_state: &mut AppState,
+    providers: &ProviderRegistry,
+    requested: &str,
+) -> Result<()> {
+    let (provider_id, model_id) = if let Some((provider_id, model_id)) = requested.split_once('/') {
+        let provider = providers
+            .provider(provider_id)
+            .with_context(|| format!("provider {provider_id} not found"))?;
+        let model = provider
+            .models
+            .iter()
+            .find(|model| model.id == model_id)
+            .with_context(|| format!("model {requested} not found"))?;
+        (provider.id.clone(), model.id.clone())
+    } else {
+        let (provider, model) = providers
+            .providers()
+            .find_map(|provider| {
+                provider
+                    .models
+                    .iter()
+                    .find(|model| model.id == requested)
+                    .map(|model| (provider, model))
+            })
+            .with_context(|| format!("model {requested} not found"))?;
+        (provider.id.clone(), model.id.clone())
+    };
+
+    let effort = app_state.effort_level.clone();
+    let fast_mode = app_state.fast_mode;
+    apply_model_preferences(app_state, &provider_id, &model_id, &effort, fast_mode)
+}
+
+fn apply_daemon_yolo_mode(app_state: &mut AppState) {
+    app_state.sandbox_mode = "danger-full-access".to_string();
+    app_state.set_session_allow_all();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        apply_daemon_yolo_mode, apply_turn_model_override, handle_create_session, DaemonState,
+    };
+    use indexmap::IndexMap;
+    use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
+    use puffer_core::AppState;
+    use puffer_provider_registry::{
+        Modality, ModelDescriptor, ProviderDescriptor, ProviderRegistry,
+    };
+    use puffer_session_store::{SessionMetadata, SessionStore};
+    use serde_json::json;
+    use uuid::Uuid;
+
+    #[test]
+    fn create_session_accepts_display_name() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(
+            workspace_root.clone(),
+            paths.clone(),
+            "token".into(),
+            true,
+            false,
+            false,
+        )
+        .expect("daemon state");
+
+        let response = handle_create_session(
+            &state,
+            &json!({
+                "cwd": workspace_root.display().to_string(),
+                "displayName": "  Managed Agent  ",
+            }),
+        )
+        .expect("create session");
+
+        let session_id = response["sessionId"].as_str().expect("sessionId");
+        assert_eq!(response["displayName"], "Managed Agent");
+        assert_eq!(response["generatedTitle"], serde_json::Value::Null);
+
+        let store = SessionStore::from_paths(&paths).expect("session store");
+        let session_id = uuid::Uuid::parse_str(session_id).expect("valid session id");
+        let session = store.load_session(session_id).expect("stored session");
+        assert_eq!(
+            session.metadata.display_name.as_deref(),
+            Some("Managed Agent")
+        );
+        assert_eq!(session.metadata.generated_title, None);
+    }
+
+    #[test]
+    fn turn_model_override_selects_matching_provider_model() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let metadata = SessionMetadata {
+            id: Uuid::new_v4(),
+            display_name: None,
+            generated_title: None,
+            cwd: temp.path().to_path_buf(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        };
+        let mut state = AppState::new(PufferConfig::default(), temp.path().to_path_buf(), metadata);
+        state.effort_level = "off".to_string();
+        state.fast_mode = true;
+
+        let mut providers = ProviderRegistry::new();
+        providers.register(provider("openai", &["gpt-5.4"]));
+        providers.register(provider("anthropic", &["claude-sonnet-4-5"]));
+
+        apply_turn_model_override(&mut state, &providers, "anthropic/claude-sonnet-4-5")
+            .expect("override");
+
+        assert_eq!(state.current_provider.as_deref(), Some("anthropic"));
+        assert_eq!(
+            state.current_model.as_deref(),
+            Some("anthropic/claude-sonnet-4-5")
+        );
+        assert_eq!(
+            state.config.default_model.as_deref(),
+            Some("anthropic/claude-sonnet-4-5")
+        );
+        assert_eq!(state.effort_level, "off");
+        assert!(state.fast_mode);
+    }
+
+    #[test]
+    fn classify_turn_error_distinguishes_runner_unreachable() {
+        use super::classify_turn_error;
+
+        // Real shape from a sleeping puffer agent's first tool call after
+        // wake (production trace, agentenv issue #401): the
+        // RemoteToolRunner returns `tonic::Code::Unavailable` because the
+        // host_port `config.toml` carried is stale, surfacing as the wrapped
+        // error string `transport error: tcp connect error`.
+        let err = anyhow::anyhow!("transport error: tcp connect error: Connection refused");
+        let (msg, cat) = classify_turn_error(&err);
+        assert_eq!(cat, "runner_unreachable", "{msg}");
+        assert!(msg.contains("retry"), "{msg}");
+
+        // Cancel path keeps the lowercase canonical bail string so PR #109
+        // and downstream consumers that key on `cancelled` still work.
+        let err = anyhow::anyhow!("cancelled");
+        let (msg, cat) = classify_turn_error(&err);
+        assert_eq!(cat, "cancelled");
+        assert_eq!(msg, "cancelled");
+
+        // Anything else falls through with the raw chain preserved.
+        let err = anyhow::anyhow!("HTTP 503 from upstream");
+        let (msg, cat) = classify_turn_error(&err);
+        assert_eq!(cat, "other");
+        assert!(msg.contains("HTTP 503"));
+    }
+
+    #[test]
+    fn daemon_yolo_mode_sets_allow_all_and_danger_full_access() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let metadata = SessionMetadata {
+            id: Uuid::new_v4(),
+            display_name: None,
+            generated_title: None,
+            cwd: temp.path().to_path_buf(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        };
+        let mut state = AppState::new(PufferConfig::default(), temp.path().to_path_buf(), metadata);
+
+        apply_daemon_yolo_mode(&mut state);
+
+        assert_eq!(state.sandbox_mode, "danger-full-access");
+        assert!(state.session_allow_all);
+    }
+
+    fn provider(id: &str, models: &[&str]) -> ProviderDescriptor {
+        ProviderDescriptor {
+            id: id.to_string(),
+            display_name: id.to_string(),
+            base_url: "https://example.invalid".to_string(),
+            chat_completions_path: None,
+            default_api: "openai-responses".to_string(),
+            auth_modes: Vec::new(),
+            headers: IndexMap::new(),
+            query_params: IndexMap::new(),
+            discovery: None,
+            models: models
+                .iter()
+                .map(|model| ModelDescriptor {
+                    id: (*model).to_string(),
+                    display_name: (*model).to_string(),
+                    provider: id.to_string(),
+                    api: "openai-responses".to_string(),
+                    context_window: 128_000,
+                    max_output_tokens: 16_384,
+                    supports_reasoning: true,
+                    input: vec![Modality::Text],
+                    cost: None,
+                    compat: None,
+                })
+                .collect(),
+        }
+    }
 }

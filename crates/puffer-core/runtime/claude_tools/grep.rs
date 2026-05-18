@@ -1,5 +1,6 @@
 use crate::workspace_paths;
 use anyhow::{bail, Context, Result};
+use puffer_runner_api::FilesystemExecutionPolicy;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::fs;
@@ -75,7 +76,7 @@ enum GrepMode {
 pub fn execute_claude_grep(
     cwd: &Path,
     working_dirs: &[PathBuf],
-    allow_all_paths: bool,
+    filesystem: &FilesystemExecutionPolicy,
     input: Value,
 ) -> Result<String> {
     let input: ClaudeGrepInput = serde_json::from_value(input).context("invalid Grep input")?;
@@ -84,19 +85,14 @@ pub fn execute_claude_grep(
     }
 
     let mode = parse_mode(input.output_mode.as_deref())?;
-    let sandbox_mode = if allow_all_paths {
-        "danger-full-access"
-    } else {
-        "workspace-write"
-    };
     let absolute_target = input
         .path
         .as_deref()
         .map(|path| {
-            workspace_paths::resolve_path_for_session(
+            workspace_paths::resolve_path_for_filesystem_policy(
                 cwd,
                 working_dirs,
-                sandbox_mode,
+                filesystem.sandbox_mode,
                 Path::new(path),
             )
         })
@@ -610,7 +606,14 @@ fn to_relative_path(cwd: &Path, path_text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use puffer_runner_api::{FilesystemExecutionPolicy, FilesystemSandboxMode};
     use serde_json::json;
+
+    fn workspace_write_policy() -> FilesystemExecutionPolicy {
+        FilesystemExecutionPolicy {
+            sandbox_mode: FilesystemSandboxMode::WorkspaceWrite,
+        }
+    }
 
     #[test]
     fn pseudo_fs_exclusions_only_fire_for_root_target() {
@@ -654,7 +657,7 @@ mod tests {
         let output = execute_claude_grep(
             temp.path(),
             &[],
-            false,
+            &workspace_write_policy(),
             json!({
                 "pattern": "fn",
                 "path": "src",
@@ -680,7 +683,7 @@ mod tests {
         let output = execute_claude_grep(
             temp.path(),
             &[],
-            false,
+            &workspace_write_policy(),
             json!({
                 "pattern": "abc",
                 "output_mode": "count"
@@ -698,7 +701,7 @@ mod tests {
         let error = execute_claude_grep(
             temp.path(),
             &[],
-            false,
+            &workspace_write_policy(),
             json!({
                 "pattern": "abc",
                 "path": "../"
@@ -725,7 +728,7 @@ mod tests {
         let output = execute_claude_grep(
             &cwd,
             &[extra.clone()],
-            false,
+            &workspace_write_policy(),
             json!({
                 "pattern": "abc",
                 "path": extra.display().to_string(),

@@ -64,24 +64,15 @@ pub(crate) fn render_debug_context(
     // ── Tool definitions ──
     let _ = writeln!(&mut out, "┌─── TOOLS ({}) ───", enabled_tools.len());
     if api == "anthropic-messages" {
-        let definitions = anthropic_tool_definitions_for_request(
-            &registry,
-            None,
-            Some(&permission_context),
-            None,
-        )?;
+        let definitions =
+            anthropic_tool_definitions_for_request(&registry, None, Some(&permission_context))?;
         for def in &definitions {
             let pretty = serde_json::to_string_pretty(def).unwrap_or_else(|_| format!("{:?}", def));
             let _ = writeln!(&mut out, "{}", pretty);
         }
     } else {
-        let definitions = openai_tool_definitions_for_request(
-            &registry,
-            None,
-            false,
-            Some(&permission_context),
-            None,
-        )?;
+        let definitions =
+            openai_tool_definitions_for_request(&registry, None, false, Some(&permission_context))?;
         for def in &definitions {
             let pretty = serde_json::to_string_pretty(def).unwrap_or_else(|_| format!("{:?}", def));
             let _ = writeln!(&mut out, "{}", pretty);

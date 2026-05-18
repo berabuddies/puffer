@@ -119,7 +119,7 @@ pub(crate) fn run_blocking_loop(
             &summary_fn,
         );
         if did {
-            inject_post_compact_context(&mut items, &cwd);
+            inject_post_compact_context(&mut items, inputs.state);
         } else {
             compaction_span.set_str("puffer.compaction.skipped", "true");
         }
@@ -362,7 +362,7 @@ pub(crate) fn run_blocking_loop(
             )
         };
         if compacted {
-            inject_post_compact_context(&mut items, &cwd);
+            inject_post_compact_context(&mut items, inputs.state);
             session.notify_compacted();
         } else {
             post_compaction_span.set_str("puffer.compaction.skipped", "true");

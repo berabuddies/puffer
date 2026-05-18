@@ -32,7 +32,7 @@ use super::{
     parse_openai_text, parse_openai_text_fallback, send_openai_request_with_refresh,
     OpenAIExecutionConfig,
 };
-use crate::permissions::load_runtime_permission_context;
+use crate::permissions::{load_runtime_permission_context_with_inputs, RuntimePermissionInputs};
 use crate::runtime::agent_loop::{AssistantTurn, TurnSession};
 use crate::runtime::structured_output_support::{
     openai_chat_completion_tools_for_request, openai_chat_response_format, StructuredOutputConfig,
@@ -280,26 +280,45 @@ pub(super) fn setup_completions_session(
     let execution = super::resolve_openai_execution_config(state, auth_store, provider)?;
     let registry =
         super::super::mcp_discovery::registry_with_mcp_tools(resources, state.tool_runner.as_ref());
-    let permission_context = load_runtime_permission_context(&state.cwd, resources, state)?;
+    let permission_context = load_runtime_permission_context_with_inputs(
+        &state.cwd,
+        resources,
+        state,
+        RuntimePermissionInputs {
+            request_tool_filter: options.tool_filter.cloned(),
+        },
+    )?;
     let response_format = openai_chat_response_format(options.structured_output, use_native);
     let tools = openai_chat_completion_tools_for_request(
         &registry,
         options.structured_output,
         use_native,
         Some(&permission_context),
-        options.tool_filter,
     )?;
-    let system_prompt = render_runtime_system_prompt(
-        state,
-        resources,
-        &model_id,
-        &tools
-            .iter()
-            .map(|tool| tool.function.name.clone())
-            .collect::<std::collections::BTreeSet<_>>(),
-    )?;
-    let plan_mode_context = crate::plan_mode::take_plan_mode_context_message(state, resources)?;
-    let system_reminder = build_system_reminder(&crate::runtime::git_status_context());
+    let (system_prompt, managed_system_prompt_1, plan_mode_context, system_reminder) =
+        if options.lightweight_context {
+            (
+                "Reply directly and concisely.".to_string(),
+                None,
+                None,
+                String::new(),
+            )
+        } else {
+            (
+                render_runtime_system_prompt(
+                    state,
+                    resources,
+                    &model_id,
+                    &tools
+                        .iter()
+                        .map(|tool| tool.function.name.clone())
+                        .collect::<std::collections::BTreeSet<_>>(),
+                )?,
+                managed_system_prompt_1_from_env(),
+                crate::plan_mode::take_plan_mode_context_message(state, resources)?,
+                build_system_reminder(state, &crate::runtime::git_status_context()),
+            )
+        };
 
     let model_descriptor = provider.models.iter().find(|m| m.id == model_id);
     let model_supports_reasoning = model_descriptor
@@ -315,7 +334,7 @@ pub(super) fn setup_completions_session(
         tools,
         response_format,
         system_prompt,
-        managed_system_prompt_1: managed_system_prompt_1_from_env(),
+        managed_system_prompt_1,
         plan_mode_context,
         system_reminder,
         structured_output: options.structured_output.cloned(),

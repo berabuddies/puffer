@@ -27,7 +27,6 @@ use super::{
     enforce_tool_result_budget, process_tool_result, ToolCallRequest, ToolInvocation,
     MAX_TOOL_RESULT_CHARS,
 };
-use crate::workspace_paths;
 
 /// Execute the tool batch produced by one provider round. Splits into
 /// the parallel path (multiple parallel-safe tools spawn into a
@@ -70,7 +69,6 @@ pub(super) fn execute_tool_batch(
     }
 
     let working_dirs = inputs.state.working_dirs.clone();
-    let allow_all_paths = workspace_paths::sandbox_allows_all_paths(&inputs.state.sandbox_mode);
     let session_id = inputs.state.session.id;
     let provider_context =
         backend_to_provider_context(session.tool_execution_backend(), inputs.model_id);
@@ -100,6 +98,10 @@ pub(super) fn execute_tool_batch(
                 ));
                 continue;
             }
+            let filesystem_policy = match &permissions[i] {
+                PermissionOutcome::Allowed(policy) => policy.clone(),
+                PermissionOutcome::Denied(_) => unreachable!(),
+            };
             let definition = match inputs.registry.definition(&tc.tool_id) {
                 Some(d) => d.clone(),
                 None => {
@@ -152,7 +154,7 @@ pub(super) fn execute_tool_batch(
                         &definition,
                         cwd,
                         working_dirs_ref,
-                        allow_all_paths,
+                        &filesystem_policy,
                         &session_id,
                         args,
                         resources,

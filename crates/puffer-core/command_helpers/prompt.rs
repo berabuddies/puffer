@@ -186,6 +186,9 @@ pub(crate) fn execute_compact_prompt_command(
     rendered: &str,
     tool_filter: Option<&RequestToolFilter>,
 ) -> Result<()> {
+    if state.memory_flush_enabled() {
+        let _ = crate::flush_project_memory(state, resources, providers, auth_store);
+    }
     record_specialized_prompt_request(state, session_store, rendered)?;
     match crate::runtime::execute_user_prompt_with_tool_filter(
         state,

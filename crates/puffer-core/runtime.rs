@@ -42,6 +42,7 @@ mod provider_adapter;
 pub mod quota;
 mod reflection;
 mod request_tool_filter;
+pub mod resource_watcher;
 mod side_question;
 mod structured_output_support;
 mod system_prompt;
@@ -141,6 +142,8 @@ const OPENAI_CODEX_COMPAT_VERSION: &str = "0.125.0";
 const OPENAI_CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const HTTP_RETRY_ATTEMPTS_ENV: &str = "PUFFER_HTTP_RETRY_ATTEMPTS";
 const HTTP_RETRY_DELAY_MS_ENV: &str = "PUFFER_HTTP_RETRY_DELAY_MS";
+const SUPPRESS_TOOLS_FOR_SIMPLE_TURNS_ENV: &str = "PUFFER_SUPPRESS_TOOLS_FOR_SIMPLE_TURNS";
+const LOCAL_REPLY_FOR_SIMPLE_TURNS_ENV: &str = "PUFFER_LOCAL_REPLY_FOR_SIMPLE_TURNS";
 
 #[derive(Clone, Default)]
 struct TurnRequestOptions<'a> {
@@ -167,6 +170,7 @@ struct TurnRequestOptions<'a> {
     /// Owned (Arc-backed clone) so we can fall back to the
     /// process-wide handle without lifetime gymnastics.
     observability: Option<puffer_observability::ObservabilityHandle>,
+    lightweight_context: bool,
 }
 
 #[derive(Debug)]
@@ -336,6 +340,7 @@ pub(crate) fn execute_user_prompt_with_tool_filter(
             cancel: None,
             max_turns: None,
             observability: None,
+            lightweight_context: false,
         },
     )
 }
@@ -416,6 +421,7 @@ pub fn execute_user_prompt_with_structured_output(
             cancel: None,
             max_turns: None,
             observability: None,
+            lightweight_context: false,
         },
     )
 }
@@ -514,6 +520,7 @@ where
                 cancel: None,
                 max_turns: None,
                 observability: None,
+                lightweight_context: false,
             },
             &mut on_event,
         )
@@ -555,6 +562,7 @@ where
                 cancel: Some(cancel),
                 max_turns: None,
                 observability: None,
+                lightweight_context: false,
             },
             &mut on_event,
         )
@@ -631,6 +639,7 @@ where
             cancel: None,
             max_turns: None,
             observability: None,
+            lightweight_context: false,
         },
         &mut on_event,
     )
@@ -667,6 +676,7 @@ where
             cancel: Some(cancel),
             max_turns: None,
             observability: None,
+            lightweight_context: false,
         },
         &mut on_event,
     )
@@ -698,6 +708,7 @@ where
             cancel: None,
             max_turns: None,
             observability: None,
+            lightweight_context: false,
         },
         &mut on_event,
     )
@@ -730,18 +741,62 @@ where
     if options.observability.is_none() {
         options.observability = observability_handle();
     }
+    let suppress_tools = suppress_tools_for_simple_turn(input);
+    if suppress_tools && local_reply_for_simple_turns_enabled() {
+        let assistant_text = local_simple_turn_reply(input);
+        on_event(TurnStreamEvent::TextDelta(assistant_text.to_string()));
+        return Ok(TurnExecution {
+            assistant_text: assistant_text.to_string(),
+            tool_invocations: Vec::new(),
+            reflection_traces: Vec::new(),
+        });
+    }
     let (provider, model_id) = resolve_provider_and_model(state, providers)?;
     let api = resolve_model_api(state, providers, provider, &model_id);
     let Some(adapter) = provider_adapter::adapter_for_api(&api) else {
         // Adapter unknown → fall through to non-streaming dispatch which
         // emits the canonical "not executable yet" error message.
+        if suppress_tools {
+            options.tool_filter = Some(RequestToolFilter::empty_static());
+            options.lightweight_context = true;
+        }
         return execute_user_prompt_with_options(
             state, resources, providers, auth_store, input, options,
         );
     };
+    if suppress_tools {
+        options.tool_filter = Some(RequestToolFilter::empty_static());
+        options.lightweight_context = true;
+    }
     adapter.execute_turn_streaming(
         state, resources, providers, provider, model_id, auth_store, input, options, on_event,
     )
+}
+
+fn suppress_tools_for_simple_turn(input: &str) -> bool {
+    if !std::env::var(SUPPRESS_TOOLS_FOR_SIMPLE_TURNS_ENV)
+        .ok()
+        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+    {
+        return false;
+    }
+    matches!(
+        input.trim().to_ascii_lowercase().as_str(),
+        "hi" | "hello" | "hey"
+    )
+}
+
+fn local_reply_for_simple_turns_enabled() -> bool {
+    std::env::var(LOCAL_REPLY_FOR_SIMPLE_TURNS_ENV)
+        .ok()
+        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+fn local_simple_turn_reply(input: &str) -> &'static str {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "hey" => "Hey.",
+        _ => "Hi.",
+    }
 }
 fn resolve_provider_and_model<'a>(
     state: &AppState,
@@ -1004,9 +1059,8 @@ where
         // socket otherwise.
         drop(response);
         on_retry(attempt, max_attempts, status);
-        let delay = server_hint.unwrap_or_else(|| {
-            http_5xx_backoff_with_jitter(base_delay, attempt)
-        });
+        let delay =
+            server_hint.unwrap_or_else(|| http_5xx_backoff_with_jitter(base_delay, attempt));
         std::thread::sleep(delay);
     }
     unreachable!("retry_on_5xx loop always returns or errors")
@@ -1043,10 +1097,9 @@ fn parse_retry_after_headers(headers: &reqwest::header::HeaderMap) -> Option<Dur
     }
     // HTTP-date: parse as RFC 2822 (covers IMF-fixdate, the only modern
     // preferred HTTP-date format per RFC 7231 §7.1.1.1).
-    if let Ok(target) = time::OffsetDateTime::parse(
-        trimmed,
-        &time::format_description::well_known::Rfc2822,
-    ) {
+    if let Ok(target) =
+        time::OffsetDateTime::parse(trimmed, &time::format_description::well_known::Rfc2822)
+    {
         let now = time::OffsetDateTime::now_utc();
         let diff = target - now;
         let ms = diff.whole_milliseconds();

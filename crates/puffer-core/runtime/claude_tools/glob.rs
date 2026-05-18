@@ -1,6 +1,7 @@
 use crate::workspace_paths;
 use anyhow::{anyhow, bail, Context, Result};
 use glob::{MatchOptions, Pattern};
+use puffer_runner_api::FilesystemExecutionPolicy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
@@ -68,7 +69,7 @@ struct ClaudeGlobOutput {
 pub fn execute_claude_glob(
     cwd: &Path,
     working_dirs: &[PathBuf],
-    allow_all_paths: bool,
+    filesystem: &FilesystemExecutionPolicy,
     input: Value,
 ) -> Result<String> {
     let started = Instant::now();
@@ -79,19 +80,14 @@ pub fn execute_claude_glob(
 
     let pattern = Pattern::new(&input.pattern)
         .map_err(|error| anyhow!("invalid glob pattern `{}`: {error}", input.pattern))?;
-    let sandbox_mode = if allow_all_paths {
-        "danger-full-access"
-    } else {
-        "workspace-write"
-    };
     let root = input
         .path
         .as_deref()
         .map(|path| {
-            workspace_paths::resolve_path_for_session(
+            workspace_paths::resolve_path_for_filesystem_policy(
                 cwd,
                 working_dirs,
-                sandbox_mode,
+                filesystem.sandbox_mode,
                 Path::new(path),
             )
         })
@@ -187,8 +183,15 @@ fn system_time_to_epoch_ms(time: SystemTime) -> Option<u128> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use puffer_runner_api::{FilesystemExecutionPolicy, FilesystemSandboxMode};
     use serde_json::json;
     use std::time::Duration;
+
+    fn workspace_write_policy() -> FilesystemExecutionPolicy {
+        FilesystemExecutionPolicy {
+            sandbox_mode: FilesystemSandboxMode::WorkspaceWrite,
+        }
+    }
 
     #[test]
     fn pseudo_fs_root_check_recognizes_each_root() {
@@ -215,7 +218,7 @@ mod tests {
         let output = execute_claude_glob(
             temp.path(),
             &[],
-            false,
+            &workspace_write_policy(),
             json!({
                 "pattern": "src/*.rs"
             }),
@@ -238,7 +241,7 @@ mod tests {
         let output = execute_claude_glob(
             temp.path(),
             &[],
-            false,
+            &workspace_write_policy(),
             json!({
                 "pattern": "*.txt"
             }),
@@ -255,7 +258,7 @@ mod tests {
         let error = execute_claude_glob(
             temp.path(),
             &[],
-            false,
+            &workspace_write_policy(),
             json!({
                 "pattern": "*.rs",
                 "path": "../"
@@ -278,7 +281,7 @@ mod tests {
         let output = execute_claude_glob(
             &cwd,
             &[extra.clone()],
-            false,
+            &workspace_write_policy(),
             json!({
                 "pattern": "src/*.rs",
                 "path": extra.display().to_string()
@@ -316,7 +319,7 @@ mod tests {
         let output = execute_claude_glob(
             temp.path(),
             &[],
-            false,
+            &workspace_write_policy(),
             json!({
                 "pattern": "*",
                 "path": temp.path().display().to_string(),
@@ -351,8 +354,13 @@ mod tests {
         fs::write(temp.path().join("a/mid.o"), "x").unwrap();
         fs::write(temp.path().join("a/b/c/deep.o"), "x").unwrap();
 
-        let output =
-            execute_claude_glob(temp.path(), &[], false, json!({ "pattern": "**/*.o" })).unwrap();
+        let output = execute_claude_glob(
+            temp.path(),
+            &[],
+            &workspace_write_policy(),
+            json!({ "pattern": "**/*.o" }),
+        )
+        .unwrap();
         let parsed: Value = serde_json::from_str(&output).unwrap();
         let filenames = parsed["filenames"]
             .as_array()
@@ -377,8 +385,13 @@ mod tests {
             fs::write(temp.path().join(format!("f{i}.txt")), "x").unwrap();
         }
 
-        let output =
-            execute_claude_glob(temp.path(), &[], false, json!({ "pattern": "*.txt" })).unwrap();
+        let output = execute_claude_glob(
+            temp.path(),
+            &[],
+            &workspace_write_policy(),
+            json!({ "pattern": "*.txt" }),
+        )
+        .unwrap();
         let parsed: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(parsed["truncated"], true);
         let hint = parsed["hint"]
@@ -394,8 +407,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("a.txt"), "x").unwrap();
 
-        let output =
-            execute_claude_glob(temp.path(), &[], false, json!({ "pattern": "*.txt" })).unwrap();
+        let output = execute_claude_glob(
+            temp.path(),
+            &[],
+            &workspace_write_policy(),
+            json!({ "pattern": "*.txt" }),
+        )
+        .unwrap();
         let parsed: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(parsed["truncated"], false);
         assert!(

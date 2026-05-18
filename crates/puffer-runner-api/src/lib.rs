@@ -57,14 +57,33 @@ pub struct ToolRequest {
     /// resolution (the session's `working_dirs` list).
     #[serde(default)]
     pub working_dirs: Vec<PathBuf>,
-    /// When true, path-sandbox checks are bypassed (`danger-full-access`).
-    #[serde(default)]
-    pub allow_all_paths: bool,
+    /// Filesystem execution policy for Claude-style path resolution.
+    pub filesystem: FilesystemExecutionPolicy,
     /// Tool input as a JSON value (matches the tool's input schema).
     pub input: serde_json::Value,
     /// Optional opaque session token used for tying related calls together
     /// (e.g. background bash processes share a session id).
     pub session_id: Option<String>,
+}
+
+/// Filesystem execution policy sent across the runner boundary.
+///
+/// This keeps the transport model typed instead of flattening filesystem
+/// behavior into a single `allow_all_paths` boolean.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FilesystemExecutionPolicy {
+    /// Sandbox mode used for filesystem path resolution.
+    pub sandbox_mode: FilesystemSandboxMode,
+}
+
+/// Filesystem sandbox modes understood by the runner boundary.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemSandboxMode {
+    ReadOnly,
+    WorkspaceWrite,
+    DangerFullAccess,
+    Custom,
 }
 
 /// One read-state-relevant fact reported by `ToolRunner::execute_tool`.
@@ -607,6 +626,19 @@ pub trait ToolRunner: Send + Sync + std::fmt::Debug {
         Err(RunnerError::Unsupported(
             "clear_oauth_tokens is not implemented for this runner".into(),
         ))
+    }
+
+    /// Returns the runner as `&dyn Any` for the hot-reload pathway. Default
+    /// impl returns `None`; the local runner overrides it to expose its
+    /// concrete type so `puffer_core::reload_runtime_resources` can rebuild
+    /// the MCP roster without restarting the process. Remote runners leave
+    /// this as `None` because they don't own MCP server lifecycle here.
+    ///
+    /// This is intentionally a narrow seam — callers should match on the
+    /// concrete extension trait/type they care about, not paw through
+    /// arbitrary methods.
+    fn as_any(&self) -> Option<&(dyn std::any::Any + 'static)> {
+        None
     }
 }
 

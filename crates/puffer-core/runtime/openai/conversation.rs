@@ -485,6 +485,18 @@ pub(crate) fn managed_system_prompt_1_from_env() -> Option<String> {
         .filter(|prompt| !prompt.is_empty())
 }
 
+pub(crate) fn append_managed_system_prompt_1_to_instructions(
+    instructions: &mut String,
+    prompt: Option<&str>,
+) {
+    if let Some(prompt) = prompt.map(str::trim).filter(|prompt| !prompt.is_empty()) {
+        if !instructions.trim().is_empty() {
+            instructions.push_str("\n\n");
+        }
+        instructions.push_str(prompt);
+    }
+}
+
 pub(crate) fn insert_managed_system_prompt_1(
     items: &mut Vec<ConversationItem>,
     prompt: Option<&str>,
@@ -566,15 +578,18 @@ fn item_to_responses_value(item: &ConversationItem) -> Value {
             let text = content_parts_to_text(content);
             let content_block = if role == "assistant" {
                 json!([{"type": "output_text", "text": text, "annotations": []}])
-            } else if role == "system" {
-                json!(text)
             } else {
                 json!([{"type": "input_text", "text": text}])
+            };
+            let wire_role = if role == "system" {
+                "user"
+            } else {
+                role.as_str()
             };
 
             let mut val = json!({
                 "type": "message",
-                "role": role,
+                "role": wire_role,
                 "content": content_block,
             });
             if role == "assistant" {
@@ -1119,15 +1134,16 @@ pub(crate) fn compact_conversation(
 
 /// Injects a context-restoration message after compaction.
 /// Previously only applied to Responses path — now shared by both.
-pub(crate) fn inject_post_compact_context(
-    items: &mut Vec<ConversationItem>,
-    cwd: &std::path::Path,
-) {
-    let reminder = format!(
+pub(crate) fn inject_post_compact_context(items: &mut Vec<ConversationItem>, state: &AppState) {
+    let mut reminder = format!(
         "[Context restored after compaction]\nCurrent working directory: {}\n\
          Continue the task from where you left off.",
-        cwd.display()
+        state.cwd.display()
     );
+    if let Some(project_memory) = crate::memory::project_memory_skill_reminder(state) {
+        reminder.push_str("\n\n");
+        reminder.push_str(&project_memory);
+    }
     let pos = 1.min(items.len());
     items.insert(pos, ConversationItem::user_message(reminder));
 }
@@ -1160,12 +1176,16 @@ fn find_valid_keep_boundary(items: &[ConversationItem], min_keep: usize) -> usiz
 /// Builds the system reminder text (currentDate + gitStatus).
 /// Previously only injected into Responses API `instructions` field.
 /// Now available to both paths via ConversationItem pipeline.
-pub(crate) fn build_system_reminder(git_status: &str) -> String {
+pub(crate) fn build_system_reminder(state: &AppState, git_status: &str) -> String {
     let now = time::OffsetDateTime::now_utc();
     let date_str = format!("{}-{:02}-{:02}", now.year(), now.month() as u8, now.day());
     let mut reminder = format!("# currentDate\nToday's date is {date_str}.");
     if !git_status.is_empty() {
         reminder.push_str(&format!("\n\n# gitStatus\n{git_status}"));
+    }
+    if let Some(project_memory) = crate::memory::project_memory_skill_reminder(state) {
+        reminder.push_str("\n\n");
+        reminder.push_str(&project_memory);
     }
     reminder
 }
@@ -1443,12 +1463,10 @@ mod tests {
         assert_eq!(msgs[3].role, "user");
     }
 
-    /// First-position exemption: a `system_message` at the head of the
-    /// items list represents legitimate model-facing system content
-    /// (e.g. a sub-agent identity prompt pushed by `agents.rs:321`
-    /// after `nested_state.transcript.clear()`). It must NOT be dropped.
+    /// Responses rejects `role:"system"` entries in `input`; legacy leading
+    /// system transcript items are preserved as user-role context instead.
     #[test]
-    fn responses_input_preserves_leading_system_message() {
+    fn responses_input_converts_leading_system_message_to_user_context() {
         let items = vec![
             ConversationItem::system_message("You are the bug-bounty subagent."),
             ConversationItem::user_message("audit this"),
@@ -1456,8 +1474,12 @@ mod tests {
         let value = items_to_responses_input(&items);
         let arr = value.as_array().unwrap();
         assert_eq!(arr.len(), 2);
-        assert_eq!(arr[0]["role"], "system");
-        assert_eq!(arr[0]["content"], "You are the bug-bounty subagent.");
+        assert_eq!(arr[0]["role"], "user");
+        assert_eq!(arr[0]["content"][0]["type"], "input_text");
+        assert_eq!(
+            arr[0]["content"][0]["text"],
+            "You are the bug-bounty subagent."
+        );
         assert_eq!(arr[1]["role"], "user");
     }
 
@@ -1508,11 +1530,12 @@ mod tests {
         let identity_count = arr
             .iter()
             .filter(|m| {
-                m["role"] == "system"
-                    && m["content"]
-                        .as_str()
-                        .map(|s| s.contains("bug-bounty subagent"))
-                        .unwrap_or(false)
+                m["content"]
+                    .get(0)
+                    .and_then(|part| part.get("text"))
+                    .and_then(|text| text.as_str())
+                    .map(|text| text.contains("bug-bounty subagent"))
+                    .unwrap_or(false)
             })
             .count();
         assert_eq!(
@@ -1520,9 +1543,13 @@ mod tests {
             "sub-agent identity prompt must survive the runtime context-reminder prepend: {arr:?}"
         );
         // And the reminder itself must still be present, immediately after
-        // the system identity.
-        assert_eq!(arr[0]["role"], "system");
+        // the legacy identity context.
+        assert_eq!(arr[0]["role"], "user");
         assert_eq!(arr[1]["role"], "user");
+        assert!(
+            !arr.iter().any(|m| m["role"] == "system"),
+            "Responses input must not include system roles: {arr:?}"
+        );
         assert!(
             arr[1]["content"][0]["text"]
                 .as_str()
@@ -1532,9 +1559,8 @@ mod tests {
         );
     }
 
-    /// Mirror of `responses_input_preserves_leading_system_message` for the
-    /// Chat Completions boundary — confirms the first-position exemption
-    /// holds on both paths.
+    /// Chat Completions still accepts leading system messages, so keep that
+    /// boundary unchanged.
     #[test]
     fn chat_messages_preserves_leading_system_message() {
         let items = vec![
@@ -1577,24 +1603,14 @@ mod tests {
     }
 
     #[test]
-    fn managed_system_prompt_1_is_leading_responses_system_item() {
-        let mut items = vec![ConversationItem::user_message("audit this")];
-        insert_managed_system_prompt_1(&mut items, Some("managed system prompt"));
-        insert_context_reminder_preserving_legacy_leading_system(
-            &mut items,
-            "[context: cwd=/foo, ts=...]",
+    fn managed_system_prompt_1_appends_to_responses_instructions() {
+        let mut instructions = "base system prompt".to_string();
+        append_managed_system_prompt_1_to_instructions(
+            &mut instructions,
+            Some("managed system prompt"),
         );
 
-        let value = items_to_responses_input(&items);
-        let arr = value.as_array().unwrap();
-        assert_eq!(arr[0]["role"], "system");
-        assert_eq!(arr[0]["content"], "managed system prompt");
-        assert_eq!(arr[1]["role"], "user");
-        assert!(arr[1]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("context"));
-        assert_eq!(arr[2]["role"], "user");
+        assert_eq!(instructions, "base system prompt\n\nmanaged system prompt");
     }
 
     /// Mid-conversation transient system items get dropped even when a
@@ -1714,7 +1730,9 @@ mod tests {
             ConversationItem::user_message("summary"),
             ConversationItem::user_message("recent"),
         ];
-        inject_post_compact_context(&mut items, std::path::Path::new("/work"));
+        let mut state = crate::runtime::tests::state();
+        state.cwd = std::path::PathBuf::from("/work");
+        inject_post_compact_context(&mut items, &state);
         assert_eq!(items.len(), 3);
         let text = items[1].text_content().unwrap();
         assert!(text.contains("Context restored after compaction"));
@@ -1722,17 +1740,53 @@ mod tests {
     }
 
     #[test]
+    fn inject_post_compact_context_repeats_project_memory_skill_guidance() {
+        let mut items = vec![ConversationItem::user_message("summary")];
+        let mut state = crate::runtime::tests::state();
+        state.cwd = std::path::PathBuf::from("/work");
+        state.project_memory = Some(crate::memory::ProjectMemoryContext {
+            project_name: "demo".to_string(),
+            project_root: std::path::PathBuf::from("/work"),
+            memory_file: std::path::PathBuf::from("/tmp/MEMORY.md"),
+            char_limit: 6_000,
+        });
+
+        inject_post_compact_context(&mut items, &state);
+        let text = items[1].text_content().unwrap();
+        assert!(text.contains("skill: \"project-memory\""));
+        assert!(text.contains("/tmp/MEMORY.md"));
+    }
+
+    #[test]
     fn build_system_reminder_includes_date() {
-        let reminder = build_system_reminder("");
+        let state = crate::runtime::tests::state();
+        let reminder = build_system_reminder(&state, "");
         assert!(reminder.contains("currentDate"));
         assert!(reminder.contains("Today's date is"));
     }
 
     #[test]
     fn build_system_reminder_includes_git_status() {
-        let reminder = build_system_reminder("On branch main");
+        let state = crate::runtime::tests::state();
+        let reminder = build_system_reminder(&state, "On branch main");
         assert!(reminder.contains("gitStatus"));
         assert!(reminder.contains("On branch main"));
+    }
+
+    #[test]
+    fn build_system_reminder_includes_project_memory_skill_guidance() {
+        let mut state = crate::runtime::tests::state();
+        state.project_memory = Some(crate::memory::ProjectMemoryContext {
+            project_name: "demo".to_string(),
+            project_root: std::path::PathBuf::from("/workspace/demo"),
+            memory_file: std::path::PathBuf::from("/tmp/MEMORY.md"),
+            char_limit: 6_000,
+        });
+
+        let reminder = build_system_reminder(&state, "");
+        assert!(reminder.contains("projectMemory"));
+        assert!(reminder.contains("skill: \"project-memory\""));
+        assert!(reminder.contains("/tmp/MEMORY.md"));
     }
 
     #[test]

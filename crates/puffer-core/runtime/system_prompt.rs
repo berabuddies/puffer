@@ -230,6 +230,23 @@ fn build_session_guidance_section(
     }
     if preferred_tool_name(enabled_tools, &["Skill"]).is_some() && !resources.skills.is_empty() {
         items.push("User-invocable skills appear as slash commands like `/reviewer`; `/skill:<name>` remains a compatibility alias. When executed, the skill expands to a full prompt. Use the Skill tool only for skills listed in its user-invocable skills section - do not guess or use built-in CLI commands.".to_string());
+        let mut model_invocable_skills = resources
+            .skills
+            .iter()
+            .filter(|skill| !skill.value.disable_model_invocation)
+            .map(|skill| format!("{}: {}", skill.value.name, skill.value.description.trim()))
+            .collect::<Vec<_>>();
+        model_invocable_skills.sort();
+        if !model_invocable_skills.is_empty() {
+            let mut skill_list = String::from(
+                "Available model-invocable skills. Invoke these with the Skill tool by exact skill name:",
+            );
+            for skill in model_invocable_skills {
+                skill_list.push_str("\n  - ");
+                skill_list.push_str(&skill);
+            }
+            items.push(skill_list);
+        }
     }
     if items.is_empty() {
         return String::new();
@@ -444,7 +461,9 @@ fn os_version() -> String {
 mod tests {
     use super::{load_memory_prompt, render_runtime_system_prompt};
     use crate::runtime::tests::state;
-    use puffer_resources::{LoadedItem, LoadedResources, PromptTemplate, SourceInfo, SourceKind};
+    use puffer_resources::{
+        LoadedItem, LoadedResources, PromptTemplate, SkillSpec, SourceInfo, SourceKind,
+    };
     use std::collections::BTreeSet;
     use std::path::PathBuf;
 
@@ -519,6 +538,48 @@ mod tests {
         assert!(prompt.contains("AskUserQuestion"));
         assert!(prompt.contains("# Environment"));
         assert!(prompt.contains("Primary working directory:"));
+    }
+
+    #[test]
+    fn runtime_system_prompt_lists_model_invocable_skills() {
+        let state = state();
+        let enabled_tools = BTreeSet::from(["Skill".to_string()]);
+        let resources = LoadedResources {
+            skills: vec![
+                LoadedItem {
+                    value: SkillSpec {
+                        name: "agent-browser".to_string(),
+                        description: "Use AgentEnv platform browsers".to_string(),
+                        disable_model_invocation: false,
+                        ..SkillSpec::default()
+                    },
+                    source_info: SourceInfo {
+                        path: PathBuf::from(".puffer/resources/skills/agent-browser/SKILL.md"),
+                        kind: SourceKind::Workspace,
+                    },
+                },
+                LoadedItem {
+                    value: SkillSpec {
+                        name: "hidden".to_string(),
+                        description: "Do not show this one".to_string(),
+                        disable_model_invocation: true,
+                        ..SkillSpec::default()
+                    },
+                    source_info: SourceInfo {
+                        path: PathBuf::from(".puffer/resources/skills/hidden/SKILL.md"),
+                        kind: SourceKind::Workspace,
+                    },
+                },
+            ],
+            ..LoadedResources::default()
+        };
+
+        let prompt =
+            render_runtime_system_prompt(&state, &resources, "gpt-5", &enabled_tools).unwrap();
+
+        assert!(prompt.contains("Available model-invocable skills"));
+        assert!(prompt.contains("- agent-browser: Use AgentEnv platform browsers"));
+        assert!(!prompt.contains("Do not show this one"));
     }
 
     #[test]

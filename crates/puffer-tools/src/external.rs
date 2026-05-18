@@ -210,6 +210,7 @@ fn is_runtime_local_handler(handler: &str) -> bool {
             | "runtime:list_mcp_resources"
             | "runtime:read_mcp_resource"
             | "runtime:mcp_call"
+            | "runtime:project_memory"
     ) || handler.starts_with("runtime:claude_")
         || handler.starts_with("runtime:workflow:")
 }

@@ -213,3 +213,139 @@ fn execute_anthropic_tool_calls_respect_request_tool_filter() {
         .output
         .contains("slash command tool scope denied this tool call"));
 }
+
+#[test]
+fn request_scoped_write_path_filters_allow_only_matching_paths() {
+    let mut tool = loaded_tool("Write", "Write file", "runtime:claude_write");
+    tool.value.approval_policy = Some("on-request".to_string());
+    tool.value.sandbox_policy = Some("workspace-write".to_string());
+    let resources = LoadedResources {
+        tools: vec![tool],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let mut providers = ProviderRegistry::new();
+    providers.register(openai_provider("http://127.0.0.1".to_string()));
+    let request_config = test_openai_request_config();
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let allowed_dir = cwd.join("allowed");
+    let denied_dir = cwd.join("other");
+    fs::create_dir_all(&allowed_dir).unwrap();
+    fs::create_dir_all(&denied_dir).unwrap();
+    let filter =
+        super::super::build_request_tool_filter(&[format!("Write({}/**)", allowed_dir.display())])
+            .unwrap()
+            .unwrap();
+    let permission_context = crate::permissions::load_runtime_permission_context_with_inputs(
+        &cwd,
+        &resources,
+        &state,
+        crate::permissions::RuntimePermissionInputs {
+            request_tool_filter: Some(filter.clone()),
+        },
+    )
+    .unwrap();
+    let definition = registry.definition("Write").unwrap();
+    let allowed_path = allowed_dir.join("file.txt");
+    let denied_path = denied_dir.join("file.txt");
+
+    assert!(permission_context.tool_visible_to_model(definition));
+    assert_eq!(
+        permission_context
+            .decision_for_tool_call(
+                definition,
+                &json!({"file_path": allowed_path, "content": "allowed"})
+            )
+            .behavior,
+        crate::permissions::ToolPermissionBehavior::Allow
+    );
+    let denied_decision = permission_context.decision_for_tool_call(
+        definition,
+        &json!({"file_path": denied_path, "content": "denied"}),
+    );
+    assert_eq!(
+        denied_decision.behavior,
+        crate::permissions::ToolPermissionBehavior::Deny
+    );
+    assert_eq!(
+        denied_decision.reason.as_deref(),
+        Some("slash command tool scope denied this tool call")
+    );
+
+    let result = execute_tool_call(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &registry,
+        "gpt-5",
+        &cwd,
+        ToolExecutionBackend::OpenAi {
+            request_config: &request_config,
+            structured_output: None,
+        },
+        Some(&filter),
+        "Write",
+        json!({"file_path": denied_path, "content": "denied"}),
+    )
+    .unwrap();
+
+    assert!(!result.success);
+    assert!(result
+        .output
+        .stdout
+        .contains("slash command tool scope denied this tool call"));
+}
+
+#[test]
+fn request_scoped_edit_path_filters_allow_only_the_selected_file() {
+    let mut tool = loaded_tool("Edit", "Edit file", "runtime:claude_edit");
+    tool.value.approval_policy = Some("on-request".to_string());
+    tool.value.sandbox_policy = Some("workspace-write".to_string());
+    let resources = LoadedResources {
+        tools: vec![tool],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let cwd = std::path::PathBuf::from("/tmp/work");
+    let allowed_path = cwd.join("allowed").join("file.txt");
+    let denied_path = cwd.join("other").join("file.txt");
+    let filter =
+        super::super::build_request_tool_filter(&[format!("Edit({})", allowed_path.display())])
+            .unwrap()
+            .unwrap();
+    let permission_context = crate::permissions::load_runtime_permission_context_with_inputs(
+        &cwd,
+        &resources,
+        &state(),
+        crate::permissions::RuntimePermissionInputs {
+            request_tool_filter: Some(filter),
+        },
+    )
+    .unwrap();
+    let definition = registry.definition("Edit").unwrap();
+
+    assert!(permission_context.tool_visible_to_model(definition));
+    assert_eq!(
+        permission_context
+            .decision_for_tool_call(
+                definition,
+                &json!({"file_path": allowed_path, "old_string": "a", "new_string": "b"})
+            )
+            .behavior,
+        crate::permissions::ToolPermissionBehavior::Allow
+    );
+    let denied_decision = permission_context.decision_for_tool_call(
+        definition,
+        &json!({"file_path": denied_path, "old_string": "a", "new_string": "b"}),
+    );
+    assert_eq!(
+        denied_decision.behavior,
+        crate::permissions::ToolPermissionBehavior::Deny
+    );
+    assert_eq!(
+        denied_decision.reason.as_deref(),
+        Some("slash command tool scope denied this tool call")
+    );
+}

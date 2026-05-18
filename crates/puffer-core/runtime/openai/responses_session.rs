@@ -23,8 +23,8 @@ use serde_json::Value;
 use std::collections::HashSet;
 
 use super::conversation::{
-    append_reasoning_items, generate_openai_summary,
-    insert_context_reminder_preserving_legacy_leading_system, insert_managed_system_prompt_1,
+    append_managed_system_prompt_1_to_instructions, append_reasoning_items,
+    generate_openai_summary, insert_context_reminder_preserving_legacy_leading_system,
     items_to_responses_input, managed_system_prompt_1_from_env, ConversationItem,
 };
 use super::support::{
@@ -35,7 +35,7 @@ use super::{
     parse_openai_assistant_text, resolve_openai_execution_config, send_openai_request_with_refresh,
     send_openai_request_with_refresh_streaming, OpenAIExecutionConfig,
 };
-use crate::permissions::load_runtime_permission_context;
+use crate::permissions::{load_runtime_permission_context_with_inputs, RuntimePermissionInputs};
 use crate::runtime::agent_loop::{AssistantTurn, TurnSession};
 use crate::runtime::structured_output_support::StructuredOutputConfig;
 use crate::runtime::structured_output_support::{
@@ -55,13 +55,17 @@ use crate::AppState;
 pub(super) struct OpenAIResponsesTurnSession {
     pub execution: OpenAIExecutionConfig,
     pub instructions: String,
-    pub managed_system_prompt_1: Option<String>,
+    pub lightweight_context: bool,
     pub tools: Vec<OpenAIResponsesTool>,
     pub text: Option<OpenAIResponsesTextConfig>,
     pub structured_output: Option<StructuredOutputConfig>,
     pub model_id: String,
     pub supports_reasoning: bool,
     pub supports_response_threading: bool,
+    /// Pre-rendered `<system-reminder>` text (currentDate + gitStatus +
+    /// optional project-memory skill guidance). Computed once at session
+    /// setup so `pre_loop_inject` does not need `&AppState`.
+    pub context_reminder: String,
     /// Server-side response identifier from the most recent turn. When
     /// set, the next request omits already-known prefix items.
     pub previous_response_id: Option<String>,
@@ -372,13 +376,16 @@ impl TurnSession for OpenAIResponsesTurnSession {
     }
 
     fn pre_loop_inject(&mut self, items: &mut Vec<ConversationItem>) {
-        // Pin per-turn dynamic context (currentDate + gitStatus) at
-        // the front so every Responses request includes it. Static
-        // instructions stay in `instructions` — only this dynamic part
-        // belongs in `input`.
-        insert_managed_system_prompt_1(items, self.managed_system_prompt_1.as_deref());
-        let context_reminder = super::build_context_reminder_message();
-        insert_context_reminder_preserving_legacy_leading_system(items, &context_reminder);
+        if self.lightweight_context {
+            return;
+        }
+        // Pin per-turn dynamic context (currentDate + gitStatus + optional
+        // project-memory skill guidance) at the front so every Responses
+        // request includes it. Static instructions stay in `instructions`
+        // — only this dynamic part belongs in `input`. The reminder text
+        // was rendered once at session setup with `&AppState` access,
+        // since this trait method does not receive state.
+        insert_context_reminder_preserving_legacy_leading_system(items, &self.context_reminder);
     }
 
     fn notify_compacted(&mut self) {
@@ -405,14 +412,20 @@ pub(super) fn setup_responses_session(
     let execution = resolve_openai_execution_config(state, auth_store, provider)?;
     let registry =
         super::super::mcp_discovery::registry_with_mcp_tools(resources, state.tool_runner.as_ref());
-    let permission_context = load_runtime_permission_context(&state.cwd, resources, state)?;
+    let permission_context = load_runtime_permission_context_with_inputs(
+        &state.cwd,
+        resources,
+        state,
+        RuntimePermissionInputs {
+            request_tool_filter: options.tool_filter.cloned(),
+        },
+    )?;
     let text = openai_responses_text_config(options.structured_output, use_native);
     let tools = openai_tool_definitions_for_request(
         &registry,
         options.structured_output,
         use_native,
         Some(&permission_context),
-        options.tool_filter,
     )?;
     // Native server-side tools (e.g. `web_search`) serialize without a name,
     // so filter empty entries out of the system-prompt tool set.
@@ -421,24 +434,44 @@ pub(super) fn setup_responses_session(
         .map(|tool| tool.name.clone())
         .filter(|name| !name.is_empty())
         .collect::<std::collections::BTreeSet<_>>();
-    let system_prompt =
-        render_runtime_system_prompt(state, resources, &model_id, &enabled_tool_names)?;
-    let instructions = super::openai_request_instructions(state, resources, Some(&system_prompt))?;
+    let mut instructions = if options.lightweight_context {
+        "Reply directly and concisely.".to_string()
+    } else {
+        let system_prompt =
+            render_runtime_system_prompt(state, resources, &model_id, &enabled_tool_names)?;
+        super::openai_request_instructions(state, resources, Some(&system_prompt))?
+    };
+    let managed_system_prompt_1 = if options.lightweight_context {
+        None
+    } else {
+        managed_system_prompt_1_from_env()
+    };
+    append_managed_system_prompt_1_to_instructions(
+        &mut instructions,
+        managed_system_prompt_1.as_deref(),
+    );
     let model = provider.models.iter().find(|m| m.id == model_id);
     let supports_reasoning = openai_model_supports_reasoning(provider, &model_id);
     let supports_response_threading =
         openai_supports_response_threading(provider, &execution.request_config.base_url, model);
 
+    let context_reminder = if options.lightweight_context {
+        String::new()
+    } else {
+        super::build_context_reminder_message(state)
+    };
+
     Ok(OpenAIResponsesTurnSession {
         execution,
         instructions,
-        managed_system_prompt_1: managed_system_prompt_1_from_env(),
+        lightweight_context: options.lightweight_context,
         tools,
         text,
         structured_output: options.structured_output.cloned(),
         model_id,
         supports_reasoning,
         supports_response_threading,
+        context_reminder,
         previous_response_id: None,
         continuation_start: None,
     })

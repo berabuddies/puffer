@@ -1,5 +1,6 @@
 use crate::workspace_paths;
 use anyhow::{bail, Context, Result};
+use puffer_runner_api::FilesystemExecutionPolicy;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::fs;
@@ -18,7 +19,7 @@ struct ClaudeEditInput {
 pub fn execute_claude_edit(
     cwd: &Path,
     working_dirs: &[std::path::PathBuf],
-    allow_all_paths: bool,
+    filesystem: &FilesystemExecutionPolicy,
     input: Value,
 ) -> Result<String> {
     let input: ClaudeEditInput = serde_json::from_value(input).context("invalid Edit input")?;
@@ -30,15 +31,10 @@ pub fn execute_claude_edit(
     {
         bail!("Edit expects `file_path` to be an absolute path");
     }
-    let sandbox_mode = if allow_all_paths {
-        "danger-full-access"
-    } else {
-        "workspace-write"
-    };
-    let path = workspace_paths::resolve_path_for_session(
+    let path = workspace_paths::resolve_path_for_filesystem_policy(
         cwd,
         working_dirs,
-        sandbox_mode,
+        filesystem.sandbox_mode,
         Path::new(&input.file_path),
     )?;
     if input.old_string == input.new_string {
@@ -211,7 +207,14 @@ fn split_lines(content: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use puffer_runner_api::{FilesystemExecutionPolicy, FilesystemSandboxMode};
     use serde_json::json;
+
+    fn workspace_write_policy() -> FilesystemExecutionPolicy {
+        FilesystemExecutionPolicy {
+            sandbox_mode: FilesystemSandboxMode::WorkspaceWrite,
+        }
+    }
 
     #[test]
     fn old_string_diagnostic_snippet_truncates_long_strings() {
@@ -248,7 +251,8 @@ mod tests {
             "new_string": "x"
         });
 
-        let err = execute_claude_edit(temp.path(), &[], false, input).unwrap_err();
+        let err =
+            execute_claude_edit(temp.path(), &[], &workspace_write_policy(), input).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("was not found"));
         assert!(
@@ -268,7 +272,8 @@ mod tests {
             "new_string": "x"
         });
 
-        let err = execute_claude_edit(temp.path(), &[], false, input).unwrap_err();
+        let err =
+            execute_claude_edit(temp.path(), &[], &workspace_write_policy(), input).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("\\uXXXX") || msg.contains("escape"));
     }
@@ -284,7 +289,8 @@ mod tests {
             "new_string": "x"
         });
 
-        let err = execute_claude_edit(temp.path(), &[], false, input).unwrap_err();
+        let err =
+            execute_claude_edit(temp.path(), &[], &workspace_write_policy(), input).unwrap_err();
         let msg = err.to_string();
         assert!(!msg.contains("escapes"));
     }
@@ -301,7 +307,8 @@ mod tests {
             // replace_all defaults to false
         });
 
-        let err = execute_claude_edit(temp.path(), &[], false, input).unwrap_err();
+        let err =
+            execute_claude_edit(temp.path(), &[], &workspace_write_policy(), input).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("Found 3 matches"),
@@ -321,7 +328,8 @@ mod tests {
             "new_string": "gamma"
         });
 
-        let output = execute_claude_edit(temp.path(), &[], false, input).unwrap();
+        let output =
+            execute_claude_edit(temp.path(), &[], &workspace_write_policy(), input).unwrap();
         assert!(output.contains("\"replaceAll\": false"));
         assert_eq!(fs::read_to_string(&file).unwrap(), "alpha\ngamma\n");
     }
@@ -338,7 +346,7 @@ mod tests {
             "replace_all": true
         });
 
-        let _ = execute_claude_edit(temp.path(), &[], false, input).unwrap();
+        let _ = execute_claude_edit(temp.path(), &[], &workspace_write_policy(), input).unwrap();
         assert_eq!(fs::read_to_string(&file).unwrap(), "a\ny\ny\n");
     }
 
@@ -353,7 +361,8 @@ mod tests {
             "new_string": "y"
         });
 
-        let error = execute_claude_edit(temp.path(), &[], false, input).unwrap_err();
+        let error =
+            execute_claude_edit(temp.path(), &[], &workspace_write_policy(), input).unwrap_err();
         assert!(
             error.to_string().contains("Found 2 matches")
                 || error.to_string().contains("not unique")
@@ -369,7 +378,8 @@ mod tests {
             "new_string": "y"
         });
 
-        let error = execute_claude_edit(temp.path(), &[], false, input).unwrap_err();
+        let error =
+            execute_claude_edit(temp.path(), &[], &workspace_write_policy(), input).unwrap_err();
         assert!(error.to_string().contains("absolute path"));
     }
 
@@ -383,7 +393,8 @@ mod tests {
             "new_string": "hello"
         });
 
-        let output = execute_claude_edit(temp.path(), &[], false, input).unwrap();
+        let output =
+            execute_claude_edit(temp.path(), &[], &workspace_write_policy(), input).unwrap();
         assert!(output.contains("\"originalFile\": \"\""));
         assert_eq!(fs::read_to_string(&file).unwrap(), "hello");
     }
@@ -411,7 +422,8 @@ mod tests {
             "new_string": "gamma"
         });
 
-        let error = execute_claude_edit(temp.path(), &[], false, input).unwrap_err();
+        let error =
+            execute_claude_edit(temp.path(), &[], &workspace_write_policy(), input).unwrap_err();
         assert!(error
             .to_string()
             .contains("outside the current working directories"));

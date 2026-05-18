@@ -8,8 +8,9 @@ use crate::text_overlay::TextOverlay;
 use crate::usage::UsageOverlay;
 use crate::user_question_overlay::UserQuestionOverlay;
 use puffer_core::{
-    CommandSpec, PermissionPromptAction, PermissionPromptRequest, ToolCallRequest, ToolInvocation,
-    TurnExecution, TurnUsageReport, UserQuestionPromptRequest, UserQuestionPromptResponse,
+    CommandSpec, PermissionPromptAction, PermissionPromptRequest, SessionPermissionState,
+    ToolCallRequest, ToolInvocation, TurnExecution, TurnUsageReport, UserQuestionPromptRequest,
+    UserQuestionPromptResponse,
 };
 use puffer_provider_registry::{AuthStore, ExternalImportCandidate};
 use puffer_session_store::SessionSummary;
@@ -89,16 +90,25 @@ pub(crate) struct TuiState {
     /// Snapshot of the user's in-progress input at the moment they started
     /// navigating history, restored when they move past the newest entry.
     pub(crate) history_draft: Option<String>,
+    /// Timestamp of the most recent user keystroke. Auto-recap fires when
+    /// `now - last_user_input_at > config.recap.idle_secs` and the rest of
+    /// `puffer_core::recap::should_auto_trigger` passes.
+    pub(crate) last_user_input_at: std::time::Instant,
+    /// Count of user messages observed at the time the last recap (manual or
+    /// auto) was triggered. Feeds the cooldown check.
+    pub(crate) last_recap_user_msg_count: Option<usize>,
 }
 
 /// Carries one completed background provider turn back to the UI thread.
 pub(crate) struct PendingSubmitResult {
     pub(crate) outcome: std::result::Result<TurnExecution, String>,
     pub(crate) auth_store: AuthStore,
-    /// Session-level tool permissions accumulated on the worker clone.
-    pub(crate) session_tool_permissions: std::collections::HashMap<String, String>,
+    /// Session-level permission state accumulated on the worker clone.
+    pub(crate) session_permission_state: SessionPermissionState,
     /// Whether the user chose "allow all" during this turn.
     pub(crate) session_allow_all: bool,
+    /// Project-memory review turns accumulated on the worker clone.
+    pub(crate) project_memory_review_turns: usize,
 }
 
 /// Carries one event emitted while a provider-backed turn is in flight.
@@ -175,6 +185,8 @@ impl Default for TuiState {
             history: VecDeque::new(),
             history_cursor: None,
             history_draft: None,
+            last_user_input_at: std::time::Instant::now(),
+            last_recap_user_msg_count: None,
         }
     }
 }

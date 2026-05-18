@@ -27,8 +27,9 @@ use crate::flow::{
     advance_loop_after_turn, allow_prompt_before_onboarding, apply_selected_provider,
     builtin_openai_base_url, builtin_openai_headers, builtin_openai_query_params,
     cancel_pending_submit, check_loop_interval, emit_system_message, handle_prompt_submit,
-    handle_submit, persist_user_config, poll_pending_submit, run_embedded_auth_login,
-    set_overlay_state, submit_next_queued_prompt, submit_queued_prompt_if_ready, try_open_overlay,
+    handle_submit, maybe_apply_requested_reload, persist_user_config, poll_pending_submit,
+    run_embedded_auth_login, set_overlay_state, submit_next_queued_prompt,
+    submit_queued_prompt_if_ready, try_open_overlay,
 };
 use crate::permission_prompt_flow::handle_permission_prompt_key;
 use crate::render::initialize_top_panel_image_state;
@@ -49,7 +50,9 @@ use crossterm::terminal::{
     ClearType, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::ExecutableCommand;
+use puffer_config::ConfigPaths;
 use puffer_core::{command_surface, shutdown_runtime_services, AppState, CommandSpec};
+use puffer_core::ResourceWatcher;
 use puffer_provider_registry::{AuthStore, ProviderRegistry, StoredCredential};
 use puffer_resources::LoadedResources;
 use puffer_session_store::SessionStore;
@@ -172,6 +175,27 @@ pub fn run_app(
 
     sync_render_state(&tui);
 
+    // Spin up the filesystem watcher so users adding / editing skills or
+    // MCP server manifests in another shell get their changes picked up
+    // without restarting puffer. Watcher errors are non-fatal: the user
+    // can still trigger reloads with `/reload-plugins`.
+    // Held to keep the watcher alive for the lifetime of `run_app`. The
+    // underscore-prefixed binding signals intent: nothing else reads from
+    // it — the watcher dispatches into `state.reload_signal()` directly.
+    let _resource_watcher = match ResourceWatcher::start(
+        &ConfigPaths::discover(&state.cwd),
+        state.reload_signal(),
+    ) {
+        Ok(watcher) => Some(watcher),
+        Err(err) => {
+            tracing::warn!(
+                target = "puffer::tui",
+                "resource hot-reload watcher failed to start: {err}"
+            );
+            None
+        }
+    };
+
     let mut viewport_height = if use_content_viewport {
         let (width, height) = terminal_size()?;
         render::desired_height(
@@ -193,6 +217,18 @@ pub fn run_app(
     };
 
     loop {
+        // Idle hot-reload check: pick up filesystem-watcher signals
+        // between user input. Skipped while a turn is in flight —
+        // `reload_runtime_resources` calls `shutdown_runtime_services()`
+        // (which sleeps 500ms and waits for background agents to drain)
+        // and swaps the live MCP host out from under the worker. The
+        // signal remains latched on `AppState`, so we'll pick it up on
+        // the next idle iteration. Command-driven reloads (e.g.
+        // `/reload-plugins`) still run inline because they go through
+        // the post-submit path in `flow::handle_submit`.
+        if !tui.has_pending_submit() {
+            maybe_apply_requested_reload(state, resources, providers, auth_store, session_store)?;
+        }
         if poll_pending_submit(state, auth_store, auth_path, session_store, &mut tui)? {
             advance_loop_after_turn(state, session_store, &mut tui)?;
             pentest_command::advance_after_turn(state, session_store, &mut tui)?;
@@ -228,6 +264,26 @@ pub fn run_app(
                     completed.join("\n")
                 );
                 tui.enqueue_prompt(notice);
+            }
+        }
+        // Auto-recap: when the user has stepped away (idle timer elapsed) and
+        // the skip checks pass, enqueue `/recap` so the existing slash-command
+        // dispatcher runs the side-turn and surfaces a 1-2 sentence summary.
+        if !tui.has_pending_submit() && tui.queued_prompts.is_empty() {
+            let idle_threshold = std::time::Duration::from_secs(state.config.recap.idle_secs);
+            let idle_elapsed = tui.last_user_input_at.elapsed();
+            if idle_elapsed >= idle_threshold
+                && puffer_core::recap::should_auto_trigger(
+                    state,
+                    tui.last_recap_user_msg_count,
+                    &tui.input,
+                )
+            {
+                tui.enqueue_prompt("/recap".to_string());
+                tui.last_recap_user_msg_count = Some(puffer_core::recap::count_user_messages(state));
+                // Reset idle timer so we don't fire again immediately when the
+                // user keeps the terminal unfocused after the recap shows up.
+                tui.last_user_input_at = std::time::Instant::now();
             }
         }
         if !tui.has_pending_submit() && !tui.queued_prompts.is_empty() {
@@ -420,6 +476,9 @@ fn handle_key(
     tui: &mut TuiState,
     no_alt_screen: bool,
 ) -> Result<bool> {
+    // Reset the recap idle timer on any keystroke. Auto-recap fires only
+    // after `config.recap.idle_secs` have elapsed since the last keystroke.
+    tui.last_user_input_at = std::time::Instant::now();
     if tui.overlay.is_some() {
         return handle_overlay_key(
             key,

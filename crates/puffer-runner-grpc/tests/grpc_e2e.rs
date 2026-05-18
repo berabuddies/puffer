@@ -151,7 +151,9 @@ fn make_request(tool_id: &str, cwd: &Path, input: serde_json::Value) -> ToolRequ
         tool_id: tool_id.to_string(),
         cwd: cwd.to_path_buf(),
         working_dirs: Vec::new(),
-        allow_all_paths: false,
+        filesystem: puffer_runner_api::FilesystemExecutionPolicy {
+            sandbox_mode: puffer_runner_api::FilesystemSandboxMode::WorkspaceWrite,
+        },
         input,
         session_id: None,
     }

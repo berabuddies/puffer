@@ -1,3 +1,5 @@
+use crate::memory::ProjectMemoryContext;
+use crate::permissions::{SessionPermissionGrants, SessionPermissionState};
 use crate::runner_adapter::LocalToolRunner;
 use crate::runtime::ReflectionConfig;
 use puffer_config::PufferConfig;
@@ -8,6 +10,7 @@ use puffer_session_store::{
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// Describes the role of a rendered transcript message.
@@ -185,6 +188,8 @@ pub struct AppState {
     pub active_team_name: Option<String>,
     pub statusline_enabled: bool,
     pub status_line_text: Option<String>,
+    pub project_memory: Option<ProjectMemoryContext>,
+    pub project_memory_review_turns: usize,
     pub vim_mode: bool,
     /// Session-scoped reflection policy toggled via `/reflect`; `None` means off.
     pub reflection_config: Option<ReflectionConfig>,
@@ -196,7 +201,14 @@ pub struct AppState {
     pub session_goal: Option<SessionGoal>,
     pub should_exit: bool,
     pub reload_resources_requested: bool,
+    /// Cross-thread signal raised by the filesystem watcher when a tracked
+    /// skill/MCP/plugin file changes. Mirrors `reload_resources_requested`
+    /// but is safe to flip from background threads (e.g. the resource
+    /// watcher). The TUI loop ORs both sources together via
+    /// [`AppState::take_reload_request`] before deciding to reload.
+    pub resource_reload_signal: Arc<AtomicBool>,
     pub(crate) claude_read_state: HashMap<PathBuf, ClaudeReadState>,
+    pub(crate) session_permission_state: SessionPermissionState,
     pub session_tool_permissions: HashMap<String, String>,
     /// When true, all tool permission prompts are auto-allowed for the session.
     pub session_allow_all: bool,
@@ -240,6 +252,13 @@ impl AppState {
             .clone()
             .unwrap_or_else(|| "auto".to_string());
         let fast_mode = config.fast_mode;
+        let project_memory = if config.memory.enabled {
+            ProjectMemoryContext::load(&cwd, config.memory.char_limit)
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
         let vim_mode = config.editor_mode == "vim";
         Self {
             current_model,
@@ -268,12 +287,16 @@ impl AppState {
             active_team_name: None,
             statusline_enabled: true,
             status_line_text: None,
+            project_memory,
+            project_memory_review_turns: 0,
             vim_mode,
             reflection_config: None,
             session_goal: None,
             should_exit: false,
             reload_resources_requested: false,
+            resource_reload_signal: Arc::new(AtomicBool::new(false)),
             claude_read_state: HashMap::new(),
+            session_permission_state: SessionPermissionState::default(),
             session_tool_permissions: HashMap::new(),
             session_allow_all: false,
             native_structured_output_unsupported: HashSet::new(),
@@ -298,6 +321,23 @@ impl AppState {
     pub fn with_tool_runner(mut self, runner: Arc<dyn ToolRunner>) -> Self {
         self.tool_runner = runner;
         self
+    }
+
+    /// Returns true and clears both the command-driven flag and the
+    /// background filesystem-watcher signal if either is set. The caller
+    /// (typically `puffer-tui`) is then expected to invoke
+    /// [`crate::reload_runtime_resources`] before continuing the loop so a
+    /// turn never starts against stale resources.
+    pub fn take_reload_request(&mut self) -> bool {
+        let from_signal = self.resource_reload_signal.swap(false, Ordering::AcqRel);
+        let from_flag = std::mem::replace(&mut self.reload_resources_requested, false);
+        from_signal || from_flag
+    }
+
+    /// Returns a cheap clone of the cross-thread reload signal so background
+    /// services (e.g. the filesystem watcher) can raise it from off-loop.
+    pub fn reload_signal(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.resource_reload_signal)
     }
 
     /// Restores application state from a persisted session record.
@@ -470,6 +510,37 @@ impl AppState {
     }
 
     /// Records one completed or failed task in the current runtime session state.
+    pub fn memory_enabled(&self) -> bool {
+        self.config.memory.enabled
+    }
+
+    pub fn memory_review_enabled(&self) -> bool {
+        self.config.memory.background_review
+    }
+
+    pub fn memory_flush_enabled(&self) -> bool {
+        self.config.memory.flush_on_compact
+    }
+
+    pub fn memory_review_nudge_interval(&self) -> usize {
+        self.config.memory.review_nudge_interval
+    }
+
+    pub fn memory_flush_min_turns(&self) -> usize {
+        self.config.memory.flush_min_turns
+    }
+
+    pub fn refresh_project_memory(&mut self) {
+        self.project_memory = if self.config.memory.enabled {
+            ProjectMemoryContext::load(&self.cwd, self.config.memory.char_limit)
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+    }
+
+    /// Records one completed or failed task in the current runtime session state.
     pub fn record_task(
         &mut self,
         label: impl Into<String>,
@@ -566,8 +637,79 @@ impl AppState {
     }
 
     pub(crate) fn allow_tool_for_session(&mut self, tool_id: &str) {
-        self.session_tool_permissions
-            .insert(tool_id.to_ascii_lowercase(), "allow".to_string());
+        let definition = puffer_tools::ToolDefinition {
+            id: tool_id.to_string(),
+            name: tool_id.to_string(),
+            description: String::new(),
+            handler: String::new(),
+            aliases: Vec::new(),
+            handler_args: Vec::new(),
+            kind: puffer_tools::ToolKind::Custom,
+            input_schema: puffer_tools::ToolInputSchema::default(),
+            metadata: puffer_tools::ToolMetadata::default(),
+            policy: puffer_tools::ToolPolicyHints::default(),
+            shared_lib: None,
+            enabled_if: None,
+            display: puffer_tools::ToolDisplayHints::default(),
+        };
+        self.allow_permission_for_tool_call(&definition, &serde_json::Value::Null);
+    }
+
+    /// Grants session-scoped permission for one tool call and refreshes the
+    /// legacy projection cache used by older callers.
+    pub fn allow_permission_for_tool_call(
+        &mut self,
+        definition: &puffer_tools::ToolDefinition,
+        input: &serde_json::Value,
+    ) {
+        self.session_permission_state.grants_mut().grant_tool_call(
+            definition,
+            input,
+            &self.session.id,
+        );
+        self.session_tool_permissions = self
+            .session_permission_state
+            .grants()
+            .legacy_tool_permissions();
+    }
+
+    /// Rebuilds legacy session tool permissions from the typed session state.
+    pub fn sync_session_tool_permissions_from_state(&mut self) {
+        self.session_tool_permissions = self
+            .session_permission_state
+            .grants()
+            .legacy_tool_permissions();
+    }
+
+    /// Returns the typed session permission state.
+    pub fn session_permission_state(&self) -> &SessionPermissionState {
+        &self.session_permission_state
+    }
+
+    /// Replaces the typed session permission state and refreshes the legacy
+    /// projection cache so worker and UI threads stay in sync.
+    pub fn replace_session_permission_state(&mut self, state: SessionPermissionState) {
+        self.session_permission_state = state;
+        self.session_allow_all = self.session_permission_state.allow_all_tools();
+        self.sync_session_tool_permissions_from_state();
+    }
+
+    /// Grants all tool permissions for the current session.
+    pub fn set_session_allow_all(&mut self) {
+        self.session_allow_all = true;
+        self.session_permission_state.set_allow_all_tools(true);
+    }
+
+    /// Rebuilds the typed session permission state from legacy session fields.
+    ///
+    /// Callers must update `self.session_allow_all` before invoking this helper.
+    /// The typed `allow_all_tools` bit is sourced from that legacy flag and then
+    /// combined with grants projected from `self.session_tool_permissions`.
+    pub(crate) fn sync_session_permission_state(&mut self) {
+        self.session_permission_state = SessionPermissionState::new(
+            self.session_allow_all,
+            SessionPermissionGrants::from_legacy_tool_permissions(&self.session_tool_permissions),
+        );
     }
 
     pub(crate) fn native_structured_output_key(

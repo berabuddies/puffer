@@ -388,11 +388,23 @@ pub(crate) fn handle_prompt_submit(
             )
         })
         .map_err(|error| error.to_string());
+        if let Ok(turn) = &outcome {
+            worker_state.push_message(MessageRole::Assistant, turn.assistant_text.clone());
+            if puffer_core::project_memory_turn_completed(&mut worker_state) {
+                puffer_core::spawn_project_memory_review(
+                    &worker_state,
+                    &worker_resources,
+                    &worker_providers,
+                    &worker_auth_store,
+                );
+            }
+        }
         let _ = sender.send(PendingSubmitEvent::Finished(PendingSubmitResult {
             outcome,
             auth_store: worker_auth_store,
-            session_tool_permissions: worker_state.session_tool_permissions.clone(),
+            session_permission_state: worker_state.session_permission_state().clone(),
             session_allow_all: worker_state.session_allow_all,
+            project_memory_review_turns: worker_state.project_memory_review_turns,
         }));
     });
     tui.pending_submit = Some(PendingSubmit {
@@ -480,8 +492,9 @@ pub(crate) fn poll_pending_submit(
             Err(TryRecvError::Disconnected) => PendingSubmitEvent::Finished(PendingSubmitResult {
                 outcome: Err("background request disconnected".to_string()),
                 auth_store: auth_store.clone(),
-                session_tool_permissions: std::collections::HashMap::new(),
+                session_permission_state: state.session_permission_state().clone(),
                 session_allow_all: false,
+                project_memory_review_turns: state.project_memory_review_turns,
             }),
         };
         match event {
@@ -550,13 +563,14 @@ pub(crate) fn poll_pending_submit(
                 let rendered_tool_invocations = pending.rendered_tool_invocations;
                 let previous_auth_store = auth_store.clone();
                 *auth_store = result.auth_store;
-                // Sync session permissions from worker clone back to main state.
-                state
-                    .session_tool_permissions
-                    .extend(result.session_tool_permissions);
-                if result.session_allow_all {
-                    state.session_allow_all = true;
-                }
+                // Sync the full typed session permission state from the worker
+                // clone so category grants survive the worker/UI round-trip.
+                // This also avoids depending on AppState's legacy rebuild path,
+                // where sync_session_permission_state() assumes
+                // session_allow_all was updated before reconstruction.
+                let _ = result.session_allow_all;
+                state.replace_session_permission_state(result.session_permission_state);
+                state.project_memory_review_turns = result.project_memory_review_turns;
                 match result.outcome {
                     Ok(turn) => {
                         if rendered_tool_invocations < turn.tool_invocations.len() {
@@ -718,6 +732,9 @@ pub(crate) fn handle_submit(
                     text: turn.assistant_text,
                 },
             )?;
+            if puffer_core::project_memory_turn_completed(state) {
+                puffer_core::spawn_project_memory_review(state, resources, providers, auth_store);
+            }
         }
         Err(error) => {
             let message = format!("Provider request failed: {error}");
@@ -924,7 +941,17 @@ pub(crate) fn submit_queued_prompt_if_ready(
     Ok(())
 }
 
-/// Reloads runtime resources when commands request it and emits the reload summary.
+/// Reloads runtime resources when commands or the resource watcher request
+/// it and emits the reload summary. Coalesces the in-loop flag and the
+/// cross-thread filesystem watcher signal so the watcher and `/reload-plugins`
+/// hit the same code path.
+///
+/// A reload error (e.g. transient invalid YAML from an editor's atomic-save
+/// of a partially-written file under `.puffer/resources/`) is surfaced as a
+/// system message rather than propagated; the watcher-driven path must not
+/// be able to kill the TUI session and discard the in-memory transcript
+/// just because a SKILL.md is mid-edit. The user can re-save to retry — the
+/// watcher will fire again.
 pub(crate) fn maybe_apply_requested_reload(
     state: &mut AppState,
     resources: &mut LoadedResources,
@@ -932,12 +959,14 @@ pub(crate) fn maybe_apply_requested_reload(
     auth_store: &AuthStore,
     session_store: &SessionStore,
 ) -> Result<()> {
-    if !state.reload_resources_requested {
+    if !state.take_reload_request() {
         return Ok(());
     }
-    state.reload_resources_requested = false;
-    let summary = reload_runtime_resources(state, resources, providers, auth_store)?;
-    emit_system_message(state, session_store, summary)
+    let message = match reload_runtime_resources(state, resources, providers, auth_store) {
+        Ok(summary) => summary,
+        Err(err) => format!("Resource hot-reload failed: {err:#}"),
+    };
+    emit_system_message(state, session_store, message)
 }
 
 /// Appends one system message to the in-memory transcript and persisted session log.

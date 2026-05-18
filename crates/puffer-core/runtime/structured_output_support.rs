@@ -1,5 +1,4 @@
 use crate::permissions::RuntimePermissionContext;
-use crate::runtime::RequestToolFilter;
 use anyhow::{anyhow, bail, Context, Result};
 use puffer_provider_openai::{
     OpenAIChatCompletionTool, OpenAIChatCompletionToolFunction, OpenAIChatResponseFormat,
@@ -86,22 +85,19 @@ pub(super) fn anthropic_tool_definitions(
     registry: &ToolRegistry,
     structured_output: Option<&StructuredOutputConfig>,
 ) -> Result<Vec<Value>> {
-    anthropic_tool_definitions_for_request(registry, structured_output, None, None)
+    anthropic_tool_definitions_for_request(registry, structured_output, None)
 }
 
 pub(super) fn anthropic_tool_definitions_for_request(
     registry: &ToolRegistry,
     structured_output: Option<&StructuredOutputConfig>,
     permission_context: Option<&RuntimePermissionContext>,
-    request_tool_filter: Option<&RequestToolFilter>,
 ) -> Result<Vec<Value>> {
     let definitions =
         anthropic_tool_definitions_with_structured_output(registry, structured_output)?;
     Ok(definitions
         .into_iter()
-        .filter(|definition| {
-            tool_visible_to_model(permission_context, request_tool_filter, definition)
-        })
+        .filter(|definition| tool_visible_to_model(permission_context, definition))
         .map(|definition| {
             json!({
                 "name": definition.id,
@@ -117,7 +113,7 @@ pub(super) fn openai_tool_definitions(
     structured_output: Option<&StructuredOutputConfig>,
     use_native: bool,
 ) -> Result<Vec<OpenAIResponsesTool>> {
-    openai_tool_definitions_for_request(registry, structured_output, use_native, None, None)
+    openai_tool_definitions_for_request(registry, structured_output, use_native, None)
 }
 
 pub(super) fn openai_tool_definitions_for_request(
@@ -125,15 +121,12 @@ pub(super) fn openai_tool_definitions_for_request(
     structured_output: Option<&StructuredOutputConfig>,
     use_native: bool,
     permission_context: Option<&RuntimePermissionContext>,
-    request_tool_filter: Option<&RequestToolFilter>,
 ) -> Result<Vec<OpenAIResponsesTool>> {
     let definitions =
         openai_tool_definitions_with_structured_output(registry, structured_output, use_native)?;
     Ok(definitions
         .into_iter()
-        .filter(|definition| {
-            tool_visible_to_model(permission_context, request_tool_filter, definition)
-        })
+        .filter(|definition| tool_visible_to_model(permission_context, definition))
         .map(|definition| {
             if is_native_openai_web_search(&definition) {
                 native_openai_web_search_tool()
@@ -203,7 +196,7 @@ pub(super) fn openai_chat_completion_tools(
     structured_output: Option<&StructuredOutputConfig>,
     use_native: bool,
 ) -> Result<Vec<OpenAIChatCompletionTool>> {
-    openai_chat_completion_tools_for_request(registry, structured_output, use_native, None, None)
+    openai_chat_completion_tools_for_request(registry, structured_output, use_native, None)
 }
 
 pub(super) fn openai_chat_completion_tools_for_request(
@@ -211,15 +204,12 @@ pub(super) fn openai_chat_completion_tools_for_request(
     structured_output: Option<&StructuredOutputConfig>,
     use_native: bool,
     permission_context: Option<&RuntimePermissionContext>,
-    request_tool_filter: Option<&RequestToolFilter>,
 ) -> Result<Vec<OpenAIChatCompletionTool>> {
     let definitions =
         openai_tool_definitions_with_structured_output(registry, structured_output, use_native)?;
     Ok(definitions
         .into_iter()
-        .filter(|definition| {
-            tool_visible_to_model(permission_context, request_tool_filter, definition)
-        })
+        .filter(|definition| tool_visible_to_model(permission_context, definition))
         .map(|definition| OpenAIChatCompletionTool {
             kind: "function".to_string(),
             function: OpenAIChatCompletionToolFunction {
@@ -319,15 +309,11 @@ fn include_base_model_tool(registry: &ToolRegistry, definition: &ToolDefinition)
 
 fn tool_visible_to_model(
     permission_context: Option<&RuntimePermissionContext>,
-    request_tool_filter: Option<&RequestToolFilter>,
     definition: &ToolDefinition,
 ) -> bool {
     permission_context
         .map(|context| context.tool_visible_to_model(definition))
         .unwrap_or(true)
-        && request_tool_filter
-            .map(|filter| filter.allows_definition(definition))
-            .unwrap_or(true)
 }
 
 fn requested_structured_output_definition(

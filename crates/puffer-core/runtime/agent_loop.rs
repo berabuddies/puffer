@@ -283,7 +283,7 @@ pub(crate) fn run_streaming_loop(
         did
     };
     if pre_compacted {
-        inject_post_compact_context(&mut items, &cwd);
+        inject_post_compact_context(&mut items, inputs.state);
         session.notify_compacted();
     }
 
@@ -972,7 +972,7 @@ pub(crate) fn run_streaming_loop(
             )
         };
         if compacted {
-            inject_post_compact_context(&mut items, &cwd);
+            inject_post_compact_context(&mut items, inputs.state);
             session.notify_compacted();
         } else {
             post_compaction_span.set_str("puffer.compaction.skipped", "true");

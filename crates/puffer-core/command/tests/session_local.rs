@@ -40,7 +40,7 @@ fn branch_forks_and_switches_current_session() {
     assert_eq!(state.session.parent_session_id, Some(original_id));
     assert_eq!(
         state.session.display_name.as_deref(),
-        Some("drydock (Branch 3)")
+        Some("drydock (Branch)")
     );
     assert!(state.transcript.last().unwrap().text.contains("/resume"));
 }
@@ -84,7 +84,7 @@ fn branch_without_explicit_name_derives_branch_title_from_first_user_message() {
     assert_ne!(state.session.id, original_id);
     assert_eq!(
         state.session.display_name.as_deref(),
-        Some("Inspect the auth flow (Branch 3)")
+        Some("Inspect the auth flow (Branch)")
     );
 }
 
@@ -128,6 +128,10 @@ fn branch_refuses_to_fork_empty_conversations() {
 #[test]
 fn memory_command_updates_session_metadata() {
     let tempdir = tempdir().unwrap();
+    let _lock = lock_puffer_home();
+    let home = tempdir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let _home = ScopedPufferHome::set(&home);
     let paths = ConfigPaths::discover(tempdir.path());
     ensure_workspace_dirs(&paths).unwrap();
     let session_store = SessionStore::from_paths(&paths).unwrap();

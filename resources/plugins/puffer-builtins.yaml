@@ -9,6 +9,7 @@ commands:
   - name: ide
     description: Manage IDE integrations
 skills:
+  - project-memory
   - reviewer
   - browser
 mcp_servers:

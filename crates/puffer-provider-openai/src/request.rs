@@ -298,10 +298,7 @@ fn build_request<T: Serialize>(
     config: &OpenAIRequestConfig,
     request: &T,
 ) -> anyhow::Result<BuiltOpenAIRequest> {
-    let path = config
-        .responses_path
-        .as_deref()
-        .unwrap_or("/v1/responses");
+    let path = config.responses_path.as_deref().unwrap_or("/v1/responses");
     build_request_to_path(config, request, path, false)
 }
 
@@ -974,6 +971,9 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(request.url, "https://relay.example.com/api/openai/responses");
+        assert_eq!(
+            request.url,
+            "https://relay.example.com/api/openai/responses"
+        );
     }
 }
