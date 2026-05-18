@@ -1159,6 +1159,28 @@ impl OverlayState {
         )
     }
 
+    /// Returns true when printable typing should filter or jump selection.
+    pub(crate) fn accepts_filter_input(&self) -> bool {
+        matches!(
+            self,
+            Self::SessionPicker { .. }
+                | Self::AgentPicker { .. }
+                | Self::ModelPicker { .. }
+                | Self::EffortPicker { .. }
+                | Self::FastModePicker { .. }
+                | Self::LoginPicker { .. }
+                | Self::ProviderPicker { .. }
+                | Self::AuthPicker { .. }
+                | Self::LogoutPicker { .. }
+                | Self::ThemePicker { .. }
+                | Self::CommandPicker { .. }
+                | Self::OnboardingTheme { .. }
+                | Self::OnboardingProvider { .. }
+                | Self::OnboardingAuth { .. }
+                | Self::OnboardingModel { .. }
+        )
+    }
+
     /// Returns the selected permission action when the overlay is a permission prompt.
     pub(crate) fn selected_permission_action(&self) -> Option<PermissionPromptAction> {
         match self {

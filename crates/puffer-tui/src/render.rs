@@ -379,8 +379,12 @@ pub(crate) fn render(
             );
         } else if let Some(hint_row) = hint_row {
             frame.render_widget(
-                Paragraph::new(overlay_hint_line(input, onboarding_active))
-                    .style(Style::default().add_modifier(Modifier::DIM)),
+                Paragraph::new(overlay_hint_line(
+                    input,
+                    onboarding_active,
+                    active_overlay.as_ref(),
+                ))
+                .style(Style::default().add_modifier(Modifier::DIM)),
                 hint_row,
             );
         }
@@ -737,7 +741,16 @@ fn overlay_prompt_line(input: &str, placeholder: &str) -> Line<'static> {
     }
 }
 
-fn overlay_hint_line(input: &str, onboarding_active: bool) -> String {
+fn overlay_hint_line(
+    input: &str,
+    onboarding_active: bool,
+    overlay: Option<&OverlayState>,
+) -> String {
+    if overlay
+        .is_some_and(|overlay| !overlay.accepts_text_input() && !overlay.accepts_filter_input())
+    {
+        return "Esc closes · / starts a command".to_string();
+    }
     let prefix = if input.is_empty() {
         "Type to jump"
     } else {

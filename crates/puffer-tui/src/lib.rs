@@ -911,6 +911,9 @@ fn handle_overlay_key(
             }
         }
         KeyCode::Backspace => {
+            if !overlay_snapshot.accepts_filter_input() {
+                return Ok(false);
+            }
             let commands = command_surface(resources);
             tui.backspace(&commands);
             if let Some(overlay) = tui.overlay.as_mut() {
@@ -918,6 +921,9 @@ fn handle_overlay_key(
             }
         }
         KeyCode::Delete => {
+            if !overlay_snapshot.accepts_filter_input() {
+                return Ok(false);
+            }
             let commands = command_surface(resources);
             tui.delete(&commands);
             if let Some(overlay) = tui.overlay.as_mut() {
@@ -1327,6 +1333,13 @@ fn handle_overlay_key(
                 let commands = command_surface(resources);
                 set_overlay_state(tui, None);
                 tui.insert_char(ch, &commands);
+                return Ok(false);
+            }
+            if tui
+                .overlay
+                .as_ref()
+                .is_some_and(|overlay| !overlay.accepts_filter_input())
+            {
                 return Ok(false);
             }
             let commands = command_surface(resources);

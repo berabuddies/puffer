@@ -113,6 +113,7 @@ pub(super) fn overlay_prompt_placeholder(overlay: Option<&OverlayState>) -> &'st
         Some(OverlayState::ApiKeyPrompt { .. } | OverlayState::OnboardingApiKey { .. }) => {
             "Paste API key"
         }
+        Some(overlay) if !overlay.accepts_filter_input() => "Overlay open",
         _ => "Type to jump",
     }
 }
@@ -214,8 +215,10 @@ fn generic_overlay_dropdown_lines(overlay: &OverlayState) -> Vec<Line<'static>> 
     lines.push(Line::from(Span::styled(
         if overlay.is_onboarding() {
             "Enter to continue · Esc to go back"
-        } else {
+        } else if overlay.accepts_filter_input() {
             "Typing jumps selection · Enter to select · Esc to close"
+        } else {
+            "Use arrows or shortcuts · Enter to select · Esc to close"
         },
         Style::default().add_modifier(Modifier::DIM),
     )));

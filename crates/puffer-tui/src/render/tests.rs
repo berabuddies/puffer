@@ -568,6 +568,37 @@ fn render_usage_overlay_shows_loading_state() {
 }
 
 #[test]
+fn read_only_overlay_prompt_does_not_invite_typing() {
+    let state = sample_state();
+    let resources = sample_resources();
+    let providers = sample_providers();
+    let auth_store = sample_auth_store();
+    let overlay =
+        crate::status_overlay::StatusOverlay::open(&state, &resources, &providers, &auth_store);
+
+    assert_eq!(overlay_prompt_placeholder(Some(&overlay)), "Overlay open");
+    assert_eq!(
+        overlay_hint_line("", false, Some(&overlay)),
+        "Esc closes · / starts a command"
+    );
+}
+
+#[test]
+fn picker_overlay_prompt_still_invites_typing() {
+    let overlay = OverlayState::LoginPicker {
+        entries: vec![ModelPickerEntry {
+            selector: "openai".to_string(),
+            description: "OpenAI".to_string(),
+            command: None,
+        }],
+        selection: 0,
+    };
+
+    assert_eq!(overlay_prompt_placeholder(Some(&overlay)), "Type to jump");
+    assert!(overlay_hint_line("", false, Some(&overlay)).contains("Type to jump"));
+}
+
+#[test]
 fn render_usage_overlay_shows_claude_style_sections() {
     let backend = TestBackend::new(100, 32);
     let mut terminal = Terminal::new(backend).unwrap();
