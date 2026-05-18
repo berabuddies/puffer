@@ -71,6 +71,14 @@
     if (provider.id === "claude") return "Claude Code CLI";
     return "Puffer CLI";
   }
+
+  $effect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busy) onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
 </script>
 
 <div
