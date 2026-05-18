@@ -138,3 +138,21 @@ test("Browser tab close control is a native button", async ({ page }) => {
   await closeControls.nth(1).click();
   await expect(page.locator(".pf-browser-tab")).toHaveCount(1);
 });
+
+test("Browser tab list event can clear stale tabs", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: /Browser regression/ }).click();
+  await page.getByRole("button", { name: "Browser" }).click();
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1"
+  );
+  await expect(page.locator(".pf-browser-tab")).toHaveCount(1);
+
+  daemon.emit("browser:session-browser:tabs", { activeTabId: null, tabs: [] });
+
+  await expect(page.locator(".pf-browser-tab")).toHaveCount(0);
+  await expect(page.locator(".pf-browser-status")).toHaveText("No pages");
+});

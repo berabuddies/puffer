@@ -42,6 +42,10 @@
     devtools: BrowserDevtoolsEvent[];
   };
 
+  type ApplyTabsOptions = {
+    allowEmpty?: boolean;
+  };
+
   let { sessionId }: Props = $props();
 
   const initialTabs = loadSavedTabs();
@@ -119,7 +123,7 @@
     const client = await ensureLocalDaemonClient();
     disposers.push(
       client.on<BrowserTabsState>(`browser:${sessionId}:tabs`, (next) => {
-        applyTabsState(next);
+        applyTabsState(next, { allowEmpty: true });
       })
     );
 
@@ -177,8 +181,25 @@
     };
   }
 
-  function applyTabsState(state: BrowserTabsState) {
-    if (!Array.isArray(state.tabs) || state.tabs.length === 0) return;
+  function applyTabsState(state: BrowserTabsState, options: ApplyTabsOptions = {}) {
+    if (!Array.isArray(state.tabs)) return;
+    if (state.tabs.length === 0) {
+      if (!options.allowEmpty) return;
+      tabs = [];
+      activeTabId = "";
+      nextTabNumber = 2;
+      saveTabs([]);
+      connected = false;
+      loading = false;
+      error = null;
+      status = "No pages";
+      title = "";
+      currentUrl = "about:blank";
+      urlDraft = "about:blank";
+      disposeActiveSubscriptions();
+      clearCanvas();
+      return;
+    }
     const nextTabs = state.tabs.map(tabFromInfo);
     tabs = nextTabs;
     activeTabId = state.activeTabId || nextTabs.find((tab) => tab.connected)?.id || nextTabs[0].id;
@@ -463,7 +484,7 @@
     event.stopPropagation();
     void browserTabClose(sessionId, tabId)
       .then((state) => {
-        if (state.tabs.length) applyTabsState(state);
+        applyTabsState(state, { allowEmpty: true });
       })
       .catch(() => browserClose(backendSessionId(tabId)).catch(() => {}));
     const index = tabs.findIndex((tab) => tab.id === tabId);
