@@ -263,6 +263,7 @@ impl BackendState {
         model_override: Option<String>,
     ) -> Result<Value> {
         let cwd = normalize_path(&cwd);
+        ensure_session_cwd(&cwd)?;
         let mut config = self.load_config()?;
         if config.default_provider.is_none() {
             config.default_provider = Some(DEFAULT_PROVIDER.to_string());
@@ -1012,6 +1013,20 @@ impl BackendState {
     fn save_sessions(&self, sessions: &[SessionRecord]) -> Result<()> {
         write_json(&sessions_file()?, sessions)
     }
+}
+
+fn ensure_session_cwd(cwd: &Path) -> Result<()> {
+    if cwd.exists() {
+        if cwd.is_dir() {
+            return Ok(());
+        }
+        bail!(
+            "session cwd exists but is not a directory: {}",
+            cwd.display()
+        );
+    }
+    fs::create_dir_all(cwd)
+        .with_context(|| format!("failed to create session cwd {}", cwd.display()))
 }
 
 fn run_agent_turn_thread(
@@ -1908,6 +1923,27 @@ mod tests {
 
         assert_eq!(provider, "anthropic");
         assert_eq!(api_key, "sk-test");
+    }
+
+    #[test]
+    fn session_cwd_initializer_creates_missing_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("new-project").join("nested");
+
+        ensure_session_cwd(&missing).unwrap();
+
+        assert!(missing.is_dir());
+    }
+
+    #[test]
+    fn session_cwd_initializer_rejects_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("not-a-directory");
+        fs::write(&file, "not a directory").unwrap();
+
+        let err = ensure_session_cwd(&file).unwrap_err();
+
+        assert!(err.to_string().contains("not a directory"));
     }
 
     #[test]

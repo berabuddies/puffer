@@ -62,6 +62,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufReader, Read};
 use std::net::SocketAddr;
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1580,6 +1581,7 @@ fn handle_create_session(state: &DaemonState, params: &Value) -> Result<Value> {
         optional_trimmed_value(params, &["providerId", "provider_id"]),
         optional_trimmed_value(params, &["modelId", "model_id"]),
     )?;
+    ensure_session_cwd(&cwd)?;
     let display_name = params
         .get("displayName")
         .or_else(|| params.get("display_name"))
@@ -1620,6 +1622,20 @@ fn handle_create_session(state: &DaemonState, params: &Value) -> Result<Value> {
         "providerId": routing.provider_id,
         "modelId": routing.model_id,
     }))
+}
+
+fn ensure_session_cwd(cwd: &Path) -> Result<()> {
+    if cwd.exists() {
+        if cwd.is_dir() {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "session cwd exists but is not a directory: {}",
+            cwd.display()
+        );
+    }
+    std::fs::create_dir_all(cwd)
+        .with_context(|| format!("failed to create session cwd {}", cwd.display()))
 }
 
 fn resolve_create_session_routing(
@@ -2796,6 +2812,44 @@ mod tests {
             Some("Managed Agent")
         );
         assert_eq!(session.metadata.generated_title, None);
+    }
+
+    #[test]
+    fn create_session_creates_missing_cwd() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(
+            workspace_root.clone(),
+            paths.clone(),
+            "token".into(),
+            true,
+            false,
+            false,
+        )
+        .expect("daemon state");
+        let missing = workspace_root.join("new-project").join("nested");
+
+        let response = handle_create_session(
+            &state,
+            &json!({
+                "cwd": missing.display().to_string(),
+            }),
+        )
+        .expect("create session");
+
+        assert!(missing.is_dir());
+        let session_id = response["sessionId"].as_str().expect("sessionId");
+        let store = SessionStore::from_paths(&paths).expect("session store");
+        let session_id = uuid::Uuid::parse_str(session_id).expect("valid session id");
+        let session = store.load_session(session_id).expect("stored session");
+        assert_eq!(session.metadata.cwd, missing);
     }
 
     #[test]
