@@ -17,6 +17,8 @@ mod status_overlay;
 mod statusline;
 mod task_overlay;
 mod task_panels;
+#[cfg(test)]
+mod test_env;
 mod text_overlay;
 mod usage;
 mod user_question_flow;

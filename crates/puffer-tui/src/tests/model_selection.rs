@@ -14,6 +14,7 @@ fn temp_session_store(tempdir: &tempfile::TempDir) -> SessionStore {
 #[test]
 fn onboarding_model_picker_enter_preserves_current_effort_selection() {
     let tempdir = tempdir().unwrap();
+    let _home = crate::test_env::ScopedPufferHome::new("model-selection-onboarding");
     let session_store = temp_session_store(&tempdir);
     let session = session_store
         .create_session(tempdir.path().to_path_buf())
@@ -88,6 +89,7 @@ fn onboarding_model_picker_enter_preserves_current_effort_selection() {
 #[test]
 fn slash_command_model_picker_enter_applies_selected_model_immediately() {
     let tempdir = tempdir().unwrap();
+    let _home = crate::test_env::ScopedPufferHome::new("model-selection-slash");
     let session_store = temp_session_store(&tempdir);
     let session = session_store
         .create_session(tempdir.path().to_path_buf())
@@ -139,6 +141,7 @@ fn slash_command_model_picker_enter_applies_selected_model_immediately() {
 #[test]
 fn effort_picker_enter_opens_fast_mode_picker_with_provider_defaults() {
     let tempdir = tempdir().unwrap();
+    let _home = crate::test_env::ScopedPufferHome::new("model-selection-effort");
     let session_store = temp_session_store(&tempdir);
     let session = session_store
         .create_session(tempdir.path().to_path_buf())
@@ -211,6 +214,7 @@ fn effort_picker_enter_opens_fast_mode_picker_with_provider_defaults() {
 #[test]
 fn fast_mode_picker_enter_applies_model_effort_and_fast_mode() {
     let tempdir = tempdir().unwrap();
+    let _home = crate::test_env::ScopedPufferHome::new("model-selection-fast");
     let session_store = temp_session_store(&tempdir);
     let session = session_store
         .create_session(tempdir.path().to_path_buf())

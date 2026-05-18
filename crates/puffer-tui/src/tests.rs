@@ -17,7 +17,6 @@ use ratatui::buffer::Buffer;
 use ratatui::style::Color;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
 use tempfile::tempdir;
 use uuid::Uuid;
 mod help;
@@ -30,11 +29,6 @@ mod support;
 mod tag;
 mod user_question;
 use support::*;
-
-fn puffer_home_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
 
 #[test]
 fn render_shows_command_popup_for_slash_input() {
@@ -333,13 +327,9 @@ fn try_open_overlay_builds_logout_picker() {
 #[test]
 fn logout_clears_active_provider_selection() {
     let tempdir = tempdir().unwrap();
-    let _lock = puffer_home_lock().lock().unwrap();
-    let old_home = std::env::var_os("PUFFER_HOME");
-    let home = tempdir.path().join("home");
+    let _home = crate::test_env::ScopedPufferHome::new("logout-active-provider");
     let workspace = tempdir.path().join("workspace");
-    std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&workspace).unwrap();
-    std::env::set_var("PUFFER_HOME", &home);
 
     let paths = ConfigPaths::discover(&workspace);
     ensure_workspace_dirs(&paths).unwrap();
@@ -371,24 +361,14 @@ fn logout_clears_active_provider_selection() {
     assert_eq!(state.config.default_provider, None);
     assert_eq!(state.config.default_model, None);
     assert!(!auth_store.has_auth("anthropic"));
-
-    if let Some(value) = old_home {
-        std::env::set_var("PUFFER_HOME", value);
-    } else {
-        std::env::remove_var("PUFFER_HOME");
-    }
 }
 
 #[test]
 fn logout_clears_selection_when_model_provider_matches_logged_out_provider() {
     let tempdir = tempdir().unwrap();
-    let _lock = puffer_home_lock().lock().unwrap();
-    let old_home = std::env::var_os("PUFFER_HOME");
-    let home = tempdir.path().join("home");
+    let _home = crate::test_env::ScopedPufferHome::new("logout-model-provider");
     let workspace = tempdir.path().join("workspace");
-    std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&workspace).unwrap();
-    std::env::set_var("PUFFER_HOME", &home);
 
     let paths = ConfigPaths::discover(&workspace);
     ensure_workspace_dirs(&paths).unwrap();
@@ -443,24 +423,14 @@ fn logout_clears_selection_when_model_provider_matches_logged_out_provider() {
             ..
         })
     ));
-
-    if let Some(value) = old_home {
-        std::env::set_var("PUFFER_HOME", value);
-    } else {
-        std::env::remove_var("PUFFER_HOME");
-    }
 }
 
 #[test]
 fn missing_auth_for_selected_provider_reopens_auth_picker() {
     let tempdir = tempdir().unwrap();
-    let _lock = puffer_home_lock().lock().unwrap();
-    let old_home = std::env::var_os("PUFFER_HOME");
-    let home = tempdir.path().join("home");
+    let _home = crate::test_env::ScopedPufferHome::new("missing-auth-provider");
     let workspace = tempdir.path().join("workspace");
-    std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&workspace).unwrap();
-    std::env::set_var("PUFFER_HOME", &home);
 
     let paths = ConfigPaths::discover(&workspace);
     ensure_workspace_dirs(&paths).unwrap();
@@ -493,12 +463,6 @@ fn missing_auth_for_selected_provider_reopens_auth_picker() {
         tui.overlay,
         Some(OverlayState::AuthPicker { ref provider_id, .. }) if provider_id == "openai"
     ));
-
-    if let Some(value) = old_home {
-        std::env::set_var("PUFFER_HOME", value);
-    } else {
-        std::env::remove_var("PUFFER_HOME");
-    }
 }
 
 #[test]
@@ -562,13 +526,9 @@ fn try_open_overlay_builds_fast_mode_picker_for_current_model() {
 #[test]
 fn codex_import_without_base_url_clears_previous_openai_override() {
     let tempdir = tempdir().unwrap();
-    let _lock = puffer_home_lock().lock().unwrap();
-    let old_home = std::env::var_os("PUFFER_HOME");
-    let home = tempdir.path().join("home");
+    let _home = crate::test_env::ScopedPufferHome::new("codex-import-openai");
     let workspace = tempdir.path().join("workspace");
-    std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&workspace).unwrap();
-    std::env::set_var("PUFFER_HOME", &home);
 
     let paths = ConfigPaths::discover(&workspace);
     ensure_workspace_dirs(&paths).unwrap();
@@ -650,12 +610,6 @@ fn codex_import_without_base_url_clears_previous_openai_override() {
         .provider("openai")
         .map(|provider| provider.query_params.is_empty())
         .unwrap_or(false));
-
-    if let Some(value) = old_home {
-        std::env::set_var("PUFFER_HOME", value);
-    } else {
-        std::env::remove_var("PUFFER_HOME");
-    }
 }
 
 #[test]

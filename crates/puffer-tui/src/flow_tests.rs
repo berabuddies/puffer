@@ -4,45 +4,11 @@ use crate::state::{LoopKind, PendingSubmit, PendingSubmitEvent, PendingSubmitRes
 use puffer_config::{ensure_workspace_dirs, ConfigPaths, MemoryConfig, PufferConfig};
 use puffer_core::TurnExecution;
 use puffer_session_store::SessionMetadata;
-use std::ffi::OsString;
-use std::sync::{mpsc, Mutex, MutexGuard, OnceLock};
+use std::sync::mpsc;
 use tempfile::tempdir;
 
 fn sample_state(session: SessionMetadata, cwd: &Path) -> AppState {
     AppState::new(PufferConfig::default(), cwd.to_path_buf(), session)
-}
-
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-struct ScopedPufferHome {
-    old_home: Option<OsString>,
-}
-
-impl ScopedPufferHome {
-    fn set(path: &Path) -> Self {
-        let old_home = std::env::var_os("PUFFER_HOME");
-        std::env::set_var("PUFFER_HOME", path);
-        Self { old_home }
-    }
-}
-
-impl Drop for ScopedPufferHome {
-    fn drop(&mut self) {
-        if let Some(value) = self.old_home.take() {
-            std::env::set_var("PUFFER_HOME", value);
-        } else {
-            std::env::remove_var("PUFFER_HOME");
-        }
-    }
-}
-
-fn lock_env() -> MutexGuard<'static, ()> {
-    env_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[test]
@@ -164,13 +130,10 @@ fn handle_prompt_submit_queues_prompt_while_turn_is_running() {
 
 #[test]
 fn poll_pending_submit_syncs_project_memory_review_turns_back_to_main_state() {
-    let _guard = lock_env();
     let tempdir = tempdir().unwrap();
-    let home = tempdir.path().join("home");
+    let _home = crate::test_env::ScopedPufferHome::new("memory-review-turn-sync");
     let workspace = tempdir.path().join("workspace");
-    std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&workspace).unwrap();
-    let _home = ScopedPufferHome::set(&home);
     let paths = ConfigPaths::discover(&workspace);
     ensure_workspace_dirs(&paths).unwrap();
     std::fs::write(
