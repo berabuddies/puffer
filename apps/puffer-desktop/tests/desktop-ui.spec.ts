@@ -326,6 +326,69 @@ test("Browser cursor probe does not run after tabs are cleared", async ({ page }
   expect(daemon.requests.filter((request) => request.method === "browser_cursor")).toHaveLength(0);
 });
 
+test("Browser cleared tabs do not paint late frame images", async ({ page }) => {
+  await page.addInitScript(() => {
+    const pendingImages: Array<{ onload: (() => void) | null }> = [];
+    const originalGetContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function patchedGetContext(
+      this: HTMLCanvasElement,
+      contextId: string,
+      options?: CanvasRenderingContext2DSettings
+    ) {
+      const context = originalGetContext.call(this, contextId, options);
+      if (contextId !== "2d" || !context) return context;
+      const record = context as CanvasRenderingContext2D & { __pufferDrawWrapped?: boolean };
+      if (!record.__pufferDrawWrapped) {
+        record.__pufferDrawWrapped = true;
+        record.drawImage = (() => {
+          window.__pufferBrowserDrawCalls = (window.__pufferBrowserDrawCalls ?? 0) + 1;
+        }) as typeof record.drawImage;
+      }
+      return context;
+    } as typeof HTMLCanvasElement.prototype.getContext;
+    class DelayedImage {
+      onload: (() => void) | null = null;
+
+      set src(_value: string) {
+        pendingImages.push(this);
+      }
+    }
+    window.__pufferBrowserDrawCalls = 0;
+    window.__flushPufferBrowserImages = () => {
+      while (pendingImages.length > 0) {
+        pendingImages.shift()?.onload?.();
+      }
+    };
+    Object.defineProperty(window, "Image", { value: DelayedImage });
+  });
+
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1"
+  );
+
+  daemon.emit("browser:session-browser:browser:tab-1:frame", {
+    frameId: "late-frame",
+    mimeType: "image/png",
+    encoding: "base64",
+    data: "unused",
+    width: 2,
+    height: 2
+  });
+  daemon.emit("browser:session-browser:tabs", { activeTabId: null, tabs: [] });
+  await expect(page.locator(".pf-browser-status")).toHaveText("No pages");
+
+  await page.evaluate(() => window.__flushPufferBrowserImages?.());
+
+  const drawCalls = await page.evaluate(() => window.__pufferBrowserDrawCalls ?? 0);
+  expect(drawCalls).toBe(0);
+});
+
 test("Browser pointer state resets when tabs clear mid-drag", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
