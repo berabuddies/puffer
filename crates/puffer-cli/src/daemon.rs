@@ -1942,13 +1942,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         .and_then(|v| v.as_str())
         .context("missing message")?
         .to_string();
-    let model_override = params
-        .get("modelOverride")
-        .or_else(|| params.get("model_override"))
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(str::to_string);
+    let turn_options = TurnRequestOptions::from_params(&params);
 
     // Parse cheap, non-tokio-touching things synchronously so we can fail
     // fast with a clean error. Anything that builds a runtime (i.e. the
@@ -1990,7 +1984,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     let setup_state = state.clone();
     let message_for_thread = message.clone();
     let session_id_for_thread = session_id.clone();
-    let model_override_for_thread = model_override.clone();
+    let turn_options_for_thread = turn_options.clone();
     std::thread::spawn(move || {
         setup_state.publish_event(ServerEnvelope::Event {
             event: channel_thread.clone(),
@@ -2062,24 +2056,22 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         };
         let cfg_for_turn = setup_state.config.lock().unwrap().clone();
         let mut app_state = AppState::from_session_record(cfg_for_turn.clone(), record);
+        if let Err(err) =
+            apply_turn_request_options(&mut app_state, &inputs.providers, &turn_options_for_thread)
+        {
+            setup_state.publish_event(ServerEnvelope::Event {
+                event: channel_thread.clone(),
+                payload: json!({
+                    "type": "turn-error",
+                    "turnId": turn_id_thread,
+                    "error": format!("turn options: {err:#}"),
+                }),
+            });
+            setup_state.turns.lock().unwrap().remove(&turn_id_thread);
+            return;
+        }
         if setup_state.yolo {
             apply_daemon_yolo_mode(&mut app_state);
-        }
-        if let Some(model_override) = model_override_for_thread.as_deref() {
-            if let Err(err) =
-                apply_turn_model_override(&mut app_state, &inputs.providers, model_override)
-            {
-                setup_state.publish_event(ServerEnvelope::Event {
-                    event: channel_thread.clone(),
-                    payload: json!({
-                        "type": "turn-error",
-                        "turnId": turn_id_thread,
-                        "error": format!("modelOverride: {err:#}"),
-                    }),
-                });
-                setup_state.turns.lock().unwrap().remove(&turn_id_thread);
-                return;
-            }
         }
         let runner = crate::runner_selection::select_tool_runner(
             &cfg_for_turn,
@@ -2382,11 +2374,138 @@ fn classify_turn_error(err: &anyhow::Error) -> (String, &'static str) {
     (chain, "other")
 }
 
+#[derive(Debug, Clone, Default)]
+struct TurnRequestOptions {
+    model_override: Option<String>,
+    provider_id: Option<String>,
+    model_id: Option<String>,
+    thinking_option_id: Option<String>,
+    fast_mode: Option<bool>,
+    permission_mode: Option<String>,
+}
+
+impl TurnRequestOptions {
+    fn from_params(params: &Value) -> Self {
+        Self {
+            model_override: optional_trimmed_value(params, &["modelOverride", "model_override"]),
+            provider_id: optional_trimmed_value(params, &["providerId", "provider_id"]),
+            model_id: optional_trimmed_value(params, &["modelId", "model_id"]),
+            thinking_option_id: optional_trimmed_value(
+                params,
+                &["thinkingOptionId", "thinking_option_id", "effort"],
+            )
+            .filter(|value| value != "default"),
+            fast_mode: params
+                .get("fastMode")
+                .or_else(|| params.get("fast_mode"))
+                .and_then(Value::as_bool),
+            permission_mode: optional_trimmed_value(params, &["permissionMode", "permission_mode"])
+                .and_then(|mode| match mode.as_str() {
+                    "read-only" | "workspace-write" | "full-access" => Some(mode),
+                    _ => None,
+                }),
+        }
+    }
+}
+
+fn optional_trimmed_value(params: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| params.get(*key))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn apply_turn_request_options(
+    app_state: &mut AppState,
+    providers: &ProviderRegistry,
+    options: &TurnRequestOptions,
+) -> Result<()> {
+    let effort = options
+        .thinking_option_id
+        .as_deref()
+        .unwrap_or(app_state.effort_level.as_str())
+        .to_string();
+    let fast_mode = options.fast_mode.unwrap_or(app_state.fast_mode);
+
+    if let Some(requested) = options.model_override.as_deref() {
+        apply_turn_model_override_with_preferences(
+            app_state,
+            providers,
+            requested,
+            &effort,
+            fast_mode,
+        )?;
+    } else if let Some(model_id) = options.model_id.as_deref() {
+        apply_turn_model_selection(
+            app_state,
+            providers,
+            options.provider_id.as_deref(),
+            model_id,
+            &effort,
+            fast_mode,
+        )?;
+    } else {
+        if let Some(effort) = options.thinking_option_id.as_deref() {
+            app_state.effort_level = effort.to_string();
+            app_state.config.effort_level = Some(effort.to_string());
+        }
+        if let Some(fast_mode) = options.fast_mode {
+            app_state.fast_mode = fast_mode;
+            app_state.config.fast_mode = fast_mode;
+        }
+    }
+
+    if let Some(mode) = options.permission_mode.as_deref() {
+        apply_turn_permission_mode(app_state, mode);
+    }
+    Ok(())
+}
+
+fn apply_turn_model_selection(
+    app_state: &mut AppState,
+    providers: &ProviderRegistry,
+    provider_id: Option<&str>,
+    model_id: &str,
+    effort: &str,
+    fast_mode: bool,
+) -> Result<()> {
+    let requested = if let Some(provider_id) = provider_id {
+        if model_id.starts_with(&format!("{provider_id}/")) {
+            model_id.to_string()
+        } else {
+            format!("{provider_id}/{model_id}")
+        }
+    } else {
+        model_id.to_string()
+    };
+    apply_turn_model_override_with_preferences(app_state, providers, &requested, effort, fast_mode)
+}
+
+fn apply_turn_model_override_with_preferences(
+    app_state: &mut AppState,
+    providers: &ProviderRegistry,
+    requested: &str,
+    effort: &str,
+    fast_mode: bool,
+) -> Result<()> {
+    let (provider_id, model_id) = resolve_turn_model(providers, requested)?;
+    apply_model_preferences(app_state, &provider_id, &model_id, effort, fast_mode)
+}
+
+#[cfg(test)]
 fn apply_turn_model_override(
     app_state: &mut AppState,
     providers: &ProviderRegistry,
     requested: &str,
 ) -> Result<()> {
+    let effort = app_state.effort_level.clone();
+    let fast_mode = app_state.fast_mode;
+    apply_turn_model_override_with_preferences(app_state, providers, requested, &effort, fast_mode)
+}
+
+fn resolve_turn_model(providers: &ProviderRegistry, requested: &str) -> Result<(String, String)> {
     let (provider_id, model_id) = if let Some((provider_id, model_id)) = requested.split_once('/') {
         let provider = providers
             .provider(provider_id)
@@ -2411,9 +2530,19 @@ fn apply_turn_model_override(
         (provider.id.clone(), model.id.clone())
     };
 
-    let effort = app_state.effort_level.clone();
-    let fast_mode = app_state.fast_mode;
-    apply_model_preferences(app_state, &provider_id, &model_id, &effort, fast_mode)
+    Ok((provider_id, model_id))
+}
+
+fn apply_turn_permission_mode(app_state: &mut AppState, permission_mode: &str) {
+    match permission_mode {
+        "read-only" => {
+            app_state.sandbox_mode = "read-only".to_string();
+        }
+        "full-access" => apply_daemon_yolo_mode(app_state),
+        _ => {
+            app_state.sandbox_mode = "workspace-write".to_string();
+        }
+    }
 }
 
 fn apply_daemon_yolo_mode(app_state: &mut AppState) {
@@ -2424,7 +2553,8 @@ fn apply_daemon_yolo_mode(app_state: &mut AppState) {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_daemon_yolo_mode, apply_turn_model_override, handle_create_session, DaemonState,
+        apply_daemon_yolo_mode, apply_turn_model_override, apply_turn_request_options,
+        handle_create_session, DaemonState, TurnRequestOptions,
     };
     use indexmap::IndexMap;
     use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
@@ -2517,6 +2647,65 @@ mod tests {
         );
         assert_eq!(state.effort_level, "off");
         assert!(state.fast_mode);
+    }
+
+    #[test]
+    fn turn_request_options_parse_desktop_fields() {
+        let options = TurnRequestOptions::from_params(&json!({
+            "providerId": "anthropic",
+            "modelId": "claude-sonnet-4-5",
+            "thinkingOptionId": "high",
+            "fastMode": true,
+            "permissionMode": "read-only",
+        }));
+
+        assert_eq!(options.provider_id.as_deref(), Some("anthropic"));
+        assert_eq!(options.model_id.as_deref(), Some("claude-sonnet-4-5"));
+        assert_eq!(options.thinking_option_id.as_deref(), Some("high"));
+        assert_eq!(options.fast_mode, Some(true));
+        assert_eq!(options.permission_mode.as_deref(), Some("read-only"));
+    }
+
+    #[test]
+    fn turn_request_options_apply_desktop_model_effort_and_permissions() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let metadata = SessionMetadata {
+            id: Uuid::new_v4(),
+            display_name: None,
+            generated_title: None,
+            cwd: temp.path().to_path_buf(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        };
+        let mut state = AppState::new(PufferConfig::default(), temp.path().to_path_buf(), metadata);
+        state.effort_level = "low".to_string();
+        state.fast_mode = true;
+
+        let mut providers = ProviderRegistry::new();
+        providers.register(provider("openai", &["gpt-5.4"]));
+        providers.register(provider("anthropic", &["claude-sonnet-4-5"]));
+        let options = TurnRequestOptions::from_params(&json!({
+            "providerId": "anthropic",
+            "modelId": "claude-sonnet-4-5",
+            "thinkingOptionId": "high",
+            "fastMode": false,
+            "permissionMode": "read-only",
+        }));
+
+        apply_turn_request_options(&mut state, &providers, &options).expect("turn options");
+
+        assert_eq!(state.current_provider.as_deref(), Some("anthropic"));
+        assert_eq!(
+            state.current_model.as_deref(),
+            Some("anthropic/claude-sonnet-4-5")
+        );
+        assert_eq!(state.effort_level, "high");
+        assert!(!state.fast_mode);
+        assert_eq!(state.sandbox_mode, "read-only");
     }
 
     #[test]
