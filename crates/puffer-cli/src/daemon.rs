@@ -35,11 +35,11 @@ use puffer_config::{
     ensure_workspace_dirs, load_config, save_user_config, ConfigPaths, PufferConfig,
 };
 use puffer_core::{
-    apply_model_preferences, default_effort_level,
-    execute_user_turn_streaming_with_permissions_and_cancel, provider_preference_family,
-    supported_effort_levels, with_user_question_prompt_handler, AppState, CancelToken, MessageRole,
-    ModelPreferenceFamily, PermissionPromptAction, PermissionPromptRequest, TurnStreamEvent,
-    UserQuestionPromptRequest, UserQuestionPromptResponse,
+    default_effort_level, execute_user_turn_streaming_with_permissions_and_cancel,
+    provider_preference_family, supported_effort_levels, with_user_question_prompt_handler,
+    AppState, CancelToken, MessageRole, ModelPreferenceFamily, PermissionPromptAction,
+    PermissionPromptRequest, TurnStreamEvent, UserQuestionPromptRequest,
+    UserQuestionPromptResponse,
 };
 use puffer_provider_openai::{
     exchange_authorization_code as exchange_openai_authorization_code,
@@ -2656,7 +2656,29 @@ fn apply_turn_model_override_with_preferences(
     fast_mode: bool,
 ) -> Result<()> {
     let (provider_id, model_id) = resolve_turn_model(providers, requested)?;
-    apply_model_preferences(app_state, &provider_id, &model_id, effort, fast_mode)
+    apply_turn_model_preferences(app_state, &provider_id, &model_id, effort, fast_mode);
+    Ok(())
+}
+
+fn apply_turn_model_preferences(
+    app_state: &mut AppState,
+    provider_id: &str,
+    model_id: &str,
+    effort: &str,
+    fast_mode: bool,
+) {
+    app_state.current_provider = Some(provider_id.to_string());
+    app_state.current_model = Some(format!("{provider_id}/{model_id}"));
+    app_state.config.default_provider = Some(provider_id.to_string());
+    app_state.config.default_model = Some(format!("{provider_id}/{model_id}"));
+    app_state.effort_level = effort.to_string();
+    app_state.config.effort_level = if effort == "auto" {
+        None
+    } else {
+        Some(effort.to_string())
+    };
+    app_state.fast_mode = fast_mode;
+    app_state.config.fast_mode = fast_mode;
 }
 
 #[cfg(test)]
