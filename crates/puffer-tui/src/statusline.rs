@@ -151,7 +151,7 @@ fn run_status_line_command(
     input: &str,
 ) -> Result<Option<String>> {
     let mut child = Command::new(puffer_tools::detected_shell())
-        .arg("-lc")
+        .arg("-c")
         .arg(command)
         .current_dir(cwd)
         .stdin(Stdio::piped())
