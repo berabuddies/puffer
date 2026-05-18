@@ -255,6 +255,28 @@ test("auto recap does not start a second turn while one is running", async ({ pa
   ).toHaveLength(0);
 });
 
+test("auto recap waits while the composer has an unsent draft", async ({ page }) => {
+  await page.clock.install({ time: baseTime });
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /^Browser regression\b/);
+  const composer = page.locator(".pf-composer textarea");
+  await composer.fill("Half-written thought");
+
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+  await page.clock.fastForward(180_001);
+  await page.evaluate(() => Promise.resolve());
+
+  expect(
+    daemon.requests.filter(
+      (request) => request.method === "run_agent_turn" && request.params.message === "/recap"
+    )
+  ).toHaveLength(0);
+  await expect(composer).toHaveValue("Half-written thought");
+});
+
 test("streamed assistant text stays visible through transcript reload", async ({ page }) => {
   const streamedText = "Streaming answer stays stable across reload.";
   const daemon = new FakeDaemon({

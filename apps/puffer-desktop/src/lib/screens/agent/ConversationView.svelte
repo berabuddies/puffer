@@ -1,7 +1,7 @@
 <script lang="ts">
   import "../../design/chat.css";
 
-  import { tick } from "svelte";
+  import { onDestroy, tick } from "svelte";
   import Puffer from "../../design/Puffer.svelte";
   import Icon, { type IconName } from "../../design/Icon.svelte";
   import MessageBody from "../../components/MessageBody.svelte";
@@ -55,6 +55,7 @@
     ) => void;
     onCancelTurn?: () => void;
     onOpenFileLink?: (path: string, line?: number | null) => void;
+    onDraftChange?: (hasDraft: boolean) => void;
   };
 
   let {
@@ -74,7 +75,8 @@
     onResolvePermission,
     onResolveUserQuestion,
     onCancelTurn,
-    onOpenFileLink
+    onOpenFileLink,
+    onDraftChange
   }: Props = $props();
 
   let displayUserName = $derived(userDisplayName.trim() || "Otter");
@@ -335,6 +337,14 @@
       lastSessionId = session?.id ?? null;
       void tick().then(() => threadEl?.scrollTo({ top: 0, behavior: "auto" }));
     }
+  });
+
+  $effect(() => {
+    onDraftChange?.(draft.trim().length > 0);
+  });
+
+  onDestroy(() => {
+    onDraftChange?.(false);
   });
 
   $effect(() => {

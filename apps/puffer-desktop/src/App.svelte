@@ -301,13 +301,14 @@
   // "is the window away long enough to be worth asking."
   const RECAP_IDLE_MS = 180_000;
   let recapBlurTimer: ReturnType<typeof setTimeout> | null = null;
+  let composerHasDraft = $state(false);
 
   function armRecapBlurTimer() {
-    if (turnRunning) return;
+    if (turnRunning || composerHasDraft) return;
     if (recapBlurTimer != null) return;
     recapBlurTimer = setTimeout(() => {
       recapBlurTimer = null;
-      if (!selectedSession || turnRunning) return;
+      if (!selectedSession || turnRunning || composerHasDraft) return;
       void submitMessage("/recap", {});
     }, RECAP_IDLE_MS);
   }
@@ -1523,6 +1524,7 @@
                 onResolvePermission={resolvePermission}
                 onResolveUserQuestion={resolveUserQuestion}
                 onCancelTurn={() => { if (currentTurnId) void cancelTurn(currentTurnId); }}
+                onDraftChange={(hasDraft) => (composerHasDraft = hasDraft)}
                 onRenameTitle={renameSelectedSession}
               />
             {:else if openProjectId && sortedGroups.find((g) => g.id === openProjectId)}

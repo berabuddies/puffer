@@ -46,6 +46,7 @@
     ) => void;
     onCancelTurn?: () => void;
     onOpenFileLink?: (path: string, line?: number | null) => void;
+    onDraftChange?: (hasDraft: boolean) => void;
     fileToOpen?: string | null;
   };
 
@@ -71,6 +72,7 @@
     onResolveUserQuestion,
     onCancelTurn,
     onOpenFileLink,
+    onDraftChange,
     fileToOpen = null
   }: Props = $props();
 
@@ -152,6 +154,7 @@
       onResolveUserQuestion={onResolveUserQuestion}
       onCancelTurn={onCancelTurn}
       onOpenFileLink={onOpenFileLink}
+      onDraftChange={onDraftChange}
     />
   {:else if tab === "diff"}
     <div class="diff-subtabs">
