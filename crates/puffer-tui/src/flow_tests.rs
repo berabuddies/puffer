@@ -1,14 +1,45 @@
 use super::flow_loop::*;
 use super::*;
 use crate::state::{LoopKind, PendingSubmit, PendingSubmitEvent, PendingSubmitResult};
-use puffer_config::{ensure_workspace_dirs, ConfigPaths, MemoryConfig, PufferConfig};
+use puffer_config::{
+    ensure_workspace_dirs, save_user_config, ConfigPaths, MemoryConfig, PufferConfig,
+};
 use puffer_core::TurnExecution;
+use puffer_provider_registry::{AuthMode, ModelDescriptor, ProviderDescriptor};
 use puffer_session_store::SessionMetadata;
 use std::sync::mpsc;
 use tempfile::tempdir;
 
 fn sample_state(session: SessionMetadata, cwd: &Path) -> AppState {
     AppState::new(PufferConfig::default(), cwd.to_path_buf(), session)
+}
+
+fn auth_required_provider_registry() -> ProviderRegistry {
+    let mut providers = ProviderRegistry::default();
+    providers.register(ProviderDescriptor {
+        id: "anthropic".to_string(),
+        display_name: "Anthropic".to_string(),
+        base_url: "https://api.anthropic.com".to_string(),
+        default_api: "anthropic-messages".to_string(),
+        auth_modes: vec![AuthMode::ApiKey, AuthMode::OAuth],
+        headers: Default::default(),
+        query_params: Default::default(),
+        discovery: None,
+        models: vec![ModelDescriptor {
+            id: "claude-sonnet-4-5".to_string(),
+            display_name: "Claude Sonnet 4.5".to_string(),
+            provider: "anthropic".to_string(),
+            api: "anthropic-messages".to_string(),
+            context_window: 200_000,
+            max_output_tokens: 8_192,
+            supports_reasoning: true,
+            compat: None,
+            input: vec![puffer_provider_registry::Modality::Text],
+            cost: None,
+        }],
+        chat_completions_path: None,
+    });
+    providers
 }
 
 #[test]
@@ -20,6 +51,102 @@ fn provider_prompt_detection_matches_interactive_surface() {
     assert!(!is_provider_prompt_input("!pwd"));
     assert!(!is_provider_prompt_input("login openai"));
     assert!(!is_provider_prompt_input("/logout"));
+}
+
+#[test]
+fn startup_bypass_includes_local_read_only_commands() {
+    for command in ["/diff", "/session", "/remote", "/config", "/permissions"] {
+        assert!(
+            allow_prompt_before_onboarding(command),
+            "{command} should run before provider auth is complete"
+        );
+    }
+
+    assert!(!allow_prompt_before_onboarding("/diff staged"));
+    assert!(!allow_prompt_before_onboarding("review this diff"));
+    assert!(!allow_prompt_before_onboarding("/login"));
+}
+
+#[test]
+fn queued_startup_diff_runs_before_missing_auth_onboarding() {
+    let tempdir = tempdir().unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(tempdir.path())
+        .arg("init")
+        .arg("-q")
+        .status()
+        .expect("git init");
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    save_user_config(&paths, &PufferConfig::default()).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = sample_state(session, tempdir.path());
+    state.current_provider = Some("anthropic".to_string());
+    state.current_model = Some("anthropic/claude-sonnet-4-5".to_string());
+    let mut resources = LoadedResources::default();
+    let mut providers = auth_required_provider_registry();
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let mut auth_store = AuthStore::default();
+    let mut tui = TuiState::default();
+    tui.defer_prompt(Some("/diff".to_string()));
+
+    submit_queued_prompt_if_ready(
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+
+    assert!(tui.deferred_prompt.is_none());
+    assert!(tui.overlay.is_none());
+    assert!(state.transcript.iter().any(|message| {
+        message.role == MessageRole::System && message.text.contains("Working tree is clean")
+    }));
+}
+
+#[test]
+fn queued_startup_session_overlay_opens_before_missing_auth_onboarding() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    save_user_config(&paths, &PufferConfig::default()).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = sample_state(session, tempdir.path());
+    state.current_provider = Some("anthropic".to_string());
+    state.current_model = Some("anthropic/claude-sonnet-4-5".to_string());
+    let mut resources = LoadedResources::default();
+    let mut providers = auth_required_provider_registry();
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let mut auth_store = AuthStore::default();
+    let mut tui = TuiState::default();
+    tui.defer_prompt(Some("/session".to_string()));
+
+    submit_queued_prompt_if_ready(
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+
+    assert!(tui.deferred_prompt.is_none());
+    assert!(matches!(tui.overlay, Some(OverlayState::Session(..))));
 }
 
 #[test]
@@ -571,7 +698,9 @@ fn maybe_apply_requested_reload_swallows_parse_errors_as_system_message() {
     .unwrap();
 
     // Simulate a watcher-driven reload request.
-    state.reload_signal().store(true, std::sync::atomic::Ordering::Release);
+    state
+        .reload_signal()
+        .store(true, std::sync::atomic::Ordering::Release);
 
     // Must NOT propagate — the TUI loop calls this with `?` and a
     // returned `Err` would crash `run_app` and lose the session.

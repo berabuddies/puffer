@@ -1156,10 +1156,44 @@ pub(crate) fn parse_shell_shortcut(input: &str) -> Option<&str> {
 
 /// Returns true for slash commands that should bypass startup onboarding.
 pub(crate) fn allow_prompt_before_onboarding(prompt: &str) -> bool {
-    matches!(
-        prompt.trim(),
-        "/help" | "/?" | "/theme" | "/doctor" | "/status" | "/usage" | "/context"
-    )
+    let trimmed = prompt.trim();
+    let Some(without_slash) = trimmed.strip_prefix('/') else {
+        return false;
+    };
+    let (name, args) = without_slash
+        .split_once(char::is_whitespace)
+        .map(|(name, args)| (name, args.trim()))
+        .unwrap_or((without_slash, ""));
+    args.is_empty()
+        && matches!(
+            name,
+            "?" | "agents"
+                | "config"
+                | "context"
+                | "cost"
+                | "debug"
+                | "diff"
+                | "doctor"
+                | "files"
+                | "help"
+                | "hooks"
+                | "ide"
+                | "marketplace"
+                | "mcp"
+                | "memory"
+                | "permissions"
+                | "allowed-tools"
+                | "plugin"
+                | "plugins"
+                | "remote"
+                | "sandbox"
+                | "session"
+                | "skills"
+                | "status"
+                | "tasks"
+                | "theme"
+                | "usage"
+        )
 }
 
 fn command_requires_terminal_restore(submitted: &str) -> bool {
