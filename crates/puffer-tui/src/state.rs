@@ -331,15 +331,17 @@ impl TuiState {
     }
 
     /// Removes the character immediately before the cursor. If the cursor is
-    /// at the end of a `[Pasted text #N ...]` placeholder, removes the entire
+    /// inside a `[Pasted text #N ...]` placeholder, removes the entire
     /// placeholder and drops its stored content.
     pub(crate) fn backspace(&mut self, commands: &[CommandSpec]) {
         if self.cursor == 0 {
             return;
         }
         self.exit_history_navigation();
-        if let Some((start, placeholder)) = self.paste_placeholder_ending_at(self.cursor) {
-            self.input.drain(start..self.cursor);
+        if let Some((start, end, placeholder)) =
+            self.paste_placeholder_span_for_backspace(self.cursor)
+        {
+            self.input.drain(start..end);
             self.cursor = start;
             self.pending_pastes.retain(|(name, _)| *name != placeholder);
             self.sync(commands);
@@ -351,25 +353,56 @@ impl TuiState {
         self.sync(commands);
     }
 
-    /// Returns `(start_byte, placeholder)` when `end_byte` is the closing
-    /// boundary of a tracked paste placeholder.
-    fn paste_placeholder_ending_at(&self, end: usize) -> Option<(usize, String)> {
-        let prefix = self.input.get(..end)?;
+    /// Returns `(start_byte, end_byte, placeholder)` when `cursor` is inside
+    /// or at the closing boundary of a tracked paste placeholder.
+    fn paste_placeholder_span_for_backspace(
+        &self,
+        cursor: usize,
+    ) -> Option<(usize, usize, String)> {
+        self.paste_placeholder_span_at(cursor, false, true)
+    }
+
+    /// Returns `(start_byte, end_byte, placeholder)` when `cursor` is inside
+    /// or at the opening boundary of a tracked paste placeholder.
+    fn paste_placeholder_span_for_delete(&self, cursor: usize) -> Option<(usize, usize, String)> {
+        self.paste_placeholder_span_at(cursor, true, false)
+    }
+
+    fn paste_placeholder_span_at(
+        &self,
+        cursor: usize,
+        include_start: bool,
+        include_end: bool,
+    ) -> Option<(usize, usize, String)> {
         for (placeholder, _) in &self.pending_pastes {
-            if prefix.ends_with(placeholder) {
-                let start = end - placeholder.len();
-                return Some((start, placeholder.clone()));
+            for (start, _) in self.input.match_indices(placeholder) {
+                let end = start + placeholder.len();
+                let after_start = cursor > start || (include_start && cursor == start);
+                let before_end = cursor < end || (include_end && cursor == end);
+                if after_start && before_end {
+                    return Some((start, end, placeholder.clone()));
+                }
             }
         }
         None
     }
 
-    /// Removes the character immediately after the cursor.
+    /// Removes the character immediately after the cursor. If the cursor is
+    /// inside a `[Pasted text #N ...]` placeholder, removes the entire
+    /// placeholder and drops its stored content.
     pub(crate) fn delete(&mut self, commands: &[CommandSpec]) {
         if self.cursor >= self.input.len() {
             return;
         }
         self.exit_history_navigation();
+        if let Some((start, end, placeholder)) = self.paste_placeholder_span_for_delete(self.cursor)
+        {
+            self.input.drain(start..end);
+            self.cursor = start;
+            self.pending_pastes.retain(|(name, _)| *name != placeholder);
+            self.sync(commands);
+            return;
+        }
         let end = next_boundary(&self.input, self.cursor);
         self.input.drain(self.cursor..end);
         self.sync(commands);
@@ -1415,6 +1448,38 @@ mod tests {
         tui.cursor = len;
         tui.backspace(&[]);
         assert!(tui.input.is_empty());
+        assert!(tui.pending_pastes.is_empty());
+    }
+
+    #[test]
+    fn backspace_inside_placeholder_removes_whole_paste() {
+        let mut tui = TuiState::default();
+        tui.insert_str("before ", &[]);
+        tui.handle_paste("one\ntwo", &[]);
+        tui.insert_str(" after", &[]);
+        let placeholder_start = "before ".len();
+        tui.cursor = placeholder_start + 4;
+
+        tui.backspace(&[]);
+
+        assert_eq!(tui.input, "before  after");
+        assert_eq!(tui.cursor, placeholder_start);
+        assert!(tui.pending_pastes.is_empty());
+    }
+
+    #[test]
+    fn delete_at_start_of_placeholder_removes_whole_paste() {
+        let mut tui = TuiState::default();
+        tui.insert_str("before ", &[]);
+        tui.handle_paste("one\ntwo", &[]);
+        tui.insert_str(" after", &[]);
+        let placeholder_start = "before ".len();
+        tui.cursor = placeholder_start;
+
+        tui.delete(&[]);
+
+        assert_eq!(tui.input, "before  after");
+        assert_eq!(tui.cursor, placeholder_start);
         assert!(tui.pending_pastes.is_empty());
     }
 
