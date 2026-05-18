@@ -15,22 +15,22 @@
 
   const fallbackProviders: ProviderSummary[] = [
     {
-      id: "codex",
+      id: "openai",
       displayName: "Codex",
-      baseUrl: "local-cli://codex",
-      defaultApi: "cli",
+      baseUrl: "https://api.openai.com",
+      defaultApi: "openai-responses",
       modelCount: 1,
-      authModes: ["native"],
+      authModes: ["api_key", "oauth"],
       sourceKind: "builtin",
       sourcePath: null
     },
     {
-      id: "claude",
-      displayName: "Claude",
-      baseUrl: "local-cli://claude",
-      defaultApi: "cli",
+      id: "anthropic",
+      displayName: "Anthropic",
+      baseUrl: "https://api.anthropic.com",
+      defaultApi: "anthropic-messages",
       modelCount: 1,
-      authModes: ["native"],
+      authModes: ["api_key", "oauth"],
       sourceKind: "builtin",
       sourcePath: null
     },
@@ -62,7 +62,7 @@
     if (configured && providerOptions.some((provider) => provider.id === configured)) {
       return configured;
     }
-    return providerOptions[0]?.id ?? "codex";
+    return providerOptions[0]?.id ?? "openai";
   }
 
   $effect(() => {
@@ -195,6 +195,9 @@
     flex-shrink: 0;
   }
   .pf-provider-dot[data-provider="claude"] {
+    background: #7c3aed;
+  }
+  .pf-provider-dot[data-provider="anthropic"] {
     background: #7c3aed;
   }
   .pf-provider-dot[data-provider="puffer"] {

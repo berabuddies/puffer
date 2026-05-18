@@ -24,6 +24,27 @@ const codexAuth = [
   }
 ];
 
+const canonicalProviderAuth = [
+  {
+    providerId: "openai",
+    kind: "oauth",
+    email: "tester@example.com",
+    expiresAtMs: null,
+    scopes: [],
+    planType: "test",
+    organizationName: null
+  },
+  {
+    providerId: "anthropic",
+    kind: "api_key",
+    email: null,
+    expiresAtMs: null,
+    scopes: [],
+    planType: null,
+    organizationName: null
+  }
+];
+
 test("Files tab close button works from the keyboard", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
@@ -195,6 +216,24 @@ test("new agent provider choice is used for the first turn", async ({ page }) =>
   expect(turnRequest.params).toMatchObject({
     providerId: "anthropic",
     modelId: "test-model"
+  });
+});
+
+test("new agent fallback providers use daemon provider ids", async ({ page }) => {
+  const daemon = new FakeDaemon({ auth: canonicalProviderAuth, providers: [] });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "New agent in puffer" }).click();
+  const dialog = page.getByRole("dialog", { name: "New agent" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("radio", { name: /Codex/ })).toBeVisible();
+  await expect(dialog.getByRole("radio", { name: /Anthropic/ })).toBeVisible();
+  await dialog.getByRole("button", { name: "Start agent" }).click();
+
+  const createRequest = await daemon.waitForRequest("create_session");
+  expect(createRequest.params).toMatchObject({
+    providerId: "openai"
   });
 });
 

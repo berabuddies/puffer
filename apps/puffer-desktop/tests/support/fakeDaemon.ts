@@ -220,6 +220,7 @@ export class FakeDaemon {
   private readonly details = new Map<string, SessionDetailOverrides>();
   private readonly files = new Map<string, string>();
   private readonly providerModels: Record<string, JsonRecord[]>;
+  private readonly providerSummaries: JsonRecord[] | null;
   private workspaceRoot = "/tmp/puffer";
   private authStatuses: JsonRecord[];
   private settingsConfig: { defaultProvider: string | null; defaultModel: string | null } = {
@@ -249,6 +250,7 @@ export class FakeDaemon {
   constructor(options: {
     sessions?: FakeDaemonSessionInput[];
     providerModels?: Record<string, JsonRecord[]>;
+    providers?: JsonRecord[];
     mcpServers?: JsonRecord[];
     protocol?: "legacy" | "real";
     workspaceRoot?: string;
@@ -278,6 +280,7 @@ export class FakeDaemon {
       });
     }
     this.providerModels = options.providerModels ?? {};
+    this.providerSummaries = options.providers ?? null;
     this.mcpServers = options.mcpServers ?? this.mcpServers;
   }
 
@@ -735,7 +738,7 @@ export class FakeDaemon {
       },
       sessions: { totalSessions: 1, folderGroups: 1 },
       auth: this.authStatuses,
-      providers: [
+      providers: this.providerSummaries ?? [
         {
           id: "codex",
           displayName: "Codex",
