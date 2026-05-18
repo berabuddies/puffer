@@ -282,7 +282,7 @@ pub fn supported_commands() -> Vec<CommandSpec> {
             "pentest",
             &[],
             "Run an authorized web penetration test",
-            Some("<url> [max-iterations] | stop"),
+            Some("<url> [max-iterations] | resume | stop"),
             CommandKind::Local,
         ),
         cmd(

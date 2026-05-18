@@ -34,7 +34,7 @@ fn pentest_command_is_registered_as_local() {
     assert_eq!(pentest.kind, CommandKind::Local);
     assert_eq!(
         pentest.argument_hint.as_deref(),
-        Some("<url> [max-iterations] | stop")
+        Some("<url> [max-iterations] | resume | stop")
     );
 }
 
