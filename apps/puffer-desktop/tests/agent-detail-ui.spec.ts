@@ -150,3 +150,40 @@ test("Agent detail find covers chat plus side panel diff without corrupting text
   await page.getByRole("button", { name: "Close side page" }).click();
   await expect(page.locator(".pf-side-panel")).toHaveCount(0);
 });
+
+test("Side panel does not duplicate effectful Browser or Terminal panes", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openAgent(page, /^Browser regression\b/);
+  const tabs = page.locator(".pf-agent-tabs");
+
+  await tabs.getByRole("button", { name: "Browser", exact: true }).click();
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1"
+  );
+
+  await page.waitForTimeout(50);
+  const browserAgentCount = daemon.requests.filter((request) => request.method === "browser_agent").length;
+  await tabs.getByRole("button", { name: "Browser", exact: true }).click({ modifiers: ["Meta"] });
+  await expect(page.locator(".pf-side-panel")).toHaveCount(0);
+  await page.waitForTimeout(50);
+  expect(daemon.requests.filter((request) => request.method === "browser_agent")).toHaveLength(browserAgentCount);
+
+  await tabs.getByRole("button", { name: "Terminal", exact: true }).click();
+  await daemon.waitForRequest("pty_open", (request) => request.params.sessionId === "session-browser");
+  await daemon.waitForRequest("pty_replay");
+  await page.waitForTimeout(50);
+  const terminalAttachCount = daemon.requests.filter((request) =>
+    ["pty_list", "pty_open", "pty_focus", "pty_replay"].includes(request.method)
+  ).length;
+  await tabs.getByRole("button", { name: "Terminal", exact: true }).click({ modifiers: ["Meta"] });
+  await expect(page.locator(".pf-side-panel")).toHaveCount(0);
+  await page.waitForTimeout(50);
+  expect(
+    daemon.requests.filter((request) =>
+      ["pty_list", "pty_open", "pty_focus", "pty_replay"].includes(request.method)
+    )
+  ).toHaveLength(terminalAttachCount);
+});

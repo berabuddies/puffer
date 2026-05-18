@@ -188,13 +188,18 @@
 
   function handleTabClick(event: MouseEvent, nextTab: Tab) {
     if (event.metaKey || event.ctrlKey) {
-      sideTab = nextTab;
       event.preventDefault();
+      if (!sidePanelTabAllowed(nextTab) || nextTab === tab) return;
+      sideTab = nextTab;
       if (searchOpen) void refreshSearch(false);
       return;
     }
     tab = nextTab;
     if (searchOpen) void refreshSearch(false);
+  }
+
+  function sidePanelTabAllowed(value: Tab): boolean {
+    return value === "diff";
   }
 
   function openLinkedFile(path: string) {
