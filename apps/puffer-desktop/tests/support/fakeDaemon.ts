@@ -33,6 +33,14 @@ type PtySet = {
   tabs: JsonRecord[];
 };
 
+type SessionDetailOverrides = {
+  latestDiff: JsonRecord | null;
+  diffHistory: JsonRecord[];
+  repoStatus: JsonRecord | null;
+  agentDiff: JsonRecord;
+  divergence: JsonRecord;
+};
+
 export type FakeDaemonSessionInput = {
   sessionId: string;
   displayName?: string | null;
@@ -51,6 +59,11 @@ export type FakeDaemonSessionInput = {
   providerId?: string | null;
   modelId?: string | null;
   timeline?: JsonRecord[];
+  latestDiff?: JsonRecord | null;
+  diffHistory?: JsonRecord[];
+  repoStatus?: JsonRecord | null;
+  agentDiff?: JsonRecord;
+  divergence?: JsonRecord;
 };
 
 const ONE_PIXEL_PNG =
@@ -95,26 +108,35 @@ function defaultTimeline(): JsonRecord[] {
 }
 
 function sessionMeta(input: FakeDaemonSessionInput): JsonRecord {
-  const title = input.title ?? input.displayName ?? session.title;
-  const cwd = input.cwd ?? session.cwd;
-  const folderPath = input.folderPath ?? cwd;
+  const {
+    timeline: _timeline,
+    latestDiff: _latestDiff,
+    diffHistory: _diffHistory,
+    repoStatus: _repoStatus,
+    agentDiff: _agentDiff,
+    divergence: _divergence,
+    ...metadataInput
+  } = input;
+  const title = metadataInput.title ?? metadataInput.displayName ?? session.title;
+  const cwd = metadataInput.cwd ?? session.cwd;
+  const folderPath = metadataInput.folderPath ?? cwd;
   return {
     ...session,
-    ...input,
-    sessionId: input.sessionId,
-    displayName: input.displayName ?? title,
+    ...metadataInput,
+    sessionId: metadataInput.sessionId,
+    displayName: metadataInput.displayName ?? title,
     title,
     cwd,
     folderPath,
-    updatedAtMs: input.updatedAtMs ?? session.updatedAtMs,
-    createdAtMs: input.createdAtMs ?? session.createdAtMs,
-    eventCount: input.eventCount ?? input.timeline?.length ?? session.eventCount,
-    activityStatus: input.activityStatus ?? session.activityStatus,
-    tags: input.tags ?? session.tags,
-    note: input.note ?? null,
-    parentSessionId: input.parentSessionId ?? null,
-    providerId: input.providerId ?? session.providerId,
-    modelId: input.modelId ?? session.modelId
+    updatedAtMs: metadataInput.updatedAtMs ?? session.updatedAtMs,
+    createdAtMs: metadataInput.createdAtMs ?? session.createdAtMs,
+    eventCount: metadataInput.eventCount ?? input.timeline?.length ?? session.eventCount,
+    activityStatus: metadataInput.activityStatus ?? session.activityStatus,
+    tags: metadataInput.tags ?? session.tags,
+    note: metadataInput.note ?? null,
+    parentSessionId: metadataInput.parentSessionId ?? null,
+    providerId: metadataInput.providerId ?? session.providerId,
+    modelId: metadataInput.modelId ?? session.modelId
   };
 }
 
@@ -191,6 +213,7 @@ export class FakeDaemon {
   private readonly ptys = new Map<string, PtySet>();
   private readonly sessions = new Map<string, JsonRecord>();
   private readonly timelines = new Map<string, JsonRecord[]>();
+  private readonly details = new Map<string, SessionDetailOverrides>();
   private readonly providerModels: Record<string, JsonRecord[]>;
   private workspaceRoot = "/tmp/puffer";
   private authStatuses: JsonRecord[];
@@ -241,6 +264,13 @@ export class FakeDaemon {
       const sessionId = String(metadata.sessionId);
       this.sessions.set(sessionId, metadata);
       this.timelines.set(sessionId, input.timeline ?? defaultTimeline());
+      this.details.set(sessionId, {
+        latestDiff: input.latestDiff ?? null,
+        diffHistory: input.diffHistory ?? [],
+        repoStatus: input.repoStatus ?? null,
+        agentDiff: input.agentDiff ?? { files: [], entries: [] },
+        divergence: input.divergence ?? { agentOnly: [], gitOnly: [], agentTotal: 0, gitTotal: 0 }
+      });
     }
     this.providerModels = options.providerModels ?? {};
     this.mcpServers = options.mcpServers ?? this.mcpServers;
@@ -747,12 +777,19 @@ export class FakeDaemon {
   private sessionDetail(sessionId: string): JsonRecord {
     const metadata = this.sessions.get(sessionId) ?? session;
     const timeline = this.timelines.get(sessionId) ?? defaultTimeline();
+    const detail = this.details.get(sessionId) ?? {
+      latestDiff: null,
+      diffHistory: [],
+      repoStatus: null,
+      agentDiff: { files: [], entries: [] },
+      divergence: { agentOnly: [], gitOnly: [], agentTotal: 0, gitTotal: 0 }
+    };
     return {
       ...metadata,
       eventCount: timeline.length,
       timeline,
-      latestDiff: null,
-      diffHistory: [],
+      latestDiff: detail.latestDiff,
+      diffHistory: detail.diffHistory,
       repoStatus: {
         sessionId,
         cwd: String(metadata.cwd ?? session.cwd),
@@ -768,10 +805,11 @@ export class FakeDaemon {
         createPullRequestReason: "gh unavailable in tests",
         mergePullRequestReason: "gh unavailable in tests",
         openPullRequest: null,
-        warnings: []
+        warnings: [],
+        ...(detail.repoStatus ?? {})
       },
-      agentDiff: { files: [], entries: [] },
-      divergence: { agentOnly: [], gitOnly: [], agentTotal: 0, gitTotal: 0 }
+      agentDiff: detail.agentDiff,
+      divergence: detail.divergence
     };
   }
 
