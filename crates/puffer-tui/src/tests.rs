@@ -2,7 +2,7 @@ use super::*;
 use crate::flow::{handle_auth_command, parse_shell_shortcut};
 use crate::state::AuthPickerEntry;
 use puffer_config::{ensure_workspace_dirs, save_user_config, ConfigPaths, PufferConfig};
-use puffer_core::{supported_commands, MessageRole};
+use puffer_core::{supported_commands, CommandKind, CommandSpec, MessageRole};
 use puffer_provider_registry::{
     AuthMode, ExternalImportCandidate, ExternalImportFamily, ExternalImportSource, ModelDescriptor,
     OAuthCredential, ProviderDescriptor, StoredCredential,
@@ -91,6 +91,48 @@ fn enter_completion_prefers_selected_slash_command() {
 }
 
 #[test]
+fn slash_completion_clamps_stale_selection_after_command_reload() {
+    let commands = vec![visible_test_command("model")];
+    let mut tui = TuiState::default();
+    tui.input = "/mo".to_string();
+    tui.cursor = tui.input.len();
+    tui.slash_selection = 99;
+
+    assert!(tui.complete_on_enter(&commands));
+    assert_eq!(tui.input, "/model");
+    assert_eq!(tui.slash_selection, 0);
+}
+
+#[test]
+fn render_clamps_stale_slash_selection() {
+    let commands = vec![visible_test_command("model")];
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let state = sample_state();
+    let resources = sample_resources();
+    let providers = sample_providers();
+    let auth_store = sample_auth_store();
+    terminal
+        .draw(|frame| {
+            render::render(
+                frame,
+                &state,
+                &resources,
+                &providers,
+                &auth_store,
+                "/mo",
+                3,
+                99,
+                0,
+                &commands,
+            )
+        })
+        .unwrap();
+    let rendered = buffer_to_string(terminal.backend().buffer());
+    assert!(rendered.contains("› /model"));
+}
+
+#[test]
 fn transcript_scroll_clamps_to_available_lines() {
     let mut tui = TuiState::default();
     tui.follow_output = false;
@@ -98,6 +140,17 @@ fn transcript_scroll_clamps_to_available_lines() {
     assert_eq!(tui.scroll_offset, 2);
     tui.scroll_up(1, 3, 1);
     assert_eq!(tui.scroll_offset, 1);
+}
+
+fn visible_test_command(name: &str) -> CommandSpec {
+    CommandSpec {
+        name: name.to_string(),
+        aliases: Vec::new(),
+        description: "Visible command".to_string(),
+        argument_hint: None,
+        kind: CommandKind::Local,
+        hidden: false,
+    }
 }
 
 #[test]

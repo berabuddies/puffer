@@ -386,8 +386,7 @@ impl TuiState {
 
     /// Applies the currently highlighted slash-command suggestion to the prompt.
     pub(crate) fn apply_selected_command(&mut self, commands: &[CommandSpec]) -> bool {
-        let rows = self.matching_rows(commands);
-        let Some(command) = rows.get(self.slash_selection).copied() else {
+        let Some(command) = self.selected_matching_command(commands) else {
             return false;
         };
         self.input = format!("/{}", command.name);
@@ -404,18 +403,30 @@ impl TuiState {
         if !self.input.starts_with('/') || self.input.contains(' ') {
             return false;
         }
-        let trimmed = self.input.trim_start_matches('/');
+        let trimmed = self.input.trim_start_matches('/').to_string();
         if trimmed.is_empty() {
             return false;
         }
-        let rows = self.matching_rows(commands);
-        let Some(command) = rows.get(self.slash_selection).copied() else {
+        let Some(command) = self.selected_matching_command(commands) else {
             return false;
         };
-        if command.name == trimmed || command.aliases.iter().any(|alias| alias == trimmed) {
+        if command.name == trimmed || command.aliases.iter().any(|alias| alias == &trimmed) {
             return false;
         }
         self.apply_selected_command(commands)
+    }
+
+    fn selected_matching_command<'a>(
+        &mut self,
+        commands: &'a [CommandSpec],
+    ) -> Option<&'a CommandSpec> {
+        let rows = self.matching_rows(commands);
+        if rows.is_empty() {
+            self.slash_selection = 0;
+            return None;
+        }
+        self.slash_selection = self.slash_selection.min(rows.len() - 1);
+        rows.get(self.slash_selection).copied()
     }
 
     /// Takes the current input, expanding any `[Pasted text #N]` placeholders

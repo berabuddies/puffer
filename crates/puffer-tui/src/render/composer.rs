@@ -160,10 +160,11 @@ fn command_dropdown_lines(
             Style::default().add_modifier(Modifier::DIM),
         ))];
     }
+    let selected_index = slash_selection.min(rows.len() - 1);
     rows.into_iter()
         .enumerate()
         .map(|(index, command)| {
-            let selected = index == slash_selection;
+            let selected = index == selected_index;
             let argument_hint = command
                 .argument_hint
                 .as_deref()
