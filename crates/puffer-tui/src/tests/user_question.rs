@@ -36,6 +36,27 @@ fn sample_multi_select_payload() -> serde_json::Value {
     ])
 }
 
+fn sample_preview_payload() -> serde_json::Value {
+    json!([
+        {
+            "header": "Mode",
+            "question": "Pick one",
+            "options": [
+                {
+                    "label": "Fast",
+                    "description": "Prioritize speed",
+                    "preview": "**Fast** path\nskips broad tests"
+                },
+                {
+                    "label": "Careful",
+                    "description": "Prioritize review",
+                    "preview": "Careful path\nruns focused tests"
+                }
+            ]
+        }
+    ])
+}
+
 #[test]
 fn poll_pending_submit_opens_user_question_overlay() {
     let tempdir = tempdir().unwrap();
@@ -233,4 +254,56 @@ fn render_user_question_shows_list_options() {
     assert!(rendered.contains("Mode: Pick one"));
     assert!(rendered.contains("Fast  Prioritize speed"));
     assert!(rendered.contains("Careful  Prioritize review"));
+}
+
+#[test]
+fn user_question_selected_preview_tracks_selection() {
+    let mut overlay = UserQuestionOverlay::from_value(sample_preview_payload()).unwrap();
+
+    assert_eq!(
+        overlay.selected_preview(),
+        Some("**Fast** path\nskips broad tests")
+    );
+    overlay.select_next();
+    assert_eq!(
+        overlay.selected_preview(),
+        Some("Careful path\nruns focused tests")
+    );
+}
+
+#[test]
+fn render_user_question_shows_selected_preview() {
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let state = sample_state();
+    let resources = sample_resources();
+    let providers = sample_providers();
+    let auth_store = sample_auth_store();
+    let overlay = OverlayState::UserQuestionPrompt {
+        overlay: UserQuestionOverlay::from_value(sample_preview_payload()).unwrap(),
+    };
+
+    terminal
+        .draw(|frame| {
+            render::set_active_overlay(Some(overlay.clone()));
+            render::render(
+                frame,
+                &state,
+                &resources,
+                &providers,
+                &auth_store,
+                "",
+                0,
+                0,
+                0,
+                &supported_commands(),
+            );
+            render::set_active_overlay(None);
+        })
+        .unwrap();
+    let rendered = buffer_to_string(terminal.backend().buffer());
+    assert!(rendered.contains("Preview"));
+    assert!(rendered.contains("Fast path"));
+    assert!(rendered.contains("skips broad tests"));
+    assert!(!rendered.contains("Careful path"));
 }

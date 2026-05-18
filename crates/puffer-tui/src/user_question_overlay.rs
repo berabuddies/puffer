@@ -18,6 +18,7 @@ pub(crate) struct UserQuestion {
 pub(crate) struct UserQuestionOption {
     label: String,
     description: String,
+    preview: Option<String>,
 }
 
 /// Modal list state for answering `AskUserQuestion` prompts.
@@ -46,6 +47,7 @@ impl UserQuestionOverlay {
                     .map(|option| UserQuestionOption {
                         label: option.label,
                         description: option.description,
+                        preview: option.preview,
                     })
                     .collect(),
                 multi_select: raw.multi_select,
@@ -134,6 +136,20 @@ impl UserQuestionOverlay {
                 (index == selection, text)
             })
             .collect()
+    }
+
+    /// Returns the preview for the active single-select option.
+    pub(crate) fn selected_preview(&self) -> Option<&str> {
+        let question = self.current_question()?;
+        if question.multi_select {
+            return None;
+        }
+        question
+            .options
+            .get(self.selection())?
+            .preview
+            .as_deref()
+            .filter(|preview| !preview.trim().is_empty())
     }
 
     /// Moves the selection upward.
@@ -248,6 +264,8 @@ struct RawUserQuestion {
 struct RawUserQuestionOption {
     label: String,
     description: String,
+    #[serde(default)]
+    preview: Option<String>,
 }
 
 fn number_shortcut(index: usize) -> Option<char> {

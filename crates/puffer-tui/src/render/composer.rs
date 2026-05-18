@@ -1,7 +1,9 @@
 use super::onboarding_body_lines;
 use super::overlay_content::{overlay_rows, overlay_title};
 use super::overlay_list::{overlay_selection, visible_overlay_rows};
+use crate::markdown::render_markdown;
 use crate::popup::popup_rows;
+use crate::user_question_overlay::UserQuestionOverlay;
 use crate::OverlayState;
 use puffer_core::CommandSpec;
 use ratatui::layout::Rect;
@@ -11,6 +13,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
 const MAX_INLINE_DROPDOWN_ROWS: usize = 8;
+const MAX_USER_QUESTION_PREVIEW_LINES: usize = 8;
 /// Hard cap on how tall the input prompt is allowed to grow when the user
 /// inserts newlines or pastes are inserted verbatim. Beyond this the prompt
 /// is rendered with an internal scroll so the rest of the UI stays visible.
@@ -189,9 +192,40 @@ fn overlay_dropdown_lines(overlay: &OverlayState) -> Vec<Line<'static>> {
         OverlayState::OnboardingApiKey { provider_name, .. } => {
             api_key_dropdown_lines("Let's get started.", provider_name)
         }
+        OverlayState::UserQuestionPrompt { overlay } => user_question_dropdown_lines(overlay),
         _ if overlay.is_onboarding() => onboarding_body_lines(overlay, MAX_INLINE_DROPDOWN_ROWS),
         _ => generic_overlay_dropdown_lines(overlay),
     }
+}
+
+fn user_question_dropdown_lines(overlay: &UserQuestionOverlay) -> Vec<Line<'static>> {
+    let mut lines = generic_overlay_dropdown_lines(&OverlayState::UserQuestionPrompt {
+        overlay: overlay.clone(),
+    });
+    let Some(preview) = overlay.selected_preview() else {
+        return lines;
+    };
+    let footer = lines.pop();
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        "Preview",
+        Style::default().add_modifier(Modifier::DIM),
+    )));
+    let mut preview_lines = render_markdown(preview).lines;
+    let truncated = preview_lines.len() > MAX_USER_QUESTION_PREVIEW_LINES;
+    preview_lines.truncate(MAX_USER_QUESTION_PREVIEW_LINES);
+    lines.extend(preview_lines);
+    if truncated {
+        lines.push(Line::from(Span::styled(
+            "... preview truncated",
+            Style::default().add_modifier(Modifier::DIM),
+        )));
+    }
+    if let Some(footer) = footer {
+        lines.push(Line::default());
+        lines.push(footer);
+    }
+    lines
 }
 
 fn generic_overlay_dropdown_lines(overlay: &OverlayState) -> Vec<Line<'static>> {
