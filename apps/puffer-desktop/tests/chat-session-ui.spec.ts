@@ -1,7 +1,11 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 import { FakeDaemon } from "./support/fakeDaemon";
 
 const baseTime = Date.now();
+
+async function openSession(page: Page, name: RegExp): Promise<void> {
+  await page.getByRole("button", { name }).first().click();
+}
 
 test("turn completion reload does not leak live chat into a newly selected session", async ({
   page
@@ -51,7 +55,7 @@ test("turn completion reload does not leak live chat into a newly selected sessi
   await daemon.open(page);
 
   await expect(page.getByRole("button", { name: /Alpha session/ }).first()).toBeVisible();
-  await page.getByRole("button", { name: /Alpha session/ }).first().click();
+  await openSession(page, /Alpha session/);
   await expect(page.getByText("Alpha seed")).toBeVisible();
 
   await page.locator(".pf-composer textarea").fill("Race from alpha");
@@ -74,7 +78,7 @@ test("turn completion reload does not leak live chat into a newly selected sessi
     assistantText: "Alpha completion should stay with alpha"
   });
 
-  await page.getByRole("button", { name: /Beta session/ }).first().click();
+  await openSession(page, /Beta session/);
   await expect(page.getByText("Beta seed")).toBeVisible();
 
   await page.waitForTimeout(650);
@@ -126,8 +130,75 @@ test("resolved transcript permissions do not reappear as pending approvals", asy
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.getByRole("button", { name: /Resolved permission/ }).first().click();
+  await openSession(page, /Resolved permission/);
   await expect(page.getByText("The command finished.")).toBeVisible();
   await expect(page.getByText("Approval needed")).toHaveCount(0);
   await expect(page.locator(".pf-agent-status-pill")).toHaveAttribute("data-status", "idle");
+});
+
+test("failed permission responses keep the approval prompt retryable", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /^Browser regression\b/);
+  daemon.emit("session:session-browser:event", {
+    type: "permission-request",
+    turnId: "turn-permission",
+    requestId: "permission-1",
+    toolId: "bash",
+    summary: "Run shell command",
+    reason: "Needs workspace write access."
+  });
+
+  await expect(page.getByText("Approval needed")).toBeVisible();
+  daemon.failNext("resolve_permission", "permission channel closed");
+  await page.getByRole("button", { name: "Deny" }).click();
+
+  const request = await daemon.waitForRequest("resolve_permission");
+  expect(request.params).toMatchObject({
+    turnId: "turn-permission",
+    requestId: "permission-1",
+    action: "deny"
+  });
+  await expect(page.getByText("Approval needed")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Deny" })).toBeVisible();
+});
+
+test("failed question responses keep the question prompt retryable", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /^Browser regression\b/);
+  daemon.emit("session:session-browser:event", {
+    type: "user-question-request",
+    turnId: "turn-question",
+    requestId: "question-1",
+    questions: [
+      {
+        header: "Path",
+        question: "Which path should I use?",
+        options: [
+          { label: "src", description: "Use the src directory." },
+          { label: "tests", description: "Use the tests directory." }
+        ]
+      }
+    ]
+  });
+
+  await expect(page.getByText("Which path should I use?")).toBeVisible();
+  await page.getByPlaceholder("Type another answer").fill("examples");
+  daemon.failNext("resolve_user_question", "question channel closed");
+  await page.getByRole("button", { name: "Send answer" }).click();
+
+  const request = await daemon.waitForRequest("resolve_user_question");
+  expect(request.params).toMatchObject({
+    turnId: "turn-question",
+    requestId: "question-1",
+    answers: { "Which path should I use?": "examples" },
+    annotations: {}
+  });
+  await expect(page.getByText("Which path should I use?")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Send answer" })).toBeEnabled();
 });

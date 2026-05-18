@@ -158,6 +158,7 @@ export class FakeDaemon {
   private readonly sockets = new Set<WebSocketRoute>();
   private readonly waiters: Waiter[] = [];
   private readonly responseDelays: ResponseDelay[] = [];
+  private readonly methodFailures = new Map<string, string[]>();
   private readonly browserTabs = new Map<string, TabSet>();
   private readonly ptys = new Map<string, PtySet>();
   private readonly sessions = new Map<string, JsonRecord>();
@@ -213,6 +214,12 @@ export class FakeDaemon {
     ms: number
   ): void {
     this.responseDelays.push({ method, predicate, ms });
+  }
+
+  failNext(method: string, error: string): void {
+    const failures = this.methodFailures.get(method) ?? [];
+    failures.push(error);
+    this.methodFailures.set(method, failures);
   }
 
   setSessionTimeline(sessionId: string, timeline: JsonRecord[]): void {
@@ -277,6 +284,7 @@ export class FakeDaemon {
   }
 
   private dispatch(request: DaemonRequest): unknown {
+    this.throwQueuedFailure(request.method);
     switch (request.method) {
       case "default_workspace":
         return { cwd: "/tmp/puffer", workspaceRoot: "/tmp/puffer" };
@@ -292,6 +300,9 @@ export class FakeDaemon {
         return this.sessionDetail(String(request.params.sessionId ?? session.sessionId));
       case "run_agent_turn":
         return { turnId: `turn-${String(request.params.sessionId ?? session.sessionId)}` };
+      case "resolve_permission":
+      case "resolve_user_question":
+        return {};
       case "list_provider_models":
         return {
           providerId: String(request.params.providerId ?? "codex"),
@@ -355,6 +366,18 @@ export class FakeDaemon {
       default:
         throw new Error(`Unhandled fake daemon method: ${request.method}`);
     }
+  }
+
+  private throwQueuedFailure(method: string): void {
+    const failures = this.methodFailures.get(method);
+    if (!failures || failures.length === 0) return;
+    const [error, ...rest] = failures;
+    if (rest.length === 0) {
+      this.methodFailures.delete(method);
+    } else {
+      this.methodFailures.set(method, rest);
+    }
+    throw new Error(error);
   }
 
   private settingsSnapshot(): JsonRecord {

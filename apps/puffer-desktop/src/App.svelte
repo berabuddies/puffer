@@ -826,20 +826,21 @@
   }
 
   async function resolvePermission(permissionId: string, choice: string) {
-    dismissedPermissionIds = [...dismissedPermissionIds, permissionId];
     const mapping = turnPermissionLookup[permissionId];
     if (mapping) {
       try {
         await resolveTurnPermission(mapping.turnId, mapping.requestId, mapPermissionAction(choice));
+        dismissedPermissionIds = [...dismissedPermissionIds, permissionId];
         statusMessage = `${choice} sent to agent.`;
+        const { [permissionId]: _drop, ...rest } = turnPermissionLookup;
+        turnPermissionLookup = rest;
       } catch (error) {
         const detail = errorText(error);
         statusMessage = `resolve_permission failed: ${detail}`;
         appendAgentError("Permission response failed", detail, "permission-error");
       }
-      const { [permissionId]: _drop, ...rest } = turnPermissionLookup;
-      turnPermissionLookup = rest;
     } else {
+      dismissedPermissionIds = [...dismissedPermissionIds, permissionId];
       statusMessage = `${choice} selected (no in-flight turn).`;
     }
   }
@@ -849,20 +850,21 @@
     answers: Record<string, string | string[]>,
     annotations: Record<string, Record<string, string>> = {}
   ) {
-    dismissedQuestionIds = [...dismissedQuestionIds, questionId];
     const mapping = turnQuestionLookup[questionId];
     if (mapping) {
       try {
         await resolveTurnUserQuestion(mapping.turnId, mapping.requestId, answers, annotations);
+        dismissedQuestionIds = [...dismissedQuestionIds, questionId];
         statusMessage = "Answer sent to agent.";
+        const { [questionId]: _drop, ...rest } = turnQuestionLookup;
+        turnQuestionLookup = rest;
       } catch (error) {
         const detail = errorText(error);
         statusMessage = `resolve_user_question failed: ${detail}`;
         appendAgentError("Question response failed", detail, "question-error");
       }
-      const { [questionId]: _drop, ...rest } = turnQuestionLookup;
-      turnQuestionLookup = rest;
     } else {
+      dismissedQuestionIds = [...dismissedQuestionIds, questionId];
       statusMessage = "Answer selected (no in-flight turn).";
     }
   }
