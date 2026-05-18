@@ -1020,9 +1020,22 @@
     tweaks = { ...tweaks, screen: "workspace" };
   }
 
+  function providerIsAuthenticated(providerId: string | null | undefined): boolean {
+    if (!settingsSnapshot || !providerId) return true;
+    return settingsSnapshot.auth.some((auth) => auth.providerId === providerId);
+  }
+
   async function submitMessage(message: string, options: AgentTurnOptions = {}) {
     if (!selectedSession) {
       statusMessage = "Select a session to send a message.";
+      return;
+    }
+    const requestedProviderId =
+      options.providerId ?? selectedSession.providerId ?? settingsSnapshot?.config.defaultProvider;
+    if (!providerIsAuthenticated(requestedProviderId)) {
+      const detail = `Reconnect ${requestedProviderId} before continuing this session.`;
+      statusMessage = detail;
+      appendAgentError("Provider disconnected", detail, "provider-auth");
       return;
     }
     const now = Date.now();

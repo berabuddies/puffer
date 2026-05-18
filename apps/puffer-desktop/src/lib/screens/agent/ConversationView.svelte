@@ -114,6 +114,22 @@
       )
   );
   let allowProviderSwitch = $derived(Boolean(session) && !conversationStarted && !turnRunning);
+  let authenticatedProviderIds = $derived(
+    new Set((settingsSnapshot?.auth ?? []).map((entry) => entry.providerId))
+  );
+  let selectedProviderAuthenticated = $derived(
+    settingsSnapshot === null ||
+      !selectedProviderId ||
+      authenticatedProviderIds.has(selectedProviderId)
+  );
+  let composerBlockedReason = $derived(
+    selectedProviderAuthenticated
+      ? null
+      : `Reconnect ${providerDisplayName(selectedProviderId)} to continue this session.`
+  );
+  let canSubmitPrompt = $derived(
+    Boolean(draft.trim() && session && !turnRunning && selectedProviderAuthenticated)
+  );
 
   function modelSupportsFastMode(modelId: string | null | undefined): boolean {
     const normalized = modelId?.trim().toLowerCase();
@@ -425,7 +441,7 @@
 
   async function submit() {
     const v = draft.trim();
-    if (!v) return;
+    if (!v || !canSubmitPrompt) return;
     onSubmitMessage(v, composerOptions());
     draft = "";
     await tick();
@@ -1250,7 +1266,7 @@
         bind:value={draft}
         placeholder={session ? `Reply to ${engineerName}…` : "Select a session to continue"}
         onkeydown={onKeydown}
-        disabled={!session}
+        disabled={!session || !selectedProviderAuthenticated}
       ></textarea>
       <div class="pf-composer-foot">
         <ModelPicker
@@ -1258,7 +1274,7 @@
           currentProvider={selectedProviderId}
           currentModel={selectedModelId}
           allowProviderSwitch={allowProviderSwitch}
-          disabled={turnRunning}
+          disabled={turnRunning || !selectedProviderAuthenticated}
           onChange={pickModel}
         />
         <label class="pf-toggle-chip" class:disabled={!fastModeAvailable} title={fastModeAvailable ? "Fast mode" : "Fast mode is not available for this model"}>
@@ -1293,7 +1309,7 @@
         </label>
         <span class="spacer"></span>
         <span class="pf-composer-hint">
-          ⏎ to send · ⇧⏎ for newline
+          {composerBlockedReason ?? "⏎ to send · ⇧⏎ for newline"}
         </span>
         {#if turnRunning}
           <button
@@ -1306,7 +1322,7 @@
             <Icon name="pause2" size={14} />
           </button>
         {:else}
-          <button type="button" class="pf-send-btn" disabled={!draft.trim() || !session} onclick={submit} aria-label="Send">
+          <button type="button" class="pf-send-btn" disabled={!canSubmitPrompt} onclick={submit} aria-label="Send">
             <Icon name="arrowUp" size={15} />
           </button>
         {/if}

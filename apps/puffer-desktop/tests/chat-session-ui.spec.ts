@@ -136,6 +136,61 @@ test("resolved transcript permissions do not reappear as pending approvals", asy
   await expect(page.locator(".pf-agent-status-pill")).toHaveAttribute("data-status", "idle");
 });
 
+test("logged-out provider sessions cannot start new turns", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-anthropic-history",
+        displayName: "Claude history",
+        title: "Claude history",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        providerId: "anthropic",
+        modelId: "test-model",
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "anthropic-seed",
+            text: "Anthropic seed",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Claude history/);
+  await expect(page.getByText("Anthropic seed")).toBeVisible();
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  const accountRow = page.locator(".pf-settings-row").filter({ hasText: "Account" });
+  await accountRow
+    .locator("div", { hasText: /^anthropic\s*·/ })
+    .getByRole("button", { name: "Sign out" })
+    .click();
+  const logout = await daemon.waitForRequest("logout_provider");
+  expect(logout.params).toMatchObject({ providerId: "anthropic" });
+
+  await page.getByRole("button", { name: "Workspace" }).click();
+  await openSession(page, /Claude history/);
+  const composer = page.locator(".pf-composer textarea");
+  await expect(composer).toBeDisabled();
+  await expect(page.locator(".pf-composer-hint")).toContainText(
+    "Reconnect Claude to continue this session."
+  );
+  await expect(page.getByRole("button", { name: "Send" })).toBeDisabled();
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(50);
+  expect(
+    daemon.requests.filter((request) => request.method === "run_agent_turn")
+  ).toHaveLength(0);
+});
+
 test("failed permission responses keep the approval prompt retryable", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
