@@ -2,7 +2,7 @@ use super::*;
 use crate::approval_overlay::ApprovalOverlay;
 use crate::permission_prompt_flow::handle_permission_prompt_key;
 use crate::state::{PendingPermissionRequest, PendingSubmit, PendingSubmitEvent};
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use puffer_core::{PermissionPromptAction, PermissionPromptRequest};
 use ratatui::backend::TestBackend;
 use std::sync::mpsc;
@@ -88,6 +88,34 @@ fn permission_prompt_shortcuts_send_response() {
     assert_eq!(
         response_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
         PermissionPromptAction::AllowSession
+    );
+    assert!(tui.overlay.is_none());
+    assert!(tui.pending_permission_request.is_none());
+}
+
+#[test]
+fn permission_prompt_ctrl_c_denies_and_closes_overlay() {
+    let request = PermissionPromptRequest {
+        tool_id: "Bash".to_string(),
+        summary: "git push origin master".to_string(),
+        reason: Some("shell command matches sandbox exclusion `git push`".to_string()),
+    };
+    let (response_tx, response_rx) = mpsc::channel();
+    let mut tui = TuiState {
+        overlay: Some(OverlayState::PermissionPrompt {
+            overlay: ApprovalOverlay::new(request),
+        }),
+        pending_permission_request: Some(PendingPermissionRequest { response_tx }),
+        ..TuiState::default()
+    };
+
+    assert!(handle_permission_prompt_key(
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        &mut tui
+    ));
+    assert_eq!(
+        response_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        PermissionPromptAction::Deny
     );
     assert!(tui.overlay.is_none());
     assert!(tui.pending_permission_request.is_none());
