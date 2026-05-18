@@ -155,9 +155,6 @@
   let remoteBusy = $state(false);
   let remotePassword = $state("");
 
-  // Tauri is stateless: preferences live in Puffer's workspace config, not
-  // here. We keep an in-memory copy to drive the Settings pane but never
-  // persist it — relaunching the app re-reads from the daemon.
   const defaultDesktopPreferences: DesktopPreferences = {
     rememberSession: false,
     rememberInspectorLayout: false,
@@ -168,7 +165,13 @@
     remoteTarget: "",
     remoteCwd: ""
   };
-  let desktopPreferences = $state<DesktopPreferences>({ ...defaultDesktopPreferences });
+  const DESKTOP_PREFERENCES_KEY = "puffer-desktop:preferences";
+  const REMEMBERED_SESSION_KEY = "puffer-desktop:remembered-session";
+  type RememberedSession = {
+    workspaceRoot: string;
+    sessionId: string;
+  };
+  let desktopPreferences = $state<DesktopPreferences>(loadDesktopPreferences());
 
   // The daemon's default workspace (host, path). Shown in the sidebar /
   // workspace header; new sessions default to this cwd.
@@ -308,6 +311,94 @@
     }
   }
 
+  function loadDesktopPreferences(): DesktopPreferences {
+    if (typeof window === "undefined") return { ...defaultDesktopPreferences };
+    try {
+      const raw = window.localStorage.getItem(DESKTOP_PREFERENCES_KEY);
+      if (!raw) return { ...defaultDesktopPreferences };
+      const parsed = JSON.parse(raw) as Partial<DesktopPreferences>;
+      return {
+        ...defaultDesktopPreferences,
+        rememberSession: parsed.rememberSession === true,
+        rememberInspectorLayout: parsed.rememberInspectorLayout === true,
+        launchInspectorOpen:
+          typeof parsed.launchInspectorOpen === "boolean"
+            ? parsed.launchInspectorOpen
+            : defaultDesktopPreferences.launchInspectorOpen,
+        defaultInspectorTab: parsed.defaultInspectorTab ?? defaultDesktopPreferences.defaultInspectorTab,
+        defaultInspectorWidth:
+          typeof parsed.defaultInspectorWidth === "number"
+            ? parsed.defaultInspectorWidth
+            : defaultDesktopPreferences.defaultInspectorWidth,
+        remoteEnabled: parsed.remoteEnabled === true,
+        remoteTarget: typeof parsed.remoteTarget === "string" ? parsed.remoteTarget : "",
+        remoteCwd: typeof parsed.remoteCwd === "string" ? parsed.remoteCwd : ""
+      };
+    } catch {
+      return { ...defaultDesktopPreferences };
+    }
+  }
+
+  function persistDesktopPreferences(preferences: DesktopPreferences) {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(DESKTOP_PREFERENCES_KEY, JSON.stringify(preferences));
+  }
+
+  function workspaceIdentity(): string {
+    return settingsSnapshot?.workspaceRoot || daemonWorkspaceRoot || defaultWorkspaceCwd || "";
+  }
+
+  function loadRememberedSession(): RememberedSession | null {
+    if (typeof window === "undefined") return null;
+    try {
+      const raw = window.localStorage.getItem(REMEMBERED_SESSION_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as Partial<RememberedSession>;
+      if (typeof parsed.sessionId !== "string" || !parsed.sessionId) return null;
+      return {
+        sessionId: parsed.sessionId,
+        workspaceRoot: typeof parsed.workspaceRoot === "string" ? parsed.workspaceRoot : ""
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  function clearRememberedSession() {
+    if (typeof window === "undefined") return;
+    window.localStorage.removeItem(REMEMBERED_SESSION_KEY);
+  }
+
+  function rememberSession(sessionId: string) {
+    if (!desktopPreferences.rememberSession || typeof window === "undefined") return;
+    const workspaceRoot = workspaceIdentity();
+    if (!workspaceRoot || !sessionId) return;
+    window.localStorage.setItem(
+      REMEMBERED_SESSION_KEY,
+      JSON.stringify({ workspaceRoot, sessionId } satisfies RememberedSession)
+    );
+  }
+
+  function findSessionById(sessionId: string): SessionListItem | null {
+    return groups.flatMap((g) => g.sessions).find((session) => session.id === sessionId) ?? null;
+  }
+
+  async function openRememberedSessionIfAvailable(): Promise<boolean> {
+    if (!desktopPreferences.rememberSession) return false;
+    const remembered = loadRememberedSession();
+    if (!remembered) return false;
+    const workspaceRoot = workspaceIdentity();
+    if (remembered.workspaceRoot && workspaceRoot && remembered.workspaceRoot !== workspaceRoot) {
+      return false;
+    }
+    const session = findSessionById(remembered.sessionId);
+    if (!session) return false;
+    await openSession(session);
+    openAgentSessionId = session.id;
+    tweaks = { ...tweaks, screen: "workspace" };
+    return true;
+  }
+
   function hasProviderAuth(snapshot: SettingsSnapshot | null): boolean {
     return (snapshot?.auth?.length ?? 0) > 0;
   }
@@ -394,6 +485,10 @@
     persistTweaks(tweaks); // Tweaks are renderer ergonomics, not workspace data.
   });
 
+  $effect(() => {
+    persistDesktopPreferences(desktopPreferences);
+  });
+
   async function init() {
     void loadDefaultWorkspace()
       .then((info) => {
@@ -419,6 +514,8 @@
       // the most recent real session so the Chat tab renders a transcript
       // instead of the empty state.
       if (!selectedSession) {
+        const restored = await openRememberedSessionIfAvailable();
+        if (restored) return;
         const firstReal = sortedGroups
           .flatMap((g) => g.sessions)
           .sort((a, b) => b.updatedAtMs - a.updatedAtMs)[0];
@@ -625,6 +722,7 @@
       if (loadGeneration !== sessionLoadGeneration) return;
       selectedSession = detail.session;
       sessionDetail = detail;
+      rememberSession(detail.session.id);
       if (resetLiveState) {
         // New session lands: drop any lingering live-stream items + local draft
         // so the composer feels fresh.
@@ -704,10 +802,18 @@
 
   function updateDesktopPreference<K extends keyof DesktopPreferences>(key: K, value: DesktopPreferences[K]) {
     desktopPreferences = { ...desktopPreferences, [key]: value };
+    if (key === "rememberSession") {
+      if (value === true && selectedSession) {
+        rememberSession(selectedSession.id);
+      } else if (value === false) {
+        clearRememberedSession();
+      }
+    }
   }
 
   function resetDesktopPreferences() {
     desktopPreferences = { ...defaultDesktopPreferences };
+    clearRememberedSession();
     statusMessage = "Desktop preferences reset.";
   }
 
@@ -764,6 +870,7 @@
     await refreshSettings();
     await refreshPins();
     await refreshGroups();
+    await openRememberedSessionIfAvailable();
     statusMessage = `Switched workspace to ${hs.workspaceRoot}.`;
   }
 

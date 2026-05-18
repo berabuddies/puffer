@@ -164,6 +164,31 @@ test("settings panes follow refreshed workspace state", async ({ page }) => {
   await expect(refreshedRow.locator("select")).toHaveValue("deny");
 });
 
+test("remember last session persists and restores agent detail", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  const remember = page
+    .locator(".pf-settings-row")
+    .filter({ hasText: "Remember last session" })
+    .locator("input");
+  await remember.check();
+  await expect(remember).toBeChecked();
+
+  await page.getByRole("button", { name: "Workspace" }).click();
+  await page
+    .locator(".pf-sidebar-agents-list")
+    .getByRole("button", { name: /^Browser regression\b/ })
+    .click();
+  await expect(page.getByRole("button", { name: "Back" })).toBeVisible();
+
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Back" })).toBeVisible();
+  await expect(page.locator(".pf-agent-detail .primary-title")).toContainText("Browser regression");
+});
+
 test("MCP settings add server through the daemon", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
