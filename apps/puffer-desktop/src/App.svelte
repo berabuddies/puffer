@@ -311,6 +311,14 @@
     }
   }
 
+  function handleShellKeydown(event: KeyboardEvent) {
+    if (event.defaultPrevented || onboarding) return;
+    if ((event.metaKey || event.ctrlKey) && event.key === ",") {
+      event.preventDefault();
+      onSelectScreen("settings");
+    }
+  }
+
   function loadDesktopPreferences(): DesktopPreferences {
     if (typeof window === "undefined") return { ...defaultDesktopPreferences };
     try {
@@ -467,6 +475,7 @@
     }
     window.addEventListener("blur", armRecapBlurTimer);
     window.addEventListener("focus", cancelRecapBlurTimer);
+    window.addEventListener("keydown", handleShellKeydown, true);
     void init();
     return () => {
       cancelRecapBlurTimer();
@@ -477,6 +486,7 @@
       }
       window.removeEventListener("blur", armRecapBlurTimer);
       window.removeEventListener("focus", cancelRecapBlurTimer);
+      window.removeEventListener("keydown", handleShellKeydown, true);
     };
   });
 

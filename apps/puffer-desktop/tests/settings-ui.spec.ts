@@ -35,6 +35,20 @@ test("default model cannot be saved before provider models load", async ({ page 
   });
 });
 
+test("advertised settings shortcut opens settings", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await expect(page.getByRole("button", { name: "Connect project" })).toBeVisible();
+  await page.keyboard.press("Control+,");
+
+  await expect(page.getByRole("heading", { name: "General" })).toBeVisible();
+  await page.getByRole("button", { name: "Shortcuts" }).click();
+  await expect(page.getByText("Cmd/Ctrl + ,")).toBeVisible();
+  await expect(page.getByText("Open settings")).toBeVisible();
+});
+
 test("provider API key connect requires a non-empty key", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

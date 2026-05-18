@@ -289,7 +289,7 @@
     { combo: "Enter",            action: "Send composer message" },
     { combo: "Shift + Enter",    action: "Insert newline in composer" },
     { combo: "Esc",              action: "Close modal / cancel" },
-    { combo: "Cmd/Ctrl + ,",     action: "Open settings (via title bar)" }
+    { combo: "Cmd/Ctrl + ,",     action: "Open settings" }
   ];
 
   // Well-known git providers we surface on the Git & PRs pane. If the user
