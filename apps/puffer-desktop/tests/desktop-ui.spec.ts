@@ -151,6 +151,85 @@ test("dispatches printable Browser keyboard input as key events", async ({ page 
   expect(textInsertions).toHaveLength(0);
 });
 
+test("Browser canvas reload shortcut calls daemon reload", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open");
+
+  await page.locator(".pf-browser-canvas").focus();
+  await page.keyboard.press("Control+R");
+
+  await expect.poll(() =>
+    daemon.requests.some((request) => request.method === "browser_reload")
+  ).toBe(true);
+  const reload = daemon.requests.find((request) => request.method === "browser_reload");
+  expect(reload?.params).toMatchObject({
+    sessionId: "session-browser:browser:tab-1"
+  });
+  const forwardedShortcut = daemon.requests.filter((request) => {
+    const event = request.params.event as Record<string, unknown> | undefined;
+    return request.method === "browser_input" && event?.key === "r";
+  });
+  expect(forwardedShortcut).toHaveLength(0);
+});
+
+test("Browser canvas location shortcut focuses the URL field", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open");
+
+  await page.locator(".pf-browser-canvas").focus();
+  await page.keyboard.press("Control+L");
+
+  await expect(page.getByLabel("URL")).toBeFocused();
+  const forwardedShortcut = daemon.requests.filter((request) => {
+    const event = request.params.event as Record<string, unknown> | undefined;
+    return request.method === "browser_input" && event?.key === "l";
+  });
+  expect(forwardedShortcut).toHaveLength(0);
+});
+
+test("Browser canvas close shortcut closes the active tab", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1"
+  );
+
+  await page.locator(".pf-browser-canvas").focus();
+  await page.keyboard.press("Control+W");
+
+  await expect.poll(() =>
+    daemon.requests.some((request) =>
+      request.method === "browser_agent" && request.params.action === "close"
+    )
+  ).toBe(true);
+  const close = daemon.requests.find((request) =>
+    request.method === "browser_agent" && request.params.action === "close"
+  );
+  expect(close?.params).toMatchObject({
+    sessionId: "session-browser",
+    tabId: "tab-1"
+  });
+  const forwardedShortcut = daemon.requests.filter((request) => {
+    const event = request.params.event as Record<string, unknown> | undefined;
+    return request.method === "browser_input" && event?.key === "w";
+  });
+  expect(forwardedShortcut).toHaveLength(0);
+});
+
 test("new Browser tab button creates a distinct daemon tab", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

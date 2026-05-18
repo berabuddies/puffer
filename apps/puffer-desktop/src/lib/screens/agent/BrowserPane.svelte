@@ -50,6 +50,7 @@
 
   let viewport: HTMLDivElement | null = $state(null);
   let canvas: HTMLCanvasElement | null = $state(null);
+  let addressInput: HTMLInputElement | null = $state(null);
   let tabs = $state<BrowserTab[]>([]);
   let activeTabId = $state("");
   let nextTabNumber = 2;
@@ -92,6 +93,7 @@
   let pendingCursorPoint: { x: number; y: number } | null = null;
   let pendingCursorSessionId: string | null = null;
   let tabStateVersion = 0;
+  const handledBrowserShortcutCodes = new Set<string>();
 
   let activeTab = $derived(tabs.find((tab) => tab.id === activeTabId) ?? tabs[0]);
   let browserControlsEnabled = $derived(Boolean(activeTab && connected));
@@ -576,8 +578,8 @@
     void connectActiveTab();
   }
 
-  function closeTab(tabId: string, event: Event) {
-    event.stopPropagation();
+  function closeTab(tabId: string, event?: Event) {
+    event?.stopPropagation();
     void browserTabClose(sessionId, tabId)
       .then((state) => {
         applyTabsState(state, { allowEmpty: true });
@@ -811,6 +813,25 @@
     return (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "c";
   }
 
+  function handleBrowserShortcut(event: KeyboardEvent): boolean {
+    if (!event.metaKey && !event.ctrlKey) return false;
+    const key = event.key.toLowerCase();
+    if (!["r", "l", "w"].includes(key)) return false;
+    event.preventDefault();
+    handledBrowserShortcutCodes.add(event.code);
+    if (key === "r") {
+      void browserReload(activeBackendSessionId()).catch((err) => {
+        error = String(err);
+      });
+    } else if (key === "l") {
+      addressInput?.focus();
+      addressInput?.select();
+    } else if (activeTabId) {
+      closeTab(activeTabId);
+    }
+    return true;
+  }
+
   function keyDown(event: KeyboardEvent) {
     if (!connected) return;
     if (isCopyShortcut(event)) {
@@ -818,7 +839,7 @@
       void copySelection();
       return;
     }
-    if ((event.metaKey || event.ctrlKey) && ["r", "l", "w"].includes(event.key.toLowerCase())) {
+    if (handleBrowserShortcut(event)) {
       return;
     }
     event.preventDefault();
@@ -837,6 +858,10 @@
 
   function keyUp(event: KeyboardEvent) {
     if (!connected) return;
+    if (handledBrowserShortcutCodes.delete(event.code)) {
+      event.preventDefault();
+      return;
+    }
     if (isCopyShortcut(event)) {
       event.preventDefault();
       return;
@@ -965,6 +990,7 @@
       aria-label="URL"
       spellcheck="false"
       disabled={!browserControlsEnabled}
+      bind:this={addressInput}
       bind:value={urlDraft}
     />
     <button
