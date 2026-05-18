@@ -933,7 +933,7 @@ tmux_golden_mode = false
             .expect("resolve")
             .expect("project memory");
         assert_eq!(resolved.name, "api");
-        assert_eq!(resolved.root, project_root);
+        assert_eq!(resolved.root, normalize_project_path(&project_root));
         assert!(resolved.memory_file.ends_with("MEMORY.md"));
         assert!(resolved
             .memory_file
@@ -969,6 +969,6 @@ tmux_golden_mode = false
             .expect("resolve")
             .expect("project memory");
         assert_eq!(resolved.name, "api");
-        assert_eq!(resolved.root, nested_root);
+        assert_eq!(resolved.root, normalize_project_path(&nested_root));
     }
 }
