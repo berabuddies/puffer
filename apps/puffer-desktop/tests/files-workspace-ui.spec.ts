@@ -59,6 +59,24 @@ test("Files tab saves text edits through the daemon", async ({ page }) => {
   await expect(editor).toHaveValue(saved);
 });
 
+test("Files editor keeps global find shortcuts while focused", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openFilesPanel(page);
+
+  const editor = page.getByLabel("Edit file contents");
+  await editor.focus();
+  await expect(editor).toBeFocused();
+
+  await page.keyboard.press("Control+F");
+
+  await expect(page.getByRole("search", { name: "Find in agent view" })).toHaveCount(0);
+  await expect(editor).toBeFocused();
+});
+
 test("Files tab keeps dirty edits visible after save failure", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

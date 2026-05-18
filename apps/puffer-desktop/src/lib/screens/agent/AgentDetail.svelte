@@ -241,13 +241,13 @@
 
   function handleGlobalKeydown(event: KeyboardEvent) {
     const key = event.key.toLowerCase();
+    if (isEditableTarget(event.target)) return;
     if ((event.metaKey || event.ctrlKey) && key === "f") {
       event.preventDefault();
       openSearch();
       return;
     }
     if (!searchOpen) return;
-    if (isEditableTarget(event.target)) return;
     if (event.key === "Escape") {
       event.preventDefault();
       closeSearch();

@@ -50,3 +50,20 @@ test("Terminal pane restores PTYs when switching sessions", async ({ page }) => 
     request.params.cwd === "/tmp/puffer-beta"
   );
 });
+
+test("Terminal input keeps global find shortcuts while focused", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: /Browser regression/ }).first().click();
+  await page.locator(".pf-agent-tabs").getByRole("button", { name: "Terminal", exact: true }).click();
+  await daemon.waitForRequest("pty_open");
+
+  const terminalHost = page.locator(".pf-terminal-host");
+  await expect(terminalHost).toBeVisible();
+  await terminalHost.click();
+  await page.keyboard.press("Control+F");
+
+  await expect(page.getByRole("search", { name: "Find in agent view" })).toHaveCount(0);
+});
