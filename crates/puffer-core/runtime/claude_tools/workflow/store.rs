@@ -191,6 +191,10 @@ pub(super) struct WorktreeStore {
 
 #[derive(Debug, Deserialize)]
 pub(super) struct AgentInput {
+    // Mirror the runtime AgentToolInput: some providers emit `name`
+    // instead of `description`; treat description as optional at the
+    // wire and fall back at the call site.
+    #[serde(default)]
     pub(super) description: String,
     pub(super) prompt: String,
     #[serde(default)]

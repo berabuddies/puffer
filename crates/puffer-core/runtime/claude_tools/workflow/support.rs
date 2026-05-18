@@ -51,7 +51,16 @@ fn unique_team_name(teams: &TeamStore, requested: &str) -> String {
 
 /// Executes the live `Agent` workflow tool.
 pub(super) fn execute_agent(state: &mut AppState, _cwd: &Path, input: Value) -> Result<String> {
-    let parsed: AgentInput = serde_json::from_value(input).context("invalid Agent input")?;
+    let mut parsed: AgentInput =
+        serde_json::from_value(input).context("invalid Agent input")?;
+    if parsed.description.trim().is_empty() {
+        parsed.description = parsed
+            .name
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| parsed.subagent_type.clone().filter(|s| !s.trim().is_empty()))
+            .unwrap_or_else(|| "agent task".to_string());
+    }
     let agent_id = format!("agent-{}", Uuid::new_v4().simple());
     let store_cwd = state.session.cwd.as_path();
     let root = workflow_root(store_cwd)?;

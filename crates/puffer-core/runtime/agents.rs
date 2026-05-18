@@ -19,6 +19,12 @@ use uuid::Uuid;
 
 #[derive(Debug, serde::Deserialize)]
 struct AgentToolInput {
+    // Some provider/model versions emit `name` instead of `description`
+    // for the Agent tool's required label. Accept either at the wire
+    // (description is optional here) and let the call site fall back
+    // to `name` → `subagent_type` → "agent task" so a missing
+    // description never aborts the dispatch.
+    #[serde(default)]
     description: String,
     prompt: String,
     #[serde(default)]
@@ -194,9 +200,18 @@ pub(super) fn execute_agent_tool(
     cwd: &Path,
     input: Value,
 ) -> Result<String> {
-    let input: AgentToolInput = serde_json::from_value(input).context("invalid Agent input")?;
+    let mut input: AgentToolInput =
+        serde_json::from_value(input).context("invalid Agent input")?;
     if input.prompt.trim().is_empty() {
         bail!("Agent prompt cannot be empty");
+    }
+    if input.description.trim().is_empty() {
+        input.description = input
+            .name
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| input.subagent_type.clone().filter(|s| !s.trim().is_empty()))
+            .unwrap_or_else(|| "agent task".to_string());
     }
     if input.cwd.is_some() && input.isolation.as_deref() == Some("worktree") {
         bail!("agent cwd override is incompatible with isolation=worktree");
