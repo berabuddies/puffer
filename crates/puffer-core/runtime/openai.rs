@@ -476,7 +476,12 @@ pub(super) fn execute_openai_tool_calls(
 
     // ---------- Phase 2: Execute tools ----------
     // Clone immutable data needed by parallel tools.
-    let working_dirs = state.working_dirs.clone();
+    // Effective working_dirs = user-added /add-dir roots + session
+    // scratchpad (see AppState::effective_working_dirs). The scratchpad
+    // augmentation is the single fix point for the bug where subagent
+    // sessions (and any session whose model follows the scratchpad
+    // guidance) hit the path sandbox.
+    let working_dirs = state.effective_working_dirs();
     let provider_context = super::claude_tools::ProviderToolContext::OpenAI {
         request_config,
         model_id,

@@ -399,17 +399,13 @@ fn load_memory_prompt_for_filename(cwd: &Path, filename: &str) -> Option<String>
     }
 }
 
-/// Returns the session-specific scratchpad directory, creating it if needed.
-/// Returns the session-specific scratchpad directory under $HOME/.puffer/
-/// (not in the project directory, to avoid polluting workspace listings).
+/// Returns the session-specific scratchpad directory advertised in the
+/// system prompt. Thin wrapper over
+/// [`crate::workspace_paths::session_scratchpad_dir`] so the prompt and
+/// the path sandbox (`AppState::effective_working_dirs`) always agree on
+/// the exact directory string.
 fn scratchpad_dir(state: &AppState) -> Option<PathBuf> {
-    let home = env::var_os("HOME")?;
-    let dir = Path::new(&home)
-        .join(".puffer")
-        .join("scratchpad")
-        .join(state.session.id.to_string());
-    std::fs::create_dir_all(&dir).ok()?;
-    Some(dir)
+    crate::workspace_paths::session_scratchpad_dir(&state.session.id)
 }
 
 fn is_git_repository(cwd: &Path) -> bool {

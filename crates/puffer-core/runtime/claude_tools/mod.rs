@@ -102,6 +102,11 @@ pub(crate) fn execute_tool(
             return Ok(result);
         }
     }
+    // Augment the user-added `/add-dir` roots with the session scratchpad
+    // (see `AppState::effective_working_dirs`). All in-process tool paths
+    // below resolve paths through this slice; the runner_adapter dispatch
+    // above gets the same set via the RunnerToolRequest builder.
+    let effective_working_dirs = state.effective_working_dirs();
     match definition.id.as_str() {
         "Bash" => {
             let execution = bash::execute_from_value(cwd, &state.session.id, input)?;
@@ -125,7 +130,7 @@ pub(crate) fn execute_tool(
             }
             let output = read::execute_claude_read_tool(
                 cwd,
-                &state.working_dirs,
+                &effective_working_dirs,
                 &filesystem_policy.runner_policy(),
                 input.clone(),
             )?;
@@ -136,7 +141,7 @@ pub(crate) fn execute_tool(
             let mut read_state = clone_read_state(state);
             let output = write::execute_claude_write_tool(
                 cwd,
-                &state.working_dirs,
+                &effective_working_dirs,
                 &filesystem_policy.runner_policy(),
                 input.clone(),
                 &mut read_state,
@@ -153,7 +158,7 @@ pub(crate) fn execute_tool(
             }
             let output = edit::execute_claude_edit(
                 cwd,
-                &state.working_dirs,
+                &effective_working_dirs,
                 &filesystem_policy.runner_policy(),
                 input.clone(),
             )?;
@@ -167,7 +172,7 @@ pub(crate) fn execute_tool(
             true,
             glob::execute_claude_glob(
                 cwd,
-                &state.working_dirs,
+                &effective_working_dirs,
                 &filesystem_policy.runner_policy(),
                 input,
             )?,
@@ -177,7 +182,7 @@ pub(crate) fn execute_tool(
             true,
             grep::execute_claude_grep(
                 cwd,
-                &state.working_dirs,
+                &effective_working_dirs,
                 &filesystem_policy.runner_policy(),
                 input,
             )?,
@@ -191,7 +196,7 @@ pub(crate) fn execute_tool(
             }
             let output = notebook_edit::execute_notebook_edit_tool(
                 cwd,
-                &state.working_dirs,
+                &effective_working_dirs,
                 &filesystem_policy.runner_policy(),
                 input.clone(),
             )?;
@@ -444,7 +449,15 @@ fn try_runner_dispatch(
     let request = RunnerToolRequest {
         tool_id: tool_id.to_string(),
         cwd: cwd.to_path_buf(),
-        working_dirs: state.working_dirs.clone(),
+        // Use `effective_working_dirs` so the model can resolve paths it
+        // was told to write under the session scratchpad (which lives at
+        // ~/.puffer/scratchpad/<session> and is otherwise outside the
+        // workspace sandbox). Subagents need this most — their nested
+        // cwd is unrelated to the parent project, so without the
+        // scratchpad root every Bash/Read/Edit/Write attempt that
+        // follows the system-prompt scratchpad guidance bounces off
+        // resolve_path_for_session.
+        working_dirs: state.effective_working_dirs(),
         filesystem: filesystem_policy.runner_policy(),
         input: input.clone(),
         session_id: Some(state.session.id.to_string()),

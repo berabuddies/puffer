@@ -323,6 +323,29 @@ impl AppState {
         self
     }
 
+    /// Returns the workspace roots that the path sandbox should accept,
+    /// extending the user-added `/add-dir` roots in `working_dirs` with
+    /// implicit roots the model is told to use:
+    ///   - this session's scratchpad (`$HOME/.puffer/scratchpad/<session>`)
+    ///     so tools dispatched from the model can write the path
+    ///     advertised in the system prompt without bouncing off the
+    ///     `resolve_path_for_session` workspace check.
+    /// All tool dispatch sites should call this in place of
+    /// `state.working_dirs` directly; otherwise the model-following-the-
+    /// scratchpad-advertisement gets rejected. Returns owned `PathBuf` so
+    /// callers can pass it across thread boundaries in `tool_batch`.
+    pub fn effective_working_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs = self.working_dirs.clone();
+        if let Some(scratchpad) =
+            crate::workspace_paths::session_scratchpad_dir(&self.session.id)
+        {
+            if !dirs.iter().any(|root| root == &scratchpad) {
+                dirs.push(scratchpad);
+            }
+        }
+        dirs
+    }
+
     /// Returns true and clears both the command-driven flag and the
     /// background filesystem-watcher signal if either is set. The caller
     /// (typically `puffer-tui`) is then expected to invoke

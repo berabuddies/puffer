@@ -2,9 +2,32 @@ use crate::AppState;
 use anyhow::{anyhow, Context, Result};
 use puffer_runner_api::FilesystemSandboxMode;
 use std::collections::BTreeSet;
+use std::env;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
+use uuid::Uuid;
+
+/// Returns the per-session scratchpad directory under
+/// `$HOME/.puffer/scratchpad/<session-id>/`, creating it on demand so it
+/// is always a valid workspace root the model can write into. Returns
+/// `None` only when `$HOME` is unset or the directory cannot be created
+/// (e.g. permission denied), in which case callers should fall back to
+/// existing workspace roots without the scratchpad augmentation.
+///
+/// This is the canonical implementation; `runtime::system_prompt` and
+/// `AppState::effective_working_dirs` both call this so the path the
+/// system prompt advertises and the path the path sandbox accepts are
+/// always the same string.
+pub fn session_scratchpad_dir(session_id: &Uuid) -> Option<PathBuf> {
+    let home = env::var_os("HOME")?;
+    let dir = Path::new(&home)
+        .join(".puffer")
+        .join("scratchpad")
+        .join(session_id.to_string());
+    fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
 
 /// Describes the outcome of validating one `/add-dir` directory candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]

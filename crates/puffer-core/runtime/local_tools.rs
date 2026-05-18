@@ -63,7 +63,13 @@ pub(super) fn execute_runtime_local_tool(
         "runtime:skill" => execute_skill_tool(resources, input),
         "runtime:tool_search" => execute_tool_search(registry, input),
         "runtime:browser" => browser::execute_browser_tool(cwd, &state.session.id, input),
-        "runtime:glob" => execute_glob_tool(cwd, &state.working_dirs, filesystem_policy, input),
+        "runtime:glob" => {
+            // Use effective_working_dirs so Glob can match files the
+            // model was told to write under the session scratchpad
+            // (see AppState::effective_working_dirs).
+            let effective_dirs = state.effective_working_dirs();
+            execute_glob_tool(cwd, &effective_dirs, filesystem_policy, input)
+        }
         "runtime:sleep" => sleep::execute_sleep(input),
         "runtime:list_mcp_resources" => {
             execute_list_mcp_resources(state.tool_runner.as_ref(), input)

@@ -68,7 +68,9 @@ pub(super) fn execute_tool_batch(
         )?);
     }
 
-    let working_dirs = inputs.state.working_dirs.clone();
+    // See AppState::effective_working_dirs — required so tools resolve paths
+    // the model was told to write under the session scratchpad.
+    let working_dirs = inputs.state.effective_working_dirs();
     let session_id = inputs.state.session.id;
     let provider_context =
         backend_to_provider_context(session.tool_execution_backend(), inputs.model_id);
