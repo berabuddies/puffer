@@ -240,6 +240,42 @@ test("Browser tab list event reconnects when active tab changes", async ({ page 
   await expect(page.getByLabel("URL")).toHaveValue("https://example.com");
 });
 
+test("Browser tab list ignores active ids missing from the tab set", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1"
+  );
+  const previousRequestCount = daemon.requests.length;
+
+  daemon.emit("browser:session-browser:tabs", {
+    activeTabId: "missing-tab",
+    tabs: [
+      {
+        tabId: "tab-1",
+        label: "Stable tab",
+        url: "https://example.com",
+        title: "Stable tab",
+        loading: false,
+        connected: true,
+        active: true,
+        backendSessionId: "session-browser:browser:tab-1",
+        createdAtMs: Date.now(),
+        updatedAtMs: Date.now()
+      }
+    ]
+  });
+  await page.waitForTimeout(20);
+
+  const newRequests = daemon.requests.slice(previousRequestCount);
+  expect(newRequests.map((request) => request.params.sessionId)).not.toContain("session-browser:browser:missing-tab");
+  await expect(page.getByLabel("URL")).toHaveValue("https://example.com");
+});
+
 test("Browser tab list event reopens disconnected active tab", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

@@ -206,8 +206,12 @@
       return;
     }
     const nextTabs = state.tabs.map(tabFromInfo);
+    const connectedTabId = nextTabs.find((tab) => tab.connected)?.id;
+    const validActiveTabId = state.activeTabId && nextTabs.some((tab) => tab.id === state.activeTabId)
+      ? state.activeTabId
+      : null;
     tabs = nextTabs;
-    activeTabId = state.activeTabId || nextTabs.find((tab) => tab.connected)?.id || nextTabs[0].id;
+    activeTabId = validActiveTabId || connectedTabId || nextTabs[0].id;
     nextTabNumber = nextTabIndex(nextTabs);
     saveTabs(nextTabs);
     syncFromActiveTab();
