@@ -7,7 +7,7 @@ use puffer_config::{
 use puffer_core::TurnExecution;
 use puffer_provider_registry::{AuthMode, ModelDescriptor, ProviderDescriptor};
 use puffer_resources::{LoadedItem, SourceInfo, SourceKind, ToolSpec};
-use puffer_session_store::SessionMetadata;
+use puffer_session_store::{SessionMetadata, TranscriptEvent};
 use std::sync::mpsc;
 use tempfile::tempdir;
 
@@ -806,6 +806,52 @@ fn submit_next_queued_prompt_starts_shell_shortcut_as_pending_submit() {
     assert!(!tui.has_pending_submit());
     assert!(state.transcript.iter().any(|message| {
         message.role == MessageRole::Assistant && message.text == "queued-shell"
+    }));
+}
+
+#[test]
+fn failed_shell_shortcut_persists_as_system_message() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = sample_state(session, tempdir.path());
+    let mut resources = resources_with_bash_tool();
+    let mut providers = ProviderRegistry::new();
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let mut auth_store = AuthStore::default();
+
+    handle_submit(
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        "!printf shell-failed >&2; exit 7".to_string(),
+        true,
+    )
+    .unwrap();
+
+    assert!(state.transcript.iter().any(|message| {
+        message.role == MessageRole::System && message.text.contains("shell-failed")
+    }));
+
+    let record = session_store.load_session(state.session.id).unwrap();
+    assert!(record.events.iter().any(|event| {
+        matches!(
+            event,
+            TranscriptEvent::SystemMessage { text } if text.contains("shell-failed")
+        )
+    }));
+    assert!(!record.events.iter().any(|event| {
+        matches!(
+            event,
+            TranscriptEvent::AssistantMessage { text } if text.contains("shell-failed")
+        )
     }));
 }
 
