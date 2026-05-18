@@ -79,6 +79,7 @@
   // MCP servers discovered on disk plus a small manifest writer for new
   // workspace/user entries.
   let mcpServers = $state<McpServerInfo[]>([]);
+  let mcpLoaded = $state(false);
   let mcpLoading = $state(false);
   let mcpSaving = $state(false);
   let mcpError = $state<string | null>(null);
@@ -127,6 +128,7 @@
     } catch (e) {
       mcpError = (e as Error).message ?? String(e);
     } finally {
+      mcpLoaded = true;
       mcpLoading = false;
     }
   }
@@ -155,6 +157,7 @@
         target: mcpForm.transport === "stdio" ? targetOrUrl : undefined,
         scope: mcpForm.scope
       });
+      mcpLoaded = true;
       mcpSaved = `Added ${id}`;
       mcpForm = {
         id: "",
@@ -336,7 +339,7 @@
     if (section === "permissions" && permissionSnapshot === null) {
       void loadPermissionSnapshot();
     }
-    if (section === "mcp" && mcpServers.length === 0 && !mcpLoading) {
+    if (section === "mcp" && !mcpLoaded && !mcpLoading) {
       void loadMcpServers();
     }
     if (section === "providers" && modelPickerProvider) {

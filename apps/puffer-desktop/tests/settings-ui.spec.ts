@@ -84,3 +84,17 @@ test("MCP settings add server through the daemon", async ({ page }) => {
   });
   await expect(page.getByText("Added github")).toBeVisible();
 });
+
+test("MCP settings do not reload-loop when no servers are configured", async ({ page }) => {
+  const daemon = new FakeDaemon({ mcpServers: [] });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "MCP Servers" }).click();
+  await daemon.waitForRequest("list_mcp_servers");
+
+  await expect(page.getByText("No MCP servers configured.")).toBeVisible();
+  await page.waitForTimeout(300);
+  expect(daemon.requests.filter((request) => request.method === "list_mcp_servers")).toHaveLength(1);
+});

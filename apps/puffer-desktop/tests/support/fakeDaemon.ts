@@ -192,6 +192,7 @@ export class FakeDaemon {
   constructor(options: {
     sessions?: FakeDaemonSessionInput[];
     providerModels?: Record<string, JsonRecord[]>;
+    mcpServers?: JsonRecord[];
     protocol?: "legacy" | "real";
   } = {}) {
     this.protocol = options.protocol ?? "legacy";
@@ -203,6 +204,7 @@ export class FakeDaemon {
       this.timelines.set(sessionId, input.timeline ?? defaultTimeline());
     }
     this.providerModels = options.providerModels ?? {};
+    this.mcpServers = options.mcpServers ?? this.mcpServers;
   }
 
   async install(page: Page): Promise<void> {
