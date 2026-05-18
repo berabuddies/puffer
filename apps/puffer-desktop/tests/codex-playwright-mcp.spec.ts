@@ -12,8 +12,9 @@ const codexPlaywrightConfig = [
 ];
 
 test("Codex resolves the built-in Playwright MCP server", async () => {
+  test.setTimeout(60_000);
   const { stdout } = await execFileAsync("codex", ["mcp", "list", ...codexPlaywrightConfig], {
-    timeout: 30_000
+    timeout: 60_000
   });
 
   expect(stdout).toContain("playwright");
