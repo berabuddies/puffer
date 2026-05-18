@@ -222,6 +222,7 @@
   }
 
   function timelineItemKeyBase(item: TimelineItem): string {
+    if (item.id) return `${item.kind}:${item.id}`;
     return `${item.kind}:${stableTextHash(
       [item.title, item.summary, item.body].filter(Boolean).join("\n")
     )}`;

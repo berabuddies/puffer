@@ -412,3 +412,64 @@ test("stale turn reloads do not clear the active streamed answer", async ({ page
   await expect(page.getByText("Late stale text should be ignored.")).toHaveCount(0);
   await expect(page.getByText("Current answer must stay visible.")).toBeVisible();
 });
+
+test("streaming agent row keeps its DOM identity without a local user row", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-remote-stream",
+        displayName: "Remote stream",
+        title: "Remote stream",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Remote stream/);
+  daemon.emit("session:session-remote-stream:event", {
+    type: "turn-start",
+    turnId: "turn-remote-stream"
+  });
+  daemon.emit("session:session-remote-stream:event", {
+    type: "text-delta",
+    turnId: "turn-remote-stream",
+    delta: "Identity"
+  });
+  await expect(page.getByText("Identity")).toBeVisible();
+
+  await page.evaluate(() => {
+    const win = window as typeof window & {
+      __agentRowStillConnected?: () => boolean;
+    };
+    const row = document.querySelector(".pf-msg[data-role='agent']");
+    win.__agentRowStillConnected = () => row?.isConnected === true;
+  });
+
+  daemon.emit("session:session-remote-stream:event", {
+    type: "text-delta",
+    turnId: "turn-remote-stream",
+    delta: " safe"
+  });
+  daemon.emit("session:session-remote-stream:event", {
+    type: "text-delta",
+    turnId: "turn-remote-stream",
+    delta: " stream"
+  });
+
+  await expect(page.getByText("Identity safe stream")).toBeVisible();
+  await expect.poll(() =>
+    page.evaluate(() => {
+      const win = window as typeof window & {
+        __agentRowStillConnected?: () => boolean;
+      };
+      return win.__agentRowStillConnected?.() ?? false;
+    })
+  ).toBe(true);
+});
