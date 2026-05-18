@@ -210,6 +210,7 @@
       throw e;
     }
 
+    let createdSessionId: string;
     try {
       // 2. Optional clone on the remote.
       let targetCwd = remoteDest.trim();
@@ -218,12 +219,11 @@
         targetCwd = await runStreamingClone(url, targetCwd, `Cloning on ${sshTarget}`);
       }
 
-      // 3. Create a session on the remote and open it in the UI.
+      // 3. Create a session on the remote. Only backend failures in this
+      // phase should roll back to the prior daemon.
       status = `Creating agent on ${sshTarget}…`;
       const created = await createSession(targetCwd, selectedProvider || defaultProviderId());
-      status = `Ready — session ${created.sessionId.slice(0, 8)} on ${sshTarget}`;
-      await onConnected?.(created.sessionId);
-      onClose();
+      createdSessionId = created.sessionId;
     } catch (e) {
       if (switchedToRemote && previousHandshake) {
         try {
@@ -234,6 +234,9 @@
       }
       throw e;
     }
+    status = `Ready — session ${createdSessionId.slice(0, 8)} on ${sshTarget}`;
+    await onConnected?.(createdSessionId);
+    onClose();
   }
 
   // SSH auth helper — when `start_ssh_daemon` surfaces a familiar failure

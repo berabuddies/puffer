@@ -141,12 +141,14 @@
   let connectionState = $state<ConnectionState>("idle");
   let daemonUrl = $state<string | null>(null);
   let daemonWorkspaceRoot = $state<string | null>(null);
+  let daemonClientFingerprint = $state<string | null>(null);
   let daemonClientUnlisteners: Array<() => void> = [];
   let sessionLoadGeneration = 0;
   let desktopPins = $state<DesktopPinState>({ pinnedAgentIds: [], pinnedWorkspacePaths: [] });
 
   let settingsSnapshot = $state<SettingsSnapshot | null>(null);
   let settingsLoading = $state(false);
+  let settingsRefreshGeneration = 0;
   let authBusyProviderId = $state<string | null>(null);
   let authError = $state<string | null>(null);
   let externalCredentials = $state<ExternalCredential[]>([]);
@@ -426,9 +428,23 @@
     return !skipOnboarding;
   }
 
+  function daemonFingerprint(client: DaemonClient): string {
+    const hs = client.handshake;
+    return [hs.url, hs.token, hs.protocolVersion, hs.workspaceRoot].join("\n");
+  }
+
   function updateDaemonIdentity(client: DaemonClient | null = currentDaemonClient()) {
     daemonUrl = client?.handshake.url ?? null;
     daemonWorkspaceRoot = client?.handshake.workspaceRoot ?? null;
+    daemonClientFingerprint = client ? daemonFingerprint(client) : null;
+  }
+
+  async function adoptCurrentDaemonClient(client: DaemonClient, workspaceRoot: string) {
+    defaultWorkspaceCwd = workspaceRoot;
+    resetDaemonScopedSessionState();
+    attachDaemonClient(client);
+    await refreshSettings();
+    await refreshPins();
   }
 
   function clearDaemonClientListeners() {
@@ -549,26 +565,34 @@
   // Handlers — mostly lifted from the prior App.svelte
   // ─────────────────────────────────────────────────────────────
   async function refreshSettings() {
+    const generation = ++settingsRefreshGeneration;
     settingsLoading = true;
     try {
-      settingsSnapshot = await loadSettingsSnapshot(remoteConnection);
+      const snapshot = await loadSettingsSnapshot(remoteConnection);
+      if (generation !== settingsRefreshGeneration) return;
+      settingsSnapshot = snapshot;
       onboarding = shouldShowOnboarding(settingsSnapshot);
       // Re-scan ~/.claude / ~/.codex so the LoginView can offer one-click
       // imports for credentials the user already has on disk. Failure is
       // non-fatal — the manual API-key path still works.
       void listExternalCredentials()
         .then((found) => {
+          if (generation !== settingsRefreshGeneration) return;
           externalCredentials = found;
         })
         .catch(() => {
+          if (generation !== settingsRefreshGeneration) return;
           externalCredentials = [];
         });
       statusMessage = "Settings snapshot refreshed.";
     } catch (error) {
+      if (generation !== settingsRefreshGeneration) return;
       statusMessage = String(error);
       if (!skipOnboarding) onboarding = true;
     } finally {
-      settingsLoading = false;
+      if (generation === settingsRefreshGeneration) {
+        settingsLoading = false;
+      }
     }
   }
 
@@ -878,17 +902,18 @@
     workspaceRoot: string;
   }) {
     showWorkspacePicker = false;
-    defaultWorkspaceCwd = hs.workspaceRoot;
-    resetDaemonScopedSessionState();
     const client = currentDaemonClient();
     if (client) {
-      attachDaemonClient(client);
+      await adoptCurrentDaemonClient(client, hs.workspaceRoot);
     } else {
+      defaultWorkspaceCwd = hs.workspaceRoot;
+      resetDaemonScopedSessionState();
       daemonUrl = hs.url;
       daemonWorkspaceRoot = hs.workspaceRoot;
+      daemonClientFingerprint = null;
+      await refreshSettings();
+      await refreshPins();
     }
-    await refreshSettings();
-    await refreshPins();
     await refreshGroups();
     await openRememberedSessionIfAvailable();
     statusMessage = `Switched workspace to ${hs.workspaceRoot}.`;
@@ -975,13 +1000,17 @@
   /** Fired by ConnectProjectModal once a clone+create has landed. Refreshes
    *  the workspace board and drills straight into the new session. */
   async function handleSessionReady(sessionId: string) {
-    // Refresh the default workspace info in case we just connected to a
-    // remote daemon — the workspace root changed.
-    void loadDefaultWorkspace()
-      .then((info) => {
-        defaultWorkspaceCwd = info.cwd;
-      })
-      .catch(() => {});
+    const client = currentDaemonClient();
+    const currentFingerprint = client ? daemonFingerprint(client) : null;
+    if (client && currentFingerprint !== daemonClientFingerprint) {
+      await adoptCurrentDaemonClient(client, client.handshake.workspaceRoot);
+    } else {
+      void loadDefaultWorkspace()
+        .then((info) => {
+          defaultWorkspaceCwd = info.cwd;
+        })
+        .catch(() => {});
+    }
     await refreshGroups();
     const session = groups.flatMap((g) => g.sessions).find((s) => s.id === sessionId);
     if (session) {

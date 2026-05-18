@@ -218,7 +218,6 @@
     <ConnectProjectModal
       onClose={() => (showConnect = false)}
       onConnected={async (sessionId) => {
-        showConnect = false;
         await onSessionReady?.(sessionId);
       }}
       defaultLocalPath={defaultWorkspaceCwd || "~/code"}

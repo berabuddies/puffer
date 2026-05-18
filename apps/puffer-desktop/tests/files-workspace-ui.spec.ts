@@ -320,3 +320,68 @@ test("failed remote project creation restores the previous daemon", async ({ pag
   });
   expect(activeToken).toBe("test");
 });
+
+test("successful remote project creation adopts remote daemon state", async ({ page }) => {
+  const localDaemon = new FakeDaemon({ workspaceRoot: "/tmp/puffer-local" });
+  const remoteDaemon = new FakeDaemon({
+    url: "ws://127.0.0.1:17778/ws",
+    workspaceRoot: "/tmp/puffer-remote"
+  });
+  await localDaemon.install(page);
+  await remoteDaemon.install(page);
+  await localDaemon.open(page, {
+    extraParams: {
+      pufferRemoteBackend: remoteDaemon.url,
+      pufferRemoteToken: "remote-token",
+      pufferRemoteWorkspaceRoot: "/tmp/puffer-remote"
+    }
+  });
+
+  await page.getByRole("button", { name: "Connect project" }).click();
+  const dialog = page.getByRole("dialog", { name: "Connect project" });
+  await dialog.getByRole("tab", { name: /Remote/ }).click();
+  await dialog.getByLabel("SSH target").fill("devbox");
+  await dialog.getByLabel("Destination directory").fill("/tmp/remote-project");
+  await dialog.getByRole("button", { name: "Start agent" }).click();
+
+  const createRequest = await remoteDaemon.waitForRequest("create_session");
+  expect(createRequest.params).toMatchObject({
+    cwd: "/tmp/remote-project",
+    providerId: "codex"
+  });
+  await expect(dialog).toHaveCount(0);
+
+  const active = await page.evaluate(async () => {
+    const mod = await import("/src/lib/api/daemonClient.ts");
+    const handshake = mod.currentDaemonClient()?.handshake ?? null;
+    return handshake
+      ? { token: handshake.token, workspaceRoot: handshake.workspaceRoot }
+      : null;
+  });
+  expect(active).toEqual({
+    token: "remote-token",
+    workspaceRoot: "/tmp/puffer-remote"
+  });
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await expect(page.getByRole("heading", { name: "General" })).toBeVisible();
+  const settingsPane = page.locator(".pf-settings-pane");
+  await expect(settingsPane.locator(".pf-settings-row").filter({ hasText: "Workspace root" })).toContainText(
+    "/tmp/puffer-remote"
+  );
+  await expect(settingsPane.locator(".pf-settings-row").filter({ hasText: "Daemon" })).toContainText(
+    remoteDaemon.url
+  );
+
+  const localPermissionRequestsBefore = localDaemon.requests.filter(
+    (request) => request.method === "list_permissions"
+  ).length;
+  await page.getByRole("button", { name: "Permissions" }).click();
+  await remoteDaemon.waitForRequest("list_permissions");
+  expect(
+    localDaemon.requests.filter((request) => request.method === "list_permissions")
+  ).toHaveLength(localPermissionRequestsBefore);
+  await expect(page.getByText("Stored at")).toContainText(
+    "/tmp/puffer-remote/.puffer/permissions.json"
+  );
+});
