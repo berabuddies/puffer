@@ -12,6 +12,41 @@ async function openAgentPanel(page: Page, name: "Browser" | "Files"): Promise<vo
   await page.locator(".pf-agent-tabs").getByRole("button", { name, exact: true }).click();
 }
 
+function browserTab(tabId: string, url = `https://${tabId}.example`, connected = true): Record<string, unknown> {
+  return {
+    tabId,
+    label: `Fuzz ${tabId}`,
+    url,
+    title: `Fuzz ${tabId}`,
+    loading: false,
+    connected,
+    active: false,
+    backendSessionId: `session-browser:browser:${tabId}`,
+    createdAtMs: Date.now(),
+    updatedAtMs: Date.now()
+  };
+}
+
+async function pasteText(page: Page, text: string): Promise<void> {
+  await page.evaluate((value) => {
+    const data = new DataTransfer();
+    data.setData("text/plain", value);
+    const canvas = document.querySelector(".pf-browser-canvas");
+    canvas?.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: data }));
+  }, text);
+}
+
+function invalidBrowserSessionRequests(daemon: FakeDaemon): string[] {
+  return daemon.requests
+    .filter((request) => request.method.startsWith("browser_"))
+    .map((request) => String(request.params.sessionId ?? ""))
+    .filter((sessionId) =>
+      sessionId.endsWith(":browser:") ||
+      sessionId.includes(":browser:missing") ||
+      sessionId.includes(":browser:undefined")
+    );
+}
+
 test("opens the Browser tab against a mocked desktop daemon", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
@@ -216,6 +251,75 @@ test("Browser cursor probe does not run after tabs are cleared", async ({ page }
   await page.waitForTimeout(90);
 
   expect(daemon.requests.filter((request) => request.method === "browser_cursor")).toHaveLength(0);
+});
+
+test("Browser fuzz click storm keeps daemon session ids valid", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  const consoleErrors: string[] = [];
+  page.on("pageerror", (error) => consoleErrors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error" && !message.text().startsWith("Failed to load resource:")) {
+      consoleErrors.push(message.text());
+    }
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1"
+  );
+
+  const canvas = page.locator(".pf-browser-canvas");
+  for (let step = 0; step < 24; step += 1) {
+    const mode = step % 8;
+    if (mode === 0) {
+      await canvas.click({ position: { x: 18 + step, y: 20 } });
+    } else if (mode === 1) {
+      await canvas.dispatchEvent("pointermove", {
+        clientX: 30 + step,
+        clientY: 32,
+        pointerId: 1,
+        button: -1,
+        buttons: 0,
+        pointerType: "mouse"
+      });
+    } else if (mode === 2) {
+      await page.keyboard.press("a");
+    } else if (mode === 3) {
+      await pasteText(page, `paste-${step}`);
+    } else if (mode === 4) {
+      daemon.emit("browser:session-browser:tabs", { activeTabId: null, tabs: [] });
+      await expect(page.locator(".pf-browser-status")).toHaveText("No pages");
+    } else if (mode === 5) {
+      const tab = browserTab("tab-1", "https://restored.example");
+      daemon.emit("browser:session-browser:tabs", { activeTabId: "tab-1", tabs: [{ ...tab, active: true }] });
+      await expect(page.getByLabel("URL")).toHaveValue("https://restored.example");
+    } else if (mode === 6) {
+      await page.getByRole("button", { name: "New tab" }).click();
+      await daemon.waitForRequest("browser_agent", (request) =>
+        request.params.action === "open" && typeof request.params.tabId === "string"
+      );
+    } else {
+      const tab = browserTab("tab-1", "https://stable.example");
+      daemon.emit("browser:session-browser:tabs", { activeTabId: "missing-tab", tabs: [{ ...tab, active: true }] });
+      await canvas.dispatchEvent("pointermove", {
+        clientX: 44,
+        clientY: 44,
+        pointerId: 1,
+        button: -1,
+        buttons: 0,
+        pointerType: "mouse"
+      });
+    }
+    await page.waitForTimeout(8);
+  }
+  await page.waitForTimeout(90);
+
+  expect(invalidBrowserSessionRequests(daemon)).toEqual([]);
+  await expect(page.locator(".pf-browser-error")).toHaveCount(0);
+  expect(consoleErrors).toEqual([]);
 });
 
 test("Browser tab list event reconnects when active tab changes", async ({ page }) => {
