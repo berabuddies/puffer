@@ -796,6 +796,9 @@ fn is_read_only_pending_slash_command(submitted: &str) -> bool {
         .split_once(' ')
         .map(|(name, args)| (name, args.trim()))
         .unwrap_or((without_slash, ""));
+    if name == "tasks" {
+        return is_read_only_tasks_command(args);
+    }
     if !args.is_empty() {
         return false;
     }
@@ -814,6 +817,16 @@ fn is_read_only_pending_slash_command(submitted: &str) -> bool {
             | "session"
             | "remote"
     )
+}
+
+fn is_read_only_tasks_command(args: &str) -> bool {
+    let trimmed = args.trim();
+    matches!(
+        trimmed,
+        "" | "show" | "list" | "path" | "agents" | "teams" | "worktrees" | "todos"
+    ) || trimmed.starts_with("show ")
+        || trimmed.starts_with("get ")
+        || trimmed.starts_with("output ")
 }
 
 fn append_thinking_delta(state: &mut AppState, delta: &str) {

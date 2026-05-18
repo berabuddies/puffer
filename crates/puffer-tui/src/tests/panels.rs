@@ -364,6 +364,89 @@ fn try_open_overlay_builds_task_dashboard_panel() {
 }
 
 #[test]
+fn pending_turn_opens_tasks_overlay_instead_of_queueing() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let mut state = sample_state();
+    state.cwd = tempdir.path().to_path_buf();
+    state.session.cwd = tempdir.path().to_path_buf();
+    let mut resources = sample_resources();
+    let mut providers = sample_providers();
+    let mut auth_store = sample_auth_store();
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let commands = supported_commands();
+    let mut tui = TuiState::default();
+    set_pending_turn(&mut tui);
+    tui.input = "/tasks".to_string();
+    tui.cursor = tui.input.len();
+
+    handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &commands,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        tui.overlay,
+        Some(OverlayState::CommandPicker {
+            ref title,
+            ..
+        }) if title == "Background Tasks"
+    ));
+    assert!(tui.queued_prompts.is_empty());
+}
+
+#[test]
+fn pending_turn_queues_task_stop_instead_of_opening_overlay() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let mut state = sample_state();
+    state.cwd = tempdir.path().to_path_buf();
+    state.session.cwd = tempdir.path().to_path_buf();
+    let mut resources = sample_resources();
+    let mut providers = sample_providers();
+    let mut auth_store = sample_auth_store();
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let commands = supported_commands();
+    let mut tui = TuiState::default();
+    set_pending_turn(&mut tui);
+    tui.input = "/tasks stop task-1".to_string();
+    tui.cursor = tui.input.len();
+
+    handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &commands,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+
+    assert!(tui.overlay.is_none());
+    assert_eq!(
+        tui.queued_prompts.front().map(String::as_str),
+        Some("/tasks stop task-1")
+    );
+}
+
+#[test]
 fn try_open_overlay_builds_session_panel() {
     assert!(matches!(open_panel("/session"), OverlayState::Session(..)));
 }
