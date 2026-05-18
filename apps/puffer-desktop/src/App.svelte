@@ -62,6 +62,7 @@
     type ConnectionState
   } from "./lib/api/daemonClient";
   import { sessionDisplayName, sessionDisplayTitle } from "./lib/sessionDisplay";
+  import { providerIdInSet } from "./lib/providerIds";
   import type { UnlistenFn } from "@tauri-apps/api/event";
   import type {
     DesktopPreferences,
@@ -1022,7 +1023,10 @@
 
   function providerIsAuthenticated(providerId: string | null | undefined): boolean {
     if (!settingsSnapshot || !providerId) return true;
-    return settingsSnapshot.auth.some((auth) => auth.providerId === providerId);
+    return providerIdInSet(
+      providerId,
+      settingsSnapshot.auth.map((auth) => auth.providerId)
+    );
   }
 
   async function submitMessage(message: string, options: AgentTurnOptions = {}) {

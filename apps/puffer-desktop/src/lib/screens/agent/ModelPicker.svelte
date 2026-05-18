@@ -2,6 +2,7 @@
   import { listProviderModels, type ModelDescriptorInfo } from "../../api/desktop";
   import type { SettingsSnapshot } from "../../types";
   import Icon from "../../design/Icon.svelte";
+  import { providerIdInSet, providerIdsEquivalent } from "../../providerIds";
 
   type Props = {
     snapshot: SettingsSnapshot | null;
@@ -38,24 +39,28 @@
   let currentModel = $derived(
     currentModelOverride ?? snapshot?.config?.defaultModel ?? ""
   );
-  let authedProviderIds = $derived(
-    new Set((snapshot?.auth ?? []).map((entry) => entry.providerId))
-  );
+  let authedProviderIds = $derived((snapshot?.auth ?? []).map((entry) => entry.providerId));
   let authedProviders = $derived(
-    (snapshot?.providers ?? []).filter((provider) => authedProviderIds.has(provider.id))
+    (snapshot?.providers ?? []).filter((provider) => providerIdInSet(provider.id, authedProviderIds))
   );
   let providerLabel = $derived(
-    snapshot?.providers?.find((p) => p.id === currentProvider)?.displayName ?? currentProvider
+    snapshot?.providers?.find((p) => providerIdsEquivalent(p.id, currentProvider))?.displayName ??
+      currentProvider
   );
 
-  let currentProviderModels = $derived(modelsByProvider[currentProvider] ?? []);
+  let currentProviderEntry = $derived(
+    authedProviders.find((provider) => providerIdsEquivalent(provider.id, currentProvider)) ?? null
+  );
+  let currentProviderModels = $derived(
+    modelsByProvider[currentProvider] ?? modelsByProvider[currentProviderEntry?.id ?? ""] ?? []
+  );
 
   // Filter models only within the selected provider. Provider switching is
   // explicit via the provider row above the model list.
   let filteredEntries = $derived.by(() => {
     const needle = query.trim().toLowerCase();
     const out: { provider: string; providerLabel: string; model: ModelDescriptorInfo }[] = [];
-    const provider = authedProviders.find((entry) => entry.id === currentProvider);
+    const provider = authedProviders.find((entry) => providerIdsEquivalent(entry.id, currentProvider));
     if (!provider) return out;
     for (const model of currentProviderModels) {
       if (
@@ -76,7 +81,7 @@
       const next: Record<string, ModelDescriptorInfo[]> = { ...modelsByProvider };
       const providers = allowProviderSwitch
         ? authedProviders
-        : authedProviders.filter((provider) => provider.id === currentProvider);
+        : authedProviders.filter((provider) => providerIdsEquivalent(provider.id, currentProvider));
       for (const provider of providers) {
         if (next[provider.id]) continue;
         try {
@@ -94,7 +99,7 @@
 
   async function selectProvider(providerId: string) {
     if (!allowProviderSwitch || disabled) return;
-    if (providerId === currentProvider) return;
+    if (providerIdsEquivalent(providerId, currentProvider)) return;
     query = "";
     let models = modelsByProvider[providerId] ?? [];
     if (models.length === 0) {
@@ -173,7 +178,7 @@
           {#each authedProviders as provider (provider.id)}
             <button
               type="button"
-              class:on={provider.id === currentProvider}
+              class:on={providerIdsEquivalent(provider.id, currentProvider)}
               onclick={() => selectProvider(provider.id)}
             >
               {provider.displayName}

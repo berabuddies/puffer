@@ -8,7 +8,11 @@
     type DirEntry
   } from "../../api/desktop";
   import { canInvokeTauri, currentDaemonClient, switchDaemonClient } from "../../api/daemonClient";
-  import { canonicalDaemonProviderId } from "../../providerIds";
+  import {
+    canonicalDaemonProviderId,
+    providerIdInSet,
+    providerIdsEquivalent
+  } from "../../providerIds";
   import type { ProviderSummary, SettingsSnapshot } from "../../types";
 
   /** Native directory chooser — only works in Tauri. Silently becomes a
@@ -99,21 +103,22 @@
   ];
 
   const personalProviderIds = new Set(["codex", "openai", "claude", "anthropic", "puffer"]);
-  let authenticatedProviderIds = $derived(
-    new Set((snapshot?.auth ?? []).map((entry) => entry.providerId))
-  );
+  let authenticatedProviderIds = $derived((snapshot?.auth ?? []).map((entry) => entry.providerId));
 
   let providerOptions = $derived(
     (snapshot?.providers?.length ? snapshot.providers : fallbackProviders).filter((provider) =>
       personalProviderIds.has(provider.id) &&
-      (snapshot === null || authenticatedProviderIds.has(provider.id))
+      (snapshot === null || providerIdInSet(provider.id, authenticatedProviderIds))
     )
   );
 
   function defaultProviderId(): string {
     const configured = snapshot?.config.defaultProvider;
-    if (configured && providerOptions.some((provider) => provider.id === configured)) {
-      return configured;
+    const configuredProvider = providerOptions.find((provider) =>
+      providerIdsEquivalent(provider.id, configured)
+    );
+    if (configuredProvider) {
+      return configuredProvider.id;
     }
     return providerOptions[0]?.id ?? "openai";
   }

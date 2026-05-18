@@ -386,7 +386,7 @@ test("successful remote project creation adopts remote daemon state", async ({ p
   const createRequest = await remoteDaemon.waitForRequest("create_session");
   expect(createRequest.params).toMatchObject({
     cwd: "/tmp/remote-project",
-    providerId: "codex"
+    providerId: "openai"
   });
   await expect(dialog).toHaveCount(0);
 

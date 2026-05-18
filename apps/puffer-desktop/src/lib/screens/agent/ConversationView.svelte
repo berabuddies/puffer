@@ -27,6 +27,10 @@
     type AgentTurnOptions,
     type ModelDescriptorInfo
   } from "../../api/desktop";
+  import {
+    canonicalDaemonProviderId,
+    providerIdInSet
+  } from "../../providerIds";
 
   const ENGINEER_NAME = "Engineer";
 
@@ -114,13 +118,11 @@
       )
   );
   let allowProviderSwitch = $derived(Boolean(session) && !conversationStarted && !turnRunning);
-  let authenticatedProviderIds = $derived(
-    new Set((settingsSnapshot?.auth ?? []).map((entry) => entry.providerId))
-  );
+  let authenticatedProviderIds = $derived((settingsSnapshot?.auth ?? []).map((entry) => entry.providerId));
   let selectedProviderAuthenticated = $derived(
     settingsSnapshot === null ||
       !selectedProviderId ||
-      authenticatedProviderIds.has(selectedProviderId)
+      providerIdInSet(selectedProviderId, authenticatedProviderIds)
   );
   let composerBlockedReason = $derived(
     selectedProviderAuthenticated
@@ -137,6 +139,28 @@
     return ["gpt-5", "gpt-4.1", "o3", "o4-mini"].some(
       (prefix) => normalized === prefix || normalized.startsWith(prefix)
     );
+  }
+
+  function normalizeModelIdForProvider(
+    providerId: string | null | undefined,
+    modelId: string | null | undefined
+  ): string | null {
+    const trimmed = modelId?.trim();
+    if (!trimmed) return null;
+    const slashIndex = trimmed.indexOf("/");
+    if (slashIndex <= 0 || slashIndex === trimmed.length - 1) return trimmed;
+    const prefix = trimmed.slice(0, slashIndex);
+    const model = trimmed.slice(slashIndex + 1).trim();
+    const provider = providerId?.trim();
+    if (
+      provider &&
+      model &&
+      canonicalDaemonProviderId(prefix).toLowerCase() ===
+        canonicalDaemonProviderId(provider).toLowerCase()
+    ) {
+      return model;
+    }
+    return trimmed;
   }
 
   function providerDisplayName(providerId: string | null | undefined): string {
@@ -367,9 +391,12 @@
     const sessionId = session?.id ?? null;
     if (sessionId === routingSessionId) return;
     routingSessionId = sessionId;
-    selectedProviderId =
-      session?.providerId ?? settingsSnapshot?.config.defaultProvider ?? null;
-    selectedModelId = session?.modelId ?? settingsSnapshot?.config.defaultModel ?? null;
+    const providerId = session?.providerId ?? settingsSnapshot?.config.defaultProvider ?? null;
+    selectedProviderId = providerId;
+    selectedModelId = normalizeModelIdForProvider(
+      providerId,
+      session?.modelId ?? settingsSnapshot?.config.defaultModel ?? null
+    );
     selectedThinkingOptionId = "";
   });
 

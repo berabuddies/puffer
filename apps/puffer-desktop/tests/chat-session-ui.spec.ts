@@ -348,6 +348,191 @@ test("composer sends fast mode and permission mode with the turn request", async
   });
 });
 
+test("composer controls handle provider-prefixed session model ids", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "openai",
+        kind: "api_key",
+        email: null,
+        expiresAtMs: null,
+        scopes: [],
+        planType: null,
+        organizationName: null
+      }
+    ],
+    providers: [
+      {
+        id: "openai",
+        displayName: "OpenAI",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 1,
+        authModes: ["api_key"],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ],
+    sessions: [
+      {
+        sessionId: "session-prefixed-model",
+        displayName: "Prefixed model",
+        title: "Prefixed model",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "openai",
+        modelId: "openai/gpt-5",
+        timeline: []
+      }
+    ],
+    providerModels: {
+      openai: [
+        {
+          id: "gpt-5",
+          displayName: "GPT-5",
+          provider: "openai",
+          api: "openai-responses",
+          contextWindow: 128000,
+          maxOutputTokens: 4096,
+          supportsReasoning: true,
+          thinkingOptions: [
+            {
+              id: "medium",
+              label: "Medium",
+              description: "Use medium reasoning effort.",
+              isDefault: true
+            },
+            {
+              id: "high",
+              label: "High",
+              description: "Use high reasoning effort."
+            }
+          ],
+          defaultThinkingOptionId: "medium",
+          isDefault: true
+        }
+      ]
+    }
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Prefixed model/);
+  const fastToggle = page.locator(".pf-toggle-chip").filter({ hasText: "Fast" });
+  await expect(fastToggle.locator("input")).toBeEnabled();
+  const thinkingSelect = page.getByLabel("Thinking level");
+  await expect(thinkingSelect).toBeEnabled();
+  await expect(thinkingSelect).toHaveValue("medium");
+  await thinkingSelect.selectOption("high");
+
+  await page.locator(".pf-composer textarea").fill("Use normalized model");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  const request = await daemon.waitForRequest(
+    "run_agent_turn",
+    (item) => item.params.message === "Use normalized model"
+  );
+  expect(request.params).toMatchObject({
+    providerId: "openai",
+    modelId: "gpt-5",
+    thinkingOptionId: "high"
+  });
+});
+
+for (const scenario of [
+  {
+    label: "Codex",
+    providerId: "codex",
+    canonicalProviderId: "openai",
+    authKind: "oauth",
+    providerName: /Codex/,
+    assistantText: "Codex reply is visible in the UI."
+  },
+  {
+    label: "Claude",
+    providerId: "claude",
+    canonicalProviderId: "anthropic",
+    authKind: "api_key",
+    providerName: /Claude/,
+    assistantText: "Claude reply is visible in the UI."
+  }
+]) {
+  test(`new ${scenario.label} agent can send a turn and render the reply`, async ({ page }) => {
+    const daemon = new FakeDaemon({
+      sessions: [],
+      auth: [
+        {
+          providerId: scenario.providerId,
+          kind: scenario.authKind,
+          email: scenario.authKind === "oauth" ? "tester@example.com" : null,
+          expiresAtMs: null,
+          scopes: [],
+          planType: scenario.authKind === "oauth" ? "test" : null,
+          organizationName: null
+        }
+      ],
+      providers: [
+        {
+          id: scenario.providerId,
+          displayName: scenario.label,
+          baseUrl: "",
+          defaultApi:
+            scenario.canonicalProviderId === "openai"
+              ? "openai-responses"
+              : "anthropic-messages",
+          modelCount: 1,
+          authModes: [scenario.authKind],
+          sourceKind: "test",
+          sourcePath: null
+        }
+      ]
+    });
+    await daemon.install(page);
+    await daemon.open(page);
+
+    await expect(page.getByRole("heading", { name: "No sessions yet" })).toBeVisible();
+    await page.getByRole("button", { name: "New agent in default workspace" }).click();
+    const dialog = page.getByRole("dialog", { name: "New agent" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("radio", { name: scenario.providerName })).toBeVisible();
+    await dialog.getByRole("button", { name: "Start agent" }).click();
+
+    const createRequest = await daemon.waitForRequest("create_session");
+    expect(createRequest.params).toMatchObject({
+      cwd: "/tmp/puffer",
+      providerId: scenario.canonicalProviderId
+    });
+
+    const composer = page.locator(".pf-composer textarea");
+    await expect(page.getByText(/Reconnect .* to continue this session\./)).toHaveCount(0);
+    await expect(composer).toBeEnabled();
+    await composer.fill(`Hello from ${scenario.label}`);
+    await page.getByRole("button", { name: "Send" }).click();
+
+    const turnRequest = await daemon.waitForRequest(
+      "run_agent_turn",
+      (request) => request.params.message === `Hello from ${scenario.label}`
+    );
+    expect(turnRequest.params).toMatchObject({
+      sessionId: "session-created-1",
+      providerId: scenario.canonicalProviderId,
+      modelId: "test-model"
+    });
+
+    const turnId = "turn-session-created-1";
+    daemon.emit("session:session-created-1:event", { type: "turn-start", turnId });
+    daemon.emit("session:session-created-1:event", {
+      type: "text-delta",
+      turnId,
+      delta: scenario.assistantText
+    });
+    await expect(page.getByText(scenario.assistantText)).toBeVisible();
+  });
+}
+
 test("stop turn requests cancellation for the active turn", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
