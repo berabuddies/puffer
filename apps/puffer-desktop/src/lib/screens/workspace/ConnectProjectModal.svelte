@@ -96,9 +96,11 @@
     }
   ];
 
+  const personalProviderIds = new Set(["codex", "openai", "claude", "anthropic", "puffer"]);
+
   let providerOptions = $derived(
     (snapshot?.providers?.length ? snapshot.providers : fallbackProviders).filter((provider) =>
-      ["codex", "claude", "puffer"].includes(provider.id)
+      personalProviderIds.has(provider.id)
     )
   );
 

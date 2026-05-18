@@ -91,3 +91,24 @@ test("empty workspace can start a new agent in the default workspace", async ({ 
     providerId: "codex"
   });
 });
+
+test("connect project provider choice includes Anthropic", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Connect project" }).click();
+  const dialog = page.getByRole("dialog", { name: "Connect project" });
+  await expect(dialog).toBeVisible();
+
+  await expect(dialog.getByRole("radio", { name: "Anthropic" })).toBeVisible();
+  await dialog.getByRole("radio", { name: "Anthropic" }).click();
+  await dialog.getByLabel("Directory").fill("/tmp/puffer-new-project");
+  await dialog.getByRole("button", { name: "Start agent" }).click();
+
+  const createRequest = await daemon.waitForRequest("create_session");
+  expect(createRequest.params).toMatchObject({
+    cwd: "/tmp/puffer-new-project",
+    providerId: "anthropic"
+  });
+});
