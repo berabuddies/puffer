@@ -660,6 +660,42 @@ fn render_shows_status_line_when_enabled() {
 }
 
 #[test]
+fn render_hides_status_line_when_disabled() {
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut state = sample_state();
+    let resources = sample_resources();
+    let providers = sample_providers();
+    let auth_store = sample_auth_store();
+    state.statusline_enabled = false;
+    state.status_line_text = Some("custom tui status".to_string());
+    state.config.ui.status_line = Some(puffer_config::StatusLineConfig {
+        command: "printf custom".to_string(),
+        padding: 0,
+    });
+
+    terminal
+        .draw(|frame| {
+            render::render(
+                frame,
+                &state,
+                &resources,
+                &providers,
+                &auth_store,
+                "",
+                0,
+                0,
+                0,
+                &supported_commands(),
+            )
+        })
+        .unwrap();
+    let rendered = buffer_to_string(terminal.backend().buffer());
+    assert!(!rendered.contains("custom tui status"));
+    assert!(!rendered.contains("sandbox workspace-write"));
+}
+
+#[test]
 fn render_shows_overlay_query_in_prompt_row() {
     let backend = TestBackend::new(100, 30);
     let mut terminal = Terminal::new(backend).unwrap();

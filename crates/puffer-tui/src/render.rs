@@ -215,12 +215,17 @@ pub(crate) fn render(
         commands,
         frame.area().width,
     );
-    let custom_status_line = state.config.ui.status_line.as_ref().and_then(|config| {
-        state.status_line_text.as_ref().map(|text| {
-            let padding = " ".repeat(config.padding as usize);
-            format!("{padding}{text}{padding}")
+    let custom_status_line = state
+        .statusline_enabled
+        .then(|| {
+            state.config.ui.status_line.as_ref().and_then(|config| {
+                state.status_line_text.as_ref().map(|text| {
+                    let padding = " ".repeat(config.padding as usize);
+                    format!("{padding}{text}{padding}")
+                })
+            })
         })
-    });
+        .flatten();
     let prompt_lines = prompt_line_count(input);
     let footer_height = composer_area_height(help_active, dropdown_height, prompt_lines);
     let body_min_height = 1;
@@ -417,9 +422,13 @@ pub(crate) fn render(
                     hint_row,
                 );
             } else {
-                let footer_line = custom_status_line
-                    .clone()
-                    .unwrap_or_else(|| footer_status_line(state, providers));
+                let footer_line = if state.statusline_enabled {
+                    custom_status_line
+                        .clone()
+                        .unwrap_or_else(|| footer_status_line(state, providers))
+                } else {
+                    String::new()
+                };
                 frame.render_widget(
                     Paragraph::new(footer_line).style(Style::default().add_modifier(Modifier::DIM)),
                     hint_row,
@@ -1040,4 +1049,5 @@ mod overlay_tests;
 #[cfg(test)]
 mod scroll_tests;
 #[cfg(test)]
+#[rustfmt::skip]
 mod tests;
