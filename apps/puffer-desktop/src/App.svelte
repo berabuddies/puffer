@@ -924,6 +924,40 @@
     ];
   }
 
+  async function refreshSessionAfterTurn(
+    sessionToRefresh: SessionListItem,
+    liveItemsAtCompletion: TimelineItem[],
+    submittedAtCompletion: TimelineItem[],
+    preservedErrorItems: TimelineItem[],
+    turnEndedWithError: boolean
+  ) {
+    const loadGeneration = ++sessionLoadGeneration;
+    try {
+      const detail = await loadSessionDetailFromDaemon(sessionToRefresh.id);
+      if (loadGeneration !== sessionLoadGeneration || selectedSession?.id !== sessionToRefresh.id) {
+        return;
+      }
+      const persistedTimeline = detail.timeline;
+      selectedSession = detail.session;
+      sessionDetail = detail;
+      statusMessage = `Loaded ${detail.timeline.length} conversation items.`;
+      if (turnEndedWithError) {
+        liveStreamItems = stillMissingFromPersisted(persistedTimeline, preservedErrorItems);
+        submittedMessages = [];
+        return;
+      }
+      liveStreamItems = stillMissingFromPersisted(persistedTimeline, liveItemsAtCompletion);
+      submittedMessages = stillMissingFromPersisted(persistedTimeline, submittedAtCompletion);
+    } catch (error) {
+      if (loadGeneration !== sessionLoadGeneration || selectedSession?.id !== sessionToRefresh.id) {
+        return;
+      }
+      const detail = errorText(error);
+      statusMessage = detail;
+      appendAgentError("Conversation load failed", detail, "load-session");
+    }
+  }
+
   function upsertStreamingAssistant(delta: string) {
     const last = liveStreamItems[liveStreamItems.length - 1];
     if (last && last.kind === "assistant" && last.id.startsWith("live-stream-assistant")) {
@@ -1112,24 +1146,13 @@
           const preservedErrorItems = liveItemsAtCompletion.filter(
             (item) => item.kind === "system" && item.meta.includes("error")
           );
-          void openSession(sessionToRefresh, {
-            showLoading: false,
-            resetLiveState: false
-          }).then(() => {
-            if (selectedSession?.id !== sessionToRefresh.id) {
-              return;
-            }
-            // Preserve a turn-error placeholder so the user can still
-            // read the failure after the persisted transcript reloads.
-            const persistedTimeline = sessionDetail?.timeline ?? [];
-            if (turnEndedWithError) {
-              liveStreamItems = stillMissingFromPersisted(persistedTimeline, preservedErrorItems);
-              submittedMessages = [];
-              return;
-            }
-            liveStreamItems = stillMissingFromPersisted(persistedTimeline, liveItemsAtCompletion);
-            submittedMessages = stillMissingFromPersisted(persistedTimeline, submittedAtCompletion);
-          });
+          void refreshSessionAfterTurn(
+            sessionToRefresh,
+            liveItemsAtCompletion,
+            submittedAtCompletion,
+            preservedErrorItems,
+            turnEndedWithError
+          );
         }
         break;
     }

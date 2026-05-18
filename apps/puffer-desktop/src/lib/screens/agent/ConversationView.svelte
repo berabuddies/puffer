@@ -165,9 +165,10 @@
   // Rolled-up thread: agent activity stays attached to the final response,
   // while intermediate prose remains in chronological order with tool work.
   type RowKind =
-    | { kind: "user"; item: MessageTimelineItem }
-    | { kind: "system"; item: MessageTimelineItem }
+    | { key: string; kind: "user"; item: MessageTimelineItem }
+    | { key: string; kind: "system"; item: MessageTimelineItem }
     | {
+        key: string;
         kind: "agent";
         item: MessageTimelineItem | null;
         children: ActivityChild[];
@@ -211,11 +212,46 @@
     return reordered;
   }
 
+  function stableTextHash(text: string): string {
+    let hash = 2166136261;
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36);
+  }
+
+  function timelineItemKeyBase(item: TimelineItem): string {
+    return `${item.kind}:${stableTextHash(
+      [item.title, item.summary, item.body].filter(Boolean).join("\n")
+    )}`;
+  }
+
+  function nextRowKey(base: string, counts: Map<string, number>): string {
+    const count = counts.get(base) ?? 0;
+    counts.set(base, count + 1);
+    return `${base}:${count}`;
+  }
+
   function buildRows(items: TimelineItem[]): RowKind[] {
     const rows: RowKind[] = [];
+    const keyCounts = new Map<string, number>();
+    let lastUserKey: string | null = null;
     let current:
       | Extract<RowKind, { kind: "agent" }>
       | null = null;
+
+    const startAgentRow = (seed: TimelineItem): Extract<RowKind, { kind: "agent" }> => ({
+      key: nextRowKey(
+        lastUserKey ? `agent-after:${lastUserKey}` : `agent:${timelineItemKeyBase(seed)}`,
+        keyCounts
+      ),
+      kind: "agent",
+      item: null,
+      children: [],
+      approvals: [],
+      questions: []
+    });
 
     const flushCurrent = () => {
       if (!current) return;
@@ -239,21 +275,26 @@
     for (const item of items) {
       if (item.kind === "user") {
         flushCurrent();
-        rows.push({ kind: "user", item: item as MessageTimelineItem });
+        lastUserKey = nextRowKey(timelineItemKeyBase(item), keyCounts);
+        rows.push({ key: lastUserKey, kind: "user", item: item as MessageTimelineItem });
       } else if (item.kind === "system") {
         flushCurrent();
-        rows.push({ kind: "system", item: item as MessageTimelineItem });
+        rows.push({
+          key: nextRowKey(timelineItemKeyBase(item), keyCounts),
+          kind: "system",
+          item: item as MessageTimelineItem
+        });
       } else if (item.kind === "assistant" || item.kind === "command") {
-        if (!current) current = { kind: "agent", item: null, children: [], approvals: [], questions: [] };
+        if (!current) current = startAgentRow(item);
         current.children.push(item as MessageTimelineItem);
       } else if (item.kind === "tool") {
-        if (!current) current = { kind: "agent", item: null, children: [], approvals: [], questions: [] };
+        if (!current) current = startAgentRow(item);
         current.children.push(item as ToolTimelineItem);
       } else if (item.kind === "diff") {
-        if (!current) current = { kind: "agent", item: null, children: [], approvals: [], questions: [] };
+        if (!current) current = startAgentRow(item);
         current.children.push(item as DiffTimelineItem);
       } else if (item.kind === "question") {
-        if (!current) current = { kind: "agent", item: null, children: [], approvals: [], questions: [] };
+        if (!current) current = startAgentRow(item);
         current.questions.push(item as UserQuestionTimelineItem);
       }
     }
@@ -406,6 +447,7 @@
       };
     } else {
       out.push({
+        key: "agent-pending-prompts",
         kind: "agent",
         item: null,
         children: [],
@@ -460,7 +502,7 @@
   }
 
   function activityGroupId(row: Extract<RowKind, { kind: "agent" }>, idx: number): string {
-    return row.item?.id ?? row.children[0]?.id ?? `activity-${idx}`;
+    return row.key || row.item?.id || row.children[0]?.id || `activity-${idx}`;
   }
 
   function activityExpanded(id: string): boolean {
@@ -1006,7 +1048,7 @@
       {:else if rows.length === 0 && !typingLabel}
         <div class="state">No messages in this session yet. Send a prompt to get started.</div>
       {:else}
-        {#each distributedRows as row, idx (idx)}
+        {#each distributedRows as row, idx (row.key)}
           {#if row.kind === "user"}
             <div class="pf-msg" data-role="user">
               <div class="pf-msg-avatar">{userInitial}</div>

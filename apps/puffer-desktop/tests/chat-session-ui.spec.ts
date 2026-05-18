@@ -227,3 +227,100 @@ test("composer sends selected thinking option with the turn request", async ({ p
     thinkingOptionId: "high"
   });
 });
+
+test("streamed assistant text stays visible through transcript reload", async ({ page }) => {
+  const streamedText = "Streaming answer stays stable across reload.";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-streaming",
+        displayName: "Streaming session",
+        title: "Streaming session",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Streaming session/);
+  await page.evaluate((phrase) => {
+    const win = window as typeof window & {
+      __chatSamples?: number[];
+      __stopChatSampling?: () => void;
+    };
+    const samples: number[] = [];
+    let stopped = false;
+    const sample = () => {
+      const text = document.querySelector(".pf-chat-thread")?.textContent ?? "";
+      samples.push(text.split(phrase).length - 1);
+      if (!stopped) window.requestAnimationFrame(sample);
+    };
+    win.__chatSamples = samples;
+    win.__stopChatSampling = () => {
+      stopped = true;
+    };
+    window.requestAnimationFrame(sample);
+  }, streamedText);
+
+  await page.locator(".pf-composer textarea").fill("Stream this answer");
+  await page.getByRole("button", { name: "Send" }).click();
+  const turnRequest = await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.sessionId === "session-streaming"
+  );
+  expect(turnRequest.params.message).toBe("Stream this answer");
+  const turnId = "turn-session-streaming";
+  daemon.emit("session:session-streaming:event", { type: "turn-start", turnId });
+  daemon.emit("session:session-streaming:event", {
+    type: "text-delta",
+    turnId,
+    delta: streamedText
+  });
+
+  await expect(page.getByText(streamedText)).toBeVisible();
+  daemon.delayResponse(
+    "load_session_detail",
+    (request) => request.params.sessionId === "session-streaming",
+    180
+  );
+  daemon.setSessionTimeline("session-streaming", [
+    {
+      kind: "user_message",
+      id: "persisted-user",
+      text: "Stream this answer",
+      createdAtMs: baseTime + 1
+    },
+    {
+      kind: "assistant_message",
+      id: "persisted-assistant",
+      text: streamedText,
+      createdAtMs: baseTime + 2
+    }
+  ]);
+  daemon.emit("session:session-streaming:event", {
+    type: "turn-complete",
+    turnId,
+    assistantText: streamedText
+  });
+
+  await expect(page.getByText(streamedText)).toBeVisible();
+  await page.waitForTimeout(260);
+  const samples = await page.evaluate(() => {
+    const win = window as typeof window & {
+      __chatSamples?: number[];
+      __stopChatSampling?: () => void;
+    };
+    win.__stopChatSampling?.();
+    return win.__chatSamples ?? [];
+  });
+  const firstVisible = samples.findIndex((count) => count > 0);
+  expect(firstVisible).toBeGreaterThanOrEqual(0);
+  expect(samples.slice(firstVisible)).not.toContain(0);
+  expect(Math.max(...samples.slice(firstVisible))).toBe(1);
+});
