@@ -16,6 +16,11 @@ type Waiter = {
   resolve: (request: DaemonRequest) => void;
 };
 
+type TabSet = {
+  activeTabId: string | null;
+  tabs: JsonRecord[];
+};
+
 const ONE_PIXEL_PNG =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lzTnGQAAAABJRU5ErkJggg==";
 
@@ -76,6 +81,7 @@ export class FakeDaemon {
   readonly requests: DaemonRequest[] = [];
   private readonly sockets = new Set<WebSocketRoute>();
   private readonly waiters: Waiter[] = [];
+  private readonly browserTabs = new Map<string, TabSet>();
   private nextTab = 2;
 
   async install(page: Page): Promise<void> {
@@ -294,12 +300,30 @@ export class FakeDaemon {
 
   private browserAgent(params: JsonRecord): unknown {
     const action = String(params.action ?? "list");
-    if (action === "list") return { activeTabId: null, tabs: [] };
-    if (action === "focus") return browserTabInfo(String(params.tabId ?? "tab-1"));
-    if (action === "close") return { activeTabId: null, tabs: [] };
+    const sessionId = String(params.sessionId ?? session.sessionId);
+    if (action === "list") return this.tabState(sessionId);
+    if (action === "focus") {
+      const tabId = String(params.tabId ?? "tab-1");
+      const set = this.tabSet(sessionId);
+      set.activeTabId = tabId;
+      this.refreshActiveFlags(set);
+      return set.tabs.find((tab) => tab.tabId === tabId) ?? browserTabInfo(tabId);
+    }
+    if (action === "close") {
+      const tabId = String(params.tabId ?? "tab-1");
+      const set = this.tabSet(sessionId);
+      set.tabs = set.tabs.filter((tab) => tab.tabId !== tabId);
+      set.activeTabId = (set.tabs[0]?.tabId as string | undefined) ?? null;
+      this.refreshActiveFlags(set);
+      return this.tabState(sessionId);
+    }
     if (action === "open") {
-      const tabId = typeof params.tabId === "string" ? params.tabId : `tab-${this.nextTab++}`;
-      return browserTabInfo(tabId, String(params.url ?? "about:blank"));
+      const set = this.tabSet(sessionId);
+      if (typeof params.tabId !== "string" && set.tabs.length > 0) {
+        return set.tabs.find((tab) => tab.active === true) ?? set.tabs[0];
+      }
+      const tabId = typeof params.tabId === "string" ? params.tabId : `t${this.nextTab++}`;
+      return this.upsertTab(sessionId, browserTabInfo(tabId, String(params.url ?? "about:blank")));
     }
     throw new Error(`Unhandled browser_agent action: ${action}`);
   }
@@ -307,6 +331,7 @@ export class FakeDaemon {
   private openBrowser(params: JsonRecord): unknown {
     const sessionId = String(params.sessionId ?? "");
     const url = String(params.url ?? "about:blank");
+    this.recordBrowserOpen(sessionId, url);
     queueMicrotask(() => {
       this.emit(`browser:${sessionId}:frame`, {
         frameId: "frame-1",
@@ -318,6 +343,44 @@ export class FakeDaemon {
       });
     });
     return browserState(url);
+  }
+
+  private tabSet(sessionId: string): TabSet {
+    const existing = this.browserTabs.get(sessionId);
+    if (existing) return existing;
+    const created: TabSet = { activeTabId: null, tabs: [] };
+    this.browserTabs.set(sessionId, created);
+    return created;
+  }
+
+  private tabState(sessionId: string): JsonRecord {
+    const set = this.tabSet(sessionId);
+    return { activeTabId: set.activeTabId, tabs: set.tabs };
+  }
+
+  private upsertTab(sessionId: string, tab: JsonRecord): JsonRecord {
+    const set = this.tabSet(sessionId);
+    set.tabs = [...set.tabs.filter((item) => item.tabId !== tab.tabId), tab];
+    set.activeTabId = String(tab.tabId);
+    this.refreshActiveFlags(set);
+    return tab;
+  }
+
+  private refreshActiveFlags(set: TabSet): void {
+    set.tabs = set.tabs.map((tab) => ({
+      ...tab,
+      active: tab.tabId === set.activeTabId
+    }));
+  }
+
+  private recordBrowserOpen(backendSessionId: string, url: string): void {
+    const marker = ":browser:";
+    const markerIndex = backendSessionId.indexOf(marker);
+    if (markerIndex === -1) return;
+    const rootSessionId = backendSessionId.slice(0, markerIndex);
+    const tabId = backendSessionId.slice(markerIndex + marker.length);
+    if (!rootSessionId || !tabId) return;
+    this.upsertTab(rootSessionId, browserTabInfo(tabId, url));
   }
 
   private navigateBrowser(params: JsonRecord): unknown {

@@ -426,9 +426,11 @@
 
   async function addTab() {
     const size = measureViewport() ?? lastResize;
+    const tabId = `tab-${nextTabNumber}`;
     try {
       const info = await browserTabOpen({
         sessionId,
+        tabId,
         url: "about:blank",
         width: size.width,
         height: size.height,

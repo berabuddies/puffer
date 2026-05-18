@@ -92,3 +92,28 @@ test("dispatches printable Browser keyboard input as key events", async ({ page 
   });
   expect(textInsertions).toHaveLength(0);
 });
+
+test("new Browser tab button creates a distinct daemon tab", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: /Browser regression/ }).click();
+  await page.getByRole("button", { name: "Browser" }).click();
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1"
+  );
+
+  await page.getByRole("button", { name: "New tab" }).click();
+  const request = await daemon.waitForRequest("browser_agent", (candidate) =>
+    candidate.params.action === "open" && candidate.params.tabId === "tab-2"
+  );
+
+  expect(request.params).toMatchObject({
+    action: "open",
+    sessionId: "session-browser",
+    tabId: "tab-2",
+    activate: true
+  });
+  await expect(page.locator(".pf-browser-tab")).toHaveCount(2);
+});
