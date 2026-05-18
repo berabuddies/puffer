@@ -567,6 +567,13 @@
     }
   }
 
+  function handleFileTabKeydown(event: KeyboardEvent, path: string, size: number) {
+    if (event.target !== event.currentTarget) return;
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    void activateFile(path, size);
+  }
+
   function fmtSize(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -1014,11 +1021,7 @@
             title={tab.path}
             onclick={() => void activateFile(tab.path, tab.size)}
             ondblclick={() => pinTab(tab.path)}
-            onkeydown={(event) => {
-              if (event.key !== "Enter" && event.key !== " ") return;
-              event.preventDefault();
-              void activateFile(tab.path, tab.size);
-            }}
+            onkeydown={(event) => handleFileTabKeydown(event, tab.path, tab.size)}
           >
             <Icon name="file" size={11} color="var(--muted-foreground)" />
             <span class="tab-title">{tab.name}</span>
