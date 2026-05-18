@@ -1,5 +1,5 @@
 use super::*;
-use puffer_core::supported_commands;
+use puffer_core::{default_effort_level, supported_commands, ModelPreferenceFamily};
 
 fn picker_commands() -> Vec<CommandSpec> {
     supported_commands()
@@ -74,7 +74,10 @@ fn onboarding_model_picker_enter_preserves_current_effort_selection() {
         }) => {
             assert_eq!(provider_id, "openai");
             assert_eq!(model_id, "gpt-5");
-            assert_eq!(entries[*selection].selector, "high");
+            assert_eq!(
+                entries[*selection].selector,
+                default_effort_level(ModelPreferenceFamily::OpenAi)
+            );
             assert!(entries.iter().any(|entry| entry.selector == "xhigh"));
             assert!(entries.iter().any(|entry| entry.selector == "minimal"));
         }
