@@ -7,32 +7,26 @@ async function openForcedOnboarding(page: Page): Promise<void> {
   await daemon.open(page, { forceOnboarding: true, skipOnboarding: false });
 }
 
-test("onboarding repo Continue enters the workspace", async ({ page }) => {
+test("onboarding Continue enters the workspace", async ({ page }) => {
   await openForcedOnboarding(page);
 
   await expect(
-    page.getByRole("heading", { name: "Choose the repos Puffer can see" })
+    page.getByRole("heading", { name: "Workspace is ready" })
   ).toBeVisible();
   await page.getByRole("button", { name: /Continue/ }).click();
 
   await expect(page.getByRole("button", { name: "New agent in puffer" })).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "Choose the repos Puffer can see" })
+    page.getByRole("heading", { name: "Workspace is ready" })
   ).toHaveCount(0);
 });
 
-test("onboarding repo Skip enters the workspace", async ({ page }) => {
+test("onboarding does not show fake repository choices", async ({ page }) => {
   await openForcedOnboarding(page);
 
-  await expect(
-    page.getByRole("heading", { name: "Choose the repos Puffer can see" })
-  ).toBeVisible();
-  await page.getByRole("button", { name: "Skip for now" }).click();
-
-  await expect(page.getByRole("button", { name: "New agent in puffer" })).toBeVisible();
-  await expect(
-    page.getByRole("heading", { name: "Choose the repos Puffer can see" })
-  ).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Workspace is ready" })).toBeVisible();
+  await expect(page.getByText("puffer-web")).toHaveCount(0);
+  await expect(page.getByText("stripe-api")).toHaveCount(0);
 });
 
 test("skip flag does not bypass provider login when auth is empty", async ({ page }) => {
