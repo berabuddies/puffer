@@ -8,6 +8,7 @@
     type DirEntry
   } from "../../api/desktop";
   import { canInvokeTauri, currentDaemonClient, switchDaemonClient } from "../../api/daemonClient";
+  import { canonicalDaemonProviderId } from "../../providerIds";
   import type { ProviderSummary, SettingsSnapshot } from "../../types";
 
   /** Native directory chooser — only works in Tauri. Silently becomes a
@@ -186,7 +187,10 @@
     }
     // 2. Create a new session rooted at that directory.
     status = `Creating agent in ${targetCwd}…`;
-    const created = await createSession(targetCwd, selectedProvider || defaultProviderId());
+    const created = await createSession(
+      targetCwd,
+      canonicalDaemonProviderId(selectedProvider || defaultProviderId())
+    );
     status = `Ready — session ${created.sessionId.slice(0, 8)}`;
     await onConnected?.(created.sessionId);
     onClose();
@@ -222,7 +226,10 @@
       // 3. Create a session on the remote. Only backend failures in this
       // phase should roll back to the prior daemon.
       status = `Creating agent on ${sshTarget}…`;
-      const created = await createSession(targetCwd, selectedProvider || defaultProviderId());
+      const created = await createSession(
+        targetCwd,
+        canonicalDaemonProviderId(selectedProvider || defaultProviderId())
+      );
       createdSessionId = created.sessionId;
     } catch (e) {
       if (switchedToRemote && previousHandshake) {

@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from "../../design/Icon.svelte";
+  import { canonicalDaemonProviderId } from "../../providerIds";
   import type { ProviderSummary, SettingsSnapshot } from "../../types";
 
   type Props = {
@@ -148,7 +149,7 @@
           type="button"
           class="sc-btn"
           data-variant="default"
-          onclick={() => onCreate(selectedProvider || defaultProviderId())}
+          onclick={() => onCreate(canonicalDaemonProviderId(selectedProvider || defaultProviderId()))}
           disabled={busy || providerOptions.length === 0}
         >
           <Icon name="plus" size={13} />Start agent

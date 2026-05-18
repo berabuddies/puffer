@@ -251,7 +251,7 @@ test("new agent provider picker only shows authenticated providers", async ({ pa
 
   const createRequest = await daemon.waitForRequest("create_session");
   expect(createRequest.params).toMatchObject({
-    providerId: "codex"
+    providerId: "openai"
   });
 });
 
@@ -270,7 +270,7 @@ test("empty workspace can start a new agent in the default workspace", async ({ 
   const createRequest = await daemon.waitForRequest("create_session");
   expect(createRequest.params).toMatchObject({
     cwd: "/tmp/puffer",
-    providerId: "codex"
+    providerId: "openai"
   });
 });
 
@@ -312,7 +312,7 @@ test("connect project provider picker only shows authenticated providers", async
   const createRequest = await daemon.waitForRequest("create_session");
   expect(createRequest.params).toMatchObject({
     cwd: "/tmp/puffer-new-project",
-    providerId: "codex"
+    providerId: "openai"
   });
 });
 
