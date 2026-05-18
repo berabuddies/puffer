@@ -894,6 +894,22 @@
     return pending.filter((item) => !timelineHasBody(items, item.kind, timelineItemBody(item)));
   }
 
+  function withCompletionAssistantFallback(items: TimelineItem[], text: string): TimelineItem[] {
+    const trimmed = text.trim();
+    if (!trimmed || timelineHasBody(items, "assistant", trimmed)) return items;
+    return [
+      ...items,
+      {
+        id: `live-complete-assistant-${Date.now()}`,
+        kind: "assistant",
+        title: "Assistant",
+        summary: trimmed,
+        body: trimmed,
+        meta: []
+      }
+    ];
+  }
+
   function upsertStreamingAssistant(delta: string) {
     const last = liveStreamItems[liveStreamItems.length - 1];
     if (last && last.kind === "assistant" && last.id.startsWith("live-stream-assistant")) {
@@ -1075,7 +1091,8 @@
         // Reload the persisted transcript; then drop live items.
         if (selectedSession) {
           const sessionToRefresh = selectedSession;
-          const liveItemsAtCompletion = liveStreamItems;
+          const completionText = ev.type === "turn-complete" ? ev.assistantText : "";
+          const liveItemsAtCompletion = withCompletionAssistantFallback(liveStreamItems, completionText);
           const submittedAtCompletion = submittedMessages;
           const turnEndedWithError = ev.type === "turn-error";
           const preservedErrorItems = liveItemsAtCompletion.filter(

@@ -352,6 +352,29 @@ test("streamed assistant text stays visible when completion reload is stale", as
   await expect(page.getByText("Streaming answer should not flash")).toBeVisible();
 });
 
+test("completion assistant text appears when no delta was streamed", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await expect(page.getByText("Ready to exercise the managed browser.")).toBeVisible();
+
+  const previousRequestCount = daemon.requests.length;
+  daemon.emit("session:session-browser:event", { type: "turn-start", turnId: "turn-final-only" });
+  daemon.emit("session:session-browser:event", {
+    type: "turn-complete",
+    turnId: "turn-final-only",
+    assistantText: "Final answer arrived only at completion"
+  });
+  await daemon.waitForRequest("load_session_detail", (request) =>
+    daemon.requests.indexOf(request) >= previousRequestCount
+  );
+  await page.waitForTimeout(50);
+
+  await expect(page.getByText("Final answer arrived only at completion")).toBeVisible();
+});
+
 test("Browser tab list event reconnects when active tab changes", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
