@@ -623,7 +623,7 @@ pub(crate) fn respond_to_permission_prompt(
         return false;
     };
     let _ = pending.response_tx.send(action);
-    set_overlay_state(tui, None);
+    close_prompt_overlay_preserving_input(tui);
     true
 }
 
@@ -636,8 +636,13 @@ pub(crate) fn respond_to_user_question(
         return false;
     };
     let _ = pending.response_tx.send(response);
-    set_overlay_state(tui, None);
+    close_prompt_overlay_preserving_input(tui);
     true
+}
+
+fn close_prompt_overlay_preserving_input(tui: &mut TuiState) {
+    tui.overlay = None;
+    tui.slash_selection = 0;
 }
 
 fn empty_user_question_response() -> UserQuestionPromptResponse {

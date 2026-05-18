@@ -94,6 +94,47 @@ fn permission_prompt_shortcuts_send_response() {
 }
 
 #[test]
+fn permission_prompt_response_preserves_composer_draft() {
+    let request = PermissionPromptRequest {
+        tool_id: "Bash".to_string(),
+        summary: "cat <<'EOF'".to_string(),
+        reason: Some("pasted shell input requires approval".to_string()),
+    };
+    let (response_tx, response_rx) = mpsc::channel();
+    let draft = "next message [Pasted text #1 +2 lines]".to_string();
+    let pending_pastes = vec![(
+        "[Pasted text #1 +2 lines]".to_string(),
+        "first pasted line\nsecond pasted line".to_string(),
+    )];
+    let mut tui = TuiState {
+        input: draft.clone(),
+        cursor: draft.len(),
+        slash_selection: 2,
+        overlay: Some(OverlayState::PermissionPrompt {
+            overlay: ApprovalOverlay::new(request),
+        }),
+        pending_permission_request: Some(PendingPermissionRequest { response_tx }),
+        pending_pastes: pending_pastes.clone(),
+        ..TuiState::default()
+    };
+
+    assert!(handle_permission_prompt_key(
+        KeyEvent::from(KeyCode::Char('a')),
+        &mut tui
+    ));
+    assert_eq!(
+        response_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        PermissionPromptAction::AllowSession
+    );
+    assert!(tui.overlay.is_none());
+    assert!(tui.pending_permission_request.is_none());
+    assert_eq!(tui.input, draft);
+    assert_eq!(tui.cursor, tui.input.len());
+    assert_eq!(tui.pending_pastes, pending_pastes);
+    assert_eq!(tui.slash_selection, 0);
+}
+
+#[test]
 fn permission_prompt_ctrl_c_denies_and_closes_overlay() {
     let request = PermissionPromptRequest {
         tool_id: "Bash".to_string(),

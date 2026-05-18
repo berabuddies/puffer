@@ -118,6 +118,41 @@ fn user_question_enter_sends_selected_answer() {
 }
 
 #[test]
+fn user_question_response_preserves_composer_draft() {
+    let (response_tx, response_rx) = mpsc::channel();
+    let draft = "keep this draft [Pasted text #1 +2 lines]".to_string();
+    let pending_pastes = vec![(
+        "[Pasted text #1 +2 lines]".to_string(),
+        "remembered pasted text\nwith another line".to_string(),
+    )];
+    let mut tui = TuiState {
+        input: draft.clone(),
+        cursor: draft.len(),
+        slash_selection: 3,
+        overlay: Some(OverlayState::UserQuestionPrompt {
+            overlay: UserQuestionOverlay::from_value(sample_question_payload()).unwrap(),
+        }),
+        pending_user_question_request: Some(PendingUserQuestionRequest { response_tx }),
+        pending_pastes: pending_pastes.clone(),
+        ..TuiState::default()
+    };
+
+    assert!(handle_user_question_key(
+        KeyEvent::from(KeyCode::Enter),
+        &mut tui
+    ));
+    let response = response_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert_eq!(response.answers["Pick one"], json!("Fast"));
+    assert!(response.annotations.is_empty());
+    assert!(tui.overlay.is_none());
+    assert!(tui.pending_user_question_request.is_none());
+    assert_eq!(tui.input, draft);
+    assert_eq!(tui.cursor, tui.input.len());
+    assert_eq!(tui.pending_pastes, pending_pastes);
+    assert_eq!(tui.slash_selection, 0);
+}
+
+#[test]
 fn user_question_number_shortcut_sends_single_select_answer() {
     let (response_tx, response_rx) = mpsc::channel();
     let mut tui = TuiState {
