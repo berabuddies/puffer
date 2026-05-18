@@ -308,6 +308,16 @@
     }
   }
 
+  function hasProviderAuth(snapshot: SettingsSnapshot | null): boolean {
+    return (snapshot?.auth?.length ?? 0) > 0;
+  }
+
+  function shouldShowOnboarding(snapshot: SettingsSnapshot | null): boolean {
+    if (!hasProviderAuth(snapshot)) return true;
+    if (forceOnboarding && !onboardingCompleted) return true;
+    return !skipOnboarding;
+  }
+
   function updateDaemonIdentity(client: DaemonClient | null = currentDaemonClient()) {
     daemonUrl = client?.handshake.url ?? null;
     daemonWorkspaceRoot = client?.handshake.workspaceRoot ?? null;
@@ -363,8 +373,6 @@
     applyTweaksToDocument(tweaks);
     if (forceOnboarding && !onboardingCompleted) {
       onboarding = true;
-    } else if (skipOnboarding) {
-      onboarding = false;
     }
     window.addEventListener("blur", armRecapBlurTimer);
     window.addEventListener("focus", cancelRecapBlurTimer);
@@ -428,13 +436,7 @@
     settingsLoading = true;
     try {
       settingsSnapshot = await loadSettingsSnapshot(remoteConnection);
-      if (forceOnboarding && !onboardingCompleted) {
-        onboarding = true;
-      } else if (skipOnboarding) {
-        onboarding = false;
-      } else {
-        onboarding = (settingsSnapshot.auth?.length ?? 0) === 0;
-      }
+      onboarding = shouldShowOnboarding(settingsSnapshot);
       // Re-scan ~/.claude / ~/.codex so the LoginView can offer one-click
       // imports for credentials the user already has on disk. Failure is
       // non-fatal — the manual API-key path still works.
@@ -448,7 +450,7 @@
       statusMessage = "Settings snapshot refreshed.";
     } catch (error) {
       statusMessage = String(error);
-      if (skipOnboarding) onboarding = false;
+      if (!skipOnboarding) onboarding = true;
     } finally {
       settingsLoading = false;
     }

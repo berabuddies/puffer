@@ -34,3 +34,15 @@ test("onboarding repo Skip enters the workspace", async ({ page }) => {
     page.getByRole("heading", { name: "Choose the repos Puffer can see" })
   ).toHaveCount(0);
 });
+
+test("skip flag does not bypass provider login when auth is empty", async ({ page }) => {
+  const daemon = new FakeDaemon({ auth: [] });
+  await daemon.install(page);
+  await page.addInitScript(() => {
+    window.localStorage.setItem("puffer-desktop:skip-onboarding", "1");
+  });
+  await daemon.open(page);
+
+  await expect(page.getByLabel("API key for Anthropic")).toBeVisible();
+  await expect(page.getByRole("button", { name: "New agent in puffer" })).toHaveCount(0);
+});

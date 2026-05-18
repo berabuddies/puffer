@@ -153,6 +153,29 @@ function browserState(url = "about:blank"): JsonRecord {
   };
 }
 
+function defaultAuthStatuses(): JsonRecord[] {
+  return [
+    {
+      providerId: "codex",
+      kind: "oauth",
+      email: "tester@example.com",
+      expiresAtMs: null,
+      scopes: [],
+      planType: "test",
+      organizationName: null
+    },
+    {
+      providerId: "anthropic",
+      kind: "api_key",
+      email: null,
+      expiresAtMs: null,
+      scopes: [],
+      planType: null,
+      organizationName: null
+    }
+  ];
+}
+
 export class FakeDaemon {
   readonly requests: DaemonRequest[] = [];
   readonly socketUrls: string[] = [];
@@ -166,6 +189,7 @@ export class FakeDaemon {
   private readonly timelines = new Map<string, JsonRecord[]>();
   private readonly providerModels: Record<string, JsonRecord[]>;
   private workspaceRoot = "/tmp/puffer";
+  private authStatuses: JsonRecord[];
   private settingsConfig: { defaultProvider: string | null; defaultModel: string | null } = {
     defaultProvider: "codex",
     defaultModel: "test-model"
@@ -196,9 +220,11 @@ export class FakeDaemon {
     mcpServers?: JsonRecord[];
     protocol?: "legacy" | "real";
     workspaceRoot?: string;
+    auth?: JsonRecord[];
   } = {}) {
     this.protocol = options.protocol ?? "legacy";
     this.workspaceRoot = options.workspaceRoot ?? this.workspaceRoot;
+    this.authStatuses = options.auth ?? defaultAuthStatuses();
     this.permissions = {
       ...this.permissions,
       path: `${this.workspaceRoot}/.puffer/permissions.json`
@@ -234,6 +260,10 @@ export class FakeDaemon {
       path: `${this.workspaceRoot}/.puffer/permissions.json`,
       tools: { ...tools }
     };
+  }
+
+  setAuthStatuses(auth: JsonRecord[]): void {
+    this.authStatuses = auth;
   }
 
   async install(page: Page): Promise<void> {
@@ -389,6 +419,8 @@ export class FakeDaemon {
         return this.settingsSnapshot();
       case "login_with_api_key":
         return this.settingsSnapshot();
+      case "logout_provider":
+        return this.logoutProvider(request.params);
       case "list_external_credentials":
         return [];
       case "load_desktop_pins":
@@ -555,6 +587,12 @@ export class FakeDaemon {
     return this.settingsSnapshot();
   }
 
+  private logoutProvider(params: JsonRecord): JsonRecord {
+    const providerId = String(params.providerId ?? "");
+    this.authStatuses = this.authStatuses.filter((item) => item.providerId !== providerId);
+    return this.settingsSnapshot();
+  }
+
   private savePermissions(params: JsonRecord): JsonRecord {
     this.permissions = {
       path: this.permissions.path,
@@ -617,26 +655,7 @@ export class FakeDaemon {
         ides: 0
       },
       sessions: { totalSessions: 1, folderGroups: 1 },
-      auth: [
-        {
-          providerId: "codex",
-          kind: "oauth",
-          email: "tester@example.com",
-          expiresAtMs: null,
-          scopes: [],
-          planType: "test",
-          organizationName: null
-        },
-        {
-          providerId: "anthropic",
-          kind: "api_key",
-          email: null,
-          expiresAtMs: null,
-          scopes: [],
-          planType: null,
-          organizationName: null
-        }
-      ],
+      auth: this.authStatuses,
       providers: [
         {
           id: "codex",
