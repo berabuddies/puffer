@@ -1,6 +1,7 @@
 mod backend;
 mod browser;
 mod codex_app_server;
+mod daemon_launcher;
 mod dtos;
 mod events;
 mod files;
@@ -11,12 +12,40 @@ mod repo_actions;
 mod websocket;
 
 use backend::BackendState;
+use daemon_launcher::DaemonLauncher;
 use events::EventEmitter;
 use serde_json::{json, Value};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{AppHandle, Builder, State};
 
 type SharedBackend = Arc<BackendState>;
+type SharedDaemonLauncher = Arc<DaemonLauncher>;
+
+#[cfg(test)]
+const REGISTERED_TAURI_COMMANDS: &[&str] = &[
+    "backend_request",
+    "list_grouped_sessions",
+    "load_session_detail",
+    "refresh_repo_status",
+    "create_pull_request",
+    "merge_pull_request",
+    "load_settings_snapshot",
+    "login_with_oauth",
+    "login_with_api_key",
+    "logout_provider",
+    "list_external_credentials",
+    "import_external_credential",
+    "run_remote_bash",
+    "read_remote_file",
+    "write_remote_file",
+    "restart_local_daemon",
+    "start_ssh_daemon",
+    "run_agent_turn",
+    "resolve_permission",
+    "resolve_user_question",
+    "cancel_turn",
+];
 
 fn backend_call(
     app: AppHandle,
@@ -216,6 +245,32 @@ fn write_remote_file(
 }
 
 #[tauri::command]
+fn restart_local_daemon(
+    launcher: State<'_, SharedDaemonLauncher>,
+    cwd: String,
+) -> Result<daemon_launcher::DaemonHandshake, String> {
+    launcher
+        .restart_local(PathBuf::from(cwd))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn start_ssh_daemon(
+    launcher: State<'_, SharedDaemonLauncher>,
+    ssh_target: String,
+    remote_binary: Option<String>,
+    remote_workspace: Option<String>,
+) -> Result<daemon_launcher::DaemonHandshake, String> {
+    launcher
+        .start_ssh(
+            &ssh_target,
+            remote_binary.as_deref(),
+            remote_workspace.as_deref(),
+        )
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn run_agent_turn(
     app: AppHandle,
     state: State<'_, SharedBackend>,
@@ -276,11 +331,13 @@ fn cancel_turn(
 
 pub fn run() {
     let backend = Arc::new(BackendState::new());
+    let launcher = Arc::new(DaemonLauncher::new());
     websocket::start_backend_ws(backend.clone());
 
     Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(backend)
+        .manage(launcher)
         .invoke_handler(tauri::generate_handler![
             backend_request,
             list_grouped_sessions,
@@ -297,6 +354,8 @@ pub fn run() {
             run_remote_bash,
             read_remote_file,
             write_remote_file,
+            restart_local_daemon,
+            start_ssh_daemon,
             run_agent_turn,
             resolve_permission,
             resolve_user_question,
@@ -304,4 +363,63 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Corbina desktop");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::REGISTERED_TAURI_COMMANDS;
+    use std::collections::BTreeSet;
+
+    fn direct_invoke_commands(source: &str) -> BTreeSet<String> {
+        let mut commands = BTreeSet::new();
+        let mut offset = 0;
+        while let Some(found) = source[offset..].find("invoke") {
+            let invoke_at = offset + found;
+            let Some(open_paren_at) = source[invoke_at..].find('(').map(|idx| invoke_at + idx)
+            else {
+                break;
+            };
+            let mut cursor = open_paren_at + 1;
+            while let Some(ch) = source[cursor..].chars().next() {
+                if !ch.is_whitespace() {
+                    break;
+                }
+                cursor += ch.len_utf8();
+            }
+            let Some(quote) = source[cursor..].chars().next() else {
+                break;
+            };
+            if quote == '"' || quote == '\'' {
+                cursor += quote.len_utf8();
+                if let Some(end) = source[cursor..].find(quote) {
+                    commands.insert(source[cursor..cursor + end].to_string());
+                    offset = cursor + end + quote.len_utf8();
+                    continue;
+                }
+            }
+            offset = open_paren_at + 1;
+        }
+        commands
+    }
+
+    #[test]
+    fn direct_frontend_invokes_have_registered_tauri_commands() {
+        let mut invoked = direct_invoke_commands(include_str!("../../src/lib/api/desktop.ts"));
+        invoked.extend(direct_invoke_commands(include_str!(
+            "../../src/lib/api/daemonClient.ts"
+        )));
+        let registered = REGISTERED_TAURI_COMMANDS
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let missing = invoked
+            .iter()
+            .filter(|command| !registered.contains(command.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(
+            missing.is_empty(),
+            "frontend invokes missing Tauri command registration: {missing:?}"
+        );
+    }
 }
