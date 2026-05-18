@@ -505,6 +505,23 @@ impl LspSession {
         }
     }
 
+    fn drain_pending_messages_until_idle(&mut self, idle_timeout: Duration) -> Result<()> {
+        loop {
+            match self.messages.recv_timeout(idle_timeout) {
+                Ok(message) => {
+                    let message = message?;
+                    if is_server_request(&message) {
+                        self.respond_to_server_request(&message)?;
+                        continue;
+                    }
+                    let _ = self.handle_notification(&message)?;
+                }
+                Err(RecvTimeoutError::Timeout) => return Ok(()),
+                Err(RecvTimeoutError::Disconnected) => return Ok(()),
+            }
+        }
+    }
+
     fn handle_notification(&mut self, message: &Value) -> Result<bool> {
         let Some(method) = message.get("method").and_then(Value::as_str) else {
             return Ok(false);
