@@ -249,12 +249,15 @@
   async function closeTerminalTab(event: Event, ptyId: string) {
     event.stopPropagation();
     if (closingPtyIds.includes(ptyId)) return;
+    const targetSessionId = sessionId;
+    const generation = restoreGeneration;
     closingPtyIds = [...closingPtyIds, ptyId];
     try {
       const closingIndex = ptyTabs.findIndex((tab) => tab.ptyId === ptyId);
       try {
         await closePty(ptyId);
       } catch (err) {
+        if (disposed || generation !== restoreGeneration || targetSessionId !== sessionId) return;
         const message = err instanceof Error ? err.message : String(err);
         if (activePtyId === ptyId || ptyTabs.length <= 1) {
           error = message;
@@ -264,6 +267,7 @@
         }
         return;
       }
+      if (disposed || generation !== restoreGeneration || targetSessionId !== sessionId) return;
       error = null;
       closeError = null;
       const nextTabs = ptyTabs.filter((tab) => tab.ptyId !== ptyId);
@@ -278,7 +282,9 @@
         cleanupTerminalAttach();
       }
     } finally {
-      closingPtyIds = closingPtyIds.filter((id) => id !== ptyId);
+      if (!disposed && generation === restoreGeneration && targetSessionId === sessionId) {
+        closingPtyIds = closingPtyIds.filter((id) => id !== ptyId);
+      }
     }
   }
 

@@ -51,6 +51,63 @@ test("Terminal pane restores PTYs when switching sessions", async ({ page }) => 
   );
 });
 
+test("late Terminal close failures do not leak into a switched session", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-alpha-close-terminal",
+        displayName: "Alpha close terminal",
+        title: "Alpha close terminal",
+        cwd: "/tmp/puffer-alpha",
+        folderPath: "/tmp/puffer-alpha",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        timeline: []
+      },
+      {
+        sessionId: "session-beta-close-terminal",
+        displayName: "Beta close terminal",
+        title: "Beta close terminal",
+        cwd: "/tmp/puffer-beta",
+        folderPath: "/tmp/puffer-beta",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: /Alpha close terminal/ }).first().click();
+  await page.locator(".pf-agent-tabs").getByRole("button", { name: "Terminal", exact: true }).click();
+  await daemon.waitForRequest("pty_open", (request) =>
+    request.params.sessionId === "session-alpha-close-terminal"
+  );
+  await expect(page.getByRole("tab", { name: /Terminal 1/ })).toBeVisible();
+
+  daemon.delayFailure(
+    "pty_close",
+    (request) => request.params.ptyId === "pty-1",
+    "alpha terminal close failed after session switch",
+    180
+  );
+  await page.getByRole("button", { name: "Close Terminal 1" }).click();
+  await daemon.waitForRequest("pty_close", (request) => request.params.ptyId === "pty-1");
+
+  await page.getByRole("button", { name: /Beta close terminal/ }).first().click();
+  await daemon.waitForRequest("pty_open", (request) =>
+    request.params.sessionId === "session-beta-close-terminal"
+  );
+  await expect(page.getByRole("tab", { name: /Terminal 1/ })).toBeVisible();
+  await expect(page.locator(".pf-terminal-host")).toBeVisible();
+
+  await page.waitForTimeout(240);
+  await expect(page.getByText("Terminal failed")).toHaveCount(0);
+  await expect(page.getByText(/alpha terminal close failed/)).toHaveCount(0);
+  await expect(page.locator(".pf-terminal-host")).toBeVisible();
+});
+
 test("Terminal input keeps global find shortcuts while focused", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
