@@ -303,6 +303,26 @@ test("new agent provider choice is used for the first turn", async ({ page }) =>
   });
 });
 
+test("new agent ignores repeated start clicks while creating", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.delayResponse("create_session", () => true, 250);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "New agent in puffer" }).click();
+  const dialog = page.getByRole("dialog", { name: "New agent" });
+  await expect(dialog).toBeVisible();
+
+  await dialog.getByRole("button", { name: "Start agent" }).evaluate((button) => {
+    (button as HTMLButtonElement).click();
+    (button as HTMLButtonElement).click();
+  });
+
+  await daemon.waitForRequest("create_session");
+  await page.waitForTimeout(50);
+  expect(daemon.requests.filter((request) => request.method === "create_session")).toHaveLength(1);
+});
+
 test("new agent fallback providers use daemon provider ids", async ({ page }) => {
   const daemon = new FakeDaemon({ auth: canonicalProviderAuth, providers: [] });
   await daemon.install(page);

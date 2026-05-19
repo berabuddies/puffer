@@ -1909,7 +1909,7 @@
       if (!newSessionBusy) newSessionCwd = null;
     }}
     onCreate={async (providerId) => {
-      if (!newSessionCwd) return;
+      if (!newSessionCwd || newSessionBusy) return;
       newSessionBusy = true;
       try {
         const ok = await handleNewAgent(newSessionCwd, providerId);
