@@ -18,7 +18,9 @@ use puffer_provider_openai::{
     parse_chat_completions_response, OpenAIChatCompletionTool, OpenAIChatCompletionsRequest,
     OpenAIChatResponseFormat, OpenAIRequestConfig, OpenAIResponsesToolChoiceMode,
 };
-use puffer_provider_registry::{AuthStore, ModelCompat, ProviderDescriptor, ThinkingFormat};
+use puffer_provider_registry::{
+    AuthStore, OpenAiCompletionsCompat, ProviderDescriptor, ThinkingFormat,
+};
 use puffer_resources::LoadedResources;
 use puffer_tools::ToolRegistry;
 use serde_json::{json, Value};
@@ -327,7 +329,8 @@ pub(super) fn setup_completions_session(
     let compat = model_descriptor
         .and_then(|m| m.compat.as_ref())
         .and_then(|c| c.as_openai_completions())
-        .cloned();
+        .cloned()
+        .or_else(|| inferred_completions_compat(provider));
 
     Ok(OpenAICompletionsTurnSession {
         execution,
@@ -342,6 +345,18 @@ pub(super) fn setup_completions_session(
         compat,
         model_supports_reasoning,
     })
+}
+
+fn inferred_completions_compat(provider: &ProviderDescriptor) -> Option<OpenAiCompletionsCompat> {
+    let provider_id = provider.id.trim().to_ascii_lowercase();
+    let base_url = provider.base_url.to_ascii_lowercase();
+    if provider_id == "openrouter" || base_url.contains("openrouter.ai") {
+        return Some(OpenAiCompletionsCompat {
+            thinking_format: Some(ThinkingFormat::Openrouter),
+            ..OpenAiCompletionsCompat::default()
+        });
+    }
+    None
 }
 
 /// Resolved reasoning fields for one Chat Completions request.
@@ -460,6 +475,26 @@ mod reasoning_fields_tests {
             thinking_format: Some(ThinkingFormat::Openrouter),
             ..Default::default()
         };
+        let f = resolve_reasoning_fields(Some(&compat), true, "high");
+        assert!(f.reasoning_effort.is_none());
+        assert_eq!(f.reasoning, Some(json!({ "effort": "high" })));
+    }
+
+    #[test]
+    fn openrouter_provider_infers_nested_reasoning_object() {
+        let provider = ProviderDescriptor {
+            id: "openrouter".to_string(),
+            display_name: "OpenRouter".to_string(),
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            default_api: "openai-completions".to_string(),
+            auth_modes: Vec::new(),
+            headers: Default::default(),
+            query_params: Default::default(),
+            discovery: None,
+            models: Vec::new(),
+            chat_completions_path: None,
+        };
+        let compat = inferred_completions_compat(&provider).expect("openrouter compat");
         let f = resolve_reasoning_fields(Some(&compat), true, "high");
         assert!(f.reasoning_effort.is_none());
         assert_eq!(f.reasoning, Some(json!({ "effort": "high" })));

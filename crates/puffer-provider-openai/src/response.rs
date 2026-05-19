@@ -41,8 +41,8 @@ pub struct OpenAIResponsesOutputItem {
     #[serde(default)]
     pub summary: Vec<Value>,
     /// Present when `kind == "reasoning"` — opaque encrypted thinking chain
-    /// returned by the Responses API when `include` contains
-    /// `reasoning.encrypted_content`. Aligned with Codex
+    /// returned by the Responses API when `include` contains the
+    /// `reasoning.encryptedcontent` selector. Aligned with Codex
     /// `ResponseItem::Reasoning.encrypted_content`.
     #[serde(default)]
     pub encrypted_content: Option<String>,

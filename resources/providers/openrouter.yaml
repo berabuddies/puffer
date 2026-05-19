@@ -19,3 +19,6 @@ models:
     context_window: 200000
     max_output_tokens: 16384
     supports_reasoning: true
+    compat:
+      api: openai-completions
+      thinking_format: openrouter

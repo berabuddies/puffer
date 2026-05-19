@@ -1,6 +1,7 @@
 use crate::auth::{AuthStore, StoredCredential};
 use crate::model::{
-    ModelDescriptor, ModelDiscoveryConfig, ModelDiscoveryFormat, ProviderDescriptor,
+    ModelCompat, ModelDescriptor, ModelDiscoveryConfig, ModelDiscoveryFormat,
+    OpenAiCompletionsCompat, ProviderDescriptor, ThinkingFormat,
 };
 use anyhow::{anyhow, Context, Result};
 use reqwest::blocking::Client;
@@ -278,12 +279,29 @@ fn parse_discovered_models(
             context_window: discovery.context_window,
             max_output_tokens: discovery.max_output_tokens,
             supports_reasoning: discovery.supports_reasoning,
-            compat: None,
+            compat: discovery_model_compat(provider, discovery),
             input: vec![crate::Modality::Text],
             cost: None,
         });
     }
     Ok(models)
+}
+
+fn discovery_model_compat(
+    provider: &ProviderDescriptor,
+    discovery: &ModelDiscoveryConfig,
+) -> Option<ModelCompat> {
+    let provider_id = provider.id.trim().to_ascii_lowercase();
+    let base_url = provider.base_url.to_ascii_lowercase();
+    if discovery.api == "openai-completions"
+        && (provider_id == "openrouter" || base_url.contains("openrouter.ai"))
+    {
+        return Some(ModelCompat::OpenAiCompletions(OpenAiCompletionsCompat {
+            thinking_format: Some(ThinkingFormat::Openrouter),
+            ..OpenAiCompletionsCompat::default()
+        }));
+    }
+    None
 }
 
 fn default_display_name<'a>(item: &'a Value, format: &ModelDiscoveryFormat) -> Option<&'a str> {
@@ -514,6 +532,40 @@ mod tests {
         assert_eq!(models[0].id, "qwen3:14b");
         assert_eq!(models[0].display_name, "qwen3:14b");
         assert_eq!(models[0].api, "openai-completions");
+    }
+
+    #[test]
+    fn openrouter_discovery_marks_completions_reasoning_shape() {
+        let discovery = ModelDiscoveryConfig {
+            path: "/models".to_string(),
+            response: ModelDiscoveryFormat::OpenAiModels,
+            api: "openai-completions".to_string(),
+            context_window: 200_000,
+            max_output_tokens: 16_384,
+            supports_reasoning: true,
+            items_field: "data".to_string(),
+            id_field: "id".to_string(),
+            display_name_field: None,
+            headers: IndexMap::new(),
+        };
+        let payload = serde_json::json!({
+            "data": [
+                { "id": "google/gemini-3.5-flash", "name": "Google: Gemini 3.5 Flash" }
+            ]
+        });
+        let mut provider = provider(discovery);
+        provider.id = "openrouter".to_string();
+        provider.base_url = "https://openrouter.ai/api/v1".to_string();
+        let models =
+            parse_discovered_models(&provider, provider.discovery.as_ref().unwrap(), &payload)
+                .expect("models");
+
+        let compat = models[0]
+            .compat
+            .as_ref()
+            .and_then(ModelCompat::as_openai_completions)
+            .expect("openrouter completions compat");
+        assert_eq!(compat.thinking_format, Some(ThinkingFormat::Openrouter));
     }
 
     #[test]

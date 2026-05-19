@@ -25,10 +25,7 @@ pub(crate) fn build_codex_openai_request_body(
     let reasoning = codex_reasoning_config(state, supports_reasoning);
     let mut include: Vec<Value> = Vec::new();
     if reasoning.is_some() {
-        include.push(json!("reasoning.encrypted_content"));
-    }
-    if tools.iter().any(|tool| tool.kind == "web_search") {
-        include.push(json!("web_search_call.action.sources"));
+        include.push(json!("reasoning.encryptedcontent"));
     }
     let store = std::env::var("PUFFER_OPENAI_STORE_RESPONSES")
         .ok()
@@ -570,7 +567,7 @@ mod tests {
     }
 
     #[test]
-    fn request_body_includes_web_search_sources_when_native_tool_present() {
+    fn request_body_omits_unsupported_web_search_sources_include() {
         use puffer_provider_openai::OpenAIResponsesTool;
         let state = state();
         let tools = vec![OpenAIResponsesTool {
@@ -596,7 +593,7 @@ mod tests {
         );
 
         let include = body["include"].as_array().expect("include array");
-        assert!(include.contains(&json!("web_search_call.action.sources")));
+        assert!(!include.contains(&json!("web_search_call.action.sources")));
     }
 
     #[test]

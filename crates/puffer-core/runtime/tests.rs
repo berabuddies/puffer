@@ -669,7 +669,7 @@ fn build_codex_openai_request_body_matches_codex_shape() {
 
     assert_eq!(body["model"], json!("gpt-5"));
     assert_eq!(body["stream"], json!(true));
-    assert_eq!(body["include"][0], json!("reasoning.encrypted_content"));
+    assert_eq!(body["include"][0], json!("reasoning.encryptedcontent"));
     assert_eq!(body["prompt_cache_key"], json!(Uuid::nil().to_string()));
     assert_eq!(body["instructions"], json!("system instructions"));
     assert_eq!(body["input"][0]["type"], json!("message"));
@@ -734,7 +734,7 @@ fn build_codex_openai_request_body_uses_priority_tier_for_fast_mode() {
     // Fast mode no longer disables reasoning — it only sets service_tier.
     // Reasoning is controlled solely by effort_level, matching Anthropic behavior.
     assert_eq!(body["reasoning"]["effort"], json!("medium"));
-    assert_eq!(body["include"][0], json!("reasoning.encrypted_content"));
+    assert_eq!(body["include"][0], json!("reasoning.encryptedcontent"));
 }
 
 #[test]
