@@ -111,11 +111,11 @@
       kind: "project",
       tags: ["project", "workspace"]
     },
-    ...sortedSessions.slice(0, 5).map((session, index) => ({
+    ...sortedSessions.map((session, index) => ({
       id: session.id,
       name: `session-${index + 1}.md`,
       path: `${group.path}/.puffer/memory/sessions/session-${index + 1}.md`,
-      title: sessionDisplayTitle(session),
+      title: sessionDisplayTitle(session) || sessionDisplayName(session),
       body: `${sessionDisplayName(session)} last updated ${formatAge(session.updatedAtMs)} ago.\n\n${session.note ?? "No pinned session note yet."}`,
       updated: formatAge(session.updatedAtMs),
       kind: "session" as const,

@@ -73,6 +73,32 @@ test("workspace search includes older sessions beyond the first page", async ({ 
   await expect(page.locator(".pf-composer textarea")).toBeVisible();
 });
 
+test("project memory includes older sessions beyond the first page", async ({ page }) => {
+  const sessions = Array.from({ length: 7 }, (_, index) => ({
+    sessionId: `session-memory-${index}`,
+    displayName: index === 6 ? "Deep memory session" : `Memory session ${index + 1}`,
+    title: index === 6 ? "Deep memory session" : `Memory session ${index + 1}`,
+    cwd: "/tmp/puffer-memory",
+    folderPath: "/tmp/puffer-memory",
+    updatedAtMs: baseTime - index * 1_000,
+    createdAtMs: baseTime - 60_000 - index * 1_000,
+    eventCount: index === 6 ? 9 : 1
+  }));
+  const daemon = new FakeDaemon({ sessions });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-pw-project").filter({ hasText: "puffer-memory" })
+    .getByRole("button", { name: "Details" })
+    .click();
+  await page.locator(".pf-fpb-tab").filter({ hasText: "Memory" }).click();
+
+  const memoryPanel = page.locator(".pf-pmem");
+  await expect(memoryPanel.getByText("session-7.md")).toBeVisible();
+  await memoryPanel.getByRole("button", { name: /session-7\.md/ }).click();
+  await expect(page.locator(".pf-pmem-title")).toHaveText("Deep memory session");
+});
+
 test("workspace board renders daemon session activity states", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
