@@ -757,11 +757,30 @@
     resetLiveState?: boolean;
   };
 
+  function resetLiveTurnState() {
+    submittedMessages = [];
+    liveStreamItems = [];
+    replayTextByTurn = {};
+    turnPermissionLookup = {};
+    turnQuestionLookup = {};
+    currentTurnId = null;
+    turnStartedAtMs = null;
+    turnThinking = false;
+    turnStatusHint = null;
+    settledTurnIds = new Set();
+  }
+
   async function openSession(session: SessionListItem, options: OpenSessionOptions = {}) {
     const showLoading = options.showLoading ?? selectedSession?.id !== session.id;
     const resetLiveState = options.resetLiveState ?? true;
     const loadGeneration = ++sessionLoadGeneration;
     if (showLoading) sessionLoading = true;
+    if (resetLiveState && selectedSession?.id !== session.id) {
+      selectedSession = session;
+      sessionDetail = null;
+      rememberSession(session.id);
+      resetLiveTurnState();
+    }
     try {
       const detail = await loadSessionDetailFromDaemon(session.id);
       if (loadGeneration !== sessionLoadGeneration) return;
@@ -771,16 +790,7 @@
       if (resetLiveState) {
         // New session lands: drop any lingering live-stream items + local draft
         // so the composer feels fresh.
-        submittedMessages = [];
-        liveStreamItems = [];
-        replayTextByTurn = {};
-        turnPermissionLookup = {};
-        turnQuestionLookup = {};
-        currentTurnId = null;
-        turnStartedAtMs = null;
-        turnThinking = false;
-        turnStatusHint = null;
-        settledTurnIds = new Set();
+        resetLiveTurnState();
       }
       statusMessage = `Loaded ${detail.timeline.length} conversation items.`;
     } catch (error) {

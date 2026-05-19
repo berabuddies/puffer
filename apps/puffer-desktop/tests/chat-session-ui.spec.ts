@@ -771,6 +771,44 @@ for (const scenario of [
   });
 }
 
+test("new empty agent keeps first-message composer usable if detail load fails", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({ sessions: [] });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await expect(page.getByRole("heading", { name: "No sessions yet" })).toBeVisible();
+  await page.getByRole("button", { name: "New agent in default workspace" }).click();
+  const dialog = page.getByRole("dialog", { name: "New agent" });
+  await expect(dialog).toBeVisible();
+  daemon.failNext("load_session_detail", "detail temporarily unavailable");
+  await dialog.getByRole("button", { name: "Start agent" }).click();
+
+  const createRequest = await daemon.waitForRequest("create_session");
+  expect(createRequest.params).toMatchObject({
+    cwd: "/tmp/puffer",
+    providerId: "openai"
+  });
+
+  const composer = page.locator(".pf-composer textarea");
+  await expect(page.getByText("Conversation load failed")).toBeVisible();
+  await expect(page.getByText("detail temporarily unavailable")).toBeVisible();
+  await expect(composer).toBeEnabled();
+  await composer.fill("First prompt after detail failure");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  const turnRequest = await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.message === "First prompt after detail failure"
+  );
+  expect(turnRequest.params).toMatchObject({
+    sessionId: "session-created-1",
+    providerId: "openai",
+    modelId: "test-model"
+  });
+});
+
 test("stop turn requests cancellation for the active turn", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
