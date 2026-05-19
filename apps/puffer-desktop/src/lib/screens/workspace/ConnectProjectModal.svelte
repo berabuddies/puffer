@@ -17,6 +17,8 @@
   } from "../../providerIds";
   import type { ProviderSummary, SettingsSnapshot } from "../../types";
 
+  type CreatedSessionResult = Awaited<ReturnType<typeof createSession>>;
+
   /** Native directory chooser — only works in Tauri. Silently becomes a
    *  no-op in the web preview so the modal can still be used for testing. */
   async function pickDirectory(): Promise<string | null> {
@@ -36,9 +38,9 @@
 
   type Props = {
     onClose: () => void;
-    /** Fired when the modal finishes (clone + create_session) with the id
+    /** Fired when the modal finishes (clone + create_session) with the payload
      *  of the new session so the caller can open AgentDetail. */
-    onConnected?: (sessionId: string) => void | Promise<void>;
+    onConnected?: (created: CreatedSessionResult) => void | Promise<void>;
     /** Shown as the placeholder for the local path field. */
     defaultLocalPath?: string;
     snapshot?: SettingsSnapshot | null;
@@ -267,7 +269,7 @@
       providerForSnapshot(snapshot, selectedProvider || defaultProviderId())
     );
     status = `Ready — session ${created.sessionId.slice(0, 8)}`;
-    await onConnected?.(created.sessionId);
+    await onConnected?.(created);
     onClose();
   }
 
@@ -289,7 +291,7 @@
       throw e;
     }
 
-    let createdSessionId: string;
+    let createdSession: CreatedSessionResult | null = null;
     try {
       // 2. Optional clone on the remote.
       let targetCwd = remoteDest.trim();
@@ -306,7 +308,7 @@
         targetCwd,
         providerForSnapshot(remoteSnapshot, selectedProvider || defaultProviderId(), "remote")
       );
-      createdSessionId = created.sessionId;
+      createdSession = created;
     } catch (e) {
       if (switchedToRemote && previousHandshake) {
         try {
@@ -317,8 +319,11 @@
       }
       throw e;
     }
-    status = `Ready — session ${createdSessionId.slice(0, 8)} on ${sshTarget}`;
-    await onConnected?.(createdSessionId);
+    if (!createdSession) {
+      throw new Error("remote create_session did not return a session");
+    }
+    status = `Ready — session ${createdSession.sessionId.slice(0, 8)} on ${sshTarget}`;
+    await onConnected?.(createdSession);
     onClose();
   }
 

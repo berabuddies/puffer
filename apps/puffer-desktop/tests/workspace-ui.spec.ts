@@ -397,6 +397,42 @@ test("active agents includes an opened session before grouped history catches up
   await expect(page.locator(".pf-agent-detail")).toBeVisible();
 });
 
+test("create project opens created session before grouped history catches up", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-connect-base",
+        displayName: "Connect base",
+        title: "Connect base",
+        cwd: "/tmp/puffer-connect-base",
+        folderPath: "/tmp/puffer-connect-base",
+        updatedAtMs: baseTime - 120_000,
+        createdAtMs: baseTime - 240_000,
+        eventCount: 1
+      }
+    ]
+  });
+  daemon.setGroupedSessionFilter(
+    (metadata) => !String(metadata.sessionId ?? "").startsWith("session-created-")
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Create Project" }).click();
+  const dialog = page.getByRole("dialog", { name: "Create Project" });
+  await expect(dialog).toBeVisible();
+  await dialog.locator("#pf-local-dest").fill("/tmp/new-puffer-project");
+  await dialog.getByRole("button", { name: "Create" }).click();
+
+  await daemon.waitForRequest("create_session");
+
+  await expect(page.locator(".pf-agent-detail .primary-title")).toContainText("New Session");
+  await expect(page.locator(".pf-composer textarea")).toBeEnabled();
+  const activeList = page.locator(".pf-sidebar-agents-list");
+  await expect(activeList.locator(".pf-sidebar-agent-row").filter({ hasText: "New Session" })).toBeVisible();
+  await expect(activeList.getByText("No agents match")).toHaveCount(0);
+});
+
 test("active agents can reopen a live session before grouped history catches up", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

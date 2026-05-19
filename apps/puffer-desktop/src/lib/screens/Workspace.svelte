@@ -4,9 +4,12 @@
   import Icon from "../design/Icon.svelte";
   import ProjectRow from "./workspace/ProjectRow.svelte";
   import ConnectProjectModal from "./workspace/ConnectProjectModal.svelte";
+  import type { createSession } from "../api/desktop";
   import { sessionDisplayName, sessionDisplayTitle } from "../sessionDisplay";
   import type { MockAgent, MockProject } from "../data/mockProjects";
   import type { FolderGroup, SessionListItem, SettingsSnapshot } from "../types";
+
+  type CreatedSessionResult = Awaited<ReturnType<typeof createSession>>;
 
   type Props = {
     /** Real folder-groups loaded from the daemon. */
@@ -20,9 +23,9 @@
     /** "New agent" was clicked on a project row. `cwd` is that project's
      *  path. Receives control to create the session + open AgentDetail. */
     onNewAgent?: (cwd: string) => void | Promise<void>;
-    /** Connect-project modal just finished with a new session id — the
+    /** Connect-project modal just finished with a new session — the
      *  parent should refresh the workspace and open AgentDetail. */
-    onSessionReady?: (sessionId: string) => void | Promise<void>;
+    onSessionReady?: (created: CreatedSessionResult) => void | Promise<void>;
     pinnedWorkspacePaths?: string[];
     pinningWorkspacePaths?: string[];
     onToggleWorkspacePin?: (path: string, pinned: boolean) => void;
@@ -237,8 +240,8 @@
   {#if showConnect}
     <ConnectProjectModal
       onClose={() => (showConnect = false)}
-      onConnected={async (sessionId) => {
-        await onSessionReady?.(sessionId);
+      onConnected={async (created) => {
+        await onSessionReady?.(created);
       }}
       defaultLocalPath={defaultWorkspaceCwd || "~/code"}
       snapshot={settingsSnapshot}

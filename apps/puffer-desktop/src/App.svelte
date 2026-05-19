@@ -87,6 +87,8 @@
     turnId: string | null;
   };
 
+  type CreatedSessionResult = Awaited<ReturnType<typeof createSession>>;
+
   // ─────────────────────────────────────────────────────────────
   // Shell state
   // ─────────────────────────────────────────────────────────────
@@ -1066,40 +1068,7 @@
   async function handleNewAgent(cwd: string, providerId?: string): Promise<boolean> {
     try {
       const created = await createSession(cwd || undefined, providerId);
-      await refreshGroups();
-      const newSession =
-        groups.flatMap((g) => g.sessions).find((s) => s.id === created.sessionId) ?? null;
-      if (newSession) {
-        await openSession({
-          ...newSession,
-          providerId: created.providerId ?? providerId ?? newSession.providerId,
-          modelId: created.modelId ?? newSession.modelId
-        });
-      } else {
-        // Fall back to a synthetic SessionListItem so the AgentDetail can
-        // still open; reloading later will pick up the real record.
-        const fallback: SessionListItem = {
-          id: created.sessionId,
-          displayName: null,
-          generatedTitle: null,
-          title: "New Session",
-          cwd: created.cwd,
-          folderPath: created.cwd,
-          updatedAtMs: created.createdAtMs,
-          createdAtMs: created.createdAtMs,
-          eventCount: 0,
-          activityStatus: "idle",
-          slug: null,
-          tags: [],
-          note: null,
-          parentSessionId: null,
-          providerId: created.providerId ?? providerId ?? "codex",
-          modelId: created.modelId ?? null
-        };
-        await openSession(fallback);
-      }
-      openAgentSessionId = created.sessionId;
-      tweaks = { ...tweaks, screen: "workspace" };
+      await openCreatedSession(created, providerId);
       statusMessage = `New ${created.providerId ?? providerId ?? "agent"} session in ${cwd || defaultWorkspaceCwd || "default workspace"}.`;
       return true;
     } catch (error) {
@@ -1277,7 +1246,7 @@
 
   /** Fired by ConnectProjectModal once a clone+create has landed. Refreshes
    *  the workspace board and drills straight into the new session. */
-  async function handleSessionReady(sessionId: string) {
+  async function handleSessionReady(created: CreatedSessionResult) {
     const client = currentDaemonClient();
     const currentFingerprint = client ? daemonFingerprint(client) : null;
     if (client && currentFingerprint !== daemonClientFingerprint) {
@@ -1289,13 +1258,51 @@
         })
         .catch(() => {});
     }
+    await openCreatedSession(created, created.providerId);
+  }
+
+  async function openCreatedSession(
+    created: CreatedSessionResult,
+    requestedProviderId?: string
+  ) {
     await refreshGroups();
-    const session = groups.flatMap((g) => g.sessions).find((s) => s.id === sessionId);
-    if (session) {
-      await openSession(session);
+    const newSession =
+      groups.flatMap((g) => g.sessions).find((s) => s.id === created.sessionId) ?? null;
+    if (newSession) {
+      await openSession({
+        ...newSession,
+        providerId: created.providerId ?? requestedProviderId ?? newSession.providerId,
+        modelId: created.modelId ?? newSession.modelId
+      });
+    } else {
+      await openSession(sessionFallbackFromCreated(created, requestedProviderId));
     }
-    openAgentSessionId = sessionId;
+    openAgentSessionId = created.sessionId;
     tweaks = { ...tweaks, screen: "workspace" };
+  }
+
+  function sessionFallbackFromCreated(
+    created: CreatedSessionResult,
+    requestedProviderId?: string
+  ): SessionListItem {
+    return {
+      id: created.sessionId,
+      displayName: null,
+      generatedTitle: null,
+      title: "New Session",
+      cwd: created.cwd,
+      folderPath: created.cwd,
+      updatedAtMs: created.createdAtMs,
+      createdAtMs: created.createdAtMs,
+      eventCount: 0,
+      activityStatus: "idle",
+      slug: null,
+      tags: [],
+      note: null,
+      parentSessionId: null,
+      providerId: created.providerId ?? requestedProviderId ?? "codex",
+      modelId: created.modelId ?? null
+    };
   }
 
   function providerIsAuthenticated(providerId: string | null | undefined): boolean {
@@ -2207,7 +2214,7 @@
                 onOpenAgent={(id) => onOpenAgent(id)}
                 onOpenBoard={onOpenProject}
                 onNewAgent={(cwd) => requestNewAgent(cwd)}
-                onSessionReady={(sessionId) => handleSessionReady(sessionId)}
+                onSessionReady={(created) => handleSessionReady(created)}
                 pinnedWorkspacePaths={desktopPins.pinnedWorkspacePaths}
                 pinningWorkspacePaths={desktopPinInFlightKeys
                   .filter((key) => key.startsWith("workspace:"))
