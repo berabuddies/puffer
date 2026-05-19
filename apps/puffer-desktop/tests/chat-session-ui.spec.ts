@@ -356,6 +356,96 @@ test("turn completion preserves live chat row identity after transcript reload",
   await expect(page.locator('.pf-msg[data-role="agent"]').filter({ hasText: reply })).toHaveCount(1);
 });
 
+test("generated title reload does not duplicate the first submitted prompt", async ({ page }) => {
+  const prompt = "First prompt should not flash twice";
+  const reply = "First reply stays single.";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-title-race",
+        displayName: "Title race",
+        title: "Title race",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Title race/);
+  await page.locator(".pf-composer textarea").fill(prompt);
+  await page.getByRole("button", { name: "Send" }).click();
+
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-title-race" &&
+      request.params.message === prompt
+  );
+  const userRows = page.locator('.pf-msg[data-role="user"]').filter({ hasText: prompt });
+  await expect(userRows).toHaveCount(1);
+
+  const loadRequestsBefore = daemon.requests.filter(
+    (request) =>
+      request.method === "load_session_detail" &&
+      request.params.sessionId === "session-title-race"
+  ).length;
+  daemon.setSessionTimeline("session-title-race", [
+    {
+      kind: "user_message",
+      id: "persisted-first-user",
+      text: prompt,
+      createdAtMs: baseTime + 1
+    }
+  ]);
+  daemon.emit("workspace:sessions:changed", {
+    reason: "generated_title",
+    sessionId: "session-title-race"
+  });
+
+  await expect
+    .poll(() =>
+      daemon.requests.filter(
+        (request) =>
+          request.method === "load_session_detail" &&
+          request.params.sessionId === "session-title-race"
+      ).length
+    )
+    .toBe(loadRequestsBefore + 1);
+  await expect(userRows).toHaveCount(1);
+
+  daemon.setSessionTimeline("session-title-race", [
+    {
+      kind: "user_message",
+      id: "persisted-first-user",
+      text: prompt,
+      createdAtMs: baseTime + 1
+    },
+    {
+      kind: "assistant_message",
+      id: "persisted-first-assistant",
+      text: reply,
+      createdAtMs: baseTime + 2
+    }
+  ]);
+  daemon.emit("session:session-title-race:event", {
+    type: "turn-complete",
+    turnId: "turn-session-title-race",
+    assistantText: reply
+  });
+
+  await expect(userRows).toHaveCount(1);
+  await expect(page.locator('.pf-msg[data-role="agent"]').filter({ hasText: reply })).toHaveCount(1);
+});
+
 test("failed turn start keeps composer draft and avoids an unsent user row", async ({ page }) => {
   const prompt = "Do not lose this failed prompt";
   const daemon = new FakeDaemon({

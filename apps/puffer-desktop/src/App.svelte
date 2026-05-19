@@ -820,13 +820,19 @@
     try {
       const detail = await loadSessionDetailFromDaemon(session.id);
       if (loadGeneration !== sessionLoadGeneration) return;
+      const timeline = resetLiveState
+        ? detail.timeline
+        : reuseTransientMessageIds(detail.timeline, [...submittedMessages, ...liveStreamItems]);
       selectedSession = detail.session;
-      sessionDetail = detail;
+      sessionDetail = { ...detail, timeline };
       rememberSession(detail.session.id);
       if (resetLiveState) {
         // New session lands: drop any lingering live-stream items + local draft
         // so the composer feels fresh.
         resetLiveTurnState();
+      } else {
+        submittedMessages = stillMissingFromPersisted(timeline, submittedMessages);
+        liveStreamItems = stillMissingFromPersisted(timeline, liveStreamItems);
       }
       statusMessage = `Loaded ${detail.timeline.length} conversation items.`;
     } catch (error) {
