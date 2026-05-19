@@ -155,7 +155,7 @@
   async function saveMcpServer() {
     const id = mcpForm.id.trim();
     const targetOrUrl = mcpTargetValue();
-    if (!id || !targetOrUrl) return;
+    if (mcpSaving || !id || !targetOrUrl) return;
     mcpLoadGeneration += 1;
     mcpLoading = false;
     mcpSaving = true;

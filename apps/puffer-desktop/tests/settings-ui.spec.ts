@@ -416,6 +416,33 @@ test("MCP settings add server through the daemon", async ({ page }) => {
   await expect(page.getByText("Added github")).toBeVisible();
 });
 
+test("MCP settings add server is ignored while already saving", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.delayResponse("add_mcp_server", () => true, 500);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "MCP Servers" }).click();
+  await expect(page.locator(".pf-mcp-card .title").filter({ hasText: "Playwright" })).toBeVisible();
+
+  await page.getByLabel("ID").fill("github");
+  await page.getByLabel("Name").fill("GitHub");
+  await page.getByLabel("Command").fill("npx");
+  await page.getByLabel("Arguments").fill("@modelcontextprotocol/server-github");
+
+  const addServer = page.getByRole("button", { name: "Add server" });
+  await expect(addServer).toBeEnabled();
+  await addServer.evaluate((button) => {
+    (button as HTMLButtonElement).click();
+    (button as HTMLButtonElement).click();
+  });
+  await daemon.waitForRequest("add_mcp_server");
+  await page.waitForTimeout(80);
+
+  expect(daemon.requests.filter((request) => request.method === "add_mcp_server")).toHaveLength(1);
+});
+
 test("MCP settings keep added server when the initial list resolves late", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayResponse("list_mcp_servers", () => true, 250);
