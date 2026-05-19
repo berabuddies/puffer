@@ -304,7 +304,8 @@ impl ProviderRegistry {
         auth_store: &AuthStore,
         client: &ModelDiscoveryClient,
     ) -> Result<()> {
-        let Some(provider) = self.providers.get(provider_id).cloned() else {
+        let provider_key = canonical_provider_id(provider_id);
+        let Some(provider) = self.providers.get(provider_key.as_str()).cloned() else {
             return Err(anyhow!("provider {provider_id} is not registered"));
         };
         if provider.descriptor.discovery.is_none() {
@@ -312,14 +313,16 @@ impl ProviderRegistry {
         }
         // Skip discovery for remote providers that have no credentials — the
         // request would almost certainly fail with 401/403 anyway.
-        if auth_store.get(provider_id).is_none() && !is_local_url(&provider.descriptor.base_url) {
+        if auth_store.get(provider_key.as_str()).is_none()
+            && !is_local_url(&provider.descriptor.base_url)
+        {
             return Ok(());
         }
         let discovered = client.discover_models(&provider.descriptor, auth_store)?;
         if discovered.is_empty() {
             return Ok(());
         }
-        if let Some(entry) = self.providers.get_mut(provider_id) {
+        if let Some(entry) = self.providers.get_mut(provider_key.as_str()) {
             merge_discovered_models(&mut entry.descriptor.models, discovered);
         }
         Ok(())
@@ -537,10 +540,16 @@ mod tests {
                 .map(|model| model.provider.as_str()),
             Some("openai")
         );
+        registry
+            .discover_and_merge_provider("claude", &AuthStore::default())
+            .expect("claude alias should refresh the anthropic provider");
+        registry
+            .discover_and_merge_provider("codex", &AuthStore::default())
+            .expect("codex alias should refresh the openai provider");
     }
 
     #[test]
-    fn parse_openai_discovery_response_maps_models() {
+    fn parse_openai_discovery_response_maps_models_through_codex_alias() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
         let address = listener.local_addr().expect("address");
         let server = thread::spawn(move || -> String {
@@ -587,7 +596,7 @@ mod tests {
         registry.register(provider);
 
         registry
-            .discover_and_merge_provider("openai", &auth)
+            .discover_and_merge_provider("codex", &auth)
             .expect("discovery succeeds");
 
         let request = server.join().expect("server thread");
