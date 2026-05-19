@@ -40,6 +40,13 @@
   // in the "Current" panel so users know where they are before switching.
   const current = currentDaemonClient()?.handshake ?? null;
 
+  function selectMode(nextMode: Mode) {
+    if (busy || mode === nextMode) return;
+    error = null;
+    status = null;
+    mode = nextMode;
+  }
+
   async function pickDirectory(): Promise<string | null> {
     if (!canInvokeTauri()) {
       return null;
@@ -133,7 +140,7 @@
         aria-selected={mode === "current"}
         class="pf-modal-seg-btn"
         data-active={mode === "current"}
-        onclick={() => (mode = "current")}
+        onclick={() => selectMode("current")}
         disabled={busy}
       >
         <Icon name="check" size={13} />
@@ -148,7 +155,7 @@
         aria-selected={mode === "local"}
         class="pf-modal-seg-btn"
         data-active={mode === "local"}
-        onclick={() => (mode = "local")}
+        onclick={() => selectMode("local")}
         disabled={busy}
       >
         <Icon name="folder" size={13} />
@@ -163,7 +170,7 @@
         aria-selected={mode === "remote"}
         class="pf-modal-seg-btn"
         data-active={mode === "remote"}
-        onclick={() => (mode = "remote")}
+        onclick={() => selectMode("remote")}
         disabled={busy}
       >
         <Icon name="globe" size={13} />

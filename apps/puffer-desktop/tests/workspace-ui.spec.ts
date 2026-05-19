@@ -57,6 +57,44 @@ test("workspace picker ignores duplicate local switch submits while restart is i
   expect(calls[0].args.cwd).toBe("/tmp/puffer-next");
 });
 
+test("workspace picker clears local errors when switching modes", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await page.addInitScript(() => {
+    const win = window as unknown as {
+      __TAURI__?: unknown;
+      __TAURI_INTERNALS__?: {
+        invoke?: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+      };
+    };
+    win.__TAURI__ = {};
+    win.__TAURI_INTERNALS__ = {
+      invoke: async (cmd: string, args: Record<string, unknown> = {}) => {
+        if (cmd !== "restart_local_daemon") throw new Error(`unexpected invoke: ${cmd}`);
+        throw new Error(`cannot start ${String(args.cwd ?? "")}`);
+      }
+    };
+  });
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByTitle("Switch workspace").click();
+  const dialog = page.getByRole("dialog", { name: "Switch workspace" });
+  await dialog.getByRole("tab", { name: /Local/ }).click();
+  await dialog.getByLabel("Workspace directory").fill("/tmp/broken-workspace");
+  await dialog.getByRole("button", { name: "Switch local workspace" }).click();
+
+  const staleError = dialog.locator(".pf-modal-status", {
+    hasText: "cannot start /tmp/broken-workspace"
+  });
+  await expect(staleError).toBeVisible();
+
+  await dialog.getByRole("tab", { name: /Remote/ }).click();
+
+  await expect(staleError).toHaveCount(0);
+  await expect(dialog.getByLabel("SSH target")).toBeVisible();
+});
+
 test("agent pin ignores duplicate clicks while the pin save is in flight", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayResponse("set_desktop_pin", () => true, 500);
