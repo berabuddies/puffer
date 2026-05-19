@@ -2250,10 +2250,34 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         } else {
             None
         };
+        let mut effective_turn_options = turn_options_for_thread.clone();
+        if effective_turn_options.model_override.is_none()
+            && effective_turn_options.provider_id.is_none()
+            && effective_turn_options.model_id.is_none()
+        {
+            match load_session_routing_state(
+                &setup_state.paths.user_config_dir,
+                &session_id_for_thread,
+            ) {
+                Ok(routing) => effective_turn_options.apply_session_routing(routing),
+                Err(err) => {
+                    setup_state.publish_event(ServerEnvelope::Event {
+                        event: channel_thread.clone(),
+                        payload: json!({
+                            "type": "turn-error",
+                            "turnId": turn_id_thread,
+                            "error": format!("load session routing: {err:#}"),
+                        }),
+                    });
+                    setup_state.turns.lock().unwrap().remove(&turn_id_thread);
+                    return;
+                }
+            }
+        }
         let cfg_for_turn = setup_state.config.lock().unwrap().clone();
         let mut app_state = AppState::from_session_record(cfg_for_turn.clone(), record);
         if let Err(err) =
-            apply_turn_request_options(&mut app_state, &inputs.providers, &turn_options_for_thread)
+            apply_turn_request_options(&mut app_state, &inputs.providers, &effective_turn_options)
         {
             setup_state.publish_event(ServerEnvelope::Event {
                 event: channel_thread.clone(),
@@ -2603,6 +2627,17 @@ impl TurnRequestOptions {
                 }),
         }
     }
+
+    fn apply_session_routing(&mut self, routing: DesktopSessionRouting) {
+        if self.provider_id.is_none() {
+            self.provider_id = routing
+                .provider_id
+                .map(|provider_id| canonical_desktop_provider_id(&provider_id));
+        }
+        if self.model_id.is_none() {
+            self.model_id = routing.model_id;
+        }
+    }
 }
 
 fn optional_trimmed_value(params: &Value, keys: &[&str]) -> Option<String> {
@@ -2639,6 +2674,8 @@ fn apply_turn_request_options(
             &effort,
             fast_mode,
         )?;
+    } else if let Some(provider_id) = options.provider_id.as_deref() {
+        apply_turn_provider_selection(app_state, providers, provider_id, &effort, fast_mode)?;
     } else {
         if let Some(effort) = options.thinking_option_id.as_deref() {
             app_state.effort_level = effort.to_string();
@@ -2653,6 +2690,23 @@ fn apply_turn_request_options(
     if let Some(mode) = options.permission_mode.as_deref() {
         apply_turn_permission_mode(app_state, mode);
     }
+    Ok(())
+}
+
+fn apply_turn_provider_selection(
+    app_state: &mut AppState,
+    providers: &ProviderRegistry,
+    provider_id: &str,
+    effort: &str,
+    fast_mode: bool,
+) -> Result<()> {
+    let provider_id = canonical_desktop_provider_id(provider_id);
+    let provider = providers
+        .provider(&provider_id)
+        .with_context(|| format!("provider {provider_id} not found"))?;
+    let model_id = resolve_create_session_model_id(&app_state.config, provider, None)?
+        .with_context(|| format!("provider `{provider_id}` has no models"))?;
+    apply_turn_model_preferences(app_state, &provider_id, &model_id, effort, fast_mode);
     Ok(())
 }
 
@@ -3312,6 +3366,39 @@ mod tests {
         assert_eq!(state.effort_level, "high");
         assert!(!state.fast_mode);
         assert_eq!(state.sandbox_mode, "read-only");
+    }
+
+    #[test]
+    fn turn_request_options_provider_without_model_selects_provider_default() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let metadata = SessionMetadata {
+            id: Uuid::new_v4(),
+            display_name: None,
+            generated_title: None,
+            cwd: temp.path().to_path_buf(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        };
+        let mut state = AppState::new(PufferConfig::default(), temp.path().to_path_buf(), metadata);
+
+        let mut providers = ProviderRegistry::new();
+        providers.register(provider("openai", &["gpt-5"]));
+        providers.register(provider("anthropic", &["claude-sonnet-4-5"]));
+        let options = TurnRequestOptions::from_params(&json!({
+            "providerId": "anthropic",
+        }));
+
+        apply_turn_request_options(&mut state, &providers, &options).expect("turn options");
+
+        assert_eq!(state.current_provider.as_deref(), Some("anthropic"));
+        assert_eq!(
+            state.current_model.as_deref(),
+            Some("anthropic/claude-sonnet-4-5")
+        );
     }
 
     #[test]
