@@ -126,9 +126,20 @@
       !selectedProviderId ||
       providerIdInSet(selectedProviderId, authenticatedProviderIds)
   );
+  let providerSwitchCanRecover = $derived(
+    allowProviderSwitch && authenticatedProviderIds.length > 0
+  );
+  let composerDisabled = $derived(
+    !session || (!selectedProviderAuthenticated && !providerSwitchCanRecover)
+  );
+  let modelPickerDisabled = $derived(
+    turnRunning || (!selectedProviderAuthenticated && !providerSwitchCanRecover)
+  );
   let composerBlockedReason = $derived(
     selectedProviderAuthenticated
       ? null
+      : providerSwitchCanRecover
+        ? `Switch to a connected provider to continue this empty session.`
       : `Reconnect ${providerDisplayName(selectedProviderId)} to continue this session.`
   );
   let canSubmitPrompt = $derived(
@@ -1303,7 +1314,7 @@
         bind:value={draft}
         placeholder={session ? `Reply to ${engineerName}…` : "Select a session to continue"}
         onkeydown={onKeydown}
-        disabled={!session || !selectedProviderAuthenticated}
+        disabled={composerDisabled}
       ></textarea>
       <div class="pf-composer-foot">
         <ModelPicker
@@ -1311,7 +1322,7 @@
           currentProvider={selectedProviderId}
           currentModel={selectedModelId}
           allowProviderSwitch={allowProviderSwitch}
-          disabled={turnRunning || !selectedProviderAuthenticated}
+          disabled={modelPickerDisabled}
           onChange={pickModel}
         />
         <label class="pf-toggle-chip" class:disabled={!fastModeAvailable} title={fastModeAvailable ? "Fast mode" : "Fast mode is not available for this model"}>

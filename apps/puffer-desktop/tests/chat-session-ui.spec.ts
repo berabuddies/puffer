@@ -884,6 +884,106 @@ test("new empty agent keeps first-message composer usable if detail load fails",
   });
 });
 
+test("empty agent can recover by switching away from a disconnected provider", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-empty-disconnected-provider",
+        displayName: "Disconnected empty agent",
+        title: "Disconnected empty agent",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "anthropic",
+        modelId: "claude-sonnet-4-5",
+        timeline: []
+      }
+    ],
+    auth: [
+      {
+        providerId: "openai",
+        kind: "oauth",
+        email: "tester@example.com",
+        expiresAtMs: null,
+        scopes: [],
+        planType: "test",
+        organizationName: null
+      }
+    ],
+    providers: [
+      {
+        id: "openai",
+        displayName: "Codex",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 1,
+        authModes: ["oauth"],
+        sourceKind: "test",
+        sourcePath: null
+      },
+      {
+        id: "anthropic",
+        displayName: "Claude",
+        baseUrl: "",
+        defaultApi: "anthropic-messages",
+        modelCount: 1,
+        authModes: ["api_key"],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ],
+    providerModels: {
+      openai: [
+        {
+          id: "gpt-5",
+          displayName: "GPT-5",
+          provider: "openai",
+          api: "openai-responses",
+          supportsTools: true,
+          supportsVision: false,
+          contextWindow: null,
+          maxOutputTokens: null,
+          thinkingOptions: [],
+          defaultThinkingOptionId: null,
+          isDefault: true
+        }
+      ]
+    }
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Disconnected empty agent/);
+  await expect(page.getByText("No messages in this session yet. Send a prompt to get started.")).toBeVisible();
+  const composer = page.locator(".pf-composer textarea");
+  await expect(composer).toBeEnabled();
+  await composer.fill("Use the connected provider");
+  await expect(page.locator(".pf-composer-hint")).toContainText(
+    "Switch to a connected provider"
+  );
+  await expect(page.getByRole("button", { name: "Send" })).toBeDisabled();
+
+  await page.locator(".pf-composer .picker .trigger").click();
+  await page.getByRole("button", { name: "Codex" }).click();
+  await expect(page.locator(".pf-composer .picker .trigger")).toContainText("gpt-5");
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+  await page.getByRole("button", { name: "Send" }).click();
+
+  const turnRequest = await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.message === "Use the connected provider"
+  );
+  expect(turnRequest.params).toMatchObject({
+    sessionId: "session-empty-disconnected-provider",
+    providerId: "openai",
+    modelId: "gpt-5"
+  });
+});
+
 test("stop turn requests cancellation for the active turn", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
