@@ -1,13 +1,13 @@
 use puffer_test_support::{
-    capture_tmux_visible_pane, send_tmux_keys, start_tmux_command, start_tmux_command_with_size,
-    temp_workspace, tmux_available, wait_for_tmux_text, TerminalSize,
+    capture_tmux_visible_pane, require_tmux_or_skip, send_tmux_keys, start_tmux_command,
+    start_tmux_command_with_size, temp_workspace, wait_for_tmux_text, TerminalSize,
 };
 use std::fs;
 use std::time::Duration;
 
 #[test]
 fn tmux_smoke_renders_help_output() {
-    if !tmux_available() {
+    if !require_tmux_or_skip("tmux_smoke_renders_help_output") {
         return;
     }
 
@@ -68,7 +68,7 @@ tmux_golden_mode = true
 
 #[test]
 fn tmux_no_alt_screen_clears_previous_terminal_contents() {
-    if !tmux_available() {
+    if !require_tmux_or_skip("tmux_no_alt_screen_clears_previous_terminal_contents") {
         return;
     }
 

@@ -1,7 +1,7 @@
 use puffer_config::{ensure_workspace_dirs, ConfigPaths};
 use puffer_session_store::SessionStore;
 use puffer_test_support::{
-    capture_tmux_pane, send_tmux_keys, start_tmux_command, temp_workspace, tmux_available,
+    capture_tmux_pane, require_tmux_or_skip, send_tmux_keys, start_tmux_command, temp_workspace,
     wait_for_tmux_text,
 };
 use std::fs;
@@ -11,7 +11,7 @@ const TMUX_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[test]
 fn tmux_resume_overlay_lists_workspace_sessions() {
-    if !tmux_available() {
+    if !require_tmux_or_skip("tmux_resume_overlay_lists_workspace_sessions") {
         return;
     }
 
@@ -55,7 +55,7 @@ fn tmux_resume_overlay_lists_workspace_sessions() {
 
 #[test]
 fn tmux_login_overlay_lists_available_providers() {
-    if !tmux_available() {
+    if !require_tmux_or_skip("tmux_login_overlay_lists_available_providers") {
         return;
     }
 

@@ -12,8 +12,8 @@
 //! images).
 
 use puffer_test_support::{
-    capture_tmux_visible_pane, send_tmux_keys, start_tmux_command_with_size, temp_workspace,
-    tmux_available, wait_for_tmux_text, TerminalSize,
+    capture_tmux_visible_pane, require_tmux_or_skip, send_tmux_keys, start_tmux_command_with_size,
+    temp_workspace, wait_for_tmux_text, TerminalSize,
 };
 use std::fs;
 use std::io::{Read, Write};
@@ -191,7 +191,7 @@ fn link_repo_resources(workspace: &Path) {
 
 #[test]
 fn tmux_agent_loop_renders_assistant_reply_from_mock_anthropic() {
-    if !tmux_available() {
+    if !require_tmux_or_skip("tmux_agent_loop_renders_assistant_reply_from_mock_anthropic") {
         return;
     }
 
@@ -269,7 +269,7 @@ fn tmux_agent_loop_renders_assistant_reply_from_mock_anthropic() {
 /// full agent_loop survives through the real TUI.
 #[test]
 fn tmux_agent_loop_drives_tool_round_trip_in_tui() {
-    if !tmux_available() {
+    if !require_tmux_or_skip("tmux_agent_loop_drives_tool_round_trip_in_tui") {
         return;
     }
 
@@ -381,7 +381,7 @@ fn tmux_agent_loop_drives_tool_round_trip_in_tui() {
 
 #[test]
 fn tmux_agent_loop_answers_ask_user_question_with_keyboard_selection() {
-    if !tmux_available() {
+    if !require_tmux_or_skip("tmux_agent_loop_answers_ask_user_question_with_keyboard_selection") {
         return;
     }
 

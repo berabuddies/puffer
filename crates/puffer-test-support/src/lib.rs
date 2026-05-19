@@ -19,6 +19,7 @@ pub use tmux::capture_tmux_pane;
 pub use tmux::capture_tmux_visible_pane;
 pub use tmux::detect_tmux;
 pub use tmux::kill_tmux_session;
+pub use tmux::require_tmux_or_skip;
 pub use tmux::send_tmux_keys;
 pub use tmux::start_tmux_command;
 pub use tmux::start_tmux_command_with_size;

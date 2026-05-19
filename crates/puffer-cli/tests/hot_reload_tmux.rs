@@ -13,15 +13,15 @@
 //! `AppState`, and the resource reload that reaches `LoadedResources`.
 
 use puffer_test_support::{
-    capture_tmux_visible_pane, send_tmux_keys, start_tmux_command_with_size, temp_workspace,
-    tmux_available, wait_for_tmux_text, TerminalSize,
+    capture_tmux_visible_pane, require_tmux_or_skip, send_tmux_keys, start_tmux_command_with_size,
+    temp_workspace, wait_for_tmux_text, TerminalSize,
 };
 use std::fs;
 use std::time::Duration;
 
 #[test]
 fn tmux_tui_hot_reloads_newly_dropped_skill() {
-    if !tmux_available() {
+    if !require_tmux_or_skip("tmux_tui_hot_reloads_newly_dropped_skill") {
         return;
     }
 
