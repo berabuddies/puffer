@@ -106,7 +106,7 @@
 
   let projects = $derived<MockProject[]>(groups.map(projectFromGroup));
   let agents = $derived<MockAgent[]>(
-    groups.flatMap((g) => g.sessions.slice(0, 6).map((s) => agentFromSession(s, g.id)))
+    groups.flatMap((g) => g.sessions.map((s) => agentFromSession(s, g.id)))
   );
 
   function normalizeSearch(value: string): string {
@@ -168,7 +168,7 @@
         ? defaultWorkspaceCwd
         : searchNeedle
           ? `${visibleAgentCount} matching ${visibleAgentCount === 1 ? "agent" : "agents"}`
-          : `${agentCount} active ${agentCount === 1 ? "agent" : "agents"}`
+          : `${agentCount} ${agentCount === 1 ? "session" : "sessions"}`
   );
 
   async function handleNewAgent(cwd: string) {

@@ -48,6 +48,31 @@ test("workspace search filters projects and agents", async ({ page }) => {
   await expect(workspace.getByText("Beta browser audit")).toBeVisible();
 });
 
+test("workspace search includes older sessions beyond the first page", async ({ page }) => {
+  const sessions = Array.from({ length: 7 }, (_, index) => ({
+    sessionId: `session-history-${index}`,
+    displayName: index === 6 ? "Deep history session" : `Recent session ${index + 1}`,
+    title: index === 6 ? "Deep history session" : `Recent session ${index + 1}`,
+    cwd: "/tmp/puffer-history",
+    folderPath: "/tmp/puffer-history",
+    updatedAtMs: baseTime - index * 1_000,
+    createdAtMs: baseTime - 60_000 - index * 1_000,
+    eventCount: index === 6 ? 12 : 1
+  }));
+  const daemon = new FakeDaemon({ sessions });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const project = page.locator(".pf-pw-project").filter({ hasText: "puffer-history" });
+  await expect(project).toContainText("7 sessions");
+  await expect(project.getByText("Deep history session")).toBeVisible();
+
+  await page.getByLabel("Search workspace").fill("deep history");
+  await expect(project.getByText("Deep history session")).toBeVisible();
+  await project.getByRole("button", { name: /Deep history session/ }).click();
+  await expect(page.locator(".pf-composer textarea")).toBeVisible();
+});
+
 test("workspace board renders daemon session activity states", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

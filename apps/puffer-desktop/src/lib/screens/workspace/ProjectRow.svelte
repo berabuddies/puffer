@@ -33,7 +33,7 @@
       {/if}
     </div>
     <div class="pf-pw-project-counts">
-      <span class="count">{agents.length} agents</span>
+      <span class="count">{agents.length} {agents.length === 1 ? "session" : "sessions"}</span>
       <span class="sep">·</span>
       <span class="count running">{active} active</span>
       <span class="sep">·</span>
@@ -68,7 +68,7 @@
     {#if agents.length === 0}
       <div class="pf-pw-agents-empty">
         <span class="icon"><Icon name="sparkles" size={14} color="var(--muted-foreground)" /></span>
-        <span>No active agents.</span>
+        <span>No sessions.</span>
       </div>
     {/if}
     <button
