@@ -622,6 +622,40 @@ test("workspace board renders daemon session activity states", async ({ page }) 
   await expect(queuedColumn.getByText("Idle docs followup")).toBeVisible();
 });
 
+test("running daemon sessions keep the composer from starting another turn", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-running-composer",
+        displayName: "Running composer guard",
+        title: "Running composer guard",
+        cwd: "/tmp/puffer-active",
+        folderPath: "/tmp/puffer-active",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 3,
+        activityStatus: "running",
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page
+    .locator(".pf-sidebar-agent-row")
+    .filter({ hasText: "Running composer guard" })
+    .click();
+  await expect(page.locator(".pf-agent-detail")).toBeVisible();
+  await expect(page.locator(".pf-composer textarea")).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeDisabled();
+  await page.keyboard.press("Enter");
+
+  expect(daemon.requests.filter((request) => request.method === "run_agent_turn")).toHaveLength(0);
+});
+
 test("project memory edit control is disabled until file editing is wired", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

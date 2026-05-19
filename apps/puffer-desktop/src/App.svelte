@@ -1319,7 +1319,9 @@
     if (
       submitMessageInFlightFor(submitSessionId) ||
       turnStartedAtMs !== null ||
-      currentTurnId !== null
+      currentTurnId !== null ||
+      sessionAtSubmit.activityStatus === "running" ||
+      sessionAtSubmit.activityStatus === "awaiting"
     ) {
       statusMessage = "Wait for the current turn to finish before sending another message.";
       return false;

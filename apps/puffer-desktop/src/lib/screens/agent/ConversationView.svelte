@@ -140,21 +140,36 @@
   let providerSwitchCanRecover = $derived(
     allowProviderSwitch && authenticatedAgentProviderIds.length > 0
   );
+  let agentBusy = $derived(
+    !turnRunning &&
+      (agentState === "running" || agentState === "thinking" || agentState === "awaiting")
+  );
   let composerDisabled = $derived(
-    !session || (!selectedProviderAuthenticated && !providerSwitchCanRecover)
+    !session || agentBusy || (!selectedProviderAuthenticated && !providerSwitchCanRecover)
   );
   let modelPickerDisabled = $derived(
     turnRunning || (!selectedProviderAuthenticated && !providerSwitchCanRecover)
   );
   let composerBlockedReason = $derived(
-    selectedProviderAuthenticated
+    agentBusy
+      ? agentState === "awaiting"
+        ? "Respond to the pending request before starting another turn."
+        : "Wait for the running agent turn to finish."
+      : selectedProviderAuthenticated
       ? null
       : providerSwitchCanRecover
         ? `Switch to a connected provider to continue this empty session.`
-      : `Reconnect ${providerDisplayName(selectedProviderId)} to continue this session.`
+        : `Reconnect ${providerDisplayName(selectedProviderId)} to continue this session.`
   );
   let canSubmitPrompt = $derived(
-    Boolean(draft.trim() && session && !turnRunning && !submitInFlight && selectedProviderAuthenticated)
+    Boolean(
+      draft.trim() &&
+        session &&
+        !turnRunning &&
+        !agentBusy &&
+        !submitInFlight &&
+        selectedProviderAuthenticated
+    )
   );
   let canCancelTurn = $derived(Boolean(turnRunning && turnCancelable && onCancelTurn));
 

@@ -137,6 +137,9 @@
   });
 
   function inferStatusFromSession(d: SessionDetail | null): AgentStatus {
+    if (session?.activityStatus === "running" || session?.activityStatus === "awaiting") {
+      return session.activityStatus;
+    }
     if (!d) return "idle";
     if (d.repoStatus?.pullRequest) return "review";
     if (d.repoStatus?.hasUncommittedChanges) return "running";
