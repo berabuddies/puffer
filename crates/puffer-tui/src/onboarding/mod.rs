@@ -24,7 +24,7 @@ pub(crate) fn needs_initial_provider_setup(state: &AppState, providers: &Provide
         return true;
     }
     let Some(model_selector) = state.current_model.as_deref() else {
-        return false;
+        return true;
     };
     let Some((selected_provider, selected_model)) = model_selector.split_once('/') else {
         return false;
@@ -756,6 +756,33 @@ mod tests {
             }
             other => panic!("expected model picker, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn initial_provider_setup_required_when_model_is_unset() {
+        let address = "127.0.0.1:9".parse().expect("socket address");
+        let mut providers = ProviderRegistry::new();
+        providers.register(openai_provider(address));
+        let mut state = AppState::new(
+            puffer_config::PufferConfig::default(),
+            std::path::PathBuf::from("/workspace/puffer"),
+            puffer_session_store::SessionMetadata {
+                id: uuid::Uuid::nil(),
+                display_name: None,
+                generated_title: None,
+                cwd: std::path::PathBuf::from("/workspace/puffer"),
+                created_at_ms: 0,
+                updated_at_ms: 0,
+                parent_session_id: None,
+                slug: None,
+                tags: Vec::new(),
+                note: None,
+            },
+        );
+        state.current_provider = Some("openai".to_string());
+        state.current_model = None;
+
+        assert!(needs_initial_provider_setup(&state, &providers));
     }
 
     #[test]
