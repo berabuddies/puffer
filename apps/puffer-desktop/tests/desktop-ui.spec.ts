@@ -153,6 +153,50 @@ test("Browser panel hydrates a connected agent tab from recorded frames", async 
   ).toBe(222);
 });
 
+test("Browser panel follows agent Browser recording updates for the active tab", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    emitBrowserResizeFrame: false
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1"
+  );
+  await expect.poll(async () =>
+    page.locator(".pf-browser-canvas").evaluate((node) => (node as HTMLCanvasElement).width)
+  ).toBe(960);
+
+  daemon.emit("browser:session-browser:tabs", {
+    activeTabId: "tab-1",
+    tabs: [{ ...browserTab("tab-1", "https://google.com"), active: true }]
+  });
+  daemon.emit("browser:session-browser:recording", {
+    frameId: "agent-open-google-frame",
+    backendSessionId: "session-browser:browser:tab-1",
+    rootSessionId: "session-browser",
+    tabId: "tab-1",
+    url: "https://google.com",
+    title: "Google",
+    mimeType: "image/png",
+    encoding: "base64",
+    data: ONE_PIXEL_PNG,
+    width: 444,
+    height: 333,
+    recordedAtMs: Date.now()
+  });
+
+  await expect(page.getByLabel("URL")).toHaveValue("https://google.com");
+  await expect.poll(async () =>
+    page.locator(".pf-browser-canvas").evaluate((node) => (node as HTMLCanvasElement).width)
+  ).toBe(444);
+  await expect.poll(async () =>
+    page.locator(".pf-browser-canvas").evaluate((node) => (node as HTMLCanvasElement).height)
+  ).toBe(333);
+});
+
 test("sends Browser tab navigation through the daemon bridge", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

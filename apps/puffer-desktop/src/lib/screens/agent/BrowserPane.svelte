@@ -270,6 +270,10 @@
         ) {
           void connectActiveTab(generation);
         }
+      }),
+      client.on<BrowserRecordedFrame>(`browser:${nextSessionId}:recording`, (frame) => {
+        if (generation !== sessionGeneration || activeRootSessionId !== nextSessionId) return;
+        applyRecordingFrame(nextSessionId, frame);
       })
     );
 
@@ -542,6 +546,38 @@
       width: frame.width,
       height: frame.height
     };
+  }
+
+  function recordingBackendSessionId(frame: BrowserRecordedFrame): string {
+    return frame.backendSessionId || backendSessionId(frame.tabId);
+  }
+
+  function applyRecordingFrame(rootSessionId: string, frame: BrowserRecordedFrame) {
+    if (disposed || activeRootSessionId !== rootSessionId || frame.rootSessionId !== rootSessionId) return;
+    if (!frame.tabId || frame.tabId !== activeTabId) return;
+    const frameBackendSessionId = recordingBackendSessionId(frame);
+    if (activeEventSessionId && activeEventSessionId !== frameBackendSessionId) return;
+    const nextFrame = frameFromRecording(frame);
+    const nextUrl = frame.url || activeTab?.url || currentUrl || "about:blank";
+    const nextTitle = frame.title || activeTab?.title || title || "";
+    renderFrame(nextFrame);
+    updateTab(frame.tabId, {
+      frame: nextFrame,
+      url: nextUrl,
+      title: nextTitle,
+      loading: false,
+      error: null,
+      status: "Connected",
+      connected: true,
+      favicon: faviconFor(nextUrl)
+    });
+    currentUrl = nextUrl;
+    urlDraft = nextUrl;
+    title = nextTitle;
+    loading = false;
+    error = null;
+    status = "Connected";
+    connected = true;
   }
 
   function disposeActiveSubscriptions() {
