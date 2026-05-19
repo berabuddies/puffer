@@ -1160,24 +1160,9 @@ fn run_agent_turn_inner(
     )?;
 
     let config = read_config()?;
-    let provider = if provider_locked && !record.provider.trim().is_empty() {
-        record.provider.clone()
-    } else if let Some(provider) = options.provider_id.as_deref() {
-        provider.to_string()
-    } else if record.provider.trim().is_empty() {
-        config
-            .default_provider
-            .clone()
-            .unwrap_or_else(|| DEFAULT_PROVIDER.to_string())
-    } else {
-        record.provider.clone()
-    };
-    let provider = canonical_backend_provider_id(&provider);
-    let model = options
-        .model_id
-        .clone()
-        .or(record.model.clone())
-        .or(config.default_model);
+    let routing = resolve_turn_routing(&record, &config, options, provider_locked);
+    let provider = routing.provider;
+    let model = routing.model;
     update_session_routing(session_id, &provider, model.as_deref())?;
     let credentials: StoredCredentials = read_json_or_default(&credentials_file()?)?;
     if provider == "codex" {
@@ -1894,6 +1879,29 @@ mod tests {
     use super::*;
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 
+    fn test_session_record(
+        provider: &str,
+        model: Option<&str>,
+        events: Vec<StoredEvent>,
+    ) -> SessionRecord {
+        SessionRecord {
+            id: "test-session".to_string(),
+            display_name: None,
+            generated_title: None,
+            title: "Test session".to_string(),
+            cwd: "/tmp/puffer-test".to_string(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+            parent_session_id: None,
+            provider: provider.to_string(),
+            model: model.map(ToOwned::to_owned),
+            events,
+        }
+    }
+
     #[test]
     fn untracked_diff_omits_large_files() {
         let dir = tempfile::tempdir().unwrap();
@@ -1981,6 +1989,67 @@ mod tests {
             default_model_for("puffer"),
             Some(DEFAULT_PUFFER_MODEL.to_string())
         );
+    }
+
+    #[test]
+    fn first_turn_provider_override_does_not_reuse_previous_provider_model() {
+        let record = test_session_record("claude", Some(DEFAULT_CLAUDE_MODEL), Vec::new());
+        let config = StoredConfig {
+            default_provider: Some("openai".to_string()),
+            default_model: Some("openai/gpt-5.4".to_string()),
+            ..StoredConfig::default()
+        };
+        let options = TurnLaunchOptions {
+            provider_id: Some("openai".to_string()),
+            ..TurnLaunchOptions::default()
+        };
+
+        let routing = resolve_turn_routing(&record, &config, &options, false);
+
+        assert_eq!(routing.provider, "codex");
+        assert_eq!(routing.model.as_deref(), Some("gpt-5.4"));
+    }
+
+    #[test]
+    fn turn_routing_keeps_locked_session_provider_despite_provider_override() {
+        let record = test_session_record(
+            "claude",
+            Some(DEFAULT_CLAUDE_MODEL),
+            vec![StoredEvent::User {
+                at_ms: 1,
+                text: "hello".to_string(),
+            }],
+        );
+        let config = StoredConfig {
+            default_provider: Some("openai".to_string()),
+            default_model: Some("openai/gpt-5.4".to_string()),
+            ..StoredConfig::default()
+        };
+        let options = TurnLaunchOptions {
+            provider_id: Some("openai".to_string()),
+            ..TurnLaunchOptions::default()
+        };
+
+        let routing = resolve_turn_routing(&record, &config, &options, true);
+
+        assert_eq!(routing.provider, "claude");
+        assert_eq!(routing.model.as_deref(), Some(DEFAULT_CLAUDE_MODEL));
+    }
+
+    #[test]
+    fn turn_routing_normalizes_explicit_matching_model_prefix() {
+        let record = test_session_record("codex", Some("gpt-5.4"), Vec::new());
+        let config = StoredConfig::default();
+        let options = TurnLaunchOptions {
+            provider_id: Some("anthropic".to_string()),
+            model_id: Some("anthropic/claude-sonnet-4-5".to_string()),
+            ..TurnLaunchOptions::default()
+        };
+
+        let routing = resolve_turn_routing(&record, &config, &options, false);
+
+        assert_eq!(routing.provider, "claude");
+        assert_eq!(routing.model.as_deref(), Some("claude-sonnet-4-5"));
     }
 
     #[test]
@@ -2311,6 +2380,70 @@ fn canonical_backend_provider_id(provider: &str) -> String {
 
 fn backend_provider_ids_match(left: &str, right: &str) -> bool {
     canonical_backend_provider_id(left) == canonical_backend_provider_id(right)
+}
+
+fn resolve_turn_routing(
+    record: &SessionRecord,
+    config: &StoredConfig,
+    options: &TurnLaunchOptions,
+    provider_locked: bool,
+) -> TurnRouting {
+    let provider = if provider_locked && !record.provider.trim().is_empty() {
+        record.provider.clone()
+    } else if let Some(provider) = options.provider_id.as_deref() {
+        provider.to_string()
+    } else if record.provider.trim().is_empty() {
+        config
+            .default_provider
+            .clone()
+            .unwrap_or_else(|| DEFAULT_PROVIDER.to_string())
+    } else {
+        record.provider.clone()
+    };
+    let provider = canonical_backend_provider_id(&provider);
+    let model =
+        options
+            .model_id
+            .as_deref()
+            .and_then(|model| normalize_backend_model_id_for_provider(&provider, model))
+            .or_else(|| {
+                backend_provider_ids_match(&record.provider, &provider)
+                    .then(|| {
+                        record.model.as_deref().and_then(|model| {
+                            normalize_backend_model_id_for_provider(&provider, model)
+                        })
+                    })
+                    .flatten()
+            })
+            .or_else(|| {
+                config
+                    .default_provider
+                    .as_deref()
+                    .filter(|default| backend_provider_ids_match(default, &provider))
+                    .and_then(|_| {
+                        config.default_model.as_deref().and_then(|model| {
+                            normalize_backend_model_id_for_provider(&provider, model)
+                        })
+                    })
+            })
+            .or_else(|| default_model_for(&provider));
+    TurnRouting { provider, model }
+}
+
+fn normalize_backend_model_id_for_provider(provider_id: &str, model_id: &str) -> Option<String> {
+    let trimmed = model_id.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some((prefix, model)) = trimmed.split_once('/') {
+        let prefix = canonical_backend_provider_id(prefix);
+        let model = model.trim();
+        if prefix == canonical_backend_provider_id(provider_id) && !model.is_empty() {
+            return Some(model.to_string());
+        }
+        return None;
+    }
+    Some(trimmed.to_string())
 }
 
 fn validate_api_key_login(provider_id: &str, api_key: &str) -> Result<(String, String)> {
@@ -2715,6 +2848,12 @@ struct ProviderLaunch {
     command: String,
     args: Vec<String>,
     json_stream: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TurnRouting {
+    provider: String,
+    model: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
