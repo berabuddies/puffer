@@ -242,6 +242,7 @@ impl TuiState {
         self.cursor = 0;
         self.slash_selection = 0;
         self.pending_pastes.clear();
+        self.exit_history_navigation();
         self.sync(commands);
     }
 

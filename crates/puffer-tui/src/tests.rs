@@ -80,6 +80,21 @@ fn slash_completion_appends_argument_space_for_commands_with_args() {
 }
 
 #[test]
+fn clear_exits_history_navigation() {
+    let mut tui = TuiState::default();
+    tui.push_history("alpha");
+    assert!(tui.history_recall_prev(&[]));
+    assert_eq!(tui.input, "alpha");
+    assert!(tui.is_navigating_history());
+
+    tui.clear(&[]);
+
+    assert!(tui.input.is_empty());
+    assert!(!tui.is_navigating_history());
+    assert!(!tui.history_recall_next(&[]));
+}
+
+#[test]
 fn render_hides_slash_popup_after_argument_command_completion() {
     let backend = TestBackend::new(100, 30);
     let mut terminal = Terminal::new(backend).unwrap();
