@@ -39,6 +39,9 @@ function browserTabForSession(
   };
 }
 
+const ONE_PIXEL_PNG =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lzTnGQAAAABJRU5ErkJggg==";
+
 async function pasteText(page: Page, text: string): Promise<void> {
   await page.evaluate((value) => {
     const data = new DataTransfer();
@@ -102,6 +105,52 @@ test("Browser tab event refreshes a connected blank canvas", async ({ page }) =>
   await expect.poll(async () =>
     page.locator(".pf-browser-canvas").evaluate((node) => (node as HTMLCanvasElement).width)
   ).toBe(960);
+});
+
+test("Browser panel hydrates a connected agent tab from recorded frames", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    emitBrowserOpenFrame: false,
+    emitBrowserResizeFrame: false
+  });
+  daemon.setBrowserTabs("session-browser", {
+    activeTabId: "tab-1",
+    tabs: [{ ...browserTab("tab-1", "https://agent.example"), active: true }]
+  });
+  daemon.setBrowserRecording("session-browser", [
+    {
+      frameId: "recorded-agent-frame",
+      backendSessionId: "session-browser:browser:tab-1",
+      rootSessionId: "session-browser",
+      tabId: "tab-1",
+      url: "https://agent.example",
+      title: "Agent page",
+      mimeType: "image/png",
+      encoding: "base64",
+      data: ONE_PIXEL_PNG,
+      width: 333,
+      height: 222,
+      recordedAtMs: Date.now()
+    }
+  ]);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
+
+  await daemon.waitForRequest("browser_agent", (request) =>
+    request.params.action === "list" && request.params.sessionId === "session-browser"
+  );
+  await daemon.waitForRequest("browser_resize", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1"
+  );
+  await expect(page.getByLabel("URL")).toHaveValue("https://agent.example");
+  await expect.poll(async () =>
+    page.locator(".pf-browser-canvas").evaluate((node) => (node as HTMLCanvasElement).width)
+  ).toBe(333);
+  await expect.poll(async () =>
+    page.locator(".pf-browser-canvas").evaluate((node) => (node as HTMLCanvasElement).height)
+  ).toBe(222);
 });
 
 test("sends Browser tab navigation through the daemon bridge", async ({ page }) => {

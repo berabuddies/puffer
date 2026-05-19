@@ -10,6 +10,7 @@
     browserInput,
     browserNavigate,
     browserOpen,
+    browserRecording,
     browserReload,
     browserResize,
     browserTabClose,
@@ -19,6 +20,7 @@
     isDaemonReachable,
     type BrowserDevtoolsEvent,
     type BrowserFrameEvent,
+    type BrowserRecordedFrame,
     type BrowserState,
     type BrowserTabInfo,
     type BrowserTabsState
@@ -465,6 +467,9 @@
         if (generation !== sessionGeneration || activeEventSessionId !== eventSessionId) return;
         applyState(next, tabId);
       } else {
+        if (!activeTab.frame) {
+          void restoreRecordedFrame(generation, activeRootSessionId, tabId, eventSessionId);
+        }
         try {
           await browserResize(eventSessionId, size.width, size.height);
         } catch {
@@ -495,6 +500,48 @@
         resetPointer(activePointerId ?? undefined);
       }
     }
+  }
+
+  async function restoreRecordedFrame(
+    generation: number,
+    rootSessionId: string,
+    tabId: string,
+    backendSessionId: string
+  ) {
+    try {
+      const snapshot = await browserRecording(rootSessionId);
+      if (
+        disposed ||
+        generation !== sessionGeneration ||
+        activeRootSessionId !== rootSessionId ||
+        activeEventSessionId !== backendSessionId ||
+        activeTabId !== tabId ||
+        activeTab?.frame
+      ) return;
+      const recorded = [...snapshot.frames]
+        .reverse()
+        .find((frame) =>
+          frame.backendSessionId === backendSessionId ||
+          (frame.rootSessionId === rootSessionId && frame.tabId === tabId)
+        );
+      if (!recorded) return;
+      const frame = frameFromRecording(recorded);
+      renderFrame(frame);
+      updateTab(tabId, { frame }, false);
+    } catch {
+      /* A live screencast frame or resize may still arrive shortly after attach. */
+    }
+  }
+
+  function frameFromRecording(frame: BrowserRecordedFrame): BrowserFrameEvent {
+    return {
+      frameId: frame.frameId,
+      mimeType: frame.mimeType || "image/jpeg",
+      encoding: "base64",
+      data: frame.data,
+      width: frame.width,
+      height: frame.height
+    };
   }
 
   function disposeActiveSubscriptions() {

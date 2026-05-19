@@ -219,6 +219,7 @@ export class FakeDaemon {
   private readonly responseFailureDelays: ResponseFailureDelay[] = [];
   private readonly methodFailures = new Map<string, string[]>();
   private readonly browserTabs = new Map<string, TabSet>();
+  private readonly browserRecordings = new Map<string, JsonRecord[]>();
   private readonly ptys = new Map<string, PtySet>();
   private readonly sessions = new Map<string, JsonRecord>();
   private readonly timelines = new Map<string, JsonRecord[]>();
@@ -321,6 +322,17 @@ export class FakeDaemon {
 
   setProviderModels(providerId: string, models: JsonRecord[]): void {
     this.providerModels[providerId] = models;
+  }
+
+  setBrowserTabs(sessionId: string, state: TabSet): void {
+    this.browserTabs.set(sessionId, {
+      activeTabId: state.activeTabId,
+      tabs: state.tabs.map((tab) => ({ ...tab }))
+    });
+  }
+
+  setBrowserRecording(sessionId: string, frames: JsonRecord[]): void {
+    this.browserRecordings.set(sessionId, frames.map((frame) => ({ ...frame })));
   }
 
   setPermissions(tools: Record<string, string>): void {
@@ -611,7 +623,7 @@ export class FakeDaemon {
       case "browser_close":
         return {};
       case "browser_recording":
-        return { frames: [] };
+        return { frames: this.browserRecordings.get(String(request.params.sessionId ?? "")) ?? [] };
       case "list_dir":
         return this.listDir(request.params);
       case "load_file_tabs":
