@@ -330,6 +330,34 @@ test("connect project remote mode exposes binary override", async ({ page }) => 
   await expect(dialog.getByLabel("Remote binary")).toHaveValue("/opt/puffer/bin/puffer");
 });
 
+test("connect project directory picker ignores stale path responses", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.delayResponse(
+    "list_dir",
+    (request) => request.params.path === "/tmp/puffer",
+    220
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Connect project" }).click();
+  const dialog = page.getByRole("dialog", { name: "Connect project" });
+  await dialog.getByRole("button", { name: "Browse…" }).click();
+
+  const picker = dialog.getByLabel("Choose directory");
+  const pickerInput = picker.getByPlaceholder("/Users/me/src");
+  await expect(picker).toBeVisible();
+  await pickerInput.fill("/tmp/puffer/src");
+  await picker.getByRole("button", { name: "Go" }).click();
+
+  await expect(pickerInput).toHaveValue("/tmp/puffer/src");
+  await expect(picker.getByText("No child directories.")).toBeVisible();
+  await page.waitForTimeout(260);
+  await expect(pickerInput).toHaveValue("/tmp/puffer/src");
+  await expect(picker.getByText("No child directories.")).toBeVisible();
+  await expect(picker.getByRole("button", { name: "src" })).toHaveCount(0);
+});
+
 test("failed remote project creation restores the previous daemon", async ({ page }) => {
   const localDaemon = new FakeDaemon();
   localDaemon.failNext("create_session", "remote create failed");

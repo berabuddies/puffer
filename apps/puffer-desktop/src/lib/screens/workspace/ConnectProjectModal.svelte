@@ -67,6 +67,7 @@
   let pickerEntries = $state<DirEntry[]>([]);
   let pickerLoading = $state(false);
   let pickerError = $state<string | null>(null);
+  let pickerLoadGeneration = 0;
   let selectedProvider = $state("");
 
   const fallbackProviders: ProviderSummary[] = [
@@ -297,17 +298,22 @@
 
   async function loadPickerPath(path: string) {
     const nextPath = path.trim() || "/";
+    const generation = ++pickerLoadGeneration;
     pickerLoading = true;
     pickerError = null;
     try {
       const entries = await listDir(nextPath);
+      if (generation !== pickerLoadGeneration) return;
       pickerPath = nextPath;
       pickerEntries = entries.filter((entry) => entry.kind === "directory" || entry.kind === "symlink");
     } catch (e) {
+      if (generation !== pickerLoadGeneration) return;
       pickerError = e instanceof Error ? e.message : String(e);
       pickerEntries = [];
     } finally {
-      pickerLoading = false;
+      if (generation === pickerLoadGeneration) {
+        pickerLoading = false;
+      }
     }
   }
 
