@@ -178,6 +178,7 @@
   });
 
   async function submit() {
+    if (!canSubmit()) return;
     busy = true;
     error = null;
     sshErrorHint = null;

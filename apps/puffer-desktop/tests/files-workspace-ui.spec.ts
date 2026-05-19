@@ -379,6 +379,27 @@ test("connect project provider choice includes Anthropic", async ({ page }) => {
   });
 });
 
+test("connect project ignores repeated start clicks while creating", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.delayResponse("create_session", () => true, 250);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Connect project" }).click();
+  const dialog = page.getByRole("dialog", { name: "Connect project" });
+  await expect(dialog).toBeVisible();
+  await dialog.getByLabel("Directory").fill("/tmp/puffer-new-project");
+
+  await dialog.getByRole("button", { name: "Start agent" }).evaluate((button) => {
+    (button as HTMLButtonElement).click();
+    (button as HTMLButtonElement).click();
+  });
+
+  await daemon.waitForRequest("create_session");
+  await page.waitForTimeout(50);
+  expect(daemon.requests.filter((request) => request.method === "create_session")).toHaveLength(1);
+});
+
 test("connect project provider picker only shows authenticated providers", async ({ page }) => {
   const daemon = new FakeDaemon({ auth: codexAuth });
   await daemon.install(page);
