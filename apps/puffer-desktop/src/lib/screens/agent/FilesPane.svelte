@@ -74,6 +74,7 @@
   let lspError = $state<string | null>(null);
   let lspResult = $state<LspInspectResult | null>(null);
   let lspAnchor = $state<{ line: number; character: number } | null>(null);
+  let fileReadGeneration = 0;
   let lspInspectGeneration = 0;
   let editorEl = $state<HTMLTextAreaElement | null>(null);
   let editorGutterEl = $state<HTMLDivElement | null>(null);
@@ -113,6 +114,7 @@
       draftContent = "";
       saving = false;
       saveError = null;
+      fileReadGeneration += 1;
       clearLspState();
       void loadDir(next);
       void restoreFileTabs(next, nextSessionId);
@@ -297,13 +299,26 @@
     const target = activePath;
     if (!target) return;
     if (isTabDirty(target)) return;
+    const expectedRoot = root;
+    const expectedSessionId = sessionId;
+    const generation = fileReadGeneration;
     try {
       const result = await readFile(target);
-      if (activePath === target) {
+      if (
+        generation === fileReadGeneration &&
+        activePath === target &&
+        root === expectedRoot &&
+        sessionId === expectedSessionId
+      ) {
         cacheFileResult(result, true);
       }
     } catch (err) {
-      if (activePath === target) {
+      if (
+        generation === fileReadGeneration &&
+        activePath === target &&
+        root === expectedRoot &&
+        sessionId === expectedSessionId
+      ) {
         activeError = err instanceof Error ? err.message : String(err);
       }
     }
@@ -518,6 +533,9 @@
   }
 
   async function activateFile(path: string, size?: number, line: number | null = null) {
+    const expectedRoot = root;
+    const expectedSessionId = sessionId;
+    const generation = fileReadGeneration;
     activePath = path;
     activeSize = size ?? openTabs.find((tab) => tab.path === path)?.size ?? 0;
     activeError = null;
@@ -540,16 +558,31 @@
     let loaded = false;
     try {
       const result = await readFile(path);
-      if (activePath === path) {
+      if (
+        generation === fileReadGeneration &&
+        activePath === path &&
+        root === expectedRoot &&
+        sessionId === expectedSessionId
+      ) {
         cacheFileResult(result, false);
         loaded = true;
       }
     } catch (err) {
-      if (activePath === path) {
+      if (
+        generation === fileReadGeneration &&
+        activePath === path &&
+        root === expectedRoot &&
+        sessionId === expectedSessionId
+      ) {
         activeError = err instanceof Error ? err.message : String(err);
       }
     } finally {
-      if (activePath === path) activeLoading = false;
+      if (
+        generation === fileReadGeneration &&
+        activePath === path &&
+        root === expectedRoot &&
+        sessionId === expectedSessionId
+      ) activeLoading = false;
     }
     if (loaded) await focusEditorLine(path, line);
   }

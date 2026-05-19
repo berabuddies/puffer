@@ -366,6 +366,65 @@ test("Files tab jumps to the line from a chat file link", async ({ page }) => {
   await expect(editor).toBeFocused();
 });
 
+test("Files tab ignores late read failures from the previous session", async ({ page }) => {
+  const path = "/tmp/puffer/src/main.rs";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-files-read-a",
+        displayName: "Files read A",
+        title: "Files read A",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        timeline: []
+      },
+      {
+        sessionId: "session-files-read-b",
+        displayName: "Files read B",
+        title: "Files read B",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        timeline: []
+      }
+    ]
+  });
+  daemon.delayFailure(
+    "read_file",
+    (request) => request.params.path === path,
+    "stale read from Files A",
+    250
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page
+    .locator(".pf-sidebar-agents-list")
+    .getByRole("button", { name: /^Files read A\b/ })
+    .click();
+  await openFilesPanel(page);
+  await daemon.waitForRequest("read_file", (request) => request.params.path === path);
+
+  await page
+    .locator(".pf-sidebar-agents-list")
+    .getByRole("button", { name: /^Files read B\b/ })
+    .click();
+  await openFilesPanel(page);
+  await daemon.waitForRequest(
+    "read_file",
+    (request) =>
+      request.params.path === path &&
+      daemon.requests.filter((item) => item.method === "read_file" && item.params.path === path)
+        .length >= 2
+  );
+
+  const editor = page.getByLabel("Edit file contents");
+  await expect(editor).toHaveValue("fn main() {}\n");
+  await page.waitForTimeout(300);
+
+  await expect(page.locator(".viewer-msg.err")).toHaveCount(0);
+  await expect(editor).toHaveValue("fn main() {}\n");
+});
+
 test("New agent modal closes with Escape", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
