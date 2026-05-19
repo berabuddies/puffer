@@ -454,6 +454,48 @@ test("failed question responses keep the question prompt retryable", async ({ pa
   await expect(page.getByRole("button", { name: "Send answer" })).toBeEnabled();
 });
 
+test("replayed approval and question events do not duplicate live prompts", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /^Browser regression\b/);
+  const permissionEvent = {
+    type: "permission-request",
+    turnId: "turn-replayed-prompts",
+    requestId: "permission-replayed",
+    toolId: "bash",
+    summary: "Run repeated shell command",
+    reason: "Run repeated shell command"
+  };
+  daemon.emit("session:session-browser:event", permissionEvent);
+  daemon.emit("session:session-browser:event", permissionEvent);
+
+  await expect(page.locator(".pf-approval")).toHaveCount(1);
+  await expect(page.locator(".pf-approval")).toContainText("Run repeated shell command");
+
+  const questionEvent = {
+    type: "user-question-request",
+    turnId: "turn-replayed-prompts",
+    requestId: "question-replayed",
+    questions: [
+      {
+        header: "Target",
+        question: "Which target should I use?",
+        options: [
+          { label: "src", description: "Use source." },
+          { label: "tests", description: "Use tests." }
+        ]
+      }
+    ]
+  };
+  daemon.emit("session:session-browser:event", questionEvent);
+  daemon.emit("session:session-browser:event", questionEvent);
+
+  await expect(page.locator(".pf-question")).toHaveCount(1);
+  await expect(page.locator(".pf-question")).toContainText("Which target should I use?");
+});
+
 test("composer sends selected thinking option with the turn request", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

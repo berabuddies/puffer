@@ -1145,6 +1145,15 @@
   }
 
   function appendLive(item: TimelineItem) {
+    const existingIdx = liveStreamItems.findIndex((existing) => existing.id === item.id);
+    if (existingIdx >= 0) {
+      liveStreamItems = [
+        ...liveStreamItems.slice(0, existingIdx),
+        item,
+        ...liveStreamItems.slice(existingIdx + 1)
+      ];
+      return;
+    }
     liveStreamItems = [...liveStreamItems, item];
   }
 
