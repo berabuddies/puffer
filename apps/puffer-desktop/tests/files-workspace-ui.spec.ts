@@ -422,6 +422,36 @@ test("new agent provider picker only shows authenticated providers", async ({ pa
   });
 });
 
+test("new agent explains when no agent provider is authenticated", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "github",
+        kind: "oauth",
+        email: "tester@example.com",
+        expiresAtMs: null,
+        scopes: [],
+        planType: "test",
+        organizationName: null
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "New agent in puffer" }).click();
+  const dialog = page.getByRole("dialog", { name: "New agent" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText("Connect a provider in Settings before starting an agent.")).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Start agent" })).toBeDisabled();
+  await dialog.getByRole("button", { name: "Start agent" }).evaluate((button) => {
+    (button as HTMLButtonElement).click();
+  });
+
+  await page.waitForTimeout(50);
+  expect(daemon.requests.filter((request) => request.method === "create_session")).toHaveLength(0);
+});
+
 test("empty workspace can start a new agent in the default workspace", async ({ page }) => {
   const daemon = new FakeDaemon({ sessions: [] });
   await daemon.install(page);

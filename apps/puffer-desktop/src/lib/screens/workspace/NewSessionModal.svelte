@@ -137,6 +137,9 @@
           </button>
         {/each}
       </div>
+      {#if providerOptions.length === 0}
+        <div class="pf-field-hint">Connect a provider in Settings before starting an agent.</div>
+      {/if}
       <div class="pf-field-hint">
         Session root: <span class="pf-mono">{cwd}</span>
       </div>
