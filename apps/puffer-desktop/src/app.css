@@ -550,7 +550,7 @@ html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
 }
 
 /* Narrow: hide the entire sidebar; keep only tabs + main */
-@media (max-width: 720px) {
+@media (max-width: 719px) {
   .pf-sidebar { display: none; }
   .pf-titlebar-tabs { display: none; }
 }

@@ -35,3 +35,16 @@ test("Tauri mac shell exposes a drag titlebar without traffic-light overlap", as
     node.hasAttribute("data-tauri-drag-region")
   )).toBe(false);
 });
+
+test("desktop minimum width keeps primary navigation visible", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await page.setViewportSize({ width: 720, height: 480 });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const sidebar = page.locator(".pf-sidebar");
+  await expect(sidebar).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: "Project" })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: "Pipelines" })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: "Settings" })).toBeVisible();
+});
