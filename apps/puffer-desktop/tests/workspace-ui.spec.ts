@@ -298,6 +298,52 @@ test("active agent project filter resets when the selected project disappears", 
   await expect(activeList.getByText("No agents match")).toHaveCount(0);
 });
 
+test("active agent project filter resets when opening an out-of-filter session", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-filter-open-alpha",
+        displayName: "Alpha sidebar filter",
+        title: "Alpha sidebar filter",
+        cwd: "/tmp/sidebar-filter-alpha",
+        folderPath: "/tmp/sidebar-filter-alpha",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 2
+      },
+      {
+        sessionId: "session-filter-open-beta",
+        displayName: "Beta opened agent",
+        title: "Beta opened agent",
+        cwd: "/tmp/sidebar-filter-beta",
+        folderPath: "/tmp/sidebar-filter-beta",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 3
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const activeList = page.locator(".pf-sidebar-agents-list");
+  await page.getByLabel("Filter by project").selectOption("sidebar-filter-alpha");
+  await expect(activeList.locator(".pf-sidebar-agent-row").filter({ hasText: "Alpha sidebar filter" })).toBeVisible();
+  await expect(activeList.locator(".pf-sidebar-agent-row").filter({ hasText: "Beta opened agent" })).toHaveCount(0);
+
+  await page
+    .getByRole("region", { name: "Session history" })
+    .getByRole("button", { name: /Beta opened agent/ })
+    .click();
+
+  await expect(page.locator(".pf-agent-detail")).toBeVisible();
+  await expect(page.getByLabel("Filter by project")).toHaveValue("all");
+  await expect(
+    activeList.locator('.pf-sidebar-agent-row[data-active="true"]').filter({ hasText: "Beta opened agent" })
+  ).toBeVisible();
+  await expect(activeList.getByText("No agents match")).toHaveCount(0);
+});
+
 test("sidebar Workspace returns from agent detail to the workspace board", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

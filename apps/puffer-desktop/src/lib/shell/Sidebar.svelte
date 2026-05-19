@@ -72,6 +72,12 @@
     if (!projects.includes(filterProject)) filterProject = "all";
     if (!states.includes(filterState as AgentState | "all")) filterState = "all";
   });
+  $effect(() => {
+    const active = activeAgentId ? agents.find((agent) => agent.id === activeAgentId) : null;
+    if (!active) return;
+    if (filterProject !== "all" && active.project !== filterProject) filterProject = "all";
+    if (filterState !== "all" && active.state !== filterState) filterState = "all";
+  });
 </script>
 
 <aside class="pf-sidebar" data-collapsed={collapsed}>
