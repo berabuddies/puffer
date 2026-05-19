@@ -275,6 +275,54 @@ test("Files tab opens symbol context from the editor cursor", async ({ page }) =
   await expect(popup).toHaveCount(0);
 });
 
+test("Files tab jumps to the clicked LSP location line", async ({ page }) => {
+  const path = "/tmp/puffer/src/lib.rs";
+  const content = [
+    "pub fn fixture() {}",
+    ...Array.from({ length: 28 }, (_, index) => `// filler ${index + 2}`),
+    "pub fn target_line() {}",
+    ...Array.from({ length: 10 }, (_, index) => `// tail ${index + 31}`)
+  ].join("\n") + "\n";
+  const targetLineOffset = content
+    .split("\n")
+    .slice(0, 29)
+    .reduce((offset, line) => offset + line.length + 1, 0);
+  const targetOffset = targetLineOffset + 4;
+  const daemon = new FakeDaemon();
+  daemon.seedFile(path, content);
+  daemon.setLspLocation(path, "src/lib.rs:30:5");
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openFilesPanel(page);
+
+  await page.getByRole("tab", { name: /lib\.rs/ }).click();
+  const editor = page.getByLabel("Edit file contents");
+  await expect(editor).toHaveValue(content);
+  await editor.evaluate((node) => {
+    const textarea = node as HTMLTextAreaElement;
+    textarea.focus();
+    textarea.setSelectionRange(9, 9);
+  });
+  await editor.press("ArrowRight");
+  await daemon.waitForRequest(
+    "lsp_inspect",
+    (candidate) => candidate.params.path === path
+  );
+
+  const popup = page.getByLabel("Symbol references");
+  await expect(popup).toBeVisible();
+  const location = popup.locator(".lsp-location").filter({ hasText: "src/lib.rs:30:5" }).first();
+  await expect(location).toBeVisible();
+  await location.click();
+
+  await expect(editor).toBeFocused();
+  await expect
+    .poll(() => editor.evaluate((node) => (node as HTMLTextAreaElement).selectionStart))
+    .toBe(targetOffset);
+});
+
 test("Files tab ignores stale symbol inspect results after switching files", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayResponse(

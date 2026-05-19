@@ -45,6 +45,7 @@
   type OpenFileOptions = {
     pinned?: boolean;
     line?: number | null;
+    character?: number | null;
   };
 
   // Directory cache: absolute path → its (already-loaded) entries. Keeps
@@ -529,10 +530,15 @@
       openTabs = [...openTabs, nextTab];
     }
 
-    await activateFile(path, size, options.line);
+    await activateFile(path, size, options.line, options.character);
   }
 
-  async function activateFile(path: string, size?: number, line: number | null = null) {
+  async function activateFile(
+    path: string,
+    size?: number,
+    line: number | null = null,
+    character: number | null = null
+  ) {
     const expectedRoot = root;
     const expectedSessionId = sessionId;
     const generation = fileReadGeneration;
@@ -548,7 +554,7 @@
       activeSize = cached.size;
       draftContent = draftCache.get(path) ?? (cached.encoding === "utf8" ? cached.content : "");
       activeLoading = false;
-      await focusEditorLine(path, line);
+      await focusEditorLine(path, line, character);
       return;
     }
 
@@ -584,7 +590,7 @@
         sessionId === expectedSessionId
       ) activeLoading = false;
     }
-    if (loaded) await focusEditorLine(path, line);
+    if (loaded) await focusEditorLine(path, line, character);
   }
 
   async function closeTab(event: Event, path: string) {
@@ -748,11 +754,23 @@
     return Math.min(offset, content.length);
   }
 
-  async function focusEditorLine(path: string, line: number | null | undefined) {
+  function offsetForLocation(content: string, line: number, character: number | null | undefined): number {
+    const lineOffset = offsetForLine(content, line);
+    if (!character || !Number.isFinite(character) || character < 1) return lineOffset;
+    const lineEnd = content.indexOf("\n", lineOffset);
+    const maxOffset = lineEnd === -1 ? content.length : lineEnd;
+    return Math.min(lineOffset + Math.floor(character) - 1, maxOffset);
+  }
+
+  async function focusEditorLine(
+    path: string,
+    line: number | null | undefined,
+    character: number | null | undefined = null
+  ) {
     if (!line || !Number.isFinite(line) || line < 1) return;
     await tick();
     if (activePath !== path || !canEdit || !editorEl) return;
-    const offset = offsetForLine(draftContent, line);
+    const offset = offsetForLocation(draftContent, line, character);
     editorEl.focus();
     editorEl.setSelectionRange(offset, offset);
     const style = getComputedStyle(editorEl);
@@ -999,7 +1017,7 @@
 
   async function openLocation(location: LspLocation) {
     const path = resolvedLocationPath(location.file);
-    await openFile(path, 0);
+    await openFile(path, 0, { line: location.line, character: location.character });
   }
 
   type TreeRow = {

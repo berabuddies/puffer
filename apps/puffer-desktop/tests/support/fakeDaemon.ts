@@ -225,6 +225,7 @@ export class FakeDaemon {
   private readonly details = new Map<string, SessionDetailOverrides>();
   private groupedSessionFilter: ((metadata: JsonRecord) => boolean) | null = null;
   private readonly files = new Map<string, string>();
+  private readonly lspLocations = new Map<string, string>();
   private readonly providerModels: Record<string, JsonRecord[]>;
   private readonly providerSummaries: JsonRecord[] | null;
   private workspaceRoot = "/tmp/puffer";
@@ -317,6 +318,14 @@ export class FakeDaemon {
       path: `${this.workspaceRoot}/.puffer/permissions.json`,
       tools: { ...tools }
     };
+  }
+
+  seedFile(path: string, content: string): void {
+    this.files.set(path, content);
+  }
+
+  setLspLocation(path: string, location: string): void {
+    this.lspLocations.set(path, location);
   }
 
   setAuthStatuses(auth: JsonRecord[]): void {
@@ -1132,7 +1141,8 @@ export class FakeDaemon {
     const line = Number(params.line ?? 0);
     const character = Number(params.character ?? 0);
     const symbol = path.endsWith("main.rs") ? "main" : "fixture";
-    const location = path.endsWith("main.rs") ? "src/main.rs:1:4" : "src/lib.rs:1:8";
+    const defaultLocation = path.endsWith("main.rs") ? "src/main.rs:1:4" : "src/lib.rs:1:8";
+    const location = this.lspLocations.get(path) ?? defaultLocation;
     return {
       path,
       cwd,
