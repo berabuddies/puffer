@@ -474,6 +474,8 @@ export class FakeDaemon {
         return { cwd: this.workspaceRoot, workspaceRoot: this.workspaceRoot };
       case "load_settings_snapshot":
         return this.settingsSnapshot();
+      case "login_with_oauth":
+        return this.settingsSnapshot();
       case "login_with_api_key":
         return this.settingsSnapshot();
       case "logout_provider":

@@ -32,6 +32,11 @@
     onLoginApiKey(providerId, apiKey);
   }
 
+  function submitOauth(providerId: string) {
+    if (busyProviderId === providerId) return;
+    onLoginOauth(providerId);
+  }
+
   function supports(provider: ProviderSummary, mode: string): boolean {
     return provider.authModes.includes(mode);
   }
@@ -139,7 +144,7 @@
               <button
                 class="oauth-btn"
                 disabled={busyProviderId === provider.id}
-                on:click={() => onLoginOauth(provider.id)}
+                on:click={() => submitOauth(provider.id)}
               >
                 {busyProviderId === provider.id
                   ? "Opening browser…"

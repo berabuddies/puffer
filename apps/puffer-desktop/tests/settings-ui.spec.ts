@@ -112,6 +112,40 @@ test("provider API key enter submit is ignored while login is already busy", asy
   ).toHaveLength(1);
 });
 
+test("provider OAuth connect is ignored while login is already busy", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.delayResponse(
+    "login_with_oauth",
+    (request) => request.params.providerId === "codex",
+    500
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Providers" }).click();
+
+  const connect = page
+    .locator(".provider-card")
+    .filter({ hasText: "Codex" })
+    .getByRole("button", { name: "Connect with OAuth" });
+  await expect(connect).toBeEnabled();
+  await connect.evaluate((button) => {
+    (button as HTMLButtonElement).click();
+    (button as HTMLButtonElement).click();
+  });
+  await daemon.waitForRequest("login_with_oauth");
+  await page.waitForTimeout(80);
+
+  expect(
+    daemon.requests.filter(
+      (request) =>
+        request.method === "login_with_oauth" &&
+        request.params.providerId === "codex"
+    )
+  ).toHaveLength(1);
+});
+
 test("settings auth uses the configured daemon when Tauri globals exist", async ({ page }) => {
   await page.addInitScript(() => {
     (window as unknown as { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown }).__TAURI__ = {};
