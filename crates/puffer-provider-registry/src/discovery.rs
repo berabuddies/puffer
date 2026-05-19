@@ -70,16 +70,26 @@ impl ModelDiscoveryClient {
     }
 }
 
-/// Merges discovered models into an existing model list without replacing existing ids.
+/// Reconciles an existing model list with provider-discovered availability.
+///
+/// Discovery responses are authoritative for availability: models omitted by
+/// the provider are removed so stale bundled entries do not stay selectable.
+/// Matching bundled entries keep their curated metadata while newly discovered
+/// ids are appended with discovery-provided defaults.
 pub fn merge_discovered_models(
     existing: &mut Vec<ModelDescriptor>,
     discovered: Vec<ModelDescriptor>,
 ) {
+    if discovered.is_empty() {
+        return;
+    }
+    let previous = std::mem::take(existing);
     for model in discovered {
-        if existing.iter().any(|current| current.id == model.id) {
-            continue;
+        if let Some(current) = previous.iter().find(|current| current.id == model.id) {
+            existing.push(current.clone());
+        } else {
+            existing.push(model);
         }
-        existing.push(model);
     }
 }
 
@@ -387,19 +397,33 @@ mod tests {
     }
 
     #[test]
-    fn merge_discovered_models_only_adds_missing_ids() {
-        let mut models = vec![ModelDescriptor {
-            id: "claude-sonnet-4-5".to_string(),
-            display_name: "Claude Sonnet 4.5".to_string(),
-            provider: "anthropic".to_string(),
-            api: "anthropic-messages".to_string(),
-            context_window: 200_000,
-            max_output_tokens: 8_192,
-            supports_reasoning: true,
-            compat: None,
-            input: vec![crate::Modality::Text],
-            cost: None,
-        }];
+    fn merge_discovered_models_reconciles_available_ids() {
+        let mut models = vec![
+            ModelDescriptor {
+                id: "claude-sonnet-4-5".to_string(),
+                display_name: "Claude Sonnet 4.5".to_string(),
+                provider: "anthropic".to_string(),
+                api: "anthropic-messages".to_string(),
+                context_window: 200_000,
+                max_output_tokens: 8_192,
+                supports_reasoning: true,
+                compat: None,
+                input: vec![crate::Modality::Text],
+                cost: None,
+            },
+            ModelDescriptor {
+                id: "claude-stale".to_string(),
+                display_name: "Claude Stale".to_string(),
+                provider: "anthropic".to_string(),
+                api: "anthropic-messages".to_string(),
+                context_window: 200_000,
+                max_output_tokens: 8_192,
+                supports_reasoning: true,
+                compat: None,
+                input: vec![crate::Modality::Text],
+                cost: None,
+            },
+        ];
 
         merge_discovered_models(
             &mut models,
@@ -432,7 +456,9 @@ mod tests {
         );
 
         assert_eq!(models.len(), 2);
+        assert!(models.iter().any(|model| model.id == "claude-sonnet-4-5"));
         assert!(models.iter().any(|model| model.id == "claude-opus-4-1"));
+        assert!(!models.iter().any(|model| model.id == "claude-stale"));
     }
 
     #[test]
