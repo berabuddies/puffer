@@ -162,6 +162,58 @@ test("late turn start responses do not leak into a switched session", async ({
   await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
 });
 
+test("composer enter does not submit while IME composition is active", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-ime-compose",
+        displayName: "IME compose",
+        title: "IME compose",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /IME compose/);
+  const composer = page.locator(".pf-composer textarea");
+  await expect(composer).toBeEnabled();
+  await composer.fill("zhong");
+
+  await composer.evaluate((node) => {
+    node.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    node.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Enter",
+        bubbles: true,
+        cancelable: true,
+        isComposing: true
+      })
+    );
+    node.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Enter",
+        bubbles: true,
+        cancelable: true,
+        keyCode: 229
+      })
+    );
+  });
+
+  await page.waitForTimeout(50);
+  await expect(composer).toHaveValue("zhong");
+  expect(daemon.requests.filter((request) => request.method === "run_agent_turn")).toHaveLength(0);
+});
+
 test("turn completion preserves live chat row identity after transcript reload", async ({ page }) => {
   const prompt = "Keep this row stable";
   const reply = "Stable streamed reply is visible.";
