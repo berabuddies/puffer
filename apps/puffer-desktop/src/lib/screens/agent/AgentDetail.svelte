@@ -103,9 +103,20 @@
   let editingTitle = $state(false);
   let titleDraft = $state("");
   let titleSaving = $state(false);
+  let titleEditSessionId: string | null = null;
+  let titleEditing = $derived(Boolean(editingTitle && titleEditSessionId === (session?.id ?? null)));
 
   $effect(() => {
-    if (!editingTitle) titleDraft = displayName;
+    if (!titleEditing) titleDraft = displayName;
+  });
+
+  $effect(() => {
+    const nextSessionId = session?.id ?? null;
+    if (nextSessionId === titleEditSessionId) return;
+    titleEditSessionId = nextSessionId;
+    editingTitle = false;
+    titleSaving = false;
+    titleDraft = displayName;
   });
 
   $effect(() => {
@@ -141,6 +152,7 @@
   let diffCount = $derived(timeline.filter((t) => t.kind === "diff").length);
   function startTitleEdit() {
     if (!session || !onRenameTitle) return;
+    titleEditSessionId = session.id;
     titleDraft = displayName;
     editingTitle = true;
   }
@@ -148,14 +160,16 @@
   function cancelTitleEdit() {
     titleDraft = displayName;
     editingTitle = false;
+    titleEditSessionId = null;
   }
 
   async function saveTitleEdit() {
-    if (!session || !onRenameTitle || titleSaving) return;
+    if (!session || !onRenameTitle || titleSaving || !titleEditing) return;
     titleSaving = true;
     try {
       await onRenameTitle(titleDraft);
       editingTitle = false;
+      titleEditSessionId = null;
     } finally {
       titleSaving = false;
     }
@@ -416,8 +430,8 @@
     </button>
     <Puffer size={20} state={pufferState} />
     <div class="pf-agent-identity">
-      <div class="name" class:editing={editingTitle}>
-        {#if editingTitle}
+      <div class="name" class:editing={titleEditing}>
+        {#if titleEditing}
           <input
             class="title-input"
             bind:value={titleDraft}

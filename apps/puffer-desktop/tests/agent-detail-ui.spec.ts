@@ -151,6 +151,46 @@ test("Agent detail find covers chat plus side panel diff without corrupting text
   await expect(page.locator(".pf-side-panel")).toHaveCount(0);
 });
 
+test("title edit draft clears when switching sessions", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-title-alpha",
+        displayName: "Alpha title",
+        title: "Alpha title",
+        cwd: "/tmp/puffer-alpha",
+        folderPath: "/tmp/puffer-alpha",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        timeline: []
+      },
+      {
+        sessionId: "session-title-beta",
+        displayName: "Beta title",
+        title: "Beta title",
+        cwd: "/tmp/puffer-beta",
+        folderPath: "/tmp/puffer-beta",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openAgent(page, /^Alpha title\b/);
+  await page.getByRole("button", { name: "Edit session title" }).click();
+  await page.getByLabel("Session title").fill("Unsaved Alpha Draft");
+
+  await openAgent(page, /^Beta title\b/);
+
+  await expect(page.locator(".pf-agent-detail")).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "Session title", exact: true })).toHaveCount(0);
+  await expect(page.locator(".pf-agent-identity")).toContainText("Beta title");
+  await expect(page.locator(".pf-agent-identity")).not.toContainText("Unsaved Alpha Draft");
+});
+
 test("Side panel does not duplicate effectful Browser or Terminal panes", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
