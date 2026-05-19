@@ -7,6 +7,11 @@ async function openSession(page: Page, name: RegExp): Promise<void> {
   await page.getByRole("button", { name }).first().click();
 }
 
+async function enterWorkspaceThroughForcedOnboarding(page: Page): Promise<void> {
+  await expect(page.getByRole("heading", { name: "Workspace is ready" })).toBeVisible();
+  await page.getByRole("button", { name: /Continue/ }).click();
+}
+
 test("turn completion reload does not leak live chat into a newly selected session", async ({
   page
 }) => {
@@ -2139,7 +2144,8 @@ test("empty agent does not recover through non-agent provider credentials", asyn
     ]
   });
   await daemon.install(page);
-  await daemon.open(page);
+  await daemon.open(page, { forceOnboarding: true, skipOnboarding: false });
+  await enterWorkspaceThroughForcedOnboarding(page);
 
   await openSession(page, /GitHub only empty agent/);
   const composer = page.locator(".pf-composer textarea");

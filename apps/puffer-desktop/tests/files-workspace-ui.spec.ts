@@ -12,6 +12,11 @@ async function openFilesPanel(page: Page): Promise<void> {
   await page.locator(".pf-agent-tabs").getByRole("button", { name: "Files", exact: true }).click();
 }
 
+async function enterWorkspaceThroughForcedOnboarding(page: Page): Promise<void> {
+  await expect(page.getByRole("heading", { name: "Workspace is ready" })).toBeVisible();
+  await page.getByRole("button", { name: /Continue/ }).click();
+}
+
 const codexAuth = [
   {
     providerId: "codex",
@@ -437,7 +442,8 @@ test("new agent explains when no agent provider is authenticated", async ({ page
     ]
   });
   await daemon.install(page);
-  await daemon.open(page);
+  await daemon.open(page, { forceOnboarding: true, skipOnboarding: false });
+  await enterWorkspaceThroughForcedOnboarding(page);
 
   await page.getByRole("button", { name: "New agent in puffer" }).click();
   const dialog = page.getByRole("dialog", { name: "New agent" });
@@ -549,7 +555,8 @@ test("connect project requires an authenticated provider before starting", async
     ]
   });
   await daemon.install(page);
-  await daemon.open(page);
+  await daemon.open(page, { forceOnboarding: true, skipOnboarding: false });
+  await enterWorkspaceThroughForcedOnboarding(page);
 
   await page.getByRole("button", { name: "Connect project" }).click();
   const dialog = page.getByRole("dialog", { name: "Connect project" });

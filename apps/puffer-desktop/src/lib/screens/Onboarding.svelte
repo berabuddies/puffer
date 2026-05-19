@@ -3,6 +3,7 @@
   import BrandLogo from "../design/BrandLogo.svelte";
   import Puffer from "../design/Puffer.svelte";
   import Icon from "../design/Icon.svelte";
+  import { isAgentProviderId } from "../providerIds";
   import type { ExternalCredential, SettingsSnapshot } from "../types";
 
   type Props = {
@@ -23,7 +24,10 @@
 
   let props: Props = $props();
 
-  let signedIn = $derived(props.forceRepoStep || (props.snapshot?.auth?.length ?? 0) > 0);
+  let agentAuthCount = $derived(
+    (props.snapshot?.auth ?? []).filter((auth) => isAgentProviderId(auth.providerId)).length
+  );
+  let signedIn = $derived(props.forceRepoStep || agentAuthCount > 0);
 
   let steps = $derived(
     signedIn
@@ -74,7 +78,7 @@
         </div>
         <div>
           <div class="pf-onboard-ready-title">
-            {(props.snapshot?.auth.length ?? 0)} provider{(props.snapshot?.auth.length ?? 0) === 1 ? "" : "s"} connected
+            {agentAuthCount} agent provider{agentAuthCount === 1 ? "" : "s"} connected
           </div>
           <div class="pf-onboard-ready-sub">
             Repository access is managed from the workspace and provider settings.
