@@ -1363,11 +1363,22 @@
     setLiveSidebarAgentState(submitSessionId, "thinking", null, sessionAtSubmit);
     try {
       const turnId = await runAgentTurn(submitSessionId, message, options);
-      setLiveSidebarAgentState(submitSessionId, "thinking", turnId, sessionAtSubmit);
+      const settledBeforeRpcReturned = settledTurnIds.has(turnId);
+      if (!settledBeforeRpcReturned) {
+        setLiveSidebarAgentState(submitSessionId, "thinking", turnId, sessionAtSubmit);
+      }
       if (selectedSession?.id !== submitSessionId) {
         submittedMessages = submittedMessages.filter((item) => item.id !== localUserId);
         delete submittedMessageBaselineIds[localUserId];
         return false;
+      }
+      if (settledBeforeRpcReturned) {
+        currentTurnId = null;
+        cancelingTurnId = null;
+        turnStartedAtMs = null;
+        turnThinking = false;
+        turnStatusHint = null;
+        return true;
       }
       currentTurnId = turnId;
       cancelingTurnId = null;

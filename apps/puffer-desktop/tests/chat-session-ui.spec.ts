@@ -456,6 +456,60 @@ test("rapid send activation submits the prompt only once", async ({ page }) => {
   ).toHaveLength(1);
 });
 
+test("early turn completion before RPC response does not leave composer stuck", async ({ page }) => {
+  const prompt = "Complete before the start call returns";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-early-complete",
+        displayName: "Early complete",
+        title: "Early complete",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  daemon.delayResponse(
+    "run_agent_turn",
+    (request) => request.params.sessionId === "session-early-complete",
+    240
+  );
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Early complete/);
+  await page.locator(".pf-composer textarea").fill(prompt);
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-early-complete" &&
+      request.params.message === prompt
+  );
+
+  daemon.emit("session:session-early-complete:event", {
+    type: "turn-start",
+    turnId: "turn-session-early-complete"
+  });
+  daemon.emit("session:session-early-complete:event", {
+    type: "turn-complete",
+    turnId: "turn-session-early-complete",
+    assistantText: "Done before RPC returned."
+  });
+
+  await page.waitForTimeout(320);
+  await page.locator(".pf-composer textarea").fill("Follow-up after early completion");
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Stop turn" })).toHaveCount(0);
+});
+
 test("sidebar marks the selected agent thinking while turn start is pending", async ({ page }) => {
   const prompt = "Show sidebar thinking state";
   const daemon = new FakeDaemon();
