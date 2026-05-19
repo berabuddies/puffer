@@ -217,11 +217,7 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   gap: 10px;
   user-select: none;
 }
-.pf-titlebar-brand {
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 0 2px;
-  flex-shrink: 0;
-}
+.pf-titlebar-drag-fill { align-self: stretch; flex: 1; }
 html.is-tauri .pf-titlebar {
   height: 44px;
   display: flex;

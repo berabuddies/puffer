@@ -1,5 +1,4 @@
 <script lang="ts">
-  import BrandLogo from "../design/BrandLogo.svelte";
   import Icon from "../design/Icon.svelte";
 
   type Props = {
@@ -10,10 +9,7 @@
 </script>
 
 <div class="pf-titlebar" data-tauri-drag-region>
-  <div class="pf-titlebar-brand" data-tauri-drag-region>
-    <BrandLogo size={20} />
-  </div>
-  <div style="flex: 1;" data-tauri-drag-region></div>
+  <div class="pf-titlebar-drag-fill" data-tauri-drag-region></div>
   {#if onSearch}
     <button
       type="button"
