@@ -1694,6 +1694,7 @@
                 pendingQuestions={pendingQuestions}
                 loading={sessionLoading}
                 turnRunning={turnRunning}
+                turnCancelable={currentTurnId !== null}
                 turnStartedAtMs={turnStartedAtMs}
                 turnThinking={turnThinking}
                 turnStatusHint={turnStatusHint}

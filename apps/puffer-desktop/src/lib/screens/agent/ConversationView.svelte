@@ -47,6 +47,8 @@
      *  the composer's send button into a red "Stop" so the user can
      *  interrupt a runaway loop. */
     turnRunning?: boolean;
+    /** True once the daemon has returned the turn id required for cancel. */
+    turnCancelable?: boolean;
     turnStartedAtMs?: number | null;
     turnThinking?: boolean;
     turnStatusHint?: string | null;
@@ -72,6 +74,7 @@
     pendingQuestions,
     loading,
     turnRunning = false,
+    turnCancelable = true,
     turnStartedAtMs = null,
     turnThinking = false,
     turnStatusHint = null,
@@ -145,6 +148,7 @@
   let canSubmitPrompt = $derived(
     Boolean(draft.trim() && session && !turnRunning && !submitInFlight && selectedProviderAuthenticated)
   );
+  let canCancelTurn = $derived(Boolean(turnRunning && turnCancelable && onCancelTurn));
 
   function modelSupportsFastMode(modelId: string | null | undefined): boolean {
     const normalized = modelId?.trim().toLowerCase();
@@ -1368,9 +1372,10 @@
           <button
             type="button"
             class="pf-send-btn pf-stop-btn"
-            onclick={onCancelTurn}
+            disabled={!canCancelTurn}
+            onclick={() => { if (canCancelTurn) onCancelTurn?.(); }}
             aria-label="Stop turn"
-            title="Stop the running agent turn"
+            title={canCancelTurn ? "Stop the running agent turn" : "Waiting for turn id"}
           >
             <Icon name="pause2" size={14} />
           </button>

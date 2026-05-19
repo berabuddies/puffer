@@ -261,6 +261,48 @@ test("composer moves submitted prompt into the thread while turn start is pendin
   await expect(page.getByText("No messages in this session yet. Send a prompt to get started.")).toHaveCount(0);
 });
 
+test("stop turn is disabled until the daemon returns a turn id", async ({ page }) => {
+  const prompt = "Wait for a real turn id before cancel";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-pending-cancel",
+        displayName: "Pending cancel",
+        title: "Pending cancel",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  daemon.delayResponse(
+    "run_agent_turn",
+    (request) => request.params.sessionId === "session-pending-cancel",
+    240
+  );
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Pending cancel/);
+  await page.locator(".pf-composer textarea").fill(prompt);
+  await page.getByRole("button", { name: "Send" }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-pending-cancel" &&
+      request.params.message === prompt
+  );
+
+  await expect(page.getByRole("button", { name: "Stop turn" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Stop turn" })).toBeEnabled({ timeout: 1_000 });
+});
+
 test("turn completion preserves live chat row identity after transcript reload", async ({ page }) => {
   const prompt = "Keep this row stable";
   const reply = "Stable streamed reply is visible.";

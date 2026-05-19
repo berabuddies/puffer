@@ -33,6 +33,7 @@
     pufferState: AgentState;
     projectCwd: string;
     turnRunning: boolean;
+    turnCancelable: boolean;
     turnStartedAtMs: number | null;
     turnThinking: boolean;
     turnStatusHint: string | null;
@@ -63,6 +64,7 @@
     pufferState,
     projectCwd,
     turnRunning,
+    turnCancelable,
     turnStartedAtMs,
     turnThinking,
     turnStatusHint,
@@ -145,6 +147,7 @@
       pendingQuestions={pendingQuestions}
       loading={loading}
       turnRunning={turnRunning}
+      turnCancelable={turnCancelable}
       turnStartedAtMs={turnStartedAtMs}
       turnThinking={turnThinking}
       turnStatusHint={turnStatusHint}
