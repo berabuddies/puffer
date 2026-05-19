@@ -1,0 +1,149 @@
+use super::*;
+
+#[test]
+fn login_picker_selection_is_auth_only() {
+    let tempdir = tempdir().unwrap();
+    let _home = crate::test_env::ScopedPufferHome::new("login-picker-auth-only");
+    let workspace = tempdir.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    let paths = ConfigPaths::discover(&workspace);
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store.create_session(workspace.clone()).unwrap();
+    let mut config = PufferConfig::default();
+    config.default_provider = Some("anthropic".to_string());
+    config.default_model = Some("anthropic/claude-sonnet-4-5".to_string());
+    save_user_config(&paths, &config).unwrap();
+    let mut state = AppState::new(config, workspace, session);
+    state.current_provider = Some("anthropic".to_string());
+    state.current_model = Some("anthropic/claude-sonnet-4-5".to_string());
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let mut auth_store = sample_auth_store();
+    let mut providers = sample_providers();
+    let mut resources = sample_resources();
+    let mut tui = TuiState::default();
+
+    assert!(try_open_overlay(
+        &state,
+        &resources,
+        &mut providers,
+        &auth_store,
+        &session_store,
+        &mut tui,
+        "/login",
+    )
+    .unwrap());
+    match tui.overlay.as_mut() {
+        Some(OverlayState::LoginPicker { entries, selection }) => {
+            *selection = entries
+                .iter()
+                .position(|entry| entry.selector == "openai")
+                .expect("openai login entry");
+        }
+        _ => panic!("login picker"),
+    }
+
+    handle_overlay_key(
+        KeyEvent::from(KeyCode::Enter),
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(state.current_provider.as_deref(), Some("anthropic"));
+    assert_eq!(
+        state.current_model.as_deref(),
+        Some("anthropic/claude-sonnet-4-5")
+    );
+    match tui.overlay.as_mut() {
+        Some(OverlayState::AuthPicker {
+            provider_id,
+            entries,
+            selection,
+            onboarding,
+        }) => {
+            assert_eq!(provider_id, "openai");
+            assert!(!*onboarding);
+            *selection = entries
+                .iter()
+                .position(|entry| entry.label == "api-key")
+                .expect("api key action");
+        }
+        _ => panic!("auth picker"),
+    }
+
+    handle_overlay_key(
+        KeyEvent::from(KeyCode::Enter),
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(state.current_provider.as_deref(), Some("anthropic"));
+    assert_eq!(
+        state.current_model.as_deref(),
+        Some("anthropic/claude-sonnet-4-5")
+    );
+    assert!(matches!(
+        tui.overlay,
+        Some(OverlayState::ApiKeyPrompt {
+            ref provider_id,
+            onboarding: false,
+            ..
+        }) if provider_id == "openai"
+    ));
+
+    for ch in "sk-openai".chars() {
+        handle_overlay_key(
+            KeyEvent::from(KeyCode::Char(ch)),
+            &mut state,
+            &mut resources,
+            &mut providers,
+            &mut auth_store,
+            &auth_path,
+            &session_store,
+            &mut tui,
+            true,
+        )
+        .unwrap();
+    }
+    handle_overlay_key(
+        KeyEvent::from(KeyCode::Enter),
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(state.current_provider.as_deref(), Some("anthropic"));
+    assert_eq!(
+        state.current_model.as_deref(),
+        Some("anthropic/claude-sonnet-4-5")
+    );
+    let saved = puffer_config::load_config(&paths).unwrap();
+    assert_eq!(saved.default_provider.as_deref(), Some("anthropic"));
+    assert_eq!(
+        saved.default_model.as_deref(),
+        Some("anthropic/claude-sonnet-4-5")
+    );
+    assert!(auth_store.has_auth("openai"));
+    assert!(tui.overlay.is_none());
+}

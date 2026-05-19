@@ -20,6 +20,7 @@ use std::path::PathBuf;
 use tempfile::tempdir;
 use uuid::Uuid;
 mod help;
+mod login;
 mod model_selection;
 mod overlays;
 mod panels;

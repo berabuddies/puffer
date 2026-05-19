@@ -850,9 +850,11 @@ fn handle_overlay_key(
                     )?;
                     return Ok(false);
                 }
+                let onboarding = active_overlay.is_onboarding();
                 auth_store.set_api_key(provider_id.clone(), key_value);
                 auth_store.save(auth_path)?;
-                let next = onboarding::provider_setup_overlay(providers, auth_store, &provider_id)?;
+                let next =
+                    onboarding::post_auth_overlay(providers, auth_store, &provider_id, onboarding)?;
                 set_overlay_state(tui, next);
                 submit_queued_prompt_if_ready(
                     state,
@@ -976,7 +978,7 @@ fn handle_overlay_key(
             }
             if let Some(provider_id) = overlay_snapshot.selected_provider().map(str::to_string) {
                 match &overlay_snapshot {
-                    OverlayState::ProviderPicker { .. } | OverlayState::LoginPicker { .. } => {
+                    OverlayState::ProviderPicker { .. } => {
                         apply_selected_provider(state, &provider_id)?;
                         let next = onboarding::provider_setup_overlay(
                             providers,
@@ -985,12 +987,20 @@ fn handle_overlay_key(
                         )?;
                         set_overlay_state(tui, next);
                     }
+                    OverlayState::LoginPicker { .. } => {
+                        let next =
+                            onboarding::login_auth_overlay(providers, auth_store, &provider_id)?;
+                        set_overlay_state(tui, next);
+                    }
                     OverlayState::AuthPicker { .. } => {
                         let Some(action) = overlay_snapshot.selected_auth_action().cloned() else {
                             set_overlay_state(tui, None);
                             return Ok(false);
                         };
-                        apply_selected_provider(state, &provider_id)?;
+                        let onboarding = overlay_snapshot.is_onboarding();
+                        if onboarding {
+                            apply_selected_provider(state, &provider_id)?;
+                        }
                         match action {
                             AuthPickerAction::OAuth => {
                                 match run_embedded_auth_login(
@@ -1000,10 +1010,11 @@ fn handle_overlay_key(
                                     no_alt_screen,
                                 ) {
                                     Ok(message) => {
-                                        let next = onboarding::provider_setup_overlay(
+                                        let next = onboarding::post_auth_overlay(
                                             providers,
                                             auth_store,
                                             &provider_id,
+                                            onboarding,
                                         )?;
                                         set_overlay_state(tui, next);
                                         emit_system_message(state, session_store, message)?;
@@ -1030,7 +1041,7 @@ fn handle_overlay_key(
                                         provider_id,
                                         value: String::new(),
                                         cursor: 0,
-                                        onboarding: overlay_snapshot.is_onboarding(),
+                                        onboarding,
                                     }),
                                 );
                             }
@@ -1085,18 +1096,20 @@ fn handle_overlay_key(
                                     providers.set_openai_query_params(query_params);
                                 }
                                 auth_store.save(auth_path)?;
-                                let next = onboarding::provider_setup_overlay(
+                                let next = onboarding::post_auth_overlay(
                                     providers,
                                     auth_store,
                                     &provider_id,
+                                    onboarding,
                                 )?;
                                 set_overlay_state(tui, next);
                             }
                             AuthPickerAction::UseStored | AuthPickerAction::NoneRequired => {
-                                let next = onboarding::provider_setup_overlay(
+                                let next = onboarding::post_auth_overlay(
                                     providers,
                                     auth_store,
                                     &provider_id,
+                                    onboarding,
                                 )?;
                                 set_overlay_state(tui, next);
                             }

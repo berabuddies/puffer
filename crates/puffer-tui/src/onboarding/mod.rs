@@ -143,7 +143,7 @@ pub(crate) fn overlay_from_command(
             }
         }
         "login" if args.is_empty() => login_provider_picker(providers),
-        "login" if !args.is_empty() => auth_picker(providers, auth_store, args, false)?,
+        "login" if !args.is_empty() => login_auth_overlay(providers, auth_store, args)?,
         "logout" if args.is_empty() => logout_picker(providers, auth_store),
         "fast" if args.is_empty() => fast_mode_picker_for_current_selection(state, providers),
         "theme" if args.is_empty() => Some(theme_picker()),
@@ -169,6 +169,29 @@ pub(crate) fn provider_setup_overlay(
     Ok(model_picker(providers, provider_id, true))
 }
 
+/// Builds the auth-only overlay used by explicit `/login` commands.
+pub(crate) fn login_auth_overlay(
+    providers: &ProviderRegistry,
+    auth_store: &AuthStore,
+    provider_id: &str,
+) -> Result<Option<OverlayState>> {
+    auth_picker(providers, auth_store, provider_id, false)
+}
+
+/// Builds the next overlay after credentials are updated.
+pub(crate) fn post_auth_overlay(
+    providers: &mut ProviderRegistry,
+    auth_store: &AuthStore,
+    provider_id: &str,
+    onboarding: bool,
+) -> Result<Option<OverlayState>> {
+    if onboarding {
+        provider_setup_overlay(providers, auth_store, provider_id)
+    } else {
+        Ok(None)
+    }
+}
+
 /// Returns the first provider step used after the initial theme selection.
 pub(crate) fn initial_provider_overlay(providers: &ProviderRegistry) -> Option<OverlayState> {
     provider_picker(providers, true)
@@ -186,7 +209,13 @@ pub(crate) fn back_overlay(
             onboarding,
             ..
         } => auth_picker(providers, auth_store, provider_id, *onboarding)?,
-        OverlayState::AuthPicker { onboarding, .. } => provider_picker(providers, *onboarding),
+        OverlayState::AuthPicker { onboarding, .. } => {
+            if *onboarding {
+                provider_picker(providers, true)
+            } else {
+                login_provider_picker(providers)
+            }
+        }
         OverlayState::ProviderPicker { onboarding, .. } if *onboarding => Some(theme_picker()),
         OverlayState::ModelPicker { onboarding, .. } if *onboarding => {
             provider_picker(providers, true)
