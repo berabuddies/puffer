@@ -108,6 +108,8 @@
   let thinkingProviderId = $state<string | null>(null);
   let thinkingModels = $state<ModelDescriptorInfo[]>([]);
   let thinkingLoadError = $state<string | null>(null);
+  let composerPreferencesSessionId = $state<string | null>(null);
+  let loadedThinkingPreferenceKey = $state<string | null>(null);
   let submitInFlight = $derived(
     Boolean(session?.id && submitInFlightSessionIds.includes(session.id))
   );
@@ -251,6 +253,18 @@
       return value;
     }
     return "workspace-write";
+  }
+
+  function sessionPreferenceKey(sessionId: string, name: string): string {
+    return `puffer-agent:session:${sessionId}:${name}`;
+  }
+
+  function thinkingPreferenceKey(): string | null {
+    const sessionId = session?.id;
+    const providerId = selectedProviderModelSourceId ?? selectedProviderId;
+    const modelId = selectedModelId?.trim();
+    if (!sessionId || !providerId || !modelId) return null;
+    return sessionPreferenceKey(sessionId, `thinking:${providerId}:${modelId}`);
   }
 
   function composerOptions(): AgentTurnOptions {
@@ -537,7 +551,17 @@
   $effect(() => {
     if (!thinkingAvailable) {
       selectedThinkingOptionId = "";
+      loadedThinkingPreferenceKey = null;
       return;
+    }
+    const preferenceKey = thinkingPreferenceKey();
+    if (typeof window !== "undefined" && preferenceKey && preferenceKey !== loadedThinkingPreferenceKey) {
+      loadedThinkingPreferenceKey = preferenceKey;
+      const saved = window.localStorage.getItem(preferenceKey);
+      if (saved && thinkingOptions.some((option) => option.id === saved)) {
+        selectedThinkingOptionId = saved;
+        return;
+      }
     }
     if (
       selectedThinkingOptionId &&
@@ -562,16 +586,35 @@
 
   $effect(() => {
     if (typeof window === "undefined") return;
-    fastMode = window.localStorage.getItem("puffer-agent:fast-mode") === "1";
+    const sessionId = session?.id ?? null;
+    if (sessionId === composerPreferencesSessionId) return;
+    composerPreferencesSessionId = sessionId;
+    if (!sessionId) {
+      fastMode = false;
+      permissionMode = "workspace-write";
+      return;
+    }
+    fastMode = window.localStorage.getItem(sessionPreferenceKey(sessionId, "fast-mode")) === "1";
     permissionMode = normalizePermissionMode(
-      window.localStorage.getItem("puffer-agent:permission-mode")
+      window.localStorage.getItem(sessionPreferenceKey(sessionId, "permission-mode"))
     );
   });
 
   $effect(() => {
     if (typeof window === "undefined") return;
-    window.localStorage.setItem("puffer-agent:fast-mode", fastMode ? "1" : "0");
-    window.localStorage.setItem("puffer-agent:permission-mode", permissionMode);
+    const sessionId = session?.id ?? null;
+    if (!sessionId || composerPreferencesSessionId !== sessionId) return;
+    window.localStorage.setItem(sessionPreferenceKey(sessionId, "fast-mode"), fastMode ? "1" : "0");
+    window.localStorage.setItem(sessionPreferenceKey(sessionId, "permission-mode"), permissionMode);
+  });
+
+  $effect(() => {
+    if (typeof window === "undefined") return;
+    if (!thinkingAvailable || !selectedThinkingOptionId) return;
+    if (!thinkingOptions.some((option) => option.id === selectedThinkingOptionId)) return;
+    const preferenceKey = thinkingPreferenceKey();
+    if (!preferenceKey) return;
+    window.localStorage.setItem(preferenceKey, selectedThinkingOptionId);
   });
 
   async function submit() {

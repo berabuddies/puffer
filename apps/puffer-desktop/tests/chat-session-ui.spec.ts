@@ -2543,6 +2543,88 @@ test("composer sends selected thinking option with the turn request", async ({ p
   });
 });
 
+test("composer thinking and access controls stay scoped to each session", async ({ page }) => {
+  const model = {
+    id: "test-model",
+    displayName: "Test model",
+    provider: "codex",
+    api: "openai-responses",
+    contextWindow: 128000,
+    maxOutputTokens: 4096,
+    supportsReasoning: true,
+    thinkingOptions: [
+      {
+        id: "low",
+        label: "Low",
+        description: "Use low reasoning effort for this turn.",
+        isDefault: true
+      },
+      {
+        id: "high",
+        label: "High",
+        description: "Use high reasoning effort for this turn.",
+        isDefault: false
+      }
+    ],
+    defaultThinkingOptionId: "low",
+    isDefault: true
+  };
+  const sessionInput = (sessionId: string, title: string) => ({
+    sessionId,
+    displayName: title,
+    title,
+    cwd: "/tmp/puffer",
+    folderPath: "/tmp/puffer",
+    updatedAtMs: baseTime,
+    createdAtMs: baseTime - 60_000,
+    eventCount: 0,
+    providerId: "codex",
+    modelId: "test-model",
+    timeline: []
+  });
+  const daemon = new FakeDaemon({
+    sessions: [
+      sessionInput("session-controls-alpha", "Controls Alpha"),
+      sessionInput("session-controls-beta", "Controls Beta")
+    ],
+    providerModels: {
+      codex: [model]
+    }
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Controls Alpha/);
+  const thinkingSelect = page.getByLabel("Thinking level");
+  const accessSelect = page.getByLabel("Codex permissions");
+  await expect(thinkingSelect).toHaveValue("low");
+  await expect(accessSelect).toHaveValue("workspace-write");
+  await thinkingSelect.selectOption("high");
+  await accessSelect.selectOption("full-access");
+
+  await openSession(page, /Controls Beta/);
+  await expect(thinkingSelect).toHaveValue("low");
+  await expect(accessSelect).toHaveValue("workspace-write");
+
+  await openSession(page, /Controls Alpha/);
+  await expect(thinkingSelect).toHaveValue("high");
+  await expect(accessSelect).toHaveValue("full-access");
+
+  await page.locator(".pf-composer textarea").fill("Use session scoped controls");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  const request = await daemon.waitForRequest(
+    "run_agent_turn",
+    (item) => item.params.message === "Use session scoped controls"
+  );
+  expect(request.params).toMatchObject({
+    providerId: "codex",
+    modelId: "test-model",
+    thinkingOptionId: "high",
+    permissionMode: "full-access"
+  });
+});
+
 test("composer sends fast mode and permission mode with the turn request", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
