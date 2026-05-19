@@ -1054,9 +1054,69 @@ impl OverlayState {
         }
     }
 
+    /// Returns true when the selected entry still matches the typed query.
+    pub(crate) fn selection_matches_query(&self, query: &str) -> bool {
+        let query = normalize_picker_query(query);
+        if query.is_empty() || !self.accepts_filter_input() {
+            return true;
+        }
+        match self {
+            Self::SessionPicker {
+                sessions,
+                selection,
+            } => sessions
+                .get(*selection)
+                .is_some_and(|session| session_matches_query(session, &query)),
+            Self::AgentPicker { entries, selection }
+            | Self::ModelPicker {
+                entries, selection, ..
+            }
+            | Self::EffortPicker {
+                entries, selection, ..
+            }
+            | Self::FastModePicker {
+                entries, selection, ..
+            }
+            | Self::LoginPicker { entries, selection }
+            | Self::ProviderPicker {
+                entries, selection, ..
+            }
+            | Self::LogoutPicker { entries, selection }
+            | Self::ThemePicker { entries, selection }
+            | Self::CommandPicker {
+                entries, selection, ..
+            }
+            | Self::OnboardingTheme { entries, selection }
+            | Self::OnboardingProvider { entries, selection }
+            | Self::OnboardingAuth {
+                entries, selection, ..
+            }
+            | Self::OnboardingModel {
+                entries, selection, ..
+            } => entries
+                .get(*selection)
+                .is_some_and(|entry| model_entry_matches_query(entry, &query)),
+            Self::AuthPicker {
+                entries, selection, ..
+            } => entries
+                .get(*selection)
+                .is_some_and(|entry| auth_entry_matches_query(entry, &query)),
+            Self::PermissionPrompt { .. }
+            | Self::Help
+            | Self::Btw(..)
+            | Self::Session(..)
+            | Self::Status(..)
+            | Self::Text(..)
+            | Self::Usage(..)
+            | Self::UserQuestionPrompt { .. }
+            | Self::ApiKeyPrompt { .. }
+            | Self::OnboardingApiKey { .. } => true,
+        }
+    }
+
     /// Moves the selection to the first entry that matches the typed query.
     pub(crate) fn select_matching_query(&mut self, query: &str) {
-        let query = query.trim().to_ascii_lowercase();
+        let query = normalize_picker_query(query);
         if query.is_empty() {
             return;
         }
@@ -1065,34 +1125,10 @@ impl OverlayState {
                 sessions,
                 selection,
             } => {
-                if let Some(index) = sessions.iter().position(|session| {
-                    session.id.to_string().to_ascii_lowercase().contains(&query)
-                        || session
-                            .display_name
-                            .as_deref()
-                            .map(|name| name.to_ascii_lowercase().contains(&query))
-                            .unwrap_or(false)
-                        || session
-                            .slug
-                            .as_deref()
-                            .map(|slug| slug.to_ascii_lowercase().contains(&query))
-                            .unwrap_or(false)
-                        || session
-                            .note
-                            .as_deref()
-                            .map(|note| note.to_ascii_lowercase().contains(&query))
-                            .unwrap_or(false)
-                        || session
-                            .tags
-                            .iter()
-                            .any(|tag| tag.to_ascii_lowercase().contains(&query))
-                        || session
-                            .cwd
-                            .display()
-                            .to_string()
-                            .to_ascii_lowercase()
-                            .contains(&query)
-                }) {
+                if let Some(index) = sessions
+                    .iter()
+                    .position(|session| session_matches_query(session, &query))
+                {
                     *selection = index;
                 }
             }
@@ -1123,10 +1159,10 @@ impl OverlayState {
             | Self::OnboardingModel {
                 entries, selection, ..
             } => {
-                if let Some(index) = entries.iter().position(|entry| {
-                    entry.selector.to_ascii_lowercase().contains(&query)
-                        || entry.description.to_ascii_lowercase().contains(&query)
-                }) {
+                if let Some(index) = entries
+                    .iter()
+                    .position(|entry| model_entry_matches_query(entry, &query))
+                {
                     *selection = index;
                 }
             }
@@ -1140,10 +1176,10 @@ impl OverlayState {
             Self::AuthPicker {
                 entries, selection, ..
             } => {
-                if let Some(index) = entries.iter().position(|entry| {
-                    entry.label.to_ascii_lowercase().contains(&query)
-                        || entry.description.to_ascii_lowercase().contains(&query)
-                }) {
+                if let Some(index) = entries
+                    .iter()
+                    .position(|entry| auth_entry_matches_query(entry, &query))
+                {
                     *selection = index;
                 }
             }
@@ -1360,6 +1396,49 @@ impl OverlayState {
             _ => None,
         }
     }
+}
+
+fn normalize_picker_query(query: &str) -> String {
+    query.trim().to_ascii_lowercase()
+}
+
+fn model_entry_matches_query(entry: &ModelPickerEntry, query: &str) -> bool {
+    entry.selector.to_ascii_lowercase().contains(query)
+        || entry.description.to_ascii_lowercase().contains(query)
+}
+
+fn auth_entry_matches_query(entry: &AuthPickerEntry, query: &str) -> bool {
+    entry.label.to_ascii_lowercase().contains(query)
+        || entry.description.to_ascii_lowercase().contains(query)
+}
+
+fn session_matches_query(session: &SessionSummary, query: &str) -> bool {
+    session.id.to_string().to_ascii_lowercase().contains(query)
+        || session
+            .display_name
+            .as_deref()
+            .map(|name| name.to_ascii_lowercase().contains(query))
+            .unwrap_or(false)
+        || session
+            .slug
+            .as_deref()
+            .map(|slug| slug.to_ascii_lowercase().contains(query))
+            .unwrap_or(false)
+        || session
+            .note
+            .as_deref()
+            .map(|note| note.to_ascii_lowercase().contains(query))
+            .unwrap_or(false)
+        || session
+            .tags
+            .iter()
+            .any(|tag| tag.to_ascii_lowercase().contains(query))
+        || session
+            .cwd
+            .display()
+            .to_string()
+            .to_ascii_lowercase()
+            .contains(query)
 }
 
 fn previous_boundary(input: &str, cursor: usize) -> usize {

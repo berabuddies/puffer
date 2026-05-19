@@ -935,6 +935,15 @@ fn handle_overlay_key(
             }
         }
         KeyCode::Enter => {
+            if overlay_snapshot.accepts_filter_input()
+                && !overlay_snapshot.selection_matches_query(&tui.input)
+            {
+                tui.status_hint = Some((
+                    "No matching picker item.".to_string(),
+                    std::time::Instant::now(),
+                ));
+                return Ok(false);
+            }
             if matches!(overlay_snapshot, OverlayState::ThemePicker { .. })
                 && onboarding::initial_overlay(state, providers, auth_store)?.is_some()
             {
