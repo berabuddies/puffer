@@ -1299,6 +1299,36 @@ test("stop turn requests cancellation for the active turn", async ({ page }) => 
   });
 });
 
+test("stop turn is disabled while cancellation is in flight", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.delayResponse(
+    "cancel_turn",
+    (request) => request.params.turnId === "turn-session-browser",
+    240
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /^Browser regression\b/);
+  await page.locator(".pf-composer textarea").fill("Cancel this turn once");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.message === "Cancel this turn once"
+  );
+  const stop = page.getByRole("button", { name: "Stop turn" });
+  await expect(stop).toBeEnabled();
+
+  await stop.click();
+  await daemon.waitForRequest("cancel_turn");
+  await expect(stop).toBeDisabled();
+  await stop.click({ force: true });
+  await page.waitForTimeout(40);
+
+  expect(daemon.requests.filter((request) => request.method === "cancel_turn")).toHaveLength(1);
+});
+
 test("session title edit saves through the daemon", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

@@ -130,6 +130,7 @@
   // running. When the turn finishes we reload the session detail so the real
   // persisted transcript replaces these placeholders.
   let currentTurnId = $state<string | null>(null);
+  let cancelingTurnId = $state<string | null>(null);
   let turnStartedAtMs = $state<number | null>(null);
   let turnThinking = $state(false);
   let turnStatusHint = $state<string | null>(null);
@@ -800,6 +801,7 @@
     turnPermissionLookup = {};
     turnQuestionLookup = {};
     currentTurnId = null;
+    cancelingTurnId = null;
     turnStartedAtMs = null;
     turnThinking = false;
     turnStatusHint = null;
@@ -941,6 +943,7 @@
     turnPermissionLookup = {};
     turnQuestionLookup = {};
     currentTurnId = null;
+    cancelingTurnId = null;
     turnStartedAtMs = null;
     turnThinking = false;
     turnStatusHint = null;
@@ -1126,6 +1129,7 @@
         return false;
       }
       currentTurnId = turnId;
+      cancelingTurnId = null;
       settledTurnIds.delete(turnId);
       statusMessage = `Agent turn ${turnId.slice(0, 8)} started.`;
       return true;
@@ -1133,6 +1137,7 @@
       if (selectedSession?.id !== submitSessionId) return false;
       submittedMessages = submittedMessages.filter((item) => item.id !== localUserId);
       currentTurnId = null;
+      cancelingTurnId = null;
       turnStartedAtMs = null;
       turnThinking = false;
       turnStatusHint = null;
@@ -1212,6 +1217,24 @@
     } else {
       dismissedQuestionIds = [...dismissedQuestionIds, questionId];
       statusMessage = "Answer selected (no in-flight turn).";
+    }
+  }
+
+  async function cancelCurrentTurn() {
+    const turnId = currentTurnId;
+    if (!turnId || cancelingTurnId === turnId) return;
+    cancelingTurnId = turnId;
+    turnStatusHint = "Cancel requested";
+    try {
+      await cancelTurn(turnId);
+      statusMessage = `Cancel requested for turn ${turnId.slice(0, 8)}.`;
+    } catch (error) {
+      if (currentTurnId !== turnId) return;
+      cancelingTurnId = null;
+      turnStatusHint = "Running";
+      const detail = errorText(error);
+      statusMessage = `cancel_turn failed: ${detail}`;
+      appendAgentError("Cancel failed", detail, "cancel-error");
     }
   }
 
@@ -1368,6 +1391,9 @@
   }
 
   function markTurnActive(turnId: string) {
+    if (currentTurnId !== null && currentTurnId !== turnId) {
+      cancelingTurnId = null;
+    }
     currentTurnId = turnId;
     settledTurnIds.delete(turnId);
   }
@@ -1376,6 +1402,9 @@
     settledTurnIds.add(turnId);
     const { [turnId]: _drop, ...rest } = replayTextByTurn;
     replayTextByTurn = rest;
+    if (cancelingTurnId === turnId) {
+      cancelingTurnId = null;
+    }
     if (currentTurnId === turnId) {
       currentTurnId = null;
     }
@@ -1694,7 +1723,7 @@
                 pendingQuestions={pendingQuestions}
                 loading={sessionLoading}
                 turnRunning={turnRunning}
-                turnCancelable={currentTurnId !== null}
+                turnCancelable={currentTurnId !== null && cancelingTurnId !== currentTurnId}
                 turnStartedAtMs={turnStartedAtMs}
                 turnThinking={turnThinking}
                 turnStatusHint={turnStatusHint}
@@ -1704,7 +1733,7 @@
                 onSubmitMessage={submitMessage}
                 onResolvePermission={resolvePermission}
                 onResolveUserQuestion={resolveUserQuestion}
-                onCancelTurn={() => { if (currentTurnId) void cancelTurn(currentTurnId); }}
+                onCancelTurn={() => void cancelCurrentTurn()}
                 onDraftChange={(hasDraft) => (composerHasDraft = hasDraft)}
                 onRenameTitle={renameSelectedSession}
               />
