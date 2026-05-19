@@ -121,8 +121,10 @@
       if (!size) return;
       lastResize = size;
       if (connected && activeTabId) {
-        void browserResize(activeBackendSessionId(), size.width, size.height).catch((err) => {
-          error = String(err);
+        const target = activeCommandTarget();
+        if (!target) return;
+        void browserResize(target.backendSessionId, size.width, size.height).catch((err) => {
+          reportCommandError(target, err);
         });
       }
     });
