@@ -146,6 +146,51 @@ test("provider OAuth connect is ignored while login is already busy", async ({ p
   ).toHaveLength(1);
 });
 
+test("external provider credential import is ignored while already busy", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    externalCredentials: [
+      {
+        providerId: "codex",
+        source: "codex",
+        kind: "oauth",
+        description: "Codex CLI OAuth",
+        sourcePath: "/tmp/home/.codex/auth.json"
+      }
+    ]
+  });
+  daemon.delayResponse(
+    "import_external_credential",
+    (request) => request.params.providerId === "codex" && request.params.source === "codex",
+    500
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Providers" }).click();
+
+  const importButton = page
+    .locator(".provider-card")
+    .filter({ hasText: "Codex" })
+    .getByRole("button", { name: "Use credentials from ~/.codex" });
+  await expect(importButton).toBeVisible();
+  await importButton.evaluate((button) => {
+    (button as HTMLButtonElement).click();
+    (button as HTMLButtonElement).click();
+  });
+  await daemon.waitForRequest("import_external_credential");
+  await page.waitForTimeout(80);
+
+  expect(
+    daemon.requests.filter(
+      (request) =>
+        request.method === "import_external_credential" &&
+        request.params.providerId === "codex" &&
+        request.params.source === "codex"
+    )
+  ).toHaveLength(1);
+});
+
 test("settings auth uses the configured daemon when Tauri globals exist", async ({ page }) => {
   await page.addInitScript(() => {
     (window as unknown as { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown }).__TAURI__ = {};

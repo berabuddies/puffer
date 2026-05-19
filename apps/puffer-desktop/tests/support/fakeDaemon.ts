@@ -224,6 +224,7 @@ export class FakeDaemon {
   private readonly providerSummaries: JsonRecord[] | null;
   private workspaceRoot = "/tmp/puffer";
   private authStatuses: JsonRecord[];
+  private externalCredentials: JsonRecord[];
   private settingsConfig: { defaultProvider: string | null; defaultModel: string | null } = {
     defaultProvider: "codex",
     defaultModel: "test-model"
@@ -256,12 +257,14 @@ export class FakeDaemon {
     protocol?: "legacy" | "real";
     workspaceRoot?: string;
     auth?: JsonRecord[];
+    externalCredentials?: JsonRecord[];
     url?: string;
   } = {}) {
     this.url = options.url ?? FAKE_DAEMON_URL;
     this.protocol = options.protocol ?? "legacy";
     this.workspaceRoot = options.workspaceRoot ?? this.workspaceRoot;
     this.authStatuses = options.auth ?? defaultAuthStatuses();
+    this.externalCredentials = options.externalCredentials ?? [];
     this.permissions = {
       ...this.permissions,
       path: `${this.workspaceRoot}/.puffer/permissions.json`
@@ -481,7 +484,9 @@ export class FakeDaemon {
       case "logout_provider":
         return this.logoutProvider(request.params);
       case "list_external_credentials":
-        return [];
+        return this.externalCredentials;
+      case "import_external_credential":
+        return this.importExternalCredential(request.params);
       case "load_desktop_pins":
         return { pinnedAgentIds: [], pinnedWorkspacePaths: [] };
       case "list_grouped_sessions":
@@ -679,6 +684,29 @@ export class FakeDaemon {
   private logoutProvider(params: JsonRecord): JsonRecord {
     const providerId = String(params.providerId ?? "");
     this.authStatuses = this.authStatuses.filter((item) => item.providerId !== providerId);
+    return this.settingsSnapshot();
+  }
+
+  private importExternalCredential(params: JsonRecord): JsonRecord {
+    const providerId = String(params.providerId ?? "");
+    const source = String(params.source ?? "");
+    const credential = this.externalCredentials.find(
+      (item) => item.providerId === providerId && item.source === source
+    );
+    if (credential) {
+      this.authStatuses = [
+        ...this.authStatuses.filter((item) => item.providerId !== providerId),
+        {
+          providerId,
+          kind: credential.kind ?? "api_key",
+          email: null,
+          expiresAtMs: null,
+          scopes: [],
+          planType: null,
+          organizationName: null
+        }
+      ];
+    }
     return this.settingsSnapshot();
   }
 

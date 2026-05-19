@@ -66,6 +66,11 @@
     return `${providerId}::${source}`;
   }
 
+  function submitImport(providerId: string, source: "claude" | "codex") {
+    if (busyImportKey) return;
+    onImportExternal(providerId, source);
+  }
+
   function sourceLabel(source: "claude" | "codex"): string {
     return source === "claude" ? "~/.claude" : "~/.codex";
   }
@@ -125,8 +130,8 @@
                 <button
                   type="button"
                   class="import"
-                  disabled={busyImportKey === importKey(candidate.providerId, candidate.source)}
-                  on:click={() => onImportExternal(candidate.providerId, candidate.source)}
+                  disabled={busyImportKey !== null}
+                  on:click={() => submitImport(candidate.providerId, candidate.source)}
                   title={candidate.sourcePath}
                 >
                   {#if busyImportKey === importKey(candidate.providerId, candidate.source)}

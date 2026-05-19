@@ -693,6 +693,7 @@
   }
 
   async function handleImportExternal(providerId: string, source: "claude" | "codex") {
+    if (importBusyKey) return;
     importBusyKey = `${providerId}::${source}`;
     authError = null;
     try {
