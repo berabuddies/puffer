@@ -48,7 +48,7 @@ pub(crate) fn handle_user_question_key(key: KeyEvent, tui: &mut TuiState) -> boo
         }
         KeyCode::Char(' ') => {
             if let Some(OverlayState::UserQuestionPrompt { overlay }) = tui.overlay.as_mut() {
-                if overlay.has_custom_answer() {
+                if overlay.custom_answer_active() || overlay.has_custom_answer() {
                     overlay.insert_custom_char(' ');
                 } else {
                     overlay.toggle_current();
@@ -62,7 +62,7 @@ pub(crate) fn handle_user_question_key(key: KeyEvent, tui: &mut TuiState) -> boo
         KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             tui.overlay.as_mut().and_then(|overlay| match overlay {
                 OverlayState::UserQuestionPrompt { overlay } => {
-                    if overlay.has_custom_answer() {
+                    if overlay.custom_answer_active() || overlay.has_custom_answer() {
                         overlay.insert_custom_char(ch);
                         None
                     } else {

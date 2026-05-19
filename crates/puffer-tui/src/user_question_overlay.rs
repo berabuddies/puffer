@@ -29,6 +29,7 @@ pub(crate) struct UserQuestionOverlay {
     lists: Vec<ListSelectionView>,
     selected_multi: Vec<Vec<usize>>,
     custom_answers: Vec<String>,
+    custom_answer_active: Vec<bool>,
     answers: Map<String, Value>,
 }
 
@@ -80,12 +81,14 @@ impl UserQuestionOverlay {
             .collect::<Vec<_>>();
         let selected_multi = vec![Vec::new(); questions.len()];
         let custom_answers = vec![String::new(); questions.len()];
+        let custom_answer_active = vec![false; questions.len()];
         Ok(Self {
             questions,
             question_index: 0,
             lists,
             selected_multi,
             custom_answers,
+            custom_answer_active,
             answers: Map::new(),
         })
     }
@@ -125,7 +128,9 @@ impl UserQuestionOverlay {
         };
         let selection = self.selection();
         let custom_answer = self.current_custom_answer().trim();
-        let custom_selected = !question.multi_select && !custom_answer.is_empty();
+        let custom_active = self.is_custom_answer_active();
+        let custom_selected =
+            custom_active || (!question.multi_select && !custom_answer.is_empty());
         question
             .options
             .iter()
@@ -173,7 +178,7 @@ impl UserQuestionOverlay {
         if question.multi_select {
             return None;
         }
-        if !self.current_custom_answer().trim().is_empty() {
+        if self.is_custom_answer_active() || !self.current_custom_answer().trim().is_empty() {
             return None;
         }
         question
@@ -186,6 +191,13 @@ impl UserQuestionOverlay {
 
     /// Moves the selection upward.
     pub(crate) fn select_previous(&mut self) {
+        if self.is_custom_answer_active() {
+            if let Some(list) = self.current_list_mut() {
+                list.select_last();
+            }
+            self.set_custom_answer_active(false);
+            return;
+        }
         if let Some(list) = self.current_list_mut() {
             list.select_previous();
         }
@@ -193,6 +205,14 @@ impl UserQuestionOverlay {
 
     /// Moves the selection downward.
     pub(crate) fn select_next(&mut self) {
+        if self.is_custom_answer_active() {
+            return;
+        }
+        let custom_index = self.custom_row_index();
+        if self.selection() >= custom_index.saturating_sub(1) {
+            self.set_custom_answer_active(true);
+            return;
+        }
         if let Some(list) = self.current_list_mut() {
             list.select_next();
         }
@@ -200,6 +220,7 @@ impl UserQuestionOverlay {
 
     /// Moves the selection upward by one page.
     pub(crate) fn page_up(&mut self) {
+        self.set_custom_answer_active(false);
         if let Some(list) = self.current_list_mut() {
             list.page_up();
         }
@@ -207,8 +228,17 @@ impl UserQuestionOverlay {
 
     /// Moves the selection downward by one page.
     pub(crate) fn page_down(&mut self) {
+        if self.is_custom_answer_active() {
+            return;
+        }
+        let before = self.selection();
         if let Some(list) = self.current_list_mut() {
             list.page_down();
+        }
+        if self.selection() == before
+            && self.selection() >= self.custom_row_index().saturating_sub(1)
+        {
+            self.set_custom_answer_active(true);
         }
     }
 
@@ -218,6 +248,9 @@ impl UserQuestionOverlay {
             return;
         };
         if !question.multi_select {
+            return;
+        }
+        if self.is_custom_answer_active() {
             return;
         }
         let option_index = self.selection();
@@ -239,6 +272,7 @@ impl UserQuestionOverlay {
         {
             return UserQuestionShortcutActivation::Ignored;
         }
+        self.set_custom_answer_active(false);
         let Some(question) = self.current_question() else {
             return UserQuestionShortcutActivation::Ignored;
         };
@@ -264,6 +298,14 @@ impl UserQuestionOverlay {
             .unwrap_or_default();
         let answer = if question.multi_select {
             if self.selected_multi[question_index].is_empty() && custom.is_empty() {
+                if self
+                    .custom_answer_active
+                    .get(question_index)
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    return None;
+                }
                 self.selected_multi[question_index].push(selection);
             }
             let mut values = self.selected_multi[question_index]
@@ -277,6 +319,13 @@ impl UserQuestionOverlay {
             Value::Array(values)
         } else if !custom.is_empty() {
             Value::String(custom)
+        } else if self
+            .custom_answer_active
+            .get(question_index)
+            .copied()
+            .unwrap_or(false)
+        {
+            return None;
         } else {
             let option = question.options.get(selection)?;
             Value::String(option.label.clone())
@@ -311,6 +360,7 @@ impl UserQuestionOverlay {
 
     /// Inserts one character into the active custom answer.
     pub(crate) fn insert_custom_char(&mut self, ch: char) {
+        self.set_custom_answer_active(true);
         if let Some(answer) = self.custom_answers.get_mut(self.question_index) {
             answer.push(ch);
         }
@@ -328,11 +378,35 @@ impl UserQuestionOverlay {
         !self.current_custom_answer().is_empty()
     }
 
+    /// Returns true when typing should edit the active custom answer.
+    pub(crate) fn custom_answer_active(&self) -> bool {
+        self.is_custom_answer_active()
+    }
+
     fn current_custom_answer(&self) -> &str {
         self.custom_answers
             .get(self.question_index)
             .map(String::as_str)
             .unwrap_or("")
+    }
+
+    fn custom_row_index(&self) -> usize {
+        self.current_question()
+            .map(|question| question.options.len())
+            .unwrap_or(0)
+    }
+
+    fn is_custom_answer_active(&self) -> bool {
+        self.custom_answer_active
+            .get(self.question_index)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    fn set_custom_answer_active(&mut self, active: bool) {
+        if let Some(value) = self.custom_answer_active.get_mut(self.question_index) {
+            *value = active;
+        }
     }
 }
 

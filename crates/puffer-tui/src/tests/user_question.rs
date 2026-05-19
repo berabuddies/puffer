@@ -251,6 +251,71 @@ fn user_question_custom_answer_sends_other_text() {
 }
 
 #[test]
+fn user_question_other_row_accepts_numeric_custom_answer() {
+    let (response_tx, response_rx) = mpsc::channel();
+    let mut tui = TuiState {
+        overlay: Some(OverlayState::UserQuestionPrompt {
+            overlay: UserQuestionOverlay::from_value(sample_question_payload()).unwrap(),
+        }),
+        pending_user_question_request: Some(PendingUserQuestionRequest { response_tx }),
+        ..TuiState::default()
+    };
+
+    assert!(handle_user_question_key(
+        KeyEvent::from(KeyCode::Down),
+        &mut tui
+    ));
+    assert!(handle_user_question_key(
+        KeyEvent::from(KeyCode::Down),
+        &mut tui
+    ));
+    for ch in "2 files".chars() {
+        assert!(handle_user_question_key(
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+            &mut tui
+        ));
+    }
+    assert!(handle_user_question_key(
+        KeyEvent::from(KeyCode::Enter),
+        &mut tui
+    ));
+    let response = response_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert_eq!(response.answers["Pick one"], json!("2 files"));
+    assert!(tui.overlay.is_none());
+}
+
+#[test]
+fn user_question_empty_other_row_waits_for_custom_text() {
+    let (response_tx, response_rx) = mpsc::channel();
+    let mut tui = TuiState {
+        overlay: Some(OverlayState::UserQuestionPrompt {
+            overlay: UserQuestionOverlay::from_value(sample_question_payload()).unwrap(),
+        }),
+        pending_user_question_request: Some(PendingUserQuestionRequest { response_tx }),
+        ..TuiState::default()
+    };
+
+    assert!(handle_user_question_key(
+        KeyEvent::from(KeyCode::Down),
+        &mut tui
+    ));
+    assert!(handle_user_question_key(
+        KeyEvent::from(KeyCode::Down),
+        &mut tui
+    ));
+    assert!(handle_user_question_key(
+        KeyEvent::from(KeyCode::Enter),
+        &mut tui
+    ));
+
+    assert!(response_rx.recv_timeout(Duration::from_millis(50)).is_err());
+    assert!(matches!(
+        tui.overlay,
+        Some(OverlayState::UserQuestionPrompt { .. })
+    ));
+}
+
+#[test]
 fn user_question_multi_select_includes_custom_answer() {
     let (response_tx, response_rx) = mpsc::channel();
     let mut tui = TuiState {
@@ -277,6 +342,47 @@ fn user_question_multi_select_includes_custom_answer() {
     ));
     let response = response_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     assert_eq!(response.answers["Choose checks"], json!(["Tests", "Lint"]));
+    assert!(tui.overlay.is_none());
+}
+
+#[test]
+fn user_question_multi_select_other_row_keeps_fixed_answers() {
+    let (response_tx, response_rx) = mpsc::channel();
+    let mut tui = TuiState {
+        overlay: Some(OverlayState::UserQuestionPrompt {
+            overlay: UserQuestionOverlay::from_value(sample_multi_select_payload()).unwrap(),
+        }),
+        pending_user_question_request: Some(PendingUserQuestionRequest { response_tx }),
+        ..TuiState::default()
+    };
+
+    assert!(handle_user_question_key(
+        KeyEvent::from(KeyCode::Char('1')),
+        &mut tui
+    ));
+    assert!(handle_user_question_key(
+        KeyEvent::from(KeyCode::Down),
+        &mut tui
+    ));
+    assert!(handle_user_question_key(
+        KeyEvent::from(KeyCode::Down),
+        &mut tui
+    ));
+    for ch in "2 lint jobs".chars() {
+        assert!(handle_user_question_key(
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+            &mut tui
+        ));
+    }
+    assert!(handle_user_question_key(
+        KeyEvent::from(KeyCode::Enter),
+        &mut tui
+    ));
+    let response = response_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        response.answers["Choose checks"],
+        json!(["Tests", "2 lint jobs"])
+    );
     assert!(tui.overlay.is_none());
 }
 
