@@ -372,9 +372,11 @@
   }
 
   $effect(() => {
-    // On session change, reset scroll to top so users see the start.
-    if (session?.id !== lastSessionId) {
-      lastSessionId = session?.id ?? null;
+    // On session change, reset local composer state and scroll to the start.
+    const nextSessionId = session?.id ?? null;
+    if (nextSessionId !== lastSessionId) {
+      draft = "";
+      lastSessionId = nextSessionId;
       void tick().then(() => threadEl?.scrollTo({ top: 0, behavior: "auto" }));
     }
   });

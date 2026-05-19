@@ -182,6 +182,65 @@ test("turn completion preserves live chat row identity after transcript reload",
   await expect(page.locator('.pf-msg[data-role="agent"]').filter({ hasText: reply })).toHaveCount(1);
 });
 
+test("unsent composer draft clears when switching sessions", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-alpha-draft",
+        displayName: "Alpha draft",
+        title: "Alpha draft",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "alpha-draft-seed",
+            text: "Alpha draft seed",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      },
+      {
+        sessionId: "session-beta-draft",
+        displayName: "Beta draft",
+        title: "Beta draft",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "beta-draft-seed",
+            text: "Beta draft seed",
+            createdAtMs: baseTime - 90_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Alpha draft/);
+  await expect(page.getByText("Alpha draft seed")).toBeVisible();
+  const composer = page.locator(".pf-composer textarea");
+  await composer.fill("alpha-only draft");
+  await expect(composer).toHaveValue("alpha-only draft");
+
+  await openSession(page, /Beta draft/);
+  await expect(page.getByText("Beta draft seed")).toBeVisible();
+  await expect(composer).toHaveValue("");
+  await expect(page.getByRole("button", { name: "Send" })).toBeDisabled();
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(50);
+  expect(daemon.requests.filter((request) => request.method === "run_agent_turn")).toHaveLength(0);
+});
+
 test("resolved transcript permissions do not reappear as pending approvals", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
