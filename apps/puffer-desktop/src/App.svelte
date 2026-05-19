@@ -148,6 +148,7 @@
   let daemonClientFingerprint = $state<string | null>(null);
   let daemonClientUnlisteners: Array<() => void> = [];
   let sessionLoadGeneration = 0;
+  let liveErrorSeq = 0;
   let desktopPins = $state<DesktopPinState>({ pinnedAgentIds: [], pinnedWorkspacePaths: [] });
 
   let settingsSnapshot = $state<SettingsSnapshot | null>(null);
@@ -1336,8 +1337,9 @@
 
   function appendAgentError(title: string, body: string, code: string) {
     const trimmed = body.trim() || "Unknown error.";
+    liveErrorSeq += 1;
     appendLive({
-      id: `live-error-${code}-${Date.now()}`,
+      id: `live-error-${code}-${Date.now()}-${liveErrorSeq}`,
       kind: "system",
       title,
       summary: trimmed,

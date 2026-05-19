@@ -984,6 +984,42 @@ test("turn errors keep the submitted prompt visible when it is not persisted", a
   await expect(page.getByText("provider exploded before transcript append")).toBeVisible();
 });
 
+test("rapid turn errors keep separate inline error rows", async ({ page }) => {
+  await page.addInitScript(() => {
+    Date.now = () => 1_700_000_000_000;
+  });
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /^Browser regression\b/);
+  await expect(page.getByText("Ready to exercise the managed browser.")).toBeVisible();
+  daemon.delayResponse(
+    "load_session_detail",
+    (request) => request.params.sessionId === "session-browser",
+    400
+  );
+  daemon.delayResponse(
+    "load_session_detail",
+    (request) => request.params.sessionId === "session-browser",
+    400
+  );
+
+  daemon.emit("session:session-browser:event", {
+    type: "turn-error",
+    turnId: "turn-error-first",
+    error: "First rapid turn failure."
+  });
+  daemon.emit("session:session-browser:event", {
+    type: "turn-error",
+    turnId: "turn-error-second",
+    error: "Second rapid turn failure."
+  });
+
+  await expect(page.getByText("First rapid turn failure.")).toBeVisible();
+  await expect(page.getByText("Second rapid turn failure.")).toBeVisible();
+});
+
 test("unsent composer draft clears when switching sessions", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
