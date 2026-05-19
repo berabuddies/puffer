@@ -225,6 +225,12 @@ test("active agents includes an opened session before grouped history catches up
   const activeList = page.locator(".pf-sidebar-agents-list");
   await expect(activeList.locator(".pf-sidebar-agent-row").filter({ hasText: "New Session" })).toBeVisible();
   await expect(activeList.getByText("No agents match")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Back" }).click();
+  const history = page.getByRole("region", { name: "Session history" });
+  await expect(history).toContainText("New Session");
+  await history.getByRole("button", { name: /New Session/ }).click();
+  await expect(page.locator(".pf-agent-detail")).toBeVisible();
 });
 
 test("active agent project filter resets when the selected project disappears", async ({ page }) => {

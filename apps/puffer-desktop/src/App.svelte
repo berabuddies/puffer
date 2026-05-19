@@ -261,6 +261,62 @@
     return basenameFromPath(session.folderPath || session.cwd || defaultWorkspaceCwd) || "Workspace";
   }
 
+  function groupPathForSession(session: SessionListItem): string {
+    return session.folderPath || session.cwd || defaultWorkspaceCwd || "Workspace";
+  }
+
+  function compareFolderGroups(left: FolderGroup, right: FolderGroup): number {
+    const leftPin = Math.min(
+      pinnedIndex(desktopPins.pinnedWorkspacePaths, left.path),
+      pinnedIndex(desktopPins.pinnedWorkspacePaths, left.id)
+    );
+    const rightPin = Math.min(
+      pinnedIndex(desktopPins.pinnedWorkspacePaths, right.path),
+      pinnedIndex(desktopPins.pinnedWorkspacePaths, right.id)
+    );
+    return leftPin - rightPin
+      || latestGroupMs(right) - latestGroupMs(left)
+      || left.label.localeCompare(right.label);
+  }
+
+  function compareSessionsByRecency(left: SessionListItem, right: SessionListItem): number {
+    return (
+      right.updatedAtMs - left.updatedAtMs ||
+      sessionDisplayName(left).localeCompare(sessionDisplayName(right))
+    );
+  }
+
+  function withSelectedSessionFallback(sourceGroups: FolderGroup[]): FolderGroup[] {
+    const session = selectedSession;
+    if (!session) return sourceGroups;
+    if (sourceGroups.some((group) => group.sessions.some((item) => item.id === session.id))) {
+      return sourceGroups;
+    }
+    const path = groupPathForSession(session);
+    const existingIndex = sourceGroups.findIndex((group) => group.path === path || group.id === path);
+    if (existingIndex >= 0) {
+      return sourceGroups.map((group, index) =>
+        index === existingIndex
+          ? {
+              ...group,
+              sessionCount: group.sessionCount + 1,
+              sessions: [session, ...group.sessions].sort(compareSessionsByRecency)
+            }
+          : group
+      );
+    }
+    return [
+      {
+        id: path,
+        label: fallbackProjectLabel(session),
+        path,
+        sessionCount: 1,
+        sessions: [session]
+      },
+      ...sourceGroups
+    ].sort(compareFolderGroups);
+  }
+
   function activeAgentFromSession(session: SessionListItem, project: string): ActiveAgent {
     return {
       id: session.id,
@@ -275,20 +331,9 @@
   }
 
   let sortedGroups = $derived<FolderGroup[]>(
-    groups.slice().sort((left, right) => {
-      const leftPin = Math.min(
-        pinnedIndex(desktopPins.pinnedWorkspacePaths, left.path),
-        pinnedIndex(desktopPins.pinnedWorkspacePaths, left.id)
-      );
-      const rightPin = Math.min(
-        pinnedIndex(desktopPins.pinnedWorkspacePaths, right.path),
-        pinnedIndex(desktopPins.pinnedWorkspacePaths, right.id)
-      );
-      return leftPin - rightPin
-        || latestGroupMs(right) - latestGroupMs(left)
-        || left.label.localeCompare(right.label);
-    })
+    groups.slice().sort(compareFolderGroups)
   );
+  let workspaceGroups = $derived<FolderGroup[]>(withSelectedSessionFallback(sortedGroups));
 
   let realAgents = $derived<ActiveAgent[]>(
     sortedGroups
@@ -1792,7 +1837,7 @@
               />
             {:else}
               <Workspace
-                groups={sortedGroups}
+                groups={workspaceGroups}
                 settingsSnapshot={settingsSnapshot}
                 defaultWorkspaceCwd={defaultWorkspaceCwd}
                 loading={groupsLoading}
