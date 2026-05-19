@@ -138,7 +138,16 @@
 
   $effect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy) onClose();
+      if (e.key !== "Escape" || busy) return;
+      if (pickerOpen) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!pickerLoading) {
+          pickerOpen = false;
+        }
+        return;
+      }
+      onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
