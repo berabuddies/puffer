@@ -99,6 +99,24 @@ test("project memory includes older sessions beyond the first page", async ({ pa
   await expect(page.locator(".pf-pmem-title")).toHaveText("Deep memory session");
 });
 
+test("sidebar Workspace returns from agent detail to the workspace board", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page
+    .locator(".pf-sidebar-agents-list")
+    .getByRole("button", { name: /Browser regression/ })
+    .click();
+  await expect(page.locator(".pf-agent-detail")).toBeVisible();
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Workspace" }).click();
+
+  await expect(page.locator(".pf-pw-list")).toBeVisible();
+  await expect(page.locator(".pf-agent-detail")).toHaveCount(0);
+  await expect(page.locator(".pf-pw-project").filter({ hasText: "puffer" })).toBeVisible();
+});
+
 test("workspace board renders daemon session activity states", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

@@ -987,10 +987,8 @@
 
   function onSelectScreen(id: ScreenId) {
     tweaks = { ...tweaks, screen: id };
-    if (id !== "workspace") {
-      openProjectId = null;
-      openAgentSessionId = null;
-    }
+    openProjectId = null;
+    openAgentSessionId = null;
   }
 
   function onOpenAgent(id: string) {
