@@ -998,7 +998,8 @@
 
   async function openSession(session: SessionListItem, options: OpenSessionOptions = {}) {
     const showLoading = options.showLoading ?? selectedSession?.id !== session.id;
-    const resetLiveState = options.resetLiveState ?? true;
+    const sameSession = selectedSession?.id === session.id;
+    const resetLiveState = options.resetLiveState ?? !sameSession;
     const loadGeneration = ++sessionLoadGeneration;
     if (showLoading) sessionLoading = true;
     if (resetLiveState && selectedSession?.id !== session.id) {

@@ -2518,6 +2518,60 @@ test("streamed assistant text stays visible through transcript reload", async ({
   expect(Math.max(...samples.slice(firstVisible))).toBe(1);
 });
 
+test("reopening the active streaming agent keeps live turn state", async ({ page }) => {
+  const streamedText = "Same agent reopen keeps the active stream.";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-active-reopen",
+        displayName: "Active reopen",
+        title: "Active reopen",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Active reopen/);
+  await page.locator(".pf-composer textarea").fill("Keep streaming while I reopen");
+  await page.getByRole("button", { name: "Send" }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.sessionId === "session-active-reopen"
+  );
+  const turnId = "turn-session-active-reopen";
+  daemon.emit("session:session-active-reopen:event", { type: "turn-start", turnId });
+  daemon.emit("session:session-active-reopen:event", {
+    type: "text-delta",
+    turnId,
+    delta: streamedText
+  });
+
+  await expect(page.getByText(streamedText)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Stop turn" })).toBeVisible();
+
+  daemon.delayResponse(
+    "load_session_detail",
+    (request) => request.params.sessionId === "session-active-reopen",
+    120
+  );
+  await page
+    .locator(".pf-sidebar-agent-row")
+    .filter({ hasText: "Active reopen" })
+    .getByRole("button", { name: /Active reopen/ })
+    .click();
+
+  await page.waitForTimeout(180);
+  await expect(page.getByText(streamedText)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Stop turn" })).toBeVisible();
+});
+
 test("final-only assistant text appears before delayed transcript reload", async ({ page }) => {
   const finalText = "Final-only answer appears before reload finishes.";
   const daemon = new FakeDaemon({
