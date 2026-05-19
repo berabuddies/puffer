@@ -221,7 +221,7 @@
         {:else}
           {#each filteredEntries as entry (entry.provider + "::" + entry.model.id)}
             {@const isCurrent =
-              entry.provider === currentProvider && entry.model.id === currentModel}
+              providerIdsEquivalent(entry.provider, currentProvider) && entry.model.id === currentModel}
             <button
               type="button"
               class="row"

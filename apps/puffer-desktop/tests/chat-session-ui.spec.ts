@@ -2133,6 +2133,75 @@ test("model picker only offers authenticated agent providers", async ({ page }) 
   await expect(providerList.getByRole("button", { name: "GitHub", exact: true })).toHaveCount(0);
 });
 
+test("model picker marks alias-equivalent provider models as selected", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "codex",
+        kind: "oauth",
+        email: "tester@example.com",
+        expiresAtMs: null,
+        scopes: [],
+        planType: "test",
+        organizationName: null
+      }
+    ],
+    providers: [
+      {
+        id: "codex",
+        displayName: "Codex",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 1,
+        authModes: ["oauth"],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ],
+    sessions: [
+      {
+        sessionId: "session-model-picker-alias",
+        displayName: "Model picker alias",
+        title: "Model picker alias",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "openai",
+        modelId: "gpt-5",
+        timeline: []
+      }
+    ],
+    providerModels: {
+      codex: [
+        {
+          id: "gpt-5",
+          displayName: "GPT-5",
+          provider: "codex",
+          api: "openai-responses",
+          supportsTools: true,
+          supportsVision: false,
+          contextWindow: null,
+          maxOutputTokens: null,
+          thinkingOptions: [],
+          defaultThinkingOptionId: null,
+          isDefault: true
+        }
+      ]
+    }
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Model picker alias/);
+  await page.locator(".pf-composer .picker .trigger").click();
+
+  const currentRow = page.locator(".pf-composer .picker .row").filter({ hasText: "GPT-5" });
+  await expect(currentRow).toHaveAttribute("aria-selected", "true");
+  await expect(currentRow.locator(".row-name")).toHaveText("GPT-5");
+});
+
 test("model picker ignores stale provider switch responses", async ({ page }) => {
   const auth = [
     {
