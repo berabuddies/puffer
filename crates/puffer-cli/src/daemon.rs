@@ -1011,11 +1011,12 @@ fn handle_workflow_run_show(state: &DaemonState, params: &Value) -> Result<Value
 /// the refreshed settings snapshot so the UI can re-render without a
 /// second round-trip.
 fn handle_login_with_api_key(state: &DaemonState, params: &Value) -> Result<Value> {
-    let provider_id = params
+    let requested_provider_id = params
         .get("providerId")
         .or_else(|| params.get("provider_id"))
         .and_then(|v| v.as_str())
         .context("missing providerId")?;
+    let provider_id = canonical_desktop_provider_id(requested_provider_id);
     let api_key = params
         .get("apiKey")
         .or_else(|| params.get("api_key"))
@@ -1028,14 +1029,14 @@ fn handle_login_with_api_key(state: &DaemonState, params: &Value) -> Result<Valu
         &mut inputs.auth_store,
         &inputs.providers,
         &auth_path,
-        provider_id,
+        &provider_id,
         api_key,
     )?;
     let _ = desktop_api::ensure_default_routing(
         &state.paths,
         &inputs.providers,
         &inputs.auth_store,
-        provider_id,
+        &provider_id,
     );
     reload_daemon_config(state)?;
     // Rebuild so provider discovery can pick up the newly-stored key.
@@ -1054,17 +1055,18 @@ fn handle_login_with_api_key(state: &DaemonState, params: &Value) -> Result<Valu
 
 /// Runs the provider OAuth flow from the daemon host and returns a fresh snapshot.
 fn handle_login_with_oauth(state: &DaemonState, params: &Value) -> Result<Value> {
-    let provider_id = params
+    let requested_provider_id = params
         .get("providerId")
         .or_else(|| params.get("provider_id"))
         .and_then(|v| v.as_str())
         .context("missing providerId")?;
+    let provider_id = canonical_desktop_provider_id(requested_provider_id);
 
     let mut inputs = state.build_runtime_inputs()?;
     let auth_path = state.paths.user_config_dir.join("auth.json");
     let listener = crate::authflow::CallbackListener::bind_localhost("/callback")?;
     let bundle =
-        oauth_login_bundle_for_provider(&inputs.providers, provider_id, listener.redirect_uri())?;
+        oauth_login_bundle_for_provider(&inputs.providers, &provider_id, listener.redirect_uri())?;
     let launch_url = bundle
         .automatic_authorization_url
         .as_deref()
@@ -1076,7 +1078,7 @@ fn handle_login_with_oauth(state: &DaemonState, params: &Value) -> Result<Value>
         .wait_for_callback_url(Duration::from_secs(180))?
         .ok_or_else(|| anyhow::anyhow!("timed out waiting for OAuth callback"))?;
 
-    match oauth_family_for_provider(&inputs.providers, provider_id) {
+    match oauth_family_for_provider(&inputs.providers, &provider_id) {
         Some(OauthFamily::OpenAi) => {
             let (code, parsed_state) = parse_openai_authorization_input(&callback);
             let code = code
@@ -1112,7 +1114,7 @@ fn handle_login_with_oauth(state: &DaemonState, params: &Value) -> Result<Value>
                 Some(&redirect_uri),
                 Some(ANTHROPIC_API_BASE_URL),
             )?;
-            store_anthropic_credential(&mut inputs.auth_store, provider_id, credential)?;
+            store_anthropic_credential(&mut inputs.auth_store, &provider_id, credential)?;
         }
         None => anyhow::bail!("oauth login is not implemented for {provider_id}"),
     }
@@ -1122,7 +1124,7 @@ fn handle_login_with_oauth(state: &DaemonState, params: &Value) -> Result<Value>
         &state.paths,
         &inputs.providers,
         &inputs.auth_store,
-        provider_id,
+        &provider_id,
     );
     reload_daemon_config(state)?;
     let fresh = state.build_runtime_inputs()?;
@@ -1148,11 +1150,12 @@ fn handle_list_external_credentials(state: &DaemonState) -> Result<Value> {
 
 /// Imports a discovered external credential and returns a fresh settings snapshot.
 fn handle_import_external_credential(state: &DaemonState, params: &Value) -> Result<Value> {
-    let provider_id = params
+    let requested_provider_id = params
         .get("providerId")
         .or_else(|| params.get("provider_id"))
         .and_then(|v| v.as_str())
         .context("missing providerId")?;
+    let provider_id = canonical_desktop_provider_id(requested_provider_id);
     let source = params
         .get("source")
         .and_then(|v| v.as_str())
@@ -1165,14 +1168,14 @@ fn handle_import_external_credential(state: &DaemonState, params: &Value) -> Res
         &mut inputs.auth_store,
         &inputs.providers,
         &auth_path,
-        provider_id,
+        &provider_id,
         source,
     )?;
     let _ = desktop_api::ensure_default_routing(
         &state.paths,
         &inputs.providers,
         &inputs.auth_store,
-        provider_id,
+        &provider_id,
     );
     reload_daemon_config(state)?;
     let fresh = state.build_runtime_inputs()?;
@@ -1197,14 +1200,15 @@ fn reload_daemon_config(state: &DaemonState) -> Result<()> {
 /// Removes stored credentials for a provider and returns the refreshed
 /// settings snapshot.
 fn handle_logout_provider(state: &DaemonState, params: &Value) -> Result<Value> {
-    let provider_id = params
+    let requested_provider_id = params
         .get("providerId")
         .or_else(|| params.get("provider_id"))
         .and_then(|v| v.as_str())
         .context("missing providerId")?;
+    let provider_id = canonical_desktop_provider_id(requested_provider_id);
     let mut inputs = state.build_runtime_inputs()?;
     let auth_path = state.paths.user_config_dir.join("auth.json");
-    desktop_api::logout_provider(&mut inputs.auth_store, &auth_path, provider_id)?;
+    desktop_api::logout_provider(&mut inputs.auth_store, &auth_path, &provider_id)?;
     let fresh = state.build_runtime_inputs()?;
     let config = state.config.lock().unwrap().clone();
     let snapshot: SettingsSnapshotDto = desktop_api::load_settings_snapshot(
@@ -2775,14 +2779,15 @@ fn apply_daemon_yolo_mode(app_state: &mut AppState) {
 mod tests {
     use super::{
         apply_daemon_yolo_mode, apply_turn_model_override, apply_turn_request_options,
-        handle_create_session, handle_list_provider_models, model_descriptor_dto,
+        handle_create_session, handle_import_external_credential, handle_list_provider_models,
+        handle_login_with_api_key, handle_logout_provider, model_descriptor_dto,
         resolve_create_session_model_id, run_off_runtime, DaemonState, TurnRequestOptions,
     };
     use indexmap::IndexMap;
     use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
     use puffer_core::{AppState, ModelPreferenceFamily};
     use puffer_provider_registry::{
-        Modality, ModelDescriptor, ProviderDescriptor, ProviderRegistry,
+        AuthStore, Modality, ModelDescriptor, ProviderDescriptor, ProviderRegistry,
     };
     use puffer_session_store::{SessionMetadata, SessionStore};
     use serde_json::json;
@@ -3067,6 +3072,102 @@ mod tests {
                 .is_some_and(|models| !models.is_empty()),
             "{response}"
         );
+    }
+
+    #[test]
+    fn login_with_api_key_accepts_desktop_provider_aliases() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let auth_path = paths.user_config_dir.join("auth.json");
+        let state = DaemonState::load(
+            workspace_root,
+            paths.clone(),
+            "token".into(),
+            true,
+            false,
+            false,
+        )
+        .expect("daemon state");
+
+        let response = handle_login_with_api_key(
+            &state,
+            &json!({ "providerId": "codex", "apiKey": "sk-test" }),
+        )
+        .expect("login with api key");
+        let auth = AuthStore::load(&auth_path).expect("auth store");
+
+        assert!(auth.get("openai").is_some());
+        assert!(auth.get("codex").is_none());
+        assert!(response["auth"]
+            .as_array()
+            .is_some_and(|auth| auth.iter().any(|item| item["providerId"] == "openai")));
+    }
+
+    #[test]
+    fn import_external_credential_accepts_desktop_provider_aliases() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let error = handle_import_external_credential(
+            &state,
+            &json!({ "providerId": "codex", "source": "not-real" }),
+        )
+        .expect_err("invalid source should fail after provider alias lookup");
+
+        assert!(error
+            .to_string()
+            .contains("unknown import source `not-real`"));
+    }
+
+    #[test]
+    fn logout_provider_accepts_desktop_provider_aliases() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let auth_path = paths.user_config_dir.join("auth.json");
+        let mut auth = AuthStore::default();
+        auth.set_api_key("openai", "sk-test");
+        auth.save(&auth_path).expect("seed auth store");
+        let state = DaemonState::load(
+            workspace_root,
+            paths.clone(),
+            "token".into(),
+            true,
+            false,
+            false,
+        )
+        .expect("daemon state");
+
+        let response = handle_logout_provider(&state, &json!({ "providerId": "codex" }))
+            .expect("logout provider");
+        let auth = AuthStore::load(&auth_path).expect("auth store");
+
+        assert!(auth.get("openai").is_none());
+        assert!(response["auth"]
+            .as_array()
+            .is_some_and(|auth| auth.iter().all(|item| item["providerId"] != "openai")));
     }
 
     #[test]
