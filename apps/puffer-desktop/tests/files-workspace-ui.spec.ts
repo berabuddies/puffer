@@ -17,6 +17,13 @@ async function enterWorkspaceThroughForcedOnboarding(page: Page): Promise<void> 
   await page.getByRole("button", { name: /Continue/ }).click();
 }
 
+async function openCreateProjectDialog(page: Page) {
+  await page.getByRole("button", { name: "Create Project" }).click();
+  const dialog = page.getByRole("dialog", { name: "Create Project" });
+  await expect(dialog).toBeVisible();
+  return dialog;
+}
+
 const codexAuth = [
   {
     providerId: "codex",
@@ -691,14 +698,12 @@ test("connect project provider choice includes Anthropic", async ({ page }) => {
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.getByRole("button", { name: "Connect project" }).click();
-  const dialog = page.getByRole("dialog", { name: "Connect project" });
-  await expect(dialog).toBeVisible();
+  const dialog = await openCreateProjectDialog(page);
 
   await expect(dialog.getByRole("radio", { name: "Anthropic" })).toBeVisible();
   await dialog.getByRole("radio", { name: "Anthropic" }).click();
   await dialog.getByLabel("Directory").fill("/tmp/puffer-new-project");
-  await dialog.getByRole("button", { name: "Start agent" }).click();
+  await dialog.getByRole("button", { name: "Create" }).click();
 
   const createRequest = await daemon.waitForRequest("create_session");
   expect(createRequest.params).toMatchObject({
@@ -713,12 +718,10 @@ test("connect project ignores repeated start clicks while creating", async ({ pa
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.getByRole("button", { name: "Connect project" }).click();
-  const dialog = page.getByRole("dialog", { name: "Connect project" });
-  await expect(dialog).toBeVisible();
+  const dialog = await openCreateProjectDialog(page);
   await dialog.getByLabel("Directory").fill("/tmp/puffer-new-project");
 
-  await dialog.getByRole("button", { name: "Start agent" }).evaluate((button) => {
+  await dialog.getByRole("button", { name: "Create" }).evaluate((button) => {
     (button as HTMLButtonElement).click();
     (button as HTMLButtonElement).click();
   });
@@ -733,14 +736,12 @@ test("connect project provider picker only shows authenticated providers", async
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.getByRole("button", { name: "Connect project" }).click();
-  const dialog = page.getByRole("dialog", { name: "Connect project" });
-  await expect(dialog).toBeVisible();
+  const dialog = await openCreateProjectDialog(page);
 
   await expect(dialog.getByRole("radio", { name: "Codex" })).toBeVisible();
   await expect(dialog.getByRole("radio", { name: "Anthropic" })).toHaveCount(0);
   await dialog.getByLabel("Directory").fill("/tmp/puffer-new-project");
-  await dialog.getByRole("button", { name: "Start agent" }).click();
+  await dialog.getByRole("button", { name: "Create" }).click();
 
   const createRequest = await daemon.waitForRequest("create_session");
   expect(createRequest.params).toMatchObject({
@@ -767,14 +768,12 @@ test("connect project requires an authenticated provider before starting", async
   await daemon.open(page, { forceOnboarding: true, skipOnboarding: false });
   await enterWorkspaceThroughForcedOnboarding(page);
 
-  await page.getByRole("button", { name: "Connect project" }).click();
-  const dialog = page.getByRole("dialog", { name: "Connect project" });
-  await expect(dialog).toBeVisible();
+  const dialog = await openCreateProjectDialog(page);
   await expect(dialog.getByText("Connect a provider in Settings before starting a project.")).toBeVisible();
 
   await dialog.getByLabel("Directory").fill("/tmp/puffer-new-project");
-  await expect(dialog.getByRole("button", { name: "Start agent" })).toBeDisabled();
-  await dialog.getByRole("button", { name: "Start agent" }).evaluate((button) => {
+  await expect(dialog.getByRole("button", { name: "Create" })).toBeDisabled();
+  await dialog.getByRole("button", { name: "Create" }).evaluate((button) => {
     (button as HTMLButtonElement).click();
   });
 
@@ -787,8 +786,7 @@ test("connect project remote mode exposes binary override", async ({ page }) => 
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.getByRole("button", { name: "Connect project" }).click();
-  const dialog = page.getByRole("dialog", { name: "Connect project" });
+  const dialog = await openCreateProjectDialog(page);
   await dialog.getByRole("tab", { name: /Remote/ }).click();
 
   await expect(dialog.getByLabel("Remote binary")).toBeVisible();
@@ -806,8 +804,7 @@ test("connect project directory picker ignores stale path responses", async ({ p
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.getByRole("button", { name: "Connect project" }).click();
-  const dialog = page.getByRole("dialog", { name: "Connect project" });
+  const dialog = await openCreateProjectDialog(page);
   await dialog.getByRole("button", { name: "Browse…" }).click();
 
   const picker = dialog.getByLabel("Choose directory");
@@ -829,8 +826,7 @@ test("connect project mode switch closes the local directory picker", async ({ p
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.getByRole("button", { name: "Connect project" }).click();
-  const dialog = page.getByRole("dialog", { name: "Connect project" });
+  const dialog = await openCreateProjectDialog(page);
   await dialog.getByRole("button", { name: "Browse…" }).click();
 
   const picker = dialog.getByLabel("Choose directory");
@@ -847,8 +843,7 @@ test("connect project Escape closes directory picker before parent modal", async
   await daemon.install(page);
   await daemon.open(page);
 
-  await page.getByRole("button", { name: "Connect project" }).click();
-  const dialog = page.getByRole("dialog", { name: "Connect project" });
+  const dialog = await openCreateProjectDialog(page);
   await dialog.getByLabel("Directory").fill("/tmp/puffer-new-project");
   await dialog.getByRole("button", { name: "Browse…" }).click();
 
@@ -875,15 +870,16 @@ test("failed remote project creation restores the previous daemon", async ({ pag
     }
   });
 
-  await page.getByRole("button", { name: "Connect project" }).click();
-  const dialog = page.getByRole("dialog", { name: "Connect project" });
+  const dialog = await openCreateProjectDialog(page);
   await dialog.getByRole("tab", { name: /Remote/ }).click();
   await dialog.getByLabel("SSH target").fill("devbox");
   await dialog.getByLabel("Destination directory").fill("/tmp/remote-project");
-  await dialog.getByRole("button", { name: "Start agent" }).click();
+  await dialog.getByRole("button", { name: "Create" }).click();
 
   await localDaemon.waitForRequest("create_session");
-  await expect(dialog.locator(".pf-modal-status")).toContainText("remote create failed");
+  await expect(dialog.locator(".pf-modal-status-row .pf-modal-status-text")).toContainText(
+    "remote create failed"
+  );
 
   const activeToken = await page.evaluate(async () => {
     const mod = await import("/src/lib/api/daemonClient.ts");
@@ -905,14 +901,13 @@ test("connect project clears remote errors when switching modes", async ({ page 
     }
   });
 
-  await page.getByRole("button", { name: "Connect project" }).click();
-  const dialog = page.getByRole("dialog", { name: "Connect project" });
+  const dialog = await openCreateProjectDialog(page);
   await dialog.getByRole("tab", { name: /Remote/ }).click();
   await dialog.getByLabel("SSH target").fill("devbox");
   await dialog.getByLabel("Destination directory").fill("/tmp/remote-project");
-  await dialog.getByRole("button", { name: "Start agent" }).click();
+  await dialog.getByRole("button", { name: "Create" }).click();
 
-  const staleError = dialog.locator(".pf-modal-status", { hasText: "remote create failed" });
+  const staleError = dialog.locator(".pf-modal-status-row", { hasText: "remote create failed" });
   await expect(staleError).toBeVisible();
 
   await dialog.getByRole("tab", { name: /Local/ }).click();
@@ -937,12 +932,11 @@ test("successful remote project creation adopts remote daemon state", async ({ p
     }
   });
 
-  await page.getByRole("button", { name: "Connect project" }).click();
-  const dialog = page.getByRole("dialog", { name: "Connect project" });
+  const dialog = await openCreateProjectDialog(page);
   await dialog.getByRole("tab", { name: /Remote/ }).click();
   await dialog.getByLabel("SSH target").fill("devbox");
   await dialog.getByLabel("Destination directory").fill("/tmp/remote-project");
-  await dialog.getByRole("button", { name: "Start agent" }).click();
+  await dialog.getByRole("button", { name: "Create" }).click();
 
   const createRequest = await remoteDaemon.waitForRequest("create_session");
   expect(createRequest.params).toMatchObject({
@@ -1006,13 +1000,12 @@ test("remote project creation uses remote authenticated provider", async ({ page
     }
   });
 
-  await page.getByRole("button", { name: "Connect project" }).click();
-  const dialog = page.getByRole("dialog", { name: "Connect project" });
+  const dialog = await openCreateProjectDialog(page);
   await dialog.getByRole("radio", { name: "Anthropic" }).click();
   await dialog.getByRole("tab", { name: /Remote/ }).click();
   await dialog.getByLabel("SSH target").fill("devbox");
   await dialog.getByLabel("Destination directory").fill("/tmp/remote-project");
-  await dialog.getByRole("button", { name: "Start agent" }).click();
+  await dialog.getByRole("button", { name: "Create" }).click();
 
   const createRequest = await remoteDaemon.waitForRequest("create_session");
   expect(createRequest.params).toMatchObject({
@@ -1044,15 +1037,14 @@ test("remote project creation requires a remote authenticated provider", async (
     }
   });
 
-  await page.getByRole("button", { name: "Connect project" }).click();
-  const dialog = page.getByRole("dialog", { name: "Connect project" });
+  const dialog = await openCreateProjectDialog(page);
   await dialog.getByRole("tab", { name: /Remote/ }).click();
   await dialog.getByLabel("SSH target").fill("devbox");
   await dialog.getByLabel("Destination directory").fill("/tmp/remote-project");
-  await dialog.getByRole("button", { name: "Start agent" }).click();
+  await dialog.getByRole("button", { name: "Create" }).click();
 
   await remoteDaemon.waitForRequest("load_settings_snapshot");
-  await expect(dialog.locator(".pf-modal-status")).toContainText(
+  await expect(dialog.locator(".pf-modal-status-row .pf-modal-status-text")).toContainText(
     "Connect an agent provider on the remote host before starting a remote project."
   );
   expect(remoteDaemon.requests.some((request) => request.method === "create_session")).toBe(false);
