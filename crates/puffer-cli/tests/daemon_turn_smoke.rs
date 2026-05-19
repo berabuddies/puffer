@@ -218,6 +218,81 @@ fn daemon_uses_session_routing_when_turn_omits_provider_options() {
 }
 
 #[test]
+fn daemon_accepts_claude_alias_and_completes_mock_anthropic_turn() {
+    let mock = MockAnthropicServer::start("Claude smoke reply");
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let workspace = tempdir.path().join("workspace");
+    let puffer_home = tempdir.path().join("home");
+    let puffer_config = puffer_home.join(".puffer");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::create_dir_all(&puffer_config).expect("puffer config");
+    write_anthropic_provider_override(&workspace, &mock.base_url);
+    std::fs::write(
+        puffer_config.join("auth.json"),
+        json!({
+            "format_version": 1,
+            "providers": {
+                "anthropic": { "kind": "api_key", "key": "sk-ant-test" }
+            }
+        })
+        .to_string(),
+    )
+    .expect("auth store");
+    let discovery_cache = tempdir.path().join("discovery.json");
+    std::fs::write(&discovery_cache, discovery_cache_json()).expect("discovery cache");
+
+    let mut daemon = DaemonProcess::start(&workspace, &puffer_home, &discovery_cache);
+    let mut client = DaemonClient::connect(&daemon.handshake);
+
+    client.rpc(
+        "update_config",
+        json!({
+            "defaultProvider": "claude",
+            "defaultModel": "claude/claude-sonnet-4-5",
+        }),
+    );
+    let session = client.rpc(
+        "create_session",
+        json!({
+            "cwd": workspace.display().to_string(),
+            "providerId": "claude",
+            "modelId": "claude/claude-sonnet-4-5",
+        }),
+    );
+    assert_eq!(session["providerId"], "anthropic");
+    assert_eq!(session["modelId"], "claude-sonnet-4-5");
+    let session_id = session["sessionId"].as_str().expect("session id");
+
+    let turn = client.rpc(
+        "run_agent_turn",
+        json!({
+            "sessionId": session_id,
+            "message": "Say exactly: Claude smoke reply",
+            "permissionMode": "read-only",
+        }),
+    );
+    let turn_id = turn["turnId"].as_str().expect("turn id");
+    let complete = client.wait_for_event(|message| {
+        message["event"] == format!("session:{session_id}:event")
+            && message["payload"]["type"] == "turn-complete"
+    });
+    assert_eq!(complete["payload"]["turnId"], turn_id);
+    assert_eq!(complete["payload"]["assistantText"], "Claude smoke reply");
+    assert_eq!(mock.messages_calls.load(Ordering::SeqCst), 1);
+    let body = mock.last_messages_body();
+    assert!(
+        body.contains("Say exactly: Claude smoke reply"),
+        "provider request body should include the user instruction: {body}"
+    );
+    assert!(
+        body.contains("claude-sonnet-4-5"),
+        "provider request body should include the selected Claude model: {body}"
+    );
+
+    daemon.stop();
+}
+
+#[test]
 fn daemon_turn_error_refreshes_workspace_and_marks_session_idle() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let workspace = tempdir.path().join("workspace");
@@ -514,6 +589,64 @@ impl Drop for MockOpenAiServer {
     }
 }
 
+struct MockAnthropicServer {
+    base_url: String,
+    messages_calls: Arc<AtomicUsize>,
+    last_body: Arc<Mutex<String>>,
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl MockAnthropicServer {
+    fn start(reply: &'static str) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock anthropic");
+        listener.set_nonblocking(true).expect("nonblocking mock");
+        let address = listener.local_addr().expect("mock address");
+        let stop = Arc::new(AtomicBool::new(false));
+        let messages_calls = Arc::new(AtomicUsize::new(0));
+        let last_body = Arc::new(Mutex::new(String::new()));
+        let thread_stop = Arc::clone(&stop);
+        let thread_calls = Arc::clone(&messages_calls);
+        let thread_body = Arc::clone(&last_body);
+        let handle = thread::spawn(move || {
+            while !thread_stop.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        handle_mock_anthropic_stream(stream, reply, &thread_calls, &thread_body);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept mock anthropic request: {error}"),
+                }
+            }
+        });
+        Self {
+            base_url: format!("http://{address}"),
+            messages_calls,
+            last_body,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn last_messages_body(&self) -> String {
+        self.last_body.lock().unwrap().clone()
+    }
+}
+
+impl Drop for MockAnthropicServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Ok(mut stream) = TcpStream::connect(self.base_url.trim_start_matches("http://")) {
+            let _ = stream.write_all(b"GET /shutdown HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 fn read_handshake_line(
     stdout: &mut impl Read,
     child: &mut Child,
@@ -613,6 +746,74 @@ fn handle_mock_openai_stream(
     }
 }
 
+fn handle_mock_anthropic_stream(
+    mut stream: TcpStream,
+    reply: &str,
+    messages_calls: &AtomicUsize,
+    last_body: &Mutex<String>,
+) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let request = read_http_request(&mut stream);
+    let text = String::from_utf8_lossy(&request);
+    let path = request_path(&text);
+    if path.starts_with("/v1/models") {
+        write_http_json(
+            &mut stream,
+            json!({ "data": [{ "id": "claude-sonnet-4-5", "display_name": "Claude Sonnet 4.5" }] }),
+        );
+    } else if path.starts_with("/v1/messages") {
+        messages_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(body) = text.split("\r\n\r\n").nth(1) {
+            *last_body.lock().unwrap() = body.to_string();
+        }
+        write_http_response(
+            &mut stream,
+            200,
+            "text/event-stream",
+            anthropic_text_stream(reply).as_bytes(),
+        );
+    } else {
+        write_http_response(&mut stream, 404, "text/plain", b"not found");
+    }
+}
+
+fn read_http_request(stream: &mut TcpStream) -> Vec<u8> {
+    let mut request = Vec::new();
+    let mut buf = [0_u8; 1024];
+    loop {
+        let read = stream.read(&mut buf).expect("read mock request");
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&buf[..read]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let content_length = parse_content_length(&request).unwrap_or(0);
+            let header_end = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|index| index + 4)
+                .unwrap_or(request.len());
+            while request.len() < header_end + content_length {
+                let read = stream.read(&mut buf).expect("read mock body");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..read]);
+            }
+            break;
+        }
+    }
+    request
+}
+
+fn request_path(text: &str) -> String {
+    text.lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("/")
+        .to_string()
+}
+
 fn parse_content_length(request: &[u8]) -> Option<usize> {
     let text = String::from_utf8_lossy(request);
     text.lines().find_map(|line| {
@@ -623,6 +824,64 @@ fn parse_content_length(request: &[u8]) -> Option<usize> {
             None
         }
     })
+}
+
+fn anthropic_text_stream(reply: &str) -> String {
+    [
+        sse_event(
+            "message_start",
+            json!({
+                "type": "message_start",
+                "message": {
+                    "id": "msg_daemon_smoke",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-5",
+                    "content": [],
+                    "usage": {
+                        "input_tokens": 10,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 0,
+                        "output_tokens": 1
+                    }
+                }
+            }),
+        ),
+        sse_event(
+            "content_block_start",
+            json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": { "type": "text", "text": "" }
+            }),
+        ),
+        sse_event(
+            "content_block_delta",
+            json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": { "type": "text_delta", "text": reply }
+            }),
+        ),
+        sse_event(
+            "content_block_stop",
+            json!({ "type": "content_block_stop", "index": 0 }),
+        ),
+        sse_event(
+            "message_delta",
+            json!({
+                "type": "message_delta",
+                "delta": { "stop_reason": "end_turn" },
+                "usage": { "output_tokens": 4 }
+            }),
+        ),
+        sse_event("message_stop", json!({ "type": "message_stop" })),
+    ]
+    .join("")
+}
+
+fn sse_event(event: &str, data: Value) -> String {
+    format!("event:{event}\ndata:{data}\n\n")
 }
 
 fn write_http_json(stream: &mut TcpStream, value: Value) {
@@ -638,6 +897,43 @@ fn write_http_response(stream: &mut TcpStream, status: u16, content_type: &str, 
     );
     stream.write_all(header.as_bytes()).expect("write header");
     stream.write_all(body).expect("write body");
+}
+
+fn write_anthropic_provider_override(workspace: &Path, base_url: &str) {
+    let provider_dir = workspace
+        .join(".puffer")
+        .join("resources")
+        .join("providers");
+    std::fs::create_dir_all(&provider_dir).expect("workspace provider dir");
+    std::fs::write(
+        provider_dir.join("anthropic.yaml"),
+        format!(
+            r#"id: anthropic
+display_name: Anthropic
+base_url: "{base_url}"
+default_api: anthropic-messages
+auth_modes:
+  - api_key
+  - oauth
+discovery:
+  path: /v1/models
+  response: anthropic_models
+  api: anthropic-messages
+  context_window: 200000
+  max_output_tokens: 8192
+  supports_reasoning: true
+models:
+  - id: claude-sonnet-4-5
+    display_name: Claude Sonnet 4.5
+    provider: anthropic
+    api: anthropic-messages
+    context_window: 200000
+    max_output_tokens: 8192
+    supports_reasoning: true
+"#
+        ),
+    )
+    .expect("write anthropic provider override");
 }
 
 fn closed_http_base_url() -> String {
