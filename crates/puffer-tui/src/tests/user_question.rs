@@ -174,6 +174,71 @@ fn user_question_response_preserves_composer_draft() {
 }
 
 #[test]
+fn user_question_ctrl_c_interrupts_pending_turn() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let mut state = AppState::new(
+        PufferConfig::default(),
+        tempdir.path().to_path_buf(),
+        session,
+    );
+    let mut resources = sample_resources();
+    let mut providers = sample_providers();
+    let mut auth_store = sample_auth_store();
+    let commands = supported_commands();
+    let (_event_tx, event_rx) = mpsc::channel();
+    let (response_tx, response_rx) = mpsc::channel();
+    let cancel = puffer_core::CancelToken::new();
+    let cancel_handle = cancel.clone();
+    let mut tui = TuiState {
+        pending_submit: Some(PendingSubmit {
+            prompt: "hi".to_string(),
+            receiver: event_rx,
+            rendered_tool_invocations: 0,
+            pending_tool_calls: Vec::new(),
+            started_at: std::time::Instant::now(),
+            thinking_active: false,
+            status_hint: None,
+            cancel,
+        }),
+        overlay: Some(OverlayState::UserQuestionPrompt {
+            overlay: UserQuestionOverlay::from_value(sample_question_payload()).unwrap(),
+        }),
+        pending_user_question_request: Some(PendingUserQuestionRequest { response_tx }),
+        ..TuiState::default()
+    };
+
+    handle_key(
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &commands,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+
+    assert!(cancel_handle.is_cancelled());
+    assert!(!tui.has_pending_submit());
+    assert!(tui.overlay.is_none());
+    assert!(tui.pending_user_question_request.is_none());
+    assert!(response_rx.try_recv().is_err());
+    assert!(state.transcript.iter().any(|message| {
+        message.role == MessageRole::System && message.text == "Interrupted by user."
+    }));
+}
+
+#[test]
 fn user_question_number_shortcut_sends_single_select_answer() {
     let (response_tx, response_rx) = mpsc::channel();
     let mut tui = TuiState {

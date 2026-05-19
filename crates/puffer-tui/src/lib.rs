@@ -754,7 +754,7 @@ fn handle_overlay_key(
 ) -> Result<bool> {
     if matches!(
         tui.overlay.as_ref(),
-        Some(OverlayState::PermissionPrompt { .. })
+        Some(OverlayState::PermissionPrompt { .. } | OverlayState::UserQuestionPrompt { .. })
     ) && matches!(key.code, KeyCode::Char('c'))
         && key.modifiers.contains(KeyModifiers::CONTROL)
         && tui.has_pending_submit()
@@ -762,7 +762,9 @@ fn handle_overlay_key(
         let loop_active = tui.active_loop.is_some();
         cancel_pending_submit(state, session_store, tui)?;
         tui.pending_permission_request = None;
-        set_overlay_state(tui, None);
+        tui.pending_user_question_request = None;
+        tui.overlay = None;
+        tui.slash_selection = 0;
         if loop_active {
             tui.active_loop = None;
             tui.queued_prompts.clear();
