@@ -11,7 +11,7 @@
   import { canInvokeTauri, currentDaemonClient, switchDaemonClient } from "../../api/daemonClient";
   import {
     canonicalDaemonProviderId,
-    isAgentProviderId,
+    providerCanRunAgent,
     providerIdInSet,
     providerIdsEquivalent
   } from "../../providerIds";
@@ -110,7 +110,7 @@
   function providerOptionsFor(source: SettingsSnapshot | null): ProviderSummary[] {
     const authenticatedProviderIds = (source?.auth ?? []).map((entry) => entry.providerId);
     return (source?.providers?.length ? source.providers : fallbackProviders).filter((provider) =>
-      isAgentProviderId(provider.id) &&
+      providerCanRunAgent(provider) &&
       (source === null || providerIdInSet(provider.id, authenticatedProviderIds))
     );
   }

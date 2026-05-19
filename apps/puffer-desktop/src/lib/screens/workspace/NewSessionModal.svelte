@@ -2,7 +2,7 @@
   import Icon from "../../design/Icon.svelte";
   import {
     canonicalDaemonProviderId,
-    isAgentProviderId,
+    providerCanRunAgent,
     providerIdInSet,
     providerIdsEquivalent
   } from "../../providerIds";
@@ -56,7 +56,7 @@
 
   let providerOptions = $derived(
     (snapshot?.providers?.length ? snapshot.providers : fallbackProviders).filter((provider) =>
-      isAgentProviderId(provider.id) &&
+      providerCanRunAgent(provider) &&
       (snapshot === null || providerIdInSet(provider.id, authenticatedProviderIds))
     )
   );
@@ -81,7 +81,8 @@
   function providerDetail(provider: ProviderSummary): string {
     if (provider.id === "codex" || provider.id === "openai") return "OpenAI Codex CLI";
     if (provider.id === "claude" || provider.id === "anthropic") return "Claude Code CLI";
-    return "Puffer CLI";
+    if (provider.id === "puffer") return "Puffer CLI";
+    return provider.defaultApi ? `${provider.defaultApi} provider` : "Model provider";
   }
 
   $effect(() => {

@@ -3,7 +3,12 @@
 
   import Icon, { type IconName } from "../design/Icon.svelte";
   import LoginView from "../components/LoginView.svelte";
-  import { isAgentProviderId, providerIdInSet, providerIdsEquivalent } from "../providerIds";
+  import {
+    providerCanRunAgent,
+    providerIdCanRunAgent,
+    providerIdInSet,
+    providerIdsEquivalent
+  } from "../providerIds";
   import type { AccentKey, DensityKey, FontMixKey, ThemeKey, Tweaks } from "../shell/tweaks";
   import {
     addMcpServer,
@@ -225,7 +230,7 @@
   async function loadModelsForProvider(providerId: string) {
     if (
       !providerId ||
-      !isAgentProviderId(providerId)
+      !providerIdCanRunAgent(providerId, props.snapshot?.providers ?? [])
     ) {
       return;
     }
@@ -322,7 +327,7 @@
   let defaultRouteProviders = $derived.by(() => {
     const authIds = (props.snapshot?.auth ?? []).map((auth) => auth.providerId);
     return (props.snapshot?.providers ?? []).filter(
-      (provider) => isAgentProviderId(provider.id) && providerIdInSet(provider.id, authIds)
+      (provider) => providerCanRunAgent(provider) && providerIdInSet(provider.id, authIds)
     );
   });
 

@@ -6,13 +6,46 @@ export function canonicalDaemonProviderId(providerId: string): string {
   return providerId;
 }
 
-const AGENT_PROVIDER_IDS = new Set(["openai", "anthropic", "puffer"]);
+const BUILTIN_AGENT_PROVIDER_IDS = new Set(["openai", "anthropic", "puffer"]);
+const NON_AGENT_PROVIDER_IDS = new Set(["github"]);
+const NON_AGENT_APIS = new Set(["", "oauth", "none", "disabled"]);
+
+type ProviderCapability = {
+  id: string;
+  defaultApi?: string | null;
+  modelCount?: number | null;
+};
 
 /** True when a provider id can run an agent session. */
 export function isAgentProviderId(providerId: string | null | undefined): boolean {
   const trimmed = providerId?.trim();
   if (!trimmed) return false;
-  return AGENT_PROVIDER_IDS.has(canonicalDaemonProviderId(trimmed).toLowerCase());
+  const canonical = canonicalDaemonProviderId(trimmed).toLowerCase();
+  return BUILTIN_AGENT_PROVIDER_IDS.has(canonical) && !NON_AGENT_PROVIDER_IDS.has(canonical);
+}
+
+/** True when a provider descriptor exposes an agent-capable model API. */
+export function providerCanRunAgent(provider: ProviderCapability | null | undefined): boolean {
+  if (!provider) return false;
+  const id = provider.id.trim();
+  if (!id) return false;
+  const canonical = canonicalDaemonProviderId(id).toLowerCase();
+  if (NON_AGENT_PROVIDER_IDS.has(canonical)) return false;
+  if (BUILTIN_AGENT_PROVIDER_IDS.has(canonical)) return true;
+  const api = provider.defaultApi?.trim().toLowerCase() ?? "";
+  if (!NON_AGENT_APIS.has(api)) return true;
+  return (provider.modelCount ?? 0) > 0;
+}
+
+/** True when an id is backed by a known agent-capable provider descriptor. */
+export function providerIdCanRunAgent(
+  providerId: string | null | undefined,
+  providers: Iterable<ProviderCapability | null | undefined> = []
+): boolean {
+  for (const provider of providers) {
+    if (providerIdsEquivalent(provider?.id, providerId)) return providerCanRunAgent(provider);
+  }
+  return isAgentProviderId(providerId);
 }
 
 /** True when two provider ids refer to the same daemon provider. */

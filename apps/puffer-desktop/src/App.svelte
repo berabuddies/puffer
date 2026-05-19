@@ -62,7 +62,7 @@
     type ConnectionState
   } from "./lib/api/daemonClient";
   import { sessionDisplayName, sessionDisplayTitle } from "./lib/sessionDisplay";
-  import { isAgentProviderId, providerIdInSet } from "./lib/providerIds";
+  import { providerIdCanRunAgent, providerIdInSet } from "./lib/providerIds";
   import type { UnlistenFn } from "@tauri-apps/api/event";
   import type {
     DesktopPreferences,
@@ -774,7 +774,9 @@
   }
 
   function hasAgentProviderAuth(snapshot: SettingsSnapshot | null): boolean {
-    return (snapshot?.auth ?? []).some((auth) => isAgentProviderId(auth.providerId));
+    return (snapshot?.auth ?? []).some((auth) =>
+      providerIdCanRunAgent(auth.providerId, snapshot?.providers ?? [])
+    );
   }
 
   function shouldShowOnboarding(snapshot: SettingsSnapshot | null): boolean {
@@ -1609,13 +1611,16 @@
 
   function providerIsAuthenticated(providerId: string | null | undefined): boolean {
     if (!providerId) return true;
-    if (!isAgentProviderId(providerId)) return false;
-    if (!settingsSnapshot) return true;
+    const snapshot = settingsSnapshot;
+    if (!providerIdCanRunAgent(providerId, snapshot?.providers ?? [])) return false;
+    if (!snapshot) return true;
     return providerIdInSet(
       providerId,
-      settingsSnapshot.auth
+      snapshot.auth
         .map((auth) => auth.providerId)
-        .filter((authProviderId) => isAgentProviderId(authProviderId))
+        .filter((authProviderId) =>
+          providerIdCanRunAgent(authProviderId, snapshot.providers)
+        )
     );
   }
 
@@ -1654,8 +1659,11 @@
     }
     const requestedProviderId =
       options.providerId ?? sessionAtSubmit.providerId ?? settingsSnapshot?.config.defaultProvider;
-    if (requestedProviderId && !isAgentProviderId(requestedProviderId)) {
-      const detail = `${requestedProviderId} cannot run agent sessions. Select Codex, Claude, or Puffer.`;
+    if (
+      requestedProviderId &&
+      !providerIdCanRunAgent(requestedProviderId, settingsSnapshot?.providers ?? [])
+    ) {
+      const detail = `${requestedProviderId} cannot run agent sessions. Select an authenticated model provider.`;
       statusMessage = detail;
       appendAgentError("Provider unavailable", detail, "provider-agent");
       return false;

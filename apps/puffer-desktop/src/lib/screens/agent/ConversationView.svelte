@@ -29,8 +29,9 @@
   } from "../../api/desktop";
   import {
     canonicalDaemonProviderId,
-    isAgentProviderId,
-    providerIdInSet
+    providerIdCanRunAgent,
+    providerIdInSet,
+    providerIdsEquivalent
   } from "../../providerIds";
 
   const ENGINEER_NAME = "Engineer";
@@ -113,8 +114,17 @@
   );
 
   let fastModeAvailable = $derived(modelSupportsFastMode(selectedModelId));
+  let selectedProviderModelSourceId = $derived.by(() => {
+    if (!selectedProviderId) return null;
+    return (
+      settingsSnapshot?.providers?.find((provider) =>
+        providerIdsEquivalent(provider.id, selectedProviderId)
+      )?.id ?? selectedProviderId
+    );
+  });
   let selectedModelInfo = $derived(
-    thinkingProviderId === selectedProviderId
+    selectedProviderModelSourceId &&
+      providerIdsEquivalent(thinkingProviderId, selectedProviderModelSourceId)
       ? thinkingModels.find((model) => model.id === selectedModelId) ?? null
       : null
   );
@@ -129,12 +139,14 @@
   let allowProviderSwitch = $derived(Boolean(session) && !conversationStarted && !turnRunning);
   let authenticatedProviderIds = $derived((settingsSnapshot?.auth ?? []).map((entry) => entry.providerId));
   let authenticatedAgentProviderIds = $derived(
-    authenticatedProviderIds.filter((providerId) => isAgentProviderId(providerId))
+    authenticatedProviderIds.filter((providerId) =>
+      providerIdCanRunAgent(providerId, settingsSnapshot?.providers ?? [])
+    )
   );
   let selectedProviderAuthenticated = $derived(
     settingsSnapshot === null ||
       !selectedProviderId ||
-      (isAgentProviderId(selectedProviderId) &&
+      (providerIdCanRunAgent(selectedProviderId, settingsSnapshot?.providers ?? []) &&
         providerIdInSet(selectedProviderId, authenticatedAgentProviderIds))
   );
   let providerSwitchCanRecover = $derived(
@@ -460,7 +472,7 @@
   });
 
   $effect(() => {
-    const providerId = selectedProviderId;
+    const providerId = selectedProviderModelSourceId;
     if (!providerId) {
       thinkingProviderId = null;
       thinkingModels = [];
@@ -486,7 +498,12 @@
   });
 
   $effect(() => {
-    if (!selectedProviderId || thinkingProviderId !== selectedProviderId || thinkingModels.length === 0) {
+    if (
+      !selectedProviderId ||
+      !selectedProviderModelSourceId ||
+      !providerIdsEquivalent(thinkingProviderId, selectedProviderModelSourceId) ||
+      thinkingModels.length === 0
+    ) {
       return;
     }
     if (selectedModelId && thinkingModels.some((model) => model.id === selectedModelId)) return;

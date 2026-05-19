@@ -3,7 +3,7 @@
   import BrandLogo from "../design/BrandLogo.svelte";
   import Puffer from "../design/Puffer.svelte";
   import Icon from "../design/Icon.svelte";
-  import { isAgentProviderId } from "../providerIds";
+  import { providerIdCanRunAgent } from "../providerIds";
   import type { ExternalCredential, SettingsSnapshot } from "../types";
 
   type Props = {
@@ -24,7 +24,9 @@
   let props: Props = $props();
 
   let agentAuthCount = $derived(
-    (props.snapshot?.auth ?? []).filter((auth) => isAgentProviderId(auth.providerId)).length
+    (props.snapshot?.auth ?? []).filter((auth) =>
+      providerIdCanRunAgent(auth.providerId, props.snapshot?.providers ?? [])
+    ).length
   );
   let signedIn = $derived(agentAuthCount > 0);
 

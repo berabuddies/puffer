@@ -52,6 +52,29 @@ const canonicalProviderAuth = [
   }
 ];
 
+const groqProvider = {
+  id: "groq",
+  displayName: "Groq",
+  baseUrl: "https://api.groq.com/openai",
+  defaultApi: "openai-completions",
+  modelCount: 1,
+  authModes: ["api_key"],
+  sourceKind: "test",
+  sourcePath: null
+};
+
+const groqAuth = [
+  {
+    providerId: "groq",
+    kind: "api_key",
+    email: null,
+    expiresAtMs: null,
+    scopes: [],
+    planType: null,
+    organizationName: null
+  }
+];
+
 test("Files tab close button works from the keyboard", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
@@ -739,6 +762,23 @@ test("new agent provider picker only shows authenticated providers", async ({ pa
   });
 });
 
+test("new agent provider picker supports authenticated custom model providers", async ({ page }) => {
+  const daemon = new FakeDaemon({ auth: groqAuth, providers: [groqProvider] });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "New agent in puffer" }).click();
+  const dialog = page.getByRole("dialog", { name: "New agent" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("radio", { name: /Groq/ })).toBeVisible();
+  await dialog.getByRole("button", { name: "Start agent" }).click();
+
+  const createRequest = await daemon.waitForRequest("create_session");
+  expect(createRequest.params).toMatchObject({
+    providerId: "groq"
+  });
+});
+
 test("new agent explains when no agent provider is authenticated", async ({ page }) => {
   const daemon = new FakeDaemon({
     auth: [
@@ -842,6 +882,23 @@ test("connect project provider picker only shows authenticated providers", async
   expect(createRequest.params).toMatchObject({
     cwd: "/tmp/puffer-new-project",
     providerId: "openai"
+  });
+});
+
+test("connect project provider picker supports authenticated custom model providers", async ({ page }) => {
+  const daemon = new FakeDaemon({ auth: groqAuth, providers: [groqProvider] });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const dialog = await openCreateProjectDialog(page);
+  await expect(dialog.getByRole("radio", { name: /Groq/ })).toBeVisible();
+  await dialog.getByLabel("Directory").fill("/tmp/puffer-groq-project");
+  await dialog.getByRole("button", { name: "Create" }).click();
+
+  const createRequest = await daemon.waitForRequest("create_session");
+  expect(createRequest.params).toMatchObject({
+    cwd: "/tmp/puffer-groq-project",
+    providerId: "groq"
   });
 });
 
