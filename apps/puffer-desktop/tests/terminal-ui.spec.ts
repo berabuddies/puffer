@@ -51,6 +51,64 @@ test("Terminal pane restores PTYs when switching sessions", async ({ page }) => 
   );
 });
 
+test("late Terminal focus does not reattach a switched session", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-alpha-focus-terminal",
+        displayName: "Alpha focus terminal",
+        title: "Alpha focus terminal",
+        cwd: "/tmp/puffer-alpha",
+        folderPath: "/tmp/puffer-alpha",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        timeline: []
+      },
+      {
+        sessionId: "session-beta-focus-terminal",
+        displayName: "Beta focus terminal",
+        title: "Beta focus terminal",
+        cwd: "/tmp/puffer-beta",
+        folderPath: "/tmp/puffer-beta",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        timeline: []
+      }
+    ]
+  });
+  daemon.delayResponse("pty_focus", (request) => request.params.ptyId === "pty-1", 220);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: /Alpha focus terminal/ }).first().click();
+  await page
+    .locator(".pf-agent-tabs")
+    .getByRole("button", { name: "Terminal", exact: true })
+    .click();
+  await daemon.waitForRequest("pty_open", (request) =>
+    request.params.sessionId === "session-alpha-focus-terminal"
+  );
+  await daemon.waitForRequest("pty_focus", (request) => request.params.ptyId === "pty-1");
+
+  await page.getByRole("button", { name: /Beta focus terminal/ }).first().click();
+  await daemon.waitForRequest("pty_open", (request) =>
+    request.params.sessionId === "session-beta-focus-terminal"
+  );
+  await daemon.waitForRequest("pty_focus", (request) => request.params.ptyId === "pty-2");
+  await expect(page.locator(".pf-terminal-host")).toBeVisible();
+
+  await page.waitForTimeout(260);
+  await page.locator(".pf-terminal-host").click();
+  await page.keyboard.type("b");
+
+  await daemon.waitForRequest("pty_write", (request) => request.params.ptyId === "pty-2");
+  expect(
+    daemon.requests.filter((request) =>
+      request.method === "pty_write" && request.params.ptyId === "pty-1"
+    )
+  ).toHaveLength(0);
+});
+
 test("late Terminal close failures do not leak into a switched session", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

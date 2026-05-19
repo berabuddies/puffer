@@ -83,7 +83,7 @@
       ptyTabs = info.tabs;
       const active = info.tabs.find((tab) => tab.active) ?? info.tabs[0];
       if (active) {
-        await activatePty(active.ptyId);
+        await activatePty(active.ptyId, targetSessionId, generation);
       } else if (!info.initialized) {
         await createTerminalTab(targetSessionId, targetCwd, generation);
       }
@@ -112,7 +112,7 @@
       const info = await listPtys(targetSessionId);
       if (disposed || generation !== restoreGeneration || targetSessionId !== sessionId || targetCwd !== cwd) return;
       ptyTabs = info.tabs;
-      await activatePty(ptyId);
+      await activatePty(ptyId, targetSessionId, generation);
     } catch (err) {
       if (generation === restoreGeneration) error = err instanceof Error ? err.message : String(err);
     } finally {
@@ -123,19 +123,38 @@
     }
   }
 
-  async function activatePty(ptyId: string) {
-    if (disposed) return;
+  function terminalContextCurrent(targetSessionId: string, generation: number): boolean {
+    return !disposed && generation === restoreGeneration && targetSessionId === sessionId;
+  }
+
+  async function activatePty(
+    ptyId: string,
+    targetSessionId = sessionId,
+    generation = restoreGeneration
+  ) {
+    if (!terminalContextCurrent(targetSessionId, generation)) return;
     activePtyId = ptyId;
     ptyTabs = ptyTabs.map((tab) => ({ ...tab, active: tab.ptyId === ptyId }));
     await focusPty(ptyId).catch(() => {});
-    await attachTerminal(ptyId);
+    if (!terminalContextCurrent(targetSessionId, generation)) return;
+    await attachTerminal(ptyId, targetSessionId, generation);
   }
 
-  async function attachTerminal(ptyId: string) {
+  async function attachTerminal(
+    ptyId: string,
+    targetSessionId = sessionId,
+    restoreContext = restoreGeneration
+  ) {
     const generation = ++attachGeneration;
     cleanupTerminalAttach();
     await tick();
-    if (disposed || generation !== attachGeneration || !container) return;
+    if (
+      !terminalContextCurrent(targetSessionId, restoreContext) ||
+      generation !== attachGeneration ||
+      !container
+    ) {
+      return;
+    }
 
     const t = new Terminal({
       cursorBlink: true,
@@ -174,7 +193,12 @@
     fitTerminal(ptyId);
 
     const client = await ensureLocalDaemonClient();
-    if (disposed || generation !== attachGeneration) return;
+    if (
+      !terminalContextCurrent(targetSessionId, restoreContext) ||
+      generation !== attachGeneration
+    ) {
+      return;
+    }
 
     seenSeqByPty.set(ptyId, 0);
     let replaying = true;
@@ -198,17 +222,35 @@
 
     try {
       const chunks = await replayPty(ptyId);
-      if (disposed || generation !== attachGeneration) return;
+      if (
+        !terminalContextCurrent(targetSessionId, restoreContext) ||
+        generation !== attachGeneration
+      ) {
+        return;
+      }
       for (const chunk of chunks) writePtyEvent(ptyId, chunk);
     } catch (err) {
-      if (generation === attachGeneration) {
+      if (
+        terminalContextCurrent(targetSessionId, restoreContext) &&
+        generation === attachGeneration
+      ) {
         t.writeln(`\r\n\x1b[31mterminal replay: ${String(err)}\x1b[0m`);
       }
     } finally {
       replaying = false;
-      if (generation === attachGeneration) {
+      if (
+        terminalContextCurrent(targetSessionId, restoreContext) &&
+        generation === attachGeneration
+      ) {
         for (const event of queued) writePtyEvent(ptyId, event);
       }
+    }
+
+    if (
+      !terminalContextCurrent(targetSessionId, restoreContext) ||
+      generation !== attachGeneration
+    ) {
+      return;
     }
 
     inputDisposer = t.onData((str) => {
