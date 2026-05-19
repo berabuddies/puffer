@@ -254,7 +254,7 @@
         data-size="sm"
         onclick={() => (showConnect = true)}
       >
-        <Icon name="plus" size={13} />Connect project
+        <Icon name="plus" size={13} />Create Project
       </button>
     </div>
   </div>

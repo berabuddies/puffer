@@ -398,7 +398,7 @@
     class="pf-modal pf-connect-modal"
     onclick={(e) => e.stopPropagation()}
     role="dialog"
-    aria-label="Connect project"
+    aria-label="Create Project"
     aria-modal="true"
     tabindex="-1"
     onkeydown={() => {}}
