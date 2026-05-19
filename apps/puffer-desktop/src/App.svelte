@@ -238,18 +238,28 @@
     return status === "pending" || state === "pending";
   }
 
+  function scopedSessionItemId(sessionId: string | null | undefined, itemId: string): string {
+    return sessionId ? `${sessionId}::${itemId}` : itemId;
+  }
+
+  function activeSessionItemId(itemId: string): string {
+    return scopedSessionItemId(selectedSession?.id, itemId);
+  }
+
   let pendingPermissions = $derived<PermissionTimelineItem[]>(
     combinedTimeline.filter(
       (t): t is PermissionTimelineItem =>
         t.kind === "permission" &&
         isPendingPermission(t) &&
-        !dismissedPermissionIds.includes(t.id)
+        !dismissedPermissionIds.includes(scopedSessionItemId(selectedSession?.id, t.id))
     )
   );
   let pendingQuestions = $derived<UserQuestionTimelineItem[]>(
     combinedTimeline.filter(
       (t): t is UserQuestionTimelineItem =>
-        t.kind === "question" && t.status === "pending" && !dismissedQuestionIds.includes(t.id)
+        t.kind === "question" &&
+        t.status === "pending" &&
+        !dismissedQuestionIds.includes(scopedSessionItemId(selectedSession?.id, t.id))
     )
   );
   let turnRunning = $derived(currentTurnId !== null || turnStartedAtMs !== null);
@@ -1509,16 +1519,17 @@
   }
 
   async function resolvePermission(permissionId: string, choice: string) {
-    if (resolvingPermissionIds.includes(permissionId)) return;
+    const scopedPermissionId = activeSessionItemId(permissionId);
+    if (resolvingPermissionIds.includes(scopedPermissionId)) return;
     const responseSessionId = selectedSession?.id ?? null;
-    resolvingPermissionIds = [...resolvingPermissionIds, permissionId];
+    resolvingPermissionIds = [...resolvingPermissionIds, scopedPermissionId];
     try {
       const mapping = turnPermissionLookup[permissionId];
       if (mapping) {
         try {
           await resolveTurnPermission(mapping.turnId, mapping.requestId, mapPermissionAction(choice));
           if (selectedSession?.id !== responseSessionId) return;
-          dismissedPermissionIds = [...dismissedPermissionIds, permissionId];
+          dismissedPermissionIds = [...dismissedPermissionIds, scopedPermissionId];
           statusMessage = `${choice} sent to agent.`;
           if (currentTurnId === mapping.turnId) {
             turnThinking = false;
@@ -1533,11 +1544,11 @@
           appendAgentError("Permission response failed", detail, "permission-error");
         }
       } else {
-        dismissedPermissionIds = [...dismissedPermissionIds, permissionId];
+        dismissedPermissionIds = [...dismissedPermissionIds, scopedPermissionId];
         statusMessage = `${choice} selected (no in-flight turn).`;
       }
     } finally {
-      resolvingPermissionIds = resolvingPermissionIds.filter((id) => id !== permissionId);
+      resolvingPermissionIds = resolvingPermissionIds.filter((id) => id !== scopedPermissionId);
     }
   }
 
@@ -1546,16 +1557,17 @@
     answers: Record<string, string | string[]>,
     annotations: Record<string, Record<string, string>> = {}
   ) {
-    if (resolvingQuestionIds.includes(questionId)) return;
+    const scopedQuestionId = activeSessionItemId(questionId);
+    if (resolvingQuestionIds.includes(scopedQuestionId)) return;
     const responseSessionId = selectedSession?.id ?? null;
-    resolvingQuestionIds = [...resolvingQuestionIds, questionId];
+    resolvingQuestionIds = [...resolvingQuestionIds, scopedQuestionId];
     try {
       const mapping = turnQuestionLookup[questionId];
       if (mapping) {
         try {
           await resolveTurnUserQuestion(mapping.turnId, mapping.requestId, answers, annotations);
           if (selectedSession?.id !== responseSessionId) return;
-          dismissedQuestionIds = [...dismissedQuestionIds, questionId];
+          dismissedQuestionIds = [...dismissedQuestionIds, scopedQuestionId];
           statusMessage = "Answer sent to agent.";
           if (currentTurnId === mapping.turnId) {
             turnThinking = false;
@@ -1570,11 +1582,11 @@
           appendAgentError("Question response failed", detail, "question-error");
         }
       } else {
-        dismissedQuestionIds = [...dismissedQuestionIds, questionId];
+        dismissedQuestionIds = [...dismissedQuestionIds, scopedQuestionId];
         statusMessage = "Answer selected (no in-flight turn).";
       }
     } finally {
-      resolvingQuestionIds = resolvingQuestionIds.filter((id) => id !== questionId);
+      resolvingQuestionIds = resolvingQuestionIds.filter((id) => id !== scopedQuestionId);
     }
   }
 

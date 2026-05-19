@@ -1641,6 +1641,81 @@ test("resolved transcript permissions do not reappear as pending approvals", asy
   await expect(page.locator(".pf-agent-status-pill")).toHaveAttribute("data-status", "idle");
 });
 
+test("dismissed transcript permissions stay scoped to their session", async ({ page }) => {
+  const permissionId = "timeline-1-permission";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-permission-alpha",
+        displayName: "Permission Alpha",
+        title: "Permission Alpha",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 2,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "permission-alpha-seed",
+            text: "Alpha needs approval",
+            createdAtMs: baseTime - 50_000
+          },
+          {
+            kind: "permission_dialog",
+            id: permissionId,
+            toolId: "bash",
+            state: "pending",
+            summary: "Alpha approval",
+            reason: "Alpha pending approval.",
+            inputText: "echo alpha",
+            createdAtMs: baseTime - 45_000
+          }
+        ]
+      },
+      {
+        sessionId: "session-permission-beta",
+        displayName: "Permission Beta",
+        title: "Permission Beta",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 2,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "permission-beta-seed",
+            text: "Beta needs approval",
+            createdAtMs: baseTime - 90_000
+          },
+          {
+            kind: "permission_dialog",
+            id: permissionId,
+            toolId: "bash",
+            state: "pending",
+            summary: "Beta approval",
+            reason: "Beta pending approval.",
+            inputText: "echo beta",
+            createdAtMs: baseTime - 85_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Permission Alpha/);
+  await expect(page.getByText("Alpha pending approval.")).toBeVisible();
+  await page.getByRole("button", { name: "Deny" }).click();
+  await expect(page.getByText("Alpha pending approval.")).toHaveCount(0);
+
+  await openSession(page, /Permission Beta/);
+  await expect(page.getByText("Beta pending approval.")).toBeVisible();
+  await expect(page.getByText("Approval needed")).toBeVisible();
+});
+
 test("logged-out provider sessions cannot start new turns", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
