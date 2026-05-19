@@ -160,6 +160,21 @@
     return sshTarget.trim().length > 0 && remoteDest.trim().length > 0;
   });
 
+  function closePicker() {
+    pickerLoadGeneration += 1;
+    pickerOpen = false;
+    pickerLoading = false;
+    pickerError = null;
+  }
+
+  function selectMode(nextMode: Mode) {
+    if (busy || mode === nextMode) return;
+    if (pickerOpen) {
+      closePicker();
+    }
+    mode = nextMode;
+  }
+
   $effect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape" || busy) return;
@@ -167,7 +182,7 @@
         e.preventDefault();
         e.stopPropagation();
         if (!pickerLoading) {
-          pickerOpen = false;
+          closePicker();
         }
         return;
       }
@@ -394,7 +409,7 @@
         aria-selected={mode === "local"}
         class="pf-modal-seg-btn"
         data-active={mode === "local"}
-        onclick={() => (mode = "local")}
+        onclick={() => selectMode("local")}
         disabled={busy}
       >
         <Icon name="folder" size={13} />
@@ -409,7 +424,7 @@
         aria-selected={mode === "remote"}
         class="pf-modal-seg-btn"
         data-active={mode === "remote"}
-        onclick={() => (mode = "remote")}
+        onclick={() => selectMode("remote")}
         disabled={busy}
       >
         <Icon name="globe" size={13} />
@@ -577,7 +592,7 @@
             <button
               type="button"
               class="pf-modal-close"
-              onclick={() => (pickerOpen = false)}
+              onclick={closePicker}
               aria-label="Close directory picker"
               disabled={pickerLoading}
             >
@@ -625,7 +640,7 @@
               disabled={pickerLoading || !pickerPath.trim() || !!pickerError}
               onclick={() => {
                 localDest = pickerPath.trim();
-                pickerOpen = false;
+                closePicker();
               }}
             >
               Use this directory

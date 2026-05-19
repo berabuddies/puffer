@@ -546,6 +546,24 @@ test("connect project directory picker ignores stale path responses", async ({ p
   await expect(picker.getByRole("button", { name: "src" })).toHaveCount(0);
 });
 
+test("connect project mode switch closes the local directory picker", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Connect project" }).click();
+  const dialog = page.getByRole("dialog", { name: "Connect project" });
+  await dialog.getByRole("button", { name: "Browse…" }).click();
+
+  const picker = dialog.getByLabel("Choose directory");
+  await expect(picker).toBeVisible();
+
+  await dialog.getByRole("tab", { name: /Remote/ }).click();
+
+  await expect(picker).toHaveCount(0);
+  await expect(dialog.getByLabel("SSH target")).toBeVisible();
+});
+
 test("connect project Escape closes directory picker before parent modal", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
