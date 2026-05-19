@@ -1749,7 +1749,7 @@
           collapsed={tweaks.collapsedSidebar}
           onSelectScreen={onSelectScreen}
           agents={activeAgents}
-          activeAgentId={selectedSession?.id ?? null}
+          activeAgentId={openAgentSessionId}
           onOpenAgent={onOpenAgent}
           onToggleAgentPin={(id, pinned) => void toggleDesktopPin("agent", id, pinned)}
           onToggleCollapse={() => updateTweak("collapsedSidebar", !tweaks.collapsedSidebar)}

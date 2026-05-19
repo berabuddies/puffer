@@ -293,6 +293,7 @@ test("sidebar Workspace returns from agent detail to the workspace board", async
 
   await expect(page.locator(".pf-pw-list")).toBeVisible();
   await expect(page.locator(".pf-agent-detail")).toHaveCount(0);
+  await expect(page.locator('.pf-sidebar-agent-row[data-active="true"]')).toHaveCount(0);
   await expect(page.locator(".pf-pw-project").filter({ hasText: "puffer" })).toBeVisible();
 });
 
