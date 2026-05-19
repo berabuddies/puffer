@@ -160,7 +160,7 @@
 
   async function rebuildWatch(target: string) {
     // Tear down whatever's left from the previous watch root first.
-    await teardownWatch();
+    teardownWatch();
     if (destroyed || !target) return;
 
     const expectedWatchId = createFsWatchId();
@@ -199,17 +199,15 @@
     }
   }
 
-  async function teardownWatch() {
+  function teardownWatch() {
     fsEventUnsubscribe?.();
     fsEventUnsubscribe = null;
     const id = currentWatchId;
     currentWatchId = null;
     if (id) {
-      try {
-        await fsUnwatch(id);
-      } catch {
+      void fsUnwatch(id).catch(() => {
         /* ignore — the daemon might be gone already */
-      }
+      });
     }
   }
 

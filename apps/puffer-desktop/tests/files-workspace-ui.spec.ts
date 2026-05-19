@@ -133,6 +133,55 @@ test("Files tab applies the first watch event before fs_watch resolves", async (
   await expect(editor).toHaveValue(updated);
 });
 
+test("Files tab starts the next watch without waiting for old unwatch", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-files-watch-a",
+        displayName: "Files watch A",
+        title: "Files watch A",
+        cwd: "/tmp/watch-a",
+        folderPath: "/tmp/watch-a",
+        timeline: []
+      },
+      {
+        sessionId: "session-files-watch-b",
+        displayName: "Files watch B",
+        title: "Files watch B",
+        cwd: "/tmp/watch-b",
+        folderPath: "/tmp/watch-b",
+        timeline: []
+      }
+    ]
+  });
+  daemon.delayResponse("fs_unwatch", () => true, 500);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page
+    .locator(".pf-sidebar-agents-list")
+    .getByRole("button", { name: /^Files watch A\b/ })
+    .click();
+  await openFilesPanel(page);
+  await daemon.waitForRequest("fs_watch", (request) =>
+    Array.isArray(request.params.paths) &&
+    request.params.paths.includes("/tmp/watch-a")
+  );
+
+  await page
+    .locator(".pf-sidebar-agents-list")
+    .getByRole("button", { name: /^Files watch B\b/ })
+    .click();
+  await daemon.waitForRequest("fs_unwatch");
+  await page.waitForTimeout(80);
+
+  expect(daemon.requests.some((request) =>
+    request.method === "fs_watch" &&
+    Array.isArray(request.params.paths) &&
+    request.params.paths.includes("/tmp/watch-b")
+  )).toBe(true);
+});
+
 test("Files tab releases save state after switching tabs mid-save", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
