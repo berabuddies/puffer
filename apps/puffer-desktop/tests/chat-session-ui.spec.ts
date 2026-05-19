@@ -2950,6 +2950,24 @@ test("model picker refreshes current provider models on reopen", async ({ page }
   await expect(picker.locator(".row-name").filter({ hasText: /^GPT-5$/ })).toHaveCount(0);
 });
 
+test("model picker closes with Escape and can reopen", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Browser regression/);
+  const picker = page.locator(".pf-composer .picker");
+  const trigger = picker.locator(".trigger");
+  await trigger.click();
+  await expect(picker.locator(".menu")).toBeVisible();
+
+  await page.keyboard.press("Escape");
+  await expect(picker.locator(".menu")).toHaveCount(0);
+
+  await trigger.click();
+  await expect(picker.locator(".menu")).toBeVisible();
+});
+
 test("model picker ignores stale provider switch responses", async ({ page }) => {
   const auth = [
     {

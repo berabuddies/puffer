@@ -158,10 +158,22 @@
     open = false;
   }
 
+  function handleDocumentKeydown(event: KeyboardEvent) {
+    if (!open || event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    open = false;
+    triggerEl?.focus();
+  }
+
   $effect(() => {
     if (typeof document === "undefined") return;
     document.addEventListener("mousedown", handleDocumentClick);
-    return () => document.removeEventListener("mousedown", handleDocumentClick);
+    document.addEventListener("keydown", handleDocumentKeydown);
+    return () => {
+      document.removeEventListener("mousedown", handleDocumentClick);
+      document.removeEventListener("keydown", handleDocumentKeydown);
+    };
   });
 </script>
 
