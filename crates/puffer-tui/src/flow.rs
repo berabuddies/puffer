@@ -776,14 +776,7 @@ pub(crate) fn handle_submit(
     match execute_user_turn(state, resources, providers, auth_store, &submitted) {
         Ok(turn) => {
             append_tool_messages(state, session_store, &turn.tool_invocations)?;
-            state.push_message(MessageRole::Assistant, turn.assistant_text.clone());
-            session_store.append_event(
-                state.session.id,
-                TranscriptEvent::AssistantMessage {
-                    text: turn.assistant_text,
-                    actor: Some(state.assistant_actor()),
-                },
-            )?;
+            finalize_assistant_text(state, session_store, &turn.assistant_text)?;
             if puffer_core::project_memory_turn_completed(state) {
                 puffer_core::spawn_project_memory_review(state, resources, providers, auth_store);
             }
@@ -987,6 +980,19 @@ fn finalize_assistant_text(
     session_store: &SessionStore,
     assistant_text: &str,
 ) -> Result<()> {
+    if assistant_text.trim().is_empty() {
+        if state.transcript.last().is_some_and(|message| {
+            message.role == MessageRole::Assistant
+                && message.text.trim().is_empty()
+                && message
+                    .thinking
+                    .as_deref()
+                    .is_none_or(|thinking| thinking.trim().is_empty())
+        }) {
+            state.transcript.pop();
+        }
+        return Ok(());
+    }
     if let Some(last) = state.transcript.last_mut() {
         if last.role == MessageRole::Assistant {
             last.text = assistant_text.to_string();

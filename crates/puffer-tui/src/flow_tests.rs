@@ -4,7 +4,7 @@ use crate::state::{LoopKind, PendingSubmit, PendingSubmitEvent, PendingSubmitRes
 use puffer_config::{
     ensure_workspace_dirs, save_user_config, ConfigPaths, MemoryConfig, PufferConfig,
 };
-use puffer_core::TurnExecution;
+use puffer_core::{ToolInvocation, TurnExecution};
 use puffer_provider_registry::{AuthMode, ModelDescriptor, ProviderDescriptor};
 use puffer_resources::{LoadedItem, SourceInfo, SourceKind, ToolSpec};
 use puffer_session_store::{SessionMetadata, TranscriptEvent};
@@ -964,6 +964,82 @@ fn failed_shell_shortcut_persists_as_system_message() {
         matches!(
             event,
             TranscriptEvent::AssistantMessage { text } if text.contains("shell-failed")
+        )
+    }));
+}
+
+#[test]
+fn poll_pending_submit_skips_empty_assistant_message_after_tool_only_turn() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = sample_state(session, tempdir.path());
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let mut auth_store = AuthStore::default();
+    let mut tui = TuiState::default();
+    let (sender, receiver) = mpsc::channel();
+    tui.pending_submit = Some(PendingSubmit {
+        prompt: "run the tool".to_string(),
+        receiver,
+        pending_tool_calls: Vec::new(),
+        rendered_tool_invocations: 0,
+        started_at: std::time::Instant::now(),
+        thinking_active: false,
+        status_hint: None,
+        cancel: puffer_core::CancelToken::new(),
+    });
+
+    sender
+        .send(PendingSubmitEvent::Finished(PendingSubmitResult {
+            outcome: Ok(TurnExecution {
+                assistant_text: String::new(),
+                tool_invocations: vec![ToolInvocation {
+                    call_id: "tool-call-1".to_string(),
+                    tool_id: "bash".to_string(),
+                    input: "true".to_string(),
+                    output: "ok".to_string(),
+                    success: true,
+                    terminate: true,
+                }],
+                reflection_traces: Vec::new(),
+            }),
+            auth_store: auth_store.clone(),
+            session_permission_state: Default::default(),
+            session_allow_all: false,
+            project_memory_review_turns: 0,
+        }))
+        .unwrap();
+
+    let completed = poll_pending_submit(
+        &mut state,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+    )
+    .unwrap();
+
+    assert!(completed);
+    assert!(!state
+        .transcript
+        .iter()
+        .any(|message| message.role == MessageRole::Assistant && message.text.is_empty()));
+
+    let record = session_store.load_session(state.session.id).unwrap();
+    assert!(record.events.iter().any(|event| {
+        matches!(
+            event,
+            TranscriptEvent::ToolInvocation { call_id, .. } if call_id == "tool-call-1"
+        )
+    }));
+    assert!(!record.events.iter().any(|event| {
+        matches!(
+            event,
+            TranscriptEvent::AssistantMessage { text } if text.is_empty()
         )
     }));
 }
