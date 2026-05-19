@@ -132,6 +132,7 @@
   let showWorkspacePicker = $state(false);
   let newSessionCwd = $state<string | null>(null);
   let newSessionBusy = $state(false);
+  let newSessionError = $state<string | null>(null);
 
   // Backend-backed state
   let groups = $state<FolderGroup[]>([]);
@@ -1276,6 +1277,7 @@
    *  list refreshes so the new session appears as an agent card. */
   function requestNewAgent(cwd: string) {
     newSessionCwd = cwd || defaultWorkspaceCwd || "";
+    newSessionError = null;
   }
 
   async function handleNewAgent(cwd: string, providerId?: string): Promise<boolean> {
@@ -1283,9 +1285,12 @@
       const created = await createSession(cwd || undefined, providerId);
       await openCreatedSession(created, providerId);
       statusMessage = `New ${created.providerId ?? providerId ?? "agent"} session in ${cwd || defaultWorkspaceCwd || "default workspace"}.`;
+      newSessionError = null;
       return true;
     } catch (error) {
-      statusMessage = `Failed to create session: ${error}`;
+      const detail = errorText(error).replace(/^Error:\s*/, "");
+      newSessionError = `Failed to create session: ${detail}`;
+      statusMessage = newSessionError;
       return false;
     }
   }
@@ -2495,11 +2500,16 @@
     cwd={newSessionCwd}
     snapshot={settingsSnapshot}
     busy={newSessionBusy}
+    error={newSessionError}
     onClose={() => {
-      if (!newSessionBusy) newSessionCwd = null;
+      if (!newSessionBusy) {
+        newSessionCwd = null;
+        newSessionError = null;
+      }
     }}
     onCreate={async (providerId) => {
       if (!newSessionCwd || newSessionBusy) return;
+      newSessionError = null;
       newSessionBusy = true;
       try {
         const ok = await handleNewAgent(newSessionCwd, providerId);

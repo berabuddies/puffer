@@ -12,11 +12,12 @@
     cwd: string;
     snapshot: SettingsSnapshot | null;
     busy?: boolean;
+    error?: string | null;
     onClose: () => void;
     onCreate: (providerId: string) => void | Promise<void>;
   };
 
-  let { cwd, snapshot, busy = false, onClose, onCreate }: Props = $props();
+  let { cwd, snapshot, busy = false, error = null, onClose, onCreate }: Props = $props();
   let selectedProvider = $state("");
 
   const fallbackProviders: ProviderSummary[] = [
@@ -143,6 +144,9 @@
       <div class="pf-field-hint">
         Session root: <span class="pf-mono">{cwd}</span>
       </div>
+      {#if error}
+        <div class="pf-new-session-error" role="alert" aria-live="assertive">{error}</div>
+      {/if}
     </div>
 
     <div class="pf-modal-foot">
@@ -225,5 +229,14 @@
   .pf-provider-copy .meta {
     font-size: 12px;
     color: var(--muted-foreground);
+  }
+  .pf-new-session-error {
+    font-size: 12px;
+    line-height: 1.4;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: color-mix(in oklab, oklch(0.7 0.18 25) 12%, var(--background));
+    color: oklch(0.5 0.2 25);
+    border: 1px solid color-mix(in oklab, oklch(0.7 0.18 25) 30%, var(--border));
   }
 </style>

@@ -2995,6 +2995,30 @@ for (const scenario of [
   });
 }
 
+test("new agent creation failures stay visible in the modal", async ({ page }) => {
+  const daemon = new FakeDaemon({ sessions: [] });
+  daemon.failNext("create_session", "provider unavailable");
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await expect(page.getByRole("heading", { name: "No sessions yet" })).toBeVisible();
+  await page.getByRole("button", { name: "New agent in default workspace" }).click();
+  const dialog = page.getByRole("dialog", { name: "New agent" });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "Start agent" }).click();
+
+  const createRequest = await daemon.waitForRequest("create_session");
+  expect(createRequest.params).toMatchObject({
+    cwd: "/tmp/puffer",
+    providerId: "openai"
+  });
+
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("alert")).toContainText("Failed to create session: provider unavailable");
+  await expect(dialog.getByRole("button", { name: "Start agent" })).toBeEnabled();
+  await expect(page.getByRole("heading", { name: "No sessions yet" })).toBeVisible();
+});
+
 test("new empty agent keeps first-message composer usable if detail load fails", async ({
   page
 }) => {
