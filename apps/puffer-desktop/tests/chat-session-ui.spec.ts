@@ -1696,6 +1696,85 @@ test("logged-out provider sessions cannot start new turns", async ({ page }) => 
   ).toHaveLength(0);
 });
 
+test("reconnecting a provider re-enables an existing blocked session", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "codex",
+        kind: "oauth",
+        email: "tester@example.com",
+        expiresAtMs: null,
+        scopes: [],
+        planType: "test",
+        organizationName: null
+      }
+    ],
+    sessions: [
+      {
+        sessionId: "session-anthropic-reconnect",
+        displayName: "Claude reconnect",
+        title: "Claude reconnect",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        providerId: "anthropic",
+        modelId: "test-model",
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "anthropic-reconnect-seed",
+            text: "Anthropic reconnect seed",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Claude reconnect/);
+  const composer = page.locator(".pf-composer textarea");
+  await expect(composer).toBeDisabled();
+  await expect(page.locator(".pf-composer-hint")).toContainText(
+    "Reconnect Claude to continue this session."
+  );
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Providers" }).click();
+  await page.getByLabel("API key for Anthropic").fill("sk-reconnected");
+  await page
+    .locator(".provider-card")
+    .filter({ hasText: "Anthropic" })
+    .getByRole("button", { name: "Connect" })
+    .click();
+  const login = await daemon.waitForRequest("login_with_api_key");
+  expect(login.params).toMatchObject({
+    providerId: "anthropic",
+    apiKey: "sk-reconnected"
+  });
+
+  await openSession(page, /Claude reconnect/);
+  await expect(composer).toBeEnabled();
+  await expect(page.locator(".pf-composer-hint")).not.toContainText(
+    "Reconnect Claude to continue this session."
+  );
+  await composer.fill("Continue after reconnect");
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+  await page.getByRole("button", { name: "Send" }).click();
+  const turn = await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.message === "Continue after reconnect"
+  );
+  expect(turn.params).toMatchObject({
+    sessionId: "session-anthropic-reconnect",
+    providerId: "anthropic",
+    modelId: "test-model"
+  });
+});
+
 test("failed permission responses keep the approval prompt retryable", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

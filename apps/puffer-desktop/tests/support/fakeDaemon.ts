@@ -519,9 +519,9 @@ export class FakeDaemon {
       case "load_settings_snapshot":
         return this.settingsSnapshot();
       case "login_with_oauth":
-        return this.settingsSnapshot();
+        return this.loginProvider(request.params, "oauth");
       case "login_with_api_key":
-        return this.settingsSnapshot();
+        return this.loginProvider(request.params, "api_key");
       case "logout_provider":
         return this.logoutProvider(request.params);
       case "list_external_credentials":
@@ -721,6 +721,24 @@ export class FakeDaemon {
       this.settingsConfig.defaultModel =
         typeof params.defaultModel === "string" ? params.defaultModel : null;
     }
+    return this.settingsSnapshot();
+  }
+
+  private loginProvider(params: JsonRecord, kind: "api_key" | "oauth"): JsonRecord {
+    const providerId = String(params.providerId ?? "");
+    if (!providerId) return this.settingsSnapshot();
+    this.authStatuses = [
+      ...this.authStatuses.filter((item) => item.providerId !== providerId),
+      {
+        providerId,
+        kind,
+        email: kind === "oauth" ? "tester@example.com" : null,
+        expiresAtMs: null,
+        scopes: [],
+        planType: kind === "oauth" ? "test" : null,
+        organizationName: null
+      }
+    ];
     return this.settingsSnapshot();
   }
 
