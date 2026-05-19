@@ -672,10 +672,21 @@
   async function saveEditing() {
     const target = activePath;
     if (!target || !dirty || saving) return;
+    const expectedRoot = root;
+    const expectedSessionId = sessionId;
+    const generation = fileReadGeneration;
+    const content = draftContent;
     saving = true;
     saveError = null;
     try {
-      const result = await writeFile(target, draftContent);
+      const result = await writeFile(target, content);
+      if (
+        generation !== fileReadGeneration ||
+        root !== expectedRoot ||
+        sessionId !== expectedSessionId
+      ) {
+        return;
+      }
       cacheFileResult(result, true);
       pinTab(target);
       if (activePath === target) {
@@ -683,11 +694,22 @@
       }
       void refreshDir(parentPath(target));
     } catch (err) {
-      if (activePath === target) {
+      if (
+        generation === fileReadGeneration &&
+        root === expectedRoot &&
+        sessionId === expectedSessionId &&
+        activePath === target
+      ) {
         saveError = err instanceof Error ? err.message : String(err);
       }
     } finally {
-      saving = false;
+      if (
+        generation === fileReadGeneration &&
+        root === expectedRoot &&
+        sessionId === expectedSessionId
+      ) {
+        saving = false;
+      }
     }
   }
 

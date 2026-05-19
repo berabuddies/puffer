@@ -173,6 +173,69 @@ test("Files tab keeps dirty edits visible after save failure", async ({ page }) 
   await expect(editor).toHaveValue(draft);
 });
 
+test("Files tab ignores late save failures from the previous session", async ({ page }) => {
+  const path = "/tmp/puffer/src/main.rs";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-files-save-a",
+        displayName: "Files save A",
+        title: "Files save A",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        timeline: []
+      },
+      {
+        sessionId: "session-files-save-b",
+        displayName: "Files save B",
+        title: "Files save B",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        timeline: []
+      }
+    ]
+  });
+  daemon.delayFailure(
+    "write_file",
+    (request) => request.params.path === path,
+    "stale save from Files A",
+    250
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page
+    .locator(".pf-sidebar-agents-list")
+    .getByRole("button", { name: /^Files save A\b/ })
+    .click();
+  await openFilesPanel(page);
+
+  const editor = page.getByLabel("Edit file contents");
+  await expect(editor).toHaveValue("fn main() {}\n");
+  await editor.fill("fn main() {\n    println!(\"alpha draft\");\n}\n");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await daemon.waitForRequest("write_file", (request) => request.params.path === path);
+
+  await page
+    .locator(".pf-sidebar-agents-list")
+    .getByRole("button", { name: /^Files save B\b/ })
+    .click();
+  await openFilesPanel(page);
+  await daemon.waitForRequest(
+    "read_file",
+    (request) =>
+      request.params.path === path &&
+      daemon.requests.filter((item) => item.method === "read_file" && item.params.path === path)
+        .length >= 2
+  );
+
+  await expect(editor).toHaveValue("fn main() {}\n");
+  await page.waitForTimeout(300);
+
+  await expect(page.locator(".save-error")).toHaveCount(0);
+  await expect(editor).toHaveValue("fn main() {}\n");
+});
+
 test("Files tab opens symbol context from the editor cursor", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
