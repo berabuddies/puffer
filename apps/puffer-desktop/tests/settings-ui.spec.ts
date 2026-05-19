@@ -263,6 +263,33 @@ test("permissions settings save tool policies through the daemon", async ({ page
   });
 });
 
+test("permissions save is ignored while already saving", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.delayResponse("save_permissions", () => true, 500);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Permissions" }).click();
+  await expect(page.getByText("Stored at")).toBeVisible();
+
+  await page.getByRole("button", { name: "Add rule" }).click();
+  const row = page.locator(".pf-perm-row").last();
+  await row.locator("input").fill("browser_open");
+  await row.locator("select").selectOption("deny");
+
+  const save = page.getByRole("button", { name: "Save" });
+  await expect(save).toBeEnabled();
+  await save.evaluate((button) => {
+    (button as HTMLButtonElement).click();
+    (button as HTMLButtonElement).click();
+  });
+  await daemon.waitForRequest("save_permissions");
+  await page.waitForTimeout(80);
+
+  expect(daemon.requests.filter((request) => request.method === "save_permissions")).toHaveLength(1);
+});
+
 test("permissions settings keep edits after a late list response", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayResponse("list_permissions", () => true, 220);

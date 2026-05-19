@@ -250,6 +250,7 @@
   }
 
   async function savePermissionRows() {
+    if (permissionSaving || permissionLoading || !permissionDirty) return;
     permissionSaving = true;
     permissionError = null;
     try {
