@@ -512,6 +512,83 @@ test("next turn start keeps previous live answer visible during reload", async (
   await expect(page.getByText(firstReply)).toBeVisible();
 });
 
+test("new turn can reuse a tool call id without replacing the previous live tool", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-tool-reuse",
+        displayName: "Tool reuse",
+        title: "Tool reuse",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Tool reuse/);
+  daemon.emit("session:session-tool-reuse:event", {
+    type: "turn-start",
+    turnId: "turn-tool-first"
+  });
+  daemon.emit("session:session-tool-reuse:event", {
+    type: "tool-invocations",
+    turnId: "turn-tool-first",
+    invocations: [
+      {
+        callId: "call-reused",
+        toolId: "FirstTool",
+        input: "{\"path\":\"first.txt\"}",
+        output: "first output",
+        success: true
+      }
+    ]
+  });
+  await expect(page.locator(".pf-tool").filter({ hasText: "FirstTool" })).toHaveCount(1);
+
+  daemon.delayResponse(
+    "load_session_detail",
+    (request) => request.params.sessionId === "session-tool-reuse",
+    360
+  );
+  daemon.emit("session:session-tool-reuse:event", {
+    type: "turn-complete",
+    turnId: "turn-tool-first",
+    assistantText: ""
+  });
+  await expect(page.locator(".pf-tool").filter({ hasText: "FirstTool" })).toHaveCount(1);
+
+  daemon.emit("session:session-tool-reuse:event", {
+    type: "turn-start",
+    turnId: "turn-tool-second"
+  });
+  daemon.emit("session:session-tool-reuse:event", {
+    type: "tool-invocations",
+    turnId: "turn-tool-second",
+    invocations: [
+      {
+        callId: "call-reused",
+        toolId: "SecondTool",
+        input: "{\"path\":\"second.txt\"}",
+        output: "second output",
+        success: true
+      }
+    ]
+  });
+
+  await expect(page.locator(".pf-tool").filter({ hasText: "FirstTool" })).toHaveCount(1);
+  await expect(page.locator(".pf-tool").filter({ hasText: "SecondTool" })).toHaveCount(1);
+});
+
 test("stop turn is disabled until the daemon returns a turn id", async ({ page }) => {
   const prompt = "Wait for a real turn id before cancel";
   const daemon = new FakeDaemon({

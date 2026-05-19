@@ -1485,6 +1485,10 @@
     return `live-question-${turnId}-${requestId}`;
   }
 
+  function liveToolId(turnId: string, callId: string): string {
+    return `live-tool-${turnId}-${callId}`;
+  }
+
   function upsertStreamingAssistant(turnId: string, delta: string) {
     const id = streamingAssistantId(turnId);
     const existingIdx = liveStreamItems.findIndex((item) => item.id === id && item.kind === "assistant");
@@ -1580,10 +1584,10 @@
         turnStatusHint = "Running tools";
         // Render an immediate pending card per requested call so the user
         // sees *what* the agent is doing before it finishes. The id is
-        // `live-tool-<callId>` — we replace in place when `tool-invocations`
-        // arrives with the matching callId.
+        // scoped to the turn and call id, so backend call id reuse in a later
+        // turn does not replace a previous live card while transcript reloads.
         for (const req of ev.requests) {
-          const id = `live-tool-${req.callId}`;
+          const id = liveToolId(ev.turnId, req.callId);
           if (liveStreamItems.some((x) => x.id === id)) continue;
           appendLive({
             id,
@@ -1605,7 +1609,7 @@
         turnThinking = false;
         turnStatusHint = null;
         for (const inv of ev.invocations) {
-          const id = `live-tool-${inv.callId}`;
+          const id = liveToolId(ev.turnId, inv.callId);
           const existingIdx = liveStreamItems.findIndex((x) => x.id === id);
           const payload: TimelineItem = {
             id,
