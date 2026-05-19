@@ -218,6 +218,7 @@ export class FakeDaemon {
   private readonly sessions = new Map<string, JsonRecord>();
   private readonly timelines = new Map<string, JsonRecord[]>();
   private readonly details = new Map<string, SessionDetailOverrides>();
+  private groupedSessionFilter: ((metadata: JsonRecord) => boolean) | null = null;
   private readonly files = new Map<string, string>();
   private readonly providerModels: Record<string, JsonRecord[]>;
   private readonly providerSummaries: JsonRecord[] | null;
@@ -384,6 +385,10 @@ export class FakeDaemon {
     const failures = this.methodFailures.get(method) ?? [];
     failures.push(error);
     this.methodFailures.set(method, failures);
+  }
+
+  setGroupedSessionFilter(filter: ((metadata: JsonRecord) => boolean) | null): void {
+    this.groupedSessionFilter = filter;
   }
 
   setSessionTimeline(sessionId: string, timeline: JsonRecord[]): void {
@@ -766,6 +771,7 @@ export class FakeDaemon {
   private groupedSessions(): JsonRecord[] {
     const groups = new Map<string, JsonRecord>();
     for (const metadata of this.sessions.values()) {
+      if (this.groupedSessionFilter && !this.groupedSessionFilter(metadata)) continue;
       const folderPath = String(metadata.folderPath ?? metadata.cwd ?? "/tmp/puffer");
       const group = groups.get(folderPath) ?? {
         folderId: folderPath,

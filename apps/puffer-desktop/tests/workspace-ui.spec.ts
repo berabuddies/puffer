@@ -193,6 +193,40 @@ test("late workspace refresh does not hide a newly created session", async ({ pa
   await expect(history).toContainText("New Session");
 });
 
+test("active agents includes an opened session before grouped history catches up", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-stale-active",
+        displayName: "Stale active base",
+        title: "Stale active base",
+        cwd: "/tmp/puffer-stale-active",
+        folderPath: "/tmp/puffer-stale-active",
+        updatedAtMs: baseTime - 120_000,
+        createdAtMs: baseTime - 240_000,
+        eventCount: 1
+      }
+    ]
+  });
+  daemon.setGroupedSessionFilter(
+    (metadata) => !String(metadata.sessionId ?? "").startsWith("session-created-")
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page
+    .locator(".pf-pw-project")
+    .filter({ hasText: "puffer-stale-active" })
+    .getByRole("button", { name: "New agent" })
+    .click();
+  await page.getByRole("button", { name: /Start agent/ }).click();
+
+  await expect(page.locator(".pf-agent-detail")).toBeVisible();
+  const activeList = page.locator(".pf-sidebar-agents-list");
+  await expect(activeList.locator(".pf-sidebar-agent-row").filter({ hasText: "New Session" })).toBeVisible();
+  await expect(activeList.getByText("No agents match")).toHaveCount(0);
+});
+
 test("sidebar Workspace returns from agent detail to the workspace board", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

@@ -242,6 +242,27 @@
     return index === -1 ? Number.MAX_SAFE_INTEGER : index;
   }
 
+  function basenameFromPath(path: string): string {
+    return path.split(/[\\/]+/).filter(Boolean).at(-1) ?? path;
+  }
+
+  function fallbackProjectLabel(session: SessionListItem): string {
+    return basenameFromPath(session.folderPath || session.cwd || defaultWorkspaceCwd) || "Workspace";
+  }
+
+  function activeAgentFromSession(session: SessionListItem, project: string): ActiveAgent {
+    return {
+      id: session.id,
+      name: sessionDisplayName(session).slice(0, 24),
+      title: sessionDisplayTitle(session),
+      project,
+      branch: "",
+      state: sidebarAgentState(session.activityStatus),
+      updatedAtMs: session.updatedAtMs,
+      pinned: desktopPins.pinnedAgentIds.includes(session.id)
+    };
+  }
+
   let sortedGroups = $derived<FolderGroup[]>(
     groups.slice().sort((left, right) => {
       const leftPin = Math.min(
@@ -261,16 +282,7 @@
   let realAgents = $derived<ActiveAgent[]>(
     sortedGroups
       .flatMap((g) =>
-        g.sessions.map((s) => ({
-        id: s.id,
-        name: sessionDisplayName(s).slice(0, 24),
-        title: sessionDisplayTitle(s),
-        project: g.label,
-        branch: "",
-        state: sidebarAgentState(s.activityStatus),
-        updatedAtMs: s.updatedAtMs,
-        pinned: desktopPins.pinnedAgentIds.includes(s.id)
-      }))
+        g.sessions.map((s) => activeAgentFromSession(s, g.label))
     )
       .slice()
       .sort((left, right) =>
@@ -280,7 +292,24 @@
       )
   );
 
-  let activeAgents = $derived<ActiveAgent[]>(realAgents);
+  let selectedSessionGroup = $derived<FolderGroup | null>(
+    selectedSession
+      ? sortedGroups.find((group) =>
+          group.sessions.some((session) => session.id === selectedSession?.id)
+        ) ?? null
+      : null
+  );
+  let selectedSessionFallbackAgent = $derived<ActiveAgent | null>(
+    selectedSession && !realAgents.some((agent) => agent.id === selectedSession?.id)
+      ? activeAgentFromSession(
+          selectedSession,
+          selectedSessionGroup?.label ?? fallbackProjectLabel(selectedSession)
+        )
+      : null
+  );
+  let activeAgents = $derived<ActiveAgent[]>(
+    selectedSessionFallbackAgent ? [selectedSessionFallbackAgent, ...realAgents] : realAgents
+  );
 
   let userChip = $derived<UserChip | null>(
     settingsSnapshot?.auth.length
@@ -1000,7 +1029,13 @@
 
   function onOpenAgent(id: string) {
     const realTarget = groups.flatMap((g) => g.sessions).find((s) => s.id === id);
-    if (!realTarget) return;
+    if (!realTarget) {
+      if (selectedSession?.id === id) {
+        openAgentSessionId = id;
+        tweaks = { ...tweaks, screen: "workspace" };
+      }
+      return;
+    }
     openAgentSessionId = realTarget.id;
     tweaks = { ...tweaks, screen: "workspace" };
     void openSession(realTarget);
