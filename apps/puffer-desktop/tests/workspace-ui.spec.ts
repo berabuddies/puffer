@@ -838,6 +838,32 @@ test("workspace board renders daemon session activity states", async ({ page }) 
   await expect(queuedColumn.getByText("Idle docs followup")).toBeVisible();
 });
 
+test("sidebar keeps full session titles for resizable space", async ({ page }) => {
+  const longTitle = "Long running browser investigation that should not be pre-truncated";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-long-sidebar-title",
+        displayName: longTitle,
+        title: longTitle,
+        cwd: "/tmp/puffer-active",
+        folderPath: "/tmp/puffer-active",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        activityStatus: "idle"
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const title = page
+    .locator(".pf-sidebar-agent-row")
+    .filter({ hasText: longTitle })
+    .locator(".title");
+  await expect(title).toHaveText(longTitle);
+});
+
 test("running daemon sessions keep the composer from starting another turn", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

@@ -503,7 +503,7 @@
   ): ActiveAgent {
     return {
       id: session.id,
-      name: sessionDisplayName(session).slice(0, 24),
+      name: sessionDisplayName(session),
       title: sessionDisplayTitle(session),
       project,
       projectKey,
