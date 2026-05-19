@@ -207,6 +207,58 @@ test("Files tab opens symbol context from the editor cursor", async ({ page }) =
   await expect(popup).toHaveCount(0);
 });
 
+test("Files tab ignores stale symbol inspect results after switching files", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.delayResponse(
+    "lsp_inspect",
+    (request) => request.params.path === "/tmp/puffer/src/lib.rs",
+    120
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openFilesPanel(page);
+
+  await page.getByRole("tab", { name: /lib\.rs/ }).click();
+  const editor = page.getByLabel("Edit file contents");
+  await expect(editor).toHaveValue("pub fn fixture() {}\n");
+  await editor.evaluate((node) => {
+    const textarea = node as HTMLTextAreaElement;
+    textarea.focus();
+    textarea.setSelectionRange(9, 9);
+  });
+  await editor.press("ArrowRight");
+  await daemon.waitForRequest(
+    "lsp_inspect",
+    (request) => request.params.path === "/tmp/puffer/src/lib.rs"
+  );
+
+  await page.getByRole("tab", { name: /main\.rs/ }).click();
+  await expect(editor).toHaveValue("fn main() {}\n");
+  await editor.evaluate((node) => {
+    const textarea = node as HTMLTextAreaElement;
+    textarea.focus();
+    textarea.setSelectionRange(3, 3);
+  });
+  await editor.press("ArrowRight");
+  await daemon.waitForRequest(
+    "lsp_inspect",
+    (request) => request.params.path === "/tmp/puffer/src/main.rs"
+  );
+
+  const popup = page.getByLabel("Symbol references");
+  await expect(popup).toBeVisible();
+  await expect(popup.locator(".symbol")).toContainText("main");
+  await expect(popup.getByText("main() -> demo value")).toBeVisible();
+
+  await page.waitForTimeout(170);
+  await expect(popup.locator(".symbol")).toContainText("main");
+  await expect(popup.getByText("main() -> demo value")).toBeVisible();
+  await expect(popup.getByText("fixture() -> demo value")).toHaveCount(0);
+  await expect(popup.locator(".lsp-location").first()).toContainText("src/main.rs:1:4");
+});
+
 test("New agent modal closes with Escape", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

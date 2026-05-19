@@ -1044,6 +1044,8 @@ export class FakeDaemon {
     const cwd = String(params.cwd ?? "/tmp/puffer");
     const line = Number(params.line ?? 0);
     const character = Number(params.character ?? 0);
+    const symbol = path.endsWith("main.rs") ? "main" : "fixture";
+    const location = path.endsWith("main.rs") ? "src/main.rs:1:4" : "src/lib.rs:1:8";
     return {
       path,
       cwd,
@@ -1053,19 +1055,19 @@ export class FakeDaemon {
         hover: {
           operation: "hover",
           filePath: path,
-          result: "fixture() -> demo value"
+          result: `${symbol}() -> demo value`
         },
         goToDefinition: {
           operation: "goToDefinition",
           filePath: path,
-          result: "- src/lib.rs:1:8",
+          result: `- ${location}`,
           resultCount: 1,
           fileCount: 1
         },
         findReferences: {
           operation: "findReferences",
           filePath: path,
-          result: "src/lib.rs:\n  - line 1:8",
+          result: `${location.split(":")[0]}:\n  - line ${location.split(":")[1]}:${location.split(":")[2]}`,
           resultCount: 1,
           fileCount: 1
         }
