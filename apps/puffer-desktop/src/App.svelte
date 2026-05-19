@@ -1976,6 +1976,10 @@
           const completionText = ev.type === "turn-complete" ? ev.assistantText : "";
           const liveItemsAtCompletion = withCompletionAssistantFallback(liveStreamItems, completionText);
           const submittedAtCompletion = submittedMessages;
+          liveStreamItems = stillMissingFromPersisted(
+            [...(sessionDetail?.timeline ?? []), ...submittedAtCompletion],
+            liveItemsAtCompletion
+          );
           const turnEndedWithError = ev.type === "turn-error";
           const preservedErrorItems = liveItemsAtCompletion.filter(
             (item) => item.kind === "system" && item.meta.includes("error")

@@ -2518,6 +2518,106 @@ test("streamed assistant text stays visible through transcript reload", async ({
   expect(Math.max(...samples.slice(firstVisible))).toBe(1);
 });
 
+test("final-only assistant text appears before delayed transcript reload", async ({ page }) => {
+  const finalText = "Final-only answer appears before reload finishes.";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-final-only",
+        displayName: "Final-only session",
+        title: "Final-only session",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Final-only session/);
+  await page.evaluate((phrase) => {
+    const win = window as typeof window & {
+      __chatSamples?: number[];
+      __stopChatSampling?: () => void;
+    };
+    const samples: number[] = [];
+    let stopped = false;
+    const sample = () => {
+      const text = document.querySelector(".pf-chat-thread")?.textContent ?? "";
+      samples.push(text.split(phrase).length - 1);
+      if (!stopped) window.requestAnimationFrame(sample);
+    };
+    win.__chatSamples = samples;
+    win.__stopChatSampling = () => {
+      stopped = true;
+    };
+    window.requestAnimationFrame(sample);
+  }, finalText);
+
+  await page.locator(".pf-composer textarea").fill("Return a final-only answer");
+  await page.getByRole("button", { name: "Send" }).click();
+  const turnRequest = await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.sessionId === "session-final-only"
+  );
+  expect(turnRequest.params.message).toBe("Return a final-only answer");
+  const turnId = "turn-session-final-only";
+  daemon.emit("session:session-final-only:event", { type: "turn-start", turnId });
+
+  daemon.delayResponse(
+    "load_session_detail",
+    (request) => request.params.sessionId === "session-final-only",
+    220
+  );
+  daemon.setSessionTimeline("session-final-only", [
+    {
+      kind: "user_message",
+      id: "persisted-user-final-only",
+      text: "Return a final-only answer",
+      createdAtMs: baseTime + 1
+    },
+    {
+      kind: "assistant_message",
+      id: "persisted-assistant-final-only",
+      text: finalText,
+      createdAtMs: baseTime + 2
+    }
+  ]);
+  daemon.emit("session:session-final-only:event", {
+    type: "turn-complete",
+    turnId,
+    assistantText: finalText
+  });
+
+  await page.waitForTimeout(80);
+  const preReloadSamples = await page.evaluate(() => {
+    const win = window as typeof window & {
+      __chatSamples?: number[];
+    };
+    return win.__chatSamples ?? [];
+  });
+  expect(Math.max(...preReloadSamples)).toBeGreaterThan(0);
+
+  await expect(page.getByText(finalText)).toBeVisible();
+  await page.waitForTimeout(300);
+  const samples = await page.evaluate(() => {
+    const win = window as typeof window & {
+      __chatSamples?: number[];
+      __stopChatSampling?: () => void;
+    };
+    win.__stopChatSampling?.();
+    return win.__chatSamples ?? [];
+  });
+  const firstVisible = samples.findIndex((count) => count > 0);
+  expect(firstVisible).toBeGreaterThanOrEqual(0);
+  expect(samples.slice(firstVisible)).not.toContain(0);
+  expect(Math.max(...samples.slice(firstVisible))).toBe(1);
+});
+
 test("replayed turn-start does not clear visible streamed text", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
