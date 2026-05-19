@@ -81,6 +81,12 @@
     UserQuestionTimelineItem
   } from "./lib/types";
 
+  type LiveSidebarAgentOverlay = {
+    session: SessionListItem;
+    state: AgentState;
+    turnId: string | null;
+  };
+
   // ─────────────────────────────────────────────────────────────
   // Shell state
   // ─────────────────────────────────────────────────────────────
@@ -138,6 +144,7 @@
   let turnStartedAtMs = $state<number | null>(null);
   let turnThinking = $state(false);
   let turnStatusHint = $state<string | null>(null);
+  let liveSidebarAgentsById = $state<Record<string, LiveSidebarAgentOverlay>>({});
   let liveStreamItems = $state<TimelineItem[]>([]);
   let settledTurnIds = new Set<string>();
   let turnPermissionLookup = $state<Record<string, { turnId: string; requestId: string }>>({});
@@ -250,10 +257,74 @@
   }
 
   function liveSidebarAgentState(session: SessionListItem): AgentState {
+    const live = liveSidebarAgentsById[session.id];
+    if (live) return live.state;
     if (selectedSession?.id !== session.id) return sidebarAgentState(session.activityStatus);
     if (pendingPermissions.length > 0 || pendingQuestions.length > 0) return "awaiting";
     if (turnRunning) return turnThinking ? "thinking" : "running";
     return sidebarAgentState(session.activityStatus);
+  }
+
+  function findSidebarSession(sessionId: string, fallback?: SessionListItem | null): SessionListItem | null {
+    if (fallback?.id === sessionId) return fallback;
+    if (selectedSession?.id === sessionId) return selectedSession;
+    for (const group of groups) {
+      const session = group.sessions.find((item) => item.id === sessionId);
+      if (session) return session;
+    }
+    return liveSidebarAgentsById[sessionId]?.session ?? null;
+  }
+
+  function setLiveSidebarAgentState(
+    sessionId: string,
+    state: AgentState,
+    turnId: string | null,
+    fallback?: SessionListItem | null
+  ) {
+    const session = findSidebarSession(sessionId, fallback);
+    if (!session) return;
+    liveSidebarAgentsById = {
+      ...liveSidebarAgentsById,
+      [sessionId]: {
+        session,
+        state,
+        turnId
+      }
+    };
+  }
+
+  function clearLiveSidebarAgentState(sessionId: string, turnId: string | null) {
+    const live = liveSidebarAgentsById[sessionId];
+    if (!live) return;
+    if (turnId && live.turnId && live.turnId !== turnId) return;
+    const { [sessionId]: _drop, ...rest } = liveSidebarAgentsById;
+    liveSidebarAgentsById = rest;
+  }
+
+  function applySidebarSessionEvent(sid: string, ev: SessionStreamEvent) {
+    switch (ev.type) {
+      case "turn-start":
+      case "thinking-delta":
+      case "reflection-checkpoint":
+      case "retry-attempt":
+        setLiveSidebarAgentState(sid, "thinking", ev.turnId);
+        break;
+      case "text-delta":
+      case "tool-calls-requested":
+      case "tool-invocations":
+        setLiveSidebarAgentState(sid, "running", ev.turnId);
+        break;
+      case "permission-request":
+      case "user-question-request":
+        setLiveSidebarAgentState(sid, "awaiting", ev.turnId);
+        break;
+      case "turn-complete":
+      case "turn-error":
+        clearLiveSidebarAgentState(sid, ev.turnId);
+        break;
+      case "usage":
+        break;
+    }
   }
 
   function latestGroupMs(group: FolderGroup): number {
@@ -343,6 +414,13 @@
     };
   }
 
+  function projectLabelForSession(session: SessionListItem): string {
+    return (
+      sortedGroups.find((group) => group.sessions.some((item) => item.id === session.id))?.label ??
+      fallbackProjectLabel(session)
+    );
+  }
+
   let sortedGroups = $derived<FolderGroup[]>(
     groups.slice().sort(compareFolderGroups)
   );
@@ -376,8 +454,19 @@
         )
       : null
   );
+  let liveSidebarFallbackAgents = $derived<ActiveAgent[]>(
+    Object.values(liveSidebarAgentsById)
+      .filter(
+        (live) =>
+          !realAgents.some((agent) => agent.id === live.session.id) &&
+          selectedSessionFallbackAgent?.id !== live.session.id
+      )
+      .map((live) => activeAgentFromSession(live.session, projectLabelForSession(live.session)))
+  );
   let activeAgents = $derived<ActiveAgent[]>(
-    selectedSessionFallbackAgent ? [selectedSessionFallbackAgent, ...realAgents] : realAgents
+    selectedSessionFallbackAgent
+      ? [selectedSessionFallbackAgent, ...liveSidebarFallbackAgents, ...realAgents]
+      : [...liveSidebarFallbackAgents, ...realAgents]
   );
 
   let userChip = $derived<UserChip | null>(
@@ -576,6 +665,12 @@
       // workspace board + sidebar. Coalesced by `refreshGroups`'s own
       // loading guard.
       client.on<{ sessionId?: string; reason?: string }>("workspace:sessions:changed", (event) => {
+        if (
+          event?.sessionId &&
+          (event.reason === "turn_complete" || event.reason === "turn_error")
+        ) {
+          clearLiveSidebarAgentState(event.sessionId, null);
+        }
         void refreshGroups();
         if (
           selectedSession &&
@@ -1259,8 +1354,10 @@
     turnStartedAtMs = now;
     turnThinking = true;
     turnStatusHint = "Thinking";
+    setLiveSidebarAgentState(submitSessionId, "thinking", null, sessionAtSubmit);
     try {
       const turnId = await runAgentTurn(submitSessionId, message, options);
+      setLiveSidebarAgentState(submitSessionId, "thinking", turnId, sessionAtSubmit);
       if (selectedSession?.id !== submitSessionId) {
         submittedMessages = submittedMessages.filter((item) => item.id !== localUserId);
         delete submittedMessageBaselineIds[localUserId];
@@ -1272,6 +1369,7 @@
       statusMessage = `Agent turn ${turnId.slice(0, 8)} started.`;
       return true;
     } catch (error) {
+      clearLiveSidebarAgentState(submitSessionId, null);
       if (selectedSession?.id !== submitSessionId) {
         delete submittedMessageBaselineIds[localUserId];
         return false;
@@ -1703,8 +1801,10 @@
   }
 
   function handleSessionEvent(sid: string, ev: SessionStreamEvent) {
-    if (!selectedSession || selectedSession.id !== sid) return;
-    if (shouldIgnoreTurnEvent(ev.turnId)) return;
+    const selectedForEvent = selectedSession?.id === sid;
+    const ignoredForSelected = selectedForEvent && shouldIgnoreTurnEvent(ev.turnId);
+    if (!ignoredForSelected) applySidebarSessionEvent(sid, ev);
+    if (!selectedForEvent || ignoredForSelected) return;
     switch (ev.type) {
       case "turn-start":
         markTurnActive(ev.turnId);

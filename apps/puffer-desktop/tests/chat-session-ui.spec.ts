@@ -236,6 +236,75 @@ test("pending turn start in one session does not disable another session compose
   ).toHaveLength(1);
 });
 
+test("sidebar keeps non-selected running agent live while another session is open", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-alpha-sidebar-live",
+        displayName: "Alpha sidebar live",
+        title: "Alpha sidebar live",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        activityStatus: "idle",
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      },
+      {
+        sessionId: "session-beta-sidebar-live",
+        displayName: "Beta sidebar live",
+        title: "Beta sidebar live",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 0,
+        activityStatus: "idle",
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Alpha sidebar live/);
+  await page.locator(".pf-composer textarea").fill("Keep alpha running in the sidebar");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-alpha-sidebar-live" &&
+      request.params.message === "Keep alpha running in the sidebar"
+  );
+
+  const alphaRow = page.locator(".pf-sidebar-agent-row").filter({ hasText: "Alpha sidebar live" });
+  await expect(alphaRow.locator(".pf-task-status")).toContainText("thinking");
+
+  await openSession(page, /Beta sidebar live/);
+  await expect(page.locator(".pf-agent-detail")).toBeVisible();
+  await expect(alphaRow).toBeVisible();
+  await expect(alphaRow.locator(".pf-task-status")).toContainText("thinking");
+
+  daemon.emit("session:session-alpha-sidebar-live:event", {
+    type: "turn-complete",
+    turnId: "turn-session-alpha-sidebar-live",
+    assistantText: "Alpha sidebar turn complete"
+  });
+  daemon.emit("workspace:sessions:changed", {
+    sessionId: "session-alpha-sidebar-live",
+    reason: "turn_complete"
+  });
+  await expect(alphaRow.locator(".pf-task-status")).toContainText("idle");
+});
+
 test("composer enter does not submit while IME composition is active", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
