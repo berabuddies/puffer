@@ -208,7 +208,7 @@
                     <Icon name="bot" size={14} />
                     <div class="pf-row-stack">
                       <div class="line-1">
-                        <span class="title">{a.title || a.name}</span>
+                        <span class="title">{a.name || a.title}</span>
                         <span class="age">{formatAge(a.updatedAtMs)}</span>
                       </div>
                       <span class="state" data-state={a.state}>{a.state}</span>

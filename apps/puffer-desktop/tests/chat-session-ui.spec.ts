@@ -286,12 +286,12 @@ test("sidebar keeps non-selected running agent live while another session is ope
   );
 
   const alphaRow = page.locator(".pf-sidebar-agent-row").filter({ hasText: "Alpha sidebar live" });
-  await expect(alphaRow.locator(".pf-task-status")).toContainText("thinking");
+  await expect(alphaRow.locator('.state[data-state="thinking"]')).toContainText("thinking");
 
   await openSession(page, /Beta sidebar live/);
   await expect(page.locator(".pf-agent-detail")).toBeVisible();
   await expect(alphaRow).toBeVisible();
-  await expect(alphaRow.locator(".pf-task-status")).toContainText("thinking");
+  await expect(alphaRow.locator('.state[data-state="thinking"]')).toContainText("thinking");
 
   daemon.emit("session:session-alpha-sidebar-live:event", {
     type: "turn-complete",
@@ -302,7 +302,7 @@ test("sidebar keeps non-selected running agent live while another session is ope
     sessionId: "session-alpha-sidebar-live",
     reason: "turn_complete"
   });
-  await expect(alphaRow.locator(".pf-task-status")).toContainText("idle");
+  await expect(alphaRow.locator('.state[data-state="idle"]')).toContainText("idle");
 });
 
 test("composer enter does not submit while IME composition is active", async ({ page }) => {
@@ -655,7 +655,7 @@ test("early completed turn does not revive sidebar state after switching session
 
   await page.waitForTimeout(320);
   const alphaRow = page.locator(".pf-sidebar-agent-row").filter({ hasText: "Early alpha" });
-  await expect(alphaRow.locator(".pf-task-status")).toContainText("idle");
+  await expect(alphaRow.locator('.state[data-state="idle"]')).toContainText("idle");
 });
 
 test("sidebar marks the selected agent thinking while turn start is pending", async ({ page }) => {
@@ -679,7 +679,7 @@ test("sidebar marks the selected agent thinking while turn start is pending", as
 
   const activeRow = page.locator(".pf-sidebar-agent-row").filter({ hasText: "Browser regression" });
   await expect(activeRow).toContainText("thinking");
-  await expect(activeRow.locator('.pf-puffer[data-state="thinking"]')).toBeVisible();
+  await expect(activeRow.locator('.state[data-state="thinking"]')).toBeVisible();
 });
 
 test("persisted prompt during pending turn replaces the optimistic row", async ({ page }) => {
@@ -1591,7 +1591,7 @@ test("logged-out provider sessions cannot start new turns", async ({ page }) => 
   const logout = await daemon.waitForRequest("logout_provider");
   expect(logout.params).toMatchObject({ providerId: "anthropic" });
 
-  await page.getByRole("button", { name: "Workspace" }).click();
+  await page.getByRole("button", { name: "Project" }).click();
   await openSession(page, /Claude history/);
   const composer = page.locator(".pf-composer textarea");
   await expect(composer).toBeDisabled();
