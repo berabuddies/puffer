@@ -396,6 +396,38 @@ test("activity expansion state clears when switching sessions", async ({ page })
   await expect(page.locator(".activity-action").filter({ hasText: "/tmp/puffer-beta/src/main.rs" })).toHaveCount(0);
 });
 
+test("idle sessions with dirty repositories stay idle in detail", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-dirty-idle",
+        displayName: "Dirty idle session",
+        title: "Dirty idle session",
+        cwd: "/tmp/puffer-dirty",
+        folderPath: "/tmp/puffer-dirty",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        activityStatus: "idle",
+        repoStatus: {
+          isClean: false,
+          statusLines: [" M src/main.rs"]
+        }
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const row = page.locator(".pf-sidebar-agent-row").filter({ hasText: "Dirty idle session" });
+  await expect(row.locator(".state")).toHaveText("idle");
+  await row.getByRole("button", { name: /Dirty idle session/ }).click();
+
+  const status = page.locator(".pf-agent-status-pill");
+  await expect(status).toHaveAttribute("data-status", "idle");
+  await expect(status).toContainText("Idle");
+  await expect(page.locator(".pf-composer textarea")).toBeEnabled();
+});
+
 test("Side panel does not duplicate effectful Browser or Terminal panes", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
