@@ -429,8 +429,10 @@
       const message = String(err);
       updateTab(tabId, { connected: false, status: "Chrome failed to start", error: message });
       if (activeTabId === tabId && activeEventSessionId === eventSessionId) {
+        connected = false;
         error = message;
         status = "Chrome failed to start";
+        resetPointer(activePointerId ?? undefined);
       }
     }
   }
@@ -462,6 +464,7 @@
     const nextUrl = next.url || existing?.url || "about:blank";
     const nextTitle = next.title ?? "";
     const nextError = next.error ?? null;
+    const nextConnected = !nextError;
     const nextStatus = nextError ? "Chrome error" : next.loading ? "Loading" : "Connected";
     updateTab(tabId, {
       url: nextUrl,
@@ -469,7 +472,7 @@
       loading: next.loading,
       error: nextError,
       status: nextStatus,
-      connected: !nextError,
+      connected: nextConnected,
       favicon: faviconFor(nextUrl)
     });
     if (tabId !== activeTabId) return;
@@ -479,6 +482,11 @@
     loading = next.loading;
     error = nextError;
     status = nextStatus;
+    connected = nextConnected;
+    if (!nextConnected) {
+      clearCursorTimer();
+      resetPointer(activePointerId ?? undefined);
+    }
   }
 
   function drawFrame(frame: BrowserFrameEvent) {

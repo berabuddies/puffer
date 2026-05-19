@@ -116,6 +116,36 @@ test("renders Browser devtools events from the daemon stream", async ({ page }) 
   await expect(page.getByText("hello from browser fixture")).toBeVisible();
 });
 
+test("Browser state errors disable controls and stop canvas input", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1"
+  );
+
+  daemon.emit("browser:session-browser:browser:tab-1:state", {
+    url: "about:blank",
+    title: "",
+    loading: false,
+    error: "cdp socket closed"
+  });
+
+  await expect(page.locator(".pf-browser-status")).toHaveText("Chrome error");
+  await expect(page.getByLabel("URL")).toBeDisabled();
+
+  const before = daemon.requests.length;
+  await page.locator(".pf-browser-canvas").click({ position: { x: 20, y: 20 } });
+  await page.waitForTimeout(50);
+
+  expect(
+    daemon.requests.slice(before).filter((request) => request.method === "browser_input")
+  ).toHaveLength(0);
+});
+
 test("dispatches printable Browser keyboard input as key events", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
