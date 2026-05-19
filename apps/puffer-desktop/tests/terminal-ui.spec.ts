@@ -103,3 +103,25 @@ test("Terminal new tab ignores repeated clicks while create is in flight", async
     openedBefore + 1
   );
 });
+
+test("Terminal close ignores repeated clicks while close is in flight", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: /Browser regression/ }).first().click();
+  await page.locator(".pf-agent-tabs").getByRole("button", { name: "Terminal", exact: true }).click();
+  await daemon.waitForRequest("pty_open", (request) => request.params.sessionId === "session-browser");
+  await expect(page.getByRole("tab", { name: /Terminal 1/ })).toBeVisible();
+
+  daemon.delayResponse("pty_close", () => true, 500);
+  await page.getByRole("button", { name: "Close Terminal 1" }).evaluate((button) => {
+    (button as HTMLButtonElement).click();
+    (button as HTMLButtonElement).click();
+  });
+
+  const request = await daemon.waitForRequest("pty_close");
+  expect(request.params.ptyId).toBe("pty-1");
+  await page.waitForTimeout(50);
+  expect(daemon.requests.filter((request) => request.method === "pty_close")).toHaveLength(1);
+});

@@ -37,6 +37,7 @@
   let ptyTabs = $state<PtyTabInfo[]>([]);
   let loading = $state(false);
   let creatingPty = $state(false);
+  let closingPtyIds = $state<string[]>([]);
   let error = $state<string | null>(null);
   let disposed = false;
   let attachGeneration = 0;
@@ -57,6 +58,7 @@
       activePtyId = null;
       ptyTabs = [];
       creatingPty = false;
+      closingPtyIds = [];
       seenSeqByPty = new Map();
       cleanupTerminalAttach();
       void restoreOrCreateTerminal(targetSessionId, targetCwd, generation);
@@ -242,18 +244,24 @@
 
   async function closeTerminalTab(event: Event, ptyId: string) {
     event.stopPropagation();
-    const closingIndex = ptyTabs.findIndex((tab) => tab.ptyId === ptyId);
-    await closePty(ptyId).catch(() => {});
-    const nextTabs = ptyTabs.filter((tab) => tab.ptyId !== ptyId);
-    ptyTabs = nextTabs;
-    seenSeqByPty.delete(ptyId);
-    if (activePtyId !== ptyId) return;
-    const next = nextTabs[Math.min(closingIndex, nextTabs.length - 1)] ?? nextTabs[nextTabs.length - 1];
-    if (next) {
-      await activatePty(next.ptyId);
-    } else {
-      activePtyId = null;
-      cleanupTerminalAttach();
+    if (closingPtyIds.includes(ptyId)) return;
+    closingPtyIds = [...closingPtyIds, ptyId];
+    try {
+      const closingIndex = ptyTabs.findIndex((tab) => tab.ptyId === ptyId);
+      await closePty(ptyId).catch(() => {});
+      const nextTabs = ptyTabs.filter((tab) => tab.ptyId !== ptyId);
+      ptyTabs = nextTabs;
+      seenSeqByPty.delete(ptyId);
+      if (activePtyId !== ptyId) return;
+      const next = nextTabs[Math.min(closingIndex, nextTabs.length - 1)] ?? nextTabs[nextTabs.length - 1];
+      if (next) {
+        await activatePty(next.ptyId);
+      } else {
+        activePtyId = null;
+        cleanupTerminalAttach();
+      }
+    } finally {
+      closingPtyIds = closingPtyIds.filter((id) => id !== ptyId);
     }
   }
 
