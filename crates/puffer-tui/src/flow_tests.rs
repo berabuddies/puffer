@@ -142,7 +142,7 @@ fn queued_startup_diff_runs_before_missing_auth_onboarding() {
 }
 
 #[test]
-fn queued_startup_session_overlay_opens_before_missing_auth_onboarding() {
+fn queued_startup_session_panel_opens_before_missing_auth_onboarding() {
     let tempdir = tempdir().unwrap();
     let paths = ConfigPaths::discover(tempdir.path());
     ensure_workspace_dirs(&paths).unwrap();
@@ -174,7 +174,7 @@ fn queued_startup_session_overlay_opens_before_missing_auth_onboarding() {
     .unwrap();
 
     assert!(tui.deferred_prompt.is_none());
-    assert!(matches!(tui.overlay, Some(OverlayState::Session(..))));
+    assert!(matches!(tui.overlay, Some(OverlayState::Text(..))));
 }
 
 #[test]

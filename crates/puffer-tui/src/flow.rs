@@ -7,7 +7,7 @@ use puffer_core::{
     execute_user_turn_streaming_with_permissions_and_cancel, reload_runtime_resources,
     render_config_summary, render_context_panel, render_copy_actions, render_doctor_report,
     render_hooks_actions, render_ide_actions, render_mcp_actions, render_permissions_panel,
-    render_plugin_actions, render_sandbox_actions, render_skills_panel,
+    render_plugin_actions, render_sandbox_actions, render_session_panel, render_skills_panel,
     with_user_question_prompt_handler, AppState, MessageRole, PermissionPromptAction,
     PermissionPromptRequest, ToolInvocation, TurnStreamEvent, UserQuestionPromptRequest,
     UserQuestionPromptResponse,
@@ -150,6 +150,7 @@ pub(crate) fn try_open_overlay(
             "Permissions",
             render_permissions_panel(state, resources)?,
         )),
+        ("session", true) => Some(TextOverlay::open("Session", render_session_panel(state))),
         ("skills", true) => Some(TextOverlay::open("Skills", render_skills_panel(resources))),
         _ => None,
     };
@@ -197,10 +198,7 @@ pub(crate) fn try_open_overlay(
             return Ok(true);
         }
     }
-    if matches!(
-        (name, args.is_empty()),
-        ("session", true) | ("remote", true)
-    ) {
+    if matches!((name, args.is_empty()), ("remote", true)) {
         set_overlay_state(tui, Some(SessionOverlay::open(state)));
         return Ok(true);
     }

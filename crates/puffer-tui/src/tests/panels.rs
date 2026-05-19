@@ -493,8 +493,43 @@ fn pending_turn_opens_config_aliases_instead_of_queueing() {
 }
 
 #[test]
-fn try_open_overlay_builds_session_panel() {
-    assert!(matches!(open_panel("/session"), OverlayState::Session(..)));
+fn try_open_overlay_builds_session_summary_panel() {
+    let overlay = open_panel("/session");
+    assert!(matches!(overlay, OverlayState::Text(..)));
+
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let state = sample_state();
+    let resources = sample_resources();
+    let providers = sample_providers();
+    let auth_store = sample_auth_store();
+    render::set_active_overlay(Some(overlay));
+    terminal
+        .draw(|frame| {
+            render::render(
+                frame,
+                &state,
+                &resources,
+                &providers,
+                &auth_store,
+                "",
+                0,
+                0,
+                0,
+                &supported_commands(),
+            )
+        })
+        .unwrap();
+    render::set_active_overlay(None);
+    let rendered = buffer_to_string(terminal.backend().buffer());
+    assert!(rendered.contains("session_id="));
+    assert!(rendered.contains("cwd="));
+    assert!(!rendered.contains("Not in remote mode"));
+}
+
+#[test]
+fn try_open_overlay_builds_remote_session_overlay() {
+    assert!(matches!(open_panel("/remote"), OverlayState::Session(..)));
 }
 
 #[test]
