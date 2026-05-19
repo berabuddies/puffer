@@ -28,7 +28,15 @@ pub(crate) struct UserQuestionOverlay {
     question_index: usize,
     lists: Vec<ListSelectionView>,
     selected_multi: Vec<Vec<usize>>,
+    custom_answers: Vec<String>,
     answers: Map<String, Value>,
+}
+
+/// Result of trying to activate a question option shortcut.
+pub(crate) enum UserQuestionShortcutActivation {
+    Ignored,
+    Pending,
+    Response(UserQuestionPromptResponse),
 }
 
 impl UserQuestionOverlay {
@@ -71,11 +79,13 @@ impl UserQuestionOverlay {
             })
             .collect::<Vec<_>>();
         let selected_multi = vec![Vec::new(); questions.len()];
+        let custom_answers = vec![String::new(); questions.len()];
         Ok(Self {
             questions,
             question_index: 0,
             lists,
             selected_multi,
+            custom_answers,
             answers: Map::new(),
         })
     }
@@ -114,6 +124,8 @@ impl UserQuestionOverlay {
             return Vec::new();
         };
         let selection = self.selection();
+        let custom_answer = self.current_custom_answer().trim();
+        let custom_selected = !question.multi_select && !custom_answer.is_empty();
         question
             .options
             .iter()
@@ -133,8 +145,25 @@ impl UserQuestionOverlay {
                 } else {
                     format!("{marker}{}  {}", option.label, option.description)
                 };
-                (index == selection, text)
+                (index == selection && !custom_selected, text)
             })
+            .chain(std::iter::once({
+                let marker = if question.multi_select {
+                    if custom_answer.is_empty() {
+                        "[ ] "
+                    } else {
+                        "[x] "
+                    }
+                } else {
+                    ""
+                };
+                let body = if custom_answer.is_empty() {
+                    "Type a custom answer".to_string()
+                } else {
+                    custom_answer.to_string()
+                };
+                (custom_selected, format!("{marker}Other  {body}"))
+            }))
             .collect()
     }
 
@@ -142,6 +171,9 @@ impl UserQuestionOverlay {
     pub(crate) fn selected_preview(&self) -> Option<&str> {
         let question = self.current_question()?;
         if question.multi_select {
+            return None;
+        }
+        if !self.current_custom_answer().trim().is_empty() {
             return None;
         }
         question
@@ -199,13 +231,25 @@ impl UserQuestionOverlay {
     }
 
     /// Activates the option matching a numeric shortcut.
-    pub(crate) fn activate_shortcut(&mut self, key: char) -> Option<UserQuestionPromptResponse> {
-        self.current_list_mut()?.select_shortcut(key)?;
-        if self.current_question()?.multi_select {
-            self.toggle_current();
-            return None;
+    pub(crate) fn activate_shortcut(&mut self, key: char) -> UserQuestionShortcutActivation {
+        if self
+            .current_list_mut()
+            .and_then(|list| list.select_shortcut(key))
+            .is_none()
+        {
+            return UserQuestionShortcutActivation::Ignored;
         }
-        self.confirm_current()
+        let Some(question) = self.current_question() else {
+            return UserQuestionShortcutActivation::Ignored;
+        };
+        if question.multi_select {
+            self.toggle_current();
+            return UserQuestionShortcutActivation::Pending;
+        }
+        match self.confirm_current() {
+            Some(response) => UserQuestionShortcutActivation::Response(response),
+            None => UserQuestionShortcutActivation::Pending,
+        }
     }
 
     /// Confirms the active question and returns a response when all questions are answered.
@@ -213,16 +257,26 @@ impl UserQuestionOverlay {
         let question_index = self.question_index;
         let question = self.questions.get(question_index)?.clone();
         let selection = self.selection();
+        let custom = self
+            .custom_answers
+            .get(question_index)
+            .map(|answer| answer.trim().to_string())
+            .unwrap_or_default();
         let answer = if question.multi_select {
-            if self.selected_multi[question_index].is_empty() {
+            if self.selected_multi[question_index].is_empty() && custom.is_empty() {
                 self.selected_multi[question_index].push(selection);
             }
-            let values = self.selected_multi[question_index]
+            let mut values = self.selected_multi[question_index]
                 .iter()
                 .filter_map(|index| question.options.get(*index))
                 .map(|option| Value::String(option.label.clone()))
                 .collect::<Vec<_>>();
+            if !custom.is_empty() {
+                values.push(Value::String(custom));
+            }
             Value::Array(values)
+        } else if !custom.is_empty() {
+            Value::String(custom)
         } else {
             let option = question.options.get(selection)?;
             Value::String(option.label.clone())
@@ -248,6 +302,37 @@ impl UserQuestionOverlay {
 
     fn current_list_mut(&mut self) -> Option<&mut ListSelectionView> {
         self.lists.get_mut(self.question_index)
+    }
+
+    /// Returns the custom-answer text for the active question.
+    pub(crate) fn custom_answer(&self) -> &str {
+        self.current_custom_answer()
+    }
+
+    /// Inserts one character into the active custom answer.
+    pub(crate) fn insert_custom_char(&mut self, ch: char) {
+        if let Some(answer) = self.custom_answers.get_mut(self.question_index) {
+            answer.push(ch);
+        }
+    }
+
+    /// Removes one character from the active custom answer.
+    pub(crate) fn backspace_custom_answer(&mut self) {
+        if let Some(answer) = self.custom_answers.get_mut(self.question_index) {
+            answer.pop();
+        }
+    }
+
+    /// Returns true when the active custom answer has text.
+    pub(crate) fn has_custom_answer(&self) -> bool {
+        !self.current_custom_answer().is_empty()
+    }
+
+    fn current_custom_answer(&self) -> &str {
+        self.custom_answers
+            .get(self.question_index)
+            .map(String::as_str)
+            .unwrap_or("")
     }
 }
 

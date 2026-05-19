@@ -2,7 +2,7 @@ use super::*;
 use crate::state::{PendingSubmit, PendingSubmitEvent, PendingUserQuestionRequest};
 use crate::user_question_flow::handle_user_question_key;
 use crate::user_question_overlay::UserQuestionOverlay;
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use puffer_core::UserQuestionPromptRequest;
 use ratatui::backend::TestBackend;
 use serde_json::json;
@@ -221,6 +221,66 @@ fn user_question_number_shortcut_toggles_multi_select_answer() {
 }
 
 #[test]
+fn user_question_custom_answer_sends_other_text() {
+    let (response_tx, response_rx) = mpsc::channel();
+    let mut tui = TuiState {
+        input: "draft survives".to_string(),
+        cursor: "draft survives".len(),
+        overlay: Some(OverlayState::UserQuestionPrompt {
+            overlay: UserQuestionOverlay::from_value(sample_question_payload()).unwrap(),
+        }),
+        pending_user_question_request: Some(PendingUserQuestionRequest { response_tx }),
+        ..TuiState::default()
+    };
+
+    for ch in "Other path".chars() {
+        assert!(handle_user_question_key(
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+            &mut tui
+        ));
+    }
+    assert!(handle_user_question_key(
+        KeyEvent::from(KeyCode::Enter),
+        &mut tui
+    ));
+    let response = response_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert_eq!(response.answers["Pick one"], json!("Other path"));
+    assert!(tui.overlay.is_none());
+    assert_eq!(tui.input, "draft survives");
+    assert_eq!(tui.cursor, "draft survives".len());
+}
+
+#[test]
+fn user_question_multi_select_includes_custom_answer() {
+    let (response_tx, response_rx) = mpsc::channel();
+    let mut tui = TuiState {
+        overlay: Some(OverlayState::UserQuestionPrompt {
+            overlay: UserQuestionOverlay::from_value(sample_multi_select_payload()).unwrap(),
+        }),
+        pending_user_question_request: Some(PendingUserQuestionRequest { response_tx }),
+        ..TuiState::default()
+    };
+
+    assert!(handle_user_question_key(
+        KeyEvent::from(KeyCode::Char('1')),
+        &mut tui
+    ));
+    for ch in "Lint".chars() {
+        assert!(handle_user_question_key(
+            KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+            &mut tui
+        ));
+    }
+    assert!(handle_user_question_key(
+        KeyEvent::from(KeyCode::Enter),
+        &mut tui
+    ));
+    let response = response_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert_eq!(response.answers["Choose checks"], json!(["Tests", "Lint"]));
+    assert!(tui.overlay.is_none());
+}
+
+#[test]
 fn render_user_question_shows_list_options() {
     let backend = TestBackend::new(100, 30);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -254,6 +314,7 @@ fn render_user_question_shows_list_options() {
     assert!(rendered.contains("Mode: Pick one"));
     assert!(rendered.contains("Fast  Prioritize speed"));
     assert!(rendered.contains("Careful  Prioritize review"));
+    assert!(rendered.contains("Other  Type a custom answer"));
 }
 
 #[test]

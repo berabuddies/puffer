@@ -106,6 +106,7 @@ pub(super) fn overlay_prompt_input(input: &str, overlay: Option<&OverlayState>) 
     match overlay {
         Some(OverlayState::ApiKeyPrompt { value, .. }) => "*".repeat(value.chars().count()),
         Some(OverlayState::OnboardingApiKey { input, .. }) => "*".repeat(input.chars().count()),
+        Some(OverlayState::UserQuestionPrompt { overlay }) => overlay.custom_answer().to_string(),
         _ => input.to_string(),
     }
 }
@@ -116,6 +117,7 @@ pub(super) fn overlay_prompt_placeholder(overlay: Option<&OverlayState>) -> &'st
         Some(OverlayState::ApiKeyPrompt { .. } | OverlayState::OnboardingApiKey { .. }) => {
             "Paste API key"
         }
+        Some(OverlayState::UserQuestionPrompt { .. }) => "Type custom answer",
         Some(overlay) if !overlay.accepts_filter_input() => "Overlay open",
         _ => "Type to jump",
     }
@@ -126,6 +128,7 @@ pub(super) fn overlay_prompt_cursor(cursor: usize, overlay: Option<&OverlayState
     match overlay {
         Some(OverlayState::ApiKeyPrompt { cursor, .. }) => *cursor,
         Some(OverlayState::OnboardingApiKey { cursor, .. }) => *cursor,
+        Some(OverlayState::UserQuestionPrompt { overlay }) => overlay.custom_answer().len(),
         _ => cursor,
     }
 }
