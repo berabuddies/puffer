@@ -485,11 +485,18 @@
     };
   }
 
-  function projectLabelForSession(session: SessionListItem): string {
-    return (
-      sortedGroups.find((group) => group.sessions.some((item) => item.id === session.id))?.label ??
-      fallbackProjectLabel(session)
+  function activeAgentProjectLabel(group: FolderGroup, sourceGroups: FolderGroup[]): string {
+    const duplicateLabel = sourceGroups.some(
+      (candidate) => candidate !== group && candidate.label === group.label
     );
+    return duplicateLabel ? group.path || group.id || group.label : group.label;
+  }
+
+  function projectLabelForSession(session: SessionListItem): string {
+    const group = workspaceGroups.find((item) =>
+      item.sessions.some((candidate) => candidate.id === session.id)
+    );
+    return group ? activeAgentProjectLabel(group, workspaceGroups) : fallbackProjectLabel(session);
   }
 
   let sortedGroups = $derived<FolderGroup[]>(
@@ -500,7 +507,7 @@
   let realAgents = $derived<ActiveAgent[]>(
     workspaceGroups
       .flatMap((g) =>
-        g.sessions.map((s) => activeAgentFromSession(s, g.label))
+        g.sessions.map((s) => activeAgentFromSession(s, activeAgentProjectLabel(g, workspaceGroups)))
     )
       .slice()
       .sort((left, right) =>
@@ -521,7 +528,9 @@
     selectedSession && !realAgents.some((agent) => agent.id === selectedSession?.id)
       ? activeAgentFromSession(
           selectedSession,
-          selectedSessionGroup?.label ?? fallbackProjectLabel(selectedSession)
+          selectedSessionGroup
+            ? activeAgentProjectLabel(selectedSessionGroup, workspaceGroups)
+            : fallbackProjectLabel(selectedSession)
         )
       : null
   );

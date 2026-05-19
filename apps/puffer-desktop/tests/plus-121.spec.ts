@@ -67,3 +67,44 @@ test("PLUS-121: active agents are grouped by project and collapse on header clic
   await expect(alphaGroup.locator(".pf-sidebar-agent-row")).toHaveCount(2);
   await expect(alphaHeader).toHaveAttribute("aria-expanded", "true");
 });
+
+test("PLUS-121: active agents disambiguate projects with the same folder name", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-team-a-puffer",
+        displayName: "Team A planner",
+        title: "Team A planner",
+        cwd: "/tmp/team-a/puffer",
+        folderPath: "/tmp/team-a/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        activityStatus: "running"
+      },
+      {
+        sessionId: "session-team-b-puffer",
+        displayName: "Team B planner",
+        title: "Team B planner",
+        cwd: "/tmp/team-b/puffer",
+        folderPath: "/tmp/team-b/puffer",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 1,
+        activityStatus: "running"
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const sidebar = page.locator(".pf-sidebar-agents");
+  const groups = sidebar.locator(".pf-sidebar-project-group");
+  await expect(groups).toHaveCount(2);
+  await expect(groups.filter({ hasText: "/tmp/team-a/puffer" })).toHaveCount(1);
+  await expect(groups.filter({ hasText: "/tmp/team-b/puffer" })).toHaveCount(1);
+  await expect(groups.first().locator(".pf-sidebar-agent-row")).toHaveCount(1);
+  await expect(groups.nth(1).locator(".pf-sidebar-agent-row")).toHaveCount(1);
+});
