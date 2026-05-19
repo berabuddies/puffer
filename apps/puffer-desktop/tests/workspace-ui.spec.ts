@@ -72,6 +72,7 @@ test("agent pin ignores duplicate clicks while the pin save is in flight", async
   });
 
   const request = await daemon.waitForRequest("set_desktop_pin");
+  await expect(agentRow.getByRole("button", { name: "Unpin agent" })).toBeDisabled();
   expect(request.params).toMatchObject({
     kind: "agent",
     id: "session-browser",
@@ -79,6 +80,22 @@ test("agent pin ignores duplicate clicks while the pin save is in flight", async
   });
   await page.waitForTimeout(50);
   expect(daemon.requests.filter((request) => request.method === "set_desktop_pin")).toHaveLength(1);
+});
+
+test("workspace pin control is disabled while the pin save is in flight", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.delayResponse("set_desktop_pin", () => true, 500);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const project = page.locator(".pf-pw-project").filter({ hasText: "puffer" });
+  const pinWorkspace = project.getByRole("button", { name: "Pin workspace" });
+  await expect(pinWorkspace).toBeEnabled();
+
+  await pinWorkspace.click();
+  await daemon.waitForRequest("set_desktop_pin");
+
+  await expect(project.getByRole("button", { name: "Unpin workspace" })).toBeDisabled();
 });
 
 test("workspace search filters projects and agents", async ({ page }) => {

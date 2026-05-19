@@ -337,7 +337,8 @@
       branch: "",
       state: liveSidebarAgentState(session),
       updatedAtMs: session.updatedAtMs,
-      pinned: desktopPins.pinnedAgentIds.includes(session.id)
+      pinned: desktopPins.pinnedAgentIds.includes(session.id),
+      pinBusy: desktopPinInFlightKeys.includes(desktopPinKey("agent", session.id))
     };
   }
 
@@ -1977,6 +1978,9 @@
                 onSessionReady={(sessionId) => handleSessionReady(sessionId)}
                 onOpenWorkspacePicker={() => (showWorkspacePicker = true)}
                 pinnedWorkspacePaths={desktopPins.pinnedWorkspacePaths}
+                pinningWorkspacePaths={desktopPinInFlightKeys
+                  .filter((key) => key.startsWith("workspace:"))
+                  .map((key) => key.slice("workspace:".length))}
                 onToggleWorkspacePin={(path, pinned) => void toggleDesktopPin("workspace", path, pinned)}
               />
             {/if}

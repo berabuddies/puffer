@@ -10,6 +10,7 @@
     state: AgentState;
     updatedAtMs: number;
     pinned: boolean;
+    pinBusy?: boolean;
   };
 
   export type UserChip = {
@@ -149,6 +150,7 @@
             data-pinned={a.pinned}
             title={a.pinned ? "Unpin agent" : "Pin agent"}
             aria-label={a.pinned ? "Unpin agent" : "Pin agent"}
+            disabled={a.pinBusy ?? false}
             onclick={() => onToggleAgentPin?.(a.id, !a.pinned)}
           >
             <Icon name="pin" size={12} />

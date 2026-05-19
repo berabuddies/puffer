@@ -7,13 +7,14 @@
     project: MockProject;
     agents: MockAgent[];
     pinned?: boolean;
+    pinBusy?: boolean;
     onOpenAgent?: (id: string) => void;
     onOpenBoard?: (projectId: string) => void;
     onNewAgent?: () => void;
     onTogglePin?: () => void;
   };
 
-  let { project, agents, pinned = false, onOpenAgent, onOpenBoard, onNewAgent, onTogglePin }: Props = $props();
+  let { project, agents, pinned = false, pinBusy = false, onOpenAgent, onOpenBoard, onNewAgent, onTogglePin }: Props = $props();
 
   let active = $derived(agents.filter((a) => a.status === "running" || a.status === "awaiting").length);
   let review = $derived(agents.filter((a) => a.status === "review").length);
@@ -49,7 +50,7 @@
       title={pinned ? "Unpin workspace" : "Pin workspace"}
       aria-label={pinned ? "Unpin workspace" : "Pin workspace"}
       aria-pressed={pinned ? "true" : "false"}
-      disabled={!onTogglePin}
+      disabled={!onTogglePin || pinBusy}
     ><Icon name="pin" size={12} />{pinned ? "Pinned" : "Pin"}</button>
     <button
       type="button"

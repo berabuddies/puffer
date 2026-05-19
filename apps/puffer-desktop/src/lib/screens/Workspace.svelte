@@ -27,6 +27,7 @@
      *  should open the WorkspacePicker. */
     onOpenWorkspacePicker?: () => void;
     pinnedWorkspacePaths?: string[];
+    pinningWorkspacePaths?: string[];
     onToggleWorkspacePin?: (path: string, pinned: boolean) => void;
     settingsSnapshot?: SettingsSnapshot | null;
   };
@@ -47,6 +48,7 @@
     onSessionReady,
     onOpenWorkspacePicker,
     pinnedWorkspacePaths = [],
+    pinningWorkspacePaths = [],
     onToggleWorkspacePin,
     settingsSnapshot = null
   }: Props = $props();
@@ -344,14 +346,16 @@
       </div>
     {/if}
     {#each visibleProjects as p (p.id)}
+      {@const projectPinned = pinnedWorkspacePaths.includes(p.path) || pinnedWorkspacePaths.includes(p.id)}
       <ProjectRow
         project={p}
         agents={visibleAgentsFor(p)}
-        pinned={pinnedWorkspacePaths.includes(p.path) || pinnedWorkspacePaths.includes(p.id)}
+        pinned={projectPinned}
+        pinBusy={pinningWorkspacePaths.includes(p.path) || pinningWorkspacePaths.includes(p.id)}
         {onOpenAgent}
         {onOpenBoard}
         onNewAgent={onNewAgent ? () => handleNewAgent(p.path) : undefined}
-        onTogglePin={onToggleWorkspacePin ? () => onToggleWorkspacePin(p.path, !(pinnedWorkspacePaths.includes(p.path) || pinnedWorkspacePaths.includes(p.id))) : undefined}
+        onTogglePin={onToggleWorkspacePin ? () => onToggleWorkspacePin(p.path, !projectPinned) : undefined}
       />
     {/each}
   </div>
