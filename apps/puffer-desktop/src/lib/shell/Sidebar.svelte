@@ -50,9 +50,11 @@
   }: Props = $props();
 
   const COLLAPSED_STORAGE_KEY = "puffer.sidebar.collapsedProjects";
+  const initialCollapsedProjects = loadCollapsedProjects();
 
   let filterState = $state<string>("all");
-  let collapsedProjects = $state<Set<string>>(loadCollapsedProjects());
+  let collapsedProjects = $state<Set<string>>(new Set(initialCollapsedProjects));
+  let manuallyCollapsedProjects = $state<Set<string>>(new Set(initialCollapsedProjects));
   let lastAutoExpandedActiveKey: string | null = null;
 
   const screens: { id: ScreenId; label: string; icon: IconName }[] = [
@@ -81,7 +83,7 @@
     const activeKey = `${active.id}\u0000${active.project}`;
     if (lastAutoExpandedActiveKey === activeKey) return;
     lastAutoExpandedActiveKey = activeKey;
-    if (collapsedProjects.has(active.project)) {
+    if (collapsedProjects.has(active.project) && !manuallyCollapsedProjects.has(active.project)) {
       const next = new Set(collapsedProjects);
       next.delete(active.project);
       collapsedProjects = next;
@@ -125,12 +127,16 @@
 
   function toggleProjectCollapsed(project: string) {
     const next = new Set(collapsedProjects);
+    const manual = new Set(manuallyCollapsedProjects);
     if (next.has(project)) {
       next.delete(project);
+      manual.delete(project);
     } else {
       next.add(project);
+      manual.add(project);
     }
     collapsedProjects = next;
+    manuallyCollapsedProjects = manual;
     saveCollapsedProjects(next);
   }
 

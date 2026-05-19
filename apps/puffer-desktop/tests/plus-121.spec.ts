@@ -112,6 +112,52 @@ test("PLUS-121: active agent project stays collapsed after manual toggle", async
   await expect(alphaHeader).toHaveAttribute("aria-expanded", "false");
 });
 
+test("PLUS-121: persisted active project collapse is not auto-expanded on restore", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-puffer-restored",
+        displayName: "Restored active",
+        title: "Restored active",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 60_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 1,
+        activityStatus: "running"
+      }
+    ]
+  });
+  await daemon.install(page);
+  await page.addInitScript(() => {
+    window.localStorage.setItem(
+      "puffer.sidebar.collapsedProjects",
+      JSON.stringify(["puffer"])
+    );
+    window.localStorage.setItem(
+      "puffer-desktop:preferences",
+      JSON.stringify({ rememberSession: true })
+    );
+    window.localStorage.setItem(
+      "puffer-desktop:remembered-session",
+      JSON.stringify({ workspaceRoot: "/tmp/puffer", sessionId: "session-puffer-restored" })
+    );
+  });
+  await daemon.open(page);
+  await daemon.waitForRequest(
+    "load_session_detail",
+    (request) => request.params.sessionId === "session-puffer-restored"
+  );
+
+  await expect(page.locator(".pf-agent-detail")).toBeVisible();
+  const group = page
+    .locator(".pf-sidebar-agents .pf-sidebar-project-group")
+    .filter({ hasText: "puffer" });
+  const header = group.locator(".pf-sidebar-project-header");
+  await expect(header).toHaveAttribute("aria-expanded", "false");
+  await expect(group.locator(".pf-sidebar-agent-row")).toHaveCount(0);
+});
+
 test("PLUS-121: active agents disambiguate projects with the same folder name", async ({
   page
 }) => {
