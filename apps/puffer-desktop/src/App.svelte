@@ -1330,7 +1330,7 @@
       statusMessage = `Loaded ${detail.timeline.length} conversation items.`;
       if (turnEndedWithError) {
         liveStreamItems = stillMissingFromPersisted(persistedTimeline, preservedErrorItems);
-        submittedMessages = [];
+        submittedMessages = stillMissingFromPersisted(persistedTimeline, submittedAtCompletion);
         return;
       }
       liveStreamItems = stillMissingFromPersisted(persistedTimeline, liveItemsAtCompletion);

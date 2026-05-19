@@ -488,6 +488,68 @@ test("failed turn start keeps composer draft and avoids an unsent user row", asy
   await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
 });
 
+test("turn errors keep the submitted prompt visible when it is not persisted", async ({ page }) => {
+  const prompt = "Keep my prompt after turn error";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-turn-error",
+        displayName: "Turn error",
+        title: "Turn error",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Turn error/);
+  await page.locator(".pf-composer textarea").fill(prompt);
+  await page.getByRole("button", { name: "Send" }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-turn-error" &&
+      request.params.message === prompt
+  );
+  await expect(page.locator('.pf-msg[data-role="user"]').filter({ hasText: prompt })).toHaveCount(1);
+
+  const loadRequestsBefore = daemon.requests.filter(
+    (request) =>
+      request.method === "load_session_detail" &&
+      request.params.sessionId === "session-turn-error"
+  ).length;
+  daemon.emit("session:session-turn-error:event", {
+    type: "turn-start",
+    turnId: "turn-session-turn-error"
+  });
+  daemon.emit("session:session-turn-error:event", {
+    type: "turn-error",
+    turnId: "turn-session-turn-error",
+    error: "provider exploded before transcript append"
+  });
+
+  await expect
+    .poll(() =>
+      daemon.requests.filter(
+        (request) =>
+          request.method === "load_session_detail" &&
+          request.params.sessionId === "session-turn-error"
+      ).length
+    )
+    .toBe(loadRequestsBefore + 1);
+  await expect(page.locator('.pf-msg[data-role="user"]').filter({ hasText: prompt })).toHaveCount(1);
+  await expect(page.getByText("provider exploded before transcript append")).toBeVisible();
+});
+
 test("unsent composer draft clears when switching sessions", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
