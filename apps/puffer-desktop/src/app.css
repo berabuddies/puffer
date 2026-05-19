@@ -124,10 +124,15 @@ h1, h2, h3, h4, h5, h6 {
   margin: 0;
 }
 
-:where(button, a, input, select, textarea, [tabindex]):focus-visible {
+:where(button, a, [tabindex]):focus-visible {
   outline: none;
   border-color: var(--ring);
   box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 50%, transparent);
+}
+
+:where(input, select, textarea):focus,
+:where(input, select, textarea):focus-visible {
+  outline: none;
 }
 
 code, pre, kbd, samp { font-family: var(--font-mono); }
@@ -171,7 +176,6 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   outline: none;
 }
 .sc-input::placeholder { color: var(--muted-foreground); }
-.sc-input:focus-visible { border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 50%, transparent); }
 
 .sc-switch {
   appearance: none; -webkit-appearance: none;
