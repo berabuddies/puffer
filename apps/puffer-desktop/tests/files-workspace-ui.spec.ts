@@ -556,3 +556,41 @@ test("successful remote project creation adopts remote daemon state", async ({ p
     "/tmp/puffer-remote/.puffer/permissions.json"
   );
 });
+
+test("remote project creation uses remote authenticated provider", async ({ page }) => {
+  const localDaemon = new FakeDaemon({
+    workspaceRoot: "/tmp/puffer-local",
+    auth: canonicalProviderAuth
+  });
+  const remoteDaemon = new FakeDaemon({
+    url: "ws://127.0.0.1:17779/ws",
+    workspaceRoot: "/tmp/puffer-remote",
+    auth: codexAuth
+  });
+  await localDaemon.install(page);
+  await remoteDaemon.install(page);
+  await localDaemon.open(page, {
+    extraParams: {
+      pufferRemoteBackend: remoteDaemon.url,
+      pufferRemoteToken: "remote-token",
+      pufferRemoteWorkspaceRoot: "/tmp/puffer-remote"
+    }
+  });
+
+  await page.getByRole("button", { name: "Connect project" }).click();
+  const dialog = page.getByRole("dialog", { name: "Connect project" });
+  await dialog.getByRole("radio", { name: "Anthropic" }).click();
+  await dialog.getByRole("tab", { name: /Remote/ }).click();
+  await dialog.getByLabel("SSH target").fill("devbox");
+  await dialog.getByLabel("Destination directory").fill("/tmp/remote-project");
+  await dialog.getByRole("button", { name: "Start agent" }).click();
+
+  const createRequest = await remoteDaemon.waitForRequest("create_session");
+  expect(createRequest.params).toMatchObject({
+    cwd: "/tmp/remote-project",
+    providerId: "openai"
+  });
+  expect(
+    remoteDaemon.requests.some((request) => request.method === "load_settings_snapshot")
+  ).toBe(true);
+});

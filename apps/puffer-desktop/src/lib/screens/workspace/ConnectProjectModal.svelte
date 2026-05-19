@@ -4,6 +4,7 @@
     cloneRepo,
     connectSshDaemon,
     createSession,
+    loadSettingsSnapshot,
     listDir,
     type DirEntry
   } from "../../api/desktop";
@@ -104,24 +105,47 @@
   ];
 
   const personalProviderIds = new Set(["codex", "openai", "claude", "anthropic", "puffer"]);
-  let authenticatedProviderIds = $derived((snapshot?.auth ?? []).map((entry) => entry.providerId));
 
-  let providerOptions = $derived(
-    (snapshot?.providers?.length ? snapshot.providers : fallbackProviders).filter((provider) =>
+  function providerOptionsFor(source: SettingsSnapshot | null): ProviderSummary[] {
+    const authenticatedProviderIds = (source?.auth ?? []).map((entry) => entry.providerId);
+    return (source?.providers?.length ? source.providers : fallbackProviders).filter((provider) =>
       personalProviderIds.has(provider.id) &&
-      (snapshot === null || providerIdInSet(provider.id, authenticatedProviderIds))
-    )
-  );
+      (source === null || providerIdInSet(provider.id, authenticatedProviderIds))
+    );
+  }
 
-  function defaultProviderId(): string {
-    const configured = snapshot?.config.defaultProvider;
-    const configuredProvider = providerOptions.find((provider) =>
+  let providerOptions = $derived(providerOptionsFor(snapshot));
+
+  function defaultProviderIdFor(
+    source: SettingsSnapshot | null,
+    options: ProviderSummary[] = providerOptionsFor(source)
+  ): string {
+    const configured = source?.config.defaultProvider;
+    const configuredProvider = options.find((provider) =>
       providerIdsEquivalent(provider.id, configured)
     );
     if (configuredProvider) {
       return configuredProvider.id;
     }
-    return providerOptions[0]?.id ?? "openai";
+    return options[0]?.id ?? "openai";
+  }
+
+  function defaultProviderId(): string {
+    return defaultProviderIdFor(snapshot, providerOptions);
+  }
+
+  function providerForSnapshot(
+    source: SettingsSnapshot | null,
+    requestedProviderId: string
+  ): string {
+    const options = providerOptionsFor(source);
+    const requested = requestedProviderId.trim();
+    const requestedProvider = options.find((provider) =>
+      providerIdsEquivalent(provider.id, requested)
+    );
+    return canonicalDaemonProviderId(
+      requestedProvider?.id ?? defaultProviderIdFor(source, options)
+    );
   }
 
   $effect(() => {
@@ -204,7 +228,7 @@
     status = `Creating agent in ${targetCwd}…`;
     const created = await createSession(
       targetCwd,
-      canonicalDaemonProviderId(selectedProvider || defaultProviderId())
+      providerForSnapshot(snapshot, selectedProvider || defaultProviderId())
     );
     status = `Ready — session ${created.sessionId.slice(0, 8)}`;
     await onConnected?.(created.sessionId);
@@ -241,9 +265,10 @@
       // 3. Create a session on the remote. Only backend failures in this
       // phase should roll back to the prior daemon.
       status = `Creating agent on ${sshTarget}…`;
+      const remoteSnapshot = await loadSettingsSnapshot();
       const created = await createSession(
         targetCwd,
-        canonicalDaemonProviderId(selectedProvider || defaultProviderId())
+        providerForSnapshot(remoteSnapshot, selectedProvider || defaultProviderId())
       );
       createdSessionId = created.sessionId;
     } catch (e) {
