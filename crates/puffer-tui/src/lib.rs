@@ -755,6 +755,30 @@ fn handle_overlay_key(
     if matches!(
         tui.overlay.as_ref(),
         Some(OverlayState::PermissionPrompt { .. })
+    ) && matches!(key.code, KeyCode::Char('c'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && tui.has_pending_submit()
+    {
+        let loop_active = tui.active_loop.is_some();
+        cancel_pending_submit(state, session_store, tui)?;
+        tui.pending_permission_request = None;
+        set_overlay_state(tui, None);
+        if loop_active {
+            tui.active_loop = None;
+            tui.queued_prompts.clear();
+            tui.status_hint = Some(("Loop stopped.".into(), std::time::Instant::now()));
+        } else {
+            tui.status_hint = Some((
+                "Interrupted. Press Ctrl+C again to exit.".into(),
+                std::time::Instant::now(),
+            ));
+            tui.last_ctrl_c = Some(std::time::Instant::now());
+        }
+        return Ok(false);
+    }
+    if matches!(
+        tui.overlay.as_ref(),
+        Some(OverlayState::PermissionPrompt { .. })
     ) && handle_permission_prompt_key(key, tui)
     {
         return Ok(false);

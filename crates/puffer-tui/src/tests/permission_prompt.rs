@@ -163,6 +163,76 @@ fn permission_prompt_ctrl_c_denies_and_closes_overlay() {
 }
 
 #[test]
+fn permission_prompt_ctrl_c_interrupts_pending_turn() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let mut state = AppState::new(
+        PufferConfig::default(),
+        tempdir.path().to_path_buf(),
+        session,
+    );
+    let mut resources = sample_resources();
+    let mut providers = sample_providers();
+    let mut auth_store = sample_auth_store();
+    let commands = supported_commands();
+    let request = PermissionPromptRequest {
+        tool_id: "Bash".to_string(),
+        summary: "git push origin master".to_string(),
+        reason: Some("shell command matches sandbox exclusion `git push`".to_string()),
+    };
+    let (_event_tx, event_rx) = mpsc::channel();
+    let (response_tx, response_rx) = mpsc::channel();
+    let cancel = puffer_core::CancelToken::new();
+    let cancel_handle = cancel.clone();
+    let mut tui = TuiState {
+        pending_submit: Some(PendingSubmit {
+            prompt: "hi".to_string(),
+            receiver: event_rx,
+            rendered_tool_invocations: 0,
+            pending_tool_calls: Vec::new(),
+            started_at: std::time::Instant::now(),
+            thinking_active: false,
+            status_hint: None,
+            cancel,
+        }),
+        overlay: Some(OverlayState::PermissionPrompt {
+            overlay: ApprovalOverlay::new(request),
+        }),
+        pending_permission_request: Some(PendingPermissionRequest { response_tx }),
+        ..TuiState::default()
+    };
+
+    handle_key(
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &commands,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+
+    assert!(cancel_handle.is_cancelled());
+    assert!(!tui.has_pending_submit());
+    assert!(tui.overlay.is_none());
+    assert!(tui.pending_permission_request.is_none());
+    assert!(response_rx.try_recv().is_err());
+    assert!(state.transcript.iter().any(|message| {
+        message.role == MessageRole::System && message.text == "Interrupted by user."
+    }));
+}
+
+#[test]
 fn render_permission_prompt_shows_codex_style_options() {
     let backend = TestBackend::new(100, 30);
     let mut terminal = Terminal::new(backend).unwrap();
