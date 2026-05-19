@@ -32,6 +32,7 @@
   let loadError = $state<string | null>(null);
   let triggerEl: HTMLButtonElement | null = $state(null);
   let menuEl: HTMLDivElement | null = $state(null);
+  let providerSwitchGeneration = 0;
 
   let currentProvider = $derived(
     currentProviderOverride ?? snapshot?.config?.defaultProvider ?? ""
@@ -104,6 +105,7 @@
   async function selectProvider(providerId: string) {
     if (!allowProviderSwitch || disabled) return;
     if (providerIdsEquivalent(providerId, currentProvider)) return;
+    const generation = ++providerSwitchGeneration;
     query = "";
     let models = modelsByProvider[providerId] ?? [];
     if (models.length === 0) {
@@ -111,15 +113,20 @@
       loadError = null;
       try {
         models = await listProviderModels(providerId);
+        if (generation !== providerSwitchGeneration) return;
         modelsByProvider = { ...modelsByProvider, [providerId]: models };
       } catch (error) {
+        if (generation !== providerSwitchGeneration) return;
         modelsByProvider = { ...modelsByProvider, [providerId]: [] };
         loadError = `${providerId}: ${error}`;
         models = [];
       } finally {
-        busy = false;
+        if (generation === providerSwitchGeneration) {
+          busy = false;
+        }
       }
     }
+    if (generation !== providerSwitchGeneration) return;
     const defaultModel = models.find((model) => model.isDefault) ?? models[0];
     onChange(providerId, defaultModel?.id ?? "");
   }

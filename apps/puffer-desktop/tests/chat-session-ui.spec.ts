@@ -1931,6 +1931,136 @@ test("model picker only offers authenticated agent providers", async ({ page }) 
   await expect(providerList.getByRole("button", { name: "GitHub", exact: true })).toHaveCount(0);
 });
 
+test("model picker ignores stale provider switch responses", async ({ page }) => {
+  const auth = [
+    {
+      providerId: "codex",
+      kind: "oauth",
+      email: "tester@example.com",
+      expiresAtMs: null,
+      scopes: [],
+      planType: "test",
+      organizationName: null
+    },
+    {
+      providerId: "anthropic",
+      kind: "api_key",
+      email: null,
+      expiresAtMs: null,
+      scopes: [],
+      planType: null,
+      organizationName: null
+    },
+    {
+      providerId: "puffer",
+      kind: "oauth",
+      email: "tester@example.com",
+      expiresAtMs: null,
+      scopes: [],
+      planType: "test",
+      organizationName: null
+    }
+  ];
+  const providers = [
+    {
+      id: "codex",
+      displayName: "Codex",
+      baseUrl: "",
+      defaultApi: "openai-responses",
+      modelCount: 1,
+      authModes: ["oauth"],
+      sourceKind: "test",
+      sourcePath: null
+    },
+    {
+      id: "anthropic",
+      displayName: "Anthropic",
+      baseUrl: "",
+      defaultApi: "anthropic-messages",
+      modelCount: 1,
+      authModes: ["api_key"],
+      sourceKind: "test",
+      sourcePath: null
+    },
+    {
+      id: "puffer",
+      displayName: "Puffer",
+      baseUrl: "",
+      defaultApi: "puffer",
+      modelCount: 1,
+      authModes: ["oauth"],
+      sourceKind: "test",
+      sourcePath: null
+    }
+  ];
+  const model = (provider: string, id: string) => ({
+    id,
+    displayName: id,
+    provider,
+    api: "openai-responses",
+    supportsTools: true,
+    supportsVision: false,
+    contextWindow: null,
+    maxOutputTokens: null,
+    thinkingOptions: [],
+    defaultThinkingOptionId: null,
+    isDefault: true
+  });
+  const daemon = new FakeDaemon({
+    auth,
+    providers,
+    sessions: [
+      {
+        sessionId: "session-model-picker-race",
+        displayName: "Model picker race",
+        title: "Model picker race",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "codex-default",
+        timeline: []
+      }
+    ],
+    providerModels: {
+      codex: [model("codex", "codex-default")],
+      anthropic: [model("anthropic", "anthropic-default")],
+      puffer: [model("puffer", "puffer-default")]
+    }
+  });
+  daemon.delayResponse("list_provider_models", (request) => request.params.providerId === "anthropic", 260);
+  daemon.delayResponse("list_provider_models", (request) => request.params.providerId === "anthropic", 260);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Model picker race/);
+  const picker = page.locator(".pf-composer .picker");
+  const trigger = picker.locator(".trigger");
+  await expect(trigger).toContainText("codex-default");
+  await trigger.click();
+
+  const providerList = picker.locator(".providers");
+  await providerList.getByRole("button", { name: "Anthropic", exact: true }).click();
+  await providerList.getByRole("button", { name: "Puffer", exact: true }).click();
+  await expect(trigger).toContainText("puffer-default");
+
+  await page.waitForTimeout(340);
+  await expect(trigger).toContainText("puffer-default");
+
+  await page.locator(".pf-composer textarea").fill("Use the final provider");
+  await page.getByRole("button", { name: "Send" }).click();
+  const request = await daemon.waitForRequest(
+    "run_agent_turn",
+    (item) => item.params.message === "Use the final provider"
+  );
+  expect(request.params).toMatchObject({
+    providerId: "puffer",
+    modelId: "puffer-default"
+  });
+});
+
 for (const scenario of [
   {
     label: "Codex",
