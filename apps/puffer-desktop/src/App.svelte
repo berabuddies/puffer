@@ -89,6 +89,20 @@
 
   type CreatedSessionResult = Awaited<ReturnType<typeof createSession>>;
 
+  type TransientConversationState = {
+    submittedMessages: TimelineItem[];
+    submittedMessageBaselineIds: Record<string, string[]>;
+    liveStreamItems: TimelineItem[];
+    replayTextByTurn: Record<string, string>;
+    turnPermissionLookup: Record<string, { turnId: string; requestId: string }>;
+    turnQuestionLookup: Record<string, { turnId: string; requestId: string }>;
+    currentTurnId: string | null;
+    cancelingTurnId: string | null;
+    turnStartedAtMs: number | null;
+    turnThinking: boolean;
+    turnStatusHint: string | null;
+  };
+
   // ─────────────────────────────────────────────────────────────
   // Shell state
   // ─────────────────────────────────────────────────────────────
@@ -133,6 +147,7 @@
   let openProjectId = $state<string | null>(null);
   let submittedMessages = $state<TimelineItem[]>([]);
   let submittedMessageBaselineIds: Record<string, string[]> = {};
+  let transientConversationStates = $state<Record<string, TransientConversationState>>({});
   let submitMessageInFlightSessionIds = $state<string[]>([]);
   let dismissedPermissionIds = $state<string[]>([]);
   let dismissedQuestionIds = $state<string[]>([]);
@@ -1053,6 +1068,95 @@
     turnStatusHint = null;
   }
 
+  function captureTransientConversationState(): TransientConversationState {
+    return {
+      submittedMessages,
+      submittedMessageBaselineIds: { ...submittedMessageBaselineIds },
+      liveStreamItems,
+      replayTextByTurn: { ...replayTextByTurn },
+      turnPermissionLookup: { ...turnPermissionLookup },
+      turnQuestionLookup: { ...turnQuestionLookup },
+      currentTurnId,
+      cancelingTurnId,
+      turnStartedAtMs,
+      turnThinking,
+      turnStatusHint
+    };
+  }
+
+  function transientStateHasContent(state: TransientConversationState): boolean {
+    return (
+      state.submittedMessages.length > 0 ||
+      state.liveStreamItems.length > 0 ||
+      state.currentTurnId !== null ||
+      state.turnStartedAtMs !== null ||
+      Object.keys(state.turnPermissionLookup).length > 0 ||
+      Object.keys(state.turnQuestionLookup).length > 0
+    );
+  }
+
+  function setTransientConversationState(
+    sessionId: string,
+    state: TransientConversationState | null
+  ) {
+    if (state && transientStateHasContent(state)) {
+      transientConversationStates = { ...transientConversationStates, [sessionId]: state };
+      return;
+    }
+    if (transientConversationStates[sessionId]) {
+      const { [sessionId]: _drop, ...rest } = transientConversationStates;
+      transientConversationStates = rest;
+    }
+  }
+
+  function saveCurrentTransientConversationState(sessionId: string | null | undefined) {
+    if (!sessionId) return;
+    setTransientConversationState(sessionId, captureTransientConversationState());
+  }
+
+  function restoreTransientConversationState(sessionId: string) {
+    const cached = transientConversationStates[sessionId];
+    if (!cached) {
+      resetLiveTurnState();
+      return;
+    }
+    submittedMessages = cached.submittedMessages;
+    submittedMessageBaselineIds = { ...cached.submittedMessageBaselineIds };
+    liveStreamItems = cached.liveStreamItems;
+    replayTextByTurn = { ...cached.replayTextByTurn };
+    turnPermissionLookup = { ...cached.turnPermissionLookup };
+    turnQuestionLookup = { ...cached.turnQuestionLookup };
+    currentTurnId = cached.currentTurnId;
+    cancelingTurnId = cached.cancelingTurnId;
+    turnStartedAtMs = cached.turnStartedAtMs;
+    turnThinking = cached.turnThinking;
+    turnStatusHint = cached.turnStatusHint;
+  }
+
+  function removeCachedSubmittedMessage(sessionId: string, localUserId: string) {
+    const cached = transientConversationStates[sessionId];
+    if (!cached) return;
+    const { [localUserId]: _drop, ...baselineIds } = cached.submittedMessageBaselineIds;
+    setTransientConversationState(sessionId, {
+      ...cached,
+      submittedMessages: cached.submittedMessages.filter((item) => item.id !== localUserId),
+      submittedMessageBaselineIds: baselineIds
+    });
+  }
+
+  function markCachedTurnStarted(sessionId: string, turnId: string) {
+    const cached = transientConversationStates[sessionId];
+    if (!cached) return;
+    setTransientConversationState(sessionId, {
+      ...cached,
+      currentTurnId: turnId,
+      cancelingTurnId: null,
+      turnStartedAtMs: cached.turnStartedAtMs ?? Date.now(),
+      turnThinking: true,
+      turnStatusHint: "Thinking"
+    });
+  }
+
   function hasTransientConversationState(sessionId: string): boolean {
     return (
       submitMessageInFlightFor(sessionId) ||
@@ -1072,11 +1176,12 @@
     const loadGeneration = ++sessionLoadGeneration;
     if (showLoading) sessionLoading = true;
     if (resetLiveState && selectedSession?.id !== session.id) {
+      saveCurrentTransientConversationState(selectedSession?.id);
       selectedSession = session;
       rememberFallbackSession(session);
       sessionDetail = null;
       rememberSession(session.id);
-      resetLiveTurnState();
+      restoreTransientConversationState(session.id);
     }
     try {
       const detail = await loadSessionDetailFromDaemon(session.id);
@@ -1170,6 +1275,7 @@
     openProjectId = null;
     submittedMessages = [];
     submittedMessageBaselineIds = {};
+    transientConversationStates = {};
     submitMessageInFlightSessionIds = [];
     dismissedPermissionIds = [];
     dismissedQuestionIds = [];
@@ -1451,8 +1557,7 @@
         setLiveSidebarAgentState(submitSessionId, "thinking", turnId, sessionAtSubmit);
       }
       if (selectedSession?.id !== submitSessionId) {
-        submittedMessages = submittedMessages.filter((item) => item.id !== localUserId);
-        delete submittedMessageBaselineIds[localUserId];
+        markCachedTurnStarted(submitSessionId, turnId);
         return false;
       }
       if (settledBeforeRpcReturned) {
@@ -1471,7 +1576,7 @@
     } catch (error) {
       clearLiveSidebarAgentState(submitSessionId, null);
       if (selectedSession?.id !== submitSessionId) {
-        delete submittedMessageBaselineIds[localUserId];
+        removeCachedSubmittedMessage(submitSessionId, localUserId);
         return false;
       }
       submittedMessages = submittedMessages.filter((item) => item.id !== localUserId);

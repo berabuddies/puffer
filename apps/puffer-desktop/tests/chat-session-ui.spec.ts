@@ -167,6 +167,81 @@ test("late turn start responses do not leak into a switched session", async ({
   await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
 });
 
+test("pending submitted prompt survives switching away and back before turn id", async ({
+  page
+}) => {
+  const prompt = "Alpha prompt survives round trip";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-alpha-pending-return",
+        displayName: "Alpha pending return",
+        title: "Alpha pending return",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "alpha-pending-return-seed",
+            text: "Alpha pending return seed",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      },
+      {
+        sessionId: "session-beta-pending-return",
+        displayName: "Beta pending return",
+        title: "Beta pending return",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "beta-pending-return-seed",
+            text: "Beta pending return seed",
+            createdAtMs: baseTime - 90_000
+          }
+        ]
+      }
+    ]
+  });
+  daemon.delayResponse(
+    "run_agent_turn",
+    (request) => request.params.sessionId === "session-alpha-pending-return",
+    260
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Alpha pending return/);
+  await expect(page.getByText("Alpha pending return seed")).toBeVisible();
+  await page.locator(".pf-composer textarea").fill(prompt);
+  await page.getByRole("button", { name: "Send" }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-alpha-pending-return" &&
+      request.params.message === prompt
+  );
+  await expect(page.locator('.pf-msg[data-role="user"]').filter({ hasText: prompt })).toHaveCount(1);
+
+  await openSession(page, /Beta pending return/);
+  await expect(page.getByText("Beta pending return seed")).toBeVisible();
+  await expect(page.getByText(prompt)).toHaveCount(0);
+
+  await openSession(page, /Alpha pending return/);
+  await expect(page.locator('.pf-msg[data-role="user"]').filter({ hasText: prompt })).toHaveCount(1);
+  await page.waitForTimeout(320);
+  await expect(page.locator('.pf-msg[data-role="user"]').filter({ hasText: prompt })).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Stop turn" })).toBeVisible();
+});
+
 test("pending turn start in one session does not disable another session composer", async ({
   page
 }) => {
