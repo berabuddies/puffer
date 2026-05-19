@@ -219,6 +219,59 @@ test("Terminal new tab ignores repeated clicks while create is in flight", async
   );
 });
 
+test("stale Terminal resize observers do not resize a previous PTY", async ({ page }) => {
+  await page.addInitScript(() => {
+    type ResizeCallback = ResizeObserverCallback;
+    const callbacks: ResizeCallback[] = [];
+    class ManualResizeObserver {
+      constructor(callback: ResizeCallback) {
+        callbacks.push(callback);
+      }
+
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+
+    const target = window as unknown as {
+      ResizeObserver: typeof ResizeObserver;
+      __triggerTerminalResizeObserver: (index: number) => void;
+    };
+    target.ResizeObserver = ManualResizeObserver as unknown as typeof ResizeObserver;
+    target.__triggerTerminalResizeObserver = (index: number) => {
+      callbacks[index]?.([], {} as ResizeObserver);
+    };
+  });
+
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: /Browser regression/ }).first().click();
+  await page.locator(".pf-agent-tabs").getByRole("button", { name: "Terminal", exact: true }).click();
+  await daemon.waitForRequest("pty_open", (request) => request.params.title === "Terminal 1");
+  await daemon.waitForRequest("pty_resize", (request) => request.params.ptyId === "pty-1");
+  const firstPtyResizeCount = daemon.requests.filter((request) =>
+    request.method === "pty_resize" && request.params.ptyId === "pty-1"
+  ).length;
+
+  await page.getByRole("button", { name: "New terminal" }).click();
+  await daemon.waitForRequest("pty_open", (request) => request.params.title === "Terminal 2");
+  await daemon.waitForRequest("pty_resize", (request) => request.params.ptyId === "pty-2");
+
+  await page.evaluate(() => {
+    (window as unknown as { __triggerTerminalResizeObserver: (index: number) => void })
+      .__triggerTerminalResizeObserver(0);
+  });
+  await page.waitForTimeout(50);
+
+  expect(
+    daemon.requests.filter((request) =>
+      request.method === "pty_resize" && request.params.ptyId === "pty-1"
+    )
+  ).toHaveLength(firstPtyResizeCount);
+});
+
 test("Terminal close ignores repeated clicks while close is in flight", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

@@ -190,7 +190,7 @@
     t.open(container);
     term = t;
     fit = fa;
-    fitTerminal(ptyId);
+    fitTerminal(ptyId, generation);
 
     const client = await ensureLocalDaemonClient();
     if (
@@ -260,7 +260,7 @@
       void writePty(ptyId, btoa(bin)).catch(() => {});
     });
 
-    resizeObserver = new ResizeObserver(() => fitTerminal(ptyId));
+    resizeObserver = new ResizeObserver(() => fitTerminal(ptyId, generation));
     resizeObserver.observe(container);
   }
 
@@ -278,7 +278,8 @@
     }
   }
 
-  function fitTerminal(ptyId: string) {
+  function fitTerminal(ptyId: string, generation = attachGeneration) {
+    if (disposed || generation !== attachGeneration || activePtyId !== ptyId) return;
     if (!term || !fit) return;
     try {
       fit.fit();
