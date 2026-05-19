@@ -154,6 +154,67 @@ test("renders Browser devtools events from the daemon stream", async ({ page }) 
   await expect(page.getByText("hello from browser fixture")).toBeVisible();
 });
 
+test("late Browser devtools events do not leak into a switched agent", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-alpha-browser",
+        displayName: "Alpha browser",
+        title: "Alpha browser",
+        cwd: "/tmp/puffer-alpha",
+        folderPath: "/tmp/puffer-alpha",
+        updatedAtMs: Date.now(),
+        createdAtMs: Date.now() - 60_000,
+        timeline: []
+      },
+      {
+        sessionId: "session-beta-browser",
+        displayName: "Beta browser",
+        title: "Beta browser",
+        cwd: "/tmp/puffer-beta",
+        folderPath: "/tmp/puffer-beta",
+        updatedAtMs: Date.now() - 1_000,
+        createdAtMs: Date.now() - 120_000,
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page
+    .locator(".pf-sidebar-agents-list")
+    .getByRole("button", { name: /^Alpha browser\b/ })
+    .click();
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-alpha-browser:browser:tab-1"
+  );
+  await page.getByRole("button", { name: "DevTools" }).click();
+
+  await page
+    .locator(".pf-sidebar-agents-list")
+    .getByRole("button", { name: /^Beta browser\b/ })
+    .click();
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-beta-browser:browser:tab-1"
+  );
+
+  daemon.emit("browser:session-alpha-browser:browser:tab-1:devtools", {
+    kind: "console",
+    level: "log",
+    text: "late alpha console event"
+  });
+  daemon.emit("browser:session-beta-browser:browser:tab-1:devtools", {
+    kind: "console",
+    level: "log",
+    text: "current beta console event"
+  });
+
+  await expect(page.getByText("current beta console event")).toBeVisible();
+  await expect(page.getByText("late alpha console event")).toHaveCount(0);
+});
+
 test("Browser state errors disable controls and stop canvas input", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

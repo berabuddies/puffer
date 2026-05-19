@@ -452,7 +452,7 @@
           if (activeEventSessionId === eventSessionId) applyState(next, tabId);
         }),
         client.on<BrowserDevtoolsEvent>(`browser:${eventSessionId}:devtools`, (item) => {
-          addDevtoolsEvent(tabId, item);
+          if (activeEventSessionId === eventSessionId) addDevtoolsEvent(tabId, item);
         })
       ];
       const size = measureViewport() ?? lastResize;
