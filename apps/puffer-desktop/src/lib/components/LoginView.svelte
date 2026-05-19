@@ -1,5 +1,6 @@
 <script lang="ts">
   import { providerVisual } from "../providerVisuals";
+  import { providerIdsEquivalent } from "../providerIds";
   import type { ExternalCredential, ProviderSummary, SettingsSnapshot } from "../types";
 
   export let snapshot: SettingsSnapshot | null = null;
@@ -16,6 +17,7 @@
 
   let apiKeys: Record<string, string> = {};
   let query = "";
+  type ProviderAuth = SettingsSnapshot["auth"][number];
 
   function updateApiKey(providerId: string, value: string) {
     apiKeys = { ...apiKeys, [providerId]: value };
@@ -39,6 +41,19 @@
 
   function supports(provider: ProviderSummary, mode: string): boolean {
     return provider.authModes.includes(mode);
+  }
+
+  function authForProvider(providerId: string): ProviderAuth | null {
+    return (
+      snapshot?.auth.find((auth) => providerIdsEquivalent(auth.providerId, providerId)) ?? null
+    );
+  }
+
+  function connectedHint(auth: ProviderAuth): string {
+    const details = [auth.kind];
+    if (auth.email) details.push(auth.email);
+    if (auth.organizationName) details.push(auth.organizationName);
+    return `connected via ${details.join(" · ")}`;
   }
 
   $: filteredProviders = (() => {
@@ -121,6 +136,7 @@
       {#each filteredProviders as provider (provider.id)}
         {@const visual = providerVisual(provider)}
         {@const candidates = importsByProvider[provider.id] ?? []}
+        {@const auth = authForProvider(provider.id)}
         <article class="provider-card" style="--provider-accent: {visual.accent};">
           <header class="card-head">
             <span class="logo" aria-hidden="true">
@@ -130,6 +146,9 @@
               <h2 class="name">{provider.displayName}</h2>
               <p class="meta">{provider.id} · {provider.modelCount} model{provider.modelCount === 1 ? "" : "s"}</p>
             </div>
+            <span class="status" data-connected={auth !== null}>
+              {auth ? "Connected" : "Not connected"}
+            </span>
           </header>
 
           {#if candidates.length}
@@ -161,9 +180,13 @@
               >
                 {busyProviderId === provider.id
                   ? "Opening browser…"
-                  : remoteEnabled
-                    ? "Connect with OAuth (remote)"
-                    : "Connect with OAuth"}
+                  : auth
+                    ? remoteEnabled
+                      ? "Reconnect with OAuth (remote)"
+                      : "Reconnect with OAuth"
+                    : remoteEnabled
+                      ? "Connect with OAuth (remote)"
+                      : "Connect with OAuth"}
               </button>
             {/if}
 
@@ -173,7 +196,7 @@
                   type="password"
                   aria-label={`API key for ${provider.displayName}`}
                   value={apiKeys[provider.id] ?? ""}
-                  placeholder="Paste API key"
+                  placeholder={auth ? "Replace API key" : "Paste API key"}
                   disabled={credentialBusy}
                   on:input={(event) =>
                     updateApiKey(provider.id, (event.currentTarget as HTMLInputElement).value)}
@@ -186,13 +209,13 @@
                   disabled={credentialBusy || !(apiKeys[provider.id] ?? "").trim()}
                   on:click={() => submitApiKey(provider.id)}
                 >
-                  Connect
+                  {auth ? "Update key" : "Connect"}
                 </button>
               </div>
             {/if}
           </div>
 
-          <p class="hint">via {provider.authModes.join(" · ")}</p>
+          <p class="hint">{auth ? connectedHint(auth) : `via ${provider.authModes.join(" · ")}`}</p>
         </article>
       {/each}
     {/if}
@@ -309,6 +332,7 @@
     display: grid;
     gap: 0.1rem;
     min-width: 0;
+    flex: 1;
   }
   .name {
     margin: 0;
@@ -324,6 +348,23 @@
     font-size: 0.78rem;
     color: var(--text-muted);
     font-family: var(--font-mono, ui-monospace, monospace);
+  }
+  .status {
+    justify-self: end;
+    border-radius: 999px;
+    border: 1px solid rgba(111, 101, 89, 0.16);
+    background: rgba(255, 255, 255, 0.74);
+    color: var(--text-muted);
+    flex: 0 0 auto;
+    font-size: 0.72rem;
+    font-weight: 600;
+    line-height: 1;
+    padding: 0.35rem 0.5rem;
+  }
+  .status[data-connected="true"] {
+    border-color: color-mix(in oklab, var(--provider-accent) 42%, rgba(111, 101, 89, 0.18));
+    background: color-mix(in oklab, var(--provider-accent) 13%, white);
+    color: color-mix(in oklab, var(--provider-accent) 72%, black);
   }
 
   .imports {

@@ -2896,6 +2896,112 @@ test("model picker loads inactive provider models only after provider selection"
   await expect(picker.locator(".trigger")).toContainText("anthropic-default");
 });
 
+test("model picker shows pending OpenRouter state and updates chat labels", async ({ page }) => {
+  const model = (provider: string, id: string, displayName = id) => ({
+    id,
+    displayName,
+    provider,
+    api: "openai-responses",
+    supportsTools: true,
+    supportsVision: false,
+    contextWindow: null,
+    maxOutputTokens: null,
+    thinkingOptions: [],
+    defaultThinkingOptionId: null,
+    isDefault: true
+  });
+  const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "codex",
+        kind: "oauth",
+        email: "tester@example.com",
+        expiresAtMs: null,
+        scopes: [],
+        planType: "test",
+        organizationName: null
+      },
+      {
+        providerId: "openrouter",
+        kind: "api_key",
+        email: null,
+        expiresAtMs: null,
+        scopes: [],
+        planType: null,
+        organizationName: null
+      }
+    ],
+    providers: [
+      {
+        id: "codex",
+        displayName: "Codex",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 1,
+        authModes: ["oauth"],
+        sourceKind: "test",
+        sourcePath: null
+      },
+      {
+        id: "openrouter",
+        displayName: "OpenRouter",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 1,
+        authModes: ["api_key"],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ],
+    sessions: [
+      {
+        sessionId: "session-openrouter-label",
+        displayName: "OpenRouter label",
+        title: "OpenRouter label",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "codex-default",
+        timeline: []
+      }
+    ],
+    providerModels: {
+      codex: [model("codex", "codex-default")],
+      openrouter: [model("openrouter", "google/gemini-3.5-flash", "Google: Gemini 3.5 Flash")]
+    }
+  });
+  daemon.delayResponse(
+    "list_provider_models",
+    (request) => request.params.providerId === "openrouter",
+    260
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /OpenRouter label/);
+  const picker = page.locator(".pf-composer .picker");
+  await picker.locator(".trigger").click();
+  await picker.getByRole("button", { name: "OpenRouter", exact: true }).click();
+
+  await expect(picker.locator(".trigger")).toContainText("Loading models");
+  await expect(picker.locator(".trigger")).toContainText("OpenRouter");
+  await expect(picker.getByText(/Loading OpenRouter models/)).toBeVisible();
+  await expect(page.locator(".pf-composer textarea")).toHaveAttribute(
+    "placeholder",
+    /Engineer \(OpenRouter\)/
+  );
+  await expect(page.getByRole("button", { name: "Send" })).toBeDisabled();
+
+  await expect(picker.locator(".trigger")).toContainText("google/gemini-3.5-flash");
+  await expect(page.locator(".pf-composer textarea")).toHaveAttribute(
+    "placeholder",
+    /Engineer \(OpenRouter\)/
+  );
+});
+
 test("model picker marks alias-equivalent provider models as selected", async ({ page }) => {
   const daemon = new FakeDaemon({
     auth: [

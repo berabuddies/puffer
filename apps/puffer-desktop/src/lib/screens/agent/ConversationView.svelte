@@ -91,7 +91,6 @@
 
   let displayUserName = $derived(userDisplayName.trim() || "Otter");
   let userInitial = $derived(displayUserName.trim().charAt(0).toUpperCase() || "O");
-  let engineerName = $derived(`${ENGINEER_NAME} (${providerDisplayName(session?.providerId)})`);
 
   let draft = $state("");
   let threadEl: HTMLDivElement | undefined;
@@ -112,6 +111,10 @@
   let submitInFlight = $derived(
     Boolean(session?.id && submitInFlightSessionIds.includes(session.id))
   );
+  let displayedProviderId = $derived(
+    selectedProviderId ?? session?.providerId ?? settingsSnapshot?.config.defaultProvider ?? null
+  );
+  let engineerName = $derived(`${ENGINEER_NAME} (${providerDisplayName(displayedProviderId)})`);
 
   let fastModeAvailable = $derived(modelSupportsFastMode(selectedModelId));
   let selectedProviderModelSourceId = $derived.by(() => {
@@ -149,6 +152,7 @@
       (providerIdCanRunAgent(selectedProviderId, settingsSnapshot?.providers ?? []) &&
         providerIdInSet(selectedProviderId, authenticatedAgentProviderIds))
   );
+  let selectedModelReady = $derived(Boolean(selectedModelId?.trim()));
   let providerSwitchCanRecover = $derived(
     allowProviderSwitch && authenticatedAgentProviderIds.length > 0
   );
@@ -168,7 +172,9 @@
         ? "Respond to the pending request before starting another turn."
         : "Wait for the running agent turn to finish."
       : selectedProviderAuthenticated
-      ? null
+      ? selectedModelReady
+        ? null
+        : `Loading ${providerDisplayName(selectedProviderId)} models before sending.`
       : providerSwitchCanRecover
         ? `Switch to a connected provider to continue this empty session.`
         : `Reconnect ${providerDisplayName(selectedProviderId)} to continue this session.`
@@ -180,7 +186,8 @@
         !turnRunning &&
         !agentBusy &&
         !submitInFlight &&
-        selectedProviderAuthenticated
+        selectedProviderAuthenticated &&
+        selectedModelReady
     )
   );
   let canCancelTurn = $derived(Boolean(turnRunning && turnCancelable && onCancelTurn));
@@ -226,7 +233,12 @@
     if (!normalized) return "Codex";
     if (normalized === "codex" || normalized === "openai") return "Codex";
     if (normalized === "claude" || normalized === "anthropic") return "Claude";
+    if (normalized === "openrouter") return "OpenRouter";
     if (normalized === "puffer") return "Puffer";
+    const configured = settingsSnapshot?.providers?.find((provider) =>
+      providerIdsEquivalent(provider.id, normalized)
+    );
+    if (configured?.displayName.trim()) return configured.displayName.trim();
     return normalized
       .split(/[-_\s]+/)
       .filter(Boolean)

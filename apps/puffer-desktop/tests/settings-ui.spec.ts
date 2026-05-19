@@ -22,6 +22,7 @@ test("default model cannot be saved before provider models load", async ({ page 
   await providerSelect.selectOption("anthropic");
   await expect(modelSelect).toBeDisabled();
   await expect(saveButton).toBeDisabled();
+  await expect(pane.getByText("Fetching Anthropic models...")).toBeVisible();
 
   await expect(modelSelect).toBeEnabled();
   await expect(modelSelect).toHaveValue("test-model");
@@ -173,6 +174,79 @@ test("default routing only offers authenticated agent providers", async ({ page 
   });
 });
 
+test("providers page marks connected and disconnected providers", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "openrouter",
+        kind: "api_key",
+        email: null,
+        expiresAtMs: null,
+        scopes: [],
+        planType: null,
+        organizationName: null
+      }
+    ],
+    providers: [
+      {
+        id: "openrouter",
+        displayName: "OpenRouter",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 2,
+        authModes: ["api_key"],
+        sourceKind: "test",
+        sourcePath: null
+      },
+      {
+        id: "anthropic",
+        displayName: "Anthropic",
+        baseUrl: "",
+        defaultApi: "anthropic-messages",
+        modelCount: 1,
+        authModes: ["api_key"],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ],
+    providerModels: {
+      openrouter: [
+        {
+          id: "google/gemini-3.5-flash",
+          displayName: "Google: Gemini 3.5 Flash",
+          provider: "openrouter",
+          api: "openai-responses",
+          supportsTools: true,
+          supportsVision: false,
+          contextWindow: null,
+          maxOutputTokens: null,
+          thinkingOptions: [],
+          defaultThinkingOptionId: null,
+          isDefault: true
+        }
+      ]
+    }
+  });
+  daemon.setSettingsConfig({
+    defaultProvider: "openrouter",
+    defaultModel: "google/gemini-3.5-flash"
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Providers" }).click();
+
+  const openRouterCard = page.locator(".provider-card").filter({ hasText: "OpenRouter" });
+  await expect(openRouterCard.locator(".status")).toHaveText("Connected");
+  await expect(openRouterCard.getByText("connected via api_key")).toBeVisible();
+  await expect(openRouterCard.getByRole("button", { name: "Update key" })).toBeVisible();
+
+  const anthropicCard = page.locator(".provider-card").filter({ hasText: "Anthropic" });
+  await expect(anthropicCard.locator(".status")).toHaveText("Not connected");
+  await expect(anthropicCard.getByRole("button", { name: "Connect" })).toBeVisible();
+});
+
 test("default model save is ignored while already saving", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayResponse("update_config", () => true, 500);
@@ -244,7 +318,7 @@ test("provider API key connect requires a non-empty key", async ({ page }) => {
   const connect = page
     .locator(".provider-card")
     .filter({ hasText: "Anthropic" })
-    .getByRole("button", { name: "Connect" });
+    .getByRole("button", { name: "Update key" });
 
   await expect(connect).toBeDisabled();
   await input.fill("   ");
@@ -348,7 +422,7 @@ test("provider auth controls are disabled while another provider is busy", async
     .getByRole("button", { name: "Connect with OAuth" });
   const anthropicCard = page.locator(".provider-card").filter({ hasText: "Anthropic" });
   const anthropicInput = page.getByLabel("API key for Anthropic");
-  const anthropicConnect = anthropicCard.getByRole("button", { name: "Connect" });
+  const anthropicConnect = anthropicCard.getByRole("button", { name: "Update key" });
 
   await anthropicInput.fill("sk-while-codex-busy");
   await expect(codexOauth).toBeEnabled();
@@ -470,7 +544,7 @@ test("external credential import disables provider login controls", async ({ pag
     .getByRole("button", { name: "Use credentials from ~/.codex" });
   const anthropicCard = page.locator(".provider-card").filter({ hasText: "Anthropic" });
   const anthropicInput = page.getByLabel("API key for Anthropic");
-  const anthropicConnect = anthropicCard.getByRole("button", { name: "Connect" });
+  const anthropicConnect = anthropicCard.getByRole("button", { name: "Update key" });
 
   await anthropicInput.fill("sk-while-import-busy");
   await expect(importButton).toBeEnabled();
@@ -584,7 +658,7 @@ test("settings auth uses the configured daemon when Tauri globals exist", async 
   await page
     .locator(".provider-card")
     .filter({ hasText: "Anthropic" })
-    .getByRole("button", { name: "Connect" })
+    .getByRole("button", { name: "Update key" })
     .click();
 
   const request = await daemon.waitForRequest("login_with_api_key");

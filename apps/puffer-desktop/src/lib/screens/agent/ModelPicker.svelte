@@ -32,6 +32,7 @@
   let loadError = $state<string | null>(null);
   let triggerEl: HTMLButtonElement | null = $state(null);
   let menuEl: HTMLDivElement | null = $state(null);
+  let pendingProviderId = $state<string | null>(null);
   let modelLoadGeneration = 0;
   let providerSwitchGeneration = 0;
 
@@ -41,6 +42,8 @@
   let currentModel = $derived(
     currentModelOverride ?? snapshot?.config?.defaultModel ?? ""
   );
+  let activeProvider = $derived(pendingProviderId ?? currentProvider);
+  let activeModel = $derived(pendingProviderId ? "" : currentModel);
   let authedProviderIds = $derived((snapshot?.auth ?? []).map((entry) => entry.providerId));
   let authedProviders = $derived(
     (snapshot?.providers ?? []).filter(
@@ -50,15 +53,15 @@
     )
   );
   let providerLabel = $derived(
-    snapshot?.providers?.find((p) => providerIdsEquivalent(p.id, currentProvider))?.displayName ??
-      currentProvider
+    snapshot?.providers?.find((p) => providerIdsEquivalent(p.id, activeProvider))?.displayName ??
+      activeProvider
   );
 
   let currentProviderEntry = $derived(
-    authedProviders.find((provider) => providerIdsEquivalent(provider.id, currentProvider)) ?? null
+    authedProviders.find((provider) => providerIdsEquivalent(provider.id, activeProvider)) ?? null
   );
   let currentProviderModels = $derived(
-    modelsByProvider[currentProvider] ?? modelsByProvider[currentProviderEntry?.id ?? ""] ?? []
+    modelsByProvider[activeProvider] ?? modelsByProvider[currentProviderEntry?.id ?? ""] ?? []
   );
 
   // Filter models only within the selected provider. Provider switching is
@@ -66,7 +69,7 @@
   let filteredEntries = $derived.by(() => {
     const needle = query.trim().toLowerCase();
     const out: { provider: string; providerLabel: string; model: ModelDescriptorInfo }[] = [];
-    const provider = authedProviders.find((entry) => providerIdsEquivalent(entry.id, currentProvider));
+    const provider = authedProviders.find((entry) => providerIdsEquivalent(entry.id, activeProvider));
     if (!provider) return out;
     for (const model of currentProviderModels) {
       if (
@@ -108,10 +111,12 @@
 
   async function selectProvider(providerId: string) {
     if (!allowProviderSwitch || disabled) return;
-    if (providerIdsEquivalent(providerId, currentProvider)) return;
+    if (providerIdsEquivalent(providerId, activeProvider)) return;
     const generation = ++providerSwitchGeneration;
     modelLoadGeneration += 1;
+    pendingProviderId = providerId;
     query = "";
+    onChange(providerId, "");
     let models: ModelDescriptorInfo[] = [];
     busy = true;
     loadError = null;
@@ -132,6 +137,7 @@
     if (generation !== providerSwitchGeneration) return;
     const defaultModel = models.find((model) => model.isDefault) ?? models[0];
     onChange(providerId, defaultModel?.id ?? "");
+    pendingProviderId = null;
   }
 
   function toggle() {
@@ -144,6 +150,7 @@
 
   function pick(providerId: string, modelId: string) {
     if (disabled) return;
+    pendingProviderId = null;
     open = false;
     query = "";
     onChange(providerId, modelId);
@@ -185,13 +192,13 @@
     class:open
     onclick={toggle}
     disabled={disabled}
-    title={currentModel ? `${providerLabel} · ${currentModel}` : "Pick a model"}
+    title={activeModel ? `${providerLabel} · ${activeModel}` : "Pick a model"}
   >
     <Icon name="sparkles" size={11} color="var(--muted-foreground)" />
-    <span class="model" class:placeholder={!currentModel}>
-      {currentModel || "Pick model"}
+    <span class="model" class:placeholder={!activeModel}>
+      {activeModel || (busy ? "Loading models" : "Pick model")}
     </span>
-    {#if providerLabel && currentModel}
+    {#if providerLabel && (activeModel || pendingProviderId)}
       <span class="provider">{providerLabel}</span>
     {/if}
     <Icon name="chevD" size={10} color="var(--muted-foreground)" />
@@ -204,7 +211,7 @@
           {#each authedProviders as provider (provider.id)}
             <button
               type="button"
-              class:on={providerIdsEquivalent(provider.id, currentProvider)}
+              class:on={providerIdsEquivalent(provider.id, activeProvider)}
               onclick={() => selectProvider(provider.id)}
             >
               {provider.displayName}
@@ -222,7 +229,7 @@
       />
       <div class="results">
         {#if busy && filteredEntries.length === 0}
-          <div class="hint">Loading models…</div>
+          <div class="hint">Loading {providerLabel || "provider"} models…</div>
         {:else if filteredEntries.length === 0}
           {#if authedProviders.length === 0}
             <div class="hint">Connect a provider first.</div>
@@ -236,7 +243,7 @@
         {:else}
           {#each filteredEntries as entry (entry.provider + "::" + entry.model.id)}
             {@const isCurrent =
-              providerIdsEquivalent(entry.provider, currentProvider) && entry.model.id === currentModel}
+              providerIdsEquivalent(entry.provider, activeProvider) && entry.model.id === activeModel}
             <button
               type="button"
               class="row"

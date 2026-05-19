@@ -614,6 +614,11 @@
               {/each}
             </select>
           </label>
+          {#if modelPickerLoading}
+            <div class="pf-model-loading-note">
+              Fetching {defaultRouteProviders.find((p) => providerIdsEquivalent(p.id, modelPickerProvider))?.displayName ?? modelPickerProvider} models...
+            </div>
+          {/if}
           <div style="display: flex; justify-content: flex-end; gap: 8px;">
             {#if modelError}
               <span style="color: var(--destructive, #c03232); font-size: 11.5px; align-self: center;">{modelError}</span>
@@ -1125,6 +1130,15 @@
     padding: 1px 5px;
     border-radius: 4px;
     color: var(--foreground);
+  }
+  .pf-model-loading-note {
+    border: 1px solid color-mix(in oklab, var(--accent) 28%, var(--border));
+    border-radius: 8px;
+    background: color-mix(in oklab, var(--accent) 7%, var(--background));
+    color: var(--muted-foreground);
+    font-size: 11.5px;
+    line-height: 1.4;
+    padding: 7px 9px;
   }
   .pf-model-badge {
     display: inline-flex;
