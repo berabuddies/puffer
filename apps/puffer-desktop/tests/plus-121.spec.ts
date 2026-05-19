@@ -151,6 +151,38 @@ test("PLUS-121: child sessions are not listed as top-level active agents", async
   await expect(pufferGroup.locator(".pf-sidebar-agent-row")).toHaveCount(1);
 });
 
+test("PLUS-121: collapsed active projects do not leak across same-name folders", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-other-puffer",
+        displayName: "Other puffer planner",
+        title: "Other puffer planner",
+        cwd: "/tmp/other/puffer",
+        folderPath: "/tmp/other/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        activityStatus: "running"
+      }
+    ]
+  });
+  await daemon.install(page);
+  await page.addInitScript(() => {
+    window.localStorage.setItem("puffer.sidebar.collapsedProjects", JSON.stringify(["puffer"]));
+  });
+  await daemon.open(page);
+
+  const group = page
+    .locator(".pf-sidebar-agents .pf-sidebar-project-group")
+    .filter({ hasText: "puffer" });
+  const header = group.locator(".pf-sidebar-project-header");
+  await expect(header).toHaveAttribute("aria-expanded", "true");
+  await expect(group.getByText("Other puffer planner")).toBeVisible();
+});
+
 test("PLUS-121: persisted active project collapse is not auto-expanded on restore", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
@@ -171,7 +203,7 @@ test("PLUS-121: persisted active project collapse is not auto-expanded on restor
   await page.addInitScript(() => {
     window.localStorage.setItem(
       "puffer.sidebar.collapsedProjects",
-      JSON.stringify(["puffer"])
+      JSON.stringify(["/tmp/puffer"])
     );
     window.localStorage.setItem(
       "puffer-desktop:preferences",

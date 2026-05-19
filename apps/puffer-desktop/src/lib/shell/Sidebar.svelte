@@ -6,6 +6,7 @@
     name: string;
     title: string;
     project: string;
+    projectKey: string;
     branch: string;
     state: AgentState;
     updatedAtMs: number;
@@ -81,28 +82,34 @@
       return;
     }
     if (filterState !== "all" && active.state !== filterState) filterState = "all";
-    const activeKey = `${active.id}\u0000${active.project}`;
+    const activeKey = `${active.id}\u0000${active.projectKey}`;
     if (lastAutoExpandedActiveKey === activeKey) return;
     lastAutoExpandedActiveKey = activeKey;
-    if (collapsedProjects.has(active.project) && !manuallyCollapsedProjects.has(active.project)) {
+    if (collapsedProjects.has(active.projectKey) && !manuallyCollapsedProjects.has(active.projectKey)) {
       const next = new Set(collapsedProjects);
-      next.delete(active.project);
+      next.delete(active.projectKey);
       collapsedProjects = next;
       saveCollapsedProjects(next);
     }
   });
 
-  function groupByProject(list: ActiveAgent[]): { project: string; agents: ActiveAgent[] }[] {
+  function groupByProject(list: ActiveAgent[]): { project: string; projectKey: string; agents: ActiveAgent[] }[] {
     const order: string[] = [];
+    const labels = new Map<string, string>();
     const map = new Map<string, ActiveAgent[]>();
     for (const agent of list) {
-      if (!map.has(agent.project)) {
-        order.push(agent.project);
-        map.set(agent.project, []);
+      if (!map.has(agent.projectKey)) {
+        order.push(agent.projectKey);
+        labels.set(agent.projectKey, agent.project);
+        map.set(agent.projectKey, []);
       }
-      map.get(agent.project)!.push(agent);
+      map.get(agent.projectKey)!.push(agent);
     }
-    return order.map((project) => ({ project, agents: map.get(project)! }));
+    return order.map((projectKey) => ({
+      project: labels.get(projectKey) ?? projectKey,
+      projectKey,
+      agents: map.get(projectKey)!
+    }));
   }
 
   function loadCollapsedProjects(): Set<string> {
@@ -197,13 +204,13 @@
       </select>
     </div>
     <div class="pf-sidebar-agents-list">
-      {#each groupedAgents as group (group.project)}
-        {@const isCollapsed = collapsedProjects.has(group.project)}
+      {#each groupedAgents as group (group.projectKey)}
+        {@const isCollapsed = collapsedProjects.has(group.projectKey)}
         <div class="pf-sidebar-project-group" data-collapsed={isCollapsed}>
           <button
             type="button"
             class="pf-sidebar-project-header"
-            onclick={() => toggleProjectCollapsed(group.project)}
+            onclick={() => toggleProjectCollapsed(group.projectKey)}
             aria-expanded={!isCollapsed}
             aria-label={`${isCollapsed ? "Expand" : "Collapse"} ${group.project}`}
           >

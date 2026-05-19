@@ -497,12 +497,17 @@
     }
   }
 
-  function activeAgentFromSession(session: SessionListItem, project: string): ActiveAgent {
+  function activeAgentFromSession(
+    session: SessionListItem,
+    project: string,
+    projectKey: string
+  ): ActiveAgent {
     return {
       id: session.id,
       name: sessionDisplayName(session).slice(0, 24),
       title: sessionDisplayTitle(session),
       project,
+      projectKey,
       branch: "",
       state: liveSidebarAgentState(session),
       updatedAtMs: session.updatedAtMs,
@@ -518,11 +523,22 @@
     return duplicateLabel ? group.path || group.id || group.label : group.label;
   }
 
+  function activeAgentProjectKey(group: FolderGroup): string {
+    return group.path || group.id || group.label;
+  }
+
   function projectLabelForSession(session: SessionListItem): string {
     const group = workspaceGroups.find((item) =>
       item.sessions.some((candidate) => candidate.id === session.id)
     );
     return group ? activeAgentProjectLabel(group, workspaceGroups) : fallbackProjectLabel(session);
+  }
+
+  function projectKeyForSession(session: SessionListItem): string {
+    const group = workspaceGroups.find((item) =>
+      item.sessions.some((candidate) => candidate.id === session.id)
+    );
+    return group ? activeAgentProjectKey(group) : groupPathForSession(session);
   }
 
   let sortedGroups = $derived<FolderGroup[]>(
@@ -538,7 +554,12 @@
       .flatMap((g) =>
         g.sessions
           .filter(isTopLevelSession)
-          .map((s) => activeAgentFromSession(s, activeAgentProjectLabel(g, workspaceGroups)))
+          .map((s) =>
+            activeAgentFromSession(
+              s,
+              activeAgentProjectLabel(g, workspaceGroups),
+              activeAgentProjectKey(g)
+            ))
       )
       .slice()
       .sort((left, right) =>
@@ -563,7 +584,10 @@
           selectedSession,
           selectedSessionGroup
             ? activeAgentProjectLabel(selectedSessionGroup, workspaceGroups)
-            : fallbackProjectLabel(selectedSession)
+            : fallbackProjectLabel(selectedSession),
+          selectedSessionGroup
+            ? activeAgentProjectKey(selectedSessionGroup)
+            : groupPathForSession(selectedSession)
         )
       : null
   );
@@ -575,7 +599,12 @@
           !realAgents.some((agent) => agent.id === live.session.id) &&
           selectedSessionFallbackAgent?.id !== live.session.id
       )
-      .map((live) => activeAgentFromSession(live.session, projectLabelForSession(live.session)))
+      .map((live) =>
+        activeAgentFromSession(
+          live.session,
+          projectLabelForSession(live.session),
+          projectKeyForSession(live.session)
+        ))
   );
   let activeAgents = $derived<ActiveAgent[]>(
     selectedSessionFallbackAgent
