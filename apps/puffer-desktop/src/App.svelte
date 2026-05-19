@@ -1001,6 +1001,7 @@
       const nextGroups = await listGroupedSessionsFromDaemon();
       if (generation !== groupsRefreshGeneration) return;
       groups = nextGroups;
+      if (selectedSession) rememberFallbackSession(selectedSession);
       pruneFallbackSessions(nextGroups);
       statusMessage =
         groups.length === 0

@@ -384,6 +384,70 @@ test("late workspace refresh does not hide a newly created session", async ({ pa
   await expect(history).toContainText("New Session");
 });
 
+test("session history keeps opened sessions after a later stale grouped refresh", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-history-alpha",
+        displayName: "Alpha stale history",
+        title: "Alpha stale history",
+        cwd: "/tmp/puffer-vanishing-history",
+        folderPath: "/tmp/puffer-vanishing-history",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "user_message",
+            id: "alpha-user",
+            text: "Keep alpha in history.",
+            createdAtMs: baseTime - 50_000
+          }
+        ]
+      },
+      {
+        sessionId: "session-history-beta",
+        displayName: "Beta stable history",
+        title: "Beta stable history",
+        cwd: "/tmp/puffer-vanishing-history",
+        folderPath: "/tmp/puffer-vanishing-history",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 1
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const history = page.getByRole("region", { name: "Session history" });
+  await history.getByRole("button", { name: /Alpha stale history/ }).click();
+  await expect(page.locator(".pf-agent-detail .primary-title")).toContainText("Alpha stale history");
+  await page.getByRole("button", { name: "Back" }).click();
+
+  daemon.setGroupedSessionFilter(
+    (metadata) => String(metadata.sessionId ?? "") !== "session-history-alpha"
+  );
+  const previousRefreshes = daemon.requests.filter(
+    (request) => request.method === "list_grouped_sessions"
+  ).length;
+  daemon.emit("workspace:sessions:changed", { reason: "stale-alpha-drop" });
+  await daemon.waitForRequest(
+    "list_grouped_sessions",
+    (request) =>
+      daemon.requests.filter((candidate) => candidate.method === "list_grouped_sessions")
+        .indexOf(request) >= previousRefreshes
+  );
+
+  await expect(history).toContainText("Alpha stale history");
+  await history.getByRole("button", { name: /Beta stable history/ }).click();
+  await expect(page.locator(".pf-agent-detail .primary-title")).toContainText("Beta stable history");
+  await page.getByRole("button", { name: "Back" }).click();
+
+  await expect(history).toContainText("Alpha stale history");
+  await expect(history).toContainText("Beta stable history");
+});
+
 test("active agents includes an opened session before grouped history catches up", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
