@@ -1364,6 +1364,39 @@
     return `${item.kind}:${body}`;
   }
 
+  function stableJsonText(value: unknown): string {
+    if (Array.isArray(value)) {
+      return `[${value.map(stableJsonText).join(",")}]`;
+    }
+    if (value && typeof value === "object") {
+      const record = value as Record<string, unknown>;
+      return `{${Object.keys(record)
+        .sort()
+        .map((key) => `${JSON.stringify(key)}:${stableJsonText(record[key])}`)
+        .join(",")}}`;
+    }
+    return JSON.stringify(value) ?? "undefined";
+  }
+
+  function normalizedToolInput(item: TimelineItem): string | null {
+    if (item.kind !== "tool") return null;
+    const raw = item.input?.trim();
+    if (raw) {
+      try {
+        return stableJsonText(JSON.parse(raw) as unknown);
+      } catch {
+        return raw;
+      }
+    }
+    return item.inputJson ? stableJsonText(item.inputJson) : null;
+  }
+
+  function transientToolSignature(item: TimelineItem): string | null {
+    if (item.kind !== "tool") return null;
+    const input = normalizedToolInput(item);
+    return input ? `${item.toolName}:${input}` : null;
+  }
+
   function reuseTransientMessageIds(
     persisted: TimelineItem[],
     transient: TimelineItem[]
@@ -1402,6 +1435,10 @@
   function timelineHasTransientMatch(items: TimelineItem[], pending: TimelineItem): boolean {
     const body = timelineItemBody(pending).trim();
     if (!body) {
+      const toolSignature = transientToolSignature(pending);
+      if (toolSignature) {
+        return items.some((item) => transientToolSignature(item) === toolSignature);
+      }
       return items.some((item) => item.kind === pending.kind && item.id === pending.id);
     }
     return items.some(

@@ -589,6 +589,70 @@ test("new turn can reuse a tool call id without replacing the previous live tool
   await expect(page.locator(".pf-tool").filter({ hasText: "SecondTool" })).toHaveCount(1);
 });
 
+test("transcript reload replaces pending live tool card when invocation event is missed", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-pending-tool",
+        displayName: "Pending tool",
+        title: "Pending tool",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Pending tool/);
+  daemon.emit("session:session-pending-tool:event", {
+    type: "turn-start",
+    turnId: "turn-pending-tool"
+  });
+  daemon.emit("session:session-pending-tool:event", {
+    type: "tool-calls-requested",
+    turnId: "turn-pending-tool",
+    requests: [
+      {
+        callId: "call-pending",
+        toolId: "Read",
+        input: "{\"path\":\"README.md\"}"
+      }
+    ]
+  });
+  await expect(page.locator(".pf-tool").filter({ hasText: "Read" })).toHaveCount(1);
+  await expect(page.locator(".pf-tool").filter({ hasText: "running" })).toHaveCount(1);
+
+  daemon.setSessionTimeline("session-pending-tool", [
+    {
+      kind: "tool_call",
+      id: "persisted-tool-call",
+      toolId: "Read",
+      status: "success",
+      inputText: "{\"path\":\"README.md\"}",
+      inputJson: { path: "README.md" },
+      outputText: "{\"content\":\"done\"}",
+      createdAtMs: baseTime + 1
+    }
+  ]);
+  daemon.emit("session:session-pending-tool:event", {
+    type: "turn-complete",
+    turnId: "turn-pending-tool",
+    assistantText: ""
+  });
+
+  await expect(page.locator(".pf-tool").filter({ hasText: "Read" })).toHaveCount(1);
+  await expect(page.locator(".pf-tool").filter({ hasText: "running" })).toHaveCount(0);
+});
+
 test("stop turn is disabled until the daemon returns a turn id", async ({ page }) => {
   const prompt = "Wait for a real turn id before cancel";
   const daemon = new FakeDaemon({
