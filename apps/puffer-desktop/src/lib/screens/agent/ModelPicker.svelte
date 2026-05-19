@@ -2,7 +2,7 @@
   import { listProviderModels, type ModelDescriptorInfo } from "../../api/desktop";
   import type { SettingsSnapshot } from "../../types";
   import Icon from "../../design/Icon.svelte";
-  import { providerIdInSet, providerIdsEquivalent } from "../../providerIds";
+  import { isAgentProviderId, providerIdInSet, providerIdsEquivalent } from "../../providerIds";
 
   type Props = {
     snapshot: SettingsSnapshot | null;
@@ -41,7 +41,11 @@
   );
   let authedProviderIds = $derived((snapshot?.auth ?? []).map((entry) => entry.providerId));
   let authedProviders = $derived(
-    (snapshot?.providers ?? []).filter((provider) => providerIdInSet(provider.id, authedProviderIds))
+    (snapshot?.providers ?? []).filter(
+      (provider) =>
+        isAgentProviderId(provider.id) &&
+        providerIdInSet(provider.id, authedProviderIds)
+    )
   );
   let providerLabel = $derived(
     snapshot?.providers?.find((p) => providerIdsEquivalent(p.id, currentProvider))?.displayName ??

@@ -29,6 +29,7 @@
   } from "../../api/desktop";
   import {
     canonicalDaemonProviderId,
+    isAgentProviderId,
     providerIdInSet
   } from "../../providerIds";
 
@@ -127,13 +128,17 @@
   );
   let allowProviderSwitch = $derived(Boolean(session) && !conversationStarted && !turnRunning);
   let authenticatedProviderIds = $derived((settingsSnapshot?.auth ?? []).map((entry) => entry.providerId));
+  let authenticatedAgentProviderIds = $derived(
+    authenticatedProviderIds.filter((providerId) => isAgentProviderId(providerId))
+  );
   let selectedProviderAuthenticated = $derived(
     settingsSnapshot === null ||
       !selectedProviderId ||
-      providerIdInSet(selectedProviderId, authenticatedProviderIds)
+      (isAgentProviderId(selectedProviderId) &&
+        providerIdInSet(selectedProviderId, authenticatedAgentProviderIds))
   );
   let providerSwitchCanRecover = $derived(
-    allowProviderSwitch && authenticatedProviderIds.length > 0
+    allowProviderSwitch && authenticatedAgentProviderIds.length > 0
   );
   let composerDisabled = $derived(
     !session || (!selectedProviderAuthenticated && !providerSwitchCanRecover)

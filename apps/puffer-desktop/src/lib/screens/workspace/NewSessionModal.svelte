@@ -2,6 +2,7 @@
   import Icon from "../../design/Icon.svelte";
   import {
     canonicalDaemonProviderId,
+    isAgentProviderId,
     providerIdInSet,
     providerIdsEquivalent
   } from "../../providerIds";
@@ -50,12 +51,11 @@
       sourcePath: null
     }
   ];
-  const personalProviderIds = new Set(["codex", "openai", "claude", "anthropic", "puffer"]);
   let authenticatedProviderIds = $derived((snapshot?.auth ?? []).map((entry) => entry.providerId));
 
   let providerOptions = $derived(
     (snapshot?.providers?.length ? snapshot.providers : fallbackProviders).filter((provider) =>
-      personalProviderIds.has(provider.id) &&
+      isAgentProviderId(provider.id) &&
       (snapshot === null || providerIdInSet(provider.id, authenticatedProviderIds))
     )
   );

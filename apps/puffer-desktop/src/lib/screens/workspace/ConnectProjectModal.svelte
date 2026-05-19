@@ -11,6 +11,7 @@
   import { canInvokeTauri, currentDaemonClient, switchDaemonClient } from "../../api/daemonClient";
   import {
     canonicalDaemonProviderId,
+    isAgentProviderId,
     providerIdInSet,
     providerIdsEquivalent
   } from "../../providerIds";
@@ -104,12 +105,10 @@
     }
   ];
 
-  const personalProviderIds = new Set(["codex", "openai", "claude", "anthropic", "puffer"]);
-
   function providerOptionsFor(source: SettingsSnapshot | null): ProviderSummary[] {
     const authenticatedProviderIds = (source?.auth ?? []).map((entry) => entry.providerId);
     return (source?.providers?.length ? source.providers : fallbackProviders).filter((provider) =>
-      personalProviderIds.has(provider.id) &&
+      isAgentProviderId(provider.id) &&
       (source === null || providerIdInSet(provider.id, authenticatedProviderIds))
     );
   }

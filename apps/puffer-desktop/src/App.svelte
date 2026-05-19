@@ -62,7 +62,7 @@
     type ConnectionState
   } from "./lib/api/daemonClient";
   import { sessionDisplayName, sessionDisplayTitle } from "./lib/sessionDisplay";
-  import { providerIdInSet } from "./lib/providerIds";
+  import { isAgentProviderId, providerIdInSet } from "./lib/providerIds";
   import type { UnlistenFn } from "@tauri-apps/api/event";
   import type {
     DesktopPreferences,
@@ -1172,10 +1172,14 @@
   }
 
   function providerIsAuthenticated(providerId: string | null | undefined): boolean {
-    if (!settingsSnapshot || !providerId) return true;
+    if (!providerId) return true;
+    if (!isAgentProviderId(providerId)) return false;
+    if (!settingsSnapshot) return true;
     return providerIdInSet(
       providerId,
-      settingsSnapshot.auth.map((auth) => auth.providerId)
+      settingsSnapshot.auth
+        .map((auth) => auth.providerId)
+        .filter((authProviderId) => isAgentProviderId(authProviderId))
     );
   }
 
@@ -1212,6 +1216,12 @@
     }
     const requestedProviderId =
       options.providerId ?? sessionAtSubmit.providerId ?? settingsSnapshot?.config.defaultProvider;
+    if (requestedProviderId && !isAgentProviderId(requestedProviderId)) {
+      const detail = `${requestedProviderId} cannot run agent sessions. Select Codex, Claude, or Puffer.`;
+      statusMessage = detail;
+      appendAgentError("Provider unavailable", detail, "provider-agent");
+      return false;
+    }
     if (!providerIsAuthenticated(requestedProviderId)) {
       const detail = `Reconnect ${requestedProviderId} before continuing this session.`;
       statusMessage = detail;

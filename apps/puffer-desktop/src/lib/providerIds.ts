@@ -6,6 +6,15 @@ export function canonicalDaemonProviderId(providerId: string): string {
   return providerId;
 }
 
+const AGENT_PROVIDER_IDS = new Set(["openai", "anthropic", "puffer"]);
+
+/** True when a provider id can run an agent session. */
+export function isAgentProviderId(providerId: string | null | undefined): boolean {
+  const trimmed = providerId?.trim();
+  if (!trimmed) return false;
+  return AGENT_PROVIDER_IDS.has(canonicalDaemonProviderId(trimmed).toLowerCase());
+}
+
 /** True when two provider ids refer to the same daemon provider. */
 export function providerIdsEquivalent(
   left: string | null | undefined,

@@ -1768,6 +1768,94 @@ test("composer controls handle provider-prefixed session model ids", async ({ pa
   });
 });
 
+test("model picker only offers authenticated agent providers", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "openai",
+        kind: "oauth",
+        email: "tester@example.com",
+        expiresAtMs: null,
+        scopes: [],
+        planType: "test",
+        organizationName: null
+      },
+      {
+        providerId: "github",
+        kind: "oauth",
+        email: "tester@example.com",
+        expiresAtMs: null,
+        scopes: [],
+        planType: "test",
+        organizationName: null
+      }
+    ],
+    providers: [
+      {
+        id: "openai",
+        displayName: "Codex",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 1,
+        authModes: ["oauth"],
+        sourceKind: "test",
+        sourcePath: null
+      },
+      {
+        id: "github",
+        displayName: "GitHub",
+        baseUrl: "",
+        defaultApi: "oauth",
+        modelCount: 0,
+        authModes: ["oauth"],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ],
+    sessions: [
+      {
+        sessionId: "session-provider-picker-agent-only",
+        displayName: "Agent provider picker",
+        title: "Agent provider picker",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "openai",
+        modelId: "gpt-5",
+        timeline: []
+      }
+    ],
+    providerModels: {
+      openai: [
+        {
+          id: "gpt-5",
+          displayName: "GPT-5",
+          provider: "openai",
+          api: "openai-responses",
+          supportsTools: true,
+          supportsVision: false,
+          contextWindow: null,
+          maxOutputTokens: null,
+          thinkingOptions: [],
+          defaultThinkingOptionId: null,
+          isDefault: true
+        }
+      ]
+    }
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Agent provider picker/);
+  await page.locator(".pf-composer .picker .trigger").click();
+
+  const providerList = page.locator(".pf-composer .picker .providers");
+  await expect(providerList.getByRole("button", { name: "Codex", exact: true })).toBeVisible();
+  await expect(providerList.getByRole("button", { name: "GitHub", exact: true })).toHaveCount(0);
+});
+
 for (const scenario of [
   {
     label: "Codex",
@@ -1995,6 +2083,78 @@ test("empty agent can recover by switching away from a disconnected provider", a
     providerId: "openai",
     modelId: "gpt-5"
   });
+});
+
+test("empty agent does not recover through non-agent provider credentials", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-empty-github-only",
+        displayName: "GitHub only empty agent",
+        title: "GitHub only empty agent",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "anthropic",
+        modelId: "claude-sonnet-4-5",
+        timeline: []
+      }
+    ],
+    auth: [
+      {
+        providerId: "github",
+        kind: "oauth",
+        email: "tester@example.com",
+        expiresAtMs: null,
+        scopes: [],
+        planType: "test",
+        organizationName: null
+      }
+    ],
+    providers: [
+      {
+        id: "github",
+        displayName: "GitHub",
+        baseUrl: "",
+        defaultApi: "oauth",
+        modelCount: 0,
+        authModes: ["oauth"],
+        sourceKind: "test",
+        sourcePath: null
+      },
+      {
+        id: "anthropic",
+        displayName: "Claude",
+        baseUrl: "",
+        defaultApi: "anthropic-messages",
+        modelCount: 1,
+        authModes: ["api_key"],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /GitHub only empty agent/);
+  const composer = page.locator(".pf-composer textarea");
+  await expect(page.getByText("No messages in this session yet. Send a prompt to get started.")).toBeVisible();
+  await expect(composer).toBeDisabled();
+  await expect(page.locator(".pf-composer-hint")).toContainText(
+    "Reconnect Claude to continue this session."
+  );
+  await expect(page.locator(".pf-composer .picker .trigger")).toBeDisabled();
+  await page.getByRole("button", { name: "Send" }).evaluate((button) => {
+    (button as HTMLButtonElement).click();
+  });
+
+  await page.waitForTimeout(50);
+  expect(daemon.requests.filter((request) => request.method === "run_agent_turn")).toHaveLength(0);
 });
 
 test("stop turn requests cancellation for the active turn", async ({ page }) => {
