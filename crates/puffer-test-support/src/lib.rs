@@ -25,6 +25,7 @@ pub use tmux::start_tmux_command;
 pub use tmux::start_tmux_command_with_size;
 pub use tmux::tmux_available;
 pub use tmux::wait_for_tmux_text;
+pub use tmux::wait_for_tmux_visible_text;
 pub use tmux::TmuxInfo;
 pub use tmux::TmuxSession;
 pub use workspace::read_to_string;

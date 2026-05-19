@@ -148,6 +148,7 @@ fn write_config(workspace: &Path) {
         r#"
 app_name = "Puffer Code"
 default_provider = "anthropic"
+default_model = "anthropic/claude-sonnet-4-5"
 theme = "puffer"
 
 [mascot]

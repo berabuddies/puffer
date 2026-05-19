@@ -161,17 +161,53 @@ pub fn capture_tmux_visible_pane(session: &TmuxSession) -> Result<String> {
 
 /// Sends tmux key presses to the target session pane.
 pub fn send_tmux_keys(session: &TmuxSession, keys: &[&str]) -> Result<()> {
-    let mut args = vec!["send-keys", "-t", session.name.as_str()];
-    args.extend(keys.iter().copied());
-    let output = run_tmux_command(session, &args)?;
-    if output.status_code != 0 {
-        return Err(anyhow!(
-            "failed to send tmux keys to {}: {}",
-            session.name,
-            output.stderr.trim()
-        ));
+    for key in keys {
+        if tmux_key_name(key) {
+            let output =
+                run_tmux_command(session, &["send-keys", "-t", session.name.as_str(), key])?;
+            if output.status_code != 0 {
+                return Err(anyhow!(
+                    "failed to send tmux keys to {}: {}",
+                    session.name,
+                    output.stderr.trim()
+                ));
+            }
+            continue;
+        }
+
+        let output = run_tmux_command(
+            session,
+            &["send-keys", "-l", "-t", session.name.as_str(), key],
+        )?;
+        if output.status_code != 0 {
+            return Err(anyhow!(
+                "failed to send tmux keys to {}: {}",
+                session.name,
+                output.stderr.trim()
+            ));
+        }
     }
     Ok(())
+}
+
+fn tmux_key_name(key: &str) -> bool {
+    matches!(
+        key,
+        "Enter"
+            | "Escape"
+            | "Esc"
+            | "BSpace"
+            | "Backspace"
+            | "Delete"
+            | "Up"
+            | "Down"
+            | "Left"
+            | "Right"
+            | "Tab"
+            | "Space"
+    ) || key.starts_with("C-")
+        || key.starts_with("M-")
+        || key.starts_with("S-")
 }
 
 /// Waits until the tmux pane contains the requested text or the timeout expires.
@@ -180,16 +216,35 @@ pub fn wait_for_tmux_text(
     needle: &str,
     timeout: Duration,
 ) -> Result<String> {
+    wait_for_tmux_capture(session, needle, timeout, capture_tmux_pane)
+}
+
+/// Waits until the visible tmux pane contains the requested text.
+pub fn wait_for_tmux_visible_text(
+    session: &TmuxSession,
+    needle: &str,
+    timeout: Duration,
+) -> Result<String> {
+    wait_for_tmux_capture(session, needle, timeout, capture_tmux_visible_pane)
+}
+
+fn wait_for_tmux_capture(
+    session: &TmuxSession,
+    needle: &str,
+    timeout: Duration,
+    capture: fn(&TmuxSession) -> Result<String>,
+) -> Result<String> {
     let deadline = Instant::now() + timeout;
     loop {
-        let capture = capture_tmux_pane(session)?;
-        if capture.contains(needle) {
-            return Ok(capture);
+        let pane = capture(session)?;
+        if pane.contains(needle) {
+            return Ok(pane);
         }
         if Instant::now() >= deadline {
             return Err(anyhow!(
-                "timed out waiting for `{needle}` in tmux session {}",
-                session.name
+                "timed out waiting for `{needle}` in tmux session {}\nlast pane capture:\n{}",
+                session.name,
+                pane
             ));
         }
         std::thread::sleep(Duration::from_millis(100));
