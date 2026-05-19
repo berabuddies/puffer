@@ -51,8 +51,8 @@ use crossterm::terminal::{
 };
 use crossterm::ExecutableCommand;
 use puffer_config::ConfigPaths;
-use puffer_core::{command_surface, shutdown_runtime_services, AppState, CommandSpec};
 use puffer_core::ResourceWatcher;
+use puffer_core::{command_surface, shutdown_runtime_services, AppState, CommandSpec, MessageRole};
 use puffer_provider_registry::{AuthStore, ProviderRegistry, StoredCredential};
 use puffer_resources::LoadedResources;
 use puffer_session_store::SessionStore;
@@ -60,7 +60,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use state::TuiState;
 pub(crate) use state::{AuthPickerAction, ModelPickerEntry, OverlayState};
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::time::Duration;
 
@@ -88,6 +88,7 @@ pub fn run_app(
 ) -> Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         if let Some(prompt) = initial_prompt.filter(|prompt| !prompt.trim().is_empty()) {
+            let transcript_start = state.transcript.len();
             handle_submit(
                 state,
                 resources,
@@ -98,6 +99,7 @@ pub fn run_app(
                 prompt,
                 no_alt_screen,
             )?;
+            print_noninteractive_transcript_delta(state, transcript_start)?;
             return Ok(());
         }
         anyhow::bail!("interactive TUI requires stdin and stdout to be terminals");
@@ -414,6 +416,27 @@ fn apply_startup_action(
             overlay.select_matching_query(&tui.input);
         }
     }
+    Ok(())
+}
+
+fn print_noninteractive_transcript_delta(state: &AppState, transcript_start: usize) -> Result<()> {
+    let mut stdout = io::stdout();
+    let mut wrote = false;
+    for message in state.transcript.iter().skip(transcript_start) {
+        if message.role == MessageRole::User {
+            continue;
+        }
+        let text = message.text.trim_end();
+        if text.is_empty() {
+            continue;
+        }
+        if wrote {
+            writeln!(stdout)?;
+        }
+        writeln!(stdout, "{text}")?;
+        wrote = true;
+    }
+    stdout.flush()?;
     Ok(())
 }
 

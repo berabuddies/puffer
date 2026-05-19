@@ -101,6 +101,16 @@ fn remote_help_mentions_ssh_launch() {
 }
 
 #[test]
+fn non_interactive_startup_prompt_prints_command_output() {
+    let (_tempdir, workspace, puffer_home) = configured_workspace();
+    let output = run_puffer(&workspace, &puffer_home, &["--no-alt-screen", "/status"]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Status"), "{stdout}");
+    assert!(stdout.contains("Provider:"), "{stdout}");
+}
+
+#[test]
 fn browser_help_lists_phase_two_surface_commands() {
     let (_tempdir, workspace, puffer_home) = configured_workspace();
     let output = run_puffer(&workspace, &puffer_home, &["browser", "--help"]);
