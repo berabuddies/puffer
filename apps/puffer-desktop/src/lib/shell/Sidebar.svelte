@@ -27,7 +27,7 @@
   import type { ScreenId } from "./tweaks.ts";
 
   type Props = {
-    screen: ScreenId;
+    screen: ScreenId | null;
     collapsed?: boolean;
     onSelectScreen: (id: ScreenId) => void;
     agents: ActiveAgent[];

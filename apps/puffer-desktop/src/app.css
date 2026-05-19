@@ -333,7 +333,7 @@ html.is-tauri-mac .pf-titlebar { padding-left: 84px; }
   border-radius: 6px;
   color: var(--muted-foreground);
   cursor: pointer;
-  transition: background 120ms, color 120ms, border-color 120ms, box-shadow 120ms;
+  transition: color 120ms, border-color 120ms, box-shadow 120ms;
   min-height: 30px; white-space: nowrap; overflow: hidden;
   background: transparent; border: 1px solid transparent; width: 100%;
   text-align: left; font-size: inherit;
@@ -393,7 +393,7 @@ html.is-tauri-mac .pf-titlebar { padding-left: 84px; }
   border-radius: 6px;
   overflow: hidden;
   border: 1px solid transparent;
-  transition: background 120ms, border-color 120ms, box-shadow 120ms;
+  transition: border-color 120ms, box-shadow 120ms;
 }
 .pf-sidebar-agent {
   display: flex; align-items: center; gap: 10px;

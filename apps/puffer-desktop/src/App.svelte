@@ -2153,7 +2153,7 @@
     <div class="pf-app-body">
       {#if tweaks.showSidebar}
         <Sidebar
-          screen={tweaks.screen}
+          screen={openAgentSessionId || openProjectId ? null : tweaks.screen}
           collapsed={tweaks.collapsedSidebar}
           onSelectScreen={onSelectScreen}
           agents={activeAgents}
