@@ -441,106 +441,9 @@ test("active agents can reopen a live session before grouped history catches up"
 
   const liveFallbackRow = activeList.locator(".pf-sidebar-agent-row").filter({ hasText: "New Session" });
   await expect(liveFallbackRow).toBeVisible();
-  await expect(liveFallbackRow.locator(".pf-task-status")).toContainText("thinking");
+  await expect(liveFallbackRow.locator(".state")).toContainText("thinking");
   await liveFallbackRow.getByRole("button", { name: /New Session/ }).click();
   await expect(page.locator(".pf-agent-detail .primary-title")).toContainText("New Session");
-});
-
-test("active agent project filter resets when the selected project disappears", async ({ page }) => {
-  const daemon = new FakeDaemon({
-    sessions: [
-      {
-        sessionId: "session-filter-alpha",
-        displayName: "Alpha filtered agent",
-        title: "Alpha filtered agent",
-        cwd: "/tmp/puffer-filter-alpha",
-        folderPath: "/tmp/puffer-filter-alpha",
-        updatedAtMs: baseTime - 1_000,
-        createdAtMs: baseTime - 60_000,
-        eventCount: 2
-      },
-      {
-        sessionId: "session-filter-beta",
-        displayName: "Beta survivor agent",
-        title: "Beta survivor agent",
-        cwd: "/tmp/puffer-filter-beta",
-        folderPath: "/tmp/puffer-filter-beta",
-        updatedAtMs: baseTime,
-        createdAtMs: baseTime - 120_000,
-        eventCount: 3
-      }
-    ]
-  });
-  await daemon.install(page);
-  await daemon.open(page);
-
-  const activeList = page.locator(".pf-sidebar-agents-list");
-  await page.getByLabel("Filter by project").selectOption("puffer-filter-alpha");
-  await expect(activeList.locator(".pf-sidebar-agent-row").filter({ hasText: "Alpha filtered agent" })).toBeVisible();
-  await expect(activeList.locator(".pf-sidebar-agent-row").filter({ hasText: "Beta survivor agent" })).toHaveCount(0);
-
-  const listRequestsBefore = daemon.requests.filter(
-    (request) => request.method === "list_grouped_sessions"
-  ).length;
-  daemon.setGroupedSessionFilter(
-    (metadata) => String(metadata.sessionId ?? "") !== "session-filter-alpha"
-  );
-  daemon.emit("workspace:sessions:changed", { reason: "manual-refresh" });
-
-  await expect
-    .poll(() =>
-      daemon.requests.filter((request) => request.method === "list_grouped_sessions").length
-    )
-    .toBe(listRequestsBefore + 1);
-  await expect(page.getByLabel("Filter by project")).toHaveValue("all");
-  await expect(activeList.locator(".pf-sidebar-agent-row").filter({ hasText: "Beta survivor agent" })).toBeVisible();
-  await expect(activeList.getByText("No agents match")).toHaveCount(0);
-});
-
-test("active agent project filter resets when opening an out-of-filter session", async ({ page }) => {
-  const daemon = new FakeDaemon({
-    sessions: [
-      {
-        sessionId: "session-filter-open-alpha",
-        displayName: "Alpha sidebar filter",
-        title: "Alpha sidebar filter",
-        cwd: "/tmp/sidebar-filter-alpha",
-        folderPath: "/tmp/sidebar-filter-alpha",
-        updatedAtMs: baseTime - 1_000,
-        createdAtMs: baseTime - 60_000,
-        eventCount: 2
-      },
-      {
-        sessionId: "session-filter-open-beta",
-        displayName: "Beta opened agent",
-        title: "Beta opened agent",
-        cwd: "/tmp/sidebar-filter-beta",
-        folderPath: "/tmp/sidebar-filter-beta",
-        updatedAtMs: baseTime,
-        createdAtMs: baseTime - 120_000,
-        eventCount: 3
-      }
-    ]
-  });
-  await daemon.install(page);
-  await daemon.open(page);
-
-  const activeList = page.locator(".pf-sidebar-agents-list");
-  await page.getByLabel("Filter by project").selectOption("sidebar-filter-alpha");
-  await expect(activeList.locator(".pf-sidebar-agent-row").filter({ hasText: "Alpha sidebar filter" })).toBeVisible();
-  await expect(activeList.locator(".pf-sidebar-agent-row").filter({ hasText: "Beta opened agent" })).toHaveCount(0);
-
-  await page
-    .getByRole("region", { name: "Session history" })
-    .getByRole("button", { name: /Beta opened agent/ })
-    .click();
-
-  await expect(page.locator(".pf-agent-detail")).toBeVisible();
-  await expect(page.getByLabel("Filter by project")).toHaveValue("all");
-  await expect(
-    activeList.locator('.pf-sidebar-agent-row[data-active="true"]').filter({ hasText: "Beta opened agent" })
-  ).toBeVisible();
-  await expect(activeList.getByText("No agents match")).toHaveCount(0);
 });
 
 test("sidebar Workspace returns from agent detail to the workspace board", async ({ page }) => {
@@ -605,13 +508,6 @@ test("workspace board renders daemon session activity states", async ({ page }) 
 
   const project = page.locator(".pf-pw-project").filter({ hasText: "puffer-active" });
   await expect(project).toContainText("2 active");
-
-  await expect(
-    page.locator(".pf-sidebar-agent-row").filter({ hasText: "Running checkout fix" })
-  ).toContainText("running");
-  await expect(
-    page.locator(".pf-sidebar-agent-row").filter({ hasText: "Awaiting deploy approval" })
-  ).toContainText("awaiting");
 
   await project.getByRole("button", { name: "Details" }).click();
   const runningColumn = page.locator(".pf-fpb-col").filter({ hasText: "Running" });

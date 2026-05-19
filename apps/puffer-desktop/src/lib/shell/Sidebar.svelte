@@ -50,8 +50,10 @@
     user = null
   }: Props = $props();
 
-  let filterProject = $state<string>("all");
+  const COLLAPSED_STORAGE_KEY = "puffer.sidebar.collapsedProjects";
+
   let filterState = $state<string>("all");
+  let collapsedProjects = $state<Set<string>>(loadCollapsedProjects());
 
   const screens: { id: ScreenId; label: string; icon: IconName }[] = [
     { id: "workspace", label: "Project", icon: "sparkles" },
@@ -61,24 +63,83 @@
 
   const states: (AgentState | "all")[] = ["all", "running", "thinking", "awaiting", "idle"];
 
-  let projects = $derived(["all", ...Array.from(new Set(agents.map((a) => a.project)))]);
   let filtered = $derived(
-    agents.filter(
-      (a) =>
-        (filterProject === "all" || a.project === filterProject) &&
-        (filterState === "all" || a.state === filterState)
-    )
+    agents.filter((a) => filterState === "all" || a.state === filterState)
   );
+  let groupedAgents = $derived(groupByProject(filtered));
+
   $effect(() => {
-    if (!projects.includes(filterProject)) filterProject = "all";
     if (!states.includes(filterState as AgentState | "all")) filterState = "all";
   });
   $effect(() => {
     const active = activeAgentId ? agents.find((agent) => agent.id === activeAgentId) : null;
     if (!active) return;
-    if (filterProject !== "all" && active.project !== filterProject) filterProject = "all";
     if (filterState !== "all" && active.state !== filterState) filterState = "all";
+    if (collapsedProjects.has(active.project)) {
+      const next = new Set(collapsedProjects);
+      next.delete(active.project);
+      collapsedProjects = next;
+      saveCollapsedProjects(next);
+    }
   });
+
+  function groupByProject(list: ActiveAgent[]): { project: string; agents: ActiveAgent[] }[] {
+    const order: string[] = [];
+    const map = new Map<string, ActiveAgent[]>();
+    for (const agent of list) {
+      if (!map.has(agent.project)) {
+        order.push(agent.project);
+        map.set(agent.project, []);
+      }
+      map.get(agent.project)!.push(agent);
+    }
+    return order.map((project) => ({ project, agents: map.get(project)! }));
+  }
+
+  function loadCollapsedProjects(): Set<string> {
+    if (typeof window === "undefined") return new Set();
+    try {
+      const raw = window.localStorage.getItem(COLLAPSED_STORAGE_KEY);
+      if (!raw) return new Set();
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? new Set(parsed.filter((x) => typeof x === "string")) : new Set();
+    } catch {
+      return new Set();
+    }
+  }
+
+  function saveCollapsedProjects(set: Set<string>) {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(COLLAPSED_STORAGE_KEY, JSON.stringify(Array.from(set)));
+    } catch {
+      /* storage full or unavailable — silently skip */
+    }
+  }
+
+  function toggleProjectCollapsed(project: string) {
+    const next = new Set(collapsedProjects);
+    if (next.has(project)) {
+      next.delete(project);
+    } else {
+      next.add(project);
+    }
+    collapsedProjects = next;
+    saveCollapsedProjects(next);
+  }
+
+  function formatAge(updatedAtMs: number): string {
+    const delta = Date.now() - updatedAtMs;
+    const mins = Math.round(delta / 60_000);
+    if (mins < 1) return "just now";
+    if (mins < 60) return `${mins}m`;
+    const hours = Math.round(mins / 60);
+    if (hours < 24) return `${hours}h`;
+    const days = Math.round(hours / 24);
+    if (days < 7) return `${days}d`;
+    const weeks = Math.round(days / 7);
+    return `${weeks}w`;
+  }
 </script>
 
 <aside class="pf-sidebar" data-collapsed={collapsed}>
@@ -114,11 +175,6 @@
       <span class="count">{filtered.length}</span>
     </div>
     <div class="pf-sidebar-filters">
-      <select bind:value={filterProject} aria-label="Filter by project">
-        {#each projects as p (p)}
-          <option value={p}>{p === "all" ? "All projects" : p}</option>
-        {/each}
-      </select>
       <select bind:value={filterState} aria-label="Filter by state">
         {#each states as s (s)}
           <option value={s}>{s === "all" ? "All states" : s}</option>
@@ -126,35 +182,54 @@
       </select>
     </div>
     <div class="pf-sidebar-agents-list">
-      {#each filtered as a (a.id)}
-        <div class="pf-sidebar-agent-row" data-active={activeAgentId === a.id} data-pinned={a.pinned}>
+      {#each groupedAgents as group (group.project)}
+        {@const isCollapsed = collapsedProjects.has(group.project)}
+        <div class="pf-sidebar-project-group" data-collapsed={isCollapsed}>
           <button
             type="button"
-            class="pf-sidebar-agent"
-            onclick={() => onOpenAgent?.(a.id)}
+            class="pf-sidebar-project-header"
+            onclick={() => toggleProjectCollapsed(group.project)}
+            aria-expanded={!isCollapsed}
+            aria-label={`${isCollapsed ? "Expand" : "Collapse"} ${group.project}`}
           >
-            <Puffer size={16} state={a.state} />
-            <div class="pf-row-stack">
-              <span class="title">
-                {a.name}
-                {#if a.title}
-                  · {a.title}
-                {/if}
-              </span>
-              <span class="pf-task-status">{a.project} · {a.state}</span>
+            <Icon name={isCollapsed ? "chevR" : "chevD"} size={12} />
+            <Icon name={isCollapsed ? "folder" : "folderOpen"} size={13} />
+            <span class="name">{group.project}</span>
+            <span class="count">{group.agents.length}</span>
+          </button>
+          {#if !isCollapsed}
+            <div class="pf-sidebar-project-children">
+              {#each group.agents as a (a.id)}
+                <div class="pf-sidebar-agent-row" data-active={activeAgentId === a.id} data-pinned={a.pinned}>
+                  <button
+                    type="button"
+                    class="pf-sidebar-agent"
+                    onclick={() => onOpenAgent?.(a.id)}
+                  >
+                    <Puffer size={14} state={a.state} />
+                    <div class="pf-row-stack">
+                      <div class="line-1">
+                        <span class="title">{a.title || a.name}</span>
+                        <span class="age">{formatAge(a.updatedAtMs)}</span>
+                      </div>
+                      <span class="state" data-state={a.state}>{a.state}</span>
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    class="pf-pin-button"
+                    data-pinned={a.pinned}
+                    title={a.pinned ? "Unpin agent" : "Pin agent"}
+                    aria-label={a.pinned ? "Unpin agent" : "Pin agent"}
+                    disabled={a.pinBusy ?? false}
+                    onclick={() => onToggleAgentPin?.(a.id, !a.pinned)}
+                  >
+                    <Icon name="pin" size={12} />
+                  </button>
+                </div>
+              {/each}
             </div>
-          </button>
-          <button
-            type="button"
-            class="pf-pin-button"
-            data-pinned={a.pinned}
-            title={a.pinned ? "Unpin agent" : "Pin agent"}
-            aria-label={a.pinned ? "Unpin agent" : "Pin agent"}
-            disabled={a.pinBusy ?? false}
-            onclick={() => onToggleAgentPin?.(a.id, !a.pinned)}
-          >
-            <Icon name="pin" size={12} />
-          </button>
+          {/if}
         </div>
       {/each}
       {#if filtered.length === 0}
