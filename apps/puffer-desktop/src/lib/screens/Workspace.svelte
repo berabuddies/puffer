@@ -305,7 +305,7 @@
   {/if}
 
   <div class="pf-pw-list">
-    {#if projectCount === 0 && !loading}
+    {#if projectCount === 0 && !searchNeedle && !loading}
       <div class="pf-pw-empty">
         <div class="pf-pw-empty-inner">
           <h2>No sessions yet</h2>

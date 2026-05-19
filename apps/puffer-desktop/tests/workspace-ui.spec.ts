@@ -181,6 +181,23 @@ test("workspace search filters projects and agents", async ({ page }) => {
   await expect(workspace.getByText("Beta browser audit")).toBeVisible();
 });
 
+test("empty workspace search shows only the search empty state", async ({ page }) => {
+  const daemon = new FakeDaemon({ sessions: [] });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await expect(page.getByRole("heading", { name: "No sessions yet" })).toBeVisible();
+
+  await page.getByLabel("Search workspace").fill("missing session");
+
+  await expect(page.getByRole("heading", { name: "No workspace results" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "No sessions yet" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "New agent in default workspace" })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Clear search" }).click();
+  await expect(page.getByRole("heading", { name: "No sessions yet" })).toBeVisible();
+});
+
 test("workspace search includes older sessions beyond the first page", async ({ page }) => {
   const sessions = Array.from({ length: 7 }, (_, index) => ({
     sessionId: `session-history-${index}`,
