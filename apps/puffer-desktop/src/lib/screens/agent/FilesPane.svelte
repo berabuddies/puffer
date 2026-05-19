@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, untrack } from "svelte";
+  import { onDestroy, tick, untrack } from "svelte";
   import HighlightedLine from "../../components/HighlightedLine.svelte";
   import Icon from "../../design/Icon.svelte";
   import {
@@ -20,8 +20,20 @@
   } from "../../api/desktop";
   import { ensureLocalDaemonClient } from "../../api/daemonClient";
 
-  type Props = { cwd: string; sessionId?: string; openPath?: string | null };
-  let { cwd, sessionId = "preview", openPath = null }: Props = $props();
+  type Props = {
+    cwd: string;
+    sessionId?: string;
+    openPath?: string | null;
+    openLine?: number | null;
+    openRequestId?: number | null;
+  };
+  let {
+    cwd,
+    sessionId = "preview",
+    openPath = null,
+    openLine = null,
+    openRequestId = null
+  }: Props = $props();
 
   type OpenFileTab = {
     path: string;
@@ -32,6 +44,7 @@
 
   type OpenFileOptions = {
     pinned?: boolean;
+    line?: number | null;
   };
 
   // Directory cache: absolute path → its (already-loaded) entries. Keeps
@@ -62,11 +75,12 @@
   let lspResult = $state<LspInspectResult | null>(null);
   let lspAnchor = $state<{ line: number; character: number } | null>(null);
   let lspInspectGeneration = 0;
+  let editorEl = $state<HTMLTextAreaElement | null>(null);
   let editorGutterEl = $state<HTMLDivElement | null>(null);
   let editorHighlightEl = $state<HTMLPreElement | null>(null);
   let fileTabsReady = $state(false);
   let fileTabsSaveTimer: ReturnType<typeof setTimeout> | null = null;
-  let lastOpenPath: string | null = null;
+  let lastOpenRequestKey: string | null = null;
 
   // Root is derived from cwd — switching sessions resets everything.
   let root = $derived(cwd);
@@ -114,9 +128,10 @@
 
   $effect(() => {
     const path = openPath;
-    if (!path || path === lastOpenPath || !root || previewMode) return;
-    lastOpenPath = path;
-    void revealAndOpenFile(path);
+    const requestKey = openRequestId == null ? `${path ?? ""}:${openLine ?? ""}` : String(openRequestId);
+    if (!path || requestKey === lastOpenRequestKey || !root || previewMode) return;
+    lastOpenRequestKey = requestKey;
+    void revealAndOpenFile(path, openLine);
   });
 
   // Filesystem-watcher lifecycle. When `cwd` is set, ask the daemon to watch
@@ -457,7 +472,7 @@
     expanded = next;
   }
 
-  async function revealAndOpenFile(path: string) {
+  async function revealAndOpenFile(path: string, line: number | null = null) {
     const nextExpanded = new Set(expanded);
     const relative = path.startsWith(`${root}/`) ? path.slice(root.length + 1) : "";
     if (relative) {
@@ -469,7 +484,7 @@
       }
       expanded = nextExpanded;
     }
-    await openFile(path, 0, { pinned: true });
+    await openFile(path, 0, { pinned: true, line });
   }
 
   async function openFile(path: string, size: number, options: OpenFileOptions = {}) {
@@ -499,10 +514,10 @@
       openTabs = [...openTabs, nextTab];
     }
 
-    await activateFile(path, size);
+    await activateFile(path, size, options.line);
   }
 
-  async function activateFile(path: string, size?: number) {
+  async function activateFile(path: string, size?: number, line: number | null = null) {
     activePath = path;
     activeSize = size ?? openTabs.find((tab) => tab.path === path)?.size ?? 0;
     activeError = null;
@@ -515,16 +530,19 @@
       activeSize = cached.size;
       draftContent = draftCache.get(path) ?? (cached.encoding === "utf8" ? cached.content : "");
       activeLoading = false;
+      await focusEditorLine(path, line);
       return;
     }
 
     activeFile = null;
     draftContent = "";
     activeLoading = true;
+    let loaded = false;
     try {
       const result = await readFile(path);
       if (activePath === path) {
         cacheFileResult(result, false);
+        loaded = true;
       }
     } catch (err) {
       if (activePath === path) {
@@ -533,6 +551,7 @@
     } finally {
       if (activePath === path) activeLoading = false;
     }
+    if (loaded) await focusEditorLine(path, line);
   }
 
   async function closeTab(event: Event, path: string) {
@@ -650,13 +669,41 @@
     }
   }
 
-  function syncEditorScroll(event: Event) {
-    const target = event.currentTarget as HTMLTextAreaElement;
+  function syncEditorOverlays(target: HTMLTextAreaElement) {
     if (editorGutterEl) editorGutterEl.scrollTop = target.scrollTop;
     if (editorHighlightEl) {
       editorHighlightEl.scrollTop = target.scrollTop;
       editorHighlightEl.scrollLeft = target.scrollLeft;
     }
+  }
+
+  function syncEditorScroll(event: Event) {
+    const target = event.currentTarget as HTMLTextAreaElement;
+    syncEditorOverlays(target);
+  }
+
+  function offsetForLine(content: string, line: number): number {
+    const targetLine = Math.max(1, Math.floor(line));
+    let offset = 0;
+    for (let current = 1; current < targetLine; current += 1) {
+      const next = content.indexOf("\n", offset);
+      if (next === -1) return content.length;
+      offset = next + 1;
+    }
+    return Math.min(offset, content.length);
+  }
+
+  async function focusEditorLine(path: string, line: number | null | undefined) {
+    if (!line || !Number.isFinite(line) || line < 1) return;
+    await tick();
+    if (activePath !== path || !canEdit || !editorEl) return;
+    const offset = offsetForLine(draftContent, line);
+    editorEl.focus();
+    editorEl.setSelectionRange(offset, offset);
+    const style = getComputedStyle(editorEl);
+    const lineHeight = Number.parseFloat(style.lineHeight) || 18;
+    editorEl.scrollTop = Math.max(0, (Math.floor(line) - 1) * lineHeight - editorEl.clientHeight / 3);
+    syncEditorOverlays(editorEl);
   }
 
   function clearLspState() {
@@ -1115,6 +1162,7 @@
               <pre class="editor-highlight" bind:this={editorHighlightEl} aria-hidden="true">{#each draftLines as line}<span class:symbol-line={lineHasSymbol(line, selectedSymbol)}><HighlightedLine text={line || " "} path={activePath} highlight={selectedSymbol} /></span>{/each}</pre>
               <textarea
                 class="editor"
+                bind:this={editorEl}
                 value={draftContent}
                 spellcheck="false"
                 wrap="off"

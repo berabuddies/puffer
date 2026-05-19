@@ -73,11 +73,13 @@
   }: Props = $props();
 
   type Tab = "chat" | "diff" | "terminal" | "files" | "browser";
+  type FileOpenTarget = { path: string; line: number | null; requestId: number };
   let tab = $state<Tab>("chat");
   let sideTab = $state<Tab | null>(null);
   let sideWidth = $state(420);
   let sideDragStart: { pointerId: number; startX: number; startWidth: number } | null = null;
-  let fileToOpen = $state<string | null>(null);
+  let fileToOpen = $state<FileOpenTarget | null>(null);
+  let fileOpenRequestId = 0;
   let fileToOpenSessionId: string | null = null;
   let rootEl = $state<HTMLElement | undefined>(undefined);
   let searchInputEl = $state<HTMLInputElement | undefined>(undefined);
@@ -235,8 +237,8 @@
     return value === "diff";
   }
 
-  function openLinkedFile(path: string) {
-    fileToOpen = path;
+  function openLinkedFile(path: string, line: number | null = null) {
+    fileToOpen = { path, line, requestId: ++fileOpenRequestId };
     tab = "files";
   }
 

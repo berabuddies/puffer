@@ -20,6 +20,7 @@
   type Tab = "chat" | "diff" | "terminal" | "files" | "browser";
   type DiffSubTab = "agent" | "git" | "divergence";
   type SubmitMessageResult = boolean | void | Promise<boolean | void>;
+  type FileOpenTarget = { path: string; line: number | null; requestId: number };
 
   type Props = {
     tab: Tab;
@@ -49,7 +50,7 @@
     onCancelTurn?: () => void;
     onOpenFileLink?: (path: string, line?: number | null) => void;
     onDraftChange?: (hasDraft: boolean) => void;
-    fileToOpen?: string | null;
+    fileToOpen?: FileOpenTarget | null;
   };
 
   let {
@@ -287,7 +288,13 @@
   {:else if tab === "terminal"}
     <TerminalPane cwd={projectCwd} sessionId={session?.id ?? "preview"} />
   {:else if tab === "files"}
-    <FilesPane cwd={projectCwd} sessionId={session?.id ?? "preview"} openPath={fileToOpen} />
+    <FilesPane
+      cwd={projectCwd}
+      sessionId={session?.id ?? "preview"}
+      openPath={fileToOpen?.path ?? null}
+      openLine={fileToOpen?.line ?? null}
+      openRequestId={fileToOpen?.requestId ?? null}
+    />
   {:else if tab === "browser"}
     <BrowserPane sessionId={session?.id ?? "preview"} />
   {/if}

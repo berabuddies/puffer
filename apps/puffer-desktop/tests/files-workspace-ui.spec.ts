@@ -327,6 +327,45 @@ test("Files tab does not reopen a linked file from the previous session", async 
   await expect(page.locator(".viewer-head .path", { hasText: linkedPath })).toHaveCount(0);
 });
 
+test("Files tab jumps to the line from a chat file link", async ({ page }) => {
+  const linkedPath = "/tmp/puffer/src/main.rs";
+  const content = `${Array.from({ length: 40 }, (_, index) => `line ${index + 1}`).join("\n")}\n`;
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-files-line-link",
+        displayName: "Files line link",
+        title: "Files line link",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "files-line-link",
+            text: `Open [main line 30](${linkedPath}:30) before editing.`
+          }
+        ]
+      }
+    ]
+  });
+  (daemon as unknown as { files: Map<string, string> }).files.set(linkedPath, content);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page
+    .locator(".pf-sidebar-agents-list")
+    .getByRole("button", { name: /^Files line link\b/ })
+    .click();
+  await page.getByRole("link", { name: "main line 30" }).click();
+  await daemon.waitForRequest("read_file", (request) => request.params.path === linkedPath);
+
+  const editor = page.getByLabel("Edit file contents");
+  await expect(editor).toHaveValue(content);
+  const lineThirtyOffset = Array.from({ length: 29 }, (_, index) => `line ${index + 1}\n`).join("").length;
+  await expect.poll(async () => editor.evaluate((node) => (node as HTMLTextAreaElement).selectionStart)).toBe(lineThirtyOffset);
+  await expect(editor).toBeFocused();
+});
+
 test("New agent modal closes with Escape", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
