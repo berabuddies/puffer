@@ -35,6 +35,29 @@ test("default model cannot be saved before provider models load", async ({ page 
   });
 });
 
+test("default model save is ignored while already saving", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.delayResponse("update_config", () => true, 500);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Providers" }).click();
+
+  const saveButton = page.locator(".pf-settings-pane").getByRole("button", {
+    name: "Save default"
+  });
+  await expect(saveButton).toBeEnabled();
+  await saveButton.evaluate((button) => {
+    (button as HTMLButtonElement).click();
+    (button as HTMLButtonElement).click();
+  });
+  await daemon.waitForRequest("update_config");
+  await page.waitForTimeout(80);
+
+  expect(daemon.requests.filter((request) => request.method === "update_config")).toHaveLength(1);
+});
+
 test("advertised settings shortcut opens settings", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

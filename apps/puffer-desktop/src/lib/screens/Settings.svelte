@@ -273,7 +273,7 @@
   }
 
   async function saveDefaultModel() {
-    if (!modelPickerProvider || !modelPickerModel || modelPickerLoading) return;
+    if (!modelPickerProvider || !modelPickerModel || modelPickerLoading || modelSaving) return;
     modelSaving = true;
     modelError = null;
     try {
