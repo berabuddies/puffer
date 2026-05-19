@@ -1635,6 +1635,86 @@ test("failed permission responses keep the approval prompt retryable", async ({ 
   await expect(page.getByRole("button", { name: "Deny" })).toBeVisible();
 });
 
+test("late permission response failures do not leak into a switched session", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-permission-stale-a",
+        displayName: "Permission stale A",
+        title: "Permission stale A",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "permission-stale-a-seed",
+            text: "Permission stale A seed",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      },
+      {
+        sessionId: "session-permission-stale-b",
+        displayName: "Permission stale B",
+        title: "Permission stale B",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "permission-stale-b-seed",
+            text: "Permission stale B seed",
+            createdAtMs: baseTime - 90_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Permission stale A/);
+  await expect(page.getByText("Permission stale A seed")).toBeVisible();
+  daemon.emit("session:session-permission-stale-a:event", {
+    type: "permission-request",
+    turnId: "turn-permission-stale",
+    requestId: "permission-stale",
+    toolId: "bash",
+    summary: "Run stale permission command",
+    reason: "This delayed failure belongs to A."
+  });
+
+  await expect(page.getByText("This delayed failure belongs to A.")).toBeVisible();
+  daemon.delayFailure(
+    "resolve_permission",
+    (request) =>
+      request.params.turnId === "turn-permission-stale" &&
+      request.params.requestId === "permission-stale",
+    "permission failed after switch",
+    200
+  );
+  await page.getByRole("button", { name: "Deny" }).click();
+  await daemon.waitForRequest(
+    "resolve_permission",
+    (request) =>
+      request.params.turnId === "turn-permission-stale" &&
+      request.params.requestId === "permission-stale"
+  );
+
+  await openSession(page, /Permission stale B/);
+  await expect(page.getByText("Permission stale B seed")).toBeVisible();
+  await page.waitForTimeout(260);
+
+  await expect(page.getByText("Permission stale B seed")).toBeVisible();
+  await expect(page.getByText("permission failed after switch")).toHaveCount(0);
+});
+
 test("successful permission response clears the awaiting approval hint", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

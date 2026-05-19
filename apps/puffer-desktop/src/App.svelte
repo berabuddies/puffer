@@ -1455,12 +1455,14 @@
 
   async function resolvePermission(permissionId: string, choice: string) {
     if (resolvingPermissionIds.includes(permissionId)) return;
+    const responseSessionId = selectedSession?.id ?? null;
     resolvingPermissionIds = [...resolvingPermissionIds, permissionId];
     try {
       const mapping = turnPermissionLookup[permissionId];
       if (mapping) {
         try {
           await resolveTurnPermission(mapping.turnId, mapping.requestId, mapPermissionAction(choice));
+          if (selectedSession?.id !== responseSessionId) return;
           dismissedPermissionIds = [...dismissedPermissionIds, permissionId];
           statusMessage = `${choice} sent to agent.`;
           if (currentTurnId === mapping.turnId) {
@@ -1470,6 +1472,7 @@
           const { [permissionId]: _drop, ...rest } = turnPermissionLookup;
           turnPermissionLookup = rest;
         } catch (error) {
+          if (selectedSession?.id !== responseSessionId) return;
           const detail = errorText(error);
           statusMessage = `resolve_permission failed: ${detail}`;
           appendAgentError("Permission response failed", detail, "permission-error");
