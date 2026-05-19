@@ -229,6 +229,20 @@ test("active agents includes an opened session before grouped history catches up
   await page.getByRole("button", { name: "Back" }).click();
   const history = page.getByRole("region", { name: "Session history" });
   await expect(history).toContainText("New Session");
+
+  await page
+    .locator(".pf-pw-project")
+    .filter({ hasText: "puffer-stale-active" })
+    .getByRole("button", { name: "Details" })
+    .click();
+  const projectDetail = page.locator(".pf-fpb");
+  await expect(projectDetail).toContainText("New Session");
+  await projectDetail.getByRole("button", { name: /New Session/ }).click();
+  await expect(page.locator(".pf-agent-detail")).toBeVisible();
+  await page.getByRole("button", { name: "Back" }).click();
+  await expect(projectDetail).toBeVisible();
+  await page.getByRole("button", { name: "Back" }).click();
+
   await history.getByRole("button", { name: /New Session/ }).click();
   await expect(page.locator(".pf-agent-detail")).toBeVisible();
 });

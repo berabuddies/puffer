@@ -1827,9 +1827,9 @@
                 onDraftChange={(hasDraft) => (composerHasDraft = hasDraft)}
                 onRenameTitle={renameSelectedSession}
               />
-            {:else if openProjectId && sortedGroups.find((g) => g.id === openProjectId)}
+            {:else if openProjectId && workspaceGroups.find((g) => g.id === openProjectId)}
               <ProjectDetail
-                group={sortedGroups.find((g) => g.id === openProjectId)!}
+                group={workspaceGroups.find((g) => g.id === openProjectId)!}
                 pinnedAgentIds={desktopPins.pinnedAgentIds}
                 onBack={() => (openProjectId = null)}
                 onOpenAgent={(id) => onOpenAgent(id)}
