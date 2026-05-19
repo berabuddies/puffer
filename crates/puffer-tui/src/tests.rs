@@ -24,6 +24,7 @@ mod login;
 mod model_selection;
 mod overlays;
 mod panels;
+mod pending_submit;
 mod permission_prompt;
 mod status;
 mod support;

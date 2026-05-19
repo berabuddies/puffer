@@ -34,6 +34,7 @@ fn poll_pending_submit_opens_permission_prompt_overlay() {
         pending_submit: Some(PendingSubmit {
             prompt: "hi".to_string(),
             receiver: event_rx,
+            transcript_start_len: 0,
             rendered_tool_invocations: 0,
             pending_tool_calls: Vec::new(),
             started_at: std::time::Instant::now(),
@@ -194,6 +195,7 @@ fn permission_prompt_ctrl_c_interrupts_pending_turn() {
         pending_submit: Some(PendingSubmit {
             prompt: "hi".to_string(),
             receiver: event_rx,
+            transcript_start_len: 0,
             rendered_tool_invocations: 0,
             pending_tool_calls: Vec::new(),
             started_at: std::time::Instant::now(),

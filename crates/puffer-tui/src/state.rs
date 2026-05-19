@@ -135,6 +135,8 @@ pub(crate) enum PendingSubmitEvent {
 pub(crate) struct PendingSubmit {
     pub(crate) prompt: String,
     pub(crate) receiver: Receiver<PendingSubmitEvent>,
+    /// Transcript index immediately after the prompt that started this turn.
+    pub(crate) transcript_start_len: usize,
     pub(crate) pending_tool_calls: Vec<ToolCallRequest>,
     pub(crate) rendered_tool_invocations: usize,
     pub(crate) started_at: std::time::Instant,

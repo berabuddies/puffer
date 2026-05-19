@@ -648,6 +648,7 @@ fn poll_pending_submit_syncs_project_memory_review_turns_back_to_main_state() {
     tui.pending_submit = Some(PendingSubmit {
         prompt: "remember this".to_string(),
         receiver,
+        transcript_start_len: state.transcript.len(),
         pending_tool_calls: Vec::new(),
         rendered_tool_invocations: 0,
         started_at: std::time::Instant::now(),
@@ -985,6 +986,7 @@ fn poll_pending_submit_skips_empty_assistant_message_after_tool_only_turn() {
     tui.pending_submit = Some(PendingSubmit {
         prompt: "run the tool".to_string(),
         receiver,
+        transcript_start_len: state.transcript.len(),
         pending_tool_calls: Vec::new(),
         rendered_tool_invocations: 0,
         started_at: std::time::Instant::now(),
@@ -1093,6 +1095,7 @@ fn poll_pending_submit_preserves_browser_category_session_grants() {
     tui.pending_submit = Some(PendingSubmit {
         prompt: "hi".to_string(),
         receiver: event_rx,
+        transcript_start_len: state.transcript.len(),
         rendered_tool_invocations: 0,
         pending_tool_calls: Vec::new(),
         started_at: std::time::Instant::now(),
