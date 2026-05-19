@@ -1035,6 +1035,36 @@ test("failed permission responses keep the approval prompt retryable", async ({ 
   await expect(page.getByRole("button", { name: "Deny" })).toBeVisible();
 });
 
+test("successful permission response clears the awaiting approval hint", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /^Browser regression\b/);
+  daemon.emit("session:session-browser:event", {
+    type: "permission-request",
+    turnId: "turn-permission-success",
+    requestId: "permission-success",
+    toolId: "bash",
+    summary: "Run approved shell command",
+    reason: "Needs workspace write access."
+  });
+
+  await expect(page.getByText("Approval needed")).toBeVisible();
+  await expect(page.getByText(/Awaiting approval/)).toBeVisible();
+  await page.getByRole("button", { name: "Allow once" }).click();
+
+  const request = await daemon.waitForRequest("resolve_permission");
+  expect(request.params).toMatchObject({
+    turnId: "turn-permission-success",
+    requestId: "permission-success",
+    action: "allow_once"
+  });
+  await expect(page.getByText("Approval needed")).toHaveCount(0);
+  await expect(page.getByText(/Awaiting approval/)).toHaveCount(0);
+  await expect(page.getByText(/Running/)).toBeVisible();
+});
+
 test("failed question responses keep the question prompt retryable", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

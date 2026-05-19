@@ -1254,6 +1254,10 @@
         await resolveTurnPermission(mapping.turnId, mapping.requestId, mapPermissionAction(choice));
         dismissedPermissionIds = [...dismissedPermissionIds, permissionId];
         statusMessage = `${choice} sent to agent.`;
+        if (currentTurnId === mapping.turnId) {
+          turnThinking = false;
+          turnStatusHint = "Running";
+        }
         const { [permissionId]: _drop, ...rest } = turnPermissionLookup;
         turnPermissionLookup = rest;
       } catch (error) {
@@ -1278,6 +1282,10 @@
         await resolveTurnUserQuestion(mapping.turnId, mapping.requestId, answers, annotations);
         dismissedQuestionIds = [...dismissedQuestionIds, questionId];
         statusMessage = "Answer sent to agent.";
+        if (currentTurnId === mapping.turnId) {
+          turnThinking = false;
+          turnStatusHint = "Running";
+        }
         const { [questionId]: _drop, ...rest } = turnQuestionLookup;
         turnQuestionLookup = rest;
       } catch (error) {
