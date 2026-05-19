@@ -169,6 +169,40 @@ test("provider OAuth connect is ignored while login is already busy", async ({ p
   ).toHaveLength(1);
 });
 
+test("provider logout is ignored while already busy", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.delayResponse(
+    "logout_provider",
+    (request) => request.params.providerId === "anthropic",
+    500
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+
+  const signOut = page
+    .locator(".pf-settings-row")
+    .filter({ hasText: "Account" })
+    .locator("div", { hasText: /^anthropic\s*·/ })
+    .getByRole("button", { name: "Sign out" });
+  await expect(signOut).toBeEnabled();
+  await signOut.evaluate((button) => {
+    (button as HTMLButtonElement).click();
+    (button as HTMLButtonElement).click();
+  });
+  await daemon.waitForRequest("logout_provider");
+  await page.waitForTimeout(80);
+
+  expect(
+    daemon.requests.filter(
+      (request) =>
+        request.method === "logout_provider" &&
+        request.params.providerId === "anthropic"
+    )
+  ).toHaveLength(1);
+});
+
 test("external provider credential import is ignored while already busy", async ({ page }) => {
   const daemon = new FakeDaemon({
     externalCredentials: [

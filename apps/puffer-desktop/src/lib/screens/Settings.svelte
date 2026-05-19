@@ -467,8 +467,15 @@
             <div style="display: flex; align-items: center; gap: 8px; font-size: 12px;">
               <span style="font-family: var(--font-mono);">{a.providerId}</span>
               <span style="color: var(--muted-foreground);">· {a.kind}{a.email ? ` · ${a.email}` : ""}</span>
-              <button type="button" class="sc-btn" data-variant="ghost" data-size="sm" onclick={() => props.onLogout(a.providerId)}>
-                Sign out
+              <button
+                type="button"
+                class="sc-btn"
+                data-variant="ghost"
+                data-size="sm"
+                disabled={props.busyProviderId !== null}
+                onclick={() => props.onLogout(a.providerId)}
+              >
+                {props.busyProviderId === a.providerId ? "Signing out..." : "Sign out"}
               </button>
             </div>
           {/each}

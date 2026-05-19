@@ -779,6 +779,7 @@
   }
 
   async function handleLogout(providerId: string) {
+    if (authBusyProviderId) return;
     authBusyProviderId = providerId;
     authError = null;
     try {
