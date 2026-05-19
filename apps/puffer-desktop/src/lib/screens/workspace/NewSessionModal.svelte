@@ -121,21 +121,28 @@
     <div class="pf-modal-body">
       <div class="pf-provider-choice" role="radiogroup" aria-label="Agent provider">
         {#each providerOptions as provider (provider.id)}
-          <button
-            type="button"
+          <label
             class="pf-provider-choice-btn"
             data-active={selectedProvider === provider.id}
-            role="radio"
-            aria-checked={selectedProvider === provider.id}
-            onclick={() => (selectedProvider = provider.id)}
-            disabled={busy}
           >
+            <input
+              class="pf-provider-choice-input"
+              type="radio"
+              name="new-agent-provider"
+              value={provider.id}
+              checked={selectedProvider === provider.id}
+              onchange={(event) => {
+                event.stopPropagation();
+                selectedProvider = provider.id;
+              }}
+              disabled={busy}
+            />
             <span class="pf-provider-dot" data-provider={provider.id}></span>
             <span class="pf-provider-copy">
               <span class="name">{provider.displayName}</span>
               <span class="meta">{providerDetail(provider)}</span>
             </span>
-          </button>
+          </label>
         {/each}
       </div>
       {#if providerOptions.length === 0}
@@ -192,10 +199,28 @@
     color: var(--foreground);
     text-align: left;
     cursor: pointer;
+    position: relative;
     transition: background 100ms, border-color 100ms, box-shadow 100ms;
   }
-  .pf-provider-choice-btn:hover:not(:disabled) {
+  .pf-provider-choice-input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    opacity: 0;
+    cursor: inherit;
+  }
+  .pf-provider-choice-btn:has(.pf-provider-choice-input:disabled) {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+  .pf-provider-choice-btn:hover:not(:has(.pf-provider-choice-input:disabled)) {
     background: var(--accent);
+  }
+  .pf-provider-choice-btn:focus-within {
+    outline: 2px solid color-mix(in oklab, var(--accent) 70%, transparent);
+    outline-offset: 2px;
   }
   .pf-provider-choice-btn[data-active="true"] {
     border-color: var(--foreground);
@@ -207,6 +232,7 @@
     border-radius: 999px;
     background: #2563eb;
     flex-shrink: 0;
+    pointer-events: none;
   }
   .pf-provider-dot[data-provider="claude"] {
     background: #7c3aed;
@@ -222,6 +248,7 @@
     display: flex;
     flex-direction: column;
     gap: 3px;
+    pointer-events: none;
   }
   .pf-provider-copy .name {
     font-size: 13px;

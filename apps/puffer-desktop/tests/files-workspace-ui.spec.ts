@@ -660,6 +660,29 @@ test("new agent provider choice is used for the first turn", async ({ page }) =>
   });
 });
 
+test("new agent provider choice does not create a session until Start agent", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "New agent in puffer" }).click();
+  const dialog = page.getByRole("dialog", { name: "New agent" });
+  await expect(dialog).toBeVisible();
+
+  await dialog.getByRole("radio", { name: /Anthropic/ }).click();
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("radio", { name: /Anthropic/ })).toBeChecked();
+  await expect(page.locator(".pf-agent-detail")).toHaveCount(0);
+  await page.waitForTimeout(80);
+  expect(daemon.requests.filter((request) => request.method === "create_session")).toHaveLength(0);
+
+  await dialog.getByRole("button", { name: "Start agent" }).click();
+  const createRequest = await daemon.waitForRequest("create_session");
+  expect(createRequest.params).toMatchObject({
+    providerId: "anthropic"
+  });
+});
+
 test("new agent ignores repeated start clicks while creating", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayResponse("create_session", () => true, 250);

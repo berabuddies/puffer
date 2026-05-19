@@ -464,17 +464,24 @@
         <div class="pf-field-label">Provider</div>
         <div class="pf-provider-seg" role="radiogroup" aria-label="Agent provider">
           {#each providerOptions as provider (provider.id)}
-            <button
-              type="button"
+            <label
               class="pf-provider-seg-btn"
               data-active={selectedProvider === provider.id}
-              role="radio"
-              aria-checked={selectedProvider === provider.id}
-              onclick={() => (selectedProvider = provider.id)}
-              disabled={busy}
             >
+              <input
+                class="pf-provider-seg-input"
+                type="radio"
+                name="connect-project-provider"
+                value={provider.id}
+                checked={selectedProvider === provider.id}
+                onchange={(event) => {
+                  event.stopPropagation();
+                  selectedProvider = provider.id;
+                }}
+                disabled={busy}
+              />
               {provider.displayName}
-            </button>
+            </label>
           {/each}
         </div>
         {#if providerOptions.length === 0}
@@ -798,15 +805,35 @@
     border-radius: 7px;
     background: var(--background);
     color: var(--foreground);
+    display: grid;
+    place-items: center;
     font: inherit;
     font-size: 12px;
     font-weight: 600;
     cursor: pointer;
+    position: relative;
     transition: background 120ms, border-color 120ms;
   }
-  .pf-provider-seg-btn:hover:not(:disabled) {
+  .pf-provider-seg-input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    opacity: 0;
+    cursor: inherit;
+  }
+  .pf-provider-seg-btn:has(.pf-provider-seg-input:disabled) {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+  .pf-provider-seg-btn:hover:not(:has(.pf-provider-seg-input:disabled)) {
     border-color: transparent;
     background: var(--pf-selected-bg-hover);
+  }
+  .pf-provider-seg-btn:focus-within {
+    outline: 2px solid color-mix(in oklab, var(--accent) 70%, transparent);
+    outline-offset: 2px;
   }
   .pf-provider-seg-btn[data-active="true"] {
     border-color: transparent;
