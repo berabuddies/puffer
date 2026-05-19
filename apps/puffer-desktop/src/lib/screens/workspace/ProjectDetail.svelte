@@ -2,9 +2,8 @@
   import "../../design/workspace.css";
 
   import Icon from "../../design/Icon.svelte";
-  import Puffer from "../../design/Puffer.svelte";
   import { sessionDisplayName, sessionDisplayTitle } from "../../sessionDisplay";
-  import { agentPufferState, type MockAgent } from "../../data/mockProjects";
+  import type { MockAgent } from "../../data/mockProjects";
   import type { FolderGroup, SessionListItem } from "../../types";
 
   type BoardColumn = {
@@ -135,8 +134,6 @@
     <div class="pf-fpb-title">
       <div class="name">
         <span>{group.label}</span>
-        <span class="sep">/</span>
-        <span class="label">Details</span>
       </div>
       <div class="meta">
         <span class="mono">{group.path}</span>
@@ -188,7 +185,7 @@
                 onclick={() => onOpenAgent?.(agent.id)}
               >
                 <div class="row">
-                  <Puffer size={15} state={agentPufferState(agent.status)} />
+                  <Icon name="bot" size={15} />
                   <span class="agent-name">{agent.name}</span>
                   <span class="elapsed">{agent.elapsed}</span>
                 </div>

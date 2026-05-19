@@ -22,7 +22,6 @@
 
 <script lang="ts">
   import BrandLogo from "../design/BrandLogo.svelte";
-  import Puffer from "../design/Puffer.svelte";
   import Icon, { type IconName } from "../design/Icon.svelte";
   import type { ScreenId } from "./tweaks.ts";
 
@@ -206,7 +205,7 @@
                     class="pf-sidebar-agent"
                     onclick={() => onOpenAgent?.(a.id)}
                   >
-                    <Puffer size={14} state={a.state} />
+                    <Icon name="bot" size={14} />
                     <div class="pf-row-stack">
                       <div class="line-1">
                         <span class="title">{a.title || a.name}</span>
