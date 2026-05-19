@@ -203,6 +203,15 @@
     return () => window.removeEventListener("keydown", onKey);
   });
 
+  // PLUS-117 follow-up: the in-modal directory picker only applies to the
+  // Local destination field — collapse it when the user flips to Remote so
+  // a stale picker doesn't linger above the SSH-specific inputs.
+  $effect(() => {
+    if (mode !== "local" && pickerOpen) {
+      pickerOpen = false;
+    }
+  });
+
   async function submit() {
     if (!canSubmit()) return;
     busy = true;
@@ -405,8 +414,7 @@
   >
     <div class="pf-modal-head">
       <div class="pf-modal-title-group">
-        <div class="pf-modal-eyebrow">New project</div>
-        <div class="pf-modal-title">Clone &amp; connect</div>
+        <div class="pf-modal-title">New Project</div>
       </div>
       <button type="button" class="pf-modal-close" onclick={onClose} aria-label="Close" disabled={busy}>
         <Icon name="x" size={14} />
@@ -594,11 +602,6 @@
         </div>
       {/if}
 
-      {#if status || error}
-        <div class="pf-modal-status" data-error={!!error}>
-          {error ?? status}
-        </div>
-      {/if}
       {#if pickerOpen}
         <div class="pf-dir-picker" role="group" aria-label="Choose directory">
           <div class="pf-dir-picker-head">
@@ -691,6 +694,19 @@
       {/if}
     </div>
 
+    <!-- PLUS-117: status / progress row lives between body and footer with a
+         reserved height so it cannot shift other content when it appears. -->
+    <div
+      class="pf-modal-status-row"
+      data-active={!!(status || error)}
+      data-error={!!error}
+      aria-live="polite"
+    >
+      {#if status || error}
+        <span class="pf-modal-status-text">{error ?? status}</span>
+      {/if}
+    </div>
+
     <div class="pf-modal-foot">
       <div class="pf-modal-foot-hint">
         {#if mode === "local"}
@@ -711,13 +727,13 @@
           disabled={!canSubmit()}
         >
           {#if busy}
-            <Icon name="refresh" size={13} />{status ?? "Working…"}
+            <Icon name="refresh" size={13} />Working…
           {:else if mode === "local" && localGitUrl.trim()}
-            Clone &amp; start
+            Clone &amp; create
           {:else if mode === "remote" && remoteGitUrl.trim()}
-            Clone &amp; start remote
+            Clone &amp; create remote
           {:else}
-            Start agent
+            Create
           {/if}
         </button>
       </div>
@@ -739,6 +755,32 @@
     color: oklch(0.5 0.2 25);
     border: 1px solid color-mix(in oklab, oklch(0.7 0.18 25) 30%, var(--border));
   }
+  /* PLUS-117 follow-up: a fixed-height reserved row between body and footer
+     for the clone/progress status. The slot keeps its height even when
+     empty so revealing the message does not shift surrounding layout. */
+  .pf-modal-status-row {
+    flex-shrink: 0;
+    min-height: 32px;
+    padding: 6px 20px 0;
+    display: flex; align-items: center;
+  }
+  .pf-modal-status-text {
+    flex: 1; min-width: 0;
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    background: color-mix(in oklab, var(--muted) 60%, var(--background));
+    color: var(--muted-foreground);
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pf-modal-status-row[data-error="true"] .pf-modal-status-text {
+    background: color-mix(in oklab, oklch(0.7 0.18 25) 12%, var(--background));
+    color: oklch(0.5 0.2 25);
+    border: 1px solid color-mix(in oklab, oklch(0.7 0.18 25) 30%, var(--border));
+  }
   .pf-provider-seg {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -755,13 +797,17 @@
     font-size: 12px;
     font-weight: 600;
     cursor: pointer;
+    transition: background 120ms, border-color 120ms;
   }
   .pf-provider-seg-btn:hover:not(:disabled) {
-    background: var(--accent);
+    border-color: transparent;
+    background: var(--pf-selected-bg-hover);
+    font-weight: 700;
   }
   .pf-provider-seg-btn[data-active="true"] {
-    border-color: var(--foreground);
-    box-shadow: 0 0 0 1px var(--foreground) inset;
+    border-color: transparent;
+    background: var(--pf-selected-bg);
+    font-weight: 700;
   }
   .pf-modal-hint {
     font-size: 12px;
@@ -778,8 +824,8 @@
     gap: 10px;
     border: 1px solid var(--border);
     border-radius: 10px;
-    background: color-mix(in oklab, var(--background) 96%, var(--muted));
-    padding: 10px;
+    background: color-mix(in oklab, var(--muted) 70%, var(--background));
+    padding: 12px;
   }
   .pf-dir-picker-head,
   .pf-dir-picker-toolbar {
@@ -799,7 +845,8 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
-    max-height: 220px;
+    /* Height fixed so Parent reloads don't collapse the row — see PLUS-117. */
+    height: 200px;
     overflow: auto;
     border: 1px solid var(--border);
     border-radius: 8px;

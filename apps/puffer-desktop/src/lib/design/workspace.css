@@ -904,7 +904,16 @@
   from { opacity: 0; transform: translateY(6px) scale(0.98); }
   to   { opacity: 1; transform: translateY(0) scale(1); }
 }
-.pf-connect-modal { width: 520px; }
+.pf-connect-modal {
+  width: 520px;
+  /* Lock the overall modal height so head/foot stay pinned and only the
+     body scrolls when content (e.g. the directory picker) expands — see
+     PLUS-117. min-height equals height so flex children cannot shrink the
+     modal below the locked size. Bumped to 720 in v2 so the directory
+     picker fits without overflowing when the user clicks Browse. */
+  height: min(720px, calc(100vh - 80px));
+  min-height: min(720px, calc(100vh - 80px));
+}
 
 .pf-modal-head {
   display: flex; align-items: flex-start; gap: 12px;
@@ -946,6 +955,12 @@
 .pf-modal-seg-btn {
   display: flex; align-items: center; gap: 10px;
   padding: 12px 14px;
+  /* PLUS-117 v2: lock seg-btn height so Local (short sub) and Remote
+     (multi-line sub) buttons render at the same height — earlier fix used
+     ellipsis to collapse the sub-line, but that dropped Remote's full
+     descriptive text. 84px fits a 3-row button (icon + title + 2-line
+     sub). */
+  min-height: 84px;
   background: var(--background);
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -968,12 +983,33 @@
 .pf-modal-seg-btn[data-active="true"] svg { color: var(--foreground); }
 .pf-modal-seg-body { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; }
 .pf-modal-seg-title { font-size: 13px; font-weight: 600; }
-.pf-modal-seg-sub { font-size: 11px; color: var(--muted-foreground); font-family: var(--font-sans); }
+.pf-modal-seg-sub {
+  font-size: 11px;
+  color: var(--muted-foreground);
+  font-family: var(--font-sans);
+  /* PLUS-117 v2: cap sub width so longer descriptions (Remote's "SSH —
+     run agent on another host") wrap to two lines for a 3-row button,
+     restoring the original visual rhythm. Short subs (Local) stay one
+     line and the locked min-height on the button equalizes both. */
+  max-width: 140px;
+}
 
 .pf-modal-body {
   padding: 16px 20px 4px;
   overflow: auto;
   display: flex; flex-direction: column; gap: 14px;
+  /* Fill remaining modal space between fixed head/foot so the footer stays
+     pinned to the bottom regardless of body content height — PLUS-117. */
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* On the connect-project modal the overall modal height is locked, so the
+   body must claim *all* remaining space (flex-basis: 0) — that way swapping
+   Local/Remote (different field counts) does not change the body height and
+   any overflow scrolls internally instead of repositioning content. */
+.pf-connect-modal .pf-modal-body {
+  flex: 1 1 0;
 }
 
 .pf-field { display: flex; flex-direction: column; gap: 6px; }
