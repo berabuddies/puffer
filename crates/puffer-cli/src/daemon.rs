@@ -1695,7 +1695,12 @@ fn resolve_create_session_model_id(
             config
                 .default_model
                 .as_deref()
-                .filter(|_| config.default_provider.as_deref() == Some(provider.id.as_str()))
+                .filter(|_| {
+                    config
+                        .default_provider
+                        .as_deref()
+                        .is_some_and(|default| desktop_provider_ids_match(default, &provider.id))
+                })
                 .and_then(|model| normalize_provider_model_id(&provider.id, model))
         })
         .or_else(|| provider.models.first().map(|model| model.id.clone()));
@@ -2857,6 +2862,10 @@ fn canonical_desktop_provider_id(provider_id: &str) -> String {
     }
 }
 
+fn desktop_provider_ids_match(left: &str, right: &str) -> bool {
+    canonical_desktop_provider_id(left) == canonical_desktop_provider_id(right)
+}
+
 fn apply_turn_permission_mode(app_state: &mut AppState, permission_mode: &str) {
     match permission_mode {
         "read-only" => {
@@ -3590,6 +3599,26 @@ mod tests {
         let model_id = resolve_create_session_model_id(&config, &provider, Some("claude-haiku"))
             .expect("requested model");
         assert_eq!(model_id.as_deref(), Some("claude-haiku"));
+    }
+
+    #[test]
+    fn create_session_model_routing_uses_alias_provider_default() {
+        let mut config = PufferConfig::default();
+        config.default_provider = Some("codex".to_string());
+        config.default_model = Some("codex/gpt-5.4".to_string());
+        let openai_provider = provider("openai", &["gpt-5", "gpt-5.4"]);
+
+        let model_id = resolve_create_session_model_id(&config, &openai_provider, None)
+            .expect("default model");
+        assert_eq!(model_id.as_deref(), Some("gpt-5.4"));
+
+        config.default_provider = Some("claude".to_string());
+        config.default_model = Some("claude/claude-opus-4-6".to_string());
+        let anthropic_provider = provider("anthropic", &["claude-sonnet-4-5", "claude-opus-4-6"]);
+
+        let model_id = resolve_create_session_model_id(&config, &anthropic_provider, None)
+            .expect("default model");
+        assert_eq!(model_id.as_deref(), Some("claude-opus-4-6"));
     }
 
     #[test]

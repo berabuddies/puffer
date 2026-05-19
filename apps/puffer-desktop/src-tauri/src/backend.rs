@@ -292,7 +292,11 @@ impl BackendState {
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .or_else(|| {
-                if provider == config.default_provider.clone().unwrap_or_default() {
+                if config
+                    .default_provider
+                    .as_deref()
+                    .is_some_and(|default| backend_provider_ids_match(default, &provider))
+                {
                     config.default_model.clone()
                 } else {
                     None
@@ -1951,6 +1955,14 @@ mod tests {
     }
 
     #[test]
+    fn desktop_provider_aliases_match_for_default_routing() {
+        assert!(backend_provider_ids_match("openai", "codex"));
+        assert!(backend_provider_ids_match("anthropic", "claude"));
+        assert!(backend_provider_ids_match("Codex", "OPENAI"));
+        assert!(!backend_provider_ids_match("codex", "claude"));
+    }
+
+    #[test]
     fn desktop_provider_validation_accepts_frontend_canonical_ids() {
         validate_provider_id("openai").unwrap();
         validate_provider_id("anthropic").unwrap();
@@ -2295,6 +2307,10 @@ fn canonical_backend_provider_id(provider: &str) -> String {
         "puffer" => "puffer".to_string(),
         _ => trimmed.to_string(),
     }
+}
+
+fn backend_provider_ids_match(left: &str, right: &str) -> bool {
+    canonical_backend_provider_id(left) == canonical_backend_provider_id(right)
 }
 
 fn validate_api_key_login(provider_id: &str, api_key: &str) -> Result<(String, String)> {
