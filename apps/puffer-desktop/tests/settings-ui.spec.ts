@@ -35,6 +35,92 @@ test("default model cannot be saved before provider models load", async ({ page 
   });
 });
 
+test("default routing only offers authenticated agent providers", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "openai",
+        kind: "oauth",
+        email: "tester@example.com",
+        expiresAtMs: null,
+        scopes: [],
+        planType: "test",
+        organizationName: null
+      },
+      {
+        providerId: "github",
+        kind: "oauth",
+        email: "tester@example.com",
+        expiresAtMs: null,
+        scopes: [],
+        planType: "test",
+        organizationName: null
+      }
+    ],
+    providers: [
+      {
+        id: "openai",
+        displayName: "Codex",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 1,
+        authModes: ["oauth"],
+        sourceKind: "test",
+        sourcePath: null
+      },
+      {
+        id: "github",
+        displayName: "GitHub",
+        baseUrl: "",
+        defaultApi: "oauth",
+        modelCount: 0,
+        authModes: ["oauth"],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ],
+    providerModels: {
+      openai: [
+        {
+          id: "gpt-5",
+          displayName: "GPT-5",
+          provider: "openai",
+          api: "openai-responses",
+          supportsTools: true,
+          supportsVision: false,
+          contextWindow: null,
+          maxOutputTokens: null,
+          thinkingOptions: [],
+          defaultThinkingOptionId: null,
+          isDefault: true
+        }
+      ]
+    }
+  });
+  daemon.setSettingsConfig({
+    defaultProvider: "github",
+    defaultModel: null
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Providers" }).click();
+
+  const pane = page.locator(".pf-settings-pane");
+  const providerSelect = pane.getByLabel("Provider");
+  await expect(providerSelect).toHaveValue("openai");
+  await expect(providerSelect.locator('option[value="openai"]')).toHaveCount(1);
+  await expect(providerSelect.locator('option[value="github"]')).toHaveCount(0);
+  await expect(pane.getByLabel("Model")).toHaveValue("gpt-5");
+  await pane.getByRole("button", { name: "Save default" }).click();
+  const update = await daemon.waitForRequest("update_config");
+  expect(update.params).toMatchObject({
+    defaultProvider: "openai",
+    defaultModel: "gpt-5"
+  });
+});
+
 test("default model save is ignored while already saving", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayResponse("update_config", () => true, 500);

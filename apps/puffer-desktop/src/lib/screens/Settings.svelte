@@ -3,6 +3,7 @@
 
   import Icon, { type IconName } from "../design/Icon.svelte";
   import LoginView from "../components/LoginView.svelte";
+  import { isAgentProviderId, providerIdInSet, providerIdsEquivalent } from "../providerIds";
   import type { AccentKey, DensityKey, FontMixKey, ThemeKey, Tweaks } from "../shell/tweaks";
   import {
     addMcpServer,
@@ -222,7 +223,14 @@
   }
 
   async function loadModelsForProvider(providerId: string) {
-    if (!providerId || providerModels[providerId] || modelLoadingByProvider[providerId]) return;
+    if (
+      !providerId ||
+      !isAgentProviderId(providerId) ||
+      providerModels[providerId] ||
+      modelLoadingByProvider[providerId]
+    ) {
+      return;
+    }
     modelLoadingByProvider = { ...modelLoadingByProvider, [providerId]: true };
     modelError = null;
     try {
@@ -299,6 +307,20 @@
   }
 
   let authedProviderIds = $derived(new Set((props.snapshot?.auth ?? []).map((a) => a.providerId)));
+  let defaultRouteProviders = $derived.by(() => {
+    const authIds = (props.snapshot?.auth ?? []).map((auth) => auth.providerId);
+    return (props.snapshot?.providers ?? []).filter(
+      (provider) => isAgentProviderId(provider.id) && providerIdInSet(provider.id, authIds)
+    );
+  });
+
+  function defaultRouteProviderId(): string {
+    const configured = props.snapshot?.config.defaultProvider;
+    const configuredProvider = defaultRouteProviders.find((provider) =>
+      providerIdsEquivalent(provider.id, configured)
+    );
+    return configuredProvider?.id ?? defaultRouteProviders[0]?.id ?? "";
+  }
 
   // Shortcuts the app actually wires up today. Keep this honest — when we
   // add more we'll add them here, not before.
@@ -357,8 +379,11 @@
 
     providerModels = {};
     modelLoadingByProvider = {};
-    modelPickerProvider = props.snapshot?.config.defaultProvider ?? "";
-    modelPickerModel = props.snapshot?.config.defaultModel ?? "";
+    const nextProvider = defaultRouteProviderId();
+    modelPickerProvider = nextProvider;
+    modelPickerModel = providerIdsEquivalent(nextProvider, props.snapshot?.config.defaultProvider)
+      ? props.snapshot?.config.defaultModel ?? ""
+      : "";
     modelError = null;
   });
 
@@ -553,7 +578,7 @@
               }}
             >
               <option value="">— none —</option>
-              {#each props.snapshot?.providers ?? [] as p (p.id)}
+              {#each defaultRouteProviders as p (p.id)}
                 <option value={p.id}>{p.displayName} ({p.id})</option>
               {/each}
             </select>
