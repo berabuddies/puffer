@@ -31,6 +31,12 @@
     settingsSnapshot?: SettingsSnapshot | null;
   };
 
+  type RecentSession = {
+    session: SessionListItem;
+    projectLabel: string;
+    projectPath: string;
+  };
+
   let {
     groups,
     defaultWorkspaceCwd = "",
@@ -108,6 +114,20 @@
   let agents = $derived<MockAgent[]>(
     groups.flatMap((g) => g.sessions.map((s) => agentFromSession(s, g.id)))
   );
+  let recentSessions = $derived<RecentSession[]>(
+    groups
+      .flatMap((group) =>
+        group.sessions.map((session) => ({
+          session,
+          projectLabel: group.label,
+          projectPath: group.path
+        }))
+      )
+      .sort((left, right) =>
+        right.session.updatedAtMs - left.session.updatedAtMs ||
+        left.projectLabel.localeCompare(right.projectLabel)
+      )
+  );
 
   function normalizeSearch(value: string): string {
     return value.trim().toLowerCase();
@@ -136,6 +156,16 @@
     );
   }
 
+  function recentSessionMatches(row: RecentSession, needle: string): boolean {
+    return (
+      includesNeedle(sessionDisplayName(row.session), needle) ||
+      includesNeedle(sessionDisplayTitle(row.session), needle) ||
+      includesNeedle(row.session.cwd, needle) ||
+      includesNeedle(row.projectLabel, needle) ||
+      includesNeedle(row.projectPath, needle)
+    );
+  }
+
   function projectAgents(projectId: string): MockAgent[] {
     return agents.filter((a) => a.project === projectId);
   }
@@ -160,6 +190,11 @@
   let agentCount = $derived(agents.length);
   let projectCount = $derived(projects.length);
   let visibleProjectCount = $derived(visibleProjects.length);
+  let visibleRecentSessions = $derived<RecentSession[]>(
+    searchNeedle
+      ? recentSessions.filter((row) => recentSessionMatches(row, searchNeedle))
+      : recentSessions
+  );
 
   let headerSubtitle = $derived(
     loading
@@ -174,6 +209,14 @@
   async function handleNewAgent(cwd: string) {
     if (!onNewAgent) return;
     await onNewAgent(cwd);
+  }
+
+  function sessionEventLabel(count: number): string {
+    return `${count} ${count === 1 ? "event" : "events"}`;
+  }
+
+  function recentSessionTitle(session: SessionListItem): string {
+    return sessionDisplayTitle(session) || sessionDisplayName(session);
   }
 </script>
 
@@ -223,6 +266,40 @@
       defaultLocalPath={defaultWorkspaceCwd || "~/code"}
       snapshot={settingsSnapshot}
     />
+  {/if}
+
+  {#if visibleRecentSessions.length > 0}
+    <section class="pf-pw-history" aria-label="Session history">
+      <div class="pf-pw-history-head">
+        <div class="copy">
+          <span class="pf-screen-top-eyebrow">History</span>
+          <h2>Session history</h2>
+        </div>
+        <span class="count">{visibleRecentSessions.length} {visibleRecentSessions.length === 1 ? "session" : "sessions"}</span>
+      </div>
+      <div class="pf-pw-history-list">
+        {#each visibleRecentSessions as row (row.session.id)}
+          <button
+            type="button"
+            class="pf-pw-history-row"
+            onclick={() => onOpenAgent?.(row.session.id)}
+            title={`${recentSessionTitle(row.session)} - ${row.projectPath}`}
+          >
+            <span class="main">
+              <span class="title">{recentSessionTitle(row.session)}</span>
+              <span class="status-pill" data-status={row.session.activityStatus}>{row.session.activityStatus}</span>
+            </span>
+            <span class="meta">
+              <span>{row.projectLabel}</span>
+              <span class="sep">/</span>
+              <span>{sessionEventLabel(row.session.eventCount)}</span>
+              <span class="sep">/</span>
+              <span>{formatAge(row.session.updatedAtMs)}</span>
+            </span>
+          </button>
+        {/each}
+      </div>
+    </section>
   {/if}
 
   <div class="pf-pw-list">

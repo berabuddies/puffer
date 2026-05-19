@@ -99,6 +99,59 @@ test("project memory includes older sessions beyond the first page", async ({ pa
   await expect(page.locator(".pf-pmem-title")).toHaveText("Deep memory session");
 });
 
+test("session history keeps older sessions available after starting a new agent", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-old-history",
+        displayName: "Old browser plan",
+        title: "Old browser plan",
+        cwd: "/tmp/puffer-history",
+        folderPath: "/tmp/puffer-history",
+        updatedAtMs: baseTime - 120_000,
+        createdAtMs: baseTime - 240_000,
+        eventCount: 2,
+        timeline: [
+          {
+            kind: "user_message",
+            id: "old-user",
+            text: "Keep this older session available.",
+            createdAtMs: baseTime - 200_000
+          },
+          {
+            kind: "assistant_message",
+            id: "old-assistant",
+            text: "Older transcript persisted.",
+            createdAtMs: baseTime - 190_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await expect(page.getByRole("region", { name: "Session history" })).toContainText("Old browser plan");
+
+  await page
+    .locator(".pf-pw-project")
+    .filter({ hasText: "puffer-history" })
+    .getByRole("button", { name: "New agent" })
+    .click();
+  await page.getByRole("button", { name: /Start agent/ }).click();
+
+  await expect(page.locator(".pf-agent-detail")).toBeVisible();
+  await page.getByRole("button", { name: "Back" }).click();
+
+  const history = page.getByRole("region", { name: "Session history" });
+  await expect(history).toContainText("Old browser plan");
+  await expect(history).toContainText("New Session");
+  await history.getByRole("button", { name: /Old browser plan/ }).click();
+
+  await expect(page.locator(".pf-agent-detail")).toBeVisible();
+  await expect(page.getByText("Older transcript persisted.")).toBeVisible();
+});
+
 test("sidebar Workspace returns from agent detail to the workspace board", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
