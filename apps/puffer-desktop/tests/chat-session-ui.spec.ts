@@ -3828,6 +3828,85 @@ test("stop turn is disabled while cancellation is in flight", async ({ page }) =
   expect(daemon.requests.filter((request) => request.method === "cancel_turn")).toHaveLength(1);
 });
 
+test("canceled idle session does not revive running state when reopened", async ({ page }) => {
+  const prompt = "Cancel then reopen idle";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-cancel-reopen",
+        displayName: "Canceled idle target",
+        title: "Canceled idle target",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        activityStatus: "idle",
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      },
+      {
+        sessionId: "session-cancel-reopen-other",
+        displayName: "Other idle session",
+        title: "Other idle session",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 1,
+        activityStatus: "idle",
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "cancel-reopen-other-seed",
+            text: "Other session is idle.",
+            createdAtMs: baseTime - 90_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Canceled idle target/);
+  await page.locator(".pf-composer textarea").fill(prompt);
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-cancel-reopen" &&
+      request.params.message === prompt
+  );
+
+  await page.getByRole("button", { name: "Stop turn" }).click();
+  await daemon.waitForRequest(
+    "cancel_turn",
+    (request) => request.params.turnId === "turn-session-cancel-reopen"
+  );
+
+  await openSession(page, /Other idle session/);
+  await expect(page.getByText("Other session is idle.")).toBeVisible();
+  daemon.setSessionTimeline("session-cancel-reopen", [
+    {
+      kind: "user_message",
+      id: "cancel-reopen-user",
+      text: prompt,
+      createdAtMs: baseTime + 1
+    }
+  ]);
+
+  await openSession(page, /Canceled idle target/);
+
+  const row = page.locator(".pf-sidebar-agent-row").filter({ hasText: "Canceled idle target" }).first();
+  await expect(row.locator('.state[data-state="idle"]')).toContainText("idle");
+  await expect(page.locator(".pf-agent-status-pill")).toContainText("Idle");
+  await expect(page.getByRole("button", { name: "Stop turn" })).toHaveCount(0);
+});
+
 test("session title edit saves through the daemon", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

@@ -1274,6 +1274,22 @@
     );
   }
 
+  function clearTurnRuntimeState(sessionId: string, turnId: string | null) {
+    if (turnId) {
+      rememberSettledTurn(sessionId, turnId);
+      const { [turnId]: _drop, ...rest } = replayTextByTurn;
+      replayTextByTurn = rest;
+    }
+    clearLiveSidebarAgentState(sessionId, turnId);
+    currentTurnId = null;
+    cancelingTurnId = null;
+    turnStartedAtMs = null;
+    turnThinking = false;
+    turnStatusHint = null;
+    turnPermissionLookup = {};
+    turnQuestionLookup = {};
+  }
+
   function clearSettledLoadedTurnState(
     sessionId: string,
     activityStatus: AgentActivityStatus,
@@ -1282,16 +1298,15 @@
   ) {
     if (!hasTurnRuntimeState() || activityStatusIsActive(activityStatus)) return;
     if (remainingSubmittedMessages.length > 0 || remainingLiveItems.length > 0) return;
-    const settledTurnId = currentTurnId;
-    if (settledTurnId) rememberSettledTurn(sessionId, settledTurnId);
-    clearLiveSidebarAgentState(sessionId, settledTurnId);
-    currentTurnId = null;
-    cancelingTurnId = null;
-    turnStartedAtMs = null;
-    turnThinking = false;
-    turnStatusHint = null;
-    turnPermissionLookup = {};
-    turnQuestionLookup = {};
+    clearTurnRuntimeState(sessionId, currentTurnId);
+  }
+
+  function clearCanceledLoadedTurnState(sessionId: string, activityStatus: AgentActivityStatus) {
+    if (cancelingTurnId === null || activityStatusIsActive(activityStatus)) return;
+    clearTurnRuntimeState(sessionId, currentTurnId);
+    liveStreamItems = [];
+    submittedMessages = [];
+    submittedMessageBaselineIds = {};
   }
 
   async function openSession(session: SessionListItem, options: OpenSessionOptions = {}) {
@@ -1333,6 +1348,7 @@
         submittedMessages = remainingSubmittedMessages;
         liveStreamItems = remainingLiveItems;
         if (resetLiveState) {
+          clearCanceledLoadedTurnState(detail.session.id, detail.session.activityStatus);
           clearSettledLoadedTurnState(
             detail.session.id,
             detail.session.activityStatus,
