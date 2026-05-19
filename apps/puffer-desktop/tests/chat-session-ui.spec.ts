@@ -2572,6 +2572,99 @@ test("reopening the active streaming agent keeps live turn state", async ({ page
   await expect(page.getByRole("button", { name: "Stop turn" })).toBeVisible();
 });
 
+test("late session subscription does not leave duplicate event listeners", async ({ page }) => {
+  await page.addInitScript(() => {
+    const win = window as typeof window & {
+      __PUFFER_DESKTOP_TEST_HOOKS__?: {
+        beforeSessionSubscribe?: (sessionId: string) => void | Promise<void>;
+      };
+      __releaseDelayedSubscribe?: () => void;
+      __subscribeAttempts?: string[];
+    };
+    let delayed = false;
+    win.__subscribeAttempts = [];
+    win.__PUFFER_DESKTOP_TEST_HOOKS__ = {
+      beforeSessionSubscribe(sessionId: string) {
+        win.__subscribeAttempts?.push(sessionId);
+        if (sessionId !== "session-subscribe-alpha" || delayed) return;
+        delayed = true;
+        return new Promise<void>((resolve) => {
+          win.__releaseDelayedSubscribe = resolve;
+        });
+      }
+    };
+  });
+
+  const delta = "Beta listener should render once.";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-subscribe-alpha",
+        displayName: "Subscribe Alpha",
+        title: "Subscribe Alpha",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        timeline: []
+      },
+      {
+        sessionId: "session-subscribe-beta",
+        displayName: "Subscribe Beta",
+        title: "Subscribe Beta",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 0,
+        timeline: []
+      },
+      {
+        sessionId: "session-subscribe-gamma",
+        displayName: "Subscribe Gamma",
+        title: "Subscribe Gamma",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 2_000,
+        createdAtMs: baseTime - 180_000,
+        eventCount: 0,
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Subscribe Alpha/);
+  await page.waitForFunction(() =>
+    (window as typeof window & { __subscribeAttempts?: string[] })
+      .__subscribeAttempts?.includes("session-subscribe-alpha")
+  );
+  await openSession(page, /Subscribe Beta/);
+  await expect(page.locator(".pf-agent-detail .primary-title")).toHaveText("Subscribe Beta");
+  await page.evaluate(() =>
+    (window as typeof window & { __releaseDelayedSubscribe?: () => void })
+      .__releaseDelayedSubscribe?.()
+  );
+  await openSession(page, /Subscribe Gamma/);
+  await expect(page.locator(".pf-agent-detail .primary-title")).toHaveText("Subscribe Gamma");
+  await openSession(page, /Subscribe Beta/);
+  await expect(page.locator(".pf-agent-detail .primary-title")).toHaveText("Subscribe Beta");
+
+  const turnId = "turn-subscribe-beta";
+  daemon.emit("session:session-subscribe-beta:event", { type: "turn-start", turnId });
+  daemon.emit("session:session-subscribe-beta:event", {
+    type: "text-delta",
+    turnId,
+    delta
+  });
+
+  const assistantRow = page.locator('.pf-msg[data-role="agent"]').filter({ hasText: delta });
+  await expect(assistantRow).toHaveCount(1);
+  await expect(assistantRow.locator(".pf-msg-text")).toHaveText(delta);
+});
+
 test("final-only assistant text appears before delayed transcript reload", async ({ page }) => {
   const finalText = "Final-only answer appears before reload finishes.";
   const daemon = new FakeDaemon({

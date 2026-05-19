@@ -84,6 +84,21 @@ export type SessionStreamEvent =
 
 type Unlisten = () => void;
 
+type SessionEventTestHooks = {
+  beforeSessionSubscribe?: (sessionId: string) => void | Promise<void>;
+};
+
+declare global {
+  interface Window {
+    __PUFFER_DESKTOP_TEST_HOOKS__?: SessionEventTestHooks;
+  }
+}
+
+async function waitForSessionSubscribeTestHook(sessionId: string): Promise<void> {
+  if (typeof window === "undefined") return;
+  await window.__PUFFER_DESKTOP_TEST_HOOKS__?.beforeSessionSubscribe?.(sessionId);
+}
+
 /** Subscribes to all events for one session via the daemon WebSocket.
  *  Returns a disposer. If the daemon isn't reachable (pure web without a
  *  daemon URL), returns a no-op disposer — callers don't need to branch. */
@@ -93,6 +108,7 @@ export async function subscribeSessionEvents(
 ): Promise<Unlisten> {
   try {
     const client = await ensureLocalDaemonClient();
+    await waitForSessionSubscribeTestHook(sessionId);
     const channel = `session:${sessionId}:event`;
     return client.on(channel, (payload) => {
       handler(payload as SessionStreamEvent);

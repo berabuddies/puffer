@@ -152,6 +152,7 @@
   let replayTextByTurn: Record<string, string> = {};
   let sessionEventUnlisten: UnlistenFn | null = null;
   let subscribedSessionId: string | null = null;
+  let sessionSubscriptionGeneration = 0;
   let connectionState = $state<ConnectionState>("idle");
   let daemonUrl = $state<string | null>(null);
   let daemonWorkspaceRoot = $state<string | null>(null);
@@ -702,6 +703,7 @@
     return () => {
       cancelRecapBlurTimer();
       clearDaemonClientListeners();
+      sessionSubscriptionGeneration += 1;
       if (sessionEventUnlisten) {
         sessionEventUnlisten();
         sessionEventUnlisten = null;
@@ -1143,6 +1145,7 @@
     turnStatusHint = null;
     settledTurnIds = new Set();
     sessionLoadGeneration += 1;
+    sessionSubscriptionGeneration += 1;
     if (sessionEventUnlisten) {
       sessionEventUnlisten();
       sessionEventUnlisten = null;
@@ -2037,6 +2040,7 @@
 
   async function ensureSessionSubscription() {
     if (!selectedSession) {
+      sessionSubscriptionGeneration += 1;
       if (sessionEventUnlisten) {
         sessionEventUnlisten();
         sessionEventUnlisten = null;
@@ -2045,10 +2049,23 @@
       return;
     }
     if (subscribedSessionId === selectedSession.id && sessionEventUnlisten) return;
-    if (sessionEventUnlisten) sessionEventUnlisten();
+    const generation = ++sessionSubscriptionGeneration;
+    if (sessionEventUnlisten) {
+      sessionEventUnlisten();
+      sessionEventUnlisten = null;
+    }
     const sid = selectedSession.id;
     subscribedSessionId = sid;
-    sessionEventUnlisten = await subscribeSessionEvents(sid, (ev) => handleSessionEvent(sid, ev));
+    const unlisten = await subscribeSessionEvents(sid, (ev) => handleSessionEvent(sid, ev));
+    if (
+      generation !== sessionSubscriptionGeneration ||
+      selectedSession?.id !== sid ||
+      subscribedSessionId !== sid
+    ) {
+      unlisten();
+      return;
+    }
+    sessionEventUnlisten = unlisten;
   }
 
   $effect(() => {
