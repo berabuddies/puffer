@@ -366,12 +366,16 @@
   }
 
   function reportCommandError(target: BrowserCommandTarget, err: unknown) {
-    if (
-      disposed ||
-      target.generation !== sessionGeneration ||
-      activeBackendSessionId() !== target.backendSessionId
-    ) return;
+    if (!targetStillActive(target)) return;
     error = String(err);
+  }
+
+  function targetStillActive(target: BrowserCommandTarget): boolean {
+    return (
+      !disposed &&
+      target.generation === sessionGeneration &&
+      activeBackendSessionId() === target.backendSessionId
+    );
   }
 
   function runHistory(direction: "back" | "forward") {
@@ -1015,17 +1019,21 @@
   }
 
   async function copySelection() {
+    const target = activeCommandTarget();
+    if (!target) return;
     try {
-      const result = await browserCopySelection(activeBackendSessionId());
+      const result = await browserCopySelection(target.backendSessionId);
+      if (!targetStillActive(target)) return;
       if (!result.text) {
         status = "No selection";
         return;
       }
       await navigator.clipboard.writeText(result.text);
+      if (!targetStillActive(target)) return;
       error = null;
       status = "Copied selected text";
     } catch (err) {
-      error = String(err);
+      reportCommandError(target, err);
     }
   }
 

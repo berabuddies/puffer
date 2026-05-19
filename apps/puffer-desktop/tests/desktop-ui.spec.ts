@@ -775,6 +775,73 @@ test("late Browser mouse input failures do not leak into a switched agent", asyn
   await expect(page.locator(".pf-browser-status")).toHaveText("Connected");
 });
 
+test("late Browser copy failures do not leak into a switched agent", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-alpha-copy-fail",
+        displayName: "Alpha copy fail",
+        title: "Alpha copy fail",
+        cwd: "/tmp/puffer-alpha",
+        folderPath: "/tmp/puffer-alpha",
+        updatedAtMs: Date.now(),
+        createdAtMs: Date.now() - 60_000,
+        timeline: []
+      },
+      {
+        sessionId: "session-beta-copy-fail",
+        displayName: "Beta copy fail",
+        title: "Beta copy fail",
+        cwd: "/tmp/puffer-beta",
+        folderPath: "/tmp/puffer-beta",
+        updatedAtMs: Date.now() - 1_000,
+        createdAtMs: Date.now() - 120_000,
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page
+    .locator(".pf-sidebar-agents-list")
+    .getByRole("button", { name: /^Alpha copy fail\b/ })
+    .click();
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-alpha-copy-fail:browser:tab-1"
+  );
+  daemon.delayFailure(
+    "browser_copy_selection",
+    (request) => request.params.sessionId === "session-alpha-copy-fail:browser:tab-1",
+    "copy failed after agent switch",
+    160
+  );
+
+  await page.locator(".pf-browser-canvas").focus();
+  await page.keyboard.press("Control+C");
+  await daemon.waitForRequest("browser_copy_selection", (request) =>
+    request.params.sessionId === "session-alpha-copy-fail:browser:tab-1"
+  );
+
+  await page
+    .locator(".pf-sidebar-agents-list")
+    .getByRole("button", { name: /^Beta copy fail\b/ })
+    .click();
+  await daemon.waitForRequest("browser_agent", (request) =>
+    request.params.action === "list" &&
+    request.params.sessionId === "session-beta-copy-fail"
+  );
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-beta-copy-fail:browser:tab-1"
+  );
+  await expect(page.locator(".pf-browser-status")).toHaveText("Connected");
+
+  await page.waitForTimeout(220);
+  await expect(page.locator(".pf-browser-error")).toHaveCount(0);
+  await expect(page.locator(".pf-browser-status")).toHaveText("Connected");
+});
+
 test("Browser fuzz click storm keeps daemon session ids valid", async ({ page }) => {
   const daemon = new FakeDaemon();
   const consoleErrors: string[] = [];
