@@ -560,9 +560,10 @@
     nextTabNumber += 1;
     const requestedAtVersion = tabStateVersion;
     const requestedAtGeneration = sessionGeneration;
+    const requestedSessionId = sessionId;
     try {
       const info = await browserTabOpen({
-        sessionId,
+        sessionId: requestedSessionId,
         tabId,
         url: "about:blank",
         width: size.width,
@@ -582,6 +583,12 @@
       syncFromActiveTab();
       void connectActiveTab(requestedAtGeneration);
     } catch (err) {
+      if (
+        disposed ||
+        requestedAtVersion !== tabStateVersion ||
+        requestedAtGeneration !== sessionGeneration ||
+        activeRootSessionId !== requestedSessionId
+      ) return;
       error = String(err);
     }
   }

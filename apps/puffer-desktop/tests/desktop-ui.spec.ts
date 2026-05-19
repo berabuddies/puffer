@@ -930,6 +930,76 @@ test("late Browser tab focus failures do not leak into a switched agent", async 
   await expect(page.locator(".pf-browser-status")).toHaveText("Connected");
 });
 
+test("late Browser new-tab failures do not leak into a switched agent", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-alpha-newtab-fail",
+        displayName: "Alpha newtab fail",
+        title: "Alpha newtab fail",
+        cwd: "/tmp/puffer-alpha",
+        folderPath: "/tmp/puffer-alpha",
+        updatedAtMs: Date.now(),
+        createdAtMs: Date.now() - 60_000,
+        timeline: []
+      },
+      {
+        sessionId: "session-beta-newtab-fail",
+        displayName: "Beta newtab fail",
+        title: "Beta newtab fail",
+        cwd: "/tmp/puffer-beta",
+        folderPath: "/tmp/puffer-beta",
+        updatedAtMs: Date.now() - 1_000,
+        createdAtMs: Date.now() - 120_000,
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page
+    .locator(".pf-sidebar-agents-list")
+    .getByRole("button", { name: /^Alpha newtab fail\b/ })
+    .click();
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-alpha-newtab-fail:browser:tab-1"
+  );
+  daemon.delayFailure(
+    "browser_agent",
+    (request) =>
+      request.params.action === "open" &&
+      request.params.sessionId === "session-alpha-newtab-fail" &&
+      request.params.tabId === "tab-2",
+    "new tab failed after agent switch",
+    160
+  );
+  await page.getByRole("button", { name: "New tab" }).click();
+  await daemon.waitForRequest("browser_agent", (request) =>
+    request.params.action === "open" &&
+    request.params.sessionId === "session-alpha-newtab-fail" &&
+    request.params.tabId === "tab-2"
+  );
+
+  await page
+    .locator(".pf-sidebar-agents-list")
+    .getByRole("button", { name: /^Beta newtab fail\b/ })
+    .click();
+  await daemon.waitForRequest("browser_agent", (request) =>
+    request.params.action === "list" &&
+    request.params.sessionId === "session-beta-newtab-fail"
+  );
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-beta-newtab-fail:browser:tab-1"
+  );
+  await expect(page.locator(".pf-browser-status")).toHaveText("Connected");
+
+  await page.waitForTimeout(220);
+  await expect(page.locator(".pf-browser-error")).toHaveCount(0);
+  await expect(page.locator(".pf-browser-status")).toHaveText("Connected");
+});
+
 test("late Browser close responses do not overwrite a switched agent", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
