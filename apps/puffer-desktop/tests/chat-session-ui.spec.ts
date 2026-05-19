@@ -880,6 +880,83 @@ test("generated title reload does not duplicate the first submitted prompt", asy
   await expect(page.locator('.pf-msg[data-role="agent"]').filter({ hasText: reply })).toHaveCount(1);
 });
 
+test("clock-skewed transcript reload does not duplicate the submitted prompt", async ({
+  page
+}) => {
+  const prompt = "Clock skew should not duplicate me";
+  const reply = "Clock skew reply stays single.";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-clock-skew",
+        displayName: "Clock skew",
+        title: "Clock skew",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Clock skew/);
+  await page.locator(".pf-composer textarea").fill(prompt);
+  await page.getByRole("button", { name: "Send" }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-clock-skew" &&
+      request.params.message === prompt
+  );
+
+  const userRows = page.locator('.pf-msg[data-role="user"]').filter({ hasText: prompt });
+  await expect(userRows).toHaveCount(1);
+
+  const loadRequestsBefore = daemon.requests.filter(
+    (request) =>
+      request.method === "load_session_detail" &&
+      request.params.sessionId === "session-clock-skew"
+  ).length;
+  daemon.setSessionTimeline("session-clock-skew", [
+    {
+      kind: "user_message",
+      id: "persisted-clock-skew-user",
+      text: prompt,
+      createdAtMs: baseTime - 10 * 60_000
+    },
+    {
+      kind: "assistant_message",
+      id: "persisted-clock-skew-assistant",
+      text: reply,
+      createdAtMs: baseTime - 10 * 60_000 + 1
+    }
+  ]);
+  daemon.emit("session:session-clock-skew:event", {
+    type: "turn-complete",
+    turnId: "turn-session-clock-skew",
+    assistantText: reply
+  });
+
+  await expect
+    .poll(() =>
+      daemon.requests.filter(
+        (request) =>
+          request.method === "load_session_detail" &&
+          request.params.sessionId === "session-clock-skew"
+      ).length
+    )
+    .toBe(loadRequestsBefore + 1);
+  await expect(userRows).toHaveCount(1);
+  await expect(page.locator('.pf-msg[data-role="agent"]').filter({ hasText: reply })).toHaveCount(1);
+});
+
 test("failed turn start keeps composer draft and avoids an unsent user row", async ({ page }) => {
   const prompt = "Do not lose this failed prompt";
   const daemon = new FakeDaemon({

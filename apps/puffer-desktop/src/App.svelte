@@ -1446,8 +1446,8 @@
     return items.some(
       (item) =>
         item.kind === pending.kind &&
-        timelineItemBody(item).trim() === body &&
-        transientTimestampsMatch(item, pending)
+        ((item.id && item.id === pending.id) ||
+          (timelineItemBody(item).trim() === body && transientTimestampsMatch(item, pending)))
     );
   }
 
