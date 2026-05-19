@@ -136,6 +136,47 @@ test("workspace pin control is disabled while the pin save is in flight", async 
   await expect(project.getByRole("button", { name: "Unpin workspace" })).toBeDisabled();
 });
 
+test("workspace pin save stays guarded after opening an agent", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-pin-alpha",
+        displayName: "Alpha pin source",
+        title: "Alpha pin source",
+        cwd: "/tmp/puffer-pin",
+        folderPath: "/tmp/puffer-pin",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1
+      },
+      {
+        sessionId: "session-pin-beta",
+        displayName: "Beta pin target",
+        title: "Beta pin target",
+        cwd: "/tmp/puffer-pin",
+        folderPath: "/tmp/puffer-pin",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 1
+      }
+    ]
+  });
+  daemon.delayResponse("set_desktop_pin", () => true, 2_000);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const project = page.locator(".pf-pw-project").filter({ hasText: "puffer-pin" });
+  await project.getByRole("button", { name: "Pin workspace" }).click();
+  await daemon.waitForRequest("set_desktop_pin");
+
+  await project.getByRole("button", { name: /Beta pin target/ }).click();
+  await expect(page.locator(".pf-agent-detail")).toBeVisible();
+  await page.getByRole("button", { name: "Back" }).click();
+
+  await expect(project.getByRole("button", { name: "Unpin workspace" })).toBeDisabled();
+  expect(daemon.requests.filter((request) => request.method === "set_desktop_pin")).toHaveLength(1);
+});
+
 test("workspace search filters projects and agents", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

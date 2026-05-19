@@ -1060,7 +1060,6 @@
     turnQuestionLookup = {};
     resolvingPermissionIds = [];
     resolvingQuestionIds = [];
-    desktopPinInFlightKeys = [];
     currentTurnId = null;
     cancelingTurnId = null;
     turnStartedAtMs = null;
