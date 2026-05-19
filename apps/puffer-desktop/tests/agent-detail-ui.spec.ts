@@ -151,6 +151,62 @@ test("Agent detail find covers chat plus side panel diff without corrupting text
   await expect(page.locator(".pf-side-panel")).toHaveCount(0);
 });
 
+test("find query clears when switching sessions", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-find-alpha",
+        displayName: "Alpha find",
+        title: "Alpha find",
+        cwd: "/tmp/puffer-alpha",
+        folderPath: "/tmp/puffer-alpha",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "alpha-find-message",
+            text: "Needle only belongs to alpha.",
+            createdAtMs: baseTime - 50_000
+          }
+        ]
+      },
+      {
+        sessionId: "session-find-beta",
+        displayName: "Beta find",
+        title: "Beta find",
+        cwd: "/tmp/puffer-beta",
+        folderPath: "/tmp/puffer-beta",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "beta-find-message",
+            text: "Needle also appears in beta.",
+            createdAtMs: baseTime - 110_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openAgent(page, /^Alpha find\b/);
+  await page.keyboard.press("Control+F");
+  const find = page.getByRole("search", { name: "Find in agent view" });
+  await expect(find).toBeVisible();
+  await find.getByRole("textbox").fill("Needle");
+  await expect(page.locator("mark.pf-search-mark")).toHaveCount(1);
+
+  await openAgent(page, /^Beta find\b/);
+
+  await expect(find).toHaveCount(0);
+  await expect(page.locator("mark.pf-search-mark")).toHaveCount(0);
+  await expect(page.locator(".pf-agent-identity")).toContainText("Beta find");
+});
+
 test("title edit draft clears when switching sessions", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

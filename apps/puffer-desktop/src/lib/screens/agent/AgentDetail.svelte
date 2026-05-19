@@ -105,6 +105,7 @@
   let titleSaving = $state(false);
   let titleEditSessionId: string | null = null;
   let titleEditing = $derived(Boolean(editingTitle && titleEditSessionId === (session?.id ?? null)));
+  let detailSessionId: string | null = null;
 
   $effect(() => {
     if (!titleEditing) titleDraft = displayName;
@@ -124,6 +125,13 @@
     if (nextSessionId === fileToOpenSessionId) return;
     fileToOpenSessionId = nextSessionId;
     fileToOpen = null;
+  });
+
+  $effect(() => {
+    const nextSessionId = session?.id ?? null;
+    if (nextSessionId === detailSessionId) return;
+    detailSessionId = nextSessionId;
+    closeSearch();
   });
 
   function inferStatusFromSession(d: SessionDetail | null): AgentStatus {
