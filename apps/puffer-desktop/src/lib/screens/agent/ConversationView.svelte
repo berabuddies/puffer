@@ -2,7 +2,7 @@
   import "../../design/chat.css";
 
   import { onDestroy, tick } from "svelte";
-  import Puffer from "../../design/Puffer.svelte";
+  import BrandLogo from "../../design/BrandLogo.svelte";
   import Icon, { type IconName } from "../../design/Icon.svelte";
   import MessageBody from "../../components/MessageBody.svelte";
   import ToolCard from "./ToolCard.svelte";
@@ -1222,7 +1222,7 @@
             </div>
           {:else}
             <div class="pf-msg" data-role="agent">
-              <div class="pf-msg-avatar"><Puffer size={26} state="idle" /></div>
+              <div class="pf-msg-avatar"><BrandLogo size={26} /></div>
               <div class="pf-msg-body">
                 <div class="pf-msg-meta">
                   <span class="name">{engineerName}</span>
@@ -1365,7 +1365,7 @@
 
         {#if typingLabel}
           <div class="pf-msg" data-role="agent" style="opacity: 0.85;">
-            <div class="pf-msg-avatar"><Puffer size={26} state={agentState} /></div>
+            <div class="pf-msg-avatar"><BrandLogo size={26} /></div>
             <div class="pf-msg-body">
               <div class="typing">{typingLabel}</div>
             </div>
