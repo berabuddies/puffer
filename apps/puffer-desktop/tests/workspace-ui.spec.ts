@@ -3,6 +3,60 @@ import { FakeDaemon } from "./support/fakeDaemon";
 
 const baseTime = Date.now();
 
+test("workspace picker ignores duplicate local switch submits while restart is in flight", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon();
+  await page.addInitScript((daemonUrl) => {
+    const win = window as unknown as {
+      __TAURI__?: unknown;
+      __TAURI_INTERNALS__?: {
+        invoke?: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+      };
+      __workspacePickerInvokeCalls?: Array<{ cmd: string; args: Record<string, unknown> }>;
+    };
+    win.__workspacePickerInvokeCalls = [];
+    win.__TAURI__ = {};
+    win.__TAURI_INTERNALS__ = {
+      invoke: async (cmd: string, args: Record<string, unknown> = {}) => {
+        win.__workspacePickerInvokeCalls?.push({ cmd, args });
+        if (cmd !== "restart_local_daemon") throw new Error(`unexpected invoke: ${cmd}`);
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        return {
+          url: daemonUrl,
+          token: "test",
+          protocolVersion: "2025-01-01",
+          workspaceRoot: String(args.cwd ?? "/tmp/puffer-next")
+        };
+      }
+    };
+  }, daemon.url);
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByTitle("Switch workspace").click();
+  const dialog = page.getByRole("dialog", { name: "Switch workspace" });
+  await dialog.getByRole("tab", { name: /Local/ }).click();
+  await dialog.getByLabel("Workspace directory").fill("/tmp/puffer-next");
+  await dialog.getByRole("button", { name: "Switch local workspace" }).evaluate((button) => {
+    (button as HTMLButtonElement).click();
+    (button as HTMLButtonElement).click();
+  });
+
+  await page.waitForTimeout(50);
+  const calls = await page.evaluate(() => {
+    const win = window as unknown as {
+      __workspacePickerInvokeCalls?: Array<{ cmd: string; args: Record<string, unknown> }>;
+    };
+    return (win.__workspacePickerInvokeCalls ?? []).filter(
+      (call) => call.cmd === "restart_local_daemon"
+    );
+  });
+  expect(calls).toHaveLength(1);
+  expect(calls[0].args.cwd).toBe("/tmp/puffer-next");
+});
+
 test("workspace search filters projects and agents", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

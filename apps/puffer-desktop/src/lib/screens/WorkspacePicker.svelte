@@ -64,7 +64,7 @@
   });
 
   async function submitLocal() {
-    if (!localCwd.trim()) return;
+    if (busy || !localCwd.trim()) return;
     busy = true;
     error = null;
     status = `Restarting daemon in ${localCwd}…`;
@@ -81,7 +81,7 @@
   }
 
   async function submitRemote() {
-    if (!sshTarget.trim()) return;
+    if (busy || !sshTarget.trim()) return;
     busy = true;
     error = null;
     status = `Connecting to ${sshTarget}…`;
