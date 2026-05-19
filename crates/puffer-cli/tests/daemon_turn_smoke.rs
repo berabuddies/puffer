@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use std::io::{Read, Write as _};
+use std::io::{ErrorKind, Read, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-use tungstenite::{connect, Message, WebSocket};
+use tungstenite::{connect, stream::MaybeTlsStream, Message, WebSocket};
 use url::Url;
 
 #[test]
@@ -217,6 +217,101 @@ fn daemon_uses_session_routing_when_turn_omits_provider_options() {
     daemon.stop();
 }
 
+#[test]
+fn daemon_turn_error_refreshes_workspace_and_marks_session_idle() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let workspace = tempdir.path().join("workspace");
+    let puffer_home = tempdir.path().join("home");
+    let puffer_config = puffer_home.join(".puffer");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::create_dir_all(&puffer_config).expect("puffer config");
+    std::fs::write(
+        puffer_config.join("auth.json"),
+        json!({
+            "format_version": 1,
+            "providers": {
+                "openai": { "kind": "api_key", "key": "sk-test" }
+            }
+        })
+        .to_string(),
+    )
+    .expect("auth store");
+    let discovery_cache = tempdir.path().join("discovery.json");
+    std::fs::write(&discovery_cache, discovery_cache_json()).expect("discovery cache");
+
+    let mut daemon = DaemonProcess::start(&workspace, &puffer_home, &discovery_cache);
+    let mut client = DaemonClient::connect(&daemon.handshake);
+    let failing_base_url = closed_http_base_url();
+
+    client.rpc(
+        "update_config",
+        json!({
+            "openaiBaseUrl": failing_base_url,
+            "defaultProvider": "openai",
+            "defaultModel": "openai/gpt-5",
+        }),
+    );
+    let session = client.rpc(
+        "create_session",
+        json!({
+            "cwd": workspace.display().to_string(),
+            "providerId": "codex",
+            "modelId": "codex/gpt-5",
+        }),
+    );
+    let session_id = session["sessionId"].as_str().expect("session id");
+
+    let turn = client.rpc(
+        "run_agent_turn",
+        json!({
+            "sessionId": session_id,
+            "message": "Trigger a controlled provider error",
+            "providerId": "codex",
+            "modelId": "codex/gpt-5",
+            "permissionMode": "read-only",
+        }),
+    );
+    let turn_id = turn["turnId"].as_str().expect("turn id");
+    let error = client.wait_for_event(|message| {
+        message["event"] == format!("session:{session_id}:event")
+            && message["payload"]["type"] == "turn-error"
+    });
+    assert_eq!(error["payload"]["turnId"], turn_id);
+    let error_text = error["payload"]["error"]
+        .as_str()
+        .expect("friendly error")
+        .to_string();
+
+    let changed = client.wait_for_event(|message| {
+        message["event"] == "workspace:sessions:changed"
+            && message["payload"]["reason"] == "turn_error"
+    });
+    assert_eq!(changed["payload"]["sessionId"], session_id);
+
+    let detail = client.rpc("load_session_detail", json!({ "sessionId": session_id }));
+    let timeline = detail["timeline"].as_array().expect("timeline array");
+    assert!(timeline.iter().any(|item| {
+        item["kind"] == "user_message" && item["text"] == "Trigger a controlled provider error"
+    }));
+    assert!(timeline.iter().any(|item| {
+        item["kind"] == "system_message"
+            && item["text"].as_str().is_some_and(|text| text == error_text)
+    }));
+
+    let groups = client.rpc("list_grouped_sessions", json!({}));
+    let status = groups
+        .as_array()
+        .expect("groups")
+        .iter()
+        .flat_map(|group| group["sessions"].as_array().into_iter().flatten())
+        .find(|item| item["sessionId"] == session_id)
+        .and_then(|item| item["activityStatus"].as_str())
+        .expect("session activity status");
+    assert_eq!(status, "idle");
+
+    daemon.stop();
+}
+
 struct DaemonProcess {
     child: Child,
     handshake: Value,
@@ -287,7 +382,7 @@ impl Drop for DaemonProcess {
 }
 
 struct DaemonClient {
-    socket: WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
+    socket: WebSocket<MaybeTlsStream<TcpStream>>,
     next_id: u64,
     backlog: Vec<Value>,
 }
@@ -298,6 +393,7 @@ impl DaemonClient {
         url.query_pairs_mut()
             .append_pair("token", handshake["token"].as_str().expect("token"));
         let (socket, _) = connect(url.as_str()).expect("connect daemon websocket");
+        set_daemon_socket_read_timeout(&socket, Some(Duration::from_millis(100)));
         Self {
             socket,
             next_id: 1,
@@ -318,7 +414,7 @@ impl DaemonClient {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             assert!(Instant::now() < deadline, "{method} timed out");
-            let message = self.read_message();
+            let message = self.read_message_until(deadline);
             if message["id"].as_str() == Some(id.as_str()) {
                 if !message["error"].is_null() {
                     panic!("{method} failed: {}", message["error"]);
@@ -336,7 +432,7 @@ impl DaemonClient {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             assert!(Instant::now() < deadline, "event timed out");
-            let message = self.read_message();
+            let message = self.read_message_until(deadline);
             if predicate(&message) {
                 return message;
             }
@@ -344,11 +440,17 @@ impl DaemonClient {
         }
     }
 
-    fn read_message(&mut self) -> Value {
+    fn read_message_until(&mut self, deadline: Instant) -> Value {
         loop {
-            let message = self.socket.read().expect("read daemon message");
-            if let Message::Text(text) = message {
-                return serde_json::from_str(&text).expect("daemon message json");
+            assert!(Instant::now() < deadline, "daemon message timed out");
+            match self.socket.read() {
+                Ok(Message::Text(text)) => {
+                    return serde_json::from_str(&text).expect("daemon message json");
+                }
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(error))
+                    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+                Err(error) => panic!("read daemon message: {error}"),
             }
         }
     }
@@ -536,6 +638,25 @@ fn write_http_response(stream: &mut TcpStream, status: u16, content_type: &str, 
     );
     stream.write_all(header.as_bytes()).expect("write header");
     stream.write_all(body).expect("write body");
+}
+
+fn closed_http_base_url() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind closed url");
+    let address = listener.local_addr().expect("closed url address");
+    drop(listener);
+    format!("http://{address}")
+}
+
+fn set_daemon_socket_read_timeout(
+    socket: &WebSocket<MaybeTlsStream<TcpStream>>,
+    timeout: Option<Duration>,
+) {
+    let tcp = match socket.get_ref() {
+        MaybeTlsStream::Plain(stream) => stream,
+        MaybeTlsStream::Rustls(stream) => stream.get_ref(),
+        _ => return,
+    };
+    let _ = tcp.set_read_timeout(timeout);
 }
 
 fn discovery_cache_json() -> String {

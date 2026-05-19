@@ -2193,14 +2193,15 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         let mut inputs = match setup_state.build_runtime_inputs() {
             Ok(v) => v,
             Err(err) => {
-                setup_state.publish_event(ServerEnvelope::Event {
-                    event: channel_thread.clone(),
-                    payload: json!({
-                        "type": "turn-error",
-                        "turnId": turn_id_thread,
-                        "error": format!("build_runtime_inputs: {err:#}"),
-                    }),
-                });
+                publish_turn_error_event(
+                    &setup_state,
+                    &channel_thread,
+                    &session_id_for_thread,
+                    &turn_id_thread,
+                    format!("build_runtime_inputs: {err:#}"),
+                    None,
+                    None,
+                );
                 setup_state.turns.lock().unwrap().remove(&turn_id_thread);
                 return;
             }
@@ -2208,14 +2209,15 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         let record = match inputs.session_store.load_session(session_uuid) {
             Ok(v) => v,
             Err(err) => {
-                setup_state.publish_event(ServerEnvelope::Event {
-                    event: channel_thread.clone(),
-                    payload: json!({
-                        "type": "turn-error",
-                        "turnId": turn_id_thread,
-                        "error": format!("load_session: {err:#}"),
-                    }),
-                });
+                publish_turn_error_event(
+                    &setup_state,
+                    &channel_thread,
+                    &session_id_for_thread,
+                    &turn_id_thread,
+                    format!("load_session: {err:#}"),
+                    None,
+                    None,
+                );
                 setup_state.turns.lock().unwrap().remove(&turn_id_thread);
                 return;
             }
@@ -2261,14 +2263,15 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
             ) {
                 Ok(routing) => effective_turn_options.apply_session_routing(routing),
                 Err(err) => {
-                    setup_state.publish_event(ServerEnvelope::Event {
-                        event: channel_thread.clone(),
-                        payload: json!({
-                            "type": "turn-error",
-                            "turnId": turn_id_thread,
-                            "error": format!("load session routing: {err:#}"),
-                        }),
-                    });
+                    publish_turn_error_event(
+                        &setup_state,
+                        &channel_thread,
+                        &session_id_for_thread,
+                        &turn_id_thread,
+                        format!("load session routing: {err:#}"),
+                        None,
+                        None,
+                    );
                     setup_state.turns.lock().unwrap().remove(&turn_id_thread);
                     return;
                 }
@@ -2279,14 +2282,15 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         if let Err(err) =
             apply_turn_request_options(&mut app_state, &inputs.providers, &effective_turn_options)
         {
-            setup_state.publish_event(ServerEnvelope::Event {
-                event: channel_thread.clone(),
-                payload: json!({
-                    "type": "turn-error",
-                    "turnId": turn_id_thread,
-                    "error": format!("turn options: {err:#}"),
-                }),
-            });
+            publish_turn_error_event(
+                &setup_state,
+                &channel_thread,
+                &session_id_for_thread,
+                &turn_id_thread,
+                format!("turn options: {err:#}"),
+                None,
+                None,
+            );
             setup_state.turns.lock().unwrap().remove(&turn_id_thread);
             return;
         }
@@ -2528,16 +2532,22 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
             Err(err) => {
                 eprintln!("turn {turn_id_thread} failed: {err:#}");
                 let (friendly, category) = classify_turn_error(&err);
-                setup_state.publish_event(ServerEnvelope::Event {
-                    event: channel_thread.clone(),
-                    payload: json!({
-                        "type": "turn-error",
-                        "turnId": turn_id_thread,
-                        "error": friendly,
-                        "errorRaw": format!("{err:#}"),
-                        "category": category,
-                    }),
-                });
+                let raw = format!("{err:#}");
+                let _ = inputs.session_store.append_event(
+                    session_uuid,
+                    TranscriptEvent::SystemMessage {
+                        text: friendly.clone(),
+                    },
+                );
+                publish_turn_error_event(
+                    &setup_state,
+                    &channel_thread,
+                    &session_id_for_thread,
+                    &turn_id_thread,
+                    friendly,
+                    Some(raw),
+                    Some(category),
+                );
             }
         }
 
@@ -2549,6 +2559,39 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     });
 
     Ok(json!({"turnId": turn_id_resp}))
+}
+
+fn publish_turn_error_event(
+    state: &DaemonState,
+    channel: &str,
+    session_id: &str,
+    turn_id: &str,
+    error: String,
+    error_raw: Option<String>,
+    category: Option<&str>,
+) {
+    let mut payload = json!({
+        "type": "turn-error",
+        "turnId": turn_id,
+        "error": error,
+    });
+    if let Some(raw) = error_raw {
+        payload["errorRaw"] = json!(raw);
+    }
+    if let Some(category) = category {
+        payload["category"] = json!(category);
+    }
+    state.publish_event(ServerEnvelope::Event {
+        event: channel.to_string(),
+        payload,
+    });
+    state.publish_event(ServerEnvelope::Event {
+        event: "workspace:sessions:changed".to_string(),
+        payload: json!({
+            "reason": "turn_error",
+            "sessionId": session_id,
+        }),
+    });
 }
 
 /// Translates a raw `anyhow::Error` from `execute_user_turn_streaming_*`
