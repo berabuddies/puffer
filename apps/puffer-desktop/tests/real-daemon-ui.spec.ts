@@ -14,6 +14,13 @@ type DaemonHandshake = {
   protocolVersion: string;
 };
 
+type DaemonFixtureOptions = {
+  openaiBaseUrl?: string;
+  anthropicBaseUrl?: string;
+  defaultProvider: string;
+  defaultModel: string;
+};
+
 const repoRoot = path.resolve(process.cwd(), "../..");
 const defaultPufferBinary = path.join(repoRoot, "target", "debug", "puffer");
 const pufferBinary = process.env.PUFFER_DESKTOP_TEST_DAEMON ?? defaultPufferBinary;
@@ -26,7 +33,11 @@ test("real daemon UI can create an OpenAI-backed agent and render a reply", asyn
   test.setTimeout(60_000);
 
   const mock = await OpenAiMock.start("Puffer smoke reply");
-  const fixture = await DaemonFixture.start(mock.baseUrl);
+  const fixture = await DaemonFixture.start({
+    openaiBaseUrl: mock.baseUrl,
+    defaultProvider: "openai",
+    defaultModel: "openai/gpt-5"
+  });
   try {
     const params = new URLSearchParams({
       skipOnboarding: "1",
@@ -58,6 +69,50 @@ test("real daemon UI can create an OpenAI-backed agent and render a reply", asyn
   }
 });
 
+test("real daemon UI can create an Anthropic-backed agent and render a reply", async ({ page }) => {
+  test.skip(
+    !existsSync(pufferBinary),
+    `Build puffer first or set PUFFER_DESKTOP_TEST_DAEMON; missing ${pufferBinary}`
+  );
+  test.setTimeout(60_000);
+
+  const mock = await AnthropicMock.start("Claude smoke reply");
+  const fixture = await DaemonFixture.start({
+    anthropicBaseUrl: mock.baseUrl,
+    defaultProvider: "anthropic",
+    defaultModel: "anthropic/claude-sonnet-4-5"
+  });
+  try {
+    const params = new URLSearchParams({
+      skipOnboarding: "1",
+      corbinaBackend: fixture.handshake.url,
+      corbinaToken: fixture.handshake.token
+    });
+    await page.goto(`/?${params.toString()}`);
+
+    await expect(page.getByRole("heading", { name: "No sessions yet" })).toBeVisible();
+    await page.getByRole("button", { name: "New agent in default workspace" }).click();
+    const dialog = page.getByRole("dialog", { name: "New agent" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("radio", { name: /Anthropic|Claude/ })).toBeVisible();
+    await dialog.getByRole("button", { name: "Start agent" }).click();
+
+    const composer = page.locator(".pf-composer textarea");
+    await expect(composer).toBeEnabled();
+    await composer.fill("Say exactly: Claude smoke reply");
+    await page.getByRole("button", { name: "Send" }).click();
+
+    await expect.poll(() => mock.messagesCalls, { timeout: 20_000 }).toBe(1);
+    await expect(
+      page.locator('.pf-msg[data-role="agent"]').filter({ hasText: "Claude smoke reply" })
+    ).toBeVisible();
+    expect(mock.lastMessagesBody).toContain("Say exactly: Claude smoke reply");
+  } finally {
+    await fixture.stop();
+    await mock.stop();
+  }
+});
+
 class DaemonFixture {
   readonly handshake: DaemonHandshake;
   private readonly child: ChildProcessWithoutNullStreams;
@@ -70,7 +125,7 @@ class DaemonFixture {
     this.root = root;
   }
 
-  static async start(openaiBaseUrl: string): Promise<DaemonFixture> {
+  static async start(options: DaemonFixtureOptions): Promise<DaemonFixture> {
     const root = await mkdtemp(path.join(tmpdir(), "puffer-desktop-ui-"));
     const workspace = path.join(root, "workspace");
     const pufferHome = path.join(root, "home");
@@ -78,16 +133,34 @@ class DaemonFixture {
     const discoveryCache = path.join(root, "discovery.json");
     await mkdir(workspace, { recursive: true });
     await mkdir(pufferConfig, { recursive: true });
+    if (options.anthropicBaseUrl) {
+      const workspaceProviders = path.join(workspace, ".puffer", "resources", "providers");
+      await mkdir(workspaceProviders, { recursive: true });
+      await writeFile(
+        path.join(workspaceProviders, "anthropic.yaml"),
+        anthropicProviderYaml(options.anthropicBaseUrl)
+      );
+    }
     await writeFile(
       path.join(pufferConfig, "auth.json"),
       JSON.stringify({
         format_version: 1,
         providers: {
-          openai: { kind: "api_key", key: "sk-test" }
+          ...(options.openaiBaseUrl ? { openai: { kind: "api_key", key: "sk-test" } } : {}),
+          ...(options.anthropicBaseUrl ? { anthropic: { kind: "api_key", key: "sk-ant-test" } } : {})
         }
       })
     );
     await writeFile(discoveryCache, discoveryCacheJson());
+    const env: Record<string, string | undefined> = {
+      ...process.env,
+      PUFFER_HOME: pufferHome,
+      PUFFER_BUILTIN_RESOURCES_DIR: path.join(repoRoot, "resources"),
+      PUFFER_DISCOVERY_CACHE_PATH: discoveryCache
+    };
+    if (options.openaiBaseUrl) {
+      env.OPENAI_BASE_URL = options.openaiBaseUrl;
+    }
 
     const child = spawn(
       pufferBinary,
@@ -103,13 +176,7 @@ class DaemonFixture {
       ],
       {
         cwd: workspace,
-        env: {
-          ...process.env,
-          PUFFER_HOME: pufferHome,
-          PUFFER_BUILTIN_RESOURCES_DIR: path.join(repoRoot, "resources"),
-          PUFFER_DISCOVERY_CACHE_PATH: discoveryCache,
-          OPENAI_BASE_URL: openaiBaseUrl
-        }
+        env
       }
     );
     let stderr = "";
@@ -119,9 +186,9 @@ class DaemonFixture {
 
     const handshake = await readHandshake(child, () => stderr);
     await daemonRpc(handshake, "update_config", {
-      openaiBaseUrl,
-      defaultProvider: "openai",
-      defaultModel: "openai/gpt-5"
+      ...(options.openaiBaseUrl ? { openaiBaseUrl: options.openaiBaseUrl } : {}),
+      defaultProvider: options.defaultProvider,
+      defaultModel: options.defaultModel
     });
     const fixture = new DaemonFixture(handshake, child, root);
     fixture.stderr = stderr;
@@ -223,6 +290,65 @@ class OpenAiMock {
   }
 }
 
+class AnthropicMock {
+  readonly baseUrl: string;
+  messagesCalls = 0;
+  lastMessagesBody = "";
+  private readonly server: Server;
+  private readonly reply: string;
+
+  private constructor(server: Server, baseUrl: string, reply: string) {
+    this.server = server;
+    this.baseUrl = baseUrl;
+    this.reply = reply;
+  }
+
+  static async start(reply: string): Promise<AnthropicMock> {
+    let mock: AnthropicMock | null = null;
+    const server = createServer((request, response) => {
+      if (mock) {
+        void mock.handle(request, response);
+      } else {
+        response.writeHead(503, { "content-type": "text/plain" });
+        response.end("mock not ready");
+      }
+    });
+    await new Promise<void>((resolve) => {
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("mock server did not bind a TCP address");
+    }
+    const ready = new AnthropicMock(server, `http://127.0.0.1:${address.port}`, reply);
+    mock = ready;
+    return ready;
+  }
+
+  async stop(): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      this.server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+
+  private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    if (request.url === "/v1/models") {
+      writeJson(response, {
+        data: [{ id: "claude-sonnet-4-5", display_name: "Claude Sonnet 4.5" }]
+      });
+      return;
+    }
+    if (request.url?.startsWith("/v1/messages")) {
+      this.messagesCalls += 1;
+      this.lastMessagesBody = await readRequestBody(request);
+      writeSse(response, anthropicTextStream(this.reply));
+      return;
+    }
+    response.writeHead(404, { "content-type": "text/plain" });
+    response.end("not found");
+  }
+}
+
 async function readHandshake(
   child: ChildProcessWithoutNullStreams,
   stderr: () => string
@@ -297,6 +423,57 @@ function writeJson(response: ServerResponse, value: unknown): void {
   response.end(body);
 }
 
+function writeSse(response: ServerResponse, events: string): void {
+  response.writeHead(200, {
+    "content-type": "text/event-stream",
+    "cache-control": "no-cache",
+    connection: "keep-alive"
+  });
+  response.end(events);
+}
+
+function anthropicTextStream(reply: string): string {
+  return [
+    sseEvent("message_start", {
+      type: "message_start",
+      message: {
+        id: "msg_desktop_ui_smoke",
+        type: "message",
+        role: "assistant",
+        model: "claude-sonnet-4-5",
+        content: [],
+        usage: {
+          input_tokens: 10,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+          output_tokens: 1
+        }
+      }
+    }),
+    sseEvent("content_block_start", {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "text", text: "" }
+    }),
+    sseEvent("content_block_delta", {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "text_delta", text: reply }
+    }),
+    sseEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+    sseEvent("message_delta", {
+      type: "message_delta",
+      delta: { stop_reason: "end_turn" },
+      usage: { output_tokens: 4 }
+    }),
+    sseEvent("message_stop", { type: "message_stop" })
+  ].join("");
+}
+
+function sseEvent(event: string, data: unknown): string {
+  return `event:${event}\ndata:${JSON.stringify(data)}\n\n`;
+}
+
 function discoveryCacheJson(): string {
   const now = 1_700_000_000_000;
   return JSON.stringify({
@@ -307,4 +484,30 @@ function discoveryCacheJson(): string {
       vllm: { models: [], cached_at_ms: now }
     }
   });
+}
+
+function anthropicProviderYaml(baseUrl: string): string {
+  return `id: anthropic
+display_name: Anthropic
+base_url: "${baseUrl}"
+default_api: anthropic-messages
+auth_modes:
+  - api_key
+  - oauth
+discovery:
+  path: /v1/models
+  response: anthropic_models
+  api: anthropic-messages
+  context_window: 200000
+  max_output_tokens: 8192
+  supports_reasoning: true
+models:
+  - id: claude-sonnet-4-5
+    display_name: Claude Sonnet 4.5
+    provider: anthropic
+    api: anthropic-messages
+    context_window: 200000
+    max_output_tokens: 8192
+    supports_reasoning: true
+`;
 }
