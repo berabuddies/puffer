@@ -68,6 +68,50 @@ test("PLUS-121: active agents are grouped by project and collapse on header clic
   await expect(alphaHeader).toHaveAttribute("aria-expanded", "true");
 });
 
+test("PLUS-121: active agent project stays collapsed after manual toggle", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-alpha-active",
+        displayName: "Alpha active",
+        title: "Alpha active",
+        cwd: "/tmp/alpha",
+        folderPath: "/tmp/alpha",
+        updatedAtMs: baseTime - 60_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 1,
+        activityStatus: "running"
+      },
+      {
+        sessionId: "session-alpha-sidecar",
+        displayName: "Alpha sidecar",
+        title: "Alpha sidecar",
+        cwd: "/tmp/alpha",
+        folderPath: "/tmp/alpha",
+        updatedAtMs: baseTime - 600_000,
+        createdAtMs: baseTime - 1_200_000,
+        eventCount: 2,
+        activityStatus: "idle"
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const alphaGroup = page
+    .locator(".pf-sidebar-agents .pf-sidebar-project-group")
+    .filter({ hasText: "alpha" });
+  const alphaHeader = alphaGroup.locator(".pf-sidebar-project-header");
+  await alphaGroup.getByRole("button", { name: /^Alpha active\b/ }).click();
+  await expect(page.locator(".pf-agent-detail")).toBeVisible();
+
+  await alphaHeader.click();
+  await expect(alphaHeader).toHaveAttribute("aria-expanded", "false");
+  await expect(alphaGroup.locator(".pf-sidebar-agent-row")).toHaveCount(0);
+  await page.waitForTimeout(50);
+  await expect(alphaHeader).toHaveAttribute("aria-expanded", "false");
+});
+
 test("PLUS-121: active agents disambiguate projects with the same folder name", async ({
   page
 }) => {

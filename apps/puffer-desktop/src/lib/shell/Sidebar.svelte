@@ -53,6 +53,7 @@
 
   let filterState = $state<string>("all");
   let collapsedProjects = $state<Set<string>>(loadCollapsedProjects());
+  let lastAutoExpandedActiveKey: string | null = null;
 
   const screens: { id: ScreenId; label: string; icon: IconName }[] = [
     { id: "workspace", label: "Project", icon: "sparkles" },
@@ -72,8 +73,14 @@
   });
   $effect(() => {
     const active = activeAgentId ? agents.find((agent) => agent.id === activeAgentId) : null;
-    if (!active) return;
+    if (!active) {
+      lastAutoExpandedActiveKey = null;
+      return;
+    }
     if (filterState !== "all" && active.state !== filterState) filterState = "all";
+    const activeKey = `${active.id}\u0000${active.project}`;
+    if (lastAutoExpandedActiveKey === activeKey) return;
+    lastAutoExpandedActiveKey = activeKey;
     if (collapsedProjects.has(active.project)) {
       const next = new Set(collapsedProjects);
       next.delete(active.project);
