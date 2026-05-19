@@ -68,7 +68,6 @@ pub(super) fn execute_tool_batch(
         )?);
     }
 
-    let working_dirs = inputs.state.working_dirs.clone();
     let session_id = inputs.state.session.id;
     let provider_context =
         backend_to_provider_context(session.tool_execution_backend(), inputs.model_id);
@@ -112,7 +111,6 @@ pub(super) fn execute_tool_batch(
             let args: Value = serde_json::from_str(&tc.input).unwrap_or(Value::Null);
             let resources = inputs.resources;
             let registry = inputs.registry;
-            let working_dirs_ref = &working_dirs;
             let provider_context_ref = &provider_context;
             let runner_clone = runner.clone();
             // Observability-only clones are gated on a live handle so
@@ -153,7 +151,7 @@ pub(super) fn execute_tool_batch(
                     let result = match claude_tools::execute_parallel_tool(
                         &definition,
                         cwd,
-                        working_dirs_ref,
+                        &filesystem_policy.workspace_roots,
                         &filesystem_policy,
                         &session_id,
                         args,

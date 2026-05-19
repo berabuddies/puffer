@@ -173,6 +173,10 @@ impl SessionPermissionGrants {
         }
     }
 
+    pub(crate) fn grant_path_prefix(&mut self, path: PathBuf) {
+        self.granted.insert(SessionGrantTarget::PathPrefix(path));
+    }
+
     pub(crate) fn legacy_tool_permissions(&self) -> HashMap<String, String> {
         self.granted
             .iter()
@@ -345,6 +349,7 @@ impl EffectivePermissionProfile {
             current_session_id: current_session_id.to_string(),
             workspace_roots: std::iter::once(cwd.to_path_buf())
                 .chain(working_dirs.iter().cloned())
+                .chain(grants.path_prefix_grants.iter().cloned())
                 .collect(),
             surfaces,
             grants,

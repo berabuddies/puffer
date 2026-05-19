@@ -838,6 +838,14 @@ impl AppState {
             .legacy_tool_permissions();
     }
 
+    /// Grants filesystem access to one path prefix for the current session.
+    pub fn allow_path_for_session(&mut self, path: PathBuf) {
+        self.session_permission_state
+            .grants_mut()
+            .grant_path_prefix(path);
+        self.sync_session_tool_permissions_from_state();
+    }
+
     /// Rebuilds legacy session tool permissions from the typed session state.
     pub fn sync_session_tool_permissions_from_state(&mut self) {
         self.session_tool_permissions = self
