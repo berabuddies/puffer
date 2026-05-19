@@ -390,6 +390,14 @@
     });
   }
 
+  function sendBrowserInput(event: Parameters<typeof browserInput>[1]) {
+    const target = activeCommandTarget();
+    if (!target) return;
+    void browserInput(target.backendSessionId, event).catch((err) => {
+      reportCommandError(target, err);
+    });
+  }
+
   function updateTab(tabId: string, patch: Partial<BrowserTab>, persist = true) {
     tabs = tabs.map((tab) => (tab.id === tabId ? { ...tab, ...patch } : tab));
     if (persist) saveTabs();
@@ -816,7 +824,7 @@
       buttons = 0;
       click_count = activeClickCount || 1;
     }
-    void browserInput(activeBackendSessionId(), {
+    sendBrowserInput({
       kind: "mouse",
       eventType,
       x: point.x,
@@ -824,8 +832,6 @@
       button,
       buttons,
       clickCount: click_count
-    }).catch((err) => {
-      error = String(err);
     });
     if (eventType === "mouseReleased") {
       resetPointer(event.pointerId);
@@ -917,14 +923,12 @@
     if (!connected) return;
     event.preventDefault();
     const point = canvasPoint(event);
-    void browserInput(activeBackendSessionId(), {
+    sendBrowserInput({
       kind: "wheel",
       x: point.x,
       y: point.y,
       deltaX: event.deltaX,
       deltaY: event.deltaY
-    }).catch((err) => {
-      error = String(err);
     });
   }
 
@@ -972,15 +976,13 @@
     }
     event.preventDefault();
     const text = event.key.length === 1 && !event.metaKey && !event.ctrlKey ? event.key : undefined;
-    void browserInput(activeBackendSessionId(), {
+    sendBrowserInput({
       kind: "key",
       eventType: keyType(event),
       key: event.key,
       code: event.code,
       ...(text ? { text } : {}),
       modifiers: modifiers(event)
-    }).catch((err) => {
-      error = String(err);
     });
   }
 
@@ -995,14 +997,12 @@
       return;
     }
     event.preventDefault();
-    void browserInput(activeBackendSessionId(), {
+    sendBrowserInput({
       kind: "key",
       eventType: "keyUp",
       key: event.key,
       code: event.code,
       modifiers: modifiers(event)
-    }).catch((err) => {
-      error = String(err);
     });
   }
 
@@ -1011,9 +1011,7 @@
     const text = event.clipboardData?.getData("text/plain") ?? "";
     if (!text) return;
     event.preventDefault();
-    void browserInput(activeBackendSessionId(), { kind: "text", text }).catch((err) => {
-      error = String(err);
-    });
+    sendBrowserInput({ kind: "text", text });
   }
 
   async function copySelection() {

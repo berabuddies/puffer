@@ -694,6 +694,87 @@ test("Browser pointer release does not move to newly active tab mid drag", async
   expect(releasedIntoSecondTab).toHaveLength(0);
 });
 
+test("late Browser mouse input failures do not leak into a switched agent", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-alpha-input-fail",
+        displayName: "Alpha input fail",
+        title: "Alpha input fail",
+        cwd: "/tmp/puffer-alpha",
+        folderPath: "/tmp/puffer-alpha",
+        updatedAtMs: Date.now(),
+        createdAtMs: Date.now() - 60_000,
+        timeline: []
+      },
+      {
+        sessionId: "session-beta-input-fail",
+        displayName: "Beta input fail",
+        title: "Beta input fail",
+        cwd: "/tmp/puffer-beta",
+        folderPath: "/tmp/puffer-beta",
+        updatedAtMs: Date.now() - 1_000,
+        createdAtMs: Date.now() - 120_000,
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page
+    .locator(".pf-sidebar-agents-list")
+    .getByRole("button", { name: /^Alpha input fail\b/ })
+    .click();
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-alpha-input-fail:browser:tab-1"
+  );
+  daemon.delayFailure(
+    "browser_input",
+    (request) => {
+      const event = request.params.event as Record<string, unknown> | undefined;
+      return request.params.sessionId === "session-alpha-input-fail:browser:tab-1" &&
+        event?.kind === "mouse" &&
+        event.eventType === "mousePressed";
+    },
+    "mouse input failed after agent switch",
+    160
+  );
+
+  await page.locator(".pf-browser-canvas").dispatchEvent("pointerdown", {
+    clientX: 20,
+    clientY: 20,
+    pointerId: 13,
+    button: 0,
+    buttons: 1,
+    pointerType: "mouse"
+  });
+  await daemon.waitForRequest("browser_input", (request) => {
+    const event = request.params.event as Record<string, unknown> | undefined;
+    return request.params.sessionId === "session-alpha-input-fail:browser:tab-1" &&
+      event?.kind === "mouse" &&
+      event.eventType === "mousePressed";
+  });
+
+  await page
+    .locator(".pf-sidebar-agents-list")
+    .getByRole("button", { name: /^Beta input fail\b/ })
+    .click();
+  await daemon.waitForRequest("browser_agent", (request) =>
+    request.params.action === "list" &&
+    request.params.sessionId === "session-beta-input-fail"
+  );
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-beta-input-fail:browser:tab-1"
+  );
+  await expect(page.locator(".pf-browser-status")).toHaveText("Connected");
+
+  await page.waitForTimeout(220);
+  await expect(page.locator(".pf-browser-error")).toHaveCount(0);
+  await expect(page.locator(".pf-browser-status")).toHaveText("Connected");
+});
+
 test("Browser fuzz click storm keeps daemon session ids valid", async ({ page }) => {
   const daemon = new FakeDaemon();
   const consoleErrors: string[] = [];
