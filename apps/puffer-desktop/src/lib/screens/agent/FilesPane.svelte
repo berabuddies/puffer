@@ -151,11 +151,20 @@
   let fsEventUnsubscribe: (() => void) | null = null;
   let destroyed = false;
 
+  function createFsWatchId(): string {
+    const random =
+      globalThis.crypto?.randomUUID?.() ??
+      `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    return `files-${random}`;
+  }
+
   async function rebuildWatch(target: string) {
     // Tear down whatever's left from the previous watch root first.
     await teardownWatch();
     if (destroyed || !target) return;
 
+    const expectedWatchId = createFsWatchId();
+    currentWatchId = expectedWatchId;
     try {
       const client = await ensureLocalDaemonClient();
       const listener = (payload: FsChangedEvent) => {
@@ -171,8 +180,8 @@
 
       // Start the actual watch. If the pane was unmounted / rerooted while
       // this await was pending, unwatch immediately to avoid leaking.
-      const { watchId } = await fsWatch([target], true);
-      if (destroyed || target !== root) {
+      const { watchId } = await fsWatch([target], true, expectedWatchId);
+      if (destroyed || target !== root || currentWatchId !== expectedWatchId) {
         await fsUnwatch(watchId).catch(() => {
           /* best-effort */
         });
@@ -180,6 +189,9 @@
       }
       currentWatchId = watchId;
     } catch (_err) {
+      if (currentWatchId === expectedWatchId) currentWatchId = null;
+      fsEventUnsubscribe?.();
+      fsEventUnsubscribe = null;
       // Failing to install the watcher isn't fatal — the pane still works,
       // just without auto-refresh. Don't spam the user with a toast; the
       // cache fallback (expand/collapse) still works.

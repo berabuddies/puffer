@@ -1324,10 +1324,15 @@ export async function lspInspect(
  *  `fsUnwatch(watchId)` on unmount to free the native watcher. */
 export async function fsWatch(
   paths: string[],
-  recursive: boolean = true
+  recursive: boolean = true,
+  watchId: string | null = null
 ): Promise<{ watchId: string }> {
   const client = await ensureLocalDaemonClient();
-  return client.request<{ watchId: string }>("fs_watch", { paths, recursive });
+  return client.request<{ watchId: string }>("fs_watch", {
+    paths,
+    recursive,
+    ...(watchId ? { watchId } : {})
+  });
 }
 
 /** Stop a filesystem watch. Idempotent — a stale id is a no-op. */

@@ -607,7 +607,7 @@ export class FakeDaemon {
       case "lsp_inspect":
         return this.lspInspect(request.params);
       case "fs_watch":
-        return { watchId: "watch-fixture" };
+        return { watchId: String(request.params.watchId ?? "watch-fixture") };
       case "fs_unwatch":
         return {};
       default:

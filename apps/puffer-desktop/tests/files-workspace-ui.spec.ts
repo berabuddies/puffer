@@ -104,6 +104,35 @@ test("Files tab saves text edits through the daemon", async ({ page }) => {
   await expect(editor).toHaveValue(saved);
 });
 
+test("Files tab applies the first watch event before fs_watch resolves", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.delayResponse("fs_watch", () => true, 250);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openFilesPanel(page);
+
+  const editor = page.getByLabel("Edit file contents");
+  await expect(editor).toHaveValue("fn main() {}\n");
+
+  const watchRequest = await daemon.waitForRequest("fs_watch");
+  expect(watchRequest.params).toMatchObject({
+    paths: ["/tmp/puffer"],
+    recursive: true
+  });
+
+  const updated = "fn main() {\n    println!(\"watch refreshed\");\n}\n";
+  daemon.seedFile("/tmp/puffer/src/main.rs", updated);
+  daemon.emit("workspace:fs:changed", {
+    watchId: String(watchRequest.params.watchId ?? "watch-fixture"),
+    paths: ["/tmp/puffer/src/main.rs"],
+    changedAtMs: Date.now()
+  });
+
+  await expect(editor).toHaveValue(updated);
+});
+
 test("Files tab releases save state after switching tabs mid-save", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
