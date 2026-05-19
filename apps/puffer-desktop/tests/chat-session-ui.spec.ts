@@ -182,6 +182,48 @@ test("turn completion preserves live chat row identity after transcript reload",
   await expect(page.locator('.pf-msg[data-role="agent"]').filter({ hasText: reply })).toHaveCount(1);
 });
 
+test("failed turn start keeps composer draft and avoids an unsent user row", async ({ page }) => {
+  const prompt = "Do not lose this failed prompt";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-failed-start",
+        displayName: "Failed start",
+        title: "Failed start",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Failed start/);
+  const composer = page.locator(".pf-composer textarea");
+  await composer.fill(prompt);
+  daemon.failNext("run_agent_turn", "daemon unavailable");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-failed-start" &&
+      request.params.message === prompt
+  );
+
+  await expect(page.getByText("Agent start failed")).toBeVisible();
+  await expect(composer).toHaveValue(prompt);
+  await expect(page.locator('.pf-msg[data-role="user"]').filter({ hasText: prompt })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+});
+
 test("unsent composer draft clears when switching sessions", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

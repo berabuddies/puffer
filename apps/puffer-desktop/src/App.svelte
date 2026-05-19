@@ -1032,7 +1032,7 @@
   async function submitMessage(message: string, options: AgentTurnOptions = {}) {
     if (!selectedSession) {
       statusMessage = "Select a session to send a message.";
-      return;
+      return false;
     }
     const requestedProviderId =
       options.providerId ?? selectedSession.providerId ?? settingsSnapshot?.config.defaultProvider;
@@ -1040,28 +1040,29 @@
       const detail = `Reconnect ${requestedProviderId} before continuing this session.`;
       statusMessage = detail;
       appendAgentError("Provider disconnected", detail, "provider-auth");
-      return;
+      return false;
     }
     const now = Date.now();
     turnStartedAtMs = now;
     turnThinking = true;
     turnStatusHint = "Thinking";
-    submittedMessages = [
-      ...submittedMessages,
-      {
-        id: `local-user-${now}`,
-        kind: "user",
-        title: "User",
-        summary: message,
-        body: message,
-        meta: []
-      }
-    ];
     try {
       const turnId = await runAgentTurn(selectedSession.id, message, options);
       currentTurnId = turnId;
       settledTurnIds.delete(turnId);
+      submittedMessages = [
+        ...submittedMessages,
+        {
+          id: `local-user-${now}`,
+          kind: "user",
+          title: "User",
+          summary: message,
+          body: message,
+          meta: []
+        }
+      ];
       statusMessage = `Agent turn ${turnId.slice(0, 8)} started.`;
+      return true;
     } catch (error) {
       currentTurnId = null;
       turnStartedAtMs = null;
@@ -1070,6 +1071,7 @@
       const detail = errorText(error);
       statusMessage = `run_agent_turn failed: ${detail}`;
       appendAgentError("Agent start failed", detail, "turn-start-error");
+      return false;
     }
   }
 

@@ -33,6 +33,7 @@
   } from "../../providerIds";
 
   const ENGINEER_NAME = "Engineer";
+  type SubmitMessageResult = boolean | void | Promise<boolean | void>;
 
   type Props = {
     session: SessionListItem | null;
@@ -50,7 +51,7 @@
     turnThinking?: boolean;
     turnStatusHint?: string | null;
     settingsSnapshot?: SettingsSnapshot | null;
-    onSubmitMessage: (message: string, options?: AgentTurnOptions) => void;
+    onSubmitMessage: (message: string, options?: AgentTurnOptions) => SubmitMessageResult;
     onResolvePermission: (permissionId: string, choice: string) => void;
     onResolveUserQuestion: (
       questionId: string,
@@ -99,6 +100,7 @@
   let selectedProviderId = $state<string | null>(null);
   let selectedModelId = $state<string | null>(null);
   let selectedThinkingOptionId = $state("");
+  let submitInFlight = $state(false);
   let thinkingProviderId = $state<string | null>(null);
   let thinkingModels = $state<ModelDescriptorInfo[]>([]);
   let thinkingLoadError = $state<string | null>(null);
@@ -130,7 +132,7 @@
       : `Reconnect ${providerDisplayName(selectedProviderId)} to continue this session.`
   );
   let canSubmitPrompt = $derived(
-    Boolean(draft.trim() && session && !turnRunning && selectedProviderAuthenticated)
+    Boolean(draft.trim() && session && !turnRunning && !submitInFlight && selectedProviderAuthenticated)
   );
 
   function modelSupportsFastMode(modelId: string | null | undefined): boolean {
@@ -471,10 +473,16 @@
   async function submit() {
     const v = draft.trim();
     if (!v || !canSubmitPrompt) return;
-    onSubmitMessage(v, composerOptions());
-    draft = "";
-    await tick();
-    threadEl?.scrollTo({ top: threadEl.scrollHeight, behavior: "smooth" });
+    submitInFlight = true;
+    try {
+      const accepted = await onSubmitMessage(v, composerOptions());
+      if (accepted === false) return;
+      draft = "";
+      await tick();
+      threadEl?.scrollTo({ top: threadEl.scrollHeight, behavior: "smooth" });
+    } finally {
+      submitInFlight = false;
+    }
   }
 
   function onKeydown(e: KeyboardEvent) {

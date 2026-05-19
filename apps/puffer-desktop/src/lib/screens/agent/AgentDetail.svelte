@@ -19,6 +19,7 @@
   } from "../../types";
   import type { AgentState } from "../../shell/tweaks";
   import type { AgentTurnOptions } from "../../api/desktop";
+  type SubmitMessageResult = boolean | void | Promise<boolean | void>;
 
   type Props = {
     // Live session data from the backend.
@@ -35,7 +36,7 @@
     settingsSnapshot?: SettingsSnapshot | null;
     userDisplayName?: string;
     onBack: () => void;
-    onSubmitMessage: (message: string, options?: AgentTurnOptions) => void;
+    onSubmitMessage: (message: string, options?: AgentTurnOptions) => SubmitMessageResult;
     onResolvePermission: (permissionId: string, choice: string) => void;
     onResolveUserQuestion: (
       questionId: string,

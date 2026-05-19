@@ -19,6 +19,7 @@
 
   type Tab = "chat" | "diff" | "terminal" | "files" | "browser";
   type DiffSubTab = "agent" | "git" | "divergence";
+  type SubmitMessageResult = boolean | void | Promise<boolean | void>;
 
   type Props = {
     tab: Tab;
@@ -37,7 +38,7 @@
     turnStatusHint: string | null;
     settingsSnapshot?: SettingsSnapshot | null;
     userDisplayName?: string;
-    onSubmitMessage: (message: string, options?: AgentTurnOptions) => void;
+    onSubmitMessage: (message: string, options?: AgentTurnOptions) => SubmitMessageResult;
     onResolvePermission: (permissionId: string, choice: string) => void;
     onResolveUserQuestion: (
       questionId: string,
