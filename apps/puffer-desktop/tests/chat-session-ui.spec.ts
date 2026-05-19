@@ -162,6 +162,75 @@ test("late turn start responses do not leak into a switched session", async ({
   await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
 });
 
+test("pending turn start in one session does not disable another session composer", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-alpha-inflight",
+        displayName: "Alpha inflight",
+        title: "Alpha inflight",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      },
+      {
+        sessionId: "session-beta-inflight",
+        displayName: "Beta inflight",
+        title: "Beta inflight",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  daemon.delayResponse(
+    "run_agent_turn",
+    (request) => request.params.sessionId === "session-alpha-inflight",
+    5_000
+  );
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Alpha inflight/);
+  await page.locator(".pf-composer textarea").fill("Alpha waits for turn id");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-alpha-inflight" &&
+      request.params.message === "Alpha waits for turn id"
+  );
+
+  await openSession(page, /Beta inflight/);
+  const betaComposer = page.locator(".pf-composer textarea");
+  await betaComposer.fill("Beta should still send");
+  const sendButton = page.getByRole("button", { name: "Send", exact: true });
+  await expect(sendButton).toBeEnabled({ timeout: 500 });
+  await sendButton.click();
+  await page.waitForTimeout(100);
+  expect(
+    daemon.requests.filter(
+      (request) =>
+        request.method === "run_agent_turn" &&
+        request.params.sessionId === "session-beta-inflight" &&
+        request.params.message === "Beta should still send"
+    )
+  ).toHaveLength(1);
+});
+
 test("composer enter does not submit while IME composition is active", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

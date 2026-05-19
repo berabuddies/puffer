@@ -123,7 +123,7 @@
   let openAgentSessionId = $state<string | null>(null);
   let openProjectId = $state<string | null>(null);
   let submittedMessages = $state<TimelineItem[]>([]);
-  let submitMessageInFlight = $state(false);
+  let submitMessageInFlightSessionIds = $state<string[]>([]);
   let dismissedPermissionIds = $state<string[]>([]);
   let dismissedQuestionIds = $state<string[]>([]);
 
@@ -999,6 +999,7 @@
     openAgentSessionId = null;
     openProjectId = null;
     submittedMessages = [];
+    submitMessageInFlightSessionIds = [];
     dismissedPermissionIds = [];
     dismissedQuestionIds = [];
     liveStreamItems = [];
@@ -1154,27 +1155,46 @@
     );
   }
 
+  function submitMessageInFlightFor(sessionId: string): boolean {
+    return submitMessageInFlightSessionIds.includes(sessionId);
+  }
+
+  function setSubmitMessageInFlight(sessionId: string, inFlight: boolean) {
+    if (inFlight) {
+      if (!submitMessageInFlightSessionIds.includes(sessionId)) {
+        submitMessageInFlightSessionIds = [...submitMessageInFlightSessionIds, sessionId];
+      }
+      return;
+    }
+    submitMessageInFlightSessionIds = submitMessageInFlightSessionIds.filter(
+      (id) => id !== sessionId
+    );
+  }
+
   async function submitMessage(message: string, options: AgentTurnOptions = {}) {
     if (!selectedSession) {
       statusMessage = "Select a session to send a message.";
       return false;
     }
-    if (submitMessageInFlight || turnStartedAtMs !== null || currentTurnId !== null) {
+    const sessionAtSubmit = selectedSession;
+    const submitSessionId = sessionAtSubmit.id;
+    if (
+      submitMessageInFlightFor(submitSessionId) ||
+      turnStartedAtMs !== null ||
+      currentTurnId !== null
+    ) {
       statusMessage = "Wait for the current turn to finish before sending another message.";
       return false;
     }
-    submitMessageInFlight = true;
-    const sessionAtSubmit = selectedSession;
-    const submitSessionId = sessionAtSubmit.id;
     const requestedProviderId =
       options.providerId ?? sessionAtSubmit.providerId ?? settingsSnapshot?.config.defaultProvider;
     if (!providerIsAuthenticated(requestedProviderId)) {
       const detail = `Reconnect ${requestedProviderId} before continuing this session.`;
       statusMessage = detail;
       appendAgentError("Provider disconnected", detail, "provider-auth");
-      submitMessageInFlight = false;
       return false;
     }
+    setSubmitMessageInFlight(submitSessionId, true);
     const now = Date.now();
     const localUserId = `local-user-${now}`;
     submittedMessages = [
@@ -1216,7 +1236,7 @@
       appendAgentError("Agent start failed", detail, "turn-start-error");
       return false;
     } finally {
-      submitMessageInFlight = false;
+      setSubmitMessageInFlight(submitSessionId, false);
     }
   }
 

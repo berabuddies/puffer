@@ -103,10 +103,13 @@
   let selectedProviderId = $state<string | null>(null);
   let selectedModelId = $state<string | null>(null);
   let selectedThinkingOptionId = $state("");
-  let submitInFlight = $state(false);
+  let submitInFlightSessionIds = $state<string[]>([]);
   let thinkingProviderId = $state<string | null>(null);
   let thinkingModels = $state<ModelDescriptorInfo[]>([]);
   let thinkingLoadError = $state<string | null>(null);
+  let submitInFlight = $derived(
+    Boolean(session?.id && submitInFlightSessionIds.includes(session.id))
+  );
 
   let fastModeAvailable = $derived(modelSupportsFastMode(selectedModelId));
   let selectedModelInfo = $derived(
@@ -214,6 +217,16 @@
     selectedProviderId = providerId;
     selectedModelId = modelId;
     selectedThinkingOptionId = "";
+  }
+
+  function setSubmitInFlight(sessionId: string, inFlight: boolean) {
+    if (inFlight) {
+      if (!submitInFlightSessionIds.includes(sessionId)) {
+        submitInFlightSessionIds = [...submitInFlightSessionIds, sessionId];
+      }
+      return;
+    }
+    submitInFlightSessionIds = submitInFlightSessionIds.filter((id) => id !== sessionId);
   }
 
   function thinkingLabel(optionId: string | null | undefined): string {
@@ -490,19 +503,23 @@
   async function submit() {
     const v = draft.trim();
     if (!v || !canSubmitPrompt) return;
+    const targetSessionId = session?.id;
+    if (!targetSessionId) return;
     const previousDraft = draft;
-    submitInFlight = true;
+    setSubmitInFlight(targetSessionId, true);
     draft = "";
     try {
       const accepted = await onSubmitMessage(v, composerOptions());
       if (accepted === false) {
-        if (!draft.trim()) draft = previousDraft;
+        if ((session?.id ?? null) === targetSessionId && !draft.trim()) draft = previousDraft;
         return;
       }
       await tick();
-      threadEl?.scrollTo({ top: threadEl.scrollHeight, behavior: "smooth" });
+      if ((session?.id ?? null) === targetSessionId) {
+        threadEl?.scrollTo({ top: threadEl.scrollHeight, behavior: "smooth" });
+      }
     } finally {
-      submitInFlight = false;
+      setSubmitInFlight(targetSessionId, false);
     }
   }
 
