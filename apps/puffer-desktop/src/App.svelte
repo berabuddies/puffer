@@ -1465,14 +1465,24 @@
     }
   }
 
-  function upsertStreamingAssistant(delta: string) {
-    const last = liveStreamItems[liveStreamItems.length - 1];
-    if (last && last.kind === "assistant" && last.id.startsWith("live-stream-assistant")) {
-      const updated = { ...last, body: last.body + delta, summary: last.body + delta };
-      liveStreamItems = [...liveStreamItems.slice(0, -1), updated];
+  function streamingAssistantId(turnId: string): string {
+    return `live-stream-assistant-${turnId}`;
+  }
+
+  function upsertStreamingAssistant(turnId: string, delta: string) {
+    const id = streamingAssistantId(turnId);
+    const existingIdx = liveStreamItems.findIndex((item) => item.id === id && item.kind === "assistant");
+    if (existingIdx >= 0) {
+      const existing = liveStreamItems[existingIdx];
+      const updated = { ...existing, body: existing.body + delta, summary: existing.body + delta };
+      liveStreamItems = [
+        ...liveStreamItems.slice(0, existingIdx),
+        updated,
+        ...liveStreamItems.slice(existingIdx + 1)
+      ];
     } else {
       appendLive({
-        id: `live-stream-assistant-${Date.now()}`,
+        id,
         kind: "assistant",
         title: "Assistant",
         summary: delta,
@@ -1510,11 +1520,11 @@
   function replaySafeDelta(turnId: string, delta: string): string {
     const replayText = `${replayTextByTurn[turnId] ?? ""}${delta}`;
     replayTextByTurn = { ...replayTextByTurn, [turnId]: replayText };
-    const last = liveStreamItems[liveStreamItems.length - 1];
-    if (!last || last.kind !== "assistant" || !last.id.startsWith("live-stream-assistant")) {
+    const currentItem = liveStreamItems.find((item) => item.id === streamingAssistantId(turnId));
+    if (!currentItem || currentItem.kind !== "assistant") {
       return delta;
     }
-    const current = last.body;
+    const current = currentItem.body;
     if (current.startsWith(replayText)) return "";
     if (replayText.startsWith(current)) return replayText.slice(current.length);
     return delta;
@@ -1530,7 +1540,6 @@
         turnThinking = true;
         turnStatusHint = "Thinking";
         if (!ev.replay) {
-          liveStreamItems = [];
           const { [ev.turnId]: _drop, ...rest } = replayTextByTurn;
           replayTextByTurn = rest;
         }
@@ -1546,7 +1555,7 @@
         turnStatusHint = null;
         {
           const delta = ev.replay ? replaySafeDelta(ev.turnId, ev.delta) : ev.delta;
-          if (delta) upsertStreamingAssistant(delta);
+          if (delta) upsertStreamingAssistant(ev.turnId, delta);
         }
         break;
       case "tool-calls-requested":

@@ -455,6 +455,63 @@ test("same text can be submitted again after an earlier turn", async ({ page }) 
   await expect(page.locator('.pf-msg[data-role="user"]').filter({ hasText: prompt })).toHaveCount(2);
 });
 
+test("next turn start keeps previous live answer visible during reload", async ({ page }) => {
+  const firstReply = "First answer should stay visible.";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-next-turn",
+        displayName: "Next turn",
+        title: "Next turn",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Next turn/);
+  daemon.emit("session:session-next-turn:event", { type: "turn-start", turnId: "turn-first" });
+  daemon.emit("session:session-next-turn:event", {
+    type: "text-delta",
+    turnId: "turn-first",
+    delta: firstReply
+  });
+  await expect(page.getByText(firstReply)).toBeVisible();
+
+  daemon.delayResponse(
+    "load_session_detail",
+    (request) => request.params.sessionId === "session-next-turn",
+    360
+  );
+  daemon.emit("session:session-next-turn:event", {
+    type: "turn-complete",
+    turnId: "turn-first",
+    assistantText: firstReply
+  });
+  await expect(page.getByText(firstReply)).toBeVisible();
+
+  await page.locator(".pf-composer textarea").fill("Start the next turn");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.message === "Start the next turn"
+  );
+  daemon.emit("session:session-next-turn:event", {
+    type: "turn-start",
+    turnId: "turn-session-next-turn"
+  });
+
+  await expect(page.getByText(firstReply)).toBeVisible();
+});
+
 test("stop turn is disabled until the daemon returns a turn id", async ({ page }) => {
   const prompt = "Wait for a real turn id before cancel";
   const daemon = new FakeDaemon({
