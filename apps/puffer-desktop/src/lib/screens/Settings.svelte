@@ -56,6 +56,11 @@
   let props: Props = $props();
   let credentialBusy = $derived(props.busyProviderId != null || props.busyImportKey != null);
 
+  function refreshIfIdle() {
+    if (credentialBusy) return;
+    props.onRefresh();
+  }
+
   type Section = "general" | "providers" | "permissions" | "mcp" | "git" | "appearance" | "shortcuts";
   let section = $state<Section>("general");
 
@@ -463,7 +468,14 @@
           <div class="desc">{(props.snapshot?.auth.length ?? 0) === 0 ? "No providers signed in." : "Signed-in providers and session controls."}</div>
         </div>
         <div style="display: flex; flex-direction: column; gap: 6px; justify-self: end; align-items: flex-end;">
-          <button type="button" class="sc-btn" data-variant="outline" data-size="sm" onclick={props.onRefresh}>
+          <button
+            type="button"
+            class="sc-btn"
+            data-variant="outline"
+            data-size="sm"
+            disabled={credentialBusy}
+            onclick={refreshIfIdle}
+          >
             <Icon name="refresh" size={13} />Refresh
           </button>
           {#each props.snapshot?.auth ?? [] as a (a.providerId)}

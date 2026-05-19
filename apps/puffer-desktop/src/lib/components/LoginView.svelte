@@ -71,6 +71,11 @@
     onImportExternal(providerId, source);
   }
 
+  function submitRefresh() {
+    if (credentialBusy) return;
+    onRefresh();
+  }
+
   function sourceLabel(source: "claude" | "codex"): string {
     return source === "claude" ? "~/.claude" : "~/.codex";
   }
@@ -100,7 +105,7 @@
       autocomplete="off"
       spellcheck="false"
     />
-    <button class="refresh-btn" on:click={onRefresh} title="Re-scan providers">
+    <button class="refresh-btn" disabled={credentialBusy} on:click={submitRefresh} title="Re-scan providers">
       Refresh
     </button>
   </div>
@@ -248,6 +253,10 @@
     background: rgba(255, 255, 255, 0.88);
     color: var(--text);
     cursor: pointer;
+  }
+  .refresh-btn:disabled {
+    opacity: 0.6;
+    cursor: progress;
   }
 
   .provider-grid {

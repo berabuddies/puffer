@@ -664,6 +664,7 @@
   // Handlers — mostly lifted from the prior App.svelte
   // ─────────────────────────────────────────────────────────────
   async function refreshSettings() {
+    if (authBusyProviderId || importBusyKey) return;
     const generation = ++settingsRefreshGeneration;
     settingsLoading = true;
     try {

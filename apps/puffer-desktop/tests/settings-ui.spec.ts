@@ -381,6 +381,54 @@ test("provider login disables external credential import controls", async ({ pag
   await expect(importButton).toBeDisabled();
 });
 
+test("provider refresh controls are disabled while credentials are busy", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.delayResponse(
+    "login_with_oauth",
+    (request) => request.params.providerId === "codex",
+    500
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  const accountRefresh = page
+    .locator(".pf-settings-row")
+    .filter({ hasText: "Account" })
+    .getByRole("button", { name: "Refresh" });
+  await page.getByRole("button", { name: "Providers" }).click();
+
+  const pane = page.locator(".pf-settings-pane");
+  const providerRefresh = pane.getByRole("button", { name: "Refresh" });
+  const oauthButton = pane
+    .locator(".provider-card")
+    .filter({ hasText: "Codex" })
+    .getByRole("button", { name: "Connect with OAuth" });
+  const settingsLoadsBefore = daemon.requests.filter(
+    (request) => request.method === "load_settings_snapshot"
+  ).length;
+
+  await expect(providerRefresh).toBeEnabled();
+  await oauthButton.click();
+  await daemon.waitForRequest("login_with_oauth");
+
+  await expect(providerRefresh).toBeDisabled();
+  await providerRefresh.evaluate((button) => (button as HTMLButtonElement).click());
+  await page.waitForTimeout(80);
+  expect(
+    daemon.requests.filter((request) => request.method === "load_settings_snapshot")
+  ).toHaveLength(settingsLoadsBefore);
+
+  await page.getByRole("button", { name: "General" }).click();
+  await expect(accountRefresh).toBeDisabled();
+  await accountRefresh.evaluate((button) => (button as HTMLButtonElement).click());
+  await page.waitForTimeout(80);
+
+  expect(
+    daemon.requests.filter((request) => request.method === "load_settings_snapshot")
+  ).toHaveLength(settingsLoadsBefore);
+});
+
 test("settings auth uses the configured daemon when Tauri globals exist", async ({ page }) => {
   await page.addInitScript(() => {
     (window as unknown as { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown }).__TAURI__ = {};
