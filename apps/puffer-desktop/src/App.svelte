@@ -123,6 +123,7 @@
   let openAgentSessionId = $state<string | null>(null);
   let openProjectId = $state<string | null>(null);
   let submittedMessages = $state<TimelineItem[]>([]);
+  let submittedMessageBaselineIds: Record<string, string[]> = {};
   let submitMessageInFlightSessionIds = $state<string[]>([]);
   let dismissedPermissionIds = $state<string[]>([]);
   let dismissedQuestionIds = $state<string[]>([]);
@@ -883,6 +884,7 @@
 
   function resetLiveTurnState() {
     submittedMessages = [];
+    submittedMessageBaselineIds = {};
     liveStreamItems = [];
     replayTextByTurn = {};
     turnPermissionLookup = {};
@@ -923,7 +925,7 @@
         // so the composer feels fresh.
         resetLiveTurnState();
       } else {
-        submittedMessages = stillMissingFromPersisted(timeline, submittedMessages);
+        submittedMessages = submittedStillMissingFromPersisted(timeline, submittedMessages);
         liveStreamItems = stillMissingFromPersisted(timeline, liveStreamItems);
       }
       statusMessage = `Loaded ${detail.timeline.length} conversation items.`;
@@ -1026,6 +1028,7 @@
     openAgentSessionId = null;
     openProjectId = null;
     submittedMessages = [];
+    submittedMessageBaselineIds = {};
     submitMessageInFlightSessionIds = [];
     dismissedPermissionIds = [];
     dismissedQuestionIds = [];
@@ -1237,6 +1240,9 @@
     setSubmitMessageInFlight(submitSessionId, true);
     const now = Date.now();
     const localUserId = `local-user-${now}`;
+    submittedMessageBaselineIds[localUserId] = (sessionDetail?.timeline ?? [])
+      .map((item) => item.id)
+      .filter((id) => id.length > 0);
     submittedMessages = [
       ...submittedMessages,
       {
@@ -1256,6 +1262,7 @@
       const turnId = await runAgentTurn(submitSessionId, message, options);
       if (selectedSession?.id !== submitSessionId) {
         submittedMessages = submittedMessages.filter((item) => item.id !== localUserId);
+        delete submittedMessageBaselineIds[localUserId];
         return false;
       }
       currentTurnId = turnId;
@@ -1264,8 +1271,12 @@
       statusMessage = `Agent turn ${turnId.slice(0, 8)} started.`;
       return true;
     } catch (error) {
-      if (selectedSession?.id !== submitSessionId) return false;
+      if (selectedSession?.id !== submitSessionId) {
+        delete submittedMessageBaselineIds[localUserId];
+        return false;
+      }
       submittedMessages = submittedMessages.filter((item) => item.id !== localUserId);
+      delete submittedMessageBaselineIds[localUserId];
       currentTurnId = null;
       cancelingTurnId = null;
       turnStartedAtMs = null;
@@ -1487,7 +1498,10 @@
       const item = keyed[index];
       const signature = transientMessageSignature(item);
       const candidates = signature ? transientIds.get(signature) : null;
-      const replacement = candidates?.shift();
+      const candidateIndex =
+        candidates?.findIndex((candidate) => !wasPersistedBeforeSubmit(candidate, item.id)) ?? -1;
+      const replacement =
+        candidates && candidateIndex >= 0 ? candidates.splice(candidateIndex, 1)[0] : null;
       if (replacement) keyed[index] = { ...item, id: replacement };
     }
     return keyed;
@@ -1511,20 +1525,46 @@
     if (!body) {
       const toolSignature = transientToolSignature(pending);
       if (toolSignature) {
-        return items.some((item) => transientToolSignature(item) === toolSignature);
+        return items.some(
+          (item) =>
+            !wasPersistedBeforeSubmit(pending.id, item.id) &&
+            transientToolSignature(item) === toolSignature
+        );
       }
-      return items.some((item) => item.kind === pending.kind && item.id === pending.id);
+      return items.some(
+        (item) =>
+          !wasPersistedBeforeSubmit(pending.id, item.id) &&
+          item.kind === pending.kind &&
+          item.id === pending.id
+      );
     }
     return items.some(
       (item) =>
+        !wasPersistedBeforeSubmit(pending.id, item.id) &&
         item.kind === pending.kind &&
         ((item.id && item.id === pending.id) ||
           (timelineItemBody(item).trim() === body && transientTimestampsMatch(item, pending)))
     );
   }
 
+  function wasPersistedBeforeSubmit(pendingId: string, persistedId: string): boolean {
+    return submittedMessageBaselineIds[pendingId]?.includes(persistedId) ?? false;
+  }
+
   function stillMissingFromPersisted(items: TimelineItem[], pending: TimelineItem[]): TimelineItem[] {
     return pending.filter((item) => !timelineHasTransientMatch(items, item));
+  }
+
+  function submittedStillMissingFromPersisted(
+    items: TimelineItem[],
+    pending: TimelineItem[]
+  ): TimelineItem[] {
+    const missing = stillMissingFromPersisted(items, pending);
+    const missingIds = new Set(missing.map((item) => item.id));
+    for (const item of pending) {
+      if (!missingIds.has(item.id)) delete submittedMessageBaselineIds[item.id];
+    }
+    return missing;
   }
 
   function withCompletionAssistantFallback(items: TimelineItem[], text: string): TimelineItem[] {
@@ -1569,11 +1609,11 @@
       statusMessage = `Loaded ${detail.timeline.length} conversation items.`;
       if (turnEndedWithError) {
         liveStreamItems = stillMissingFromPersisted(persistedTimeline, preservedErrorItems);
-        submittedMessages = stillMissingFromPersisted(persistedTimeline, submittedAtCompletion);
+        submittedMessages = submittedStillMissingFromPersisted(persistedTimeline, submittedAtCompletion);
         return;
       }
       liveStreamItems = stillMissingFromPersisted(persistedTimeline, liveItemsAtCompletion);
-      submittedMessages = stillMissingFromPersisted(persistedTimeline, submittedAtCompletion);
+      submittedMessages = submittedStillMissingFromPersisted(persistedTimeline, submittedAtCompletion);
     } catch (error) {
       if (loadGeneration !== sessionLoadGeneration || selectedSession?.id !== sessionToRefresh.id) {
         return;

@@ -480,8 +480,9 @@ test("persisted prompt during pending turn replaces the optimistic row", async (
   await expect(page.locator('.pf-msg[data-role="user"]').filter({ hasText: prompt })).toHaveCount(1);
 });
 
-test("same text can be submitted again after an earlier turn", async ({ page }) => {
+test("same text can be submitted again after a recent earlier turn", async ({ page }) => {
   const prompt = "Repeatable prompt text";
+  const earlierTurnAt = Date.now() - 60_000;
   const daemon = new FakeDaemon({
     sessions: [
       {
@@ -491,7 +492,7 @@ test("same text can be submitted again after an earlier turn", async ({ page }) 
         cwd: "/tmp/puffer",
         folderPath: "/tmp/puffer",
         updatedAtMs: baseTime,
-        createdAtMs: baseTime - 900_000,
+        createdAtMs: earlierTurnAt,
         eventCount: 1,
         providerId: "codex",
         modelId: "test-model",
@@ -500,7 +501,7 @@ test("same text can be submitted again after an earlier turn", async ({ page }) 
             kind: "user_message",
             id: "old-repeat-user",
             text: prompt,
-            createdAtMs: baseTime - 900_000
+            createdAtMs: earlierTurnAt
           }
         ]
       }
