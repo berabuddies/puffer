@@ -253,7 +253,7 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  transition: transform 120ms, box-shadow 160ms, border-color 160ms;
+  transition: box-shadow 160ms, border-color 160ms, background 160ms;
   min-width: 0;
   width: max-content;
   max-width: 100%;
@@ -261,7 +261,6 @@
   color: inherit;
 }
 .pf-pw-agent:hover {
-  transform: translateY(-1px);
   border-color: color-mix(in oklab, var(--puffer-accent) 40%, var(--border));
   box-shadow: 0 8px 18px -12px color-mix(in oklab, var(--puffer-accent) 50%, transparent);
 }
@@ -315,10 +314,9 @@
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  transition: transform 120ms, border-color 160ms, color 160ms, background 160ms;
+  transition: border-color 160ms, color 160ms, background 160ms;
 }
 .pf-pw-agent-add:hover:not(:disabled) {
-  transform: translateY(-1px);
   color: var(--foreground);
   border-color: color-mix(in oklab, var(--puffer-accent) 45%, var(--border));
   background: color-mix(in oklab, var(--puffer-accent) 8%, var(--background));
@@ -611,11 +609,10 @@
   font: inherit;
   font-size: 12px;
   color: var(--foreground);
-  transition: transform 100ms, border-color 120ms, background 120ms;
+  transition: border-color 120ms, background 120ms;
 }
 .pf-pw-chip:hover {
   border-color: color-mix(in oklab, var(--puffer-accent) 40%, var(--border));
-  transform: translateX(1px);
 }
 .pf-pw-chip .row {
   display: flex;
