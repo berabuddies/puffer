@@ -291,7 +291,9 @@
     const element = target instanceof HTMLElement ? target : null;
     if (!element) return false;
     if (element.closest(".pf-agent-find")) return false;
-    return Boolean(element.closest("input, textarea, select, [contenteditable='true']"));
+    return Boolean(
+      element.closest("input, textarea, select, [contenteditable='true'], .pf-browser-canvas")
+    );
   }
 
   function handleGlobalKeydown(event: KeyboardEvent) {

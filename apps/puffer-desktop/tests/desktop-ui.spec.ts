@@ -364,6 +364,24 @@ test("Browser canvas location shortcut focuses the URL field", async ({ page }) 
   expect(forwardedShortcut).toHaveLength(0);
 });
 
+test("Browser canvas keeps global find shortcuts while focused", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open");
+
+  const canvas = page.locator(".pf-browser-canvas");
+  await canvas.focus();
+  await expect(canvas).toBeFocused();
+  await page.keyboard.press("Control+F");
+
+  await expect(page.getByRole("search", { name: "Find in agent view" })).toHaveCount(0);
+  await expect(canvas).toBeFocused();
+});
+
 test("Browser canvas close shortcut closes the active tab", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
