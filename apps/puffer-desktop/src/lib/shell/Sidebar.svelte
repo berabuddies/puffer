@@ -334,7 +334,7 @@
   <button
     type="button"
     class="pf-sidebar-resizer"
-    aria-label="Resize sidebar"
+    aria-label="Adjust navigation size"
     onpointerdown={startResize}
     onkeydown={handleResizeKeydown}
     ondblclick={() => onResize?.(SIDEBAR_DEFAULT_WIDTH)}

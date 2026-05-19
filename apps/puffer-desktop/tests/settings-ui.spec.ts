@@ -877,6 +877,7 @@ test("MCP settings add server through the daemon", async ({ page }) => {
   await page.getByRole("button", { name: "Settings" }).click();
   await page.getByRole("button", { name: "MCP Servers" }).click();
   await expect(page.locator(".pf-mcp-card .title").filter({ hasText: "Playwright" })).toBeVisible();
+  await expect(page.getByLabel("ID")).toHaveCount(1);
 
   await page.getByLabel("ID").fill("github");
   await page.getByLabel("Name").fill("GitHub");

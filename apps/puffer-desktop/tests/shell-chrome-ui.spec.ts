@@ -71,6 +71,7 @@ test("sidebar width can be resized and persists as a local shell tweak", async (
   const sidebar = page.locator(".pf-sidebar");
   const resizer = page.locator(".pf-sidebar-resizer");
   await expect(resizer).toBeVisible();
+  await expect(page.getByRole("button", { name: "Adjust navigation size" })).toHaveCount(1);
 
   const initialBox = await sidebar.boundingBox();
   const handleBox = await resizer.boundingBox();
