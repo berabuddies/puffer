@@ -255,11 +255,15 @@ fn needs_auth_choice(provider: &ProviderDescriptor, auth_store: &AuthStore) -> b
     supports_local_auth && !auth_store.has_auth(&provider.id)
 }
 
+fn provider_can_offer_models(provider: &ProviderDescriptor) -> bool {
+    !provider.models.is_empty() || provider.discovery.is_some()
+}
+
 fn provider_picker(providers: &ProviderRegistry, onboarding: bool) -> Option<OverlayState> {
     let mut providers = providers
         .providers()
         .filter(|provider| {
-            !provider.models.is_empty() && (onboarding || !provider.auth_modes.is_empty())
+            provider_can_offer_models(provider) && (onboarding || !provider.auth_modes.is_empty())
         })
         .collect::<Vec<_>>();
     providers.sort_by_key(|provider| provider_rank(provider.id.as_str()));
@@ -287,7 +291,7 @@ fn provider_picker(providers: &ProviderRegistry, onboarding: bool) -> Option<Ove
 fn login_provider_picker(providers: &ProviderRegistry) -> Option<OverlayState> {
     let mut providers = providers
         .providers()
-        .filter(|provider| !provider.models.is_empty())
+        .filter(|provider| provider_can_offer_models(provider))
         .filter(|provider| !provider.auth_modes.is_empty())
         .collect::<Vec<_>>();
     providers.sort_by_key(|provider| provider_rank(provider.id.as_str()));
@@ -678,6 +682,20 @@ mod tests {
         }
     }
 
+    fn discovery_only_provider(
+        id: &str,
+        display_name: &str,
+        auth_modes: Vec<AuthMode>,
+    ) -> ProviderDescriptor {
+        let address = "127.0.0.1:9".parse().expect("socket address");
+        let mut provider = openai_provider(address);
+        provider.id = id.to_string();
+        provider.display_name = display_name.to_string();
+        provider.auth_modes = auth_modes;
+        provider.models.clear();
+        provider
+    }
+
     fn spawn_model_server() -> std::net::SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
         let address = listener.local_addr().expect("address");
@@ -783,6 +801,40 @@ mod tests {
         state.current_model = None;
 
         assert!(needs_initial_provider_setup(&state, &providers));
+    }
+
+    #[test]
+    fn provider_picker_includes_discovery_provider_without_bundled_models() {
+        let mut providers = ProviderRegistry::new();
+        providers.register(discovery_only_provider("lmstudio", "LM Studio", Vec::new()));
+
+        let overlay = provider_picker(&providers, true);
+
+        match overlay {
+            Some(OverlayState::ProviderPicker { entries, .. }) => {
+                assert!(entries.iter().any(|entry| entry.selector == "lmstudio"));
+            }
+            other => panic!("expected provider picker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn login_picker_includes_auth_discovery_provider_without_bundled_models() {
+        let mut providers = ProviderRegistry::new();
+        providers.register(discovery_only_provider(
+            "custom-openai",
+            "Custom OpenAI",
+            vec![AuthMode::ApiKey],
+        ));
+
+        let overlay = login_provider_picker(&providers);
+
+        match overlay {
+            Some(OverlayState::LoginPicker { entries, .. }) => {
+                assert!(entries.iter().any(|entry| entry.selector == "custom-openai"));
+            }
+            other => panic!("expected login picker, got {other:?}"),
+        }
     }
 
     #[test]
