@@ -239,6 +239,52 @@ test("empty workspace search shows only the search empty state", async ({ page }
   await expect(page.getByRole("heading", { name: "No sessions yet" })).toBeVisible();
 });
 
+test("workspace board does not list child sessions as top-level history", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-parent-workspace",
+        displayName: "Parent workspace agent",
+        title: "Parent workspace agent",
+        cwd: "/tmp/puffer-subagents",
+        folderPath: "/tmp/puffer-subagents",
+        updatedAtMs: baseTime - 60_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 2,
+        activityStatus: "running"
+      },
+      {
+        sessionId: "session-child-workspace",
+        displayName: "Child workspace agent",
+        title: "Child workspace agent",
+        cwd: "/tmp/puffer-subagents",
+        folderPath: "/tmp/puffer-subagents",
+        updatedAtMs: baseTime - 10_000,
+        createdAtMs: baseTime - 90_000,
+        eventCount: 1,
+        activityStatus: "running",
+        parentSessionId: "session-parent-workspace"
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const history = page.locator(".pf-pw-history");
+  const project = page.locator(".pf-pw-project").filter({ hasText: "puffer-subagents" });
+  await expect(history.getByText("Parent workspace agent")).toBeVisible();
+  await expect(history.getByText("Child workspace agent")).toHaveCount(0);
+  await expect(project.getByText("Parent workspace agent")).toBeVisible();
+  await expect(project.getByText("Child workspace agent")).toHaveCount(0);
+  await expect(project).toContainText("1 active");
+
+  await project.getByRole("button", { name: "Details" }).click();
+  const projectDetail = page.locator(".pf-fpb");
+  await expect(projectDetail.getByText("Parent workspace agent")).toBeVisible();
+  await expect(projectDetail.getByText("Child workspace agent")).toHaveCount(0);
+  await expect(projectDetail.getByText("1 agents")).toBeVisible();
+});
+
 test("workspace search includes older sessions beyond the first page", async ({ page }) => {
   const sessions = Array.from({ length: 7 }, (_, index) => ({
     sessionId: `session-history-${index}`,

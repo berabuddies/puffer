@@ -309,6 +309,16 @@
     return !session.parentSessionId;
   }
 
+  function topLevelFolderGroup(group: FolderGroup): FolderGroup | null {
+    const sessions = group.sessions.filter(isTopLevelSession);
+    if (sessions.length === 0) return null;
+    return {
+      ...group,
+      sessionCount: sessions.length,
+      sessions
+    };
+  }
+
   function findSidebarSession(sessionId: string, fallback?: SessionListItem | null): SessionListItem | null {
     if (fallback?.id === sessionId) return fallback;
     if (selectedSession?.id === sessionId) return selectedSession;
@@ -421,6 +431,7 @@
     sourceGroups: FolderGroup[],
     session: SessionListItem
   ): FolderGroup[] {
+    if (!isTopLevelSession(session)) return sourceGroups;
     if (sourceGroups.some((group) => group.sessions.some((item) => item.id === session.id))) {
       return sourceGroups;
     }
@@ -515,7 +526,10 @@
   }
 
   let sortedGroups = $derived<FolderGroup[]>(
-    groups.slice().sort(compareFolderGroups)
+    groups
+      .map(topLevelFolderGroup)
+      .filter((group): group is FolderGroup => group !== null)
+      .sort(compareFolderGroups)
   );
   let workspaceGroups = $derived<FolderGroup[]>(withSelectedSessionFallback(sortedGroups));
 
