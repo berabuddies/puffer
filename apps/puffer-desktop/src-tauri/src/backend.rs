@@ -286,6 +286,7 @@ impl BackendState {
                     .clone()
                     .unwrap_or_else(|| DEFAULT_PROVIDER.to_string())
             });
+        let provider = canonical_backend_provider_id(&provider);
         validate_provider_id(&provider)?;
         let model = model_override
             .map(|value| value.trim().to_string())
@@ -951,7 +952,7 @@ impl BackendState {
             config.default_provider = if provider.trim().is_empty() {
                 None
             } else {
-                Some(provider.to_string())
+                Some(canonical_backend_provider_id(provider))
             };
             if params.get("defaultModel").is_none() {
                 config.default_model = default_model_for(provider);
@@ -1165,6 +1166,7 @@ fn run_agent_turn_inner(
     } else {
         record.provider.clone()
     };
+    let provider = canonical_backend_provider_id(&provider);
     let model = options
         .model_id
         .clone()
@@ -1926,6 +1928,36 @@ mod tests {
     }
 
     #[test]
+    fn desktop_provider_aliases_map_to_tauri_cli_backends() {
+        assert_eq!(canonical_backend_provider_id("openai"), "codex");
+        assert_eq!(canonical_backend_provider_id("codex"), "codex");
+        assert_eq!(canonical_backend_provider_id("anthropic"), "claude");
+        assert_eq!(canonical_backend_provider_id("claude"), "claude");
+        assert_eq!(canonical_backend_provider_id("puffer"), "puffer");
+    }
+
+    #[test]
+    fn desktop_provider_validation_accepts_frontend_canonical_ids() {
+        validate_provider_id("openai").unwrap();
+        validate_provider_id("anthropic").unwrap();
+
+        let err = validate_provider_id("unknown-provider").unwrap_err();
+        assert!(err.to_string().contains("unknown provider"));
+    }
+
+    #[test]
+    fn desktop_default_models_accept_frontend_canonical_ids() {
+        assert_eq!(
+            default_model_for("anthropic"),
+            Some(DEFAULT_CLAUDE_MODEL.to_string())
+        );
+        assert_eq!(
+            default_model_for("puffer"),
+            Some(DEFAULT_PUFFER_MODEL.to_string())
+        );
+    }
+
+    #[test]
     fn session_cwd_initializer_creates_missing_directory() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("new-project").join("nested");
@@ -2077,7 +2109,7 @@ fn provider_summaries() -> Vec<ProviderSummaryDto> {
 }
 
 fn provider_models(provider_id: &str) -> Vec<Value> {
-    match provider_id {
+    match canonical_backend_provider_id(provider_id).as_str() {
         "puffer" => vec![model("default", "Default", "puffer", false)],
         "claude" => claude_models(),
         _ => codex_app_server_models().unwrap_or_default(),
@@ -2225,7 +2257,7 @@ fn claude_model(
 }
 
 fn default_model_for(provider: &str) -> Option<String> {
-    match provider {
+    match canonical_backend_provider_id(provider).as_str() {
         "claude" => Some(DEFAULT_CLAUDE_MODEL.to_string()),
         "puffer" => Some(DEFAULT_PUFFER_MODEL.to_string()),
         _ => codex_app_server_catalog()
@@ -2235,9 +2267,19 @@ fn default_model_for(provider: &str) -> Option<String> {
 }
 
 fn validate_provider_id(provider: &str) -> Result<()> {
-    match provider {
+    match canonical_backend_provider_id(provider).as_str() {
         "puffer" | "codex" | "claude" => Ok(()),
         other => bail!("unknown provider `{other}`"),
+    }
+}
+
+fn canonical_backend_provider_id(provider: &str) -> String {
+    let trimmed = provider.trim();
+    match trimmed.to_ascii_lowercase().as_str() {
+        "openai" | "codex" => "codex".to_string(),
+        "anthropic" | "claude" => "claude".to_string(),
+        "puffer" => "puffer".to_string(),
+        _ => trimmed.to_string(),
     }
 }
 
