@@ -1065,6 +1065,47 @@ test("successful permission response clears the awaiting approval hint", async (
   await expect(page.getByText(/Running/)).toBeVisible();
 });
 
+test("new turn can reuse a permission request id after earlier approval", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /^Browser regression\b/);
+  daemon.emit("session:session-browser:event", {
+    type: "permission-request",
+    turnId: "turn-permission-first",
+    requestId: "permission-reused",
+    toolId: "bash",
+    summary: "Approve first command",
+    reason: "First turn needs approval."
+  });
+
+  await expect(page.getByText("First turn needs approval.")).toBeVisible();
+  await page.getByRole("button", { name: "Allow once" }).click();
+  await daemon.waitForRequest("resolve_permission", (request) =>
+    request.params.turnId === "turn-permission-first" &&
+    request.params.requestId === "permission-reused"
+  );
+  daemon.emit("session:session-browser:event", {
+    type: "turn-complete",
+    turnId: "turn-permission-first",
+    assistantText: ""
+  });
+
+  daemon.emit("session:session-browser:event", { type: "turn-start", turnId: "turn-permission-second" });
+  daemon.emit("session:session-browser:event", {
+    type: "permission-request",
+    turnId: "turn-permission-second",
+    requestId: "permission-reused",
+    toolId: "bash",
+    summary: "Approve second command",
+    reason: "Second turn reuses the backend request id."
+  });
+
+  await expect(page.getByText("Second turn reuses the backend request id.")).toBeVisible();
+  await expect(page.getByText("Approval needed")).toBeVisible();
+});
+
 test("failed question responses keep the question prompt retryable", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

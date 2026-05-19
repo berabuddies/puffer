@@ -1477,6 +1477,14 @@
     return `live-stream-assistant-${turnId}`;
   }
 
+  function livePermissionId(turnId: string, requestId: string): string {
+    return `live-perm-${turnId}-${requestId}`;
+  }
+
+  function liveQuestionId(turnId: string, requestId: string): string {
+    return `live-question-${turnId}-${requestId}`;
+  }
+
   function upsertStreamingAssistant(turnId: string, delta: string) {
     const id = streamingAssistantId(turnId);
     const existingIdx = liveStreamItems.findIndex((item) => item.id === id && item.kind === "assistant");
@@ -1642,7 +1650,7 @@
         markTurnActive(ev.turnId);
         turnThinking = false;
         turnStatusHint = "Awaiting approval";
-        const id = `live-perm-${ev.requestId}`;
+        const id = livePermissionId(ev.turnId, ev.requestId);
         appendLive({
           id,
           kind: "permission",
@@ -1673,7 +1681,7 @@
         markTurnActive(ev.turnId);
         turnThinking = false;
         turnStatusHint = "Waiting for answer";
-        const id = `live-question-${ev.requestId}`;
+        const id = liveQuestionId(ev.turnId, ev.requestId);
         const questions = normalizeUserQuestions(ev.questions);
         appendLive({
           id,
