@@ -123,6 +123,7 @@
   let groups = $state<FolderGroup[]>([]);
   let groupsLoading = $state(false);
   let selectedSession = $state<SessionListItem | null>(null);
+  let fallbackSessionsById = $state<Record<string, SessionListItem>>({});
   let sessionDetail = $state<SessionDetail | null>(null);
   let sessionLoading = $state(false);
 
@@ -372,9 +373,14 @@
     );
   }
 
-  function withSelectedSessionFallback(sourceGroups: FolderGroup[]): FolderGroup[] {
-    const session = selectedSession;
-    if (!session) return sourceGroups;
+  function groupsContainSession(sourceGroups: FolderGroup[], sessionId: string): boolean {
+    return sourceGroups.some((group) => group.sessions.some((item) => item.id === sessionId));
+  }
+
+  function insertSessionFallback(
+    sourceGroups: FolderGroup[],
+    session: SessionListItem
+  ): FolderGroup[] {
     if (sourceGroups.some((group) => group.sessions.some((item) => item.id === session.id))) {
       return sourceGroups;
     }
@@ -401,6 +407,43 @@
       },
       ...sourceGroups
     ].sort(compareFolderGroups);
+  }
+
+  function withSelectedSessionFallback(sourceGroups: FolderGroup[]): FolderGroup[] {
+    const byId = new Map<string, SessionListItem>();
+    for (const session of Object.values(fallbackSessionsById)) {
+      byId.set(session.id, session);
+    }
+    if (selectedSession) {
+      byId.set(selectedSession.id, selectedSession);
+    }
+    let nextGroups = sourceGroups;
+    for (const session of byId.values()) {
+      nextGroups = insertSessionFallback(nextGroups, session);
+    }
+    return nextGroups;
+  }
+
+  function rememberFallbackSession(session: SessionListItem) {
+    if (groupsContainSession(groups, session.id)) {
+      if (fallbackSessionsById[session.id]) {
+        const { [session.id]: _drop, ...rest } = fallbackSessionsById;
+        fallbackSessionsById = rest;
+      }
+      return;
+    }
+    fallbackSessionsById = { ...fallbackSessionsById, [session.id]: session };
+  }
+
+  function pruneFallbackSessions(sourceGroups: FolderGroup[]) {
+    const next = Object.fromEntries(
+      Object.entries(fallbackSessionsById).filter(
+        ([sessionId]) => !groupsContainSession(sourceGroups, sessionId)
+      )
+    );
+    if (Object.keys(next).length !== Object.keys(fallbackSessionsById).length) {
+      fallbackSessionsById = next;
+    }
   }
 
   function activeAgentFromSession(session: SessionListItem, project: string): ActiveAgent {
@@ -430,7 +473,7 @@
   let workspaceGroups = $derived<FolderGroup[]>(withSelectedSessionFallback(sortedGroups));
 
   let realAgents = $derived<ActiveAgent[]>(
-    sortedGroups
+    workspaceGroups
       .flatMap((g) =>
         g.sessions.map((s) => activeAgentFromSession(s, g.label))
     )
@@ -919,6 +962,7 @@
       const nextGroups = await listGroupedSessionsFromDaemon();
       if (generation !== groupsRefreshGeneration) return;
       groups = nextGroups;
+      pruneFallbackSessions(nextGroups);
       statusMessage =
         groups.length === 0
           ? "No sessions in this workspace yet."
@@ -1019,6 +1063,7 @@
     if (showLoading) sessionLoading = true;
     if (resetLiveState && selectedSession?.id !== session.id) {
       selectedSession = session;
+      rememberFallbackSession(session);
       sessionDetail = null;
       rememberSession(session.id);
       resetLiveTurnState();
@@ -1035,6 +1080,7 @@
         ? detail.timeline
         : reuseTransientMessageIds(detail.timeline, [...submittedMessages, ...liveStreamItems]);
       selectedSession = detail.session;
+      rememberFallbackSession(detail.session);
       sessionDetail = { ...detail, timeline };
       rememberSession(detail.session.id);
       if (shouldResetLiveState) {
@@ -1108,6 +1154,7 @@
 
   function resetDaemonScopedSessionState() {
     selectedSession = null;
+    fallbackSessionsById = {};
     sessionDetail = null;
     openAgentSessionId = null;
     openProjectId = null;
@@ -1221,6 +1268,7 @@
   function onOpenAgent(id: string) {
     const realTarget =
       groups.flatMap((g) => g.sessions).find((s) => s.id === id) ??
+      fallbackSessionsById[id] ??
       liveSidebarAgentsById[id]?.session;
     if (!realTarget) {
       if (selectedSession?.id === id) {

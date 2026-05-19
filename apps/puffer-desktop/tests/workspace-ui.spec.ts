@@ -397,6 +397,50 @@ test("active agents includes an opened session before grouped history catches up
   await expect(page.locator(".pf-agent-detail")).toBeVisible();
 });
 
+test("active agents keeps a fallback-created session after opening older history", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-stale-active-old",
+        displayName: "Old active history",
+        title: "Old active history",
+        cwd: "/tmp/puffer-stale-active-old",
+        folderPath: "/tmp/puffer-stale-active-old",
+        updatedAtMs: baseTime - 120_000,
+        createdAtMs: baseTime - 240_000,
+        eventCount: 1
+      }
+    ]
+  });
+  daemon.setGroupedSessionFilter(
+    (metadata) => !String(metadata.sessionId ?? "").startsWith("session-created-")
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page
+    .locator(".pf-pw-project")
+    .filter({ hasText: "puffer-stale-active-old" })
+    .getByRole("button", { name: "New agent" })
+    .click();
+  await page.getByRole("button", { name: /Start agent/ }).click();
+
+  await expect(page.locator(".pf-agent-detail .primary-title")).toContainText("New Session");
+  await page.getByRole("button", { name: "Back" }).click();
+  await page.getByRole("region", { name: "Session history" })
+    .getByRole("button", { name: /Old active history/ })
+    .click();
+  await expect(page.locator(".pf-agent-detail .primary-title")).toContainText("Old active history");
+
+  const activeList = page.locator(".pf-sidebar-agents-list");
+  const createdRow = activeList.locator(".pf-sidebar-agent-row").filter({ hasText: "New Session" });
+  await expect(createdRow).toBeVisible();
+  await expect(activeList.getByText("No agents match")).toHaveCount(0);
+
+  await createdRow.getByRole("button", { name: /New Session/ }).click();
+  await expect(page.locator(".pf-agent-detail .primary-title")).toContainText("New Session");
+});
+
 test("create project opens created session before grouped history catches up", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
