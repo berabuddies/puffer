@@ -87,6 +87,81 @@ test("turn completion reload does not leak live chat into a newly selected sessi
   await expect(page.getByText("Race from alpha")).toHaveCount(0);
 });
 
+test("late turn start responses do not leak into a switched session", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-alpha-start",
+        displayName: "Alpha start",
+        title: "Alpha start",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "alpha-start-seed",
+            text: "Alpha start seed",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      },
+      {
+        sessionId: "session-beta-start",
+        displayName: "Beta start",
+        title: "Beta start",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "beta-start-seed",
+            text: "Beta start seed",
+            createdAtMs: baseTime - 90_000
+          }
+        ]
+      }
+    ]
+  });
+  daemon.delayResponse(
+    "run_agent_turn",
+    (request) => request.params.sessionId === "session-alpha-start",
+    120
+  );
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Alpha start/);
+  await expect(page.getByText("Alpha start seed")).toBeVisible();
+  await page.locator(".pf-composer textarea").fill("Alpha delayed prompt");
+  await page.getByRole("button", { name: "Send" }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-alpha-start" &&
+      request.params.message === "Alpha delayed prompt"
+  );
+
+  await openSession(page, /Beta start/);
+  await expect(page.getByText("Beta start seed")).toBeVisible();
+
+  await page.waitForTimeout(170);
+  await expect(page.getByText("Beta start seed")).toBeVisible();
+  await expect(page.getByText("Alpha delayed prompt")).toHaveCount(0);
+
+  const composer = page.locator(".pf-composer textarea");
+  await composer.fill("Beta prompt after alpha race");
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+});
+
 test("turn completion preserves live chat row identity after transcript reload", async ({ page }) => {
   const prompt = "Keep this row stable";
   const reply = "Stable streamed reply is visible.";

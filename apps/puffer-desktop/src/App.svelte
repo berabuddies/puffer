@@ -1047,8 +1047,10 @@
       statusMessage = "Select a session to send a message.";
       return false;
     }
+    const sessionAtSubmit = selectedSession;
+    const submitSessionId = sessionAtSubmit.id;
     const requestedProviderId =
-      options.providerId ?? selectedSession.providerId ?? settingsSnapshot?.config.defaultProvider;
+      options.providerId ?? sessionAtSubmit.providerId ?? settingsSnapshot?.config.defaultProvider;
     if (!providerIsAuthenticated(requestedProviderId)) {
       const detail = `Reconnect ${requestedProviderId} before continuing this session.`;
       statusMessage = detail;
@@ -1060,7 +1062,8 @@
     turnThinking = true;
     turnStatusHint = "Thinking";
     try {
-      const turnId = await runAgentTurn(selectedSession.id, message, options);
+      const turnId = await runAgentTurn(submitSessionId, message, options);
+      if (selectedSession?.id !== submitSessionId) return false;
       currentTurnId = turnId;
       settledTurnIds.delete(turnId);
       submittedMessages = [
@@ -1077,6 +1080,7 @@
       statusMessage = `Agent turn ${turnId.slice(0, 8)} started.`;
       return true;
     } catch (error) {
+      if (selectedSession?.id !== submitSessionId) return false;
       currentTurnId = null;
       turnStartedAtMs = null;
       turnThinking = false;
