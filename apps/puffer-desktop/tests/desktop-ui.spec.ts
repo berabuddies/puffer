@@ -1347,6 +1347,7 @@ test("late Browser close responses do not overwrite a switched agent", async ({ 
   );
   await expect(page.locator(".pf-browser-status")).toHaveText("Connected");
   await expect(page.locator(".pf-browser-tab")).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Close tab" })).toBeEnabled();
 
   await page.waitForTimeout(170);
   await expect(page.locator(".pf-browser-status")).toHaveText("Connected");

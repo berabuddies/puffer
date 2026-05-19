@@ -51,6 +51,11 @@
     generation: number;
   };
 
+  type ClosingTabTarget = {
+    sessionId: string;
+    tabId: string;
+  };
+
   let { sessionId }: Props = $props();
 
   let viewport: HTMLDivElement | null = $state(null);
@@ -71,7 +76,7 @@
   let browserCursorStyle = $state("default");
   let showDevtools = $state(false);
   let devtoolsView = $state<"console" | "network">("console");
-  let closingTabIds = $state<string[]>([]);
+  let closingTabs = $state<ClosingTabTarget[]>([]);
 
   let disposers: Array<() => void> = [];
   let activeDisposers: Array<() => void> = [];
@@ -674,6 +679,12 @@
     );
   }
 
+  function isClosingTab(targetSessionId: string, tabId: string): boolean {
+    return closingTabs.some(
+      (target) => target.sessionId === targetSessionId && target.tabId === tabId
+    );
+  }
+
   function removeClosedTabLocally(tabId: string, index: number) {
     const nextTabs = tabs.filter((tab) => tab.id !== tabId);
     tabStateVersion += 1;
@@ -701,14 +712,14 @@
 
   async function closeTab(tabId: string, event?: Event) {
     event?.stopPropagation();
-    if (closingTabIds.includes(tabId)) return;
     const requestedSessionId = sessionId;
+    if (isClosingTab(requestedSessionId, tabId)) return;
     const requestedGeneration = sessionGeneration;
     const requestedBackendSessionId = `${requestedSessionId}:browser:${tabId}`;
     const index = tabs.findIndex((tab) => tab.id === tabId);
     if (index === -1) return;
     const requestedVersion = tabStateVersion;
-    closingTabIds = [...closingTabIds, tabId];
+    closingTabs = [...closingTabs, { sessionId: requestedSessionId, tabId }];
     try {
       const state = await browserTabClose(requestedSessionId, tabId);
       if (
@@ -750,7 +761,9 @@
       ) return;
       error = browserActionErrorText(err);
     } finally {
-      closingTabIds = closingTabIds.filter((id) => id !== tabId);
+      closingTabs = closingTabs.filter(
+        (target) => target.sessionId !== requestedSessionId || target.tabId !== tabId
+      );
     }
   }
 
@@ -1083,7 +1096,7 @@
           type="button"
           title="Close tab"
           aria-label="Close tab"
-          disabled={closingTabIds.includes(tab.id)}
+          disabled={isClosingTab(sessionId, tab.id)}
           onclick={(event) => closeTab(tab.id, event)}
         >
           <Icon name="x" size={11} />
