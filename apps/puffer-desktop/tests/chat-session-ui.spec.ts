@@ -1857,6 +1857,94 @@ test("failed question responses keep the question prompt retryable", async ({ pa
   await expect(page.getByRole("button", { name: "Send answer" })).toBeEnabled();
 });
 
+test("late question response failures do not leak into a switched session", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-question-stale-a",
+        displayName: "Question stale A",
+        title: "Question stale A",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "question-stale-a-seed",
+            text: "Question stale A seed",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      },
+      {
+        sessionId: "session-question-stale-b",
+        displayName: "Question stale B",
+        title: "Question stale B",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "question-stale-b-seed",
+            text: "Question stale B seed",
+            createdAtMs: baseTime - 90_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Question stale A/);
+  await expect(page.getByText("Question stale A seed")).toBeVisible();
+  daemon.emit("session:session-question-stale-a:event", {
+    type: "user-question-request",
+    turnId: "turn-question-stale",
+    requestId: "question-stale",
+    questions: [
+      {
+        header: "Path",
+        question: "Which stale path should I use?",
+        options: [
+          { label: "src", description: "Use the src directory." },
+          { label: "tests", description: "Use the tests directory." }
+        ]
+      }
+    ]
+  });
+
+  await expect(page.getByText("Which stale path should I use?")).toBeVisible();
+  await page.getByPlaceholder("Type another answer").fill("examples");
+  daemon.delayFailure(
+    "resolve_user_question",
+    (request) =>
+      request.params.turnId === "turn-question-stale" &&
+      request.params.requestId === "question-stale",
+    "question failed after switch",
+    200
+  );
+  await page.getByRole("button", { name: "Send answer" }).click();
+  await daemon.waitForRequest(
+    "resolve_user_question",
+    (request) =>
+      request.params.turnId === "turn-question-stale" &&
+      request.params.requestId === "question-stale"
+  );
+
+  await openSession(page, /Question stale B/);
+  await expect(page.getByText("Question stale B seed")).toBeVisible();
+  await page.waitForTimeout(260);
+
+  await expect(page.getByText("Question stale B seed")).toBeVisible();
+  await expect(page.getByText("question failed after switch")).toHaveCount(0);
+});
+
 test("question responses ignore duplicate sends while the answer is in flight", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

@@ -1492,12 +1492,14 @@
     annotations: Record<string, Record<string, string>> = {}
   ) {
     if (resolvingQuestionIds.includes(questionId)) return;
+    const responseSessionId = selectedSession?.id ?? null;
     resolvingQuestionIds = [...resolvingQuestionIds, questionId];
     try {
       const mapping = turnQuestionLookup[questionId];
       if (mapping) {
         try {
           await resolveTurnUserQuestion(mapping.turnId, mapping.requestId, answers, annotations);
+          if (selectedSession?.id !== responseSessionId) return;
           dismissedQuestionIds = [...dismissedQuestionIds, questionId];
           statusMessage = "Answer sent to agent.";
           if (currentTurnId === mapping.turnId) {
@@ -1507,6 +1509,7 @@
           const { [questionId]: _drop, ...rest } = turnQuestionLookup;
           turnQuestionLookup = rest;
         } catch (error) {
+          if (selectedSession?.id !== responseSessionId) return;
           const detail = errorText(error);
           statusMessage = `resolve_user_question failed: ${detail}`;
           appendAgentError("Question response failed", detail, "question-error");
