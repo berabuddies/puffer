@@ -26,14 +26,14 @@
   }
 
   function submitApiKey(providerId: string) {
-    if (busyProviderId === providerId) return;
+    if (busyProviderId) return;
     const apiKey = apiKeyValue(providerId).trim();
     if (!apiKey) return;
     onLoginApiKey(providerId, apiKey);
   }
 
   function submitOauth(providerId: string) {
-    if (busyProviderId === providerId) return;
+    if (busyProviderId) return;
     onLoginOauth(providerId);
   }
 
@@ -74,6 +74,8 @@
   function sourceLabel(source: "claude" | "codex"): string {
     return source === "claude" ? "~/.claude" : "~/.codex";
   }
+
+  $: authBusy = busyProviderId !== null;
 </script>
 
 <section class="login-page">
@@ -148,7 +150,7 @@
             {#if supports(provider, "oauth")}
               <button
                 class="oauth-btn"
-                disabled={busyProviderId === provider.id}
+                disabled={authBusy}
                 on:click={() => submitOauth(provider.id)}
               >
                 {busyProviderId === provider.id
@@ -166,7 +168,7 @@
                   aria-label={`API key for ${provider.displayName}`}
                   value={apiKeys[provider.id] ?? ""}
                   placeholder="Paste API key"
-                  disabled={busyProviderId === provider.id}
+                  disabled={authBusy}
                   on:input={(event) =>
                     updateApiKey(provider.id, (event.currentTarget as HTMLInputElement).value)}
                   on:keydown={(event) => {
@@ -175,7 +177,7 @@
                 />
                 <button
                   class="apikey-btn"
-                  disabled={busyProviderId === provider.id || !(apiKeys[provider.id] ?? "").trim()}
+                  disabled={authBusy || !(apiKeys[provider.id] ?? "").trim()}
                   on:click={() => submitApiKey(provider.id)}
                 >
                   Connect

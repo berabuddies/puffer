@@ -191,6 +191,39 @@ test("provider OAuth connect is ignored while login is already busy", async ({ p
   ).toHaveLength(1);
 });
 
+test("provider auth controls are disabled while another provider is busy", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.delayResponse(
+    "login_with_oauth",
+    (request) => request.params.providerId === "codex",
+    500
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Providers" }).click();
+
+  const codexOauth = page
+    .locator(".provider-card")
+    .filter({ hasText: "Codex" })
+    .getByRole("button", { name: "Connect with OAuth" });
+  const anthropicCard = page.locator(".provider-card").filter({ hasText: "Anthropic" });
+  const anthropicInput = page.getByLabel("API key for Anthropic");
+  const anthropicConnect = anthropicCard.getByRole("button", { name: "Connect" });
+
+  await anthropicInput.fill("sk-while-codex-busy");
+  await expect(codexOauth).toBeEnabled();
+  await expect(anthropicInput).toBeEnabled();
+  await expect(anthropicConnect).toBeEnabled();
+
+  await codexOauth.click();
+  await daemon.waitForRequest("login_with_oauth");
+
+  await expect(anthropicInput).toBeDisabled();
+  await expect(anthropicConnect).toBeDisabled();
+});
+
 test("provider logout is ignored while already busy", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayResponse(
