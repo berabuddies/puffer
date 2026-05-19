@@ -32,6 +32,7 @@
 
   type BrowserTab = {
     id: string;
+    backendSessionId: string;
     label: string;
     url: string;
     title: string;
@@ -167,9 +168,14 @@
     void activateSession(sessionId);
   });
 
-  function newBrowserTab(id: string, label: string): BrowserTab {
+  function newBrowserTab(
+    id: string,
+    label: string,
+    rootSessionId = activeRootSessionId || sessionId
+  ): BrowserTab {
     return {
       id,
+      backendSessionId: backendSessionId(id, rootSessionId),
       label,
       url: "about:blank",
       title: "",
@@ -188,6 +194,7 @@
     return {
       ...(existing ?? newBrowserTab(info.tabId, info.label || "New tab")),
       id: info.tabId,
+      backendSessionId: info.backendSessionId || existing?.backendSessionId || backendSessionId(info.tabId),
       label: info.label || existing?.label || "New tab",
       url: info.url || "about:blank",
       title: info.title || "",
@@ -319,7 +326,7 @@
       const restored = saved.tabs
         .filter((tab: Partial<BrowserTab>) => typeof tab.id === "string")
         .map((tab: Partial<BrowserTab>) => ({
-          ...newBrowserTab(tab.id!, tab.label || "New tab"),
+          ...newBrowserTab(tab.id!, tab.label || "New tab", value),
           url: tab.url || "about:blank",
           title: tab.title || "",
           status: "Disconnected",
@@ -366,11 +373,12 @@
   }
 
   function activeBackendSessionId(): string {
-    return `${sessionId}:browser:${activeTabId}`;
+    if (!activeTabId) return "";
+    return activeTab?.backendSessionId || backendSessionId(activeTabId);
   }
 
-  function backendSessionId(tabId: string): string {
-    return `${sessionId}:browser:${tabId}`;
+  function backendSessionId(tabId: string, rootSessionId = activeRootSessionId || sessionId): string {
+    return `${rootSessionId}:browser:${tabId}`;
   }
 
   function activeCommandTarget(): BrowserCommandTarget | null {
@@ -436,19 +444,20 @@
   }
 
   async function connectActiveTab(generation = sessionGeneration) {
-    if (!mounted || !viewport || !canvas || disposed || !activeTabId || !activeTab) return;
+    const tab = activeTab;
+    if (!mounted || !viewport || !canvas || disposed || !activeTabId || !tab) return;
     disposeActiveSubscriptions();
     syncFromActiveTab();
-    if (activeTab.frame) {
-      renderFrame(activeTab.frame);
+    if (tab.frame) {
+      renderFrame(tab.frame);
     } else {
       clearCanvas();
     }
     clearCursorTimer();
     browserCursorStyle = "default";
-    const tabId = activeTabId;
-    const eventSessionId = backendSessionId(tabId);
-    const shouldOpen = !activeTab.connected;
+    const tabId = tab.id;
+    const eventSessionId = tab.backendSessionId || backendSessionId(tabId);
+    const shouldOpen = !tab.connected;
     activeEventSessionId = eventSessionId;
     try {
       const client = await ensureLocalDaemonClient();
@@ -467,11 +476,11 @@
       const size = measureViewport() ?? lastResize;
       lastResize = size;
       if (shouldOpen) {
-        const next = await browserOpen({ sessionId: eventSessionId, url: activeTab.url, ...size });
+        const next = await browserOpen({ sessionId: eventSessionId, url: tab.url, ...size });
         if (generation !== sessionGeneration || activeEventSessionId !== eventSessionId) return;
         applyState(next, tabId);
       } else {
-        if (!activeTab.frame) {
+        if (!tab.frame) {
           void restoreRecordedFrame(generation, activeRootSessionId, tabId, eventSessionId);
         }
         try {
@@ -479,7 +488,7 @@
         } catch {
           const next = await browserOpen({
             sessionId: eventSessionId,
-            url: activeTab.url,
+            url: tab.url,
             ...size
           });
           if (generation !== sessionGeneration || activeEventSessionId !== eventSessionId) return;
@@ -549,7 +558,8 @@
   }
 
   function recordingBackendSessionId(frame: BrowserRecordedFrame): string {
-    return frame.backendSessionId || backendSessionId(frame.tabId);
+    const tab = tabs.find((candidate) => candidate.id === frame.tabId);
+    return frame.backendSessionId || tab?.backendSessionId || backendSessionId(frame.tabId);
   }
 
   function applyRecordingFrame(rootSessionId: string, frame: BrowserRecordedFrame) {
@@ -562,6 +572,7 @@
     const nextTitle = frame.title || activeTab?.title || title || "";
     renderFrame(nextFrame);
     updateTab(frame.tabId, {
+      backendSessionId: frameBackendSessionId,
       frame: nextFrame,
       url: nextUrl,
       title: nextTitle,
@@ -664,10 +675,11 @@
 
   async function submitUrl(event: SubmitEvent) {
     event.preventDefault();
-    if (!connected || !activeTabId) return;
+    const requestedTab = activeTab;
+    if (!connected || !activeTabId || !requestedTab) return;
     const requestedGeneration = sessionGeneration;
-    const requestedTabId = activeTabId;
-    const requestedBackendSessionId = backendSessionId(requestedTabId);
+    const requestedTabId = requestedTab.id;
+    const requestedBackendSessionId = requestedTab.backendSessionId || backendSessionId(requestedTabId);
     const requestedUrl = urlDraft;
     error = null;
     try {
@@ -801,7 +813,8 @@
     const requestedSessionId = sessionId;
     if (isClosingTab(requestedSessionId, tabId)) return;
     const requestedGeneration = sessionGeneration;
-    const requestedBackendSessionId = `${requestedSessionId}:browser:${tabId}`;
+    const requestedTab = tabs.find((tab) => tab.id === tabId);
+    const requestedBackendSessionId = requestedTab?.backendSessionId || backendSessionId(tabId, requestedSessionId);
     const index = tabs.findIndex((tab) => tab.id === tabId);
     if (index === -1) return;
     const requestedVersion = tabStateVersion;

@@ -153,6 +153,66 @@ test("Browser panel hydrates a connected agent tab from recorded frames", async 
   ).toBe(222);
 });
 
+test("Browser controls target daemon-provided backend tab ids", async ({ page }) => {
+  const backendSessionId = "browser-worker-opaque-tab-1";
+  const daemon = new FakeDaemon({
+    emitBrowserOpenFrame: false,
+    emitBrowserResizeFrame: false
+  });
+  daemon.setBrowserTabs("session-browser", {
+    activeTabId: "tab-1",
+    tabs: [
+      {
+        ...browserTab("tab-1", "https://agent.example"),
+        active: true,
+        backendSessionId
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
+
+  await daemon.waitForRequest("browser_resize", (request) =>
+    request.params.sessionId === backendSessionId
+  );
+
+  const toolbar = page.locator(".pf-browser-toolbar");
+  await toolbar.getByRole("button", { name: "Reload" }).click();
+  await daemon.waitForRequest("browser_reload", (request) =>
+    request.params.sessionId === backendSessionId
+  );
+
+  await toolbar.getByRole("button", { name: "Back" }).click();
+  await daemon.waitForRequest("browser_history", (request) =>
+    request.params.sessionId === backendSessionId && request.params.direction === "back"
+  );
+
+  await page.getByLabel("URL").fill("https://example.com/search");
+  await page.keyboard.press("Enter");
+  await daemon.waitForRequest("browser_navigate", (request) =>
+    request.params.sessionId === backendSessionId &&
+    request.params.url === "https://example.com/search"
+  );
+
+  await page.locator(".pf-browser-canvas").dispatchEvent("pointerdown", {
+    clientX: 20,
+    clientY: 20,
+    pointerId: 5,
+    button: 0,
+    buttons: 1,
+    pointerType: "mouse"
+  });
+  await daemon.waitForRequest("browser_input", (request) => {
+    const event = request.params.event as Record<string, unknown> | undefined;
+    return request.params.sessionId === backendSessionId &&
+      event?.kind === "mouse" &&
+      event.eventType === "mousePressed";
+  });
+});
+
 test("Browser panel follows agent Browser recording updates for the active tab", async ({ page }) => {
   const daemon = new FakeDaemon({
     emitBrowserResizeFrame: false
