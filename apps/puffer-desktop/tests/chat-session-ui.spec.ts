@@ -939,6 +939,60 @@ test("session title edit saves through the daemon", async ({ page }) => {
   await expect(page.getByRole("button", { name: /Renamed mission/ }).first()).toBeVisible();
 });
 
+test("late title rename responses do not overwrite a switched session", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-alpha-rename",
+        displayName: "Alpha rename",
+        title: "Alpha rename",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        timeline: []
+      },
+      {
+        sessionId: "session-beta-rename",
+        displayName: "Beta rename",
+        title: "Beta rename",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 0,
+        timeline: []
+      }
+    ]
+  });
+  daemon.delayResponse(
+    "rename_session",
+    (request) => request.params.sessionId === "session-alpha-rename",
+    120
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Alpha rename/);
+  await page.getByRole("button", { name: "Edit session title" }).click();
+  await page.getByLabel("Session title").fill("Alpha renamed late");
+  await page.getByRole("button", { name: "Save title" }).click();
+  await daemon.waitForRequest("rename_session", (request) =>
+    request.params.sessionId === "session-alpha-rename" &&
+    request.params.title === "Alpha renamed late"
+  );
+
+  await openSession(page, /Beta rename/);
+  await expect(page.locator(".primary-title")).toHaveText("Beta rename");
+
+  await page.waitForTimeout(170);
+  await expect(page.locator(".primary-title")).toHaveText("Beta rename");
+  await expect(page.getByText("Alpha renamed late")).toHaveCount(0);
+});
+
 test("auto recap does not start a second turn while one is running", async ({ page }) => {
   await page.clock.install({ time: baseTime });
   const daemon = new FakeDaemon();

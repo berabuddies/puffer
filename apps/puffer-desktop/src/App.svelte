@@ -1095,13 +1095,16 @@
   async function renameSelectedSession(title: string) {
     if (!selectedSession) return;
     const previous = selectedSession;
+    const renameSessionId = previous.id;
     try {
-      const detail = await renameSession(selectedSession.id, title);
+      const detail = await renameSession(renameSessionId, title);
+      if (selectedSession?.id !== renameSessionId) return;
       selectedSession = detail.session;
       sessionDetail = detail;
       await refreshGroups();
       statusMessage = title.trim() ? "Session title updated." : "Session title reset.";
     } catch (error) {
+      if (selectedSession?.id !== renameSessionId) return;
       selectedSession = previous;
       statusMessage = `Failed to rename session: ${errorText(error)}`;
       throw error;
