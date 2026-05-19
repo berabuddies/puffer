@@ -305,6 +305,10 @@
     return status === "running" || status === "awaiting";
   }
 
+  function isTopLevelSession(session: SessionListItem): boolean {
+    return !session.parentSessionId;
+  }
+
   function findSidebarSession(sessionId: string, fallback?: SessionListItem | null): SessionListItem | null {
     if (fallback?.id === sessionId) return fallback;
     if (selectedSession?.id === sessionId) return selectedSession;
@@ -518,8 +522,10 @@
   let realAgents = $derived<ActiveAgent[]>(
     workspaceGroups
       .flatMap((g) =>
-        g.sessions.map((s) => activeAgentFromSession(s, activeAgentProjectLabel(g, workspaceGroups)))
-    )
+        g.sessions
+          .filter(isTopLevelSession)
+          .map((s) => activeAgentFromSession(s, activeAgentProjectLabel(g, workspaceGroups)))
+      )
       .slice()
       .sort((left, right) =>
         pinnedIndex(desktopPins.pinnedAgentIds, left.id) - pinnedIndex(desktopPins.pinnedAgentIds, right.id)
@@ -536,7 +542,9 @@
       : null
   );
   let selectedSessionFallbackAgent = $derived<ActiveAgent | null>(
-    selectedSession && !realAgents.some((agent) => agent.id === selectedSession?.id)
+    selectedSession &&
+    isTopLevelSession(selectedSession) &&
+    !realAgents.some((agent) => agent.id === selectedSession?.id)
       ? activeAgentFromSession(
           selectedSession,
           selectedSessionGroup
@@ -549,6 +557,7 @@
     Object.values(liveSidebarAgentsById)
       .filter(
         (live) =>
+          isTopLevelSession(live.session) &&
           !realAgents.some((agent) => agent.id === live.session.id) &&
           selectedSessionFallbackAgent?.id !== live.session.id
       )

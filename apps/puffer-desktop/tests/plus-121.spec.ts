@@ -112,6 +112,45 @@ test("PLUS-121: active agent project stays collapsed after manual toggle", async
   await expect(alphaHeader).toHaveAttribute("aria-expanded", "false");
 });
 
+test("PLUS-121: child sessions are not listed as top-level active agents", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-parent-agent",
+        displayName: "Parent planner",
+        title: "Parent planner",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 60_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 1,
+        activityStatus: "running"
+      },
+      {
+        sessionId: "session-child-explorer",
+        displayName: "Child explorer",
+        title: "Child explorer",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 10_000,
+        createdAtMs: baseTime - 90_000,
+        eventCount: 1,
+        activityStatus: "running",
+        parentSessionId: "session-parent-agent"
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const sidebar = page.locator(".pf-sidebar-agents");
+  const pufferGroup = sidebar.locator(".pf-sidebar-project-group").filter({ hasText: "puffer" });
+  await expect(pufferGroup).toHaveCount(1);
+  await expect(pufferGroup.getByText("Parent planner")).toBeVisible();
+  await expect(sidebar.getByText("Child explorer")).toHaveCount(0);
+  await expect(pufferGroup.locator(".pf-sidebar-agent-row")).toHaveCount(1);
+});
+
 test("PLUS-121: persisted active project collapse is not auto-expanded on restore", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
