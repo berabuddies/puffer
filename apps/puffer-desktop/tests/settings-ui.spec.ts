@@ -324,6 +324,33 @@ test("permissions save is ignored while already saving", async ({ page }) => {
   expect(daemon.requests.filter((request) => request.method === "save_permissions")).toHaveLength(1);
 });
 
+test("permissions controls are disabled while saving", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.delayResponse("save_permissions", () => true, 500);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Permissions" }).click();
+  await expect(page.getByText("Stored at")).toBeVisible();
+
+  await page.getByRole("button", { name: "Add rule" }).click();
+  const row = page.locator(".pf-perm-row").last();
+  const toolInput = row.locator("input");
+  const modeSelect = row.locator("select");
+  const removeRule = row.getByRole("button", { name: "Remove rule" });
+  await toolInput.fill("browser_open");
+  await modeSelect.selectOption("deny");
+
+  await page.getByRole("button", { name: "Save" }).click();
+  await daemon.waitForRequest("save_permissions");
+
+  await expect(toolInput).toBeDisabled();
+  await expect(modeSelect).toBeDisabled();
+  await expect(removeRule).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Add rule" })).toBeDisabled();
+});
+
 test("permissions settings keep edits after a late list response", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayResponse("list_permissions", () => true, 220);
