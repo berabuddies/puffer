@@ -7,12 +7,7 @@ test("Tauri mac shell exposes a drag titlebar without traffic-light overlap", as
     Object.defineProperty(window.navigator, "userAgent", {
       get: () => "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_5) AppleWebKit/537.36"
     });
-    const win = window as unknown as {
-      __TAURI__?: unknown;
-      __TAURI_INTERNALS__?: unknown;
-    };
-    win.__TAURI__ = {};
-    win.__TAURI_INTERNALS__ = {};
+    (globalThis as unknown as { isTauri?: boolean }).isTauri = true;
   });
   await daemon.install(page);
   await daemon.open(page);
@@ -22,13 +17,13 @@ test("Tauri mac shell exposes a drag titlebar without traffic-light overlap", as
   const titlebar = page.locator(".pf-titlebar");
   await expect(titlebar).toBeVisible();
   const titlebarBox = await titlebar.boundingBox();
-  expect(titlebarBox?.height).toBeGreaterThanOrEqual(38);
+  expect(titlebarBox?.height).toBeGreaterThanOrEqual(44);
   await expect(titlebar).toHaveAttribute("data-tauri-drag-region", "");
 
   const sidebarLogo = page.locator(".pf-sidebar .pf-brand-logo").first();
   const logoBox = await sidebarLogo.boundingBox();
   expect(logoBox).not.toBeNull();
-  const trafficLightSafeRect = { left: 0, top: 0, right: 84, bottom: 36 };
+  const trafficLightSafeRect = { left: 0, top: 0, right: 88, bottom: 44 };
   const overlapsTrafficLights =
     logoBox!.left < trafficLightSafeRect.right &&
     logoBox!.left + logoBox!.width > trafficLightSafeRect.left &&

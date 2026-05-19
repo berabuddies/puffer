@@ -5,8 +5,11 @@ export type Platform = "web" | "tauri-mac" | "tauri-windows" | "tauri-linux";
 
 export function detectPlatform(): Platform {
   if (typeof window === "undefined") return "web";
-  // Tauri 2 injects __TAURI_INTERNALS__; older fallback: __TAURI__
+  // Tauri 2 exposes globalThis.isTauri and usually injects
+  // __TAURI_INTERNALS__; older builds may only expose __TAURI__.
+  const globalTauri = globalThis as unknown as { isTauri?: boolean };
   const isTauri =
+    globalTauri.isTauri === true ||
     Boolean((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) ||
     Boolean((window as unknown as { __TAURI__?: unknown }).__TAURI__);
   if (!isTauri) return "web";

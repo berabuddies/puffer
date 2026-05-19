@@ -223,14 +223,14 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   flex-shrink: 0;
 }
 html.is-tauri .pf-titlebar {
-  height: 38px;
+  height: 44px;
   display: flex;
 }
 
 /* macOS (Tauri) with titleBarStyle: "Overlay" — the native traffic lights
    sit ~12px from the left within a ~28px span. Reserve 84px so tabs don't
    collide with them. No effect outside Tauri macOS. */
-html.is-tauri-mac .pf-titlebar { padding-left: 84px; }
+html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
 .pf-traffic { display: flex; gap: 8px; align-items: center; }
 .pf-traffic .dot {
   width: 12px; height: 12px; border-radius: 50%;
