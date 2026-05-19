@@ -262,7 +262,7 @@
 
 .pf-pw-agent .title {
   font-size: 12.5px; font-weight: 600; color: var(--foreground);
-  line-height: 1;
+  line-height: 1.2;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

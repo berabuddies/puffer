@@ -268,7 +268,7 @@
     cursor: pointer;
     font: inherit;
     font-size: 11.5px;
-    line-height: 1;
+    line-height: 1.2;
     max-width: 240px;
     transition: background 120ms, border-color 120ms;
   }
