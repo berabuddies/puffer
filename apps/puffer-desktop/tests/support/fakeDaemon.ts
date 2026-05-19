@@ -233,6 +233,10 @@ export class FakeDaemon {
     path: "/tmp/puffer/.puffer/permissions.json",
     tools: { bash: "ask" }
   };
+  private desktopPins: JsonRecord = {
+    pinnedAgentIds: [],
+    pinnedWorkspacePaths: []
+  };
   private mcpServers: JsonRecord[] = [
     {
       id: "playwright",
@@ -488,7 +492,9 @@ export class FakeDaemon {
       case "import_external_credential":
         return this.importExternalCredential(request.params);
       case "load_desktop_pins":
-        return { pinnedAgentIds: [], pinnedWorkspacePaths: [] };
+        return this.desktopPins;
+      case "set_desktop_pin":
+        return this.setDesktopPin(request.params);
       case "list_grouped_sessions":
         return this.groupedSessions();
       case "load_session_detail":
@@ -719,6 +725,23 @@ export class FakeDaemon {
           : {}
     };
     return this.permissions;
+  }
+
+  private setDesktopPin(params: JsonRecord): JsonRecord {
+    const kind = String(params.kind ?? "");
+    const id = String(params.id ?? "");
+    const pinned = params.pinned === true;
+    const key = kind === "workspace" ? "pinnedWorkspacePaths" : "pinnedAgentIds";
+    const current = Array.isArray(this.desktopPins[key])
+      ? (this.desktopPins[key] as unknown[]).filter((value): value is string => typeof value === "string")
+      : [];
+    const next = current.filter((value) => value !== id);
+    this.desktopPins = {
+      ...this.desktopPins,
+      [key]: pinned ? [id, ...next] : next
+    };
+    this.emit("desktop:pins:changed", this.desktopPins);
+    return this.desktopPins;
   }
 
   private addMcpServer(params: JsonRecord): JsonRecord {

@@ -57,6 +57,30 @@ test("workspace picker ignores duplicate local switch submits while restart is i
   expect(calls[0].args.cwd).toBe("/tmp/puffer-next");
 });
 
+test("agent pin ignores duplicate clicks while the pin save is in flight", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.delayResponse("set_desktop_pin", () => true, 500);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: /Browser regression/ }).first().click();
+  const agentRow = page.locator(".pf-sidebar-agent-row").filter({ hasText: "Browser regression" });
+  await expect(agentRow).toBeVisible();
+  await agentRow.getByRole("button", { name: "Pin agent" }).evaluate((button) => {
+    (button as HTMLButtonElement).click();
+    (button as HTMLButtonElement).click();
+  });
+
+  const request = await daemon.waitForRequest("set_desktop_pin");
+  expect(request.params).toMatchObject({
+    kind: "agent",
+    id: "session-browser",
+    pinned: true
+  });
+  await page.waitForTimeout(50);
+  expect(daemon.requests.filter((request) => request.method === "set_desktop_pin")).toHaveLength(1);
+});
+
 test("workspace search filters projects and agents", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

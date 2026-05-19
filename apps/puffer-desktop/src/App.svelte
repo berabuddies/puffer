@@ -152,6 +152,7 @@
   let sessionLoadGeneration = 0;
   let liveErrorSeq = 0;
   let desktopPins = $state<DesktopPinState>({ pinnedAgentIds: [], pinnedWorkspacePaths: [] });
+  let desktopPinInFlightKeys = $state<string[]>([]);
 
   let settingsSnapshot = $state<SettingsSnapshot | null>(null);
   let settingsLoading = $state(false);
@@ -846,7 +847,14 @@
     };
   }
 
+  function desktopPinKey(kind: "agent" | "workspace", id: string): string {
+    return `${kind}:${id}`;
+  }
+
   async function toggleDesktopPin(kind: "agent" | "workspace", id: string, pinned: boolean) {
+    const key = desktopPinKey(kind, id);
+    if (desktopPinInFlightKeys.includes(key)) return;
+    desktopPinInFlightKeys = [...desktopPinInFlightKeys, key];
     applyPin(kind, id, pinned);
     try {
       desktopPins = await setDesktopPin(kind, id, pinned);
@@ -854,6 +862,8 @@
     } catch (error) {
       applyPin(kind, id, !pinned);
       statusMessage = `Failed to update pin: ${error}`;
+    } finally {
+      desktopPinInFlightKeys = desktopPinInFlightKeys.filter((value) => value !== key);
     }
   }
 
@@ -870,6 +880,7 @@
     turnQuestionLookup = {};
     resolvingPermissionIds = [];
     resolvingQuestionIds = [];
+    desktopPinInFlightKeys = [];
     currentTurnId = null;
     cancelingTurnId = null;
     turnStartedAtMs = null;
@@ -1011,6 +1022,7 @@
     dismissedQuestionIds = [];
     resolvingPermissionIds = [];
     resolvingQuestionIds = [];
+    desktopPinInFlightKeys = [];
     liveStreamItems = [];
     replayTextByTurn = {};
     turnPermissionLookup = {};
