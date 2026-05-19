@@ -16,6 +16,15 @@ pub struct ProviderRegistry {
     providers: IndexMap<String, RegisteredProvider>,
 }
 
+/// Returns the canonical built-in provider id for a user-facing alias.
+pub fn canonical_provider_id(provider_id: &str) -> String {
+    match provider_id.trim().to_ascii_lowercase().as_str() {
+        "claude" | "anthropic" => "anthropic".to_string(),
+        "codex" | "openai" => "openai".to_string(),
+        _ => provider_id.trim().to_string(),
+    }
+}
+
 impl ProviderRegistry {
     /// Creates an empty provider registry.
     pub fn new() -> Self {
@@ -95,12 +104,27 @@ impl ProviderRegistry {
 
     /// Looks up a provider descriptor by id.
     pub fn provider(&self, id: &str) -> Option<&ProviderDescriptor> {
-        self.providers.get(id).map(|provider| &provider.descriptor)
+        let trimmed = id.trim();
+        self.providers
+            .get(trimmed)
+            .or_else(|| {
+                let canonical = canonical_provider_id(trimmed);
+                (canonical != trimmed)
+                    .then(|| self.providers.get(canonical.as_str()))
+                    .flatten()
+            })
+            .map(|provider| &provider.descriptor)
     }
 
     /// Looks up a registered provider entry by id.
     pub fn provider_entry(&self, id: &str) -> Option<&RegisteredProvider> {
-        self.providers.get(id)
+        let trimmed = id.trim();
+        self.providers.get(trimmed).or_else(|| {
+            let canonical = canonical_provider_id(trimmed);
+            (canonical != trimmed)
+                .then(|| self.providers.get(canonical.as_str()))
+                .flatten()
+        })
     }
 
     /// Returns an iterator over all known models across all providers.
@@ -482,6 +506,36 @@ mod tests {
                 .expect("model")
                 .display_name,
             "Claude Sonnet 4.5"
+        );
+    }
+
+    #[test]
+    fn registry_resolves_desktop_provider_aliases() {
+        let mut registry = ProviderRegistry::new();
+        let anthropic = provider_descriptor();
+        let mut openai = provider_descriptor();
+        openai.id = "openai".to_string();
+        openai.default_api = "openai-responses".to_string();
+        openai.models[0].id = "gpt-5".to_string();
+        openai.models[0].provider = "openai".to_string();
+        registry.register(anthropic.clone());
+        registry.register(openai.clone());
+
+        assert_eq!(canonical_provider_id("claude"), "anthropic");
+        assert_eq!(canonical_provider_id("Codex"), "openai");
+        assert_eq!(
+            registry.provider("claude").map(|p| p.id.as_str()),
+            Some("anthropic")
+        );
+        assert_eq!(
+            registry.provider("codex").map(|p| p.id.as_str()),
+            Some("openai")
+        );
+        assert_eq!(
+            registry
+                .resolve_model("codex/gpt-5")
+                .map(|model| model.provider.as_str()),
+            Some("openai")
         );
     }
 

@@ -41,7 +41,9 @@ use puffer_provider_openai::{
     parse_authorization_input as parse_openai_authorization_input,
     refresh_oauth_token as refresh_openai_oauth_token,
 };
-use puffer_provider_registry::{AuthMode, AuthStore, ProviderRegistry, StoredCredential};
+use puffer_provider_registry::{
+    canonical_provider_id, AuthMode, AuthStore, ProviderRegistry, StoredCredential,
+};
 use puffer_resources::load_resources;
 use puffer_session_store::SessionStore;
 use puffer_tools::ToolRegistry;
@@ -205,7 +207,8 @@ fn main() -> Result<()> {
             token,
             stdin,
         }) => {
-            let provider = resolve_provider_arg(provider, config.default_provider.as_deref());
+            let provider =
+                resolve_provider_arg(&providers, provider, config.default_provider.as_deref());
             let token = if stdin {
                 read_secret_from_stdin()?
             } else if let Some(token) = token {
@@ -804,7 +807,7 @@ fn run_auth_command(
             value,
             stdin,
         } => {
-            let provider = resolve_provider_arg(provider, default_provider);
+            let provider = resolve_provider_arg(providers, provider, default_provider);
             if !provider_supports_auth_mode(&provider, providers, &AuthMode::OAuth) {
                 anyhow::bail!(
                     "provider `{provider}` does not support OAuth; use `puffer setup-token {provider}` or `puffer auth set-api-key {provider}`"
@@ -813,7 +816,7 @@ fn run_auth_command(
             run_login_flow(&provider, value, stdin, auth_store, auth_path, providers)?;
         }
         AuthCommand::Logout { provider } => {
-            let provider = resolve_provider_arg(provider, default_provider);
+            let provider = resolve_provider_arg(providers, provider, default_provider);
             let removed = auth_store.remove(&provider);
             auth_store.save(auth_path)?;
             if removed.is_some() {
@@ -827,6 +830,7 @@ fn run_auth_command(
             api_key,
             stdin,
         } => {
+            let provider = resolve_provider_id(providers, &provider);
             let key = if stdin {
                 read_secret_from_stdin()?
             } else {
@@ -839,6 +843,7 @@ fn run_auth_command(
             println!("stored api key for {provider}");
         }
         AuthCommand::Clear { provider } => {
+            let provider = resolve_provider_id(providers, &provider);
             let removed = auth_store.remove(&provider);
             auth_store.save(auth_path)?;
             if removed.is_some() {
@@ -848,10 +853,12 @@ fn run_auth_command(
             }
         }
         AuthCommand::OauthUrl { provider } => {
+            let provider = resolve_provider_id(providers, &provider);
             let bundle = oauth_start_bundle_for_provider(providers, &provider)?;
             println!("{}", bundle.authorization_url);
         }
         AuthCommand::OauthStart { provider } => {
+            let provider = resolve_provider_id(providers, &provider);
             let bundle = oauth_start_bundle_for_provider(providers, &provider)?;
             println!(
                 "{}",
@@ -873,6 +880,7 @@ fn run_auth_command(
             state,
             stdin,
         } => {
+            let provider = resolve_provider_id(providers, &provider);
             let input = if stdin {
                 read_secret_from_stdin()?
             } else {
@@ -927,6 +935,7 @@ fn run_auth_command(
             println!("stored oauth credentials for {provider}");
         }
         AuthCommand::OauthRefresh { provider } => {
+            let provider = resolve_provider_id(providers, &provider);
             let credential = auth_store
                 .get(&provider)
                 .ok_or_else(|| anyhow::anyhow!("no credentials stored for {provider}"))?;
@@ -957,10 +966,22 @@ fn run_auth_command(
     Ok(())
 }
 
-fn resolve_provider_arg(provider: Option<String>, default_provider: Option<&str>) -> String {
-    provider
+fn resolve_provider_arg(
+    providers: &ProviderRegistry,
+    provider: Option<String>,
+    default_provider: Option<&str>,
+) -> String {
+    let provider = provider
         .or_else(|| default_provider.map(ToOwned::to_owned))
-        .unwrap_or_else(|| "anthropic".to_string())
+        .unwrap_or_else(|| "anthropic".to_string());
+    resolve_provider_id(providers, &provider)
+}
+
+fn resolve_provider_id(providers: &ProviderRegistry, provider: &str) -> String {
+    providers
+        .provider(provider)
+        .map(|descriptor| descriptor.id.clone())
+        .unwrap_or_else(|| canonical_provider_id(provider))
 }
 
 fn run_login_flow(

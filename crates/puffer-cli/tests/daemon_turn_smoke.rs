@@ -89,6 +89,68 @@ fn daemon_accepts_desktop_alias_and_completes_mock_turn() {
     daemon.stop();
 }
 
+#[test]
+fn daemon_uses_desktop_alias_defaults_for_new_turns() {
+    let mock = MockOpenAiServer::start("Alias default reply");
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let workspace = tempdir.path().join("workspace");
+    let puffer_home = tempdir.path().join("home");
+    let puffer_config = puffer_home.join(".puffer");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::create_dir_all(&puffer_config).expect("puffer config");
+    std::fs::write(
+        puffer_config.join("auth.json"),
+        json!({
+            "format_version": 1,
+            "providers": {
+                "openai": { "kind": "api_key", "key": "sk-test" }
+            }
+        })
+        .to_string(),
+    )
+    .expect("auth store");
+    let discovery_cache = tempdir.path().join("discovery.json");
+    std::fs::write(&discovery_cache, discovery_cache_json()).expect("discovery cache");
+
+    let mut daemon = DaemonProcess::start(&workspace, &puffer_home, &discovery_cache);
+    let mut client = DaemonClient::connect(&daemon.handshake);
+
+    client.rpc(
+        "update_config",
+        json!({
+            "openaiBaseUrl": mock.base_url,
+            "defaultProvider": "codex",
+            "defaultModel": "codex/gpt-5",
+        }),
+    );
+    let session = client.rpc(
+        "create_session",
+        json!({
+            "cwd": workspace.display().to_string(),
+        }),
+    );
+    let session_id = session["sessionId"].as_str().expect("session id");
+
+    let turn = client.rpc(
+        "run_agent_turn",
+        json!({
+            "sessionId": session_id,
+            "message": "Say exactly: Alias default reply",
+            "permissionMode": "read-only",
+        }),
+    );
+    let turn_id = turn["turnId"].as_str().expect("turn id");
+    let complete = client.wait_for_event(|message| {
+        message["event"] == format!("session:{session_id}:event")
+            && message["payload"]["type"] == "turn-complete"
+    });
+    assert_eq!(complete["payload"]["turnId"], turn_id);
+    assert_eq!(complete["payload"]["assistantText"], "Alias default reply");
+    assert_eq!(mock.responses_calls.load(Ordering::SeqCst), 1);
+
+    daemon.stop();
+}
+
 struct DaemonProcess {
     child: Child,
     handshake: Value,
