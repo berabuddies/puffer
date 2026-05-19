@@ -68,6 +68,10 @@
         (filterState === "all" || a.state === filterState)
     )
   );
+  $effect(() => {
+    if (!projects.includes(filterProject)) filterProject = "all";
+    if (!states.includes(filterState as AgentState | "all")) filterState = "all";
+  });
 </script>
 
 <aside class="pf-sidebar" data-collapsed={collapsed}>

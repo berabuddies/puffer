@@ -227,6 +227,57 @@ test("active agents includes an opened session before grouped history catches up
   await expect(activeList.getByText("No agents match")).toHaveCount(0);
 });
 
+test("active agent project filter resets when the selected project disappears", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-filter-alpha",
+        displayName: "Alpha filtered agent",
+        title: "Alpha filtered agent",
+        cwd: "/tmp/puffer-filter-alpha",
+        folderPath: "/tmp/puffer-filter-alpha",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 2
+      },
+      {
+        sessionId: "session-filter-beta",
+        displayName: "Beta survivor agent",
+        title: "Beta survivor agent",
+        cwd: "/tmp/puffer-filter-beta",
+        folderPath: "/tmp/puffer-filter-beta",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 3
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const activeList = page.locator(".pf-sidebar-agents-list");
+  await page.getByLabel("Filter by project").selectOption("puffer-filter-alpha");
+  await expect(activeList.locator(".pf-sidebar-agent-row").filter({ hasText: "Alpha filtered agent" })).toBeVisible();
+  await expect(activeList.locator(".pf-sidebar-agent-row").filter({ hasText: "Beta survivor agent" })).toHaveCount(0);
+
+  const listRequestsBefore = daemon.requests.filter(
+    (request) => request.method === "list_grouped_sessions"
+  ).length;
+  daemon.setGroupedSessionFilter(
+    (metadata) => String(metadata.sessionId ?? "") !== "session-filter-alpha"
+  );
+  daemon.emit("workspace:sessions:changed", { reason: "manual-refresh" });
+
+  await expect
+    .poll(() =>
+      daemon.requests.filter((request) => request.method === "list_grouped_sessions").length
+    )
+    .toBe(listRequestsBefore + 1);
+  await expect(page.getByLabel("Filter by project")).toHaveValue("all");
+  await expect(activeList.locator(".pf-sidebar-agent-row").filter({ hasText: "Beta survivor agent" })).toBeVisible();
+  await expect(activeList.getByText("No agents match")).toHaveCount(0);
+});
+
 test("sidebar Workspace returns from agent detail to the workspace board", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
