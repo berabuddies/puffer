@@ -1467,6 +1467,48 @@ test("failed question responses keep the question prompt retryable", async ({ pa
   await expect(page.getByRole("button", { name: "Send answer" })).toBeEnabled();
 });
 
+test("question responses ignore duplicate sends while the answer is in flight", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /^Browser regression\b/);
+  daemon.delayResponse("resolve_user_question", () => true, 500);
+  daemon.emit("session:session-browser:event", {
+    type: "user-question-request",
+    turnId: "turn-question-duplicate",
+    requestId: "question-duplicate",
+    questions: [
+      {
+        header: "Path",
+        question: "Which duplicate path should I use?",
+        options: [
+          { label: "src", description: "Use the src directory." },
+          { label: "tests", description: "Use the tests directory." }
+        ]
+      }
+    ]
+  });
+
+  await expect(page.getByText("Which duplicate path should I use?")).toBeVisible();
+  await page.getByPlaceholder("Type another answer").fill("examples");
+  const submit = page.getByRole("button", { name: "Send answer" });
+  await submit.click();
+  await submit.click();
+
+  const request = await daemon.waitForRequest("resolve_user_question");
+  expect(request.params).toMatchObject({
+    turnId: "turn-question-duplicate",
+    requestId: "question-duplicate",
+    answers: { "Which duplicate path should I use?": "examples" },
+    annotations: {}
+  });
+  await page.waitForTimeout(50);
+  expect(
+    daemon.requests.filter((request) => request.method === "resolve_user_question")
+  ).toHaveLength(1);
+});
+
 test("replayed approval and question events do not duplicate live prompts", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

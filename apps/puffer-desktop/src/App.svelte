@@ -126,6 +126,7 @@
   let submitMessageInFlightSessionIds = $state<string[]>([]);
   let dismissedPermissionIds = $state<string[]>([]);
   let dismissedQuestionIds = $state<string[]>([]);
+  let resolvingQuestionIds = $state<string[]>([]);
 
   // Live turn state: items synthesized from streaming events while a turn is
   // running. When the turn finishes we reload the session detail so the real
@@ -866,6 +867,7 @@
     replayTextByTurn = {};
     turnPermissionLookup = {};
     turnQuestionLookup = {};
+    resolvingQuestionIds = [];
     currentTurnId = null;
     cancelingTurnId = null;
     turnStartedAtMs = null;
@@ -1005,6 +1007,7 @@
     submitMessageInFlightSessionIds = [];
     dismissedPermissionIds = [];
     dismissedQuestionIds = [];
+    resolvingQuestionIds = [];
     liveStreamItems = [];
     replayTextByTurn = {};
     turnPermissionLookup = {};
@@ -1300,26 +1303,32 @@
     answers: Record<string, string | string[]>,
     annotations: Record<string, Record<string, string>> = {}
   ) {
-    const mapping = turnQuestionLookup[questionId];
-    if (mapping) {
-      try {
-        await resolveTurnUserQuestion(mapping.turnId, mapping.requestId, answers, annotations);
-        dismissedQuestionIds = [...dismissedQuestionIds, questionId];
-        statusMessage = "Answer sent to agent.";
-        if (currentTurnId === mapping.turnId) {
-          turnThinking = false;
-          turnStatusHint = "Running";
+    if (resolvingQuestionIds.includes(questionId)) return;
+    resolvingQuestionIds = [...resolvingQuestionIds, questionId];
+    try {
+      const mapping = turnQuestionLookup[questionId];
+      if (mapping) {
+        try {
+          await resolveTurnUserQuestion(mapping.turnId, mapping.requestId, answers, annotations);
+          dismissedQuestionIds = [...dismissedQuestionIds, questionId];
+          statusMessage = "Answer sent to agent.";
+          if (currentTurnId === mapping.turnId) {
+            turnThinking = false;
+            turnStatusHint = "Running";
+          }
+          const { [questionId]: _drop, ...rest } = turnQuestionLookup;
+          turnQuestionLookup = rest;
+        } catch (error) {
+          const detail = errorText(error);
+          statusMessage = `resolve_user_question failed: ${detail}`;
+          appendAgentError("Question response failed", detail, "question-error");
         }
-        const { [questionId]: _drop, ...rest } = turnQuestionLookup;
-        turnQuestionLookup = rest;
-      } catch (error) {
-        const detail = errorText(error);
-        statusMessage = `resolve_user_question failed: ${detail}`;
-        appendAgentError("Question response failed", detail, "question-error");
+      } else {
+        dismissedQuestionIds = [...dismissedQuestionIds, questionId];
+        statusMessage = "Answer selected (no in-flight turn).";
       }
-    } else {
-      dismissedQuestionIds = [...dismissedQuestionIds, questionId];
-      statusMessage = "Answer selected (no in-flight turn).";
+    } finally {
+      resolvingQuestionIds = resolvingQuestionIds.filter((id) => id !== questionId);
     }
   }
 
