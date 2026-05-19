@@ -123,7 +123,7 @@
   let conversationStarted = $derived(
     (session?.eventCount ?? 0) > 0 ||
       timeline.some((item) =>
-        ["user", "assistant", "system", "tool", "command"].includes(item.kind)
+        ["user", "assistant", "system", "tool", "command", "diff"].includes(item.kind)
       )
   );
   let allowProviderSwitch = $derived(Boolean(session) && !conversationStarted && !turnRunning);
@@ -400,7 +400,6 @@
       timeline.filter(
         (i) =>
           i.kind !== "permission" &&
-          i.kind !== "diff" &&
           !(i.kind === "question" && i.status === "pending")
       )
     )

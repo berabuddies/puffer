@@ -29,6 +29,28 @@ function gitDiff(): Record<string, unknown> {
   };
 }
 
+function timelineDiff(): Record<string, unknown> {
+  return {
+    id: "timeline-diff",
+    source: "agent",
+    commandLabel: "apply_patch",
+    statusText: "1 file changed",
+    unstagedDiffstat: "",
+    stagedDiffstat: "",
+    patch: [
+      "diff --git a/src/timeline.rs b/src/timeline.rs",
+      "--- a/src/timeline.rs",
+      "+++ b/src/timeline.rs",
+      "@@ -1,2 +1,2 @@",
+      " pub fn status() -> &'static str {",
+      "-    \"old\"",
+      "+    \"new\"",
+      " }"
+    ].join("\n"),
+    patchExcerpt: ""
+  };
+}
+
 function agentDiff(): Record<string, unknown> {
   return {
     files: [
@@ -51,6 +73,48 @@ function agentDiff(): Record<string, unknown> {
     ]
   };
 }
+
+test("Diff timeline items stay visible in the chat activity stream", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-diff-timeline",
+        displayName: "Diff timeline",
+        title: "Diff timeline",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        timeline: [
+          {
+            kind: "user_message",
+            id: "diff-timeline-user",
+            text: "Patch the file.",
+            createdAtMs: baseTime - 50_000
+          },
+          {
+            kind: "diff_snapshot",
+            id: "diff-timeline-snapshot",
+            snapshot: timelineDiff(),
+            createdAtMs: baseTime - 40_000
+          },
+          {
+            kind: "assistant_message",
+            id: "diff-timeline-assistant",
+            text: "Patched the file.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openAgent(page, /Diff timeline/);
+  await expect(page.getByText("Patched the file.")).toBeVisible();
+  await expect(page.getByText("Updated 1 diff")).toBeVisible();
+});
 
 function agentDetailDaemon(): FakeDaemon {
   return new FakeDaemon({
