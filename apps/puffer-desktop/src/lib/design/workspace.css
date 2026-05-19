@@ -20,6 +20,24 @@
 }
 .pf-pw-top-left { display: flex; align-items: baseline; gap: 10px; min-width: 0; flex: 1; }
 .pf-pw-top-left h1 { font-size: 14px; font-weight: 600; letter-spacing: -0.01em; margin: 0; white-space: nowrap; }
+.pf-pw-sub {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  white-space: nowrap;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pf-pw-sub-btn {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+.pf-pw-sub-btn:hover {
+  color: var(--foreground);
+}
 .pf-pw-top-right { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-shrink: 0; }
 .pf-pw-search {
   display: flex; align-items: center; gap: 6px;

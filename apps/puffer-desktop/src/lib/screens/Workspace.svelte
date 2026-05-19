@@ -26,6 +26,9 @@
     /** Connect-project modal just finished with a new session — the
      *  parent should refresh the workspace and open AgentDetail. */
     onSessionReady?: (created: CreatedSessionResult) => void | Promise<void>;
+    /** User clicked the workspace-cwd chip in the header — the parent
+     *  should open the WorkspacePicker. */
+    onOpenWorkspacePicker?: () => void;
     pinnedWorkspacePaths?: string[];
     pinningWorkspacePaths?: string[];
     onToggleWorkspacePin?: (path: string, pinned: boolean) => void;
@@ -46,6 +49,7 @@
     onOpenBoard,
     onNewAgent,
     onSessionReady,
+    onOpenWorkspacePicker,
     pinnedWorkspacePaths = [],
     pinningWorkspacePaths = [],
     onToggleWorkspacePin,
@@ -196,6 +200,13 @@
       ? recentSessions.filter((row) => recentSessionMatches(row, searchNeedle))
       : recentSessions
   );
+  let headerSubtitle = $derived(
+    loading
+      ? "loading..."
+      : defaultWorkspaceCwd
+        ? defaultWorkspaceCwd
+        : `${agentCount} active ${agentCount === 1 ? "agent" : "agents"}`
+  );
 
   async function handleNewAgent(cwd: string) {
     if (!onNewAgent) return;
@@ -215,6 +226,17 @@
   <div class="pf-pw-top">
     <div class="pf-pw-top-left">
       <h1>{projectCount === 1 ? "Project" : "Projects"} {projectCount}</h1>
+      {#if onOpenWorkspacePicker && defaultWorkspaceCwd}
+        <button
+          type="button"
+          class="pf-pw-sub pf-pw-sub-btn"
+          onclick={() => onOpenWorkspacePicker?.()}
+          title="Switch workspace"
+          aria-label="Switch workspace"
+        >{headerSubtitle}</button>
+      {:else}
+        <span class="pf-pw-sub">{headerSubtitle}</span>
+      {/if}
     </div>
     <div class="pf-pw-top-right">
       <div class="pf-pw-search">
