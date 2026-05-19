@@ -975,3 +975,43 @@ test("remote project creation uses remote authenticated provider", async ({ page
     remoteDaemon.requests.some((request) => request.method === "load_settings_snapshot")
   ).toBe(true);
 });
+
+test("remote project creation requires a remote authenticated provider", async ({ page }) => {
+  const localDaemon = new FakeDaemon({
+    workspaceRoot: "/tmp/puffer-local",
+    auth: canonicalProviderAuth
+  });
+  const remoteDaemon = new FakeDaemon({
+    url: "ws://127.0.0.1:17780/ws",
+    workspaceRoot: "/tmp/puffer-remote",
+    auth: []
+  });
+  await localDaemon.install(page);
+  await remoteDaemon.install(page);
+  await localDaemon.open(page, {
+    extraParams: {
+      pufferRemoteBackend: remoteDaemon.url,
+      pufferRemoteToken: "remote-token",
+      pufferRemoteWorkspaceRoot: "/tmp/puffer-remote"
+    }
+  });
+
+  await page.getByRole("button", { name: "Connect project" }).click();
+  const dialog = page.getByRole("dialog", { name: "Connect project" });
+  await dialog.getByRole("tab", { name: /Remote/ }).click();
+  await dialog.getByLabel("SSH target").fill("devbox");
+  await dialog.getByLabel("Destination directory").fill("/tmp/remote-project");
+  await dialog.getByRole("button", { name: "Start agent" }).click();
+
+  await remoteDaemon.waitForRequest("load_settings_snapshot");
+  await expect(dialog.locator(".pf-modal-status")).toContainText(
+    "Connect an agent provider on the remote host before starting a remote project."
+  );
+  expect(remoteDaemon.requests.some((request) => request.method === "create_session")).toBe(false);
+
+  const activeToken = await page.evaluate(async () => {
+    const mod = await import("/src/lib/api/daemonClient.ts");
+    return mod.currentDaemonClient()?.handshake.token ?? null;
+  });
+  expect(activeToken).toBe("test");
+});

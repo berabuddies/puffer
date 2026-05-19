@@ -135,9 +135,17 @@
 
   function providerForSnapshot(
     source: SettingsSnapshot | null,
-    requestedProviderId: string
+    requestedProviderId: string,
+    context: "local" | "remote" = "local"
   ): string {
     const options = providerOptionsFor(source);
+    if (options.length === 0) {
+      throw new Error(
+        context === "remote"
+          ? "Connect an agent provider on the remote host before starting a remote project."
+          : "Connect an agent provider in Settings before starting a project."
+      );
+    }
     const requested = requestedProviderId.trim();
     const requestedProvider = options.find((provider) =>
       providerIdsEquivalent(provider.id, requested)
@@ -287,7 +295,7 @@
       const remoteSnapshot = await loadSettingsSnapshot();
       const created = await createSession(
         targetCwd,
-        providerForSnapshot(remoteSnapshot, selectedProvider || defaultProviderId())
+        providerForSnapshot(remoteSnapshot, selectedProvider || defaultProviderId(), "remote")
       );
       createdSessionId = created.sessionId;
     } catch (e) {
