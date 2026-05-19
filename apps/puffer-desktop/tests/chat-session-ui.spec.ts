@@ -214,6 +214,53 @@ test("composer enter does not submit while IME composition is active", async ({ 
   expect(daemon.requests.filter((request) => request.method === "run_agent_turn")).toHaveLength(0);
 });
 
+test("composer moves submitted prompt into the thread while turn start is pending", async ({
+  page
+}) => {
+  const prompt = "Render this send without a flash";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-smooth-send",
+        displayName: "Smooth send",
+        title: "Smooth send",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  daemon.delayResponse(
+    "run_agent_turn",
+    (request) => request.params.sessionId === "session-smooth-send",
+    250
+  );
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Smooth send/);
+  const composer = page.locator(".pf-composer textarea");
+  await composer.fill(prompt);
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-smooth-send" &&
+      request.params.message === prompt
+  );
+
+  await page.waitForTimeout(50);
+  expect(await composer.inputValue()).toBe("");
+  await expect(page.locator('.pf-msg[data-role="user"]').filter({ hasText: prompt })).toHaveCount(1);
+  await expect(page.getByText("No messages in this session yet. Send a prompt to get started.")).toHaveCount(0);
+});
+
 test("turn completion preserves live chat row identity after transcript reload", async ({ page }) => {
   const prompt = "Keep this row stable";
   const reply = "Stable streamed reply is visible.";

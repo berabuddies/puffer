@@ -484,11 +484,15 @@
   async function submit() {
     const v = draft.trim();
     if (!v || !canSubmitPrompt) return;
+    const previousDraft = draft;
     submitInFlight = true;
+    draft = "";
     try {
       const accepted = await onSubmitMessage(v, composerOptions());
-      if (accepted === false) return;
-      draft = "";
+      if (accepted === false) {
+        if (!draft.trim()) draft = previousDraft;
+        return;
+      }
       await tick();
       threadEl?.scrollTo({ top: threadEl.scrollHeight, behavior: "smooth" });
     } finally {

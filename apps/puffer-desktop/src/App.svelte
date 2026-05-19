@@ -1056,29 +1056,34 @@
       return false;
     }
     const now = Date.now();
+    const localUserId = `local-user-${now}`;
+    submittedMessages = [
+      ...submittedMessages,
+      {
+        id: localUserId,
+        kind: "user",
+        title: "User",
+        summary: message,
+        body: message,
+        meta: []
+      }
+    ];
     turnStartedAtMs = now;
     turnThinking = true;
     turnStatusHint = "Thinking";
     try {
       const turnId = await runAgentTurn(submitSessionId, message, options);
-      if (selectedSession?.id !== submitSessionId) return false;
+      if (selectedSession?.id !== submitSessionId) {
+        submittedMessages = submittedMessages.filter((item) => item.id !== localUserId);
+        return false;
+      }
       currentTurnId = turnId;
       settledTurnIds.delete(turnId);
-      submittedMessages = [
-        ...submittedMessages,
-        {
-          id: `local-user-${now}`,
-          kind: "user",
-          title: "User",
-          summary: message,
-          body: message,
-          meta: []
-        }
-      ];
       statusMessage = `Agent turn ${turnId.slice(0, 8)} started.`;
       return true;
     } catch (error) {
       if (selectedSession?.id !== submitSessionId) return false;
+      submittedMessages = submittedMessages.filter((item) => item.id !== localUserId);
       currentTurnId = null;
       turnStartedAtMs = null;
       turnThinking = false;
