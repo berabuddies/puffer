@@ -46,5 +46,19 @@ test("desktop minimum width keeps primary navigation visible", async ({ page }) 
   await expect(sidebar).toBeVisible();
   await expect(sidebar.getByRole("button", { name: "Project" })).toBeVisible();
   await expect(sidebar.getByRole("button", { name: "Pipelines" })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: "Deployments" })).toBeVisible();
   await expect(sidebar.getByRole("button", { name: "Settings" })).toBeVisible();
+});
+
+test("sidebar can open the deployments screen", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const sidebar = page.locator(".pf-sidebar");
+  await sidebar.getByRole("button", { name: "Deployments" }).click();
+
+  await expect(page.locator(".pf-dep")).toBeVisible();
+  await expect(page.getByText(/environments/)).toBeVisible();
+  await expect(page.getByRole("button", { name: /New deployment/ })).toBeVisible();
 });
