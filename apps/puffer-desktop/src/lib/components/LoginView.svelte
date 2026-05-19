@@ -26,6 +26,7 @@
   }
 
   function submitApiKey(providerId: string) {
+    if (busyProviderId === providerId) return;
     const apiKey = apiKeyValue(providerId).trim();
     if (!apiKey) return;
     onLoginApiKey(providerId, apiKey);
@@ -155,6 +156,7 @@
                   aria-label={`API key for ${provider.displayName}`}
                   value={apiKeys[provider.id] ?? ""}
                   placeholder="Paste API key"
+                  disabled={busyProviderId === provider.id}
                   on:input={(event) =>
                     updateApiKey(provider.id, (event.currentTarget as HTMLInputElement).value)}
                   on:keydown={(event) => {

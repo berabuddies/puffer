@@ -83,6 +83,35 @@ test("provider API key connect requires a non-empty key", async ({ page }) => {
   });
 });
 
+test("provider API key enter submit is ignored while login is already busy", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.delayResponse(
+    "login_with_api_key",
+    (request) => request.params.providerId === "anthropic",
+    500
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Providers" }).click();
+
+  const input = page.getByLabel("API key for Anthropic");
+  await input.fill("sk-repeat-safe");
+  await input.press("Enter");
+  await daemon.waitForRequest("login_with_api_key");
+  await input.press("Enter");
+  await page.waitForTimeout(80);
+
+  expect(
+    daemon.requests.filter(
+      (request) =>
+        request.method === "login_with_api_key" &&
+        request.params.providerId === "anthropic"
+    )
+  ).toHaveLength(1);
+});
+
 test("settings auth uses the configured daemon when Tauri globals exist", async ({ page }) => {
   await page.addInitScript(() => {
     (window as unknown as { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown }).__TAURI__ = {};

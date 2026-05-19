@@ -746,6 +746,7 @@
   }
 
   async function handleApiKeyLogin(providerId: string, apiKey: string) {
+    if (authBusyProviderId) return;
     authBusyProviderId = providerId;
     authError = null;
     try {
