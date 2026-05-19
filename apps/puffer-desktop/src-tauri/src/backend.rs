@@ -594,8 +594,10 @@ impl BackendState {
     }
 
     fn remove_api_key(&self, provider_id: &str) -> Result<()> {
+        let provider_id = canonical_backend_provider_id(provider_id);
+        validate_provider_id(&provider_id)?;
         let mut credentials = self.load_credentials()?;
-        credentials.api_keys.remove(provider_id);
+        credentials.api_keys.remove(&provider_id);
         self.save_credentials(&credentials)
     }
 
@@ -1923,8 +1925,20 @@ mod tests {
     fn validate_api_key_login_trims_values() {
         let (provider, api_key) = validate_api_key_login("  anthropic  ", "  sk-test  ").unwrap();
 
-        assert_eq!(provider, "anthropic");
+        assert_eq!(provider, "claude");
         assert_eq!(api_key, "sk-test");
+    }
+
+    #[test]
+    fn validate_api_key_login_canonicalizes_desktop_provider_aliases() {
+        let (provider, _) = validate_api_key_login("openai", "sk-test").unwrap();
+        assert_eq!(provider, "codex");
+
+        let (provider, _) = validate_api_key_login("Claude", "sk-test").unwrap();
+        assert_eq!(provider, "claude");
+
+        let err = validate_api_key_login("unknown-provider", "sk-test").unwrap_err();
+        assert!(err.to_string().contains("unknown provider"));
     }
 
     #[test]
@@ -2288,11 +2302,13 @@ fn validate_api_key_login(provider_id: &str, api_key: &str) -> Result<(String, S
     if provider_id.is_empty() {
         bail!("provider id cannot be empty");
     }
+    let provider_id = canonical_backend_provider_id(provider_id);
+    validate_provider_id(&provider_id)?;
     let api_key = api_key.trim();
     if api_key.is_empty() {
         bail!("api key cannot be empty");
     }
-    Ok((provider_id.to_string(), api_key.to_string()))
+    Ok((provider_id, api_key.to_string()))
 }
 
 fn provider_command(provider: &str) -> String {
