@@ -244,6 +244,13 @@
     return "idle";
   }
 
+  function liveSidebarAgentState(session: SessionListItem): AgentState {
+    if (selectedSession?.id !== session.id) return sidebarAgentState(session.activityStatus);
+    if (pendingPermissions.length > 0 || pendingQuestions.length > 0) return "awaiting";
+    if (turnRunning) return turnThinking ? "thinking" : "running";
+    return sidebarAgentState(session.activityStatus);
+  }
+
   function latestGroupMs(group: FolderGroup): number {
     return group.sessions.reduce((latest, session) => Math.max(latest, session.updatedAtMs), 0);
   }
@@ -324,7 +331,7 @@
       title: sessionDisplayTitle(session),
       project,
       branch: "",
-      state: sidebarAgentState(session.activityStatus),
+      state: liveSidebarAgentState(session),
       updatedAtMs: session.updatedAtMs,
       pinned: desktopPins.pinnedAgentIds.includes(session.id)
     };

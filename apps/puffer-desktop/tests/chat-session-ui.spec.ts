@@ -313,6 +313,30 @@ test("rapid send activation submits the prompt only once", async ({ page }) => {
   ).toHaveLength(1);
 });
 
+test("sidebar marks the selected agent thinking while turn start is pending", async ({ page }) => {
+  const prompt = "Show sidebar thinking state";
+  const daemon = new FakeDaemon();
+  daemon.delayResponse(
+    "run_agent_turn",
+    (request) => request.params.message === prompt,
+    240
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /^Browser regression\b/);
+  await page.locator(".pf-composer textarea").fill(prompt);
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.message === prompt
+  );
+
+  const activeRow = page.locator(".pf-sidebar-agent-row").filter({ hasText: "Browser regression" });
+  await expect(activeRow).toContainText("thinking");
+  await expect(activeRow.locator('.pf-puffer[data-state="thinking"]')).toBeVisible();
+});
+
 test("persisted prompt during pending turn replaces the optimistic row", async ({ page }) => {
   const prompt = "Persist this prompt once during title reload";
   const daemon = new FakeDaemon({
