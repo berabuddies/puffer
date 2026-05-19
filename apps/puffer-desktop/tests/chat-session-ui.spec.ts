@@ -3347,3 +3347,68 @@ test("streaming agent row keeps its DOM identity without a local user row", asyn
     })
   ).toBe(true);
 });
+
+test("model guard preserves session model not in provider advertised list", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "openai",
+        kind: "oauth",
+        email: "tester@example.com",
+        expiresAtMs: null,
+        scopes: [],
+        planType: "test",
+        organizationName: null
+      }
+    ],
+    sessions: [
+      {
+        sessionId: "session-custom-model",
+        displayName: "Custom model session",
+        title: "Custom model session",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "openai",
+        modelId: "ft:gpt-4o-2024-08-06:my-org::abc123",
+        timeline: []
+      }
+    ],
+    providerModels: {
+      openai: [
+        {
+          id: "gpt-5",
+          displayName: "GPT-5",
+          provider: "openai",
+          api: "openai-responses",
+          contextWindow: 128000,
+          maxOutputTokens: 4096,
+          supportsReasoning: false,
+          thinkingOptions: [],
+          defaultThinkingOptionId: null,
+          isDefault: true
+        }
+      ]
+    }
+  });
+  daemon.setSettingsConfig({
+    defaultProvider: "openai",
+    defaultModel: "gpt-5"
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Custom model session/);
+  await page.locator(".pf-composer textarea").fill("hello");
+  await page.getByRole("button", { name: "Send" }).click();
+  const request = await daemon.waitForRequest(
+    "run_agent_turn",
+    (item) => item.params.message === "hello"
+  );
+  expect(request.params).toMatchObject({
+    providerId: "openai",
+    modelId: "ft:gpt-4o-2024-08-06:my-org::abc123"
+  });
+});

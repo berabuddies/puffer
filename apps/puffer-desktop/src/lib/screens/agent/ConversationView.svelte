@@ -480,6 +480,26 @@
   });
 
   $effect(() => {
+    if (!selectedProviderId || thinkingProviderId !== selectedProviderId || thinkingModels.length === 0) {
+      return;
+    }
+    if (selectedModelId && thinkingModels.some((model) => model.id === selectedModelId)) return;
+    const defaultModel = settingsSnapshot?.config.defaultModel ?? null;
+    const defaultProvider = settingsSnapshot?.config.defaultProvider ?? null;
+    const selectedCanonical = canonicalDaemonProviderId(selectedProviderId);
+    const defaultCanonical = defaultProvider ? canonicalDaemonProviderId(defaultProvider) : null;
+    const isDefaultFromOtherProvider =
+      defaultModel &&
+      defaultCanonical &&
+      selectedModelId === normalizeModelIdForProvider(selectedProviderId, defaultModel) &&
+      selectedCanonical !== defaultCanonical;
+    if (!isDefaultFromOtherProvider) return;
+    const fallback = thinkingModels.find((model) => model.isDefault) ?? thinkingModels[0];
+    selectedModelId = fallback.id;
+    selectedThinkingOptionId = "";
+  });
+
+  $effect(() => {
     if (!thinkingAvailable) {
       selectedThinkingOptionId = "";
       return;
