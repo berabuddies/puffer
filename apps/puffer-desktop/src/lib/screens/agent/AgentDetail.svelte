@@ -106,6 +106,7 @@
   let titleDraft = $state("");
   let titleSaving = $state(false);
   let titleEditSessionId: string | null = null;
+  let titleEditGeneration = 0;
   let titleEditing = $derived(Boolean(editingTitle && titleEditSessionId === (session?.id ?? null)));
   let detailSessionId: string | null = null;
 
@@ -116,6 +117,7 @@
   $effect(() => {
     const nextSessionId = session?.id ?? null;
     if (nextSessionId === titleEditSessionId) return;
+    titleEditGeneration += 1;
     titleEditSessionId = nextSessionId;
     editingTitle = false;
     titleSaving = false;
@@ -165,12 +167,14 @@
   let diffCount = $derived(timeline.filter((t) => t.kind === "diff").length);
   function startTitleEdit() {
     if (!session || !onRenameTitle) return;
+    titleEditGeneration += 1;
     titleEditSessionId = session.id;
     titleDraft = displayName;
     editingTitle = true;
   }
 
   function cancelTitleEdit() {
+    titleEditGeneration += 1;
     titleDraft = displayName;
     editingTitle = false;
     titleEditSessionId = null;
@@ -178,13 +182,21 @@
 
   async function saveTitleEdit() {
     if (!session || !onRenameTitle || titleSaving || !titleEditing) return;
+    const saveGeneration = titleEditGeneration;
+    const saveSessionId = session.id;
     titleSaving = true;
+    let saved = false;
     try {
       await onRenameTitle(titleDraft);
-      editingTitle = false;
-      titleEditSessionId = null;
+      saved = true;
     } finally {
-      titleSaving = false;
+      if (titleEditGeneration === saveGeneration && titleEditSessionId === saveSessionId) {
+        titleSaving = false;
+        if (saved) {
+          editingTitle = false;
+          titleEditSessionId = null;
+        }
+      }
     }
   }
 

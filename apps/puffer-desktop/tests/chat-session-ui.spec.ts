@@ -3345,6 +3345,62 @@ test("late title rename responses do not overwrite a switched session", async ({
   await expect(page.getByText("Alpha renamed late")).toHaveCount(0);
 });
 
+test("late title save does not cancel editing in a switched session", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-alpha-rename-editing",
+        displayName: "Alpha rename editing",
+        title: "Alpha rename editing",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        timeline: []
+      },
+      {
+        sessionId: "session-beta-rename-editing",
+        displayName: "Beta rename editing",
+        title: "Beta rename editing",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 0,
+        timeline: []
+      }
+    ]
+  });
+  daemon.delayResponse(
+    "rename_session",
+    (request) => request.params.sessionId === "session-alpha-rename-editing",
+    160
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Alpha rename editing/);
+  await page.getByRole("button", { name: "Edit session title" }).click();
+  await page.getByLabel("Session title").fill("Alpha saved late");
+  await page.getByRole("button", { name: "Save title" }).click();
+  await daemon.waitForRequest("rename_session", (request) =>
+    request.params.sessionId === "session-alpha-rename-editing" &&
+    request.params.title === "Alpha saved late"
+  );
+
+  await openSession(page, /Beta rename editing/);
+  await page.getByRole("button", { name: "Edit session title" }).click();
+  await page.getByLabel("Session title").fill("Beta still editing");
+  await page.waitForTimeout(220);
+
+  const titleInput = page.locator('input[aria-label="Session title"]');
+  await expect(titleInput).toBeVisible();
+  await expect(titleInput).toHaveValue("Beta still editing");
+});
+
 test("auto recap does not start a second turn while one is running", async ({ page }) => {
   await page.clock.install({ time: baseTime });
   const daemon = new FakeDaemon();
