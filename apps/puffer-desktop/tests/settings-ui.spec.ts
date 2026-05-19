@@ -58,6 +58,28 @@ test("default model save is ignored while already saving", async ({ page }) => {
   expect(daemon.requests.filter((request) => request.method === "update_config")).toHaveLength(1);
 });
 
+test("default model controls are disabled while saving", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.delayResponse("update_config", () => true, 500);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Providers" }).click();
+
+  const pane = page.locator(".pf-settings-pane");
+  const providerSelect = pane.getByLabel("Provider");
+  const modelSelect = pane.getByLabel("Model");
+  await expect(providerSelect).toBeEnabled();
+  await expect(modelSelect).toBeEnabled();
+
+  await pane.getByRole("button", { name: "Save default" }).click();
+  await daemon.waitForRequest("update_config");
+
+  await expect(providerSelect).toBeDisabled();
+  await expect(modelSelect).toBeDisabled();
+});
+
 test("advertised settings shortcut opens settings", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
