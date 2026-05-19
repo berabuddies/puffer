@@ -219,6 +219,44 @@ test("dispatches printable Browser keyboard input as key events", async ({ page 
   expect(textInsertions).toHaveLength(0);
 });
 
+test("dispatches Browser Enter and Backspace as non-text key events", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open");
+
+  await page.locator(".pf-browser-canvas").click({ position: { x: 20, y: 20 } });
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Backspace");
+
+  const enter = await daemon.waitForRequest("browser_input", (request) => {
+    const event = request.params.event as Record<string, unknown> | undefined;
+    return event?.kind === "key" && event.eventType === "rawKeyDown" && event.key === "Enter";
+  });
+  expect(enter.params.event).toMatchObject({
+    kind: "key",
+    eventType: "rawKeyDown",
+    key: "Enter",
+    code: "Enter"
+  });
+  expect(enter.params.event).not.toHaveProperty("text");
+
+  const backspace = await daemon.waitForRequest("browser_input", (request) => {
+    const event = request.params.event as Record<string, unknown> | undefined;
+    return event?.kind === "key" && event.eventType === "rawKeyDown" && event.key === "Backspace";
+  });
+  expect(backspace.params.event).toMatchObject({
+    kind: "key",
+    eventType: "rawKeyDown",
+    key: "Backspace",
+    code: "Backspace"
+  });
+  expect(backspace.params.event).not.toHaveProperty("text");
+});
+
 test("Browser canvas reload shortcut calls daemon reload", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
