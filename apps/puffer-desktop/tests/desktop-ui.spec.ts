@@ -337,6 +337,33 @@ test("Browser tab close control is a native button", async ({ page }) => {
   await expect(page.locator(".pf-browser-tab")).toHaveCount(1);
 });
 
+test("Browser tab close failure keeps the tab retryable", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1"
+  );
+  await page.getByRole("button", { name: "New tab" }).click();
+  await daemon.waitForRequest("browser_agent", (candidate) =>
+    candidate.params.action === "open" && candidate.params.tabId === "tab-2"
+  );
+  await expect(page.locator(".pf-browser-tab")).toHaveCount(2);
+
+  daemon.failNext("browser_agent", "browser close channel closed");
+  await page.getByRole("button", { name: "Close tab" }).nth(1).click();
+
+  const request = await daemon.waitForRequest("browser_agent", (candidate) =>
+    candidate.params.action === "close" && candidate.params.tabId === "tab-2"
+  );
+  expect(request.params.sessionId).toBe("session-browser");
+  await expect(page.locator(".pf-browser-tab")).toHaveCount(2);
+  await expect(page.getByText(/browser close channel closed/)).toBeVisible();
+});
+
 test("Browser tab list event can clear stale tabs", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

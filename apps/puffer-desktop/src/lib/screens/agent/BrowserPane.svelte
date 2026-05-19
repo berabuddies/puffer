@@ -66,6 +66,7 @@
   let browserCursorStyle = $state("default");
   let showDevtools = $state(false);
   let devtoolsView = $state<"console" | "network">("console");
+  let closingTabIds = $state<string[]>([]);
 
   let disposers: Array<() => void> = [];
   let activeDisposers: Array<() => void> = [];
@@ -578,26 +579,19 @@
     void connectActiveTab();
   }
 
-  function closeTab(tabId: string, event?: Event) {
-    event?.stopPropagation();
-    const requestedSessionId = sessionId;
-    const requestedGeneration = sessionGeneration;
-    const requestedBackendSessionId = `${requestedSessionId}:browser:${tabId}`;
-    const index = tabs.findIndex((tab) => tab.id === tabId);
+  function browserActionErrorText(err: unknown): string {
+    return err instanceof Error ? err.message : String(err);
+  }
+
+  function shouldUseLegacyTabClose(err: unknown): boolean {
+    return /unhandled browser_agent action|unknown browser_agent action|unsupported.*tab close/i.test(
+      browserActionErrorText(err).toLowerCase()
+    );
+  }
+
+  function removeClosedTabLocally(tabId: string, index: number) {
     const nextTabs = tabs.filter((tab) => tab.id !== tabId);
     tabStateVersion += 1;
-    const requestedVersion = tabStateVersion;
-    void browserTabClose(requestedSessionId, tabId)
-      .then((state) => {
-        if (
-          disposed ||
-          requestedGeneration !== sessionGeneration ||
-          activeRootSessionId !== requestedSessionId ||
-          requestedVersion !== tabStateVersion
-        ) return;
-        applyTabsState(state, { allowEmpty: true });
-      })
-      .catch(() => browserClose(requestedBackendSessionId).catch(() => {}));
     tabs = nextTabs;
     saveTabs(nextTabs);
     if (nextTabs.length === 0) {
@@ -617,6 +611,61 @@
       activeTabId = nextTabs[Math.max(0, index - 1)]?.id ?? nextTabs[0].id;
       syncFromActiveTab();
       void connectActiveTab();
+    }
+  }
+
+  async function closeTab(tabId: string, event?: Event) {
+    event?.stopPropagation();
+    if (closingTabIds.includes(tabId)) return;
+    const requestedSessionId = sessionId;
+    const requestedGeneration = sessionGeneration;
+    const requestedBackendSessionId = `${requestedSessionId}:browser:${tabId}`;
+    const index = tabs.findIndex((tab) => tab.id === tabId);
+    if (index === -1) return;
+    const requestedVersion = tabStateVersion;
+    closingTabIds = [...closingTabIds, tabId];
+    try {
+      const state = await browserTabClose(requestedSessionId, tabId);
+      if (
+        disposed ||
+        requestedGeneration !== sessionGeneration ||
+        activeRootSessionId !== requestedSessionId ||
+        requestedVersion !== tabStateVersion
+      ) return;
+      error = null;
+      applyTabsState(state, { allowEmpty: true });
+    } catch (err) {
+      if (shouldUseLegacyTabClose(err)) {
+        try {
+          await browserClose(requestedBackendSessionId);
+        } catch (legacyErr) {
+          if (
+            !disposed &&
+            requestedGeneration === sessionGeneration &&
+            activeRootSessionId === requestedSessionId
+          ) {
+            error = browserActionErrorText(legacyErr);
+          }
+          return;
+        }
+        if (
+          disposed ||
+          requestedGeneration !== sessionGeneration ||
+          activeRootSessionId !== requestedSessionId ||
+          requestedVersion !== tabStateVersion
+        ) return;
+        error = null;
+        removeClosedTabLocally(tabId, index);
+        return;
+      }
+      if (
+        disposed ||
+        requestedGeneration !== sessionGeneration ||
+        activeRootSessionId !== requestedSessionId
+      ) return;
+      error = browserActionErrorText(err);
+    } finally {
+      closingTabIds = closingTabIds.filter((id) => id !== tabId);
     }
   }
 
@@ -957,6 +1006,7 @@
           type="button"
           title="Close tab"
           aria-label="Close tab"
+          disabled={closingTabIds.includes(tab.id)}
           onclick={(event) => closeTab(tab.id, event)}
         >
           <Icon name="x" size={11} />
