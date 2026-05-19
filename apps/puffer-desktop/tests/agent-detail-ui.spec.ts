@@ -191,6 +191,91 @@ test("title edit draft clears when switching sessions", async ({ page }) => {
   await expect(page.locator(".pf-agent-identity")).not.toContainText("Unsaved Alpha Draft");
 });
 
+test("activity expansion state clears when switching sessions", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-activity-alpha",
+        displayName: "Alpha activity",
+        title: "Alpha activity",
+        cwd: "/tmp/puffer-alpha",
+        folderPath: "/tmp/puffer-alpha",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        timeline: [
+          {
+            kind: "user_message",
+            id: "shared-user-id",
+            text: "Inspect the main file.",
+            createdAtMs: baseTime - 50_000
+          },
+          {
+            kind: "tool_call",
+            id: "shared-tool-id",
+            toolId: "read_file",
+            status: "success",
+            inputText: JSON.stringify({ path: "/tmp/puffer-alpha/src/main.rs" }),
+            outputText: "fn alpha() {}\n",
+            createdAtMs: baseTime - 45_000
+          },
+          {
+            kind: "assistant_message",
+            id: "shared-assistant-id",
+            text: "Alpha file inspected.",
+            createdAtMs: baseTime - 40_000
+          }
+        ]
+      },
+      {
+        sessionId: "session-activity-beta",
+        displayName: "Beta activity",
+        title: "Beta activity",
+        cwd: "/tmp/puffer-beta",
+        folderPath: "/tmp/puffer-beta",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        timeline: [
+          {
+            kind: "user_message",
+            id: "shared-user-id",
+            text: "Inspect the main file.",
+            createdAtMs: baseTime - 110_000
+          },
+          {
+            kind: "tool_call",
+            id: "shared-tool-id",
+            toolId: "read_file",
+            status: "success",
+            inputText: JSON.stringify({ path: "/tmp/puffer-beta/src/main.rs" }),
+            outputText: "fn beta() {}\n",
+            createdAtMs: baseTime - 105_000
+          },
+          {
+            kind: "assistant_message",
+            id: "shared-assistant-id",
+            text: "Beta file inspected.",
+            createdAtMs: baseTime - 100_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openAgent(page, /^Alpha activity\b/);
+  const alphaActivity = page.getByRole("button", { name: /Agent activity/ });
+  await expect(alphaActivity).toHaveAttribute("aria-expanded", "false");
+  await alphaActivity.click();
+  await expect(alphaActivity).toHaveAttribute("aria-expanded", "true");
+  await expect(page.locator(".activity-action").filter({ hasText: "/tmp/puffer-alpha/src/main.rs" })).toBeVisible();
+
+  await openAgent(page, /^Beta activity\b/);
+  const betaActivity = page.getByRole("button", { name: /Agent activity/ });
+  await expect(betaActivity).toHaveAttribute("aria-expanded", "false");
+  await expect(page.locator(".activity-action").filter({ hasText: "/tmp/puffer-beta/src/main.rs" })).toHaveCount(0);
+});
+
 test("Side panel does not duplicate effectful Browser or Terminal panes", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

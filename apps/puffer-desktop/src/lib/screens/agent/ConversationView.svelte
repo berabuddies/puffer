@@ -393,6 +393,8 @@
     const nextSessionId = session?.id ?? null;
     if (nextSessionId !== lastSessionId) {
       draft = "";
+      expandedActivityIds = [];
+      selectedActivityChildren = {};
       lastSessionId = nextSessionId;
       void tick().then(() => threadEl?.scrollTo({ top: 0, behavior: "auto" }));
     }
