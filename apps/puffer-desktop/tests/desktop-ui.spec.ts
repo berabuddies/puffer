@@ -1000,6 +1000,71 @@ test("late Browser new-tab failures do not leak into a switched agent", async ({
   await expect(page.locator(".pf-browser-status")).toHaveText("Connected");
 });
 
+test("late Browser reload failures do not leak into a switched agent", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-alpha-reload-fail",
+        displayName: "Alpha reload fail",
+        title: "Alpha reload fail",
+        cwd: "/tmp/puffer-alpha",
+        folderPath: "/tmp/puffer-alpha",
+        updatedAtMs: Date.now(),
+        createdAtMs: Date.now() - 60_000,
+        timeline: []
+      },
+      {
+        sessionId: "session-beta-reload-fail",
+        displayName: "Beta reload fail",
+        title: "Beta reload fail",
+        cwd: "/tmp/puffer-beta",
+        folderPath: "/tmp/puffer-beta",
+        updatedAtMs: Date.now() - 1_000,
+        createdAtMs: Date.now() - 120_000,
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page
+    .locator(".pf-sidebar-agents-list")
+    .getByRole("button", { name: /^Alpha reload fail\b/ })
+    .click();
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-alpha-reload-fail:browser:tab-1"
+  );
+  daemon.delayFailure(
+    "browser_reload",
+    (request) => request.params.sessionId === "session-alpha-reload-fail:browser:tab-1",
+    "reload failed after agent switch",
+    160
+  );
+  await page.locator(".pf-browser-toolbar").getByRole("button", { name: "Reload" }).click();
+  await daemon.waitForRequest("browser_reload", (request) =>
+    request.params.sessionId === "session-alpha-reload-fail:browser:tab-1"
+  );
+
+  await page
+    .locator(".pf-sidebar-agents-list")
+    .getByRole("button", { name: /^Beta reload fail\b/ })
+    .click();
+  await daemon.waitForRequest("browser_agent", (request) =>
+    request.params.action === "list" &&
+    request.params.sessionId === "session-beta-reload-fail"
+  );
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-beta-reload-fail:browser:tab-1"
+  );
+  await expect(page.locator(".pf-browser-status")).toHaveText("Connected");
+
+  await page.waitForTimeout(220);
+  await expect(page.locator(".pf-browser-error")).toHaveCount(0);
+  await expect(page.locator(".pf-browser-status")).toHaveText("Connected");
+});
+
 test("late Browser close responses do not overwrite a switched agent", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

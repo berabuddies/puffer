@@ -46,6 +46,11 @@
     allowEmpty?: boolean;
   };
 
+  type BrowserCommandTarget = {
+    backendSessionId: string;
+    generation: number;
+  };
+
   let { sessionId }: Props = $props();
 
   let viewport: HTMLDivElement | null = $state(null);
@@ -350,6 +355,39 @@
 
   function backendSessionId(tabId: string): string {
     return `${sessionId}:browser:${tabId}`;
+  }
+
+  function activeCommandTarget(): BrowserCommandTarget | null {
+    if (!activeTabId) return null;
+    return {
+      backendSessionId: activeBackendSessionId(),
+      generation: sessionGeneration
+    };
+  }
+
+  function reportCommandError(target: BrowserCommandTarget, err: unknown) {
+    if (
+      disposed ||
+      target.generation !== sessionGeneration ||
+      activeBackendSessionId() !== target.backendSessionId
+    ) return;
+    error = String(err);
+  }
+
+  function runHistory(direction: "back" | "forward") {
+    const target = activeCommandTarget();
+    if (!target) return;
+    void browserHistory(target.backendSessionId, direction).catch((err) => {
+      reportCommandError(target, err);
+    });
+  }
+
+  function reloadActiveTab() {
+    const target = activeCommandTarget();
+    if (!target) return;
+    void browserReload(target.backendSessionId).catch((err) => {
+      reportCommandError(target, err);
+    });
   }
 
   function updateTab(tabId: string, patch: Partial<BrowserTab>, persist = true) {
@@ -912,9 +950,7 @@
     event.preventDefault();
     handledBrowserShortcutCodes.add(event.code);
     if (key === "r") {
-      void browserReload(activeBackendSessionId()).catch((err) => {
-        error = String(err);
-      });
+      reloadActiveTab();
     } else if (key === "l") {
       addressInput?.focus();
       addressInput?.select();
@@ -1056,7 +1092,7 @@
       type="button"
       title="Back"
       disabled={!browserControlsEnabled}
-      onclick={() => browserHistory(activeBackendSessionId(), "back").catch((err) => (error = String(err)))}
+      onclick={() => runHistory("back")}
     >
       <Icon name="chevL" size={14} />
     </button>
@@ -1065,7 +1101,7 @@
       type="button"
       title="Forward"
       disabled={!browserControlsEnabled}
-      onclick={() => browserHistory(activeBackendSessionId(), "forward").catch((err) => (error = String(err)))}
+      onclick={() => runHistory("forward")}
     >
       <Icon name="chevR" size={14} />
     </button>
@@ -1074,7 +1110,7 @@
       type="button"
       title="Reload"
       disabled={!browserControlsEnabled}
-      onclick={() => browserReload(activeBackendSessionId()).catch((err) => (error = String(err)))}
+      onclick={reloadActiveTab}
     >
       <Icon name="refresh" size={14} />
     </button>
