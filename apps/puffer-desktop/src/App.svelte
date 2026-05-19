@@ -116,6 +116,12 @@
     (urlParams.has("skipOnboarding") ||
       window.localStorage.getItem("puffer-desktop:skip-onboarding") === "1");
   const forceOnboarding = urlParams.has("forceOnboarding");
+  const allowUnauthenticatedWorkspaceHarness =
+    typeof window !== "undefined" &&
+    Boolean(
+      (window as unknown as { __PUFFER_DESKTOP_ALLOW_UNAUTHENTICATED_WORKSPACE?: boolean })
+        .__PUFFER_DESKTOP_ALLOW_UNAUTHENTICATED_WORKSPACE
+    );
   let statusMessage = $state("Desktop workspace ready.");
   // Auto-dismiss the status strip a few seconds after each message so it
   // doesn't linger in the sidebar corner looking like a truncated widget.
@@ -720,7 +726,7 @@
   }
 
   function shouldShowOnboarding(snapshot: SettingsSnapshot | null): boolean {
-    if (!hasAgentProviderAuth(snapshot)) return true;
+    if (!hasAgentProviderAuth(snapshot)) return !allowUnauthenticatedWorkspaceHarness;
     if (onboardingCompleted) return false;
     if (forceOnboarding && !onboardingCompleted) return true;
     return !skipOnboarding;
@@ -2396,7 +2402,6 @@
               void handleImportExternal(providerId, source)}
             onRefresh={() => void refreshSettings()}
             onFinish={() => void finishOnboarding()}
-            forceRepoStep={forceOnboarding}
           />
         </div>
       </div>

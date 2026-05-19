@@ -61,6 +61,16 @@ test("skip flag does not bypass provider login when auth is empty", async ({ pag
   await expect(page.getByRole("button", { name: "New agent in puffer" })).toHaveCount(0);
 });
 
+test("force onboarding does not bypass provider login when auth is empty", async ({ page }) => {
+  const daemon = new FakeDaemon({ auth: [] });
+  await daemon.install(page);
+  await daemon.open(page, { forceOnboarding: true, skipOnboarding: false });
+
+  await expect(page.getByLabel("API key for Anthropic")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Workspace is ready" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Continue/ })).toHaveCount(0);
+});
+
 test("skip flag does not bypass provider login with only non-agent auth", async ({ page }) => {
   const daemon = new FakeDaemon({
     auth: [

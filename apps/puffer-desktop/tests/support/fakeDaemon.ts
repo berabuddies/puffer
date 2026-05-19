@@ -356,11 +356,18 @@ export class FakeDaemon {
   async open(
     page: Page,
     options: {
+      allowUnauthenticatedWorkspace?: boolean;
       forceOnboarding?: boolean;
       skipOnboarding?: boolean;
       extraParams?: Record<string, string>;
     } = {}
   ): Promise<void> {
+    if (options.allowUnauthenticatedWorkspace) {
+      await page.addInitScript(() => {
+        (window as unknown as { __PUFFER_DESKTOP_ALLOW_UNAUTHENTICATED_WORKSPACE?: boolean })
+          .__PUFFER_DESKTOP_ALLOW_UNAUTHENTICATED_WORKSPACE = true;
+      });
+    }
     const params = new URLSearchParams({
       corbinaBackend: this.url,
       corbinaToken: "test"

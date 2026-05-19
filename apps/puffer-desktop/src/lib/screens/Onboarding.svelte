@@ -19,7 +19,6 @@
     onImportExternal: (providerId: string, source: "claude" | "codex") => void;
     onRefresh: () => void;
     onFinish: () => void;
-    forceRepoStep?: boolean;
   };
 
   let props: Props = $props();
@@ -27,7 +26,7 @@
   let agentAuthCount = $derived(
     (props.snapshot?.auth ?? []).filter((auth) => isAgentProviderId(auth.providerId)).length
   );
-  let signedIn = $derived(props.forceRepoStep || agentAuthCount > 0);
+  let signedIn = $derived(agentAuthCount > 0);
 
   let steps = $derived(
     signedIn
