@@ -555,6 +555,9 @@
         <Icon name="globe" size={12} />Browser
       </button>
     </div>
+    <button type="button" class="pf-agent-close" onclick={onBack} title="Close session" aria-label="Close session">
+      <Icon name="x" size={13} />
+    </button>
   </div>
 
   <div class="pf-agent-detail-shell" class:withSubpage={sideTab !== null}>
@@ -703,6 +706,25 @@
     transition: background 120ms, color 120ms;
   }
   .pf-agent-back:hover { background: var(--accent); color: var(--foreground); }
+  .pf-agent-close {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--muted-foreground);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background 120ms, color 120ms, border-color 120ms;
+  }
+  .pf-agent-close:hover {
+    background: var(--accent);
+    color: var(--foreground);
+    border-color: var(--border);
+  }
   .pf-agent-identity {
     display: flex;
     flex-direction: column;

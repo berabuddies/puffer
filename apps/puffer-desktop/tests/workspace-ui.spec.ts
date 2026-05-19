@@ -438,6 +438,46 @@ test("session history keeps older sessions available after starting a new agent"
   await expect(page.getByText("Older transcript persisted.")).toBeVisible();
 });
 
+test("close session returns to workspace without removing history", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-close-history",
+        displayName: "Closable history session",
+        title: "Closable history session",
+        cwd: "/tmp/puffer-close-history",
+        folderPath: "/tmp/puffer-close-history",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "user_message",
+            id: "close-user",
+            text: "This should survive closing the detail view.",
+            createdAtMs: baseTime - 50_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const history = page.getByRole("region", { name: "Session history" });
+  await history.getByRole("button", { name: /Closable history session/ }).click();
+  await expect(page.locator(".pf-agent-detail .primary-title")).toContainText("Closable history session");
+
+  await page.getByRole("button", { name: "Close session" }).click();
+
+  await expect(page.locator(".pf-agent-detail")).toHaveCount(0);
+  await expect(page.locator(".pf-pw-list")).toBeVisible();
+  await expect(history).toContainText("Closable history session");
+
+  await history.getByRole("button", { name: /Closable history session/ }).click();
+  await expect(page.getByText("This should survive closing the detail view.")).toBeVisible();
+});
+
 test("late workspace refresh does not hide a newly created session", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
