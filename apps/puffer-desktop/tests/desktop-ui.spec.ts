@@ -77,6 +77,33 @@ test("opens the Browser tab against a mocked desktop daemon", async ({ page }) =
   await expect(page.locator(".pf-browser-error")).toHaveCount(0);
 });
 
+test("Browser tab event refreshes a connected blank canvas", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    emitBrowserOpenFrame: false,
+    emitBrowserResizeFrame: true
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1"
+  );
+
+  daemon.emit("browser:session-browser:tabs", {
+    activeTabId: "tab-1",
+    tabs: [{ ...browserTab("tab-1", "https://agent.example"), active: true }]
+  });
+
+  await daemon.waitForRequest("browser_resize", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1"
+  );
+  await expect.poll(async () =>
+    page.locator(".pf-browser-canvas").evaluate((node) => (node as HTMLCanvasElement).width)
+  ).toBe(960);
+});
+
 test("sends Browser tab navigation through the daemon bridge", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

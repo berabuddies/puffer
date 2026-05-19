@@ -228,6 +228,8 @@ export class FakeDaemon {
   private readonly lspLocations = new Map<string, string>();
   private readonly providerModels: Record<string, JsonRecord[]>;
   private readonly providerSummaries: JsonRecord[] | null;
+  private readonly emitBrowserOpenFrame: boolean;
+  private readonly emitBrowserResizeFrame: boolean;
   private workspaceRoot = "/tmp/puffer";
   private authStatuses: JsonRecord[];
   private externalCredentials: JsonRecord[];
@@ -269,6 +271,8 @@ export class FakeDaemon {
     auth?: JsonRecord[];
     externalCredentials?: JsonRecord[];
     url?: string;
+    emitBrowserOpenFrame?: boolean;
+    emitBrowserResizeFrame?: boolean;
   } = {}) {
     this.url = options.url ?? FAKE_DAEMON_URL;
     this.protocol = options.protocol ?? "legacy";
@@ -296,6 +300,8 @@ export class FakeDaemon {
     this.providerModels = options.providerModels ?? {};
     this.providerSummaries = options.providers ?? null;
     this.mcpServers = options.mcpServers ?? this.mcpServers;
+    this.emitBrowserOpenFrame = options.emitBrowserOpenFrame ?? true;
+    this.emitBrowserResizeFrame = options.emitBrowserResizeFrame ?? false;
   }
 
   setWorkspaceRoot(workspaceRoot: string): void {
@@ -594,9 +600,10 @@ export class FakeDaemon {
         return this.navigateBrowser(request.params);
       case "browser_reload":
       case "browser_history":
-      case "browser_resize":
       case "browser_input":
         return {};
+      case "browser_resize":
+        return this.resizeBrowser(request.params);
       case "browser_cursor":
         return { cursor: "text" };
       case "browser_copy_selection":
@@ -984,9 +991,20 @@ export class FakeDaemon {
     const sessionId = String(params.sessionId ?? "");
     const url = String(params.url ?? "about:blank");
     this.recordBrowserOpen(sessionId, url);
+    if (this.emitBrowserOpenFrame) this.emitBrowserFrame(sessionId, "frame-1");
+    return browserState(url);
+  }
+
+  private resizeBrowser(params: JsonRecord): unknown {
+    const sessionId = String(params.sessionId ?? "");
+    if (this.emitBrowserResizeFrame) this.emitBrowserFrame(sessionId, "frame-resize");
+    return {};
+  }
+
+  private emitBrowserFrame(sessionId: string, frameId: string): void {
     queueMicrotask(() => {
       this.emit(`browser:${sessionId}:frame`, {
-        frameId: "frame-1",
+        frameId,
         mimeType: "image/png",
         encoding: "base64",
         data: ONE_PIXEL_PNG,
@@ -994,7 +1012,6 @@ export class FakeDaemon {
         height: 720
       });
     });
-    return browserState(url);
   }
 
   private tabSet(sessionId: string): TabSet {

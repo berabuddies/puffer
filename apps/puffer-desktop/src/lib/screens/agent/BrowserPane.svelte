@@ -262,7 +262,10 @@
         if (generation !== sessionGeneration || activeRootSessionId !== nextSessionId) return;
         const previousActiveTabId = activeTabId;
         applyTabsState(next, { allowEmpty: true });
-        if (activeTabId && (activeTabId !== previousActiveTabId || !connected)) {
+        if (
+          activeTabId &&
+          (activeTabId !== previousActiveTabId || !connected || !activeTab?.frame)
+        ) {
           void connectActiveTab(generation);
         }
       })
