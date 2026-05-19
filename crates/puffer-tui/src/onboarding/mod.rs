@@ -27,7 +27,10 @@ pub(crate) fn needs_initial_provider_setup(state: &AppState, providers: &Provide
         return true;
     };
     let Some((selected_provider, selected_model)) = model_selector.split_once('/') else {
-        return false;
+        return !provider
+            .models
+            .iter()
+            .any(|model| model.id == model_selector);
     };
     selected_provider != provider_id
         || !provider
@@ -837,6 +840,60 @@ mod tests {
     }
 
     #[test]
+    fn initial_provider_setup_accepts_unscoped_current_provider_model() {
+        let address = "127.0.0.1:9".parse().expect("socket address");
+        let mut providers = ProviderRegistry::new();
+        providers.register(openai_provider(address));
+        let mut state = AppState::new(
+            puffer_config::PufferConfig::default(),
+            std::path::PathBuf::from("/workspace/puffer"),
+            puffer_session_store::SessionMetadata {
+                id: uuid::Uuid::nil(),
+                display_name: None,
+                generated_title: None,
+                cwd: std::path::PathBuf::from("/workspace/puffer"),
+                created_at_ms: 0,
+                updated_at_ms: 0,
+                parent_session_id: None,
+                slug: None,
+                tags: Vec::new(),
+                note: None,
+            },
+        );
+        state.current_provider = Some("openai".to_string());
+        state.current_model = Some("gpt-5".to_string());
+
+        assert!(!needs_initial_provider_setup(&state, &providers));
+    }
+
+    #[test]
+    fn initial_provider_setup_rejects_unknown_unscoped_model() {
+        let address = "127.0.0.1:9".parse().expect("socket address");
+        let mut providers = ProviderRegistry::new();
+        providers.register(openai_provider(address));
+        let mut state = AppState::new(
+            puffer_config::PufferConfig::default(),
+            std::path::PathBuf::from("/workspace/puffer"),
+            puffer_session_store::SessionMetadata {
+                id: uuid::Uuid::nil(),
+                display_name: None,
+                generated_title: None,
+                cwd: std::path::PathBuf::from("/workspace/puffer"),
+                created_at_ms: 0,
+                updated_at_ms: 0,
+                parent_session_id: None,
+                slug: None,
+                tags: Vec::new(),
+                note: None,
+            },
+        );
+        state.current_provider = Some("openai".to_string());
+        state.current_model = Some("gpt-unknown".to_string());
+
+        assert!(needs_initial_provider_setup(&state, &providers));
+    }
+
+    #[test]
     fn provider_picker_includes_discovery_provider_without_bundled_models() {
         let mut providers = ProviderRegistry::new();
         providers.register(discovery_only_provider("lmstudio", "LM Studio", Vec::new()));
@@ -864,7 +921,9 @@ mod tests {
 
         match overlay {
             Some(OverlayState::LoginPicker { entries, .. }) => {
-                assert!(entries.iter().any(|entry| entry.selector == "custom-openai"));
+                assert!(entries
+                    .iter()
+                    .any(|entry| entry.selector == "custom-openai"));
             }
             other => panic!("expected login picker, got {other:?}"),
         }
