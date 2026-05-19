@@ -62,7 +62,9 @@ pub(super) fn execute_runtime_local_tool(
     match definition.handler.as_str() {
         "runtime:skill" => execute_skill_tool(resources, input),
         "runtime:tool_search" => execute_tool_search(registry, input),
-        "runtime:browser" => browser::execute_browser_tool(cwd, &state.session.id, input),
+        "runtime:browser" => {
+            browser::execute_browser_tool(cwd, &state.browser_root_session_id(), input)
+        }
         "runtime:glob" => execute_glob_tool(cwd, &state.working_dirs, filesystem_policy, input),
         "runtime:sleep" => sleep::execute_sleep(input),
         "runtime:list_mcp_resources" => {
