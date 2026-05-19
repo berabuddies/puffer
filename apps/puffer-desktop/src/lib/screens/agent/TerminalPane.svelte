@@ -248,7 +248,13 @@
     closingPtyIds = [...closingPtyIds, ptyId];
     try {
       const closingIndex = ptyTabs.findIndex((tab) => tab.ptyId === ptyId);
-      await closePty(ptyId).catch(() => {});
+      try {
+        await closePty(ptyId);
+      } catch (err) {
+        error = err instanceof Error ? err.message : String(err);
+        return;
+      }
+      error = null;
       const nextTabs = ptyTabs.filter((tab) => tab.ptyId !== ptyId);
       ptyTabs = nextTabs;
       seenSeqByPty.delete(ptyId);
