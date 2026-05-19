@@ -2950,6 +2950,81 @@ test("model picker refreshes current provider models on reopen", async ({ page }
   await expect(picker.locator(".row-name").filter({ hasText: /^GPT-5$/ })).toHaveCount(0);
 });
 
+test("composer replaces stale same-provider catalog model before submit", async ({ page }) => {
+  const model = (id: string, displayName = id) => ({
+    id,
+    displayName,
+    provider: "openai",
+    api: "openai-responses",
+    supportsTools: true,
+    supportsVision: false,
+    contextWindow: null,
+    maxOutputTokens: null,
+    thinkingOptions: [],
+    defaultThinkingOptionId: null,
+    isDefault: true
+  });
+  const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "openai",
+        kind: "oauth",
+        email: "tester@example.com",
+        expiresAtMs: null,
+        scopes: [],
+        planType: "test",
+        organizationName: null
+      }
+    ],
+    providers: [
+      {
+        id: "openai",
+        displayName: "OpenAI",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 1,
+        authModes: ["oauth"],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ],
+    sessions: [
+      {
+        sessionId: "session-stale-openai-model",
+        displayName: "Stale OpenAI model",
+        title: "Stale OpenAI model",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "openai",
+        modelId: "gpt-5",
+        timeline: []
+      }
+    ],
+    providerModels: {
+      openai: [model("gpt-5.4", "GPT-5.4")]
+    }
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Stale OpenAI model/);
+  await expect(page.locator(".pf-composer .picker .trigger")).toContainText("gpt-5.4");
+  await page.locator(".pf-composer textarea").fill("Use fresh model");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  const request = await daemon.waitForRequest(
+    "run_agent_turn",
+    (item) => item.params.message === "Use fresh model"
+  );
+  expect(request.params).toMatchObject({
+    providerId: "openai",
+    modelId: "gpt-5.4"
+  });
+});
+
 test("model picker closes with Escape and can reopen", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

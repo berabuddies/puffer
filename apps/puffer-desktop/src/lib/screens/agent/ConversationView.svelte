@@ -203,6 +203,12 @@
     return trimmed;
   }
 
+  function isCustomModelId(modelId: string | null | undefined): boolean {
+    const trimmed = modelId?.trim();
+    if (!trimmed) return false;
+    return trimmed.includes(":") || trimmed.startsWith("ft-");
+  }
+
   function providerDisplayName(providerId: string | null | undefined): string {
     const normalized = providerId?.trim().toLowerCase();
     if (!normalized) return "Codex";
@@ -493,7 +499,7 @@
       defaultCanonical &&
       selectedModelId === normalizeModelIdForProvider(selectedProviderId, defaultModel) &&
       selectedCanonical !== defaultCanonical;
-    if (!isDefaultFromOtherProvider) return;
+    if (!isDefaultFromOtherProvider && isCustomModelId(selectedModelId)) return;
     const fallback = thinkingModels.find((model) => model.isDefault) ?? thinkingModels[0];
     selectedModelId = fallback.id;
     selectedThinkingOptionId = "";
