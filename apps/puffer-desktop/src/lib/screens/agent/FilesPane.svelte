@@ -623,9 +623,9 @@
     saveError = null;
     try {
       const result = await writeFile(target, draftContent);
+      cacheFileResult(result, true);
+      pinTab(target);
       if (activePath === target) {
-        cacheFileResult(result, true);
-        pinTab(target);
         clearLspState();
       }
       void refreshDir(parentPath(target));
@@ -634,7 +634,7 @@
         saveError = err instanceof Error ? err.message : String(err);
       }
     } finally {
-      if (activePath === target) saving = false;
+      saving = false;
     }
   }
 

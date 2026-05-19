@@ -92,6 +92,38 @@ test("Files tab saves text edits through the daemon", async ({ page }) => {
   await expect(editor).toHaveValue(saved);
 });
 
+test("Files tab releases save state after switching tabs mid-save", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openFilesPanel(page);
+
+  const editor = page.getByLabel("Edit file contents");
+  const mainDraft = "fn main() {\n    println!(\"background save\");\n}\n";
+  await editor.fill(mainDraft);
+  daemon.delayResponse(
+    "write_file",
+    (candidate) => candidate.params.path === "/tmp/puffer/src/main.rs",
+    250
+  );
+  await page.getByRole("button", { name: "Save" }).click();
+
+  await daemon.waitForRequest(
+    "write_file",
+    (candidate) => candidate.params.path === "/tmp/puffer/src/main.rs"
+  );
+  await page.getByRole("tab", { name: /lib\.rs/ }).click();
+
+  await expect(page.getByRole("tab", { name: /main\.rs/ }).locator(".dirty-dot")).toHaveCount(0);
+  await expect(editor).toHaveValue("pub fn fixture() {}\n");
+
+  const libDraft = "pub fn fixture() {\n    println!(\"after save\");\n}\n";
+  await editor.fill(libDraft);
+  await expect(page.getByRole("button", { name: "Save" })).toBeEnabled();
+});
+
 test("Files editor keeps global find shortcuts while focused", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
