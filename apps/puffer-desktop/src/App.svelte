@@ -146,7 +146,7 @@
   let turnStatusHint = $state<string | null>(null);
   let liveSidebarAgentsById = $state<Record<string, LiveSidebarAgentOverlay>>({});
   let liveStreamItems = $state<TimelineItem[]>([]);
-  let settledTurnIds = new Set<string>();
+  let settledTurnKeys = new Set<string>();
   let turnPermissionLookup = $state<Record<string, { turnId: string; requestId: string }>>({});
   let turnQuestionLookup = $state<Record<string, { turnId: string; requestId: string }>>({});
   let replayTextByTurn: Record<string, string> = {};
@@ -995,7 +995,6 @@
     turnStartedAtMs = null;
     turnThinking = false;
     turnStatusHint = null;
-    settledTurnIds = new Set();
   }
 
   async function openSession(session: SessionListItem, options: OpenSessionOptions = {}) {
@@ -1143,7 +1142,7 @@
     turnStartedAtMs = null;
     turnThinking = false;
     turnStatusHint = null;
-    settledTurnIds = new Set();
+    settledTurnKeys = new Set();
     sessionLoadGeneration += 1;
     sessionSubscriptionGeneration += 1;
     if (sessionEventUnlisten) {
@@ -1363,7 +1362,7 @@
     setLiveSidebarAgentState(submitSessionId, "thinking", null, sessionAtSubmit);
     try {
       const turnId = await runAgentTurn(submitSessionId, message, options);
-      const settledBeforeRpcReturned = settledTurnIds.has(turnId);
+      const settledBeforeRpcReturned = isTurnSettled(submitSessionId, turnId);
       if (!settledBeforeRpcReturned) {
         setLiveSidebarAgentState(submitSessionId, "thinking", turnId, sessionAtSubmit);
       }
@@ -1382,7 +1381,7 @@
       }
       currentTurnId = turnId;
       cancelingTurnId = null;
-      settledTurnIds.delete(turnId);
+      forgetSettledTurn(submitSessionId, turnId);
       statusMessage = `Agent turn ${turnId.slice(0, 8)} started.`;
       return true;
     } catch (error) {
@@ -1779,21 +1778,37 @@
     }
   }
 
-  function shouldIgnoreTurnEvent(turnId: string): boolean {
-    if (settledTurnIds.has(turnId)) return true;
+  function turnKey(sessionId: string, turnId: string): string {
+    return `${sessionId}\u0000${turnId}`;
+  }
+
+  function isTurnSettled(sessionId: string, turnId: string): boolean {
+    return settledTurnKeys.has(turnKey(sessionId, turnId));
+  }
+
+  function rememberSettledTurn(sessionId: string, turnId: string) {
+    settledTurnKeys.add(turnKey(sessionId, turnId));
+  }
+
+  function forgetSettledTurn(sessionId: string, turnId: string) {
+    settledTurnKeys.delete(turnKey(sessionId, turnId));
+  }
+
+  function shouldIgnoreTurnEvent(sessionId: string, turnId: string): boolean {
+    if (isTurnSettled(sessionId, turnId)) return true;
     return currentTurnId !== null && currentTurnId !== turnId;
   }
 
-  function markTurnActive(turnId: string) {
+  function markTurnActive(sessionId: string, turnId: string) {
     if (currentTurnId !== null && currentTurnId !== turnId) {
       cancelingTurnId = null;
     }
     currentTurnId = turnId;
-    settledTurnIds.delete(turnId);
+    forgetSettledTurn(sessionId, turnId);
   }
 
-  function markTurnSettled(turnId: string) {
-    settledTurnIds.add(turnId);
+  function markTurnSettled(sessionId: string, turnId: string) {
+    rememberSettledTurn(sessionId, turnId);
     const { [turnId]: _drop, ...rest } = replayTextByTurn;
     replayTextByTurn = rest;
     if (cancelingTurnId === turnId) {
@@ -1819,12 +1834,12 @@
 
   function handleSessionEvent(sid: string, ev: SessionStreamEvent) {
     const selectedForEvent = selectedSession?.id === sid;
-    const ignoredForSelected = selectedForEvent && shouldIgnoreTurnEvent(ev.turnId);
+    const ignoredForSelected = selectedForEvent && shouldIgnoreTurnEvent(sid, ev.turnId);
     if (!ignoredForSelected) applySidebarSessionEvent(sid, ev);
     if (!selectedForEvent || ignoredForSelected) return;
     switch (ev.type) {
       case "turn-start":
-        markTurnActive(ev.turnId);
+        markTurnActive(sid, ev.turnId);
         turnStartedAtMs = Date.now();
         turnThinking = true;
         turnStatusHint = "Thinking";
@@ -1834,12 +1849,12 @@
         }
         break;
       case "thinking-delta":
-        markTurnActive(ev.turnId);
+        markTurnActive(sid, ev.turnId);
         turnThinking = true;
         turnStatusHint = "Thinking";
         break;
       case "text-delta":
-        markTurnActive(ev.turnId);
+        markTurnActive(sid, ev.turnId);
         turnThinking = false;
         turnStatusHint = null;
         {
@@ -1848,7 +1863,7 @@
         }
         break;
       case "tool-calls-requested":
-        markTurnActive(ev.turnId);
+        markTurnActive(sid, ev.turnId);
         turnThinking = false;
         turnStatusHint = "Running tools";
         // Render an immediate pending card per requested call so the user
@@ -1874,7 +1889,7 @@
         }
         break;
       case "tool-invocations":
-        markTurnActive(ev.turnId);
+        markTurnActive(sid, ev.turnId);
         turnThinking = false;
         turnStatusHint = null;
         for (const inv of ev.invocations) {
@@ -1907,20 +1922,20 @@
         }
         break;
       case "reflection-checkpoint":
-        markTurnActive(ev.turnId);
+        markTurnActive(sid, ev.turnId);
         turnThinking = true;
         turnStatusHint = "Thinking";
         break;
       case "retry-attempt":
-        markTurnActive(ev.turnId);
+        markTurnActive(sid, ev.turnId);
         turnThinking = true;
         turnStatusHint = `Retrying ${ev.attempt}/${ev.maxAttempts}`;
         break;
       case "usage":
-        markTurnActive(ev.turnId);
+        markTurnActive(sid, ev.turnId);
         break;
       case "permission-request": {
-        markTurnActive(ev.turnId);
+        markTurnActive(sid, ev.turnId);
         turnThinking = false;
         turnStatusHint = "Awaiting approval";
         const id = livePermissionId(ev.turnId, ev.requestId);
@@ -1951,7 +1966,7 @@
         break;
       }
       case "user-question-request": {
-        markTurnActive(ev.turnId);
+        markTurnActive(sid, ev.turnId);
         turnThinking = false;
         turnStatusHint = "Waiting for answer";
         const id = liveQuestionId(ev.turnId, ev.requestId);
@@ -1974,7 +1989,7 @@
       }
       case "turn-complete":
       case "turn-error":
-        markTurnSettled(ev.turnId);
+        markTurnSettled(sid, ev.turnId);
         turnStartedAtMs = null;
         turnThinking = false;
         turnStatusHint = null;

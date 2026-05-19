@@ -510,6 +510,75 @@ test("early turn completion before RPC response does not leave composer stuck", 
   await expect(page.getByRole("button", { name: "Stop turn" })).toHaveCount(0);
 });
 
+test("early completed turn does not revive sidebar state after switching sessions", async ({ page }) => {
+  const prompt = "Complete alpha before switching away";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-early-alpha",
+        displayName: "Early alpha",
+        title: "Early alpha",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        activityStatus: "idle",
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      },
+      {
+        sessionId: "session-early-beta",
+        displayName: "Early beta",
+        title: "Early beta",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 0,
+        activityStatus: "idle",
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  daemon.delayResponse(
+    "run_agent_turn",
+    (request) => request.params.sessionId === "session-early-alpha",
+    240
+  );
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Early alpha/);
+  await page.locator(".pf-composer textarea").fill(prompt);
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-early-alpha" &&
+      request.params.message === prompt
+  );
+
+  daemon.emit("session:session-early-alpha:event", {
+    type: "turn-start",
+    turnId: "turn-session-early-alpha"
+  });
+  daemon.emit("session:session-early-alpha:event", {
+    type: "turn-complete",
+    turnId: "turn-session-early-alpha",
+    assistantText: "Alpha finished before RPC returned."
+  });
+  await openSession(page, /Early beta/);
+
+  await page.waitForTimeout(320);
+  const alphaRow = page.locator(".pf-sidebar-agent-row").filter({ hasText: "Early alpha" });
+  await expect(alphaRow.locator(".pf-task-status")).toContainText("idle");
+});
+
 test("sidebar marks the selected agent thinking while turn start is pending", async ({ page }) => {
   const prompt = "Show sidebar thinking state";
   const daemon = new FakeDaemon();
