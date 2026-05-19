@@ -294,6 +294,10 @@
     return sidebarAgentState(session.activityStatus);
   }
 
+  function activityStatusIsActive(status: AgentActivityStatus): boolean {
+    return status === "running" || status === "awaiting";
+  }
+
   function findSidebarSession(sessionId: string, fallback?: SessionListItem | null): SessionListItem | null {
     if (fallback?.id === sessionId) return fallback;
     if (selectedSession?.id === sessionId) return selectedSession;
@@ -1177,6 +1181,36 @@
     );
   }
 
+  function hasTurnRuntimeState(): boolean {
+    return (
+      currentTurnId !== null ||
+      cancelingTurnId !== null ||
+      turnStartedAtMs !== null ||
+      Object.keys(turnPermissionLookup).length > 0 ||
+      Object.keys(turnQuestionLookup).length > 0
+    );
+  }
+
+  function clearSettledLoadedTurnState(
+    sessionId: string,
+    activityStatus: AgentActivityStatus,
+    remainingSubmittedMessages: TimelineItem[],
+    remainingLiveItems: TimelineItem[]
+  ) {
+    if (!hasTurnRuntimeState() || activityStatusIsActive(activityStatus)) return;
+    if (remainingSubmittedMessages.length > 0 || remainingLiveItems.length > 0) return;
+    const settledTurnId = currentTurnId;
+    if (settledTurnId) rememberSettledTurn(sessionId, settledTurnId);
+    clearLiveSidebarAgentState(sessionId, settledTurnId);
+    currentTurnId = null;
+    cancelingTurnId = null;
+    turnStartedAtMs = null;
+    turnThinking = false;
+    turnStatusHint = null;
+    turnPermissionLookup = {};
+    turnQuestionLookup = {};
+  }
+
   async function openSession(session: SessionListItem, options: OpenSessionOptions = {}) {
     const showLoading = options.showLoading ?? selectedSession?.id !== session.id;
     const sameSession = selectedSession?.id === session.id;
@@ -1211,8 +1245,18 @@
         // so the composer feels fresh.
         resetLiveTurnState();
       } else {
-        submittedMessages = submittedStillMissingFromPersisted(timeline, submittedMessages);
-        liveStreamItems = stillMissingFromPersisted(timeline, liveStreamItems);
+        const remainingSubmittedMessages = submittedStillMissingFromPersisted(timeline, submittedMessages);
+        const remainingLiveItems = stillMissingFromPersisted(timeline, liveStreamItems);
+        submittedMessages = remainingSubmittedMessages;
+        liveStreamItems = remainingLiveItems;
+        if (resetLiveState) {
+          clearSettledLoadedTurnState(
+            detail.session.id,
+            detail.session.activityStatus,
+            remainingSubmittedMessages,
+            remainingLiveItems
+          );
+        }
       }
       statusMessage = `Loaded ${detail.timeline.length} conversation items.`;
     } catch (error) {

@@ -242,6 +242,91 @@ test("pending submitted prompt survives switching away and back before turn id",
   await expect(page.getByRole("button", { name: "Stop turn" })).toBeVisible();
 });
 
+test("completed turn while away does not restore stale running controls", async ({
+  page
+}) => {
+  const prompt = "Alpha finishes while hidden";
+  const reply = "Alpha finished while another session was open.";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-alpha-hidden-complete",
+        displayName: "Alpha hidden complete",
+        title: "Alpha hidden complete",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        activityStatus: "idle",
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      },
+      {
+        sessionId: "session-beta-hidden-complete",
+        displayName: "Beta hidden complete",
+        title: "Beta hidden complete",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 1,
+        activityStatus: "idle",
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "beta-hidden-complete-seed",
+            text: "Beta hidden complete seed",
+            createdAtMs: baseTime - 90_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Alpha hidden complete/);
+  await page.locator(".pf-composer textarea").fill(prompt);
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-alpha-hidden-complete" &&
+      request.params.message === prompt
+  );
+  await expect(page.getByRole("button", { name: "Stop turn" })).toBeVisible();
+
+  await openSession(page, /Beta hidden complete/);
+  await expect(page.getByText("Beta hidden complete seed")).toBeVisible();
+  daemon.setSessionTimeline("session-alpha-hidden-complete", [
+    {
+      kind: "user_message",
+      id: "alpha-hidden-complete-user",
+      text: prompt,
+      createdAtMs: baseTime + 1
+    },
+    {
+      kind: "assistant_message",
+      id: "alpha-hidden-complete-assistant",
+      text: reply,
+      createdAtMs: baseTime + 2
+    }
+  ]);
+
+  await openSession(page, /Alpha hidden complete/);
+  await expect(page.locator('.pf-msg[data-role="user"]').filter({ hasText: prompt })).toHaveCount(1);
+  await expect(page.locator('.pf-msg[data-role="agent"]').filter({ hasText: reply })).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Stop turn" })).toHaveCount(0);
+
+  const composer = page.locator(".pf-composer textarea");
+  await composer.fill("Follow-up after hidden completion");
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
+});
+
 test("pending turn start in one session does not disable another session composer", async ({
   page
 }) => {
