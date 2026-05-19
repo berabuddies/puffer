@@ -261,6 +261,176 @@ test("composer moves submitted prompt into the thread while turn start is pendin
   await expect(page.getByText("No messages in this session yet. Send a prompt to get started.")).toHaveCount(0);
 });
 
+test("rapid send activation submits the prompt only once", async ({ page }) => {
+  const prompt = "Do not duplicate this prompt";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-rapid-send",
+        displayName: "Rapid send",
+        title: "Rapid send",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  daemon.delayResponse(
+    "run_agent_turn",
+    (request) => request.params.sessionId === "session-rapid-send",
+    220
+  );
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Rapid send/);
+  await page.locator(".pf-composer textarea").fill(prompt);
+  await page.getByRole("button", { name: "Send", exact: true }).evaluate((button) => {
+    (button as HTMLButtonElement).click();
+    (button as HTMLButtonElement).click();
+  });
+
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-rapid-send" &&
+      request.params.message === prompt
+  );
+  await expect(page.locator('.pf-msg[data-role="user"]').filter({ hasText: prompt })).toHaveCount(1);
+  expect(
+    daemon.requests.filter(
+      (request) =>
+        request.method === "run_agent_turn" &&
+        request.params.sessionId === "session-rapid-send" &&
+        request.params.message === prompt
+    )
+  ).toHaveLength(1);
+});
+
+test("persisted prompt during pending turn replaces the optimistic row", async ({ page }) => {
+  const prompt = "Persist this prompt once during title reload";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-pending-persist",
+        displayName: "Pending persist",
+        title: "Pending persist",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  daemon.delayResponse(
+    "run_agent_turn",
+    (request) => request.params.sessionId === "session-pending-persist",
+    300
+  );
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Pending persist/);
+  await page.locator(".pf-composer textarea").fill(prompt);
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-pending-persist" &&
+      request.params.message === prompt
+  );
+  await expect(page.locator('.pf-msg[data-role="user"]').filter({ hasText: prompt })).toHaveCount(1);
+
+  const loadRequestsBefore = daemon.requests.filter(
+    (request) =>
+      request.method === "load_session_detail" &&
+      request.params.sessionId === "session-pending-persist"
+  ).length;
+  daemon.setSessionTimeline("session-pending-persist", [
+    {
+      kind: "user_message",
+      id: "persisted-pending-user",
+      text: prompt,
+      createdAtMs: Date.now()
+    }
+  ]);
+  daemon.emit("workspace:sessions:changed", {
+    reason: "generated_title",
+    sessionId: "session-pending-persist"
+  });
+
+  await expect
+    .poll(() =>
+      daemon.requests.filter(
+        (request) =>
+          request.method === "load_session_detail" &&
+          request.params.sessionId === "session-pending-persist"
+      ).length
+    )
+    .toBe(loadRequestsBefore + 1);
+  await expect(page.locator('.pf-msg[data-role="user"]').filter({ hasText: prompt })).toHaveCount(1);
+});
+
+test("same text can be submitted again after an earlier turn", async ({ page }) => {
+  const prompt = "Repeatable prompt text";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-repeat-prompt",
+        displayName: "Repeat prompt",
+        title: "Repeat prompt",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 900_000,
+        eventCount: 1,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: [
+          {
+            kind: "user_message",
+            id: "old-repeat-user",
+            text: prompt,
+            createdAtMs: baseTime - 900_000
+          }
+        ]
+      }
+    ]
+  });
+  daemon.delayResponse(
+    "run_agent_turn",
+    (request) => request.params.sessionId === "session-repeat-prompt",
+    240
+  );
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Repeat prompt/);
+  await expect(page.locator('.pf-msg[data-role="user"]').filter({ hasText: prompt })).toHaveCount(1);
+  await page.locator(".pf-composer textarea").fill(prompt);
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-repeat-prompt" &&
+      request.params.message === prompt
+  );
+
+  await expect(page.locator('.pf-msg[data-role="user"]').filter({ hasText: prompt })).toHaveCount(2);
+});
+
 test("stop turn is disabled until the daemon returns a turn id", async ({ page }) => {
   const prompt = "Wait for a real turn id before cancel";
   const daemon = new FakeDaemon({

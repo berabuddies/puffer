@@ -123,6 +123,7 @@
   let openAgentSessionId = $state<string | null>(null);
   let openProjectId = $state<string | null>(null);
   let submittedMessages = $state<TimelineItem[]>([]);
+  let submitMessageInFlight = $state(false);
   let dismissedPermissionIds = $state<string[]>([]);
   let dismissedQuestionIds = $state<string[]>([]);
 
@@ -201,10 +202,19 @@
   // For Phase 1 we can only distinguish by session metadata at this shell level,
   // so we mark everything idle until AgentDetail in Phase 2 has per-session state.
   // ─────────────────────────────────────────────────────────────
+  let renderedSubmittedMessages = $derived<TimelineItem[]>(
+    stillMissingFromPersisted(sessionDetail?.timeline ?? [], submittedMessages)
+  );
+  let renderedLiveStreamItems = $derived<TimelineItem[]>(
+    stillMissingFromPersisted(
+      [...(sessionDetail?.timeline ?? []), ...renderedSubmittedMessages],
+      liveStreamItems
+    )
+  );
   let combinedTimeline = $derived<TimelineItem[]>([
     ...(sessionDetail?.timeline ?? []),
-    ...submittedMessages,
-    ...liveStreamItems
+    ...renderedSubmittedMessages,
+    ...renderedLiveStreamItems
   ]);
   function isPendingPermission(item: PermissionTimelineItem): boolean {
     const status = item.status?.toLowerCase() ?? "";
@@ -1096,6 +1106,11 @@
       statusMessage = "Select a session to send a message.";
       return false;
     }
+    if (submitMessageInFlight || turnStartedAtMs !== null || currentTurnId !== null) {
+      statusMessage = "Wait for the current turn to finish before sending another message.";
+      return false;
+    }
+    submitMessageInFlight = true;
     const sessionAtSubmit = selectedSession;
     const submitSessionId = sessionAtSubmit.id;
     const requestedProviderId =
@@ -1104,6 +1119,7 @@
       const detail = `Reconnect ${requestedProviderId} before continuing this session.`;
       statusMessage = detail;
       appendAgentError("Provider disconnected", detail, "provider-auth");
+      submitMessageInFlight = false;
       return false;
     }
     const now = Date.now();
@@ -1113,6 +1129,7 @@
       {
         id: localUserId,
         kind: "user",
+        createdAtMs: now,
         title: "User",
         summary: message,
         body: message,
@@ -1145,6 +1162,8 @@
       statusMessage = `run_agent_turn failed: ${detail}`;
       appendAgentError("Agent start failed", detail, "turn-start-error");
       return false;
+    } finally {
+      submitMessageInFlight = false;
     }
   }
 
@@ -1307,8 +1326,34 @@
     return keyed;
   }
 
+  function timelineItemCreatedAtMs(item: TimelineItem): number | null {
+    return typeof item.createdAtMs === "number" && Number.isFinite(item.createdAtMs)
+      ? item.createdAtMs
+      : null;
+  }
+
+  function transientTimestampsMatch(persisted: TimelineItem, pending: TimelineItem): boolean {
+    const persistedAt = timelineItemCreatedAtMs(persisted);
+    const pendingAt = timelineItemCreatedAtMs(pending);
+    if (persistedAt === null || pendingAt === null) return true;
+    return Math.abs(persistedAt - pendingAt) <= 5 * 60 * 1000;
+  }
+
+  function timelineHasTransientMatch(items: TimelineItem[], pending: TimelineItem): boolean {
+    const body = timelineItemBody(pending).trim();
+    if (!body) {
+      return items.some((item) => item.kind === pending.kind && item.id === pending.id);
+    }
+    return items.some(
+      (item) =>
+        item.kind === pending.kind &&
+        timelineItemBody(item).trim() === body &&
+        transientTimestampsMatch(item, pending)
+    );
+  }
+
   function stillMissingFromPersisted(items: TimelineItem[], pending: TimelineItem[]): TimelineItem[] {
-    return pending.filter((item) => !timelineHasBody(items, item.kind, timelineItemBody(item)));
+    return pending.filter((item) => !timelineHasTransientMatch(items, item));
   }
 
   function withCompletionAssistantFallback(items: TimelineItem[], text: string): TimelineItem[] {
