@@ -8,13 +8,13 @@ use puffer_core::{
     render_config_summary, render_context_panel, render_copy_actions, render_doctor_report,
     render_hooks_actions, render_ide_actions, render_mcp_actions, render_permissions_panel,
     render_plugin_actions, render_sandbox_actions, render_session_panel, render_skills_panel,
-    with_user_question_prompt_handler, AppState, MessageRole, PermissionPromptAction,
-    PermissionPromptRequest, ToolInvocation, TurnStreamEvent, UserQuestionPromptRequest,
-    UserQuestionPromptResponse,
+    resumable_sessions_for_picker, with_user_question_prompt_handler, AppState, MessageRole,
+    PermissionPromptAction, PermissionPromptRequest, ToolInvocation, TurnStreamEvent,
+    UserQuestionPromptRequest, UserQuestionPromptResponse,
 };
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use puffer_resources::LoadedResources;
-use puffer_session_store::{SessionStore, TranscriptEvent};
+use puffer_session_store::{SessionStore, SessionSummary, TranscriptEvent};
 use std::io;
 use std::path::Path;
 use std::sync::mpsc::{self, TryRecvError};
@@ -275,10 +275,14 @@ pub(crate) fn handle_prompt_submit(
         tui.enqueue_prompt(submitted);
         return Ok(());
     }
+    if is_loop_command_input(&submitted) {
+        ensure_persistent_session_for_prompt_submit(state, session_store, &submitted)?;
+    }
     if try_handle_loop_command(state, session_store, tui, &submitted)? {
         return Ok(());
     }
     if let Some(shell_command) = parse_shell_shortcut(&submitted) {
+        ensure_persistent_session_for_prompt_submit(state, session_store, &submitted)?;
         execute_shell_shortcut(state, resources, session_store, tui, shell_command)?;
         return Ok(());
     }
@@ -313,6 +317,7 @@ pub(crate) fn handle_prompt_submit(
         }
     }
 
+    ensure_persistent_session_for_prompt_submit(state, session_store, &submitted)?;
     state.push_message(MessageRole::User, submitted.clone());
     session_store.append_event(
         state.session.id,
@@ -705,6 +710,10 @@ pub(crate) fn handle_submit(
     if submitted.is_empty() {
         return Ok(());
     }
+    if resume_transient_picker_selection(state, session_store, &submitted)? {
+        return Ok(());
+    }
+    ensure_persistent_session_for_direct_submit(state, session_store)?;
 
     if handle_auth_command(
         state,
@@ -797,6 +806,97 @@ pub(crate) fn handle_submit(
     session_store.append_event(state.session.id, state.snapshot_event())?;
 
     Ok(())
+}
+
+fn ensure_persistent_session_for_prompt_submit(
+    state: &mut AppState,
+    session_store: &SessionStore,
+    submitted: &str,
+) -> Result<()> {
+    if opens_resume_picker(submitted) {
+        return Ok(());
+    }
+    ensure_persistent_session(state, session_store)
+}
+
+fn ensure_persistent_session_for_direct_submit(
+    state: &mut AppState,
+    session_store: &SessionStore,
+) -> Result<()> {
+    ensure_persistent_session(state, session_store)
+}
+
+fn ensure_persistent_session(state: &mut AppState, session_store: &SessionStore) -> Result<()> {
+    if !state.session.id.is_nil() {
+        return Ok(());
+    }
+    state.session = session_store.create_session(state.cwd.clone())?;
+    Ok(())
+}
+
+fn opens_resume_picker(submitted: &str) -> bool {
+    let (name, args) = parsed_slash_command(submitted);
+    matches!(canonical_overlay_command_name(name), "resume" | "continue") && args.is_empty()
+}
+
+fn resume_transient_picker_selection(
+    state: &mut AppState,
+    session_store: &SessionStore,
+    submitted: &str,
+) -> Result<bool> {
+    if !state.session.id.is_nil() {
+        return Ok(false);
+    }
+    let Some(summary) = current_scope_resume_selection(state, session_store, submitted)? else {
+        return Ok(false);
+    };
+    let record = session_store.load_session(summary.id)?;
+    let pending_query_prompt = state.take_pending_query_prompt();
+    let config = state.config.clone();
+    *state = AppState::from_session_record(config, record);
+    if let Some(prompt) = pending_query_prompt {
+        state.queue_pending_query_prompt(prompt);
+    }
+    session_store.append_event(
+        state.session.id,
+        TranscriptEvent::CommandInvoked {
+            name: "resume".to_string(),
+            args: summary.id.to_string(),
+        },
+    )?;
+    emit_system_message(
+        state,
+        session_store,
+        format!(
+            "Resumed session {} [{}].",
+            state.session.id,
+            state.session.display_name.as_deref().unwrap_or("<unnamed>")
+        ),
+    )?;
+    Ok(true)
+}
+
+fn current_scope_resume_selection(
+    state: &AppState,
+    session_store: &SessionStore,
+    submitted: &str,
+) -> Result<Option<SessionSummary>> {
+    let (name, args) = parsed_slash_command(submitted);
+    if !matches!(canonical_overlay_command_name(name), "resume" | "continue") {
+        return Ok(None);
+    }
+    let target_id = args.trim();
+    Ok(
+        resumable_sessions_for_picker(session_store, state.session.id, &state.cwd)?
+            .iter()
+            .find(|session| session.id.to_string() == target_id)
+            .cloned(),
+    )
+}
+
+fn is_loop_command_input(submitted: &str) -> bool {
+    let (name, _) = parsed_slash_command(submitted);
+    matches!(name, "loop" | "maximize" | "max" | "minimize" | "min")
 }
 
 fn is_auth_command_input(submitted: &str) -> bool {

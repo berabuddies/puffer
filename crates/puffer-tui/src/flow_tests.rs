@@ -15,6 +15,31 @@ fn sample_state(session: SessionMetadata, cwd: &Path) -> AppState {
     AppState::new(PufferConfig::default(), cwd.to_path_buf(), session)
 }
 
+fn isolated_paths(tempdir: &tempfile::TempDir) -> ConfigPaths {
+    let workspace = tempdir.path().join("workspace");
+    ConfigPaths {
+        workspace_root: workspace.clone(),
+        workspace_config_dir: workspace.join(".puffer"),
+        user_config_dir: tempdir.path().join(".home/.puffer"),
+        builtin_resources_dir: tempdir.path().join("builtin-resources"),
+    }
+}
+
+fn transient_session(cwd: &Path) -> SessionMetadata {
+    SessionMetadata {
+        id: Default::default(),
+        display_name: Some("Resume picker".to_string()),
+        generated_title: None,
+        cwd: cwd.to_path_buf(),
+        created_at_ms: 1,
+        updated_at_ms: 1,
+        parent_session_id: None,
+        slug: None,
+        tags: Vec::new(),
+        note: None,
+    }
+}
+
 fn auth_required_provider_registry() -> ProviderRegistry {
     let mut providers = ProviderRegistry::default();
     providers.register(ProviderDescriptor {
@@ -289,6 +314,94 @@ fn handle_prompt_submit_starts_async_provider_turn_and_polls_result() {
     assert!(state.transcript.iter().any(|message| {
         message.role == MessageRole::System && message.text.starts_with("Provider request failed:")
     }));
+}
+
+#[test]
+fn transient_resume_picker_selection_does_not_create_blank_session() {
+    let tempdir = tempdir().unwrap();
+    let paths = isolated_paths(&tempdir);
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let target_session = session_store
+        .create_session(paths.workspace_root.clone())
+        .unwrap();
+    let mut state = sample_state(
+        transient_session(&paths.workspace_root),
+        &paths.workspace_root,
+    );
+    let mut resources = LoadedResources::default();
+    let mut providers = ProviderRegistry::new();
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let mut auth_store = AuthStore::default();
+
+    handle_submit(
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        format!("/resume {}", target_session.id),
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(state.session.id, target_session.id);
+    assert_eq!(session_store.list_sessions().unwrap().len(), 1);
+}
+
+#[test]
+fn transient_resume_picker_new_prompt_creates_session_lazily() {
+    let tempdir = tempdir().unwrap();
+    let paths = isolated_paths(&tempdir);
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let mut state = sample_state(
+        transient_session(&paths.workspace_root),
+        &paths.workspace_root,
+    );
+    let mut resources = LoadedResources::default();
+    let mut providers = ProviderRegistry::new();
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let mut auth_store = AuthStore::default();
+    let mut tui = TuiState::default();
+
+    handle_prompt_submit(
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        "hello from a fresh thread".to_string(),
+        true,
+    )
+    .unwrap();
+
+    assert!(!state.session.id.is_nil());
+    assert_eq!(session_store.list_sessions().unwrap().len(), 1);
+    assert!(tui.has_pending_submit());
+
+    let mut completed = false;
+    for _ in 0..20 {
+        if poll_pending_submit(
+            &mut state,
+            &mut auth_store,
+            &auth_path,
+            &session_store,
+            &mut tui,
+        )
+        .unwrap()
+        {
+            completed = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    assert!(completed);
+    assert!(!tui.has_pending_submit());
 }
 
 #[test]

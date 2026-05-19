@@ -45,7 +45,7 @@ use puffer_provider_registry::{
     canonical_provider_id, AuthMode, AuthStore, ProviderRegistry, StoredCredential,
 };
 use puffer_resources::load_resources;
-use puffer_session_store::SessionStore;
+use puffer_session_store::{SessionMetadata, SessionStore};
 use puffer_tools::ToolRegistry;
 use puffer_transport_anthropic::{
     build_messages_request, exchange_authorization_code as exchange_anthropic_code,
@@ -57,7 +57,7 @@ use puffer_transport_anthropic::{
 use puffer_tui::StartupAction;
 use std::io::Read as _;
 use std::io::Write as _;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::auth_credentials::{
@@ -444,14 +444,17 @@ fn main() -> Result<()> {
                     cli.no_alt_screen || config.ui.no_alt_screen,
                 ),
                 ResumeLaunchResolution::Picker { query, .. } if cli.resume.is_some() => {
-                    let session = session_store.create_session(cwd.clone())?;
                     let runner = crate::runner_selection::select_tool_runner(
                         &config,
                         &resources,
                         cwd.clone(),
                     );
-                    let mut state =
-                        AppState::new(config.clone(), cwd, session).with_tool_runner(runner);
+                    let mut state = AppState::new(
+                        config.clone(),
+                        cwd.clone(),
+                        transient_resume_picker_session(cwd),
+                    )
+                    .with_tool_runner(runner);
                     if let Some(prompt) = cli.prompt {
                         state.queue_pending_query_prompt(prompt);
                     }
@@ -550,6 +553,25 @@ fn run_existing_session_tui(
         initial_prompt,
         no_alt_screen,
     )
+}
+
+fn transient_resume_picker_session(cwd: std::path::PathBuf) -> SessionMetadata {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    SessionMetadata {
+        id: Uuid::nil(),
+        display_name: Some("Resume picker".to_string()),
+        generated_title: None,
+        cwd,
+        created_at_ms: now,
+        updated_at_ms: now,
+        parent_session_id: None,
+        slug: None,
+        tags: Vec::new(),
+        note: None,
+    }
 }
 
 fn run_tool_command(
