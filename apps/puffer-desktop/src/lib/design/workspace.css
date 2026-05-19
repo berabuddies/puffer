@@ -184,6 +184,11 @@
   padding: 14px 16px 12px;
   min-width: 0;
 }
+.pf-pw-project-toggle {
+  width: 28px;
+  min-width: 28px;
+  padding: 0;
+}
 .pf-pw-project-title {
   display: flex;
   align-items: baseline;

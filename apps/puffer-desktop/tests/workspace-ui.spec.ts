@@ -222,6 +222,55 @@ test("workspace search filters projects and agents", async ({ page }) => {
   await expect(workspace.getByText("Beta browser audit")).toBeVisible();
 });
 
+test("workspace project rows collapse and expand their session list", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-collapse-alpha",
+        displayName: "Collapse alpha",
+        title: "Collapse alpha",
+        cwd: "/tmp/puffer-collapse",
+        folderPath: "/tmp/puffer-collapse",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 2
+      },
+      {
+        sessionId: "session-collapse-beta",
+        displayName: "Collapse beta",
+        title: "Collapse beta",
+        cwd: "/tmp/puffer-collapse",
+        folderPath: "/tmp/puffer-collapse",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 3
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const project = page.locator(".pf-pw-project").filter({ hasText: "puffer-collapse" });
+  await expect(project.getByText("Collapse alpha")).toBeVisible();
+  await expect(project.getByText("Collapse beta")).toBeVisible();
+
+  const collapse = project.getByRole("button", { name: "Collapse puffer-collapse" });
+  await collapse.click();
+  const expand = project.getByRole("button", { name: "Expand puffer-collapse" });
+  await expect(expand).toHaveAttribute("aria-expanded", "false");
+  await expect(project.getByText("Collapse alpha")).toHaveCount(0);
+  await expect(project.getByText("Collapse beta")).toHaveCount(0);
+  await expect(project).toContainText("2 sessions");
+
+  await expand.click();
+  await expect(project.getByRole("button", { name: "Collapse puffer-collapse" })).toHaveAttribute(
+    "aria-expanded",
+    "true"
+  );
+  await expect(project.getByText("Collapse alpha")).toBeVisible();
+  await expect(project.getByText("Collapse beta")).toBeVisible();
+});
+
 test("empty workspace search shows only the search empty state", async ({ page }) => {
   const daemon = new FakeDaemon({ sessions: [] });
   await daemon.install(page);

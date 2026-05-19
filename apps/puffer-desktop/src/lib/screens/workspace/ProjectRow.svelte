@@ -16,12 +16,25 @@
 
   let { project, agents, pinned = false, pinBusy = false, onOpenAgent, onOpenBoard, onNewAgent, onTogglePin }: Props = $props();
 
+  let collapsed = $state(false);
   let active = $derived(agents.filter((a) => a.status === "running" || a.status === "awaiting").length);
   let review = $derived(agents.filter((a) => a.status === "review").length);
 </script>
 
-<div class="pf-pw-project">
+<div class="pf-pw-project" data-collapsed={collapsed}>
   <div class="pf-pw-project-head">
+    <button
+      type="button"
+      class="sc-btn pf-pw-project-toggle"
+      data-variant="ghost"
+      data-size="sm"
+      onclick={() => (collapsed = !collapsed)}
+      aria-expanded={!collapsed}
+      aria-label={`${collapsed ? "Expand" : "Collapse"} ${project.name}`}
+      title={`${collapsed ? "Expand" : "Collapse"} ${project.name}`}
+    >
+      <Icon name={collapsed ? "chevR" : "chevD"} size={12} />
+    </button>
     <div class="pf-pw-project-title">
       <span class="name">
         {project.name}
@@ -62,25 +75,27 @@
     >Details</button>
   </div>
 
-  <div class="pf-pw-agents-strip">
-    {#each agents as a (a.id)}
-      <AgentCard {a} onOpen={() => onOpenAgent?.(a.id)} />
-    {/each}
-    {#if agents.length === 0}
-      <div class="pf-pw-agents-empty">
-        <span class="icon"><Icon name="sparkles" size={14} color="var(--muted-foreground)" /></span>
-        <span>No sessions.</span>
-      </div>
-    {/if}
-    <button
-      type="button"
-      class="pf-pw-agent-add"
-      onclick={onNewAgent}
-      disabled={!onNewAgent}
-      title="New agent"
-      aria-label={`New agent in ${project.name}`}
-    >
-      <Icon name="plus" size={15} />
-    </button>
-  </div>
+  {#if !collapsed}
+    <div class="pf-pw-agents-strip">
+      {#each agents as a (a.id)}
+        <AgentCard {a} onOpen={() => onOpenAgent?.(a.id)} />
+      {/each}
+      {#if agents.length === 0}
+        <div class="pf-pw-agents-empty">
+          <span class="icon"><Icon name="sparkles" size={14} color="var(--muted-foreground)" /></span>
+          <span>No sessions.</span>
+        </div>
+      {/if}
+      <button
+        type="button"
+        class="pf-pw-agent-add"
+        onclick={onNewAgent}
+        disabled={!onNewAgent}
+        title="New agent"
+        aria-label={`New agent in ${project.name}`}
+      >
+        <Icon name="plus" size={15} />
+      </button>
+    </div>
+  {/if}
 </div>
