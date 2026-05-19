@@ -1,5 +1,33 @@
 use super::*;
 
+fn openai_only_providers() -> ProviderRegistry {
+    let mut providers = ProviderRegistry::default();
+    providers.register(ProviderDescriptor {
+        id: "openai".to_string(),
+        display_name: "OpenAI".to_string(),
+        base_url: "https://api.openai.com".to_string(),
+        default_api: "openai-responses".to_string(),
+        auth_modes: vec![AuthMode::ApiKey, AuthMode::OAuth],
+        headers: Default::default(),
+        query_params: Default::default(),
+        discovery: None,
+        models: vec![ModelDescriptor {
+            id: "gpt-5".to_string(),
+            display_name: "GPT-5".to_string(),
+            provider: "openai".to_string(),
+            api: "openai-responses".to_string(),
+            context_window: 200_000,
+            max_output_tokens: 8_192,
+            supports_reasoning: true,
+            compat: None,
+            input: vec![puffer_provider_registry::Modality::Text],
+            cost: None,
+        }],
+        chat_completions_path: None,
+    });
+    providers
+}
+
 #[test]
 fn login_picker_selection_is_auth_only() {
     let tempdir = tempdir().unwrap();
@@ -146,4 +174,59 @@ fn login_picker_selection_is_auth_only() {
     );
     assert!(auth_store.has_auth("openai"));
     assert!(tui.overlay.is_none());
+}
+
+#[test]
+fn stale_provider_prompt_opens_provider_picker() {
+    let tempdir = tempdir().unwrap();
+    let _home = crate::test_env::ScopedPufferHome::new("stale-provider-picker");
+    let workspace = tempdir.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    let paths = ConfigPaths::discover(&workspace);
+    ensure_workspace_dirs(&paths).unwrap();
+    save_user_config(&paths, &PufferConfig::default()).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store.create_session(workspace.clone()).unwrap();
+    let mut state = AppState::new(PufferConfig::default(), workspace, session);
+    state.current_provider = Some("removed-provider".to_string());
+    state.current_model = Some("removed-provider/missing-model".to_string());
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let mut resources = sample_resources();
+    let mut providers = openai_only_providers();
+    let mut auth_store = AuthStore::default();
+    let mut tui = TuiState::default();
+
+    handle_prompt_submit(
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        "hello with stale provider".to_string(),
+        true,
+    )
+    .unwrap();
+
+    assert!(!tui.has_pending_submit());
+    assert_eq!(
+        tui.deferred_prompt.as_deref(),
+        Some("hello with stale provider")
+    );
+    assert!(state.transcript.is_empty());
+    match tui.overlay {
+        Some(OverlayState::ProviderPicker {
+            entries,
+            onboarding: true,
+            ..
+        }) => {
+            assert!(entries.iter().any(|entry| entry.selector == "openai"));
+            assert!(!entries
+                .iter()
+                .any(|entry| entry.selector == "removed-provider"));
+        }
+        other => panic!("expected provider picker, got {other:?}"),
+    }
 }

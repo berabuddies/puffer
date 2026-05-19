@@ -52,6 +52,9 @@ pub(crate) fn initial_overlay(
         return Ok(Some(theme_picker()));
     }
     if let Some(provider_id) = state.current_provider.as_deref() {
+        if providers.provider(provider_id).is_none() {
+            return Ok(provider_picker(providers, true));
+        }
         return provider_setup_overlay(providers, auth_store, provider_id);
     }
     Ok(provider_picker(providers, true))
@@ -64,9 +67,10 @@ pub(crate) fn prompt_submission_overlay(
     auth_store: &AuthStore,
 ) -> Result<Option<OverlayState>> {
     if let Some(provider_id) = state.current_provider.as_deref() {
-        let selected_provider_needs_setup = providers
-            .provider(provider_id)
-            .is_some_and(|_| needs_initial_provider_setup(state, providers));
+        if providers.provider(provider_id).is_none() {
+            return Ok(provider_picker(providers, true));
+        }
+        let selected_provider_needs_setup = needs_initial_provider_setup(state, providers);
         if selected_provider_needs_setup || missing_required_auth(state, providers, auth_store) {
             return provider_setup_overlay(providers, auth_store, provider_id);
         }
