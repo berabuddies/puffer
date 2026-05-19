@@ -259,6 +259,69 @@ test("Files tab ignores stale symbol inspect results after switching files", asy
   await expect(popup.locator(".lsp-location").first()).toContainText("src/main.rs:1:4");
 });
 
+test("Files tab does not reopen a linked file from the previous session", async ({ page }) => {
+  const linkedPath = "/tmp/project-a/src/main.rs";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-files-a",
+        displayName: "Files A",
+        title: "Files A",
+        cwd: "/tmp/project-a",
+        folderPath: "/tmp/project-a",
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "files-a-link",
+            text: `Open [alpha main](${linkedPath}) for context.`
+          }
+        ]
+      },
+      {
+        sessionId: "session-files-b",
+        displayName: "Files B",
+        title: "Files B",
+        cwd: "/tmp/project-b",
+        folderPath: "/tmp/project-b",
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "files-b-note",
+            text: "This session should not inherit linked files from Files A."
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page
+    .locator(".pf-sidebar-agents-list")
+    .getByRole("button", { name: /^Files A\b/ })
+    .click();
+  await page.getByRole("link", { name: "alpha main" }).click();
+  await daemon.waitForRequest("read_file", (request) => request.params.path === linkedPath);
+
+  await page.locator(".pf-agent-tabs").getByRole("button", { name: "Chat", exact: true }).click();
+  const linkedReadsBefore = daemon.requests.filter(
+    (request) => request.method === "read_file" && request.params.path === linkedPath
+  ).length;
+
+  await page
+    .locator(".pf-sidebar-agents-list")
+    .getByRole("button", { name: /^Files B\b/ })
+    .click();
+  await openFilesPanel(page);
+  await page.waitForTimeout(150);
+
+  const linkedReadsAfter = daemon.requests.filter(
+    (request) => request.method === "read_file" && request.params.path === linkedPath
+  ).length;
+  expect(linkedReadsAfter).toBe(linkedReadsBefore);
+  await expect(page.locator(".viewer-head .path", { hasText: linkedPath })).toHaveCount(0);
+});
+
 test("New agent modal closes with Escape", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

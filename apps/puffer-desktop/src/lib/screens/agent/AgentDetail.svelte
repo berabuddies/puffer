@@ -78,6 +78,7 @@
   let sideWidth = $state(420);
   let sideDragStart: { pointerId: number; startX: number; startWidth: number } | null = null;
   let fileToOpen = $state<string | null>(null);
+  let fileToOpenSessionId: string | null = null;
   let rootEl = $state<HTMLElement | undefined>(undefined);
   let searchInputEl = $state<HTMLInputElement | undefined>(undefined);
   let searchOpen = $state(false);
@@ -105,6 +106,13 @@
 
   $effect(() => {
     if (!editingTitle) titleDraft = displayName;
+  });
+
+  $effect(() => {
+    const nextSessionId = session?.id ?? null;
+    if (nextSessionId === fileToOpenSessionId) return;
+    fileToOpenSessionId = nextSessionId;
+    fileToOpen = null;
   });
 
   function inferStatusFromSession(d: SessionDetail | null): AgentStatus {
