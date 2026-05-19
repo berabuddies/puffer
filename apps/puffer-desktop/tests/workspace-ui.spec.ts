@@ -380,6 +380,55 @@ test("active agents includes an opened session before grouped history catches up
   await expect(page.locator(".pf-agent-detail")).toBeVisible();
 });
 
+test("active agents can reopen a live session before grouped history catches up", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-live-fallback-base",
+        displayName: "Live fallback base",
+        title: "Live fallback base",
+        cwd: "/tmp/puffer-live-fallback",
+        folderPath: "/tmp/puffer-live-fallback",
+        updatedAtMs: baseTime - 120_000,
+        createdAtMs: baseTime - 240_000,
+        eventCount: 1
+      }
+    ]
+  });
+  daemon.setGroupedSessionFilter(
+    (metadata) => !String(metadata.sessionId ?? "").startsWith("session-created-")
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page
+    .locator(".pf-pw-project")
+    .filter({ hasText: "puffer-live-fallback" })
+    .getByRole("button", { name: "New agent" })
+    .click();
+  await page.getByRole("button", { name: /Start agent/ }).click();
+  await expect(page.locator(".pf-agent-detail .primary-title")).toContainText("New Session");
+
+  await page.locator(".pf-composer textarea").fill("Keep this fallback session live");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-created-2" &&
+      request.params.message === "Keep this fallback session live"
+  );
+
+  const activeList = page.locator(".pf-sidebar-agents-list");
+  await activeList.getByRole("button", { name: /Live fallback base/ }).click();
+  await expect(page.locator(".pf-agent-detail .primary-title")).toContainText("Live fallback base");
+
+  const liveFallbackRow = activeList.locator(".pf-sidebar-agent-row").filter({ hasText: "New Session" });
+  await expect(liveFallbackRow).toBeVisible();
+  await expect(liveFallbackRow.locator(".pf-task-status")).toContainText("thinking");
+  await liveFallbackRow.getByRole("button", { name: /New Session/ }).click();
+  await expect(page.locator(".pf-agent-detail .primary-title")).toContainText("New Session");
+});
+
 test("active agent project filter resets when the selected project disappears", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

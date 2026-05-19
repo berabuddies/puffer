@@ -1230,7 +1230,9 @@
   }
 
   function onOpenAgent(id: string) {
-    const realTarget = groups.flatMap((g) => g.sessions).find((s) => s.id === id);
+    const realTarget =
+      groups.flatMap((g) => g.sessions).find((s) => s.id === id) ??
+      liveSidebarAgentsById[id]?.session;
     if (!realTarget) {
       if (selectedSession?.id === id) {
         openAgentSessionId = id;
