@@ -39,6 +39,7 @@
   let creatingPty = $state(false);
   let closingPtyIds = $state<string[]>([]);
   let error = $state<string | null>(null);
+  let closeError = $state<string | null>(null);
   let disposed = false;
   let attachGeneration = 0;
   let dataDisposer: (() => void) | null = null;
@@ -59,6 +60,7 @@
       ptyTabs = [];
       creatingPty = false;
       closingPtyIds = [];
+      closeError = null;
       seenSeqByPty = new Map();
       cleanupTerminalAttach();
       void restoreOrCreateTerminal(targetSessionId, targetCwd, generation);
@@ -74,6 +76,7 @@
     if (targetSessionId === "preview") return;
     loading = true;
     error = null;
+    closeError = null;
     try {
       const info = await listPtys(targetSessionId);
       if (disposed || generation !== restoreGeneration || targetSessionId !== sessionId || targetCwd !== cwd) return;
@@ -96,6 +99,7 @@
     creatingPty = true;
     loading = true;
     error = null;
+    closeError = null;
     try {
       const title = nextTerminalTitle();
       const { ptyId } = await openPty({
@@ -251,10 +255,17 @@
       try {
         await closePty(ptyId);
       } catch (err) {
-        error = err instanceof Error ? err.message : String(err);
+        const message = err instanceof Error ? err.message : String(err);
+        if (activePtyId === ptyId || ptyTabs.length <= 1) {
+          error = message;
+          closeError = null;
+        } else {
+          closeError = message;
+        }
         return;
       }
       error = null;
+      closeError = null;
       const nextTabs = ptyTabs.filter((tab) => tab.ptyId !== ptyId);
       ptyTabs = nextTabs;
       seenSeqByPty.delete(ptyId);
@@ -341,6 +352,10 @@
         <Icon name="plus" size={13} />
       </button>
     </div>
+
+    {#if closeError}
+      <div class="terminal-inline-error" role="alert">{closeError}</div>
+    {/if}
 
     {#if error}
       <div class="terminal-empty error">
@@ -446,6 +461,16 @@
   .terminal-new:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+  .terminal-inline-error {
+    flex-shrink: 0;
+    padding: 7px 10px;
+    border-bottom: 1px solid color-mix(in oklab, oklch(0.7 0.18 25) 28%, var(--border));
+    background: color-mix(in oklab, oklch(0.7 0.18 25) 10%, var(--background));
+    color: oklch(0.5 0.2 25);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.45;
   }
   .pf-terminal-host {
     flex: 1;

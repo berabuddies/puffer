@@ -145,3 +145,30 @@ test("Terminal close failure keeps the tab retryable", async ({ page }) => {
   await expect(page.getByText("Terminal failed")).toBeVisible();
   await expect(page.getByText(/pty close channel closed/)).toBeVisible();
 });
+
+test("Terminal inactive close failure keeps the active terminal usable", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: /Browser regression/ }).first().click();
+  await page.locator(".pf-agent-tabs").getByRole("button", { name: "Terminal", exact: true }).click();
+  await daemon.waitForRequest("pty_open", (request) => request.params.title === "Terminal 1");
+  await expect(page.getByRole("tab", { name: /Terminal 1/ })).toBeVisible();
+
+  await page.getByRole("button", { name: "New terminal" }).click();
+  await daemon.waitForRequest("pty_open", (request) => request.params.title === "Terminal 2");
+  await expect(page.getByRole("tab", { name: /Terminal 2/ })).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator(".pf-terminal-host")).toBeVisible();
+
+  daemon.failNext("pty_close", "inactive close channel closed");
+  await page.getByRole("button", { name: "Close Terminal 1" }).click();
+
+  const request = await daemon.waitForRequest("pty_close");
+  expect(request.params.ptyId).toBe("pty-1");
+  await expect(page.getByRole("tab", { name: /Terminal 1/ })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /Terminal 2/ })).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator(".pf-terminal-host")).toBeVisible();
+  await expect(page.getByText("Terminal failed")).toHaveCount(0);
+  await expect(page.getByText(/inactive close channel closed/)).toBeVisible();
+});
