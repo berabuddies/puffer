@@ -1988,9 +1988,29 @@
     return missing;
   }
 
-  function withCompletionAssistantFallback(items: TimelineItem[], text: string): TimelineItem[] {
+  function withCompletionAssistantFallback(
+    items: TimelineItem[],
+    text: string,
+    turnId: string
+  ): TimelineItem[] {
     const trimmed = text.trim();
-    if (!trimmed || timelineHasBody(items, "assistant", trimmed)) return items;
+    if (!trimmed) return items;
+    const streamingId = streamingAssistantId(turnId);
+    const streamingIndex = items.findIndex((item) => item.kind === "assistant" && item.id === streamingId);
+    if (streamingIndex >= 0) {
+      const existing = items[streamingIndex];
+      if (existing.kind !== "assistant" || existing.body.trim() === trimmed) return items;
+      return [
+        ...items.slice(0, streamingIndex),
+        {
+          ...existing,
+          summary: trimmed,
+          body: trimmed
+        },
+        ...items.slice(streamingIndex + 1)
+      ];
+    }
+    if (timelineHasBody(items, "assistant", trimmed)) return items;
     return [
       ...items,
       {
@@ -2312,7 +2332,11 @@
         if (selectedSession) {
           const sessionToRefresh = selectedSession;
           const completionText = ev.type === "turn-complete" ? ev.assistantText : "";
-          const liveItemsAtCompletion = withCompletionAssistantFallback(liveStreamItems, completionText);
+          const liveItemsAtCompletion = withCompletionAssistantFallback(
+            liveStreamItems,
+            completionText,
+            ev.turnId
+          );
           const submittedAtCompletion = submittedMessages;
           liveStreamItems = stillMissingFromPersisted(
             [...(sessionDetail?.timeline ?? []), ...submittedAtCompletion],

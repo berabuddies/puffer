@@ -1291,6 +1291,96 @@ test("turn completion preserves live chat row identity after transcript reload",
   await expect(page.locator('.pf-msg[data-role="agent"]').filter({ hasText: reply })).toHaveCount(1);
 });
 
+test("turn completion replaces partial streamed text after transcript reload", async ({ page }) => {
+  const prompt = "Replace the partial stream";
+  const partialText = "Draft fragment only";
+  const finalText = "Final complete answer replaces the draft fragment.";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-partial-stream",
+        displayName: "Partial stream",
+        title: "Partial stream",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Partial stream/);
+  await page.locator(".pf-composer textarea").fill(prompt);
+  await page.getByRole("button", { name: "Send" }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-partial-stream" &&
+      request.params.message === prompt
+  );
+
+  const turnId = "turn-session-partial-stream";
+  daemon.emit("session:session-partial-stream:event", { type: "turn-start", turnId });
+  daemon.emit("session:session-partial-stream:event", {
+    type: "text-delta",
+    turnId,
+    delta: partialText
+  });
+  await expect(page.getByText(partialText)).toBeVisible();
+
+  const loadRequestsBefore = daemon.requests.filter(
+    (request) =>
+      request.method === "load_session_detail" &&
+      request.params.sessionId === "session-partial-stream"
+  ).length;
+  daemon.delayResponse(
+    "load_session_detail",
+    (request) => request.params.sessionId === "session-partial-stream",
+    180
+  );
+  daemon.setSessionTimeline("session-partial-stream", [
+    {
+      kind: "user_message",
+      id: "persisted-partial-user",
+      text: prompt,
+      createdAtMs: baseTime + 1
+    },
+    {
+      kind: "assistant_message",
+      id: "persisted-partial-assistant",
+      text: finalText,
+      createdAtMs: baseTime + 2
+    }
+  ]);
+  daemon.emit("session:session-partial-stream:event", {
+    type: "turn-complete",
+    turnId,
+    assistantText: finalText
+  });
+
+  await expect
+    .poll(() =>
+      daemon.requests.filter(
+        (request) =>
+          request.method === "load_session_detail" &&
+          request.params.sessionId === "session-partial-stream"
+      ).length
+    )
+    .toBe(loadRequestsBefore + 1);
+  await page.waitForTimeout(240);
+
+  await expect(page.getByText(finalText)).toBeVisible();
+  await expect(page.getByText(partialText)).toHaveCount(0);
+  await expect(page.locator('.pf-msg[data-role="agent"]').filter({ hasText: finalText })).toHaveCount(1);
+});
+
 test("generated title reload does not duplicate the first submitted prompt", async ({ page }) => {
   const prompt = "First prompt should not flash twice";
   const reply = "First reply stays single.";
