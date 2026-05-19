@@ -852,6 +852,84 @@ test("Browser pane resets daemon tabs when switching agents", async ({ page }) =
   );
 });
 
+test("late Browser tab focus failures do not leak into a switched agent", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-alpha-focus",
+        displayName: "Alpha focus",
+        title: "Alpha focus",
+        cwd: "/tmp/puffer-alpha",
+        folderPath: "/tmp/puffer-alpha",
+        updatedAtMs: Date.now(),
+        createdAtMs: Date.now() - 60_000,
+        timeline: []
+      },
+      {
+        sessionId: "session-beta-focus",
+        displayName: "Beta focus",
+        title: "Beta focus",
+        cwd: "/tmp/puffer-beta",
+        folderPath: "/tmp/puffer-beta",
+        updatedAtMs: Date.now() - 1_000,
+        createdAtMs: Date.now() - 120_000,
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page
+    .locator(".pf-sidebar-agents-list")
+    .getByRole("button", { name: /^Alpha focus\b/ })
+    .click();
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-alpha-focus:browser:tab-1"
+  );
+  await page.getByRole("button", { name: "New tab" }).click();
+  await daemon.waitForRequest("browser_agent", (request) =>
+    request.params.action === "open" &&
+    request.params.sessionId === "session-alpha-focus" &&
+    request.params.tabId === "tab-2"
+  );
+  await expect(page.locator(".pf-browser-tab")).toHaveCount(2);
+
+  daemon.delayFailure(
+    "browser_agent",
+    (request) =>
+      request.params.action === "focus" &&
+      request.params.sessionId === "session-alpha-focus" &&
+      request.params.tabId === "tab-1",
+    "focus failed after agent switch",
+    160
+  );
+  await page.locator(".pf-browser-tab").nth(0).click();
+  await daemon.waitForRequest("browser_agent", (request) =>
+    request.params.action === "focus" &&
+    request.params.sessionId === "session-alpha-focus" &&
+    request.params.tabId === "tab-1"
+  );
+
+  await page
+    .locator(".pf-sidebar-agents-list")
+    .getByRole("button", { name: /^Beta focus\b/ })
+    .click();
+  await daemon.waitForRequest("browser_agent", (request) =>
+    request.params.action === "list" &&
+    request.params.sessionId === "session-beta-focus"
+  );
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-beta-focus:browser:tab-1"
+  );
+  await expect(page.locator(".pf-browser-status")).toHaveText("Connected");
+
+  await page.waitForTimeout(220);
+  await expect(page.locator(".pf-browser-error")).toHaveCount(0);
+  await expect(page.locator(".pf-browser-status")).toHaveText("Connected");
+});
+
 test("late Browser close responses do not overwrite a switched agent", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
