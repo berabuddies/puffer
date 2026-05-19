@@ -1226,6 +1226,96 @@ test("generated title reload does not duplicate the first submitted prompt", asy
   await expect(page.locator('.pf-msg[data-role="agent"]').filter({ hasText: reply })).toHaveCount(1);
 });
 
+test("empty generated title reload keeps the first submitted prompt mounted", async ({ page }) => {
+  const prompt = "Generated title reload arrives before persistence";
+  const reply = "Persistence eventually catches up.";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-title-empty-reload",
+        displayName: "Title empty reload",
+        title: "Title empty reload",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Title empty reload/);
+  await page.locator(".pf-composer textarea").fill(prompt);
+  await page.getByRole("button", { name: "Send" }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-title-empty-reload" &&
+      request.params.message === prompt
+  );
+
+  const userRows = page.locator('.pf-msg[data-role="user"]').filter({ hasText: prompt });
+  await expect(userRows).toHaveCount(1);
+  await userRows.first().evaluate((node) => node.setAttribute("data-probe", "first-prompt-row"));
+
+  const loadRequestsBefore = daemon.requests.filter(
+    (request) =>
+      request.method === "load_session_detail" &&
+      request.params.sessionId === "session-title-empty-reload"
+  ).length;
+  daemon.emit("workspace:sessions:changed", {
+    reason: "generated_title",
+    sessionId: "session-title-empty-reload"
+  });
+
+  await expect
+    .poll(() =>
+      daemon.requests.filter(
+        (request) =>
+          request.method === "load_session_detail" &&
+          request.params.sessionId === "session-title-empty-reload"
+      ).length
+    )
+    .toBe(loadRequestsBefore + 1);
+  await expect(page.getByText("No messages in this session yet. Send a prompt to get started.")).toHaveCount(0);
+  await expect(page.locator('.pf-msg[data-role="user"][data-probe="first-prompt-row"]')).toContainText(
+    prompt
+  );
+  await expect(userRows).toHaveCount(1);
+
+  daemon.setSessionTimeline("session-title-empty-reload", [
+    {
+      kind: "user_message",
+      id: "persisted-empty-reload-user",
+      text: prompt,
+      createdAtMs: baseTime + 1
+    },
+    {
+      kind: "assistant_message",
+      id: "persisted-empty-reload-assistant",
+      text: reply,
+      createdAtMs: baseTime + 2
+    }
+  ]);
+  daemon.emit("session:session-title-empty-reload:event", {
+    type: "turn-complete",
+    turnId: "turn-session-title-empty-reload",
+    assistantText: reply
+  });
+
+  await expect(page.locator('.pf-msg[data-role="user"][data-probe="first-prompt-row"]')).toContainText(
+    prompt
+  );
+  await expect(userRows).toHaveCount(1);
+  await expect(page.locator('.pf-msg[data-role="agent"]').filter({ hasText: reply })).toHaveCount(1);
+});
+
 test("clock-skewed transcript reload does not duplicate the submitted prompt", async ({
   page
 }) => {
