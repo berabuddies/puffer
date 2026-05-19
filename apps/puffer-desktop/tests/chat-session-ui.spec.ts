@@ -994,6 +994,39 @@ test("replayed turn-start does not clear visible streamed text", async ({ page }
   await expect(page.getByText("Visible text before replay.")).toBeVisible();
 });
 
+test("replayed text deltas only fill missing streamed text", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /^Browser regression\b/);
+  const turnId = "turn-replay-delta";
+  daemon.emit("session:session-browser:event", {
+    type: "text-delta",
+    turnId,
+    delta: "ha"
+  });
+  const latestAgentParagraph = page.locator('.pf-msg[data-role="agent"] p').last();
+  await expect(latestAgentParagraph).toHaveText("ha");
+
+  daemon.emit("session:session-browser:event", {
+    type: "text-delta",
+    turnId,
+    delta: "ha",
+    replay: true
+  });
+  await expect(latestAgentParagraph).toHaveText("ha");
+
+  daemon.emit("session:session-browser:event", {
+    type: "text-delta",
+    turnId,
+    delta: "ha",
+    replay: true
+  });
+  await expect(latestAgentParagraph).toHaveText("haha");
+  await expect(latestAgentParagraph).not.toHaveText("hahaha");
+});
+
 test("stale turn reloads do not clear the active streamed answer", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

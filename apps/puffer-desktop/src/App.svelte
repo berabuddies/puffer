@@ -137,6 +137,7 @@
   let settledTurnIds = new Set<string>();
   let turnPermissionLookup = $state<Record<string, { turnId: string; requestId: string }>>({});
   let turnQuestionLookup = $state<Record<string, { turnId: string; requestId: string }>>({});
+  let replayTextByTurn: Record<string, string> = {};
   let sessionEventUnlisten: UnlistenFn | null = null;
   let subscribedSessionId: string | null = null;
   let connectionState = $state<ConnectionState>("idle");
@@ -772,6 +773,7 @@
         // so the composer feels fresh.
         submittedMessages = [];
         liveStreamItems = [];
+        replayTextByTurn = {};
         turnPermissionLookup = {};
         turnQuestionLookup = {};
         currentTurnId = null;
@@ -883,6 +885,7 @@
     dismissedPermissionIds = [];
     dismissedQuestionIds = [];
     liveStreamItems = [];
+    replayTextByTurn = {};
     turnPermissionLookup = {};
     turnQuestionLookup = {};
     currentTurnId = null;
@@ -1303,9 +1306,24 @@
 
   function markTurnSettled(turnId: string) {
     settledTurnIds.add(turnId);
+    const { [turnId]: _drop, ...rest } = replayTextByTurn;
+    replayTextByTurn = rest;
     if (currentTurnId === turnId) {
       currentTurnId = null;
     }
+  }
+
+  function replaySafeDelta(turnId: string, delta: string): string {
+    const replayText = `${replayTextByTurn[turnId] ?? ""}${delta}`;
+    replayTextByTurn = { ...replayTextByTurn, [turnId]: replayText };
+    const last = liveStreamItems[liveStreamItems.length - 1];
+    if (!last || last.kind !== "assistant" || !last.id.startsWith("live-stream-assistant")) {
+      return delta;
+    }
+    const current = last.body;
+    if (current.startsWith(replayText)) return "";
+    if (replayText.startsWith(current)) return replayText.slice(current.length);
+    return delta;
   }
 
   function handleSessionEvent(sid: string, ev: SessionStreamEvent) {
@@ -1319,6 +1337,8 @@
         turnStatusHint = "Thinking";
         if (!ev.replay) {
           liveStreamItems = [];
+          const { [ev.turnId]: _drop, ...rest } = replayTextByTurn;
+          replayTextByTurn = rest;
         }
         break;
       case "thinking-delta":
@@ -1330,7 +1350,10 @@
         markTurnActive(ev.turnId);
         turnThinking = false;
         turnStatusHint = null;
-        upsertStreamingAssistant(ev.delta);
+        {
+          const delta = ev.replay ? replaySafeDelta(ev.turnId, ev.delta) : ev.delta;
+          if (delta) upsertStreamingAssistant(delta);
+        }
         break;
       case "tool-calls-requested":
         markTurnActive(ev.turnId);

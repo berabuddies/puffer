@@ -7,10 +7,10 @@ type StreamActorFields = {
 
 /** Any session event may arrive with `replay: true` when the daemon is
  *  catching up a newly-connected client via the replay ring buffer. UIs
- *  that already dedupe by stable id (tool cards by callId, assistant
- *  deltas appended to a single assistant message) don't need to branch
- *  on this — the flag is exposed so handlers that would otherwise toast
- *  / bump notifications can suppress those side effects on replay. */
+ *  that already dedupe by stable id (tool cards by callId) don't need to
+ *  branch on this. Assistant deltas use the flag to avoid duplicating text
+ *  already preserved through a reconnect, and handlers that would otherwise
+ *  toast / bump notifications can suppress those side effects on replay. */
 export type SessionStreamEvent =
   | { type: "turn-start"; turnId: string; replay?: boolean }
   | ({ type: "text-delta"; turnId: string; delta: string; replay?: boolean } & StreamActorFields)
