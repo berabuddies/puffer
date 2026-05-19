@@ -65,7 +65,14 @@
     { id: "settings", label: "Settings", icon: "settings" }
   ];
 
-  const states: (AgentState | "all")[] = ["all", "running", "thinking", "awaiting", "idle"];
+  const states: (AgentState | "all")[] = [
+    "all",
+    "running",
+    "thinking",
+    "awaiting",
+    "review",
+    "idle"
+  ];
 
   let filtered = $derived(
     agents.filter((a) => filterState === "all" || a.state === filterState)

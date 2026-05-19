@@ -151,6 +151,46 @@ test("PLUS-121: child sessions are not listed as top-level active agents", async
   await expect(pufferGroup.locator(".pf-sidebar-agent-row")).toHaveCount(1);
 });
 
+test("PLUS-121: review agents keep review state in the active sidebar", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-review-agent",
+        displayName: "Review ready",
+        title: "Review ready",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 3,
+        activityStatus: "review"
+      },
+      {
+        sessionId: "session-running-agent",
+        displayName: "Running build",
+        title: "Running build",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 60_000,
+        createdAtMs: baseTime - 180_000,
+        eventCount: 2,
+        activityStatus: "running"
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const sidebar = page.locator(".pf-sidebar-agents");
+  const reviewRow = sidebar.locator(".pf-sidebar-agent-row").filter({ hasText: "Review ready" });
+  await expect(reviewRow.locator('.state[data-state="review"]')).toHaveText("review");
+
+  await sidebar.getByLabel("Filter by state").selectOption("review");
+  await expect(sidebar.locator(".pf-sidebar-label .count")).toHaveText("1");
+  await expect(sidebar.getByText("Review ready")).toBeVisible();
+  await expect(sidebar.getByText("Running build")).toHaveCount(0);
+});
+
 test("PLUS-121: collapsed active projects do not leak across same-name folders", async ({
   page
 }) => {

@@ -1,5 +1,5 @@
 export type ScreenId = "workspace" | "pipelines" | "deployments" | "settings";
-export type AgentState = "idle" | "thinking" | "running" | "awaiting";
+export type AgentState = "idle" | "thinking" | "running" | "awaiting" | "review";
 export type AccentKey = "violet" | "cyan" | "amber" | "rose" | "lime" | "mono";
 export type DensityKey = "compact" | "comfortable" | "airy";
 export type ThemeKey = "light" | "dark";

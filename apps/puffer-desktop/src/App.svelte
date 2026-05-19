@@ -237,8 +237,6 @@
   //   running = active work (unresolved permission / uncommitted changes)
   //   done    = merged / clean on a branch with closed PR
   //   idle    = otherwise
-  // For Phase 1 we can only distinguish by session metadata at this shell level,
-  // so we mark everything idle until AgentDetail in Phase 2 has per-session state.
   // ─────────────────────────────────────────────────────────────
   let renderedSubmittedMessages = $derived<TimelineItem[]>(
     stillMissingFromPersisted(sessionDetail?.timeline ?? [], submittedMessages)
@@ -289,6 +287,7 @@
   function sidebarAgentState(status: AgentActivityStatus): AgentState {
     if (status === "awaiting") return "awaiting";
     if (status === "running") return "running";
+    if (status === "review") return "review";
     return "idle";
   }
 
