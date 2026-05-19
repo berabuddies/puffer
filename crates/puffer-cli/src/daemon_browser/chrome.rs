@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::blocking::Client;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -9,10 +9,25 @@ use url::Url;
 
 use super::CHROME_START_TIMEOUT;
 
+pub(super) const EXTERNAL_BROWSER_CDP_URL_ENV: &str = "PUFFER_BROWSER_CDP_URL";
+const EXTERNAL_BROWSER_CDP_KIND_ENV: &str = "PUFFER_BROWSER_CDP_KIND";
+const MINT_BROWSER_CDP_API_BASE_URL_ENV: &str = "PUFFER_BROWSER_CDP_MINT_FROM_API_BASE_URL";
+const MINT_BROWSER_CDP_API_KEY_ENV: &str = "PUFFER_BROWSER_CDP_MINT_FROM_API_KEY";
+const MINT_BROWSER_CDP_SESSION_NAME_ENV: &str = "PUFFER_BROWSER_CDP_MINT_SESSION_NAME";
+const MINT_BROWSER_CDP_WORKSPACE_ID_ENV: &str = "PUFFER_BROWSER_CDP_MINT_WORKSPACE_ID";
+const MINT_BROWSER_CDP_TIMEOUT_SECONDS_ENV: &str = "PUFFER_BROWSER_CDP_MINT_TIMEOUT_SECONDS";
+const DEFAULT_MINT_BROWSER_CDP_TIMEOUT: Duration = Duration::from_secs(120);
+
 #[derive(Clone, Debug)]
 pub(super) struct ChromePageTarget {
     pub(super) target_id: String,
     pub(super) page_ws: String,
+}
+
+#[derive(Clone, Debug)]
+pub(super) enum ExternalDevToolsEndpoint {
+    Browser { browser_ws: String },
+    Page { page_ws: String },
 }
 
 /// Waits for Chrome to publish its browser-level DevTools WebSocket URL.
@@ -52,6 +67,329 @@ fn spawn_stderr_drain<R: std::io::Read + Send + 'static>(mut reader: BufReader<R
             sink.clear();
         }
     });
+}
+
+/// Returns a DevTools WebSocket endpoint supplied by the hosting runtime
+/// instead of launching Chrome directly.
+pub(super) fn resolve_external_devtools_endpoint() -> Result<Option<ExternalDevToolsEndpoint>> {
+    if let Some(endpoint) = resolve_configured_devtools_endpoint()? {
+        return Ok(Some(endpoint));
+    }
+    resolve_minted_devtools_endpoint()
+}
+
+fn resolve_configured_devtools_endpoint() -> Result<Option<ExternalDevToolsEndpoint>> {
+    let Some(raw) = trimmed_env(EXTERNAL_BROWSER_CDP_URL_ENV) else {
+        return Ok(None);
+    };
+    Ok(Some(devtools_endpoint_from_raw_cdp_url(&raw)?))
+}
+
+fn devtools_endpoint_from_raw_cdp_url(raw: &str) -> Result<ExternalDevToolsEndpoint> {
+    let raw = raw.trim();
+    if raw.starts_with("ws://") || raw.starts_with("wss://") {
+        let configured_kind = std::env::var(EXTERNAL_BROWSER_CDP_KIND_ENV)
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        if configured_kind == "browser" || raw.contains("/devtools/browser/") {
+            return Ok(ExternalDevToolsEndpoint::Browser {
+                browser_ws: raw.to_string(),
+            });
+        }
+        return Ok(ExternalDevToolsEndpoint::Page {
+            page_ws: raw.to_string(),
+        });
+    }
+
+    let endpoint = external_devtools_version_endpoint(raw)?;
+    let client = Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .context("build external Chrome HTTP client")?;
+    let value: Value = client
+        .get(&endpoint)
+        .send()
+        .with_context(|| format!("fetch external Chrome DevTools version from {endpoint}"))?
+        .error_for_status()
+        .context("external Chrome DevTools version failed")?
+        .json()
+        .context("parse external Chrome DevTools version")?;
+    let ws = value
+        .get("webSocketDebuggerUrl")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("external Chrome version missing webSocketDebuggerUrl"))?;
+    Ok(ExternalDevToolsEndpoint::Browser {
+        browser_ws: ws.to_string(),
+    })
+}
+
+fn resolve_minted_devtools_endpoint() -> Result<Option<ExternalDevToolsEndpoint>> {
+    let api_base_url = trimmed_env(MINT_BROWSER_CDP_API_BASE_URL_ENV);
+    let api_key = trimmed_env(MINT_BROWSER_CDP_API_KEY_ENV);
+    let (Some(api_base_url), Some(api_key)) = (api_base_url, api_key) else {
+        if std::env::var_os(MINT_BROWSER_CDP_API_BASE_URL_ENV).is_some()
+            || std::env::var_os(MINT_BROWSER_CDP_API_KEY_ENV).is_some()
+        {
+            bail!(
+                "{MINT_BROWSER_CDP_API_BASE_URL_ENV} and {MINT_BROWSER_CDP_API_KEY_ENV} must both be set to mint a platform browser CDP URL"
+            );
+        }
+        return Ok(None);
+    };
+
+    let page_ws = mint_agentenv_platform_browser_page_cdp_url(&api_base_url, &api_key)?;
+    Ok(Some(if page_ws.contains("/devtools/browser/") {
+        ExternalDevToolsEndpoint::Browser {
+            browser_ws: page_ws,
+        }
+    } else {
+        ExternalDevToolsEndpoint::Page { page_ws }
+    }))
+}
+
+fn mint_agentenv_platform_browser_page_cdp_url(
+    api_base_url: &str,
+    api_key: &str,
+) -> Result<String> {
+    let api_base_url = normalize_agentenv_api_base(api_base_url)?;
+    let client = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("build AgentEnv browser API client")?;
+    let created = agentenv_api_json(
+        &client,
+        "POST",
+        &api_base_url,
+        "/browser/sessions",
+        api_key,
+        Some(agentenv_browser_session_create_body()),
+    )?;
+    let session_id = json_string(&created, "id")
+        .ok_or_else(|| anyhow!("AgentEnv browser create response missing id"))?;
+    wait_for_minted_browser_cdp_url(&client, &api_base_url, api_key, &session_id, created)
+}
+
+fn wait_for_minted_browser_cdp_url(
+    client: &Client,
+    api_base_url: &str,
+    api_key: &str,
+    session_id: &str,
+    mut payload: Value,
+) -> Result<String> {
+    let deadline = Instant::now() + mint_browser_cdp_timeout();
+    loop {
+        let status = json_string(&payload, "status")
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if status == "running" {
+            if let Some(cdp_url) = cdp_url_from_agentenv_payload(&payload, api_key)? {
+                return Ok(cdp_url);
+            }
+            let cdp_payload = agentenv_api_json(
+                client,
+                "GET",
+                api_base_url,
+                &format!("/browser/sessions/{session_id}/cdp-url"),
+                api_key,
+                None,
+            )?;
+            if let Some(cdp_url) = cdp_url_from_agentenv_payload(&cdp_payload, api_key)? {
+                return Ok(cdp_url);
+            }
+            bail!("AgentEnv browser session {session_id} did not return a CDP URL");
+        }
+        if matches!(
+            status.as_str(),
+            "stopped" | "failed" | "expired" | "deleted"
+        ) {
+            bail!("AgentEnv browser session {session_id} ended with status {status}");
+        }
+        if Instant::now() >= deadline {
+            bail!("timed out waiting for AgentEnv browser session {session_id}");
+        }
+        std::thread::sleep(Duration::from_secs(1));
+        payload = agentenv_api_json(
+            client,
+            "GET",
+            api_base_url,
+            &format!("/browser/sessions/{session_id}"),
+            api_key,
+            None,
+        )?;
+    }
+}
+
+fn agentenv_browser_session_create_body() -> Value {
+    let name = trimmed_env(MINT_BROWSER_CDP_SESSION_NAME_ENV)
+        .or_else(|| trimmed_env("AGENTENV_BROWSER_NAME"))
+        .or_else(|| trimmed_env("MANAGED_AGENT_ID").map(|agent_id| format!("puffer-{agent_id}")))
+        .unwrap_or_else(|| "puffer-browser".to_string());
+    let mut body = json!({
+        "name": name.chars().take(120).collect::<String>(),
+        "enableCaptchaSolver": true,
+        "enableRrweb": true,
+        "profileMode": "persistent",
+    });
+    if let Some(workspace_id) = trimmed_env(MINT_BROWSER_CDP_WORKSPACE_ID_ENV)
+        .or_else(|| trimmed_env("AGENTENV_WORKSPACE_ID"))
+    {
+        body["workspaceId"] = Value::String(workspace_id);
+    }
+    body
+}
+
+fn agentenv_api_json(
+    client: &Client,
+    method: &str,
+    api_base_url: &str,
+    path: &str,
+    api_key: &str,
+    body: Option<Value>,
+) -> Result<Value> {
+    let url = format!("{api_base_url}/v1{path}");
+    let mut request = match method {
+        "GET" => client.get(&url),
+        "POST" => client.post(&url),
+        _ => bail!("unsupported AgentEnv API method {method}"),
+    }
+    .bearer_auth(api_key)
+    .header("Accept", "application/json")
+    .header("User-Agent", "puffer-browser-cdp-mint/1.0");
+    if let Some(body) = body {
+        request = request.json(&body);
+    }
+    let response = request
+        .send()
+        .with_context(|| format!("call AgentEnv API {method} {path}"))?;
+    let status = response.status();
+    let text = response
+        .text()
+        .with_context(|| format!("read AgentEnv API {method} {path} response"))?;
+    if !status.is_success() {
+        bail!(
+            "AgentEnv API {method} {path} failed ({status}): {}",
+            redact_api_key(&text, api_key)
+                .chars()
+                .take(400)
+                .collect::<String>()
+        );
+    }
+    serde_json::from_str(&text)
+        .with_context(|| format!("parse AgentEnv API {method} {path} response"))
+}
+
+fn cdp_url_from_agentenv_payload(payload: &Value, api_key: &str) -> Result<Option<String>> {
+    let Some(cdp_url) = json_string(payload, "cdpUrl").or_else(|| json_string(payload, "cdp_url"))
+    else {
+        return Ok(None);
+    };
+    Ok(Some(prepare_minted_cdp_url(&cdp_url, api_key)?))
+}
+
+fn prepare_minted_cdp_url(cdp_url: &str, api_key: &str) -> Result<String> {
+    let mut parsed = Url::parse(cdp_url).context("parse AgentEnv browser CDP URL")?;
+    match parsed.scheme() {
+        "http" => {
+            let _ = parsed.set_scheme("ws");
+        }
+        "https" => {
+            let _ = parsed.set_scheme("wss");
+        }
+        _ => {}
+    }
+    if parsed.path().contains("/devtools/") || !parsed.path().ends_with("/cdp") {
+        return Ok(parsed.to_string());
+    }
+    let has_token = parsed.query_pairs().any(|(key, _)| key == "token");
+    let mut query_pairs: Vec<(String, String)> = parsed
+        .query_pairs()
+        .filter(|(key, _)| key != "target")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    if !has_token && !api_key.is_empty() {
+        query_pairs.push(("token".to_string(), api_key.to_string()));
+    }
+    query_pairs.push(("target".to_string(), "page".to_string()));
+    parsed.set_query(None);
+    parsed
+        .query_pairs_mut()
+        .extend_pairs(query_pairs.iter().map(|(key, value)| (&**key, &**value)));
+    Ok(parsed.to_string())
+}
+
+fn normalize_agentenv_api_base(api_base_url: &str) -> Result<String> {
+    let raw = api_base_url.trim();
+    let candidate = if raw.starts_with("http://") || raw.starts_with("https://") {
+        raw.to_string()
+    } else {
+        format!("https://{raw}")
+    };
+    let mut parsed = Url::parse(&candidate).context("parse AgentEnv API base URL")?;
+    let path = parsed.path().trim_end_matches('/').to_string();
+    if path == "/v1" {
+        parsed.set_path("");
+    } else if let Some(prefix) = path.strip_suffix("/v1") {
+        parsed.set_path(prefix);
+    } else {
+        parsed.set_path(&path);
+    }
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    Ok(parsed.to_string().trim_end_matches('/').to_string())
+}
+
+fn mint_browser_cdp_timeout() -> Duration {
+    trimmed_env(MINT_BROWSER_CDP_TIMEOUT_SECONDS_ENV)
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_MINT_BROWSER_CDP_TIMEOUT)
+}
+
+fn json_string(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn trimmed_env(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn redact_api_key(value: &str, api_key: &str) -> String {
+    if api_key.is_empty() {
+        value.to_string()
+    } else {
+        value.replace(api_key, "[REDACTED]")
+    }
+}
+
+fn external_devtools_version_endpoint(raw: &str) -> Result<String> {
+    let candidate = if raw.starts_with("http://") || raw.starts_with("https://") {
+        raw.to_string()
+    } else {
+        format!("http://{raw}")
+    };
+    let mut url = Url::parse(&candidate).context("parse external Chrome DevTools URL")?;
+    let path = url.path().trim_end_matches('/');
+    if path.is_empty() || path == "/" {
+        url.set_path("/json/version");
+    } else if path == "/json" {
+        url.set_path("/json/version");
+    } else if path.ends_with("/json/version") {
+        // Already points at the version endpoint.
+    } else {
+        bail!("external Chrome DevTools URL must be a host, /json, or /json/version endpoint");
+    }
+    Ok(url.to_string())
 }
 
 /// Returns the initial Chrome page target created during browser launch, if present.
@@ -280,4 +618,137 @@ fn devtools_http_base(browser_ws: &str) -> Result<String> {
         .port()
         .ok_or_else(|| anyhow!("Chrome DevTools URL missing port"))?;
     Ok(format!("http://{host}:{port}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        external_devtools_version_endpoint, mint_agentenv_platform_browser_page_cdp_url,
+        normalize_agentenv_api_base, prepare_minted_cdp_url,
+    };
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread;
+
+    #[test]
+    fn external_devtools_endpoint_accepts_host_or_version_endpoint() {
+        assert_eq!(
+            external_devtools_version_endpoint("127.0.0.1:9222").unwrap(),
+            "http://127.0.0.1:9222/json/version"
+        );
+        assert_eq!(
+            external_devtools_version_endpoint("http://127.0.0.1:9222/json").unwrap(),
+            "http://127.0.0.1:9222/json/version"
+        );
+        assert_eq!(
+            external_devtools_version_endpoint("http://127.0.0.1:9222/json/version").unwrap(),
+            "http://127.0.0.1:9222/json/version"
+        );
+    }
+
+    #[test]
+    fn agentenv_api_base_accepts_host_or_v1_url() {
+        assert_eq!(
+            normalize_agentenv_api_base("api.agentenv.io").unwrap(),
+            "https://api.agentenv.io"
+        );
+        assert_eq!(
+            normalize_agentenv_api_base("https://api.agentenv.io/v1").unwrap(),
+            "https://api.agentenv.io"
+        );
+    }
+
+    #[test]
+    fn minted_cdp_url_is_tokenized_page_websocket() {
+        assert_eq!(
+            prepare_minted_cdp_url(
+                "https://api.agentenv.io/v1/browser/session-1/cdp?target=browser&foo=bar",
+                "secret-token",
+            )
+            .unwrap(),
+            "wss://api.agentenv.io/v1/browser/session-1/cdp?foo=bar&token=secret-token&target=page"
+        );
+        assert_eq!(
+            prepare_minted_cdp_url(
+                "wss://api.agentenv.io/v1/browser/session-1/cdp?token=existing&target=browser",
+                "secret-token",
+            )
+            .unwrap(),
+            "wss://api.agentenv.io/v1/browser/session-1/cdp?token=existing&target=page"
+        );
+    }
+
+    #[test]
+    fn mint_agentenv_platform_browser_fetches_public_page_cdp_url() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base_url = format!("http://{addr}");
+        let cdp_url = format!("ws://{addr}/v1/browser/session-1/cdp");
+        let cdp_url_for_server = cdp_url.clone();
+        let server = thread::spawn(move || {
+            let (mut create_stream, _) = listener.accept().unwrap();
+            let create_request = read_http_request(&mut create_stream);
+            assert!(create_request.starts_with("post /v1/browser/sessions "));
+            assert!(create_request.contains("authorization: bearer secret-token"));
+            assert!(create_request.contains("\"profilemode\":\"persistent\""));
+            write_json_response(
+                &mut create_stream,
+                r#"{"id":"session-1","status":"running"}"#,
+            );
+
+            let (mut cdp_stream, _) = listener.accept().unwrap();
+            let cdp_request = read_http_request(&mut cdp_stream);
+            assert!(cdp_request.starts_with("get /v1/browser/sessions/session-1/cdp-url "));
+            assert!(cdp_request.contains("authorization: bearer secret-token"));
+            write_json_response(
+                &mut cdp_stream,
+                &format!(r#"{{"cdpUrl":"{cdp_url_for_server}"}}"#),
+            );
+        });
+
+        assert_eq!(
+            mint_agentenv_platform_browser_page_cdp_url(&base_url, "secret-token").unwrap(),
+            format!("{cdp_url}?token=secret-token&target=page")
+        );
+        server.join().unwrap();
+    }
+
+    fn read_http_request(stream: &mut TcpStream) -> String {
+        let mut buf = Vec::new();
+        let mut tmp = [0_u8; 512];
+        loop {
+            let n = stream.read(&mut tmp).unwrap();
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            if request_is_complete(&buf) {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&buf).to_ascii_lowercase()
+    }
+
+    fn request_is_complete(buf: &[u8]) -> bool {
+        let Some(header_end) = buf.windows(4).position(|window| window == b"\r\n\r\n") else {
+            return false;
+        };
+        let headers = String::from_utf8_lossy(&buf[..header_end]).to_ascii_lowercase();
+        let content_length = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        buf.len() >= header_end + 4 + content_length
+    }
+
+    fn write_json_response(stream: &mut TcpStream, body: &str) {
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+    }
 }

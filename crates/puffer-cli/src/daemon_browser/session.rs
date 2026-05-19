@@ -18,7 +18,8 @@ use crate::daemon::ServerEnvelope;
 
 use super::chrome::{
     close_page_target, create_page_target, initial_page_target, read_devtools_ws_url,
-    resolve_chrome_executable, ChromePageTarget,
+    resolve_chrome_executable, resolve_external_devtools_endpoint, ChromePageTarget,
+    ExternalDevToolsEndpoint,
 };
 use super::cursor::{cursor_eval_expression, parse_cursor_response};
 use super::devtools::emit_devtools_event;
@@ -52,9 +53,15 @@ pub(super) struct BrowserRootSession {
 struct BrowserRootState {
     profile_dir: PathBuf,
     browser_ws: String,
-    child: Child,
+    owner: BrowserRootOwner,
     reusable_target: Option<ChromePageTarget>,
     last_active: Instant,
+}
+
+enum BrowserRootOwner {
+    Managed(Child),
+    ExternalBrowser,
+    ExternalPage,
 }
 
 #[derive(Clone)]
@@ -69,6 +76,37 @@ pub(super) struct BrowserSession {
 impl BrowserRootSession {
     /// Spawns one shared Chrome root owner for a browser session tree.
     pub(super) fn spawn(profile_dir: PathBuf, width: u32, height: u32) -> Result<Self> {
+        if let Some(endpoint) = resolve_external_devtools_endpoint()? {
+            match endpoint {
+                ExternalDevToolsEndpoint::Browser { browser_ws } => {
+                    let reusable_target = initial_page_target(&browser_ws)?;
+                    return Ok(Self {
+                        inner: Arc::new(Mutex::new(BrowserRootState {
+                            profile_dir,
+                            browser_ws,
+                            owner: BrowserRootOwner::ExternalBrowser,
+                            reusable_target,
+                            last_active: Instant::now(),
+                        })),
+                    });
+                }
+                ExternalDevToolsEndpoint::Page { page_ws } => {
+                    return Ok(Self {
+                        inner: Arc::new(Mutex::new(BrowserRootState {
+                            profile_dir,
+                            browser_ws: page_ws.clone(),
+                            owner: BrowserRootOwner::ExternalPage,
+                            reusable_target: Some(ChromePageTarget {
+                                target_id: "external".to_string(),
+                                page_ws,
+                            }),
+                            last_active: Instant::now(),
+                        })),
+                    });
+                }
+            }
+        }
+
         let chrome = resolve_chrome_executable()
             .ok_or_else(|| anyhow!("Chrome or Chromium executable not found"))?;
         std::fs::create_dir_all(&profile_dir).context("create browser profile directory")?;
@@ -117,7 +155,7 @@ impl BrowserRootSession {
             inner: Arc::new(Mutex::new(BrowserRootState {
                 profile_dir,
                 browser_ws,
-                child,
+                owner: BrowserRootOwner::Managed(child),
                 reusable_target,
                 last_active: Instant::now(),
             })),
@@ -128,6 +166,12 @@ impl BrowserRootSession {
         let mut inner = self.inner.lock().unwrap();
         touch_root(&mut inner);
         ensure_root_alive(&mut inner)?;
+        if matches!(&inner.owner, BrowserRootOwner::ExternalPage) {
+            return Ok(ChromePageTarget {
+                target_id: "external".to_string(),
+                page_ws: inner.browser_ws.clone(),
+            });
+        }
         if let Some(target) = inner.reusable_target.take() {
             return Ok(target);
         }
@@ -138,6 +182,9 @@ impl BrowserRootSession {
         let mut inner = self.inner.lock().unwrap();
         touch_root(&mut inner);
         ensure_root_alive(&mut inner)?;
+        if matches!(&inner.owner, BrowserRootOwner::ExternalPage) {
+            return Ok(());
+        }
         close_page_target(&inner.browser_ws, target_id)
     }
 
@@ -145,16 +192,17 @@ impl BrowserRootSession {
     pub(super) fn shutdown(&self) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
         inner.reusable_target = None;
-        match inner
-            .child
-            .try_wait()
-            .context("check Chrome shutdown status")?
-        {
-            Some(_) => Ok(()),
-            None => {
-                let _ = inner.child.kill();
-                let _ = inner.child.wait();
-                Ok(())
+        match &mut inner.owner {
+            BrowserRootOwner::ExternalBrowser | BrowserRootOwner::ExternalPage => Ok(()),
+            BrowserRootOwner::Managed(child) => {
+                match child.try_wait().context("check Chrome shutdown status")? {
+                    Some(_) => Ok(()),
+                    None => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        Ok(())
+                    }
+                }
             }
         }
     }
@@ -170,11 +218,13 @@ impl BrowserRootSession {
 
     pub(super) fn is_alive(&self) -> bool {
         let mut inner = self.inner.lock().unwrap();
-        inner
-            .child
-            .try_wait()
-            .map(|status| status.is_none())
-            .unwrap_or(false)
+        match &mut inner.owner {
+            BrowserRootOwner::ExternalBrowser | BrowserRootOwner::ExternalPage => true,
+            BrowserRootOwner::Managed(child) => child
+                .try_wait()
+                .map(|status| status.is_none())
+                .unwrap_or(false),
+        }
     }
 }
 
@@ -977,11 +1027,13 @@ pub(crate) fn send_cdp(
 }
 
 fn ensure_root_alive(inner: &mut BrowserRootState) -> Result<()> {
-    if let Some(status) = inner.child.try_wait().context("check Chrome root status")? {
-        bail!(
-            "Chrome root for profile {} exited unexpectedly: {status}",
-            inner.profile_dir.display()
-        );
+    if let BrowserRootOwner::Managed(child) = &mut inner.owner {
+        if let Some(status) = child.try_wait().context("check Chrome root status")? {
+            bail!(
+                "Chrome root for profile {} exited unexpectedly: {status}",
+                inner.profile_dir.display()
+            );
+        }
     }
     Ok(())
 }
