@@ -898,8 +898,6 @@
 .pf-modal-scrim {
   position: fixed; inset: 0; z-index: 100;
   background: color-mix(in oklch, var(--background) 30%, transparent 70%);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
   display: flex; align-items: center; justify-content: center;
   padding: 48px 24px;
   animation: pf-modal-scrim-in 140ms ease-out;
@@ -919,8 +917,8 @@
   animation: pf-modal-in 160ms cubic-bezier(0.2, 0.9, 0.3, 1);
 }
 @keyframes pf-modal-in {
-  from { opacity: 0; transform: translateY(6px) scale(0.98); }
-  to   { opacity: 1; transform: translateY(0) scale(1); }
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 .pf-connect-modal {
   width: 520px;
@@ -991,12 +989,10 @@
 .pf-modal-seg-btn:hover {
   border-color: transparent;
   background: var(--pf-selected-bg-hover);
-  font-weight: 700;
 }
 .pf-modal-seg-btn[data-active="true"] {
   border-color: transparent;
   background: var(--pf-selected-bg);
-  font-weight: 700;
 }
 .pf-modal-seg-btn[data-active="true"] svg { color: var(--foreground); }
 .pf-modal-seg-body { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; }

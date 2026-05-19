@@ -192,6 +192,7 @@
     color: var(--foreground);
     text-align: left;
     cursor: pointer;
+    transition: background 100ms, border-color 100ms, box-shadow 100ms;
   }
   .pf-provider-choice-btn:hover:not(:disabled) {
     background: var(--accent);

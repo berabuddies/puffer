@@ -985,7 +985,6 @@
   .pf-provider-card:hover {
     background: var(--pf-selected-bg-hover);
     border-color: transparent;
-    font-weight: 700;
   }
 
   .pf-provider-mark,

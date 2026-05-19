@@ -807,12 +807,10 @@
   .pf-provider-seg-btn:hover:not(:disabled) {
     border-color: transparent;
     background: var(--pf-selected-bg-hover);
-    font-weight: 700;
   }
   .pf-provider-seg-btn[data-active="true"] {
     border-color: transparent;
     background: var(--pf-selected-bg);
-    font-weight: 700;
   }
   .pf-modal-hint {
     font-size: 12px;
