@@ -151,6 +151,7 @@
   let settingsSnapshot = $state<SettingsSnapshot | null>(null);
   let settingsLoading = $state(false);
   let settingsRefreshGeneration = 0;
+  let groupsRefreshGeneration = 0;
   let authBusyProviderId = $state<string | null>(null);
   let authError = $state<string | null>(null);
   let externalCredentials = $state<ExternalCredential[]>([]);
@@ -703,17 +704,23 @@
   }
 
   async function refreshGroups() {
+    const generation = ++groupsRefreshGeneration;
     groupsLoading = true;
     try {
-      groups = await listGroupedSessionsFromDaemon();
+      const nextGroups = await listGroupedSessionsFromDaemon();
+      if (generation !== groupsRefreshGeneration) return;
+      groups = nextGroups;
       statusMessage =
         groups.length === 0
           ? "No sessions in this workspace yet."
           : `${groups.length} project${groups.length === 1 ? "" : "s"} loaded.`;
     } catch (error) {
+      if (generation !== groupsRefreshGeneration) return;
       statusMessage = String(error);
     } finally {
-      groupsLoading = false;
+      if (generation === groupsRefreshGeneration) {
+        groupsLoading = false;
+      }
     }
   }
 

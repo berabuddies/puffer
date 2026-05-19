@@ -152,6 +152,47 @@ test("session history keeps older sessions available after starting a new agent"
   await expect(page.getByText("Older transcript persisted.")).toBeVisible();
 });
 
+test("late workspace refresh does not hide a newly created session", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-stale-history",
+        displayName: "Stale history base",
+        title: "Stale history base",
+        cwd: "/tmp/puffer-stale-history",
+        folderPath: "/tmp/puffer-stale-history",
+        updatedAtMs: baseTime - 120_000,
+        createdAtMs: baseTime - 240_000,
+        eventCount: 1
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const history = page.getByRole("region", { name: "Session history" });
+  await expect(history).toContainText("Stale history base");
+
+  daemon.delayResponse("list_grouped_sessions", () => true, 900);
+  daemon.emit("workspace:sessions:changed", { reason: "manual-refresh" });
+  await page.waitForTimeout(25);
+
+  await page
+    .locator(".pf-pw-project")
+    .filter({ hasText: "puffer-stale-history" })
+    .getByRole("button", { name: "New agent" })
+    .click();
+  await page.getByRole("button", { name: /Start agent/ }).click();
+
+  await expect(page.locator(".pf-agent-detail")).toBeVisible();
+  await page.getByRole("button", { name: "Back" }).click();
+  await expect(history).toContainText("New Session");
+
+  await page.waitForTimeout(1_000);
+  await expect(history).toContainText("Stale history base");
+  await expect(history).toContainText("New Session");
+});
+
 test("sidebar Workspace returns from agent detail to the workspace board", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
