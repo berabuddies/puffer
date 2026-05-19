@@ -939,6 +939,10 @@ fn handle_overlay_key(
                 overlay.page_down();
             }
         }
+        KeyCode::Left if overlay_snapshot.accepts_filter_input() => tui.move_left(),
+        KeyCode::Right if overlay_snapshot.accepts_filter_input() => tui.move_right(),
+        KeyCode::Home if overlay_snapshot.accepts_filter_input() => tui.move_home(),
+        KeyCode::End if overlay_snapshot.accepts_filter_input() => tui.move_end(),
         KeyCode::Backspace => {
             if !overlay_snapshot.accepts_filter_input() {
                 return Ok(false);

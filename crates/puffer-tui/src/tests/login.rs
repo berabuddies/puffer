@@ -177,6 +177,100 @@ fn login_picker_selection_is_auth_only() {
 }
 
 #[test]
+fn login_picker_filter_cursor_movement_edits_query() {
+    let tempdir = tempdir().unwrap();
+    let _home = crate::test_env::ScopedPufferHome::new("login-picker-filter-cursor");
+    let workspace = tempdir.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    let paths = ConfigPaths::discover(&workspace);
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store.create_session(workspace.clone()).unwrap();
+    let mut state = AppState::new(PufferConfig::default(), workspace, session);
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let mut auth_store = AuthStore::default();
+    let mut providers = openai_only_providers();
+    let mut resources = sample_resources();
+    let mut tui = TuiState::default();
+
+    assert!(try_open_overlay(
+        &state,
+        &resources,
+        &mut providers,
+        &auth_store,
+        &session_store,
+        &mut tui,
+        "/login",
+    )
+    .unwrap());
+
+    for ch in "opnai".chars() {
+        handle_overlay_key(
+            KeyEvent::from(KeyCode::Char(ch)),
+            &mut state,
+            &mut resources,
+            &mut providers,
+            &mut auth_store,
+            &auth_path,
+            &session_store,
+            &mut tui,
+            true,
+        )
+        .unwrap();
+    }
+    for _ in 0..3 {
+        handle_overlay_key(
+            KeyEvent::from(KeyCode::Left),
+            &mut state,
+            &mut resources,
+            &mut providers,
+            &mut auth_store,
+            &auth_path,
+            &session_store,
+            &mut tui,
+            true,
+        )
+        .unwrap();
+    }
+    handle_overlay_key(
+        KeyEvent::from(KeyCode::Char('e')),
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(tui.input, "openai");
+
+    handle_overlay_key(
+        KeyEvent::from(KeyCode::Enter),
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        tui.overlay,
+        Some(OverlayState::AuthPicker {
+            ref provider_id,
+            ..
+        }) if provider_id == "openai"
+    ));
+}
+
+#[test]
 fn stale_provider_prompt_opens_provider_picker() {
     let tempdir = tempdir().unwrap();
     let _home = crate::test_env::ScopedPufferHome::new("stale-provider-picker");
