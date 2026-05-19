@@ -67,3 +67,39 @@ test("Terminal input keeps global find shortcuts while focused", async ({ page }
 
   await expect(page.getByRole("search", { name: "Find in agent view" })).toHaveCount(0);
 });
+
+test("Terminal new tab ignores repeated clicks while create is in flight", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: /Browser regression/ }).first().click();
+  await page.locator(".pf-agent-tabs").getByRole("button", { name: "Terminal", exact: true }).click();
+  await daemon.waitForRequest("pty_open", (request) => request.params.sessionId === "session-browser");
+  await expect(page.getByRole("tab", { name: /Terminal 1/ })).toBeVisible();
+
+  const openedBefore = daemon.requests.filter((request) => request.method === "pty_open").length;
+  daemon.delayResponse(
+    "pty_open",
+    (request) =>
+      request.params.sessionId === "session-browser" &&
+      request.params.title === "Terminal 2",
+    500
+  );
+  await page.getByRole("button", { name: "New terminal" }).evaluate((button) => {
+    (button as HTMLButtonElement).click();
+    (button as HTMLButtonElement).click();
+  });
+
+  const request = await daemon.waitForRequest(
+    "pty_open",
+    (request) =>
+      request.params.sessionId === "session-browser" &&
+      request.params.title === "Terminal 2"
+  );
+  expect(request.params.cwd).toBe("/tmp/puffer");
+  await page.waitForTimeout(50);
+  expect(daemon.requests.filter((request) => request.method === "pty_open")).toHaveLength(
+    openedBefore + 1
+  );
+});

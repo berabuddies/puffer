@@ -36,6 +36,7 @@
   let activePtyId = $state<string | null>(null);
   let ptyTabs = $state<PtyTabInfo[]>([]);
   let loading = $state(false);
+  let creatingPty = $state(false);
   let error = $state<string | null>(null);
   let disposed = false;
   let attachGeneration = 0;
@@ -55,6 +56,7 @@
       const generation = ++restoreGeneration;
       activePtyId = null;
       ptyTabs = [];
+      creatingPty = false;
       seenSeqByPty = new Map();
       cleanupTerminalAttach();
       void restoreOrCreateTerminal(targetSessionId, targetCwd, generation);
@@ -88,7 +90,8 @@
   }
 
   async function createTerminalTab(targetSessionId = sessionId, targetCwd = cwd, generation = restoreGeneration) {
-    if (previewMode || targetSessionId === "preview") return;
+    if (previewMode || targetSessionId === "preview" || creatingPty) return;
+    creatingPty = true;
     loading = true;
     error = null;
     try {
@@ -107,7 +110,10 @@
     } catch (err) {
       if (generation === restoreGeneration) error = err instanceof Error ? err.message : String(err);
     } finally {
-      if (generation === restoreGeneration) loading = false;
+      if (generation === restoreGeneration) {
+        loading = false;
+        creatingPty = false;
+      }
     }
   }
 
