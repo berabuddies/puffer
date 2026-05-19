@@ -126,6 +126,7 @@
   let submitMessageInFlightSessionIds = $state<string[]>([]);
   let dismissedPermissionIds = $state<string[]>([]);
   let dismissedQuestionIds = $state<string[]>([]);
+  let resolvingPermissionIds = $state<string[]>([]);
   let resolvingQuestionIds = $state<string[]>([]);
 
   // Live turn state: items synthesized from streaming events while a turn is
@@ -867,6 +868,7 @@
     replayTextByTurn = {};
     turnPermissionLookup = {};
     turnQuestionLookup = {};
+    resolvingPermissionIds = [];
     resolvingQuestionIds = [];
     currentTurnId = null;
     cancelingTurnId = null;
@@ -1007,6 +1009,7 @@
     submitMessageInFlightSessionIds = [];
     dismissedPermissionIds = [];
     dismissedQuestionIds = [];
+    resolvingPermissionIds = [];
     resolvingQuestionIds = [];
     liveStreamItems = [];
     replayTextByTurn = {};
@@ -1275,26 +1278,32 @@
   }
 
   async function resolvePermission(permissionId: string, choice: string) {
-    const mapping = turnPermissionLookup[permissionId];
-    if (mapping) {
-      try {
-        await resolveTurnPermission(mapping.turnId, mapping.requestId, mapPermissionAction(choice));
-        dismissedPermissionIds = [...dismissedPermissionIds, permissionId];
-        statusMessage = `${choice} sent to agent.`;
-        if (currentTurnId === mapping.turnId) {
-          turnThinking = false;
-          turnStatusHint = "Running";
+    if (resolvingPermissionIds.includes(permissionId)) return;
+    resolvingPermissionIds = [...resolvingPermissionIds, permissionId];
+    try {
+      const mapping = turnPermissionLookup[permissionId];
+      if (mapping) {
+        try {
+          await resolveTurnPermission(mapping.turnId, mapping.requestId, mapPermissionAction(choice));
+          dismissedPermissionIds = [...dismissedPermissionIds, permissionId];
+          statusMessage = `${choice} sent to agent.`;
+          if (currentTurnId === mapping.turnId) {
+            turnThinking = false;
+            turnStatusHint = "Running";
+          }
+          const { [permissionId]: _drop, ...rest } = turnPermissionLookup;
+          turnPermissionLookup = rest;
+        } catch (error) {
+          const detail = errorText(error);
+          statusMessage = `resolve_permission failed: ${detail}`;
+          appendAgentError("Permission response failed", detail, "permission-error");
         }
-        const { [permissionId]: _drop, ...rest } = turnPermissionLookup;
-        turnPermissionLookup = rest;
-      } catch (error) {
-        const detail = errorText(error);
-        statusMessage = `resolve_permission failed: ${detail}`;
-        appendAgentError("Permission response failed", detail, "permission-error");
+      } else {
+        dismissedPermissionIds = [...dismissedPermissionIds, permissionId];
+        statusMessage = `${choice} selected (no in-flight turn).`;
       }
-    } else {
-      dismissedPermissionIds = [...dismissedPermissionIds, permissionId];
-      statusMessage = `${choice} selected (no in-flight turn).`;
+    } finally {
+      resolvingPermissionIds = resolvingPermissionIds.filter((id) => id !== permissionId);
     }
   }
 

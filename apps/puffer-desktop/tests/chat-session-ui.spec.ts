@@ -1388,6 +1388,39 @@ test("successful permission response clears the awaiting approval hint", async (
   await expect(page.getByText(/Running/)).toBeVisible();
 });
 
+test("permission responses ignore duplicate clicks while the choice is in flight", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /^Browser regression\b/);
+  daemon.delayResponse("resolve_permission", () => true, 500);
+  daemon.emit("session:session-browser:event", {
+    type: "permission-request",
+    turnId: "turn-permission-duplicate",
+    requestId: "permission-duplicate",
+    toolId: "bash",
+    summary: "Run duplicate approval command",
+    reason: "Needs a single approval."
+  });
+
+  await expect(page.getByText("Needs a single approval.")).toBeVisible();
+  const allowOnce = page.getByRole("button", { name: "Allow once" });
+  await allowOnce.click();
+  await allowOnce.click();
+
+  const request = await daemon.waitForRequest("resolve_permission");
+  expect(request.params).toMatchObject({
+    turnId: "turn-permission-duplicate",
+    requestId: "permission-duplicate",
+    action: "allow_once"
+  });
+  await page.waitForTimeout(50);
+  expect(
+    daemon.requests.filter((request) => request.method === "resolve_permission")
+  ).toHaveLength(1);
+});
+
 test("new turn can reuse a permission request id after earlier approval", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
