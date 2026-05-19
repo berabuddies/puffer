@@ -1173,6 +1173,35 @@
     return items.some((item) => item.kind === kind && timelineItemBody(item).includes(trimmed));
   }
 
+  function transientMessageSignature(item: TimelineItem): string | null {
+    if (item.kind !== "user" && item.kind !== "assistant") return null;
+    const body = timelineItemBody(item).trim();
+    if (!body) return null;
+    return `${item.kind}:${body}`;
+  }
+
+  function reuseTransientMessageIds(
+    persisted: TimelineItem[],
+    transient: TimelineItem[]
+  ): TimelineItem[] {
+    const transientIds = new Map<string, string[]>();
+    for (let index = transient.length - 1; index >= 0; index -= 1) {
+      const item = transient[index];
+      const signature = transientMessageSignature(item);
+      if (!signature) continue;
+      transientIds.set(signature, [...(transientIds.get(signature) ?? []), item.id]);
+    }
+    const keyed = [...persisted];
+    for (let index = keyed.length - 1; index >= 0; index -= 1) {
+      const item = keyed[index];
+      const signature = transientMessageSignature(item);
+      const candidates = signature ? transientIds.get(signature) : null;
+      const replacement = candidates?.shift();
+      if (replacement) keyed[index] = { ...item, id: replacement };
+    }
+    return keyed;
+  }
+
   function stillMissingFromPersisted(items: TimelineItem[], pending: TimelineItem[]): TimelineItem[] {
     return pending.filter((item) => !timelineHasBody(items, item.kind, timelineItemBody(item)));
   }
@@ -1210,9 +1239,12 @@
       if (currentTurnId !== null && currentTurnId !== completedTurnId) {
         return;
       }
-      const persistedTimeline = detail.timeline;
+      const persistedTimeline = reuseTransientMessageIds(detail.timeline, [
+        ...submittedAtCompletion,
+        ...liveItemsAtCompletion
+      ]);
       selectedSession = detail.session;
-      sessionDetail = detail;
+      sessionDetail = { ...detail, timeline: persistedTimeline };
       statusMessage = `Loaded ${detail.timeline.length} conversation items.`;
       if (turnEndedWithError) {
         liveStreamItems = stillMissingFromPersisted(persistedTimeline, preservedErrorItems);

@@ -87,6 +87,101 @@ test("turn completion reload does not leak live chat into a newly selected sessi
   await expect(page.getByText("Race from alpha")).toHaveCount(0);
 });
 
+test("turn completion preserves live chat row identity after transcript reload", async ({ page }) => {
+  const prompt = "Keep this row stable";
+  const reply = "Stable streamed reply is visible.";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-stable-chat",
+        displayName: "Stable chat",
+        title: "Stable chat",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Stable chat/);
+  await page.locator(".pf-composer textarea").fill(prompt);
+  await page.getByRole("button", { name: "Send" }).click();
+
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-stable-chat" &&
+      request.params.message === prompt
+  );
+
+  const userRow = page.locator('.pf-msg[data-role="user"]').filter({ hasText: prompt }).last();
+  await expect(userRow).toBeVisible();
+  await userRow.evaluate((node) => node.setAttribute("data-probe", "local-user-row"));
+
+  const turnId = "turn-session-stable-chat";
+  daemon.emit("session:session-stable-chat:event", { type: "turn-start", turnId });
+  daemon.emit("session:session-stable-chat:event", {
+    type: "text-delta",
+    turnId,
+    delta: reply
+  });
+
+  const agentRow = page.locator('.pf-msg[data-role="agent"]').filter({ hasText: reply }).last();
+  await expect(agentRow).toBeVisible();
+  await agentRow.evaluate((node) => node.setAttribute("data-probe", "live-agent-row"));
+
+  const loadRequestsBefore = daemon.requests.filter(
+    (request) =>
+      request.method === "load_session_detail" &&
+      request.params.sessionId === "session-stable-chat"
+  ).length;
+  daemon.setSessionTimeline("session-stable-chat", [
+    {
+      kind: "user_message",
+      id: "persisted-user-different-id",
+      text: prompt,
+      createdAtMs: baseTime + 1
+    },
+    {
+      kind: "assistant_message",
+      id: "persisted-assistant-different-id",
+      text: reply,
+      createdAtMs: baseTime + 2
+    }
+  ]);
+  daemon.emit("session:session-stable-chat:event", {
+    type: "turn-complete",
+    turnId,
+    assistantText: reply
+  });
+
+  await expect
+    .poll(() =>
+      daemon.requests.filter(
+        (request) =>
+          request.method === "load_session_detail" &&
+          request.params.sessionId === "session-stable-chat"
+      ).length
+    )
+    .toBe(loadRequestsBefore + 1);
+  await expect(page.locator('.pf-msg[data-role="user"][data-probe="local-user-row"]')).toContainText(
+    prompt
+  );
+  await expect(page.locator('.pf-msg[data-role="agent"][data-probe="live-agent-row"]')).toContainText(
+    reply
+  );
+  await expect(page.locator('.pf-msg[data-role="user"]').filter({ hasText: prompt })).toHaveCount(1);
+  await expect(page.locator('.pf-msg[data-role="agent"]').filter({ hasText: reply })).toHaveCount(1);
+});
+
 test("resolved transcript permissions do not reappear as pending approvals", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
