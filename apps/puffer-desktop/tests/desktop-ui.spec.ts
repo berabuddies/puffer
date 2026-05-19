@@ -97,6 +97,44 @@ test("sends Browser tab navigation through the daemon bridge", async ({ page }) 
   await expect(page.getByLabel("URL")).toHaveValue("https://example.com");
 });
 
+test("late Browser navigation failures stay scoped to the submitted tab", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1"
+  );
+  await page.getByRole("button", { name: "New tab" }).click();
+  await daemon.waitForRequest("browser_agent", (candidate) =>
+    candidate.params.action === "open" && candidate.params.tabId === "tab-2"
+  );
+  await expect(page.locator(".pf-browser-tab")).toHaveCount(2);
+
+  await page.locator(".pf-browser-tab").nth(0).click();
+  await expect(page.getByLabel("URL")).toHaveValue("about:blank");
+  daemon.delayFailure(
+    "browser_navigate",
+    (request) => request.params.sessionId === "session-browser:browser:tab-1",
+    "navigation failed after tab switch",
+    120
+  );
+  await page.getByLabel("URL").fill("broken.example");
+  await page.getByLabel("URL").press("Enter");
+  await daemon.waitForRequest("browser_navigate", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1"
+  );
+
+  await page.locator(".pf-browser-tab").nth(1).click();
+  await expect(page.getByLabel("URL")).toHaveValue("about:blank");
+  await page.waitForTimeout(170);
+
+  await expect(page.getByLabel("URL")).toHaveValue("about:blank");
+  await expect(page.locator(".pf-browser-error")).toHaveCount(0);
+});
+
 test("renders Browser devtools events from the daemon stream", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

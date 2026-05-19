@@ -22,6 +22,10 @@ type ResponseDelay = {
   ms: number;
 };
 
+type ResponseFailureDelay = ResponseDelay & {
+  error: string;
+};
+
 type TabSet = {
   activeTabId: string | null;
   tabs: JsonRecord[];
@@ -212,6 +216,7 @@ export class FakeDaemon {
   private readonly sockets = new Set<WebSocketRoute>();
   private readonly waiters: Waiter[] = [];
   private readonly responseDelays: ResponseDelay[] = [];
+  private readonly responseFailureDelays: ResponseFailureDelay[] = [];
   private readonly methodFailures = new Map<string, string[]>();
   private readonly browserTabs = new Map<string, TabSet>();
   private readonly ptys = new Map<string, PtySet>();
@@ -388,6 +393,15 @@ export class FakeDaemon {
     this.responseDelays.push({ method, predicate, ms });
   }
 
+  delayFailure(
+    method: string,
+    predicate: (request: DaemonRequest) => boolean,
+    error: string,
+    ms: number
+  ): void {
+    this.responseFailureDelays.push({ method, predicate, error, ms });
+  }
+
   failNext(method: string, error: string): void {
     const failures = this.methodFailures.get(method) ?? [];
     failures.push(error);
@@ -429,6 +443,11 @@ export class FakeDaemon {
     this.record(request);
 
     try {
+      const delayedFailure = this.takeResponseFailureDelay(request);
+      if (delayedFailure) {
+        setTimeout(() => socket.send(this.failure(request.id, delayedFailure.error)), delayedFailure.ms);
+        return;
+      }
       const outbound = this.response(request.id, this.dispatch(request));
       const delay = this.takeResponseDelay(request);
       if (delay === null) {
@@ -460,6 +479,15 @@ export class FakeDaemon {
     if (index === -1) return null;
     const [delay] = this.responseDelays.splice(index, 1);
     return delay.ms;
+  }
+
+  private takeResponseFailureDelay(request: DaemonRequest): ResponseFailureDelay | null {
+    const index = this.responseFailureDelays.findIndex(
+      (delay) => delay.method === request.method && delay.predicate(request)
+    );
+    if (index === -1) return null;
+    const [delay] = this.responseFailureDelays.splice(index, 1);
+    return delay;
   }
 
   private record(request: DaemonRequest): void {
