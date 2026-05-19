@@ -525,6 +525,7 @@
 
   function shouldShowOnboarding(snapshot: SettingsSnapshot | null): boolean {
     if (!hasAgentProviderAuth(snapshot)) return true;
+    if (onboardingCompleted) return false;
     if (forceOnboarding && !onboardingCompleted) return true;
     return !skipOnboarding;
   }

@@ -21,6 +21,26 @@ test("onboarding Continue enters the workspace", async ({ page }) => {
   ).toHaveCount(0);
 });
 
+test("completed onboarding stays dismissed after settings refresh", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page, { skipOnboarding: false });
+
+  await expect(page.getByRole("heading", { name: "Workspace is ready" })).toBeVisible();
+  await page.getByRole("button", { name: /Continue/ }).click();
+  await expect(page.getByRole("button", { name: "New agent in puffer" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page
+    .locator(".pf-settings-row")
+    .filter({ hasText: "Account" })
+    .getByRole("button", { name: "Refresh" })
+    .click();
+
+  await expect(page.getByRole("heading", { name: "Workspace is ready" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "General" })).toBeVisible();
+});
+
 test("onboarding does not show fake repository choices", async ({ page }) => {
   await openForcedOnboarding(page);
 
