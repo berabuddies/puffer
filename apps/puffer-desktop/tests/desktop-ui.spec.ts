@@ -757,6 +757,76 @@ test("Browser pane resets daemon tabs when switching agents", async ({ page }) =
   );
 });
 
+test("late Browser close responses do not overwrite a switched agent", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-alpha-close",
+        displayName: "Alpha close",
+        title: "Alpha close",
+        cwd: "/tmp/puffer-alpha",
+        folderPath: "/tmp/puffer-alpha",
+        updatedAtMs: Date.now(),
+        createdAtMs: Date.now() - 60_000,
+        timeline: []
+      },
+      {
+        sessionId: "session-beta-close",
+        displayName: "Beta close",
+        title: "Beta close",
+        cwd: "/tmp/puffer-beta",
+        folderPath: "/tmp/puffer-beta",
+        updatedAtMs: Date.now() - 1_000,
+        createdAtMs: Date.now() - 120_000,
+        timeline: []
+      }
+    ]
+  });
+  daemon.delayResponse(
+    "browser_agent",
+    (request) =>
+      request.params.action === "close" &&
+      request.params.sessionId === "session-alpha-close",
+    120
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page
+    .locator(".pf-sidebar-agents-list")
+    .getByRole("button", { name: /^Alpha close\b/ })
+    .click();
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-alpha-close:browser:tab-1"
+  );
+  await expect(page.locator(".pf-browser-status")).toHaveText("Connected");
+
+  await page.getByRole("button", { name: "Close tab" }).click();
+  await daemon.waitForRequest("browser_agent", (request) =>
+    request.params.action === "close" &&
+    request.params.sessionId === "session-alpha-close"
+  );
+
+  await page
+    .locator(".pf-sidebar-agents-list")
+    .getByRole("button", { name: /^Beta close\b/ })
+    .click();
+  await daemon.waitForRequest("browser_agent", (request) =>
+    request.params.action === "list" &&
+    request.params.sessionId === "session-beta-close"
+  );
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-beta-close:browser:tab-1"
+  );
+  await expect(page.locator(".pf-browser-status")).toHaveText("Connected");
+  await expect(page.locator(".pf-browser-tab")).toHaveCount(1);
+
+  await page.waitForTimeout(170);
+  await expect(page.locator(".pf-browser-status")).toHaveText("Connected");
+  await expect(page.locator(".pf-browser-tab")).toHaveCount(1);
+});
+
 test("streamed assistant text stays visible when completion reload is stale", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
