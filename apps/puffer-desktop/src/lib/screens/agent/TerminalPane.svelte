@@ -272,7 +272,12 @@
       seenSeqByPty.set(ptyId, event.seq);
     }
     try {
-      term.write(atob(event.data));
+      const raw = atob(event.data);
+      const bytes = new Uint8Array(raw.length);
+      for (let index = 0; index < raw.length; index += 1) {
+        bytes[index] = raw.charCodeAt(index);
+      }
+      term.write(bytes);
     } catch {
       /* malformed frame - skip */
     }
