@@ -2705,6 +2705,112 @@ test("model picker only offers authenticated agent providers", async ({ page }) 
   await expect(providerList.getByRole("button", { name: "GitHub", exact: true })).toHaveCount(0);
 });
 
+test("model picker loads inactive provider models only after provider selection", async ({ page }) => {
+  const model = (provider: string, id: string) => ({
+    id,
+    displayName: id,
+    provider,
+    api: provider === "anthropic" ? "anthropic-messages" : "openai-responses",
+    supportsTools: true,
+    supportsVision: false,
+    contextWindow: null,
+    maxOutputTokens: null,
+    thinkingOptions: [],
+    defaultThinkingOptionId: null,
+    isDefault: true
+  });
+  const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "codex",
+        kind: "oauth",
+        email: "tester@example.com",
+        expiresAtMs: null,
+        scopes: [],
+        planType: "test",
+        organizationName: null
+      },
+      {
+        providerId: "anthropic",
+        kind: "api_key",
+        email: null,
+        expiresAtMs: null,
+        scopes: [],
+        planType: null,
+        organizationName: null
+      }
+    ],
+    providers: [
+      {
+        id: "codex",
+        displayName: "Codex",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 1,
+        authModes: ["oauth"],
+        sourceKind: "test",
+        sourcePath: null
+      },
+      {
+        id: "anthropic",
+        displayName: "Anthropic",
+        baseUrl: "",
+        defaultApi: "anthropic-messages",
+        modelCount: 1,
+        authModes: ["api_key"],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ],
+    sessions: [
+      {
+        sessionId: "session-lazy-picker-models",
+        displayName: "Lazy picker models",
+        title: "Lazy picker models",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "codex-default",
+        timeline: []
+      }
+    ],
+    providerModels: {
+      codex: [model("codex", "codex-default")],
+      anthropic: [model("anthropic", "anthropic-default")]
+    }
+  });
+  daemon.delayResponse(
+    "list_provider_models",
+    (request) => request.params.providerId === "anthropic",
+    250
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Lazy picker models/);
+  const picker = page.locator(".pf-composer .picker");
+  await picker.locator(".trigger").click();
+  await expect(picker.getByRole("button", { name: "Anthropic", exact: true })).toBeVisible();
+  await page.waitForTimeout(80);
+  expect(
+    daemon.requests.filter(
+      (request) =>
+        request.method === "list_provider_models" &&
+        request.params.providerId === "anthropic"
+    )
+  ).toHaveLength(0);
+
+  await picker.getByRole("button", { name: "Anthropic", exact: true }).click();
+  await daemon.waitForRequest(
+    "list_provider_models",
+    (request) => request.params.providerId === "anthropic"
+  );
+  await expect(picker.locator(".trigger")).toContainText("anthropic-default");
+});
+
 test("model picker marks alias-equivalent provider models as selected", async ({ page }) => {
   const daemon = new FakeDaemon({
     auth: [

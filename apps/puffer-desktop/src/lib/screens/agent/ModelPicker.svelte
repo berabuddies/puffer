@@ -84,9 +84,9 @@
     loadError = null;
     try {
       const next: Record<string, ModelDescriptorInfo[]> = { ...modelsByProvider };
-      const providers = allowProviderSwitch
-        ? authedProviders
-        : authedProviders.filter((provider) => providerIdsEquivalent(provider.id, currentProvider));
+      const provider = currentProviderEntry ??
+        authedProviders.find((entry) => providerIdsEquivalent(entry.id, currentProvider));
+      const providers = provider ? [provider] : [];
       for (const provider of providers) {
         if (next[provider.id]) continue;
         try {
