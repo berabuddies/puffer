@@ -32,6 +32,7 @@
   let loadError = $state<string | null>(null);
   let triggerEl: HTMLButtonElement | null = $state(null);
   let menuEl: HTMLDivElement | null = $state(null);
+  let modelLoadGeneration = 0;
   let providerSwitchGeneration = 0;
 
   let currentProvider = $derived(
@@ -80,6 +81,7 @@
   });
 
   async function loadModels() {
+    const generation = ++modelLoadGeneration;
     busy = true;
     loadError = null;
     try {
@@ -88,7 +90,6 @@
         authedProviders.find((entry) => providerIdsEquivalent(entry.id, currentProvider));
       const providers = provider ? [provider] : [];
       for (const provider of providers) {
-        if (next[provider.id]) continue;
         try {
           next[provider.id] = await listProviderModels(provider.id);
         } catch (error) {
@@ -96,9 +97,12 @@
           loadError = `${provider.id}: ${error}`;
         }
       }
+      if (generation !== modelLoadGeneration) return;
       modelsByProvider = next;
     } finally {
-      busy = false;
+      if (generation === modelLoadGeneration) {
+        busy = false;
+      }
     }
   }
 
@@ -106,24 +110,23 @@
     if (!allowProviderSwitch || disabled) return;
     if (providerIdsEquivalent(providerId, currentProvider)) return;
     const generation = ++providerSwitchGeneration;
+    modelLoadGeneration += 1;
     query = "";
-    let models = modelsByProvider[providerId] ?? [];
-    if (models.length === 0) {
-      busy = true;
-      loadError = null;
-      try {
-        models = await listProviderModels(providerId);
-        if (generation !== providerSwitchGeneration) return;
-        modelsByProvider = { ...modelsByProvider, [providerId]: models };
-      } catch (error) {
-        if (generation !== providerSwitchGeneration) return;
-        modelsByProvider = { ...modelsByProvider, [providerId]: [] };
-        loadError = `${providerId}: ${error}`;
-        models = [];
-      } finally {
-        if (generation === providerSwitchGeneration) {
-          busy = false;
-        }
+    let models: ModelDescriptorInfo[] = [];
+    busy = true;
+    loadError = null;
+    try {
+      models = await listProviderModels(providerId);
+      if (generation !== providerSwitchGeneration) return;
+      modelsByProvider = { ...modelsByProvider, [providerId]: models };
+    } catch (error) {
+      if (generation !== providerSwitchGeneration) return;
+      modelsByProvider = { ...modelsByProvider, [providerId]: [] };
+      loadError = `${providerId}: ${error}`;
+      models = [];
+    } finally {
+      if (generation === providerSwitchGeneration) {
+        busy = false;
       }
     }
     if (generation !== providerSwitchGeneration) return;

@@ -2875,6 +2875,81 @@ test("model picker marks alias-equivalent provider models as selected", async ({
   await expect(currentRow.locator(".row-name")).toHaveText("GPT-5");
 });
 
+test("model picker refreshes current provider models on reopen", async ({ page }) => {
+  const model = (id: string, displayName = id) => ({
+    id,
+    displayName,
+    provider: "openai",
+    api: "openai-responses",
+    supportsTools: true,
+    supportsVision: false,
+    contextWindow: null,
+    maxOutputTokens: null,
+    thinkingOptions: [],
+    defaultThinkingOptionId: null,
+    isDefault: true
+  });
+  const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "openai",
+        kind: "oauth",
+        email: "tester@example.com",
+        expiresAtMs: null,
+        scopes: [],
+        planType: "test",
+        organizationName: null
+      }
+    ],
+    providers: [
+      {
+        id: "openai",
+        displayName: "OpenAI",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 1,
+        authModes: ["oauth"],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ],
+    sessions: [
+      {
+        sessionId: "session-model-picker-refresh",
+        displayName: "Model picker refresh",
+        title: "Model picker refresh",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "openai",
+        modelId: "gpt-5",
+        timeline: []
+      }
+    ],
+    providerModels: {
+      openai: [model("gpt-5", "GPT-5")]
+    }
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Model picker refresh/);
+  const picker = page.locator(".pf-composer .picker");
+  const trigger = picker.locator(".trigger");
+  await trigger.click();
+  await expect(picker.locator(".row").filter({ hasText: "GPT-5" })).toBeVisible();
+
+  await page.locator(".pf-composer textarea").click();
+  await expect(picker.locator(".menu")).toHaveCount(0);
+  daemon.setProviderModels("openai", [model("gpt-5.4", "GPT-5.4")]);
+  await trigger.click();
+
+  await expect(picker.locator(".row-name").filter({ hasText: /^GPT-5\.4$/ })).toBeVisible();
+  await expect(picker.locator(".row-name").filter({ hasText: /^GPT-5$/ })).toHaveCount(0);
+});
+
 test("model picker ignores stale provider switch responses", async ({ page }) => {
   const auth = [
     {

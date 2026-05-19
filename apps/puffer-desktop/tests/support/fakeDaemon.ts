@@ -313,6 +313,10 @@ export class FakeDaemon {
     };
   }
 
+  setProviderModels(providerId: string, models: JsonRecord[]): void {
+    this.providerModels[providerId] = models;
+  }
+
   setPermissions(tools: Record<string, string>): void {
     this.permissions = {
       path: `${this.workspaceRoot}/.puffer/permissions.json`,
