@@ -2752,8 +2752,10 @@ fn resolve_turn_model(providers: &ProviderRegistry, requested: &str) -> Result<(
 fn canonical_desktop_provider_id(provider_id: &str) -> String {
     let trimmed = provider_id.trim();
     match trimmed.to_ascii_lowercase().as_str() {
+        "anthropic" => "anthropic".to_string(),
         "claude" => "anthropic".to_string(),
         "codex" => "openai".to_string(),
+        "openai" => "openai".to_string(),
         _ => trimmed.to_string(),
     }
 }
@@ -3049,6 +3051,50 @@ mod tests {
     }
 
     #[test]
+    fn create_session_accepts_display_case_provider_names_off_tokio_runtime() {
+        let _cache_guard = DiscoveryCacheEnvGuard::set();
+        let (openai_base_url, server) = spawn_openai_discovery_server();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(
+            workspace_root.clone(),
+            paths,
+            "token".into(),
+            true,
+            false,
+            false,
+        )
+        .expect("daemon state");
+        state.config.lock().unwrap().openai_base_url = Some(openai_base_url);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let response = runtime
+            .block_on(async move {
+                let params = json!({
+                    "cwd": workspace_root.display().to_string(),
+                    "providerId": "OpenAI",
+                    "modelId": "OpenAI/gpt-5",
+                });
+                run_off_runtime(move || handle_create_session(&state, &params)).await
+            })
+            .expect("create session");
+
+        server.join().expect("discovery server");
+        assert_eq!(response["providerId"], "openai");
+        assert_eq!(response["modelId"], "gpt-5");
+    }
+
+    #[test]
     fn list_provider_models_accepts_desktop_aliases() {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace_root = temp.path().join("workspace");
@@ -3325,6 +3371,55 @@ mod tests {
 
         assert_eq!(state.current_provider.as_deref(), Some("openai"));
         assert_eq!(state.current_model.as_deref(), Some("openai/gpt-5.4"));
+
+        let metadata = SessionMetadata {
+            id: Uuid::new_v4(),
+            display_name: None,
+            generated_title: None,
+            cwd: temp.path().to_path_buf(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        };
+        let mut state = AppState::new(PufferConfig::default(), temp.path().to_path_buf(), metadata);
+        let options = TurnRequestOptions::from_params(&json!({
+            "providerId": "OpenAI",
+            "modelId": "OpenAI/gpt-5.4",
+        }));
+
+        apply_turn_request_options(&mut state, &providers, &options).expect("turn options");
+
+        assert_eq!(state.current_provider.as_deref(), Some("openai"));
+        assert_eq!(state.current_model.as_deref(), Some("openai/gpt-5.4"));
+
+        let metadata = SessionMetadata {
+            id: Uuid::new_v4(),
+            display_name: None,
+            generated_title: None,
+            cwd: temp.path().to_path_buf(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        };
+        let mut state = AppState::new(PufferConfig::default(), temp.path().to_path_buf(), metadata);
+        let options = TurnRequestOptions::from_params(&json!({
+            "providerId": "Anthropic",
+            "modelId": "Anthropic/claude-sonnet-4-5",
+        }));
+
+        apply_turn_request_options(&mut state, &providers, &options).expect("turn options");
+
+        assert_eq!(state.current_provider.as_deref(), Some("anthropic"));
+        assert_eq!(
+            state.current_model.as_deref(),
+            Some("anthropic/claude-sonnet-4-5")
+        );
     }
 
     #[test]
