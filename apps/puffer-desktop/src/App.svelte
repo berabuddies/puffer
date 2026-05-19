@@ -686,9 +686,31 @@
       return false;
     }
     const session = findSessionById(remembered.sessionId);
-    if (!session) return false;
-    await openSession(session);
-    openAgentSessionId = session.id;
+    if (session) {
+      await openSession(session);
+      openAgentSessionId = session.id;
+      tweaks = { ...tweaks, screen: "workspace" };
+      return true;
+    }
+
+    const loadGeneration = ++sessionLoadGeneration;
+    sessionLoading = true;
+    try {
+      const detail = await loadSessionDetailFromDaemon(remembered.sessionId);
+      if (loadGeneration !== sessionLoadGeneration) return false;
+      saveCurrentTransientConversationState(selectedSession?.id);
+      selectedSession = detail.session;
+      rememberFallbackSession(detail.session);
+      sessionDetail = detail;
+      rememberSession(detail.session.id);
+      resetLiveTurnState();
+      statusMessage = `Loaded ${detail.timeline.length} conversation items.`;
+      openAgentSessionId = detail.session.id;
+    } catch {
+      return false;
+    } finally {
+      if (loadGeneration === sessionLoadGeneration) sessionLoading = false;
+    }
     tweaks = { ...tweaks, screen: "workspace" };
     return true;
   }

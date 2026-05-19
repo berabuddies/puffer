@@ -768,6 +768,33 @@ test("remember last session persists and restores agent detail", async ({ page }
   await expect(page.locator(".pf-agent-detail .primary-title")).toContainText("Browser regression");
 });
 
+test("remember last session restores detail even when grouped history omits it", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.setGroupedSessionFilter((metadata) => metadata.sessionId !== "session-browser");
+  await daemon.install(page);
+  await page.addInitScript(() => {
+    window.localStorage.setItem(
+      "puffer-desktop:preferences",
+      JSON.stringify({ rememberSession: true })
+    );
+    window.localStorage.setItem(
+      "puffer-desktop:remembered-session",
+      JSON.stringify({ workspaceRoot: "/tmp/puffer", sessionId: "session-browser" })
+    );
+  });
+  await daemon.open(page);
+
+  await daemon.waitForRequest(
+    "load_session_detail",
+    (request) => request.params.sessionId === "session-browser"
+  );
+  await expect(page.getByRole("button", { name: "Back" })).toBeVisible();
+  await expect(page.locator(".pf-agent-detail .primary-title")).toContainText("Browser regression");
+  await expect(
+    page.locator(".pf-sidebar-agents-list").getByRole("button", { name: /^Browser regression\b/ })
+  ).toBeVisible();
+});
+
 test("MCP settings add server through the daemon", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
