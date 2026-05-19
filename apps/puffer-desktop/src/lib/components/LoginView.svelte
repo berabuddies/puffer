@@ -26,14 +26,14 @@
   }
 
   function submitApiKey(providerId: string) {
-    if (busyProviderId) return;
+    if (credentialBusy) return;
     const apiKey = apiKeyValue(providerId).trim();
     if (!apiKey) return;
     onLoginApiKey(providerId, apiKey);
   }
 
   function submitOauth(providerId: string) {
-    if (busyProviderId) return;
+    if (credentialBusy) return;
     onLoginOauth(providerId);
   }
 
@@ -67,7 +67,7 @@
   }
 
   function submitImport(providerId: string, source: "claude" | "codex") {
-    if (busyImportKey) return;
+    if (credentialBusy) return;
     onImportExternal(providerId, source);
   }
 
@@ -76,6 +76,7 @@
   }
 
   $: authBusy = busyProviderId !== null;
+  $: credentialBusy = authBusy || busyImportKey !== null;
 </script>
 
 <section class="login-page">
@@ -132,7 +133,7 @@
                 <button
                   type="button"
                   class="import"
-                  disabled={busyImportKey !== null}
+                  disabled={credentialBusy}
                   on:click={() => submitImport(candidate.providerId, candidate.source)}
                   title={candidate.sourcePath}
                 >
@@ -150,7 +151,7 @@
             {#if supports(provider, "oauth")}
               <button
                 class="oauth-btn"
-                disabled={authBusy}
+                disabled={credentialBusy}
                 on:click={() => submitOauth(provider.id)}
               >
                 {busyProviderId === provider.id
@@ -168,7 +169,7 @@
                   aria-label={`API key for ${provider.displayName}`}
                   value={apiKeys[provider.id] ?? ""}
                   placeholder="Paste API key"
-                  disabled={authBusy}
+                  disabled={credentialBusy}
                   on:input={(event) =>
                     updateApiKey(provider.id, (event.currentTarget as HTMLInputElement).value)}
                   on:keydown={(event) => {
@@ -177,7 +178,7 @@
                 />
                 <button
                   class="apikey-btn"
-                  disabled={authBusy || !(apiKeys[provider.id] ?? "").trim()}
+                  disabled={credentialBusy || !(apiKeys[provider.id] ?? "").trim()}
                   on:click={() => submitApiKey(provider.id)}
                 >
                   Connect

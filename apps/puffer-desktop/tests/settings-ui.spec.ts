@@ -303,6 +303,84 @@ test("external provider credential import is ignored while already busy", async 
   ).toHaveLength(1);
 });
 
+test("external credential import disables provider login controls", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    externalCredentials: [
+      {
+        providerId: "codex",
+        source: "codex",
+        kind: "oauth",
+        description: "Codex CLI OAuth",
+        sourcePath: "/tmp/home/.codex/auth.json"
+      }
+    ]
+  });
+  daemon.delayResponse(
+    "import_external_credential",
+    (request) => request.params.providerId === "codex" && request.params.source === "codex",
+    500
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Providers" }).click();
+
+  const importButton = page
+    .locator(".provider-card")
+    .filter({ hasText: "Codex" })
+    .getByRole("button", { name: "Use credentials from ~/.codex" });
+  const anthropicCard = page.locator(".provider-card").filter({ hasText: "Anthropic" });
+  const anthropicInput = page.getByLabel("API key for Anthropic");
+  const anthropicConnect = anthropicCard.getByRole("button", { name: "Connect" });
+
+  await anthropicInput.fill("sk-while-import-busy");
+  await expect(importButton).toBeEnabled();
+  await expect(anthropicConnect).toBeEnabled();
+
+  await importButton.click();
+  await daemon.waitForRequest("import_external_credential");
+
+  await expect(anthropicInput).toBeDisabled();
+  await expect(anthropicConnect).toBeDisabled();
+});
+
+test("provider login disables external credential import controls", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    externalCredentials: [
+      {
+        providerId: "codex",
+        source: "codex",
+        kind: "oauth",
+        description: "Codex CLI OAuth",
+        sourcePath: "/tmp/home/.codex/auth.json"
+      }
+    ]
+  });
+  daemon.delayResponse(
+    "login_with_oauth",
+    (request) => request.params.providerId === "codex",
+    500
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Providers" }).click();
+
+  const card = page.locator(".provider-card").filter({ hasText: "Codex" });
+  const importButton = card.getByRole("button", { name: "Use credentials from ~/.codex" });
+  const oauthButton = card.getByRole("button", { name: "Connect with OAuth" });
+
+  await expect(importButton).toBeEnabled();
+  await expect(oauthButton).toBeEnabled();
+
+  await oauthButton.click();
+  await daemon.waitForRequest("login_with_oauth");
+
+  await expect(importButton).toBeDisabled();
+});
+
 test("settings auth uses the configured daemon when Tauri globals exist", async ({ page }) => {
   await page.addInitScript(() => {
     (window as unknown as { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown }).__TAURI__ = {};

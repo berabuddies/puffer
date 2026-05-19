@@ -696,7 +696,7 @@
   }
 
   async function handleImportExternal(providerId: string, source: "claude" | "codex") {
-    if (importBusyKey) return;
+    if (importBusyKey || authBusyProviderId) return;
     importBusyKey = `${providerId}::${source}`;
     authError = null;
     try {
@@ -732,7 +732,7 @@
   }
 
   async function handleOauthLogin(providerId: string) {
-    if (authBusyProviderId) return;
+    if (authBusyProviderId || importBusyKey) return;
     authBusyProviderId = providerId;
     authError = null;
     try {
@@ -751,7 +751,7 @@
   }
 
   async function handleApiKeyLogin(providerId: string, apiKey: string) {
-    if (authBusyProviderId) return;
+    if (authBusyProviderId || importBusyKey) return;
     authBusyProviderId = providerId;
     authError = null;
     try {
@@ -779,7 +779,7 @@
   }
 
   async function handleLogout(providerId: string) {
-    if (authBusyProviderId) return;
+    if (authBusyProviderId || importBusyKey) return;
     authBusyProviderId = providerId;
     authError = null;
     try {

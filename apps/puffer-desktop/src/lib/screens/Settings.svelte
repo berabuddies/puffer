@@ -54,6 +54,7 @@
   };
 
   let props: Props = $props();
+  let credentialBusy = $derived(props.busyProviderId != null || props.busyImportKey != null);
 
   type Section = "general" | "providers" | "permissions" | "mcp" | "git" | "appearance" | "shortcuts";
   let section = $state<Section>("general");
@@ -474,7 +475,7 @@
                 class="sc-btn"
                 data-variant="ghost"
                 data-size="sm"
-                disabled={props.busyProviderId !== null}
+                disabled={credentialBusy}
                 onclick={() => props.onLogout(a.providerId)}
               >
                 {props.busyProviderId === a.providerId ? "Signing out..." : "Sign out"}
