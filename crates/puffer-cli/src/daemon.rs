@@ -368,6 +368,14 @@ fn is_replay_channel(event: &str) -> bool {
 
 impl DaemonState {
     fn build_runtime_inputs(&self) -> Result<RuntimeInputs> {
+        self.build_runtime_inputs_with_discovery(true)
+    }
+
+    fn build_runtime_inputs_without_discovery(&self) -> Result<RuntimeInputs> {
+        self.build_runtime_inputs_with_discovery(false)
+    }
+
+    fn build_runtime_inputs_with_discovery(&self, discover_all: bool) -> Result<RuntimeInputs> {
         let auth_path = self.paths.user_config_dir.join("auth.json");
         let auth_store = AuthStore::load(&auth_path)?;
         let resources = load_resources(&self.paths, &puffer_runner_local::LocalToolRunner::new())?;
@@ -398,7 +406,9 @@ impl DaemonState {
                     .collect::<IndexMap<_, _>>(),
             );
         }
-        let _ = providers.discover_and_merge_all(&auth_store);
+        if discover_all {
+            let _ = providers.discover_and_merge_all(&auth_store);
+        }
         let session_store = SessionStore::from_paths(&self.paths)?;
         Ok(RuntimeInputs {
             resources,
@@ -1344,7 +1354,10 @@ fn handle_list_provider_models(state: &DaemonState, params: &Value) -> Result<Va
         .and_then(|v| v.as_str())
         .context("missing providerId")?;
     let provider_id = canonical_desktop_provider_id(requested_provider_id);
-    let inputs = state.build_runtime_inputs()?;
+    let mut inputs = state.build_runtime_inputs_without_discovery()?;
+    inputs
+        .providers
+        .discover_and_merge_provider(&provider_id, &inputs.auth_store)?;
     let entry = inputs
         .providers
         .provider_entries()
@@ -3223,6 +3236,40 @@ mod tests {
                 .as_array()
                 .is_some_and(|models| !models.is_empty()),
             "{response}"
+        );
+    }
+
+    #[test]
+    fn list_provider_models_uses_fresh_discovery_over_static_models() {
+        let (openai_base_url, server) = spawn_openai_discovery_server();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+        state.config.lock().unwrap().openai_base_url = Some(openai_base_url);
+
+        let response = handle_list_provider_models(&state, &json!({ "providerId": "codex" }))
+            .expect("list provider models");
+
+        server.join().expect("discovery server");
+        let model_ids = response["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .filter_map(|model| model.get("id").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(response["providerId"], "openai");
+        assert!(model_ids.contains(&"gpt-local-discovered"), "{response}");
+        assert!(
+            !model_ids.contains(&"gpt-5"),
+            "fresh discovery should remove stale static models: {response}"
         );
     }
 
