@@ -2495,12 +2495,14 @@
         <Sidebar
           screen={openAgentSessionId || openProjectId ? null : tweaks.screen}
           collapsed={tweaks.collapsedSidebar}
+          width={tweaks.sidebarWidth}
           onSelectScreen={onSelectScreen}
           agents={activeAgents}
           activeAgentId={openAgentSessionId}
           onOpenAgent={onOpenAgent}
           onToggleAgentPin={(id, pinned) => void toggleDesktopPin("agent", id, pinned)}
           onToggleCollapse={() => updateTweak("collapsedSidebar", !tweaks.collapsedSidebar)}
+          onResize={(width) => updateTweak("sidebarWidth", width)}
           user={userChip}
         />
       {/if}

@@ -63,6 +63,35 @@ test("desktop minimum width keeps primary navigation visible", async ({ page }) 
   await expect(sidebar.getByRole("button", { name: "Settings" })).toBeVisible();
 });
 
+test("sidebar width can be resized and persists as a local shell tweak", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const sidebar = page.locator(".pf-sidebar");
+  const resizer = page.locator(".pf-sidebar-resizer");
+  await expect(resizer).toBeVisible();
+
+  const initialBox = await sidebar.boundingBox();
+  const handleBox = await resizer.boundingBox();
+  expect(initialBox).not.toBeNull();
+  expect(handleBox).not.toBeNull();
+
+  await page.mouse.move(handleBox!.x + handleBox!.width / 2, handleBox!.y + 120);
+  await page.mouse.down();
+  await page.mouse.move(handleBox!.x + handleBox!.width / 2 + 96, handleBox!.y + 120);
+  await page.mouse.up();
+
+  await expect
+    .poll(async () => Math.round((await sidebar.boundingBox())?.width ?? 0))
+    .toBeGreaterThan(Math.round(initialBox!.width + 72));
+  const storedWidth = await page.evaluate(() => {
+    const raw = window.localStorage.getItem("puffer-desktop:tweaks");
+    return raw ? JSON.parse(raw).sidebarWidth : null;
+  });
+  expect(storedWidth).toBeGreaterThan(initialBox!.width + 72);
+});
+
 test("sidebar can open the deployments screen", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

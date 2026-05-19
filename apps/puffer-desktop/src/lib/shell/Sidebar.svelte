@@ -22,31 +22,40 @@
 </script>
 
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import BrandLogo from "../design/BrandLogo.svelte";
   import Icon, { type IconName } from "../design/Icon.svelte";
-  import type { ScreenId } from "./tweaks.ts";
+  import {
+    SIDEBAR_DEFAULT_WIDTH,
+    clampSidebarWidth,
+    type ScreenId
+  } from "./tweaks";
 
   type Props = {
     screen: ScreenId | null;
     collapsed?: boolean;
+    width?: number;
     onSelectScreen: (id: ScreenId) => void;
     agents: ActiveAgent[];
     activeAgentId?: string | null;
     onOpenAgent?: (id: string) => void;
     onToggleAgentPin?: (id: string, pinned: boolean) => void;
     onToggleCollapse?: () => void;
+    onResize?: (width: number) => void;
     user?: UserChip | null;
   };
 
   let {
     screen,
     collapsed = false,
+    width = SIDEBAR_DEFAULT_WIDTH,
     onSelectScreen,
     agents,
     activeAgentId = null,
     onOpenAgent,
     onToggleAgentPin,
     onToggleCollapse,
+    onResize,
     user = null
   }: Props = $props();
 
@@ -56,7 +65,11 @@
   let filterState = $state<string>("all");
   let collapsedProjects = $state<Set<string>>(new Set(initialCollapsedProjects));
   let manuallyCollapsedProjects = $state<Set<string>>(new Set(initialCollapsedProjects));
+  let resizing = $state(false);
+  let dragStartX = 0;
+  let dragStartWidth = SIDEBAR_DEFAULT_WIDTH;
   let lastAutoExpandedActiveKey: string | null = null;
+  let sidebarStyle = $derived(`--pf-sidebar-width: ${clampSidebarWidth(width)}px;`);
 
   const screens: { id: ScreenId; label: string; icon: IconName }[] = [
     { id: "workspace", label: "Project", icon: "sparkles" },
@@ -155,6 +168,43 @@
     saveCollapsedProjects(next);
   }
 
+  function startResize(event: PointerEvent) {
+    if (collapsed) return;
+    event.preventDefault();
+    resizing = true;
+    dragStartX = event.clientX;
+    dragStartWidth = clampSidebarWidth(width);
+    window.addEventListener("pointermove", handleResizeMove);
+    window.addEventListener("pointerup", stopResize, { once: true });
+  }
+
+  function handleResizeMove(event: PointerEvent) {
+    if (!resizing) return;
+    onResize?.(clampSidebarWidth(dragStartWidth + event.clientX - dragStartX));
+  }
+
+  function stopResize() {
+    resizing = false;
+    window.removeEventListener("pointermove", handleResizeMove);
+  }
+
+  function handleResizeKeydown(event: KeyboardEvent) {
+    if (collapsed) return;
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight" && event.key !== "Home") return;
+    event.preventDefault();
+    const step = event.shiftKey ? 32 : 16;
+    if (event.key === "Home") {
+      onResize?.(SIDEBAR_DEFAULT_WIDTH);
+      return;
+    }
+    onResize?.(clampSidebarWidth(width + (event.key === "ArrowRight" ? step : -step)));
+  }
+
+  onDestroy(() => {
+    window.removeEventListener("pointermove", handleResizeMove);
+    window.removeEventListener("pointerup", stopResize);
+  });
+
   function formatAge(updatedAtMs: number): string {
     const delta = Date.now() - updatedAtMs;
     const mins = Math.round(delta / 60_000);
@@ -169,7 +219,7 @@
   }
 </script>
 
-<aside class="pf-sidebar" data-collapsed={collapsed}>
+<aside class="pf-sidebar" data-collapsed={collapsed} data-resizing={resizing} style={sidebarStyle}>
   <div class="pf-sidebar-section">
     <div class="pf-sidebar-brand">
       <BrandLogo size={24} />
@@ -281,4 +331,12 @@
       </div>
     </div>
   {/if}
+  <button
+    type="button"
+    class="pf-sidebar-resizer"
+    aria-label="Resize sidebar"
+    onpointerdown={startResize}
+    onkeydown={handleResizeKeydown}
+    ondblclick={() => onResize?.(SIDEBAR_DEFAULT_WIDTH)}
+  ></button>
 </aside>

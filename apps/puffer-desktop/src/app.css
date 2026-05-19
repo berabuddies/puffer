@@ -277,11 +277,42 @@ html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
    Sidebar
    ========================================================================== */
 .pf-sidebar {
-  width: 248px; flex-shrink: 0;
+  width: var(--pf-sidebar-width, 248px); flex-shrink: 0;
+  min-width: 220px;
+  max-width: 420px;
   background: color-mix(in oklab, var(--background) 80%, var(--muted));
   border-right: 1px solid var(--border);
   display: flex; flex-direction: column;
   font-size: 13px;
+  position: relative;
+}
+.pf-sidebar-resizer {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  bottom: 0;
+  width: 8px;
+  border: 0;
+  padding: 0;
+  appearance: none;
+  background: transparent;
+  cursor: col-resize;
+  z-index: 8;
+}
+.pf-sidebar-resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 1px;
+  background: transparent;
+  transition: background 120ms;
+}
+.pf-sidebar-resizer:hover::after,
+.pf-sidebar-resizer:focus-visible::after,
+.pf-sidebar[data-resizing="true"] .pf-sidebar-resizer::after {
+  background: var(--puffer-accent);
 }
 .pf-sidebar-section { padding: 8px 8px 4px; }
 .pf-sidebar-section:first-child {
@@ -498,6 +529,11 @@ html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
 }
 .pf-sidebar[data-collapsed="true"] {
   width: 56px;
+  min-width: 56px;
+  max-width: 56px;
+}
+.pf-sidebar[data-collapsed="true"] .pf-sidebar-resizer {
+  display: none;
 }
 .pf-sidebar[data-collapsed="true"] .pf-sidebar-brand {
   flex-direction: column;
