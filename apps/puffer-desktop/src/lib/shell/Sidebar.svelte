@@ -54,7 +54,7 @@
   let filterState = $state<string>("all");
 
   const screens: { id: ScreenId; label: string; icon: IconName }[] = [
-    { id: "workspace", label: "Workspace", icon: "sparkles" },
+    { id: "workspace", label: "Project", icon: "sparkles" },
     { id: "pipelines", label: "Pipelines", icon: "git" },
     { id: "settings", label: "Settings", icon: "settings" }
   ];
