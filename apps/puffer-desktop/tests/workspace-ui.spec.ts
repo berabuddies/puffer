@@ -554,7 +554,7 @@ test("sidebar Workspace returns from agent detail to the workspace board", async
     .click();
   await expect(page.locator(".pf-agent-detail")).toBeVisible();
 
-  await page.locator(".pf-sidebar").getByRole("button", { name: "Workspace" }).click();
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Project" }).click();
 
   await expect(page.locator(".pf-pw-list")).toBeVisible();
   await expect(page.locator(".pf-agent-detail")).toHaveCount(0);

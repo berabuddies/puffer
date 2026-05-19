@@ -223,7 +223,7 @@ test("advertised settings shortcut opens settings", async ({ page }) => {
   await daemon.install(page);
   await daemon.open(page);
 
-  await expect(page.getByRole("button", { name: "Connect project" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Create Project" })).toBeVisible();
   await page.keyboard.press("Control+,");
 
   await expect(page.getByRole("heading", { name: "General" })).toBeVisible();
@@ -756,7 +756,7 @@ test("remember last session persists and restores agent detail", async ({ page }
   await remember.check();
   await expect(remember).toBeChecked();
 
-  await page.getByRole("button", { name: "Workspace" }).click();
+  await page.getByRole("button", { name: "Project" }).click();
   await page
     .locator(".pf-sidebar-agents-list")
     .getByRole("button", { name: /^Browser regression\b/ })
