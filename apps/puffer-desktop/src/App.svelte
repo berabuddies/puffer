@@ -997,6 +997,18 @@
     turnStatusHint = null;
   }
 
+  function hasTransientConversationState(sessionId: string): boolean {
+    return (
+      submitMessageInFlightFor(sessionId) ||
+      submittedMessages.length > 0 ||
+      liveStreamItems.length > 0 ||
+      currentTurnId !== null ||
+      turnStartedAtMs !== null ||
+      Object.keys(turnPermissionLookup).length > 0 ||
+      Object.keys(turnQuestionLookup).length > 0
+    );
+  }
+
   async function openSession(session: SessionListItem, options: OpenSessionOptions = {}) {
     const showLoading = options.showLoading ?? selectedSession?.id !== session.id;
     const sameSession = selectedSession?.id === session.id;
@@ -1012,13 +1024,18 @@
     try {
       const detail = await loadSessionDetailFromDaemon(session.id);
       if (loadGeneration !== sessionLoadGeneration) return;
-      const timeline = resetLiveState
+      const preserveTransientState =
+        resetLiveState &&
+        selectedSession?.id === session.id &&
+        hasTransientConversationState(session.id);
+      const shouldResetLiveState = resetLiveState && !preserveTransientState;
+      const timeline = shouldResetLiveState
         ? detail.timeline
         : reuseTransientMessageIds(detail.timeline, [...submittedMessages, ...liveStreamItems]);
       selectedSession = detail.session;
       sessionDetail = { ...detail, timeline };
       rememberSession(detail.session.id);
-      if (resetLiveState) {
+      if (shouldResetLiveState) {
         // New session lands: drop any lingering live-stream items + local draft
         // so the composer feels fresh.
         resetLiveTurnState();

@@ -456,6 +456,85 @@ test("rapid send activation submits the prompt only once", async ({ page }) => {
   ).toHaveLength(1);
 });
 
+test("delayed initial session load preserves the first submitted prompt row", async ({
+  page
+}) => {
+  const prompt = "First prompt while the session is still loading";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-auto-open-seed",
+        displayName: "Auto open seed",
+        title: "Auto open seed",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "auto-open-seed-message",
+            text: "Auto-open seed transcript.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      },
+      {
+        sessionId: "session-initial-load-race",
+        displayName: "Initial load race",
+        title: "Initial load race",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  daemon.delayResponse(
+    "load_session_detail",
+    (request) => request.params.sessionId === "session-initial-load-race",
+    260
+  );
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Initial load race/);
+  await expect(page.locator(".pf-agent-detail .primary-title")).toContainText("Initial load race");
+  await page.locator(".pf-composer textarea").fill(prompt);
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-initial-load-race" &&
+      request.params.message === prompt
+  );
+
+  const userRow = page.locator('.pf-msg[data-role="user"]').filter({ hasText: prompt });
+  await expect(userRow).toHaveCount(1);
+  await userRow.evaluate((node) => node.setAttribute("data-probe", "initial-local-user-row"));
+
+  daemon.setSessionTimeline("session-initial-load-race", [
+    {
+      kind: "user_message",
+      id: "persisted-initial-load-user",
+      text: prompt,
+      createdAtMs: baseTime + 1
+    }
+  ]);
+
+  await page.waitForTimeout(360);
+  await expect(page.locator('.pf-msg[data-role="user"]').filter({ hasText: prompt })).toHaveCount(1);
+  await expect(page.locator('.pf-msg[data-role="user"][data-probe="initial-local-user-row"]')).toContainText(
+    prompt
+  );
+});
+
 test("early turn completion before RPC response does not leave composer stuck", async ({ page }) => {
   const prompt = "Complete before the start call returns";
   const daemon = new FakeDaemon({
