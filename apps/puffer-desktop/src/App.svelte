@@ -2208,7 +2208,6 @@
                 onOpenBoard={onOpenProject}
                 onNewAgent={(cwd) => requestNewAgent(cwd)}
                 onSessionReady={(sessionId) => handleSessionReady(sessionId)}
-                onOpenWorkspacePicker={() => (showWorkspacePicker = true)}
                 pinnedWorkspacePaths={desktopPins.pinnedWorkspacePaths}
                 pinningWorkspacePaths={desktopPinInFlightKeys
                   .filter((key) => key.startsWith("workspace:"))

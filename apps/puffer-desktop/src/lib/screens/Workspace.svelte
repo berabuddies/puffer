@@ -23,9 +23,6 @@
     /** Connect-project modal just finished with a new session id — the
      *  parent should refresh the workspace and open AgentDetail. */
     onSessionReady?: (sessionId: string) => void | Promise<void>;
-    /** User clicked the workspace-cwd chip in the header — the parent
-     *  should open the WorkspacePicker. */
-    onOpenWorkspacePicker?: () => void;
     pinnedWorkspacePaths?: string[];
     pinningWorkspacePaths?: string[];
     onToggleWorkspacePin?: (path: string, pinned: boolean) => void;
@@ -46,7 +43,6 @@
     onOpenBoard,
     onNewAgent,
     onSessionReady,
-    onOpenWorkspacePicker,
     pinnedWorkspacePaths = [],
     pinningWorkspacePaths = [],
     onToggleWorkspacePin,
@@ -198,16 +194,6 @@
       : recentSessions
   );
 
-  let headerSubtitle = $derived(
-    loading
-      ? "loading…"
-      : defaultWorkspaceCwd
-        ? defaultWorkspaceCwd
-        : searchNeedle
-          ? `${visibleAgentCount} matching ${visibleAgentCount === 1 ? "agent" : "agents"}`
-          : `${agentCount} ${agentCount === 1 ? "session" : "sessions"}`
-  );
-
   async function handleNewAgent(cwd: string) {
     if (!onNewAgent) return;
     await onNewAgent(cwd);
@@ -225,18 +211,7 @@
 <div class="pf-pw">
   <div class="pf-pw-top">
     <div class="pf-pw-top-left">
-      <span class="pf-screen-top-eyebrow">Workspace</span>
-      <h1>{projectCount} {projectCount === 1 ? "project" : "projects"}</h1>
-      {#if onOpenWorkspacePicker && defaultWorkspaceCwd}
-        <button
-          type="button"
-          class="pf-pw-sub pf-pw-sub-btn"
-          onclick={() => onOpenWorkspacePicker?.()}
-          title="Switch workspace"
-        >· {headerSubtitle}</button>
-      {:else}
-        <span class="pf-pw-sub">· {headerSubtitle}</span>
-      {/if}
+      <h1>{projectCount === 1 ? "Project" : "Projects"} {projectCount}</h1>
     </div>
     <div class="pf-pw-top-right">
       <div class="pf-pw-search">
@@ -362,23 +337,6 @@
 </div>
 
 <style>
-  .pf-pw-sub-btn {
-    background: transparent;
-    border: none;
-    color: inherit;
-    cursor: pointer;
-    padding: 0;
-    font: inherit;
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    border-radius: 4px;
-  }
-  .pf-pw-sub-btn:hover {
-    color: var(--foreground);
-    text-decoration: underline;
-    text-underline-offset: 3px;
-  }
   .pf-pw-empty {
     padding: 20px 0 0;
     display: flex;
