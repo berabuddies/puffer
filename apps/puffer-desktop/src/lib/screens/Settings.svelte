@@ -225,25 +225,37 @@
   async function loadModelsForProvider(providerId: string) {
     if (
       !providerId ||
-      !isAgentProviderId(providerId) ||
-      providerModels[providerId] ||
-      modelLoadingByProvider[providerId]
+      !isAgentProviderId(providerId)
     ) {
       return;
     }
+    const cachedModels = providerModels[providerId];
+    if (cachedModels) {
+      if (modelPickerProvider === providerId && !modelPickerModel) {
+        modelPickerModel = defaultModelId(cachedModels);
+      }
+      return;
+    }
+    if (modelLoadingByProvider[providerId]) return;
     modelLoadingByProvider = { ...modelLoadingByProvider, [providerId]: true };
     modelError = null;
     try {
       const models = await listProviderModels(providerId);
       providerModels = { ...providerModels, [providerId]: models };
       if (modelPickerProvider === providerId && !modelPickerModel) {
-        modelPickerModel = (models.find((model) => model.isDefault) ?? models[0])?.id ?? "";
+        modelPickerModel = defaultModelId(models);
       }
     } catch (e) {
-      modelError = (e as Error).message ?? String(e);
+      if (modelPickerProvider === providerId) {
+        modelError = (e as Error).message ?? String(e);
+      }
     } finally {
       modelLoadingByProvider = { ...modelLoadingByProvider, [providerId]: false };
     }
+  }
+
+  function defaultModelId(models: ModelDescriptorInfo[]): string {
+    return (models.find((model) => model.isDefault) ?? models[0])?.id ?? "";
   }
 
   function addPermissionRow() {

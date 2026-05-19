@@ -35,6 +35,58 @@ test("default model cannot be saved before provider models load", async ({ page 
   });
 });
 
+test("default model load errors stay scoped to the selected provider", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    providerModels: {
+      codex: [
+        {
+          id: "codex-default",
+          displayName: "Codex Default",
+          provider: "codex",
+          api: "openai-responses",
+          supportsTools: true,
+          supportsVision: false,
+          contextWindow: null,
+          maxOutputTokens: null,
+          thinkingOptions: [],
+          defaultThinkingOptionId: null,
+          isDefault: true
+        }
+      ]
+    }
+  });
+  daemon.setSettingsConfig({
+    defaultProvider: "codex",
+    defaultModel: "codex-default"
+  });
+  daemon.delayFailure(
+    "list_provider_models",
+    (request) => request.params.providerId === "anthropic",
+    "anthropic models failed late",
+    160
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Providers" }).click();
+
+  const pane = page.locator(".pf-settings-pane");
+  const providerSelect = pane.getByLabel("Provider");
+  const modelSelect = pane.getByLabel("Model");
+  await expect(modelSelect).toHaveValue("codex-default");
+
+  await providerSelect.selectOption("anthropic");
+  await expect(modelSelect).toBeDisabled();
+  await providerSelect.selectOption("codex");
+  await expect(providerSelect).toHaveValue("codex");
+  await expect(modelSelect).toHaveValue("codex-default");
+
+  await page.waitForTimeout(220);
+  await expect(pane.getByText("anthropic models failed late")).toHaveCount(0);
+  await expect(modelSelect).toHaveValue("codex-default");
+});
+
 test("default routing only offers authenticated agent providers", async ({ page }) => {
   const daemon = new FakeDaemon({
     auth: [
