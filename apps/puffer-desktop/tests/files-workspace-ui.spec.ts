@@ -504,6 +504,38 @@ test("connect project provider picker only shows authenticated providers", async
   });
 });
 
+test("connect project requires an authenticated provider before starting", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "github",
+        kind: "oauth",
+        email: "tester@example.com",
+        expiresAtMs: null,
+        scopes: [],
+        planType: "test",
+        organizationName: null
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Connect project" }).click();
+  const dialog = page.getByRole("dialog", { name: "Connect project" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText("Connect a provider in Settings before starting a project.")).toBeVisible();
+
+  await dialog.getByLabel("Directory").fill("/tmp/puffer-new-project");
+  await expect(dialog.getByRole("button", { name: "Start agent" })).toBeDisabled();
+  await dialog.getByRole("button", { name: "Start agent" }).evaluate((button) => {
+    (button as HTMLButtonElement).click();
+  });
+
+  await page.waitForTimeout(50);
+  expect(daemon.requests.filter((request) => request.method === "create_session")).toHaveLength(0);
+});
+
 test("connect project remote mode exposes binary override", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

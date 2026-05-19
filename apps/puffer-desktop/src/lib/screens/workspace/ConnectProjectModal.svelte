@@ -156,6 +156,7 @@
 
   let canSubmit = $derived(() => {
     if (busy) return false;
+    if (providerOptions.length === 0) return false;
     if (mode === "local") return localDest.trim().length > 0;
     return sshTarget.trim().length > 0 && remoteDest.trim().length > 0;
   });
@@ -456,6 +457,9 @@
             </button>
           {/each}
         </div>
+        {#if providerOptions.length === 0}
+          <div class="pf-field-hint">Connect a provider in Settings before starting a project.</div>
+        {/if}
       </div>
 
       {#if mode === "local"}
