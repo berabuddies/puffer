@@ -360,6 +360,7 @@
   // static panes with a friendly "connect daemon" banner instead of a red
   // error. In Tauri the singleton connects on first `ensureLocalDaemonClient`.
   let daemonReachable = isDaemonReachable();
+  let mcpFormDisabled = $derived(!daemonReachable || mcpLoading || mcpSaving);
   let modelPickerLoading = $derived(
     Boolean(modelPickerProvider && modelLoadingByProvider[modelPickerProvider])
   );
@@ -714,6 +715,7 @@
                 class="sc-input"
                 placeholder="github"
                 value={mcpForm.id}
+                disabled={mcpFormDisabled}
                 oninput={(e) => (mcpForm.id = (e.currentTarget as HTMLInputElement).value)}
               />
             </label>
@@ -723,6 +725,7 @@
                 class="sc-input"
                 placeholder="GitHub"
                 value={mcpForm.displayName}
+                disabled={mcpFormDisabled}
                 oninput={(e) => (mcpForm.displayName = (e.currentTarget as HTMLInputElement).value)}
               />
             </label>
@@ -731,6 +734,7 @@
               <select
                 class="sc-input"
                 value={mcpForm.transport}
+                disabled={mcpFormDisabled}
                 onchange={(e) =>
                   (mcpForm.transport = (e.currentTarget as HTMLSelectElement).value as "stdio" | "sse" | "http")}
               >
@@ -744,6 +748,7 @@
               <select
                 class="sc-input"
                 value={mcpForm.scope}
+                disabled={mcpFormDisabled}
                 onchange={(e) =>
                   (mcpForm.scope = (e.currentTarget as HTMLSelectElement).value as "local" | "user")}
               >
@@ -760,6 +765,7 @@
                 ? "npx @modelcontextprotocol/server-github"
                 : "http://127.0.0.1:3000/mcp"}
               value={mcpForm.commandOrUrl}
+              disabled={mcpFormDisabled}
               oninput={(e) => (mcpForm.commandOrUrl = (e.currentTarget as HTMLInputElement).value)}
             />
           </label>
@@ -770,6 +776,7 @@
                 class="sc-input"
                 placeholder="--flag value"
                 value={mcpForm.args}
+                disabled={mcpFormDisabled}
                 oninput={(e) => (mcpForm.args = (e.currentTarget as HTMLInputElement).value)}
               />
             </label>
@@ -780,6 +787,7 @@
               class="sc-input"
               placeholder="Optional note"
               value={mcpForm.description}
+              disabled={mcpFormDisabled}
               oninput={(e) => (mcpForm.description = (e.currentTarget as HTMLInputElement).value)}
             />
           </label>
@@ -789,7 +797,7 @@
               class="sc-btn"
               data-variant="default"
               data-size="sm"
-              disabled={!daemonReachable || mcpSaving || !mcpForm.id.trim() || !mcpTargetValue()}
+              disabled={mcpFormDisabled || !mcpForm.id.trim() || !mcpTargetValue()}
               onclick={saveMcpServer}
             >
               <Icon name="plus" size={12} />{mcpSaving ? "Adding…" : "Add server"}

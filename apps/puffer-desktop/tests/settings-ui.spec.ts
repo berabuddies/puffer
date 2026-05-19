@@ -504,6 +504,42 @@ test("MCP settings add server is ignored while already saving", async ({ page })
   expect(daemon.requests.filter((request) => request.method === "add_mcp_server")).toHaveLength(1);
 });
 
+test("MCP add server controls are disabled while saving", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.delayResponse("add_mcp_server", () => true, 500);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "MCP Servers" }).click();
+  await expect(page.locator(".pf-mcp-card .title").filter({ hasText: "Playwright" })).toBeVisible();
+
+  const id = page.getByLabel("ID");
+  const name = page.getByLabel("Name");
+  const transport = page.getByLabel("Transport");
+  const scope = page.getByLabel("Scope");
+  const command = page.getByLabel("Command");
+  const args = page.getByLabel("Arguments");
+  const description = page.getByLabel("Description");
+
+  await id.fill("github");
+  await name.fill("GitHub");
+  await command.fill("npx");
+  await args.fill("@modelcontextprotocol/server-github");
+  await description.fill("GitHub issue and PR tools");
+
+  await page.getByRole("button", { name: "Add server" }).click();
+  await daemon.waitForRequest("add_mcp_server");
+
+  await expect(id).toBeDisabled();
+  await expect(name).toBeDisabled();
+  await expect(transport).toBeDisabled();
+  await expect(scope).toBeDisabled();
+  await expect(command).toBeDisabled();
+  await expect(args).toBeDisabled();
+  await expect(description).toBeDisabled();
+});
+
 test("MCP settings keep added server when the initial list resolves late", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayResponse("list_mcp_servers", () => true, 250);
