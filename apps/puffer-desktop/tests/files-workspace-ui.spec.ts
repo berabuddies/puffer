@@ -614,6 +614,35 @@ test("failed remote project creation restores the previous daemon", async ({ pag
   expect(activeToken).toBe("test");
 });
 
+test("connect project clears remote errors when switching modes", async ({ page }) => {
+  const localDaemon = new FakeDaemon();
+  localDaemon.failNext("create_session", "remote create failed");
+
+  await localDaemon.install(page);
+  await localDaemon.open(page, {
+    extraParams: {
+      pufferRemoteBackend: localDaemon.url,
+      pufferRemoteToken: "remote-token",
+      pufferRemoteWorkspaceRoot: "/tmp/puffer-remote"
+    }
+  });
+
+  await page.getByRole("button", { name: "Connect project" }).click();
+  const dialog = page.getByRole("dialog", { name: "Connect project" });
+  await dialog.getByRole("tab", { name: /Remote/ }).click();
+  await dialog.getByLabel("SSH target").fill("devbox");
+  await dialog.getByLabel("Destination directory").fill("/tmp/remote-project");
+  await dialog.getByRole("button", { name: "Start agent" }).click();
+
+  const staleError = dialog.locator(".pf-modal-status", { hasText: "remote create failed" });
+  await expect(staleError).toBeVisible();
+
+  await dialog.getByRole("tab", { name: /Local/ }).click();
+
+  await expect(staleError).toHaveCount(0);
+  await expect(dialog.getByLabel("Directory")).toBeVisible();
+});
+
 test("successful remote project creation adopts remote daemon state", async ({ page }) => {
   const localDaemon = new FakeDaemon({ workspaceRoot: "/tmp/puffer-local" });
   const remoteDaemon = new FakeDaemon({

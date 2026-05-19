@@ -172,6 +172,9 @@
     if (pickerOpen) {
       closePicker();
     }
+    status = null;
+    error = null;
+    sshErrorHint = null;
     mode = nextMode;
   }
 
