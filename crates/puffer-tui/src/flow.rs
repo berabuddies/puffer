@@ -435,7 +435,7 @@ pub(crate) fn handle_prompt_submit(
     tui.pending_submit = Some(PendingSubmit {
         prompt: submitted,
         receiver,
-        transcript_start_len,
+        transcript_persisted_len: transcript_start_len,
         pending_tool_calls: Vec::new(),
         rendered_tool_invocations: 0,
         started_at: std::time::Instant::now(),
@@ -543,10 +543,16 @@ pub(crate) fn poll_pending_submit(
                 break;
             }
             PendingSubmitEvent::ToolInvocations(invocations) => {
+                persist_pending_assistant_drafts(
+                    state,
+                    session_store,
+                    pending.transcript_persisted_len,
+                )?;
                 let completed = invocations.len().min(pending.pending_tool_calls.len());
                 pending.pending_tool_calls.drain(0..completed);
                 pending.rendered_tool_invocations += invocations.len();
                 append_tool_messages(state, session_store, &invocations)?;
+                pending.transcript_persisted_len = state.transcript.len();
             }
             PendingSubmitEvent::ReflectionCheckpoint(summary) => {
                 pending.status_hint = Some(summary);
@@ -614,11 +620,17 @@ pub(crate) fn poll_pending_submit(
                 match result.outcome {
                     Ok(turn) => {
                         if rendered_tool_invocations < turn.tool_invocations.len() {
+                            persist_pending_assistant_drafts(
+                                state,
+                                session_store,
+                                pending.transcript_persisted_len,
+                            )?;
                             append_tool_messages(
                                 state,
                                 session_store,
                                 &turn.tool_invocations[rendered_tool_invocations..],
                             )?;
+                            pending.transcript_persisted_len = state.transcript.len();
                         }
                         // TurnExecution carries every trace event produced
                         // during the turn (both streaming and non-streaming
@@ -634,7 +646,7 @@ pub(crate) fn poll_pending_submit(
                         finalize_assistant_text(state, session_store, &turn.assistant_text)?;
                     }
                     Err(error) => {
-                        discard_pending_assistant_drafts(state, pending.transcript_start_len);
+                        discard_pending_assistant_drafts(state, pending.transcript_persisted_len);
                         let message = format!("Provider request failed: {error}");
                         state.push_message(MessageRole::System, message.clone());
                         session_store.append_event(
@@ -1024,6 +1036,28 @@ fn discard_pending_assistant_drafts(state: &mut AppState, transcript_start_len: 
             index += 1;
         }
     }
+}
+
+fn persist_pending_assistant_drafts(
+    state: &AppState,
+    session_store: &SessionStore,
+    transcript_persisted_len: usize,
+) -> Result<()> {
+    for message in state
+        .transcript
+        .iter()
+        .skip(transcript_persisted_len.min(state.transcript.len()))
+    {
+        if message.role == MessageRole::Assistant && !message.text.trim().is_empty() {
+            session_store.append_event(
+                state.session.id,
+                TranscriptEvent::AssistantMessage {
+                    text: message.text.clone(),
+                },
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn submit_command_name(submitted: &str) -> &str {

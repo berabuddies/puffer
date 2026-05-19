@@ -80,7 +80,7 @@ pub(crate) fn execute_shell_shortcut(
     tui.pending_submit = Some(PendingSubmit {
         prompt,
         receiver: event_rx,
-        transcript_start_len: state.transcript.len(),
+        transcript_persisted_len: state.transcript.len(),
         rendered_tool_invocations: 0,
         pending_tool_calls: Vec::new(),
         started_at: std::time::Instant::now(),

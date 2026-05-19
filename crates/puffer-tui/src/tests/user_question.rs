@@ -81,7 +81,7 @@ fn poll_pending_submit_opens_user_question_overlay() {
         pending_submit: Some(PendingSubmit {
             prompt: "hi".to_string(),
             receiver: event_rx,
-            transcript_start_len: 0,
+            transcript_persisted_len: 0,
             rendered_tool_invocations: 0,
             pending_tool_calls: Vec::new(),
             started_at: std::time::Instant::now(),
@@ -201,7 +201,7 @@ fn user_question_ctrl_c_interrupts_pending_turn() {
         pending_submit: Some(PendingSubmit {
             prompt: "hi".to_string(),
             receiver: event_rx,
-            transcript_start_len: 0,
+            transcript_persisted_len: 0,
             rendered_tool_invocations: 0,
             pending_tool_calls: Vec::new(),
             started_at: std::time::Instant::now(),

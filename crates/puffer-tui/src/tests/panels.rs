@@ -34,7 +34,7 @@ fn set_pending_turn(tui: &mut TuiState) {
     tui.pending_submit = Some(PendingSubmit {
         prompt: "first".to_string(),
         receiver,
-        transcript_start_len: 0,
+        transcript_persisted_len: 0,
         pending_tool_calls: Vec::new(),
         rendered_tool_invocations: 0,
         started_at: std::time::Instant::now(),
