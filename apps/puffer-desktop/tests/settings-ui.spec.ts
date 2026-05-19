@@ -83,6 +83,33 @@ test("provider API key connect requires a non-empty key", async ({ page }) => {
   });
 });
 
+test("settings auth uses the configured daemon when Tauri globals exist", async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as unknown as { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown }).__TAURI__ = {};
+    (window as unknown as { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+  });
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await daemon.waitForRequest("load_settings_snapshot");
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Providers" }).click();
+
+  await page.getByLabel("API key for Anthropic").fill("sk-tauri-daemon");
+  await page
+    .locator(".provider-card")
+    .filter({ hasText: "Anthropic" })
+    .getByRole("button", { name: "Connect" })
+    .click();
+
+  const request = await daemon.waitForRequest("login_with_api_key");
+  expect(request.params).toMatchObject({
+    providerId: "anthropic",
+    apiKey: "sk-tauri-daemon"
+  });
+});
+
 test("permissions settings save tool policies through the daemon", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
