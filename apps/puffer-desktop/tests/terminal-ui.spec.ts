@@ -70,6 +70,30 @@ test("Terminal decodes UTF-8 PTY output frames", async ({ page }) => {
   await expect(page.locator(".xterm-rows")).not.toContainText("ä½");
 });
 
+test("Terminal decodes UTF-8 split across PTY output frames", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: /Browser regression/ }).first().click();
+  await page.locator(".pf-agent-tabs").getByRole("button", { name: "Terminal", exact: true }).click();
+  await daemon.waitForRequest("pty_open", (request) => request.params.sessionId === "session-browser");
+  await daemon.waitForRequest("pty_replay", (request) => request.params.ptyId === "pty-1");
+
+  const bytes = Buffer.from("split 你好\n", "utf8");
+  daemon.emit("pty:pty-1:data", {
+    seq: 1,
+    data: bytes.subarray(0, 8).toString("base64")
+  });
+  daemon.emit("pty:pty-1:data", {
+    seq: 2,
+    data: bytes.subarray(8).toString("base64")
+  });
+
+  await expect(page.locator(".xterm-rows")).toContainText("split 你好");
+  await expect(page.locator(".xterm-rows")).not.toContainText("�");
+});
+
 test("late Terminal focus does not reattach a switched session", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
