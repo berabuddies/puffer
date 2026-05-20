@@ -76,7 +76,7 @@ const groqAuth = [
   }
 ];
 
-function makePdfBase64(text: string, pageCount = 1): string {
+function makePdfBase64(text: string, pageCount = 1, width = 260, height = 160): string {
   const fontObjectId = 3 + pageCount * 2;
   const pageObjectIds = Array.from({ length: pageCount }, (_, index) => 3 + index * 2);
   const pageRefs = pageObjectIds.map((id) => `${id} 0 R`).join(" ");
@@ -89,7 +89,7 @@ function makePdfBase64(text: string, pageCount = 1): string {
       const pageText = pageCount === 1 ? text : `${text} ${index + 1}`;
       const stream = `BT /F1 18 Tf 20 100 Td (${pageText.replace(/[()\\]/g, "\\$&")}) Tj ET`;
       return [
-        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 260 160] /Resources << /Font << /F1 ${fontObjectId} 0 R >> >> /Contents ${contentObjectId} 0 R >>`,
+        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${width} ${height}] /Resources << /Font << /F1 ${fontObjectId} 0 R >> >> /Contents ${contentObjectId} 0 R >>`,
         `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`
       ];
     }),
@@ -245,6 +245,7 @@ function seedPreviewFiles(daemon: FakeDaemon): void {
   });
   daemon.seedBinaryFile("/tmp/puffer/tasks.xlsx", xlsx);
   daemon.seedBinaryFile("/tmp/puffer/sample.pdf", makePdfBase64("Puffer PDF preview"));
+  daemon.seedBinaryFile("/tmp/puffer/wide.pdf", makePdfBase64("Wide PDF preview", 1, 960, 620));
   daemon.seedBinaryFile("/tmp/puffer/long.pdf", makePdfBase64("Long PDF preview", 29));
   daemon.seedBinaryFile(
     "/tmp/puffer/tex-garbage.pdf",
@@ -458,6 +459,24 @@ test("Files tab previews common document and data formats", async ({ page }) => 
   await zoomControls.getByRole("button", { name: "Reset zoom" }).click();
   await expect(zoomControls.getByText("100%")).toBeVisible();
 
+  await page.getByRole("button", { name: "wide.pdf" }).click();
+  await expect(page.getByLabel("PDF preview")).toBeVisible();
+  await expectCanvasHasInk(page, 'canvas[aria-label="PDF page 1"]');
+  const wideInitialWidth = await page.locator('canvas[aria-label="PDF page 1"]').evaluate((canvas) =>
+    Math.round(canvas.getBoundingClientRect().width)
+  );
+  const shellWidth = await pdfPreview.evaluate((node) => Math.round(node.getBoundingClientRect().width));
+  expect(wideInitialWidth).toBeGreaterThan(shellWidth);
+  await zoomControls.getByRole("button", { name: "Zoom in" }).click();
+  await expect(zoomControls.getByText("110%")).toBeVisible();
+  await expect.poll(async () =>
+    page.locator('canvas[aria-label="PDF page 1"]').evaluate((canvas) =>
+      Math.round(canvas.getBoundingClientRect().width)
+    )
+  ).toBeGreaterThan(wideInitialWidth);
+  await zoomControls.getByRole("button", { name: "Reset zoom" }).click();
+  await expect(zoomControls.getByText("100%")).toBeVisible();
+
   await page.getByRole("button", { name: "ascii-sniffed.pdf" }).click();
   await expect(page.getByLabel("PDF preview")).toBeVisible();
   await daemon.waitForRequest(
@@ -483,10 +502,17 @@ test("Files tab previews common document and data formats", async ({ page }) => 
   await expect(pageLimit).toBeVisible();
   const pageLimitColors = await pageLimit.evaluate((node) => {
     const style = getComputedStyle(node);
-    return { color: style.color, backgroundColor: style.backgroundColor };
+    const shell = node.closest(".pdf-shell");
+    const shellStyle = shell ? getComputedStyle(shell) : null;
+    return {
+      color: style.color,
+      backgroundColor: style.backgroundColor,
+      shellBackgroundColor: shellStyle?.backgroundColor ?? ""
+    };
   });
   expect(pageLimitColors.color).not.toBe(pageLimitColors.backgroundColor);
   expect(pageLimitColors.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
+  expect(pageLimitColors.backgroundColor).not.toBe(pageLimitColors.shellBackgroundColor);
 
   await page.getByRole("button", { name: "brief.docx" }).click();
   await expect(page.getByLabel("DOCX preview")).toContainText("Quarterly planning note");

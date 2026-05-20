@@ -182,6 +182,9 @@
   }
 
   .pdf-toolbar {
+    position: sticky;
+    top: 0;
+    z-index: 2;
     display: inline-flex;
     align-items: center;
     justify-self: center;
@@ -220,22 +223,26 @@
     justify-self: center;
     width: fit-content;
     padding: 4px 8px;
-    border: 1px solid var(--border);
+    border: 1px solid color-mix(in oklab, var(--accent) 36%, var(--border));
     border-radius: 6px;
-    background: var(--background);
-    color: var(--muted-foreground);
+    background: color-mix(in oklab, var(--accent) 10%, var(--background));
+    color: var(--foreground);
     font-size: 12px;
   }
 
   .pdf-error {
+    border-color: color-mix(in oklab, #b3261e 35%, var(--border));
+    background: color-mix(in oklab, #b3261e 8%, var(--background));
     color: #b3261e;
   }
 
   .pdf-canvas-stack {
     display: grid;
     gap: 18px;
+    width: max-content;
+    min-width: 100%;
     justify-items: center;
-    overflow: auto;
+    overflow: visible;
   }
 
   :global(.pdf-canvas-page) {
@@ -251,7 +258,7 @@
   }
 
   :global(.pdf-canvas-page canvas) {
-    max-width: 100%;
+    max-width: none;
     height: auto !important;
     background: #fff;
     border: 1px solid var(--border);
