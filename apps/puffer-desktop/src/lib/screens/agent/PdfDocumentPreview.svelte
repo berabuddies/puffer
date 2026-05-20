@@ -87,6 +87,18 @@
     zoom = Math.max(PDF_MIN_ZOOM, Math.min(PDF_MAX_ZOOM, Math.round(next * 10) / 10));
   }
 
+  function handleZoomInput(event: Event): void {
+    const input = event.currentTarget as HTMLInputElement;
+    setZoom(Number(input.value) / 100);
+  }
+
+  function handleZoomWheel(event: WheelEvent): void {
+    if (!event.metaKey && !event.ctrlKey) return;
+    event.preventDefault();
+    const direction = event.deltaY < 0 ? 1 : -1;
+    setZoom(zoom + PDF_ZOOM_STEP * direction);
+  }
+
   function applyCanvasZoom(canvas: HTMLCanvasElement, currentZoom: number): void {
     const baseWidth = Number(canvas.dataset.pdfBaseWidth ?? 0);
     const baseHeight = Number(canvas.dataset.pdfBaseHeight ?? 0);
@@ -174,7 +186,7 @@
   }
 </script>
 
-<div class="pdf-renderer">
+<div class="pdf-renderer" onwheel={handleZoomWheel}>
   <div class="pdf-controls-row">
     <div class="pdf-toolbar" role="group" aria-label="PDF zoom controls">
       <button
@@ -200,6 +212,17 @@
         <ZoomInIcon size={14} strokeWidth={2} />
       </button>
     </div>
+    <input
+      class="pdf-zoom-range"
+      type="range"
+      min={PDF_MIN_ZOOM * 100}
+      max={PDF_MAX_ZOOM * 100}
+      step={PDF_ZOOM_STEP * 100}
+      value={zoomPercent}
+      aria-label="PDF zoom level"
+      aria-valuetext={`${zoomPercent}%`}
+      oninput={handleZoomInput}
+    />
     {#if status}
       <div class="pdf-status" role="status" aria-live="polite">{status}</div>
     {/if}
@@ -234,17 +257,17 @@
   .pdf-controls-row {
     position: relative;
     z-index: 20;
-    display: inline-flex;
+    display: flex;
     flex-wrap: wrap;
     align-items: center;
     justify-content: flex-start;
-    justify-self: start;
     gap: 8px;
+    width: 100%;
     max-width: 100%;
-    padding: 7px;
-    border: 1px solid #94a3b8;
+    padding: 8px;
+    border: 1px solid #64748b;
     border-radius: 8px;
-    background: #f8fafc;
+    background: #ffffff;
     box-shadow: 0 12px 32px rgb(15 23 42 / 0.26);
     color: #111827;
     pointer-events: auto;
@@ -295,23 +318,36 @@
     border-color: #94a3b8;
   }
 
+  .pdf-zoom-range {
+    width: clamp(130px, 20vw, 240px);
+    min-width: 120px;
+    accent-color: #2563eb;
+    cursor: pointer;
+  }
+
+  .pdf-zoom-range:focus-visible {
+    outline: 2px solid #2563eb;
+    outline-offset: 3px;
+  }
+
   .pdf-toolbar button:disabled {
     cursor: not-allowed;
     opacity: 0.45;
   }
 
   .pdf-status {
+    margin-left: auto;
     width: fit-content;
     max-width: 100%;
-    padding: 5px 10px;
-    border: 1px solid #1d4ed8;
+    padding: 6px 10px;
+    border: 1px solid #0f172a;
     border-radius: 6px;
-    background: #172554;
-    color: #eff6ff;
+    background: #111827;
+    color: #ffffff;
     font-size: 12px;
-    font-weight: 650;
+    font-weight: 700;
     line-height: 1.35;
-    box-shadow: 0 1px 0 rgb(255 255 255 / 0.45);
+    box-shadow: 0 1px 0 rgb(255 255 255 / 0.85), 0 8px 18px rgb(15 23 42 / 0.22);
   }
 
   .pdf-error {

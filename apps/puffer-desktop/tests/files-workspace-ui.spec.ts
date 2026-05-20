@@ -646,6 +646,8 @@ test("Files tab PDF zoom is immediate and page-limit status remains readable", a
       if (!match) return [0, 0, 0];
       return [Number(match[1]), Number(match[2]), Number(match[3])];
     };
+    const channelDelta = (left: [number, number, number], right: [number, number, number]): number =>
+      Math.abs(left[0] - right[0]) + Math.abs(left[1] - right[1]) + Math.abs(left[2] - right[2]);
     const luminance = ([red, green, blue]: [number, number, number]): number => {
       const channels = [red, green, blue].map((channel) => {
         const normalized = channel / 255;
@@ -657,22 +659,50 @@ test("Files tab PDF zoom is immediate and page-limit status remains readable", a
     };
     const style = getComputedStyle(node);
     const shell = node.closest(".pdf-shell");
+    const controls = node.closest(".pdf-controls-row");
     const shellStyle = shell ? getComputedStyle(shell) : null;
+    const controlsStyle = controls ? getComputedStyle(controls) : null;
+    const statusBackground = parseRgb(style.backgroundColor);
     const foreground = luminance(parseRgb(style.color));
-    const background = luminance(parseRgb(style.backgroundColor));
+    const background = luminance(statusBackground);
+    const shellBackground = parseRgb(shellStyle?.backgroundColor ?? "");
+    const controlsBackground = parseRgb(controlsStyle?.backgroundColor ?? "");
     return {
       ratio: (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05),
       backgroundColor: style.backgroundColor,
-      shellBackgroundColor: shellStyle?.backgroundColor ?? ""
+      shellBackgroundColor: shellStyle?.backgroundColor ?? "",
+      controlsBackgroundColor: controlsStyle?.backgroundColor ?? "",
+      shellDelta: channelDelta(statusBackground, shellBackground),
+      controlsDelta: channelDelta(statusBackground, controlsBackground)
     };
   });
   expect(contrast.ratio).toBeGreaterThanOrEqual(4.5);
   expect(contrast.backgroundColor).not.toBe(contrast.shellBackgroundColor);
+  expect(contrast.backgroundColor).not.toBe(contrast.controlsBackgroundColor);
   expect(contrast.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
+  expect(contrast.shellDelta).toBeGreaterThan(60);
+  expect(contrast.controlsDelta).toBeGreaterThan(60);
 
   const initialWidth = await page.locator('canvas[aria-label="PDF page 1"]').evaluate((canvas) =>
     Math.round(canvas.getBoundingClientRect().width)
   );
+  const zoomSlider = pdfPreview.getByLabel("PDF zoom level");
+  await expect(zoomSlider).toBeVisible();
+  await zoomSlider.evaluate((input) => {
+    const range = input as HTMLInputElement;
+    range.value = "140";
+    range.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await expect(controls.getByText("140%")).toBeVisible();
+  await expect(page.locator('canvas[aria-label^="PDF page"]')).toHaveCount(20, { timeout: 100 });
+  await expect.poll(async () =>
+    page.locator('canvas[aria-label="PDF page 1"]').evaluate((canvas) =>
+      Math.round(canvas.getBoundingClientRect().width)
+    )
+  ).toBeGreaterThan(initialWidth);
+  await controls.getByRole("button", { name: "Reset zoom" }).click();
+  await expect(controls.getByText("100%")).toBeVisible();
+
   const controlsTop = await controls.evaluate((node) => Math.round(node.getBoundingClientRect().top));
   const scrollState = await pdfPreview.getByLabel("PDF pages").evaluate((node) => {
     node.scrollTop = 520;
@@ -694,6 +724,14 @@ test("Files tab PDF zoom is immediate and page-limit status remains readable", a
   await zoomIn.click();
   await expect(controls.getByText("110%")).toBeVisible();
   await expect(pageLimit).toBeVisible({ timeout: 100 });
+  await expect(page.locator('canvas[aria-label^="PDF page"]')).toHaveCount(20, { timeout: 100 });
+  await pdfPreview.getByLabel("PDF pages").dispatchEvent("wheel", {
+    deltaY: -120,
+    ctrlKey: true,
+    bubbles: true,
+    cancelable: true
+  });
+  await expect(controls.getByText("120%")).toBeVisible();
   await expect(page.locator('canvas[aria-label^="PDF page"]')).toHaveCount(20, { timeout: 100 });
   await expect.poll(async () =>
     page.locator('canvas[aria-label="PDF page 1"]').evaluate((canvas) =>
