@@ -435,7 +435,6 @@
       case "turn-complete":
       case "turn-error":
         clearLiveSidebarAgentState(sid, ev.turnId);
-        clearCachedTurnRuntimeState(sid);
         break;
       case "usage":
         break;
