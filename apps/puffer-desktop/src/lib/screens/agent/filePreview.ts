@@ -64,7 +64,11 @@ export async function buildFilePreview(file: ReadFileResult): Promise<FilePrevie
     case "csv":
       return file.encoding === "utf8" ? { kind: "csv", rows: parseCsv(file.content) } : null;
     case "pdf":
-      return file.encoding === "base64" ? previewPdf(file.content) : null;
+      return file.encoding === "base64"
+        ? previewPdf(file.content)
+        : file.encoding === "utf8"
+          ? previewPdf(bytesToBase64(utf8StringToBytes(file.content)))
+          : null;
     case "docx":
       return file.encoding === "base64" ? previewDocx(file.content) : null;
     case "pptx":
@@ -855,6 +859,10 @@ function bytesToBinaryString(bytes: Uint8Array): string {
 
 function utf8StringToBytes(value: string): Uint8Array {
   return utf8Encoder.encode(value);
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  return btoa(bytesToBinaryString(bytes));
 }
 
 function base64ToBytes(base64: string): Uint8Array {

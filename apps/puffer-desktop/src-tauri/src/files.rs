@@ -183,7 +183,7 @@ fn read_file_path(path: &Path, max_bytes: usize) -> Result<Value> {
         .take(cap)
         .collect::<Vec<_>>();
     let truncated = (size as usize) > bytes.len();
-    let (encoding, content) = if looks_like_text(&bytes) {
+    let (encoding, content) = if !should_return_base64(path, &bytes) {
         match std::str::from_utf8(&bytes) {
             Ok(text) => ("utf8", text.to_string()),
             Err(_) => ("base64", BASE64_STANDARD.encode(&bytes)),
@@ -205,6 +205,20 @@ fn looks_like_text(bytes: &[u8]) -> bool {
     !sniff.contains(&0) && std::str::from_utf8(sniff).is_ok()
 }
 
+fn should_return_base64(path: &Path, bytes: &[u8]) -> bool {
+    is_document_preview_binary(path) || !looks_like_text(bytes)
+}
+
+fn is_document_preview_binary(path: &Path) -> bool {
+    let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "pdf" | "doc" | "docx" | "ppt" | "pptx" | "xls" | "xlsx" | "xlsm"
+    )
+}
+
 fn entry_name_lower(value: &Value) -> String {
     value
         .get("name")
@@ -215,4 +229,26 @@ fn entry_name_lower(value: &Value) -> String {
 
 fn path_starts_with(path: &Path, root: &Path) -> bool {
     path == root || path.starts_with(root)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn document_previews_return_base64_even_when_the_header_is_ascii() {
+        let ascii_pdf = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n";
+        assert!(should_return_base64(
+            Path::new("/tmp/puffer/sample.pdf"),
+            ascii_pdf
+        ));
+        assert!(should_return_base64(
+            Path::new("/tmp/puffer/legacy.doc"),
+            b"plain looking legacy document"
+        ));
+        assert!(!should_return_base64(
+            Path::new("/tmp/puffer/README.md"),
+            b"# Notes\n"
+        ));
+    }
 }

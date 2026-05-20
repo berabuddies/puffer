@@ -160,7 +160,7 @@ pub(crate) fn handle_read_file(state: &DaemonState, params: &Value) -> Result<Va
 
     let truncated = (size as usize) > filled;
 
-    let (encoding, content) = if looks_like_text(&buf) {
+    let (encoding, content) = if !should_return_base64(&path, &buf) {
         // looks_like_text already established the first 8 KiB is valid
         // UTF-8 with no NULs; decode the whole buffer and, if that fails
         // (mixed encoding past the sniff window), fall back to base64.
@@ -286,4 +286,40 @@ fn looks_like_text(buf: &[u8]) -> bool {
         return false;
     }
     std::str::from_utf8(window).is_ok()
+}
+
+fn should_return_base64(path: &Path, buf: &[u8]) -> bool {
+    is_document_preview_binary(path) || !looks_like_text(buf)
+}
+
+fn is_document_preview_binary(path: &Path) -> bool {
+    let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "pdf" | "doc" | "docx" | "ppt" | "pptx" | "xls" | "xlsx" | "xlsm"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn document_previews_return_base64_even_when_the_header_is_ascii() {
+        let ascii_pdf = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n";
+        assert!(should_return_base64(
+            Path::new("/tmp/puffer/sample.pdf"),
+            ascii_pdf
+        ));
+        assert!(should_return_base64(
+            Path::new("/tmp/puffer/legacy.doc"),
+            b"plain looking legacy document"
+        ));
+        assert!(!should_return_base64(
+            Path::new("/tmp/puffer/README.md"),
+            b"# Notes\n"
+        ));
+    }
 }

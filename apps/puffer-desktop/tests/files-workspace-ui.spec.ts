@@ -223,6 +223,10 @@ function seedPreviewFiles(daemon: FakeDaemon): void {
   });
   daemon.seedBinaryFile("/tmp/puffer/tasks.xlsx", xlsx);
   daemon.seedBinaryFile("/tmp/puffer/sample.pdf", makePdfBase64("Puffer PDF preview"));
+  daemon.seedFile(
+    "/tmp/puffer/ascii-sniffed.pdf",
+    Buffer.from(makePdfBase64("ASCII sniffed PDF preview"), "base64").toString("utf8")
+  );
   daemon.seedBinaryFile("/tmp/puffer/old-plan.doc", makeLargeLegacyOfficeBase64("Legacy Word agenda"));
   daemon.seedBinaryFile(
     "/tmp/puffer/old-deck.ppt",
@@ -312,6 +316,16 @@ test("Files tab previews common document and data formats", async ({ page }) => 
   );
   await expectCanvasHasInk(page, 'canvas[aria-label="PDF page 1"]');
   expect(pdfRendererRequests.length).toBeGreaterThan(0);
+
+  await page.getByRole("button", { name: "ascii-sniffed.pdf" }).click();
+  await expect(page.getByLabel("PDF preview")).toBeVisible();
+  await daemon.waitForRequest(
+    "read_file",
+    (request) =>
+      request.params.path === "/tmp/puffer/ascii-sniffed.pdf" &&
+      request.params.maxBytes === 24 * 1024 * 1024
+  );
+  await expectCanvasHasInk(page, 'canvas[aria-label="PDF page 1"]');
 
   await page.getByRole("button", { name: "brief.docx" }).click();
   await expect(page.getByLabel("DOCX preview")).toContainText("Quarterly planning note");
