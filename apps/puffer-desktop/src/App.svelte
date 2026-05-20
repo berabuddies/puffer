@@ -1565,6 +1565,7 @@
 
   function onCloseAgent() {
     openAgentSessionId = null;
+    clearRememberedSession();
   }
 
   function onOpenProject(id: string) {

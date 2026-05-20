@@ -506,6 +506,62 @@ test("close session returns to workspace without removing history", async ({ pag
   await expect(page.getByText("This should survive closing the detail view.")).toBeVisible();
 });
 
+test("close session clears remembered restore target without removing history", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-close-remembered",
+        displayName: "Remembered closable session",
+        title: "Remembered closable session",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "user_message",
+            id: "remembered-close-user",
+            text: "This remembered session should stay in history.",
+            createdAtMs: baseTime - 50_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await page.addInitScript(() => {
+    window.localStorage.setItem(
+      "puffer-desktop:preferences",
+      JSON.stringify({ rememberSession: true })
+    );
+  });
+  await daemon.open(page);
+
+  const history = page.getByRole("region", { name: "Session history" });
+  await history.getByRole("button", { name: /Remembered closable session/ }).click();
+  await expect(page.locator(".pf-agent-detail .primary-title")).toContainText(
+    "Remembered closable session"
+  );
+  await expect
+    .poll(() => page.evaluate(() => window.localStorage.getItem("puffer-desktop:remembered-session")))
+    .toContain("session-close-remembered");
+
+  await page.getByRole("button", { name: "Close session" }).click();
+
+  await expect(page.locator(".pf-agent-detail")).toHaveCount(0);
+  await expect(
+    page.evaluate(() => window.localStorage.getItem("puffer-desktop:remembered-session"))
+  ).resolves.toBeNull();
+
+  await page.reload();
+  await expect(page.locator(".pf-agent-detail")).toHaveCount(0);
+  await expect(page.locator(".pf-pw-list")).toBeVisible();
+  await expect(page.getByRole("region", { name: "Session history" })).toContainText(
+    "Remembered closable session"
+  );
+});
+
 test("late workspace refresh does not hide a newly created session", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
