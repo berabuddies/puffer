@@ -325,7 +325,7 @@
   async function reloadActiveFile() {
     const target = activePath;
     if (!target) return;
-    if (isTabDirty(target)) return;
+    const wasDirty = isTabDirty(target);
     const expectedRoot = root;
     const expectedSessionId = sessionId;
     const generation = fileReadGeneration;
@@ -337,7 +337,7 @@
         root === expectedRoot &&
         sessionId === expectedSessionId
       ) {
-        cacheFileResult(result, true);
+        cacheFileResult(result, !wasDirty);
       }
     } catch (err) {
       if (
