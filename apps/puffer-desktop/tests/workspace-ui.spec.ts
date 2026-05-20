@@ -222,6 +222,34 @@ test("workspace search filters projects and agents", async ({ page }) => {
   await expect(workspace.getByText("Beta browser audit")).toBeVisible();
 });
 
+test("workspace search includes session notes in history results", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-note-history",
+        displayName: "Workspace note target",
+        title: "Workspace note target",
+        cwd: "/tmp/puffer-note-search",
+        folderPath: "/tmp/puffer-note-search",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        note: "Manual approval before browser replay"
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByLabel("Search workspace").fill("manual approval");
+
+  const project = page.locator(".pf-pw-project").filter({ hasText: "puffer-note-search" });
+  await expect(project.getByText("Workspace note target")).toBeVisible();
+  await expect(
+    page.getByLabel("Session history").getByRole("button", { name: /Workspace note target/ })
+  ).toBeVisible();
+});
+
 test("workspace project rows collapse and expand their session list", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

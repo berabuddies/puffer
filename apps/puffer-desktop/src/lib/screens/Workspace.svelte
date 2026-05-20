@@ -165,6 +165,7 @@
     return (
       includesNeedle(sessionDisplayName(row.session), needle) ||
       includesNeedle(sessionDisplayTitle(row.session), needle) ||
+      includesNeedle(row.session.note, needle) ||
       includesNeedle(row.session.cwd, needle) ||
       includesNeedle(row.projectLabel, needle) ||
       includesNeedle(row.projectPath, needle)
