@@ -14,6 +14,7 @@
   let error = $state<string | null>(null);
   let generation = 0;
   let loadingTask: PDFDocumentLoadingTask | null = null;
+  let showTextFallback = $derived(textLines.length > 0 && (Boolean(error) || Boolean(status)));
 
   type PdfJsModule = typeof import("pdfjs-dist");
   type PdfWorkerUrlModule = { default: string };
@@ -128,7 +129,7 @@
     <div class="pdf-error">PDF renderer failed: {error}</div>
   {/if}
   <div bind:this={host} class="pdf-canvas-stack" aria-label="PDF rendered pages"></div>
-  {#if error && textLines.length > 0}
+  {#if showTextFallback}
     <article class="pdf-text-fallback" aria-label="PDF text fallback">
       {#each textLines as line}
         <p>{line}</p>

@@ -44,6 +44,10 @@ type RelationshipMap = Map<string, string>;
 
 const utf8Decoder = new TextDecoder("utf-8");
 const utf8Encoder = new TextEncoder();
+const PDF_TEXT_SCAN_BYTES = 2 * 1024 * 1024;
+const PDF_TEXT_MAX_STREAMS = 24;
+const PDF_TEXT_MAX_COMPRESSED_STREAM_BYTES = 512 * 1024;
+const PDF_TEXT_MAX_DECODED_STREAM_BYTES = 1024 * 1024;
 
 /** Return true when the Files pane has a richer preview than the code editor. */
 export function hasRichFilePreview(file: ReadFileResult): boolean {
@@ -94,7 +98,13 @@ function previewFormat(path: string):
   if (lower.endsWith(".docx")) return "docx";
   if (lower.endsWith(".pptx")) return "pptx";
   if (lower.endsWith(".xlsx") || lower.endsWith(".xlsm")) return "xlsx";
-  if (lower.endsWith(".doc") || lower.endsWith(".ppt") || lower.endsWith(".xls")) {
+  if (
+    lower.endsWith(".doc") ||
+    lower.endsWith(".dot") ||
+    lower.endsWith(".rtf") ||
+    lower.endsWith(".ppt") ||
+    lower.endsWith(".xls")
+  ) {
     return "legacy-office";
   }
   return "text";
@@ -271,7 +281,7 @@ function parseCsv(content: string): string[][] {
 }
 
 function extractPdfText(bytes: Uint8Array): string[] {
-  const streamTexts = decodePdfStreams(bytes);
+  const streamTexts = decodePdfStreams(bytes.slice(0, PDF_TEXT_SCAN_BYTES));
   const values = streamTexts.flatMap((stream) => extractPdfStrings(stream));
   return normalizePreviewLines(values, 200);
 }
@@ -281,13 +291,16 @@ function decodePdfStreams(bytes: Uint8Array): string[] {
   const streams: string[] = [];
   const streamMarker = /stream\r?\n?/g;
   let match: RegExpExecArray | null;
-  while ((match = streamMarker.exec(binary))) {
+  while ((match = streamMarker.exec(binary)) && streams.length < PDF_TEXT_MAX_STREAMS) {
     const streamStart = match.index + match[0].length;
     const streamEnd = binary.indexOf("endstream", streamStart);
     if (streamEnd < 0) break;
     const header = binary.slice(Math.max(0, match.index - 320), match.index);
     const raw = trimPdfStreamBytes(bytes.slice(streamStart, streamEnd));
-    streams.push(bytesToBinaryString(decodePdfStream(raw, header)));
+    if (raw.length <= PDF_TEXT_MAX_COMPRESSED_STREAM_BYTES) {
+      const decoded = decodePdfStream(raw, header).slice(0, PDF_TEXT_MAX_DECODED_STREAM_BYTES);
+      streams.push(bytesToBinaryString(decoded));
+    }
     streamMarker.lastIndex = streamEnd + "endstream".length;
   }
   return streams;

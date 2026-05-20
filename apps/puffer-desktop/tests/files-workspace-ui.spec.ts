@@ -240,6 +240,11 @@ function seedPreviewFiles(daemon: FakeDaemon): void {
     Buffer.from(makePdfBase64("ASCII sniffed PDF preview"), "base64").toString("utf8")
   );
   daemon.seedBinaryFile("/tmp/puffer/old-plan.doc", makeLargeLegacyOfficeBase64("Legacy Word agenda"));
+  daemon.seedBinaryFile("/tmp/puffer/template.dot", makeLegacyOfficeBase64("Legacy Word template"));
+  daemon.seedFile(
+    "/tmp/puffer/standalone.rtf",
+    "{\\rtf1\\ansi Standalone RTF agenda\\par RTF follow-up}"
+  );
   daemon.seedBinaryFile(
     "/tmp/puffer/native-old-word.doc",
     makeLegacyOfficeBase64("garbled fallback"),
@@ -378,6 +383,13 @@ test("Files tab previews common document and data formats", async ({ page }) => 
   );
   await expect(page.getByLabel("Legacy Word preview")).toContainText("Legacy Word agenda");
 
+  await page.getByRole("button", { name: "template.dot" }).click();
+  await expect(page.getByLabel("Legacy Word preview")).toContainText("Legacy Word template");
+
+  await page.getByRole("button", { name: "standalone.rtf" }).click();
+  await expect(page.getByLabel("Legacy Word preview")).toContainText("Standalone RTF agenda");
+  await expect(page.getByLabel("Legacy Word preview")).toContainText("RTF follow-up");
+
   await page.getByRole("button", { name: "native-old-word.doc" }).click();
   await expect(page.getByLabel("Legacy Word preview")).toContainText("Native textutil Word agenda");
   await expect(page.getByLabel("Legacy Word preview")).toContainText("Native textutil follow-up");
@@ -397,6 +409,29 @@ test("Files tab previews common document and data formats", async ({ page }) => 
   await page.getByRole("button", { name: "old-html.doc" }).click();
   await expect(page.getByLabel("Legacy Word preview")).toContainText("Legacy HTML agenda");
   await expect(page.getByLabel("Legacy Word preview")).toContainText("Owner: Otter");
+});
+
+test("Files tab shows PDF text fallback while renderer assets are still loading", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  seedPreviewFiles(daemon);
+  let delayedRendererRequests = 0;
+  await page.route("**/*pdfjs-dist*", async (route) => {
+    delayedRendererRequests += 1;
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    await route.abort();
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openFilesPanel(page);
+
+  await page.getByRole("button", { name: "sample.pdf" }).click();
+  await expect(page.getByText("Loading PDF renderer...")).toBeVisible();
+  await expect(page.getByLabel("PDF text fallback")).toContainText("Puffer PDF preview", {
+    timeout: 700
+  });
+  expect(delayedRendererRequests).toBeGreaterThan(0);
 });
 
 test("Files tab shows PDF text fallback when renderer assets fail to load", async ({ page }) => {

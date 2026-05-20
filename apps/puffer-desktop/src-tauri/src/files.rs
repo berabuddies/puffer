@@ -221,7 +221,7 @@ fn is_document_preview_binary(path: &Path) -> bool {
     };
     matches!(
         extension.to_ascii_lowercase().as_str(),
-        "pdf" | "doc" | "docx" | "ppt" | "pptx" | "xls" | "xlsx" | "xlsm"
+        "pdf" | "doc" | "dot" | "docx" | "ppt" | "pptx" | "xls" | "xlsx" | "xlsm"
     )
 }
 
@@ -247,7 +247,7 @@ fn native_text_preview(path: &Path) -> Option<Vec<String>> {
 fn is_native_text_preview_candidate(path: &Path) -> bool {
     path.extension()
         .and_then(|value| value.to_str())
-        .map(|value| value.eq_ignore_ascii_case("doc"))
+        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "doc" | "dot" | "rtf"))
         .unwrap_or(false)
 }
 
@@ -294,6 +294,10 @@ mod tests {
             Path::new("/tmp/puffer/legacy.doc"),
             b"plain looking legacy document"
         ));
+        assert!(should_return_base64(
+            Path::new("/tmp/puffer/template.dot"),
+            b"plain looking legacy template"
+        ));
         assert!(!should_return_base64(
             Path::new("/tmp/puffer/README.md"),
             b"# Notes\n"
@@ -301,9 +305,15 @@ mod tests {
     }
 
     #[test]
-    fn native_text_preview_only_targets_legacy_word_files() {
+    fn native_text_preview_targets_legacy_word_files() {
         assert!(is_native_text_preview_candidate(Path::new(
             "/tmp/puffer/legacy.DOC"
+        )));
+        assert!(is_native_text_preview_candidate(Path::new(
+            "/tmp/puffer/template.dot"
+        )));
+        assert!(is_native_text_preview_candidate(Path::new(
+            "/tmp/puffer/rich-text.rtf"
         )));
         assert!(!is_native_text_preview_candidate(Path::new(
             "/tmp/puffer/report.docx"
