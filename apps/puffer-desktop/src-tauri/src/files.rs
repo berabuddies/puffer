@@ -3,12 +3,14 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::UNIX_EPOCH;
 
 const DEFAULT_MAX_BYTES: usize = 262_144;
 const READ_HARD_MAX_BYTES: u64 = 24 * 1024 * 1024;
 const WRITE_HARD_MAX_BYTES: u64 = 5 * 1024 * 1024;
 const TEXT_SNIFF_BYTES: usize = 8 * 1024;
+const NATIVE_TEXT_PREVIEW_MAX_LINES: usize = 200;
 
 pub(crate) fn list_dir(params: &Value, allowed_roots: &[PathBuf]) -> Result<Value> {
     let raw = params
@@ -191,13 +193,17 @@ fn read_file_path(path: &Path, max_bytes: usize) -> Result<Value> {
     } else {
         ("base64", BASE64_STANDARD.encode(&bytes))
     };
-    Ok(json!({
+    let mut result = json!({
         "path": path.display().to_string(),
         "encoding": encoding,
         "content": content,
         "size": size,
         "truncated": truncated,
-    }))
+    });
+    if let Some(lines) = native_text_preview(path) {
+        result["textPreview"] = json!(lines);
+    }
+    Ok(result)
 }
 
 fn looks_like_text(bytes: &[u8]) -> bool {
@@ -217,6 +223,48 @@ fn is_document_preview_binary(path: &Path) -> bool {
         extension.to_ascii_lowercase().as_str(),
         "pdf" | "doc" | "docx" | "ppt" | "pptx" | "xls" | "xlsx" | "xlsm"
     )
+}
+
+fn native_text_preview(path: &Path) -> Option<Vec<String>> {
+    if !is_native_text_preview_candidate(path) {
+        return None;
+    }
+    let output = Command::new("textutil")
+        .args([
+            "-convert", "txt", "-stdout", "-noload", "-timeout", "5", "--",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let lines = normalize_native_text_preview(&text);
+    (!lines.is_empty()).then_some(lines)
+}
+
+fn is_native_text_preview_candidate(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.eq_ignore_ascii_case("doc"))
+        .unwrap_or(false)
+}
+
+fn normalize_native_text_preview(text: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    for raw in text.lines() {
+        let normalized = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+        let trimmed = normalized.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        lines.push(trimmed.chars().take(600).collect());
+        if lines.len() >= NATIVE_TEXT_PREVIEW_MAX_LINES {
+            break;
+        }
+    }
+    lines
 }
 
 fn entry_name_lower(value: &Value) -> String {
@@ -250,5 +298,39 @@ mod tests {
             Path::new("/tmp/puffer/README.md"),
             b"# Notes\n"
         ));
+    }
+
+    #[test]
+    fn native_text_preview_only_targets_legacy_word_files() {
+        assert!(is_native_text_preview_candidate(Path::new(
+            "/tmp/puffer/legacy.DOC"
+        )));
+        assert!(!is_native_text_preview_candidate(Path::new(
+            "/tmp/puffer/report.docx"
+        )));
+        assert!(!is_native_text_preview_candidate(Path::new(
+            "/tmp/puffer/slides.ppt"
+        )));
+    }
+
+    #[test]
+    fn native_text_preview_normalizes_lines() {
+        let lines = normalize_native_text_preview("  first\t line  \n\nsecond   line\n");
+        assert_eq!(lines, vec!["first line", "second line"]);
+    }
+
+    #[test]
+    fn legacy_doc_read_includes_native_text_preview_when_available() {
+        if Command::new("textutil").arg("-help").output().is_err() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("legacy.doc");
+        std::fs::write(&path, r"{\rtf1\ansi Native legacy doc text}").unwrap();
+        let result = read_file_path(&path, DEFAULT_MAX_BYTES).unwrap();
+        let preview = result.get("textPreview").and_then(Value::as_array).unwrap();
+        assert!(preview
+            .iter()
+            .any(|line| line.as_str() == Some("Native legacy doc text")));
     }
 }

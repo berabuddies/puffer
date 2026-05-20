@@ -16,16 +16,17 @@
   let loadingTask: PDFDocumentLoadingTask | null = null;
 
   type PdfJsModule = typeof import("pdfjs-dist");
+  type PdfWorkerUrlModule = { default: string };
 
   let pdfJsModulePromise: Promise<PdfJsModule> | null = null;
 
   function loadPdfJs(): Promise<PdfJsModule> {
-    pdfJsModulePromise ??= import("pdfjs-dist/legacy/build/pdf.mjs").then((module) => {
+    pdfJsModulePromise ??= Promise.all([
+      import("pdfjs-dist/legacy/build/pdf.mjs"),
+      import("pdfjs-dist/legacy/build/pdf.worker.mjs?url")
+    ]).then(([module, worker]) => {
       const pdfJs = module as unknown as PdfJsModule;
-      pdfJs.GlobalWorkerOptions.workerSrc = new URL(
-        "pdfjs-dist/legacy/build/pdf.worker.mjs",
-        import.meta.url
-      ).toString();
+      pdfJs.GlobalWorkerOptions.workerSrc = (worker as PdfWorkerUrlModule).default;
       return pdfJs;
     });
     return pdfJsModulePromise;
@@ -61,17 +62,17 @@
     status = "Loading PDF renderer...";
     void loadingTask?.destroy();
 
-    const { getDocument } = await loadPdfJs();
-    if (current !== generation) return;
-    status = "Loading PDF...";
-
-    const task = getDocument({
-      data: base64ToBytes(source),
-      useSystemFonts: true
-    });
-    loadingTask = task;
-
     try {
+      const { getDocument } = await loadPdfJs();
+      if (current !== generation) return;
+      status = "Loading PDF...";
+
+      const task = getDocument({
+        data: base64ToBytes(source),
+        useSystemFonts: true
+      });
+      loadingTask = task;
+
       const pdf = await task.promise;
       if (current !== generation) return;
       const maxPages = Math.min(pdf.numPages, 20);

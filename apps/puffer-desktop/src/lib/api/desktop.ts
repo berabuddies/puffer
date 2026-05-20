@@ -1235,6 +1235,7 @@ export type ReadFileResult = {
   content: string;
   size: number;
   truncated: boolean;
+  textPreview?: string[];
 };
 
 export type FileTabStateItem = {

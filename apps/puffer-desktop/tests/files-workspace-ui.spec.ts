@@ -241,6 +241,12 @@ function seedPreviewFiles(daemon: FakeDaemon): void {
   );
   daemon.seedBinaryFile("/tmp/puffer/old-plan.doc", makeLargeLegacyOfficeBase64("Legacy Word agenda"));
   daemon.seedBinaryFile(
+    "/tmp/puffer/native-old-word.doc",
+    makeLegacyOfficeBase64("garbled fallback"),
+    undefined,
+    ["Native textutil Word agenda", "Native textutil follow-up"]
+  );
+  daemon.seedBinaryFile(
     "/tmp/puffer/old-deck.ppt",
     makeLegacyOfficeBase64("Legacy PowerPoint agenda")
   );
@@ -372,6 +378,10 @@ test("Files tab previews common document and data formats", async ({ page }) => 
   );
   await expect(page.getByLabel("Legacy Word preview")).toContainText("Legacy Word agenda");
 
+  await page.getByRole("button", { name: "native-old-word.doc" }).click();
+  await expect(page.getByLabel("Legacy Word preview")).toContainText("Native textutil Word agenda");
+  await expect(page.getByLabel("Legacy Word preview")).toContainText("Native textutil follow-up");
+
   await page.getByRole("button", { name: "old-deck.ppt" }).click();
   await expect(page.getByLabel("Legacy PowerPoint preview")).toContainText(
     "Legacy PowerPoint agenda"
@@ -387,6 +397,22 @@ test("Files tab previews common document and data formats", async ({ page }) => 
   await page.getByRole("button", { name: "old-html.doc" }).click();
   await expect(page.getByLabel("Legacy Word preview")).toContainText("Legacy HTML agenda");
   await expect(page.getByLabel("Legacy Word preview")).toContainText("Owner: Otter");
+});
+
+test("Files tab shows PDF text fallback when renderer assets fail to load", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  seedPreviewFiles(daemon);
+  await page.route("**/*pdfjs-dist*", (route) => route.abort());
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openFilesPanel(page);
+
+  await page.getByRole("button", { name: "sample.pdf" }).click();
+  await expect(page.getByLabel("PDF preview")).toBeVisible();
+  await expect(page.getByText("PDF renderer failed:")).toBeVisible();
+  await expect(page.getByLabel("PDF text fallback")).toContainText("Puffer PDF preview");
 });
 
 test("Files tab keeps raw editing available for previewed text files", async ({ page }) => {

@@ -64,11 +64,7 @@ export async function buildFilePreview(file: ReadFileResult): Promise<FilePrevie
     case "csv":
       return file.encoding === "utf8" ? { kind: "csv", rows: parseCsv(file.content) } : null;
     case "pdf":
-      return file.encoding === "base64"
-        ? previewPdf(file.content)
-        : file.encoding === "utf8"
-          ? previewPdf(bytesToBase64(utf8StringToBytes(file.content)))
-          : null;
+      return previewPdf(file);
     case "docx":
       return file.encoding === "base64" ? previewDocx(file.content) : null;
     case "pptx":
@@ -104,9 +100,18 @@ function previewFormat(path: string):
   return "text";
 }
 
-function previewPdf(base64: string): PdfPreview {
+function previewPdf(file: ReadFileResult): PdfPreview | null {
+  const base64 =
+    file.encoding === "base64"
+      ? file.content
+      : file.encoding === "utf8"
+        ? bytesToBase64(utf8StringToBytes(file.content))
+        : null;
+  if (!base64) return null;
+  const nativeLines = normalizedProvidedPreviewLines(file.textPreview);
   const lines = extractPdfText(base64ToBytes(base64));
-  return { kind: "pdf", base64, lines: lines.length > 0 ? lines : ["No text found."] };
+  const previewLines = nativeLines.length > 0 ? nativeLines : lines;
+  return { kind: "pdf", base64, lines: previewLines.length > 0 ? previewLines : ["No text found."] };
 }
 
 function legacyOfficePreview(file: ReadFileResult): LegacyOfficePreview {
@@ -116,6 +121,14 @@ function legacyOfficePreview(file: ReadFileResult): LegacyOfficePreview {
     : lower.endsWith(".xls")
       ? "Legacy Excel preview"
       : "Legacy Word preview";
+  const nativeLines = normalizedProvidedPreviewLines(file.textPreview);
+  if (nativeLines.length > 0) {
+    return {
+      kind: "office-binary",
+      title,
+      lines: nativeLines
+    };
+  }
   const bytes =
     file.encoding === "base64" ? base64ToBytes(file.content) : utf8StringToBytes(file.content);
   const lines = extractLegacyOfficeText(bytes);
@@ -124,6 +137,11 @@ function legacyOfficePreview(file: ReadFileResult): LegacyOfficePreview {
     title,
     lines: lines.length > 0 ? lines : ["No text found."]
   };
+}
+
+function normalizedProvidedPreviewLines(lines: string[] | undefined): string[] {
+  if (!lines) return [];
+  return normalizePreviewLines(lines, 200);
 }
 
 function renderMarkdown(markdown: string): string {
