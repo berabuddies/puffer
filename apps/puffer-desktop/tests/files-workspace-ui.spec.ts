@@ -761,6 +761,82 @@ test("Files tab PDF zoom is immediate and page-limit status remains readable", a
   ).toBeGreaterThan(initialWidth);
 });
 
+test("Files tab PDF controls stay usable in compact previews", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  seedPreviewFiles(daemon);
+  daemon.seedBinaryFile("/tmp/puffer/compact-long.pdf", makePdfBase64("Compact long PDF preview", 29, 960, 620));
+  await daemon.install(page);
+  await page.addInitScript(() => {
+    window.localStorage.setItem("puffer-desktop:tweaks", JSON.stringify({ theme: "dark" }));
+  });
+  await page.setViewportSize({ width: 860, height: 620 });
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: /^Browser regression\b/ }).first().click();
+  await openFilesPanel(page);
+
+  await page.getByRole("button", { name: "compact-long.pdf" }).click();
+  const pdfPreview = page.getByLabel("PDF preview");
+  await expect(pdfPreview).toBeVisible();
+  await expectCanvasHasInk(page, 'canvas[aria-label="PDF page 1"]');
+
+  const pageLimit = pdfPreview.getByText("Showing first 20 of 29 pages.");
+  const controls = pdfPreview.getByRole("group", { name: "PDF zoom controls" });
+  const pages = pdfPreview.getByLabel("PDF pages");
+  await expect(pageLimit).toBeVisible();
+  await expect(controls).toBeVisible();
+  await expect(pages).toBeVisible();
+
+  const metrics = await pageLimit.evaluate((node) => {
+    const status = node as HTMLElement;
+    const preview = status.closest('[aria-label="PDF preview"]') as HTMLElement | null;
+    const controlsRow = status.closest(".pdf-controls-row") as HTMLElement | null;
+    const pagesRegion = preview?.querySelector(".pdf-page-scroll") as HTMLElement | null;
+    const zoomIn = preview?.querySelector('button[aria-label="Zoom in"]') as HTMLElement | null;
+    const statusStyle = getComputedStyle(status);
+    const controlsStyle = controlsRow ? getComputedStyle(controlsRow) : null;
+    const previewStyle = preview ? getComputedStyle(preview) : null;
+    const statusRect = status.getBoundingClientRect();
+    const controlsRect = controlsRow?.getBoundingClientRect();
+    const pagesRect = pagesRegion?.getBoundingClientRect();
+    const zoomRect = zoomIn?.getBoundingClientRect();
+    const zoomHit = zoomRect
+      ? document.elementFromPoint(zoomRect.left + zoomRect.width / 2, zoomRect.top + zoomRect.height / 2)
+      : null;
+    return {
+      statusBackground: statusStyle.backgroundColor,
+      statusColor: statusStyle.color,
+      controlsBackground: controlsStyle?.backgroundColor ?? "",
+      previewBackground: previewStyle?.backgroundColor ?? "",
+      statusWidth: Math.round(statusRect.width),
+      controlsTop: Math.round(controlsRect?.top ?? 0),
+      pagesTop: Math.round(pagesRect?.top ?? 0),
+      pagesHeight: Math.round(pagesRegion?.clientHeight ?? 0),
+      pagesScrollable: Boolean(pagesRegion && pagesRegion.scrollHeight > pagesRegion.clientHeight),
+      zoomHit: zoomHit === zoomIn || Boolean(zoomIn?.contains(zoomHit))
+    };
+  });
+  expect(metrics.statusBackground).not.toBe(metrics.statusColor);
+  expect(metrics.statusBackground).not.toBe(metrics.controlsBackground);
+  expect(metrics.statusBackground).not.toBe(metrics.previewBackground);
+  expect(metrics.statusWidth).toBeGreaterThan(150);
+  expect(metrics.pagesTop).toBeGreaterThan(metrics.controlsTop);
+  expect(metrics.pagesHeight).toBeGreaterThan(120);
+  expect(metrics.pagesScrollable).toBe(true);
+  expect(metrics.zoomHit).toBe(true);
+
+  const initialWidth = await page.locator('canvas[aria-label="PDF page 1"]').evaluate((canvas) =>
+    Math.round(canvas.getBoundingClientRect().width)
+  );
+  await controls.getByRole("button", { name: "Zoom in" }).click();
+  await expect(controls.getByText("110%")).toBeVisible();
+  await expect.poll(async () =>
+    page.locator('canvas[aria-label="PDF page 1"]').evaluate((canvas) =>
+      Math.round(canvas.getBoundingClientRect().width)
+    )
+  ).toBeGreaterThan(initialWidth);
+});
+
 test("Files tab shows PDF text fallback while renderer assets are still loading", async ({ page }) => {
   const daemon = new FakeDaemon();
   seedPreviewFiles(daemon);
