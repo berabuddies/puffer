@@ -14,6 +14,7 @@ use puffer_transport_anthropic::{
 pub(crate) enum OauthFamily {
     Anthropic,
     OpenAi,
+    WorldAgent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +35,14 @@ pub(crate) fn oauth_family_for_provider(
     let provider = providers.provider(provider_id)?;
     if !provider.auth_modes.contains(&AuthMode::OAuth) {
         return None;
+    }
+    if let Some(family) = provider.oauth_family.as_deref() {
+        return match family {
+            "openai" => Some(OauthFamily::OpenAi),
+            "anthropic" => Some(OauthFamily::Anthropic),
+            "worldagent" => Some(OauthFamily::WorldAgent),
+            _ => None,
+        };
     }
     match provider.default_api.as_str() {
         "openai-responses"
@@ -90,6 +99,17 @@ pub(crate) fn oauth_start_bundle_for_provider(
                 manual_redirect_uri: Some(ANTHROPIC_MANUAL_REDIRECT_URL.to_string()),
             })
         }
+        Some(OauthFamily::WorldAgent) => {
+            let config = puffer_provider_worldagent::WorldAgentLoginConfig::default();
+            Ok(OauthStartBundle {
+                authorization_url: puffer_provider_worldagent::build_login_url(&config),
+                automatic_authorization_url: None,
+                verifier: String::new(),
+                state: config.client_state,
+                redirect_uri: config.redirect_uri,
+                manual_redirect_uri: None,
+            })
+        }
         None => Err(anyhow!("oauth is not implemented for {provider_id}")),
     }
 }
@@ -142,6 +162,20 @@ pub(crate) fn oauth_login_bundle_for_provider(
                 state: pkce.state,
                 redirect_uri: automatic.redirect_uri,
                 manual_redirect_uri: Some(manual.redirect_uri),
+            })
+        }
+        Some(OauthFamily::WorldAgent) => {
+            let config = puffer_provider_worldagent::WorldAgentLoginConfig {
+                redirect_uri: redirect_uri.to_string(),
+                ..puffer_provider_worldagent::WorldAgentLoginConfig::default()
+            };
+            Ok(OauthStartBundle {
+                authorization_url: puffer_provider_worldagent::build_login_url(&config),
+                automatic_authorization_url: None,
+                verifier: String::new(),
+                state: config.client_state,
+                redirect_uri: config.redirect_uri,
+                manual_redirect_uri: None,
             })
         }
         None => Err(anyhow!("oauth is not implemented for {provider_id}")),
@@ -230,5 +264,35 @@ mod tests {
             vec![AuthMode::ApiKey],
         ));
         assert_eq!(oauth_family_for_provider(&providers, "custom-openai"), None);
+    }
+
+    #[test]
+    fn oauth_family_uses_explicit_oauth_family_field() {
+        let mut providers = ProviderRegistry::new();
+        let mut descriptor = provider(
+            "worldagent",
+            "openai-completions",
+            vec![AuthMode::OAuth, AuthMode::ApiKey],
+        );
+        descriptor.oauth_family = Some("worldagent".to_string());
+        providers.register(descriptor);
+        assert_eq!(
+            oauth_family_for_provider(&providers, "worldagent"),
+            Some(OauthFamily::WorldAgent)
+        );
+    }
+
+    #[test]
+    fn oauth_family_falls_back_to_default_api_when_field_unset() {
+        let mut providers = ProviderRegistry::new();
+        providers.register(provider(
+            "custom-openai",
+            "openai-completions",
+            vec![AuthMode::OAuth],
+        ));
+        assert_eq!(
+            oauth_family_for_provider(&providers, "custom-openai"),
+            Some(OauthFamily::OpenAi)
+        );
     }
 }

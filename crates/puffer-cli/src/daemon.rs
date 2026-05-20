@@ -1144,6 +1144,9 @@ fn handle_login_with_oauth(state: &DaemonState, params: &Value) -> Result<Value>
             )?;
             store_anthropic_credential(&mut inputs.auth_store, &provider_id, credential)?;
         }
+        Some(OauthFamily::WorldAgent) => {
+            todo!("worldagent oauth login — implemented in Task 11")
+        }
         None => anyhow::bail!("oauth login is not implemented for {provider_id}"),
     }
 

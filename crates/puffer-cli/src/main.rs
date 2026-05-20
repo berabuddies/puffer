@@ -963,6 +963,9 @@ fn run_auth_command(
                     )?;
                     store_anthropic_credential(auth_store, &provider, credential)?;
                 }
+                Some(OauthFamily::WorldAgent) => {
+                    todo!("worldagent oauth exchange — implemented in Task 10")
+                }
                 None => anyhow::bail!("oauth exchange is not implemented for {provider}"),
             }
             auth_store.save(auth_path)?;
@@ -989,6 +992,9 @@ fn run_auth_command(
                         Some(ANTHROPIC_API_BASE_URL),
                         Some(&registry_to_anthropic_oauth_credential(existing)),
                     )?)?
+                }
+                Some(OauthFamily::WorldAgent) => {
+                    todo!("worldagent oauth refresh — implemented in Task 10")
                 }
                 None => anyhow::bail!("oauth refresh is not implemented for {provider}"),
             };
@@ -1097,6 +1103,9 @@ fn run_login_flow(
                 Some(ANTHROPIC_API_BASE_URL),
             )?;
             store_anthropic_credential(auth_store, provider, credential)?;
+        }
+        Some(OauthFamily::WorldAgent) => {
+            todo!("worldagent oauth login — implemented in Task 10")
         }
         None => anyhow::bail!("oauth login is not implemented for {provider}"),
     }

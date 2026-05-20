@@ -24,6 +24,7 @@ puffer-core = { path = "../puffer-core" }
 puffer-mcp-oauth = { path = "../puffer-mcp-oauth" }
 puffer-observability = { path = "../puffer-observability" }
 puffer-provider-openai = { path = "../puffer-provider-openai" }
+puffer-provider-worldagent = { path = "../puffer-provider-worldagent" }
 puffer-provider-registry = { path = "../puffer-provider-registry" }
 puffer-resources = { path = "../puffer-resources" }
 puffer-runner-api = { path = "../puffer-runner-api" }
