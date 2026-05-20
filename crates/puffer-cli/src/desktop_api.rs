@@ -6,7 +6,7 @@ use puffer_provider_registry::{
 };
 use puffer_resources::LoadedResources;
 use puffer_session_store::{
-    GitDiffSnapshot, MessageActor, SessionRecord, SessionStore, TranscriptEvent,
+    GitDiffSnapshot, MessageActor, SessionRecord, SessionStore, TranscriptEvent, TranscriptRewrite,
 };
 use puffer_workflow::WorkflowStore;
 use serde_json::Value;
@@ -1050,12 +1050,37 @@ fn timeline_items(record: &SessionRecord) -> Vec<TimelineItemDto> {
                     });
                 }
             }
-            TranscriptEvent::TranscriptRewritten { .. } | TranscriptEvent::StateSnapshot { .. } => {
+            TranscriptEvent::TranscriptRewritten { rewrite } => {
+                apply_timeline_rewrite(&mut items, &mut pending_assistant, rewrite);
             }
+            TranscriptEvent::StateSnapshot { .. } => {}
         }
     }
     flush_pending_assistant(&mut items, &mut pending_assistant);
     items
+}
+
+fn apply_timeline_rewrite(
+    items: &mut Vec<TimelineItemDto>,
+    pending_assistant: &mut Option<TimelineItemDto>,
+    rewrite: &TranscriptRewrite,
+) {
+    match rewrite {
+        TranscriptRewrite::Clear => {
+            pending_assistant.take();
+            items.clear();
+        }
+        TranscriptRewrite::PopLast { count } => {
+            for _ in 0..*count {
+                if pending_assistant.take().is_some() {
+                    continue;
+                }
+                if items.pop().is_none() {
+                    break;
+                }
+            }
+        }
+    }
 }
 
 fn flush_pending_assistant(
@@ -1556,7 +1581,9 @@ fn command_exists(command: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{timeline_items, TimelineItemDto};
-    use puffer_session_store::{SessionMetadata, SessionRecord, TranscriptEvent};
+    use puffer_session_store::{
+        SessionMetadata, SessionRecord, TranscriptEvent, TranscriptRewrite,
+    };
     use std::path::PathBuf;
     use uuid::Uuid;
 
@@ -1640,5 +1667,61 @@ mod tests {
 
         let kinds = items.iter().map(item_kind).collect::<Vec<_>>();
         assert_eq!(kinds, vec!["user", "tool", "assistant"]);
+    }
+
+    #[test]
+    fn timeline_clear_discards_prior_messages() {
+        let items = timeline_items(&record(vec![
+            TranscriptEvent::UserMessage {
+                text: "old prompt".to_string(),
+                actor: None,
+            },
+            TranscriptEvent::AssistantMessage {
+                text: "old answer".to_string(),
+                actor: None,
+            },
+            TranscriptEvent::TranscriptRewritten {
+                rewrite: TranscriptRewrite::Clear,
+            },
+            TranscriptEvent::SystemMessage {
+                text: "Transcript cleared.".to_string(),
+                actor: None,
+            },
+        ]));
+
+        let kinds = items.iter().map(item_kind).collect::<Vec<_>>();
+        assert_eq!(kinds, vec!["system"]);
+        assert!(matches!(
+            &items[0],
+            TimelineItemDto::SystemMessage { text, .. } if text == "Transcript cleared."
+        ));
+    }
+
+    #[test]
+    fn timeline_pop_discards_latest_visible_message() {
+        let items = timeline_items(&record(vec![
+            TranscriptEvent::UserMessage {
+                text: "keep prompt".to_string(),
+                actor: None,
+            },
+            TranscriptEvent::AssistantMessage {
+                text: "remove answer".to_string(),
+                actor: None,
+            },
+            TranscriptEvent::TranscriptRewritten {
+                rewrite: TranscriptRewrite::PopLast { count: 1 },
+            },
+            TranscriptEvent::SystemMessage {
+                text: "Removed the latest rendered transcript item.".to_string(),
+                actor: None,
+            },
+        ]));
+
+        let kinds = items.iter().map(item_kind).collect::<Vec<_>>();
+        assert_eq!(kinds, vec!["user", "system"]);
+        assert!(matches!(
+            &items[0],
+            TimelineItemDto::UserMessage { text, .. } if text == "keep prompt"
+        ));
     }
 }

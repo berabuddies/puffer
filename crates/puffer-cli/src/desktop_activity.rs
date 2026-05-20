@@ -1,4 +1,4 @@
-use puffer_session_store::{GitDiffSnapshot, TranscriptEvent};
+use puffer_session_store::{GitDiffSnapshot, TranscriptEvent, TranscriptRewrite};
 
 pub(crate) const ACTIVITY_IDLE: &str = "idle";
 pub(crate) const ACTIVITY_RUNNING: &str = "running";
@@ -6,16 +6,44 @@ pub(crate) const ACTIVITY_AWAITING: &str = "awaiting";
 
 /// Derives the coarse desktop activity state for a session list row.
 pub(crate) fn session_activity_status(events: &[TranscriptEvent]) -> &'static str {
-    if latest_action_requires_permission(events) {
+    let events = activity_events_after_rewrites(events);
+    if latest_action_requires_permission(&events) {
         return ACTIVITY_AWAITING;
     }
-    if latest_diff_has_changes(events) {
+    if latest_diff_has_changes(&events) {
         return ACTIVITY_RUNNING;
     }
-    if latest_action_is_unanswered(events) {
+    if latest_action_is_unanswered(&events) {
         return ACTIVITY_RUNNING;
     }
     ACTIVITY_IDLE
+}
+
+fn activity_events_after_rewrites(events: &[TranscriptEvent]) -> Vec<TranscriptEvent> {
+    let mut projected = Vec::new();
+    for event in events {
+        match event {
+            TranscriptEvent::TranscriptRewritten { rewrite } => {
+                apply_activity_rewrite(&mut projected, rewrite);
+            }
+            TranscriptEvent::StateSnapshot { .. } => {}
+            _ => projected.push(event.clone()),
+        }
+    }
+    projected
+}
+
+fn apply_activity_rewrite(events: &mut Vec<TranscriptEvent>, rewrite: &TranscriptRewrite) {
+    match rewrite {
+        TranscriptRewrite::Clear => events.clear(),
+        TranscriptRewrite::PopLast { count } => {
+            for _ in 0..*count {
+                if events.pop().is_none() {
+                    break;
+                }
+            }
+        }
+    }
 }
 
 fn latest_action_requires_permission(events: &[TranscriptEvent]) -> bool {
@@ -61,7 +89,7 @@ fn latest_diff_has_changes(events: &[TranscriptEvent]) -> bool {
     for event in events.iter().rev() {
         match event {
             TranscriptEvent::GitDiffSnapshot { snapshot } => {
-                return diff_snapshot_has_changes(snapshot)
+                return diff_snapshot_has_changes(snapshot);
             }
             TranscriptEvent::TranscriptRewritten { .. }
             | TranscriptEvent::StateSnapshot { .. }
@@ -104,7 +132,7 @@ fn output_requires_permission(output: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{session_activity_status, ACTIVITY_AWAITING, ACTIVITY_IDLE, ACTIVITY_RUNNING};
-    use puffer_session_store::{GitDiffSnapshot, TranscriptEvent};
+    use puffer_session_store::{GitDiffSnapshot, TranscriptEvent, TranscriptRewrite};
 
     #[test]
     fn detects_unanswered_user_turns_as_running() {
@@ -167,6 +195,44 @@ mod tests {
             TranscriptEvent::AssistantMessage {
                 text: "hi".to_string(),
                 actor: None,
+            },
+        ];
+
+        assert_eq!(session_activity_status(&events), ACTIVITY_IDLE);
+    }
+
+    #[test]
+    fn transcript_clear_discards_unanswered_user_turn_status() {
+        let events = vec![
+            TranscriptEvent::UserMessage {
+                text: "old prompt".to_string(),
+                actor: None,
+            },
+            TranscriptEvent::TranscriptRewritten {
+                rewrite: TranscriptRewrite::Clear,
+            },
+        ];
+
+        assert_eq!(session_activity_status(&events), ACTIVITY_IDLE);
+    }
+
+    #[test]
+    fn transcript_pop_discards_latest_unanswered_user_turn_status() {
+        let events = vec![
+            TranscriptEvent::UserMessage {
+                text: "hello".to_string(),
+                actor: None,
+            },
+            TranscriptEvent::AssistantMessage {
+                text: "hi".to_string(),
+                actor: None,
+            },
+            TranscriptEvent::UserMessage {
+                text: "remove this".to_string(),
+                actor: None,
+            },
+            TranscriptEvent::TranscriptRewritten {
+                rewrite: TranscriptRewrite::PopLast { count: 1 },
             },
         ];
 
