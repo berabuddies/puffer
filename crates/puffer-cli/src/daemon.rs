@@ -49,6 +49,11 @@ use puffer_provider_openai::{
 use puffer_provider_registry::{
     AuthStore, ModelDescriptor, ProviderDescriptor, ProviderRegistry, StoredCredential,
 };
+use puffer_provider_worldagent::{
+    decode_jwt_profile as decode_worldagent_jwt_profile,
+    parse_callback_input as parse_worldagent_callback_input,
+    WorldAgentOAuthCredentials, WORLDAGENT_CALLBACK_PATH, WORLDAGENT_CALLBACK_PORT,
+};
 use puffer_resources::{load_resources, LoadedResources, McpServerSpec};
 use puffer_session_store::{MessageActor, SessionStore, TranscriptEvent};
 use puffer_transport_anthropic::{
@@ -73,7 +78,7 @@ use uuid::Uuid;
 
 use crate::auth_credentials::{
     inferred_anthropic_redirect_uri, set_stored_credential, store_anthropic_credential,
-    to_registry_oauth_credential_openai,
+    to_registry_oauth_credential_openai, to_registry_oauth_credential_worldagent,
 };
 use crate::auth_provider::{
     oauth_family_for_provider, oauth_login_bundle_for_provider, OauthFamily,
@@ -1092,7 +1097,17 @@ fn handle_login_with_oauth(state: &DaemonState, params: &Value) -> Result<Value>
 
     let mut inputs = state.build_runtime_inputs()?;
     let auth_path = state.paths.user_config_dir.join("auth.json");
-    let listener = crate::authflow::CallbackListener::bind_localhost("/callback")?;
+    let listener = if matches!(
+        oauth_family_for_provider(&inputs.providers, &provider_id),
+        Some(OauthFamily::WorldAgent)
+    ) {
+        crate::authflow::CallbackListener::bind_localhost_port(
+            WORLDAGENT_CALLBACK_PATH,
+            WORLDAGENT_CALLBACK_PORT,
+        )?
+    } else {
+        crate::authflow::CallbackListener::bind_localhost("/callback")?
+    };
     let bundle =
         oauth_login_bundle_for_provider(&inputs.providers, &provider_id, listener.redirect_uri())?;
     let launch_url = bundle
@@ -1145,7 +1160,36 @@ fn handle_login_with_oauth(state: &DaemonState, params: &Value) -> Result<Value>
             store_anthropic_credential(&mut inputs.auth_store, &provider_id, credential)?;
         }
         Some(OauthFamily::WorldAgent) => {
-            todo!("worldagent oauth login — implemented in Task 11")
+            let parsed = parse_worldagent_callback_input(&callback);
+            if let Some(err) = parsed.error.as_deref() {
+                let desc = parsed.error_description.as_deref().unwrap_or("");
+                anyhow::bail!("worldagent login failed: {err} {desc}");
+            }
+            if parsed.state.as_deref() != Some(bundle.state.as_str()) {
+                anyhow::bail!("oauth state mismatch for worldagent");
+            }
+            let access_token = parsed
+                .token
+                .ok_or_else(|| anyhow::anyhow!("worldagent callback missing token"))?;
+            let refresh_token = parsed.refresh_token.unwrap_or_default();
+            let profile = decode_worldagent_jwt_profile(&access_token);
+            let expires_at_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64 + 24 * 3600 * 1000)
+                .unwrap_or(24 * 3600 * 1000);
+            let credential = WorldAgentOAuthCredentials {
+                access_token,
+                refresh_token,
+                expires_at_ms,
+                sub: profile.sub,
+                email: profile.email,
+                name: profile.name,
+            };
+            set_stored_credential(
+                &mut inputs.auth_store,
+                provider_id.to_string(),
+                StoredCredential::OAuth(to_registry_oauth_credential_worldagent(credential)),
+            );
         }
         None => anyhow::bail!("oauth login is not implemented for {provider_id}"),
     }
