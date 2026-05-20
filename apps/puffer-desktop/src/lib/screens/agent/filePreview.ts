@@ -385,6 +385,8 @@ function decodePdfHexString(input: string): string {
 }
 
 function extractLegacyOfficeText(bytes: Uint8Array): string[] {
+  const textDocument = extractLegacyTextDocument(bytes);
+  if (textDocument.length > 0) return textDocument;
   const structured = extractCompoundOfficeText(bytes);
   if (structured.length > 0) return structured;
   return normalizePreviewLines(
@@ -392,6 +394,97 @@ function extractLegacyOfficeText(bytes: Uint8Array): string[] {
     160
   );
 }
+
+function extractLegacyTextDocument(bytes: Uint8Array): string[] {
+  const text = decodeBytes(bytes);
+  const trimmed = text.trimStart();
+  if (trimmed.startsWith("{\\rtf")) return extractRtfText(text);
+  if (/^(?:<!doctype\s+html\b|<html\b|<head\b|<body\b|<\?xml\b)/i.test(trimmed)) {
+    return extractHtmlDocumentText(text);
+  }
+  return [];
+}
+
+function extractRtfText(input: string): string[] {
+  let output = "";
+  let depth = 0;
+  let skippedDepth: number | null = null;
+
+  for (let index = 0; index < input.length; index += 1) {
+    const char = input[index];
+    if (char === "{") {
+      depth += 1;
+      continue;
+    }
+    if (char === "}") {
+      if (skippedDepth === depth) skippedDepth = null;
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+    if (skippedDepth != null) continue;
+    if (char !== "\\") {
+      output += char;
+      continue;
+    }
+
+    const next = input[index + 1];
+    if (next == null) continue;
+    if (next === "'" && /[0-9a-f]{2}/i.test(input.slice(index + 2, index + 4))) {
+      output += String.fromCharCode(parseInt(input.slice(index + 2, index + 4), 16));
+      index += 3;
+      continue;
+    }
+    if (next === "{" || next === "}" || next === "\\") {
+      output += next;
+      index += 1;
+      continue;
+    }
+
+    const control = input.slice(index + 1).match(/^([a-zA-Z]+)(-?\d+)? ?/);
+    if (!control) {
+      index += 1;
+      continue;
+    }
+    const [, word, rawValue] = control;
+    index += control[0].length;
+    if (word === "par" || word === "line") output += "\n";
+    else if (word === "tab") output += "\t";
+    else if (word === "u" && rawValue != null) {
+      const value = Number(rawValue);
+      output += String.fromCharCode(value < 0 ? value + 65536 : value);
+    } else if (RTF_DESTINATIONS.has(word)) {
+      skippedDepth = depth;
+    }
+  }
+
+  return normalizePreviewLines(output.split(/\n+/), 160);
+}
+
+function extractHtmlDocumentText(input: string): string[] {
+  const text = input
+    .replace(/<script\b[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style\b[\s\S]*?<\/style>/gi, " ")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(?:p|div|h[1-6]|li|tr|section|article)>/gi, "\n")
+    .replace(/<[^>]+>/g, " ");
+  return normalizePreviewLines(decodeHtmlEntities(text).split(/\n+/), 160);
+}
+
+function decodeHtmlEntities(input: string): string {
+  const textarea = document.createElement("textarea");
+  textarea.innerHTML = input;
+  return textarea.value;
+}
+
+const RTF_DESTINATIONS = new Set([
+  "colortbl",
+  "datastore",
+  "fonttbl",
+  "info",
+  "object",
+  "pict",
+  "stylesheet"
+]);
 
 function extractCompoundOfficeText(bytes: Uint8Array): string[] {
   const streams = readCompoundFileStreams(bytes);

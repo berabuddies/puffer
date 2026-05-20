@@ -20,12 +20,13 @@
   let pdfJsModulePromise: Promise<PdfJsModule> | null = null;
 
   function loadPdfJs(): Promise<PdfJsModule> {
-    pdfJsModulePromise ??= import("pdfjs-dist").then((module) => {
-      module.GlobalWorkerOptions.workerSrc = new URL(
-        "pdfjs-dist/build/pdf.worker.mjs",
+    pdfJsModulePromise ??= import("pdfjs-dist/legacy/build/pdf.mjs").then((module) => {
+      const pdfJs = module as unknown as PdfJsModule;
+      pdfJs.GlobalWorkerOptions.workerSrc = new URL(
+        "pdfjs-dist/legacy/build/pdf.worker.mjs",
         import.meta.url
       ).toString();
-      return module;
+      return pdfJs;
     });
     return pdfJsModulePromise;
   }

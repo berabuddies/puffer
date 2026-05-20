@@ -106,6 +106,18 @@ function makeLegacyOfficeBase64(text: string): string {
   ]).toString("base64");
 }
 
+function makeRtfDocBase64(...paragraphs: string[]): string {
+  const escapeRtf = (value: string) => value.replace(/[\\{}]/g, "\\$&");
+  return Buffer.from(
+    `{\\rtf1\\ansi{\\fonttbl{\\f0 Arial;}}\\f0\\fs24 ${paragraphs.map(escapeRtf).join("\\par ")}}`,
+    "utf8"
+  ).toString("base64");
+}
+
+function makeHtmlDocBase64(html: string): string {
+  return Buffer.from(html, "utf8").toString("base64");
+}
+
 function makeLargeLegacyOfficeBase64(text: string): string {
   return Buffer.concat([
     Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]),
@@ -233,6 +245,16 @@ function seedPreviewFiles(daemon: FakeDaemon): void {
     makeLegacyOfficeBase64("Legacy PowerPoint agenda")
   );
   daemon.seedBinaryFile("/tmp/puffer/old-budget.xls", makeLegacyOfficeBase64("Legacy Excel budget"));
+  daemon.seedBinaryFile(
+    "/tmp/puffer/old-rtf.doc",
+    makeRtfDocBase64("Legacy RTF agenda", "Second RTF paragraph")
+  );
+  daemon.seedBinaryFile(
+    "/tmp/puffer/old-html.doc",
+    makeHtmlDocBase64(
+      "<!doctype html><html><body><h1>Legacy HTML agenda</h1><p>Owner: Otter</p></body></html>"
+    )
+  );
 }
 
 test("Files tab close button works from the keyboard", async ({ page }) => {
@@ -308,6 +330,10 @@ test("Files tab previews common document and data formats", async ({ page }) => 
   await expect(page.getByLabel("CSV preview")).toContainText("Cafe");
   expect(pdfRendererRequests).toHaveLength(0);
 
+  await page.evaluate(() => {
+    Object.defineProperty(Promise, "withResolvers", { value: undefined, configurable: true });
+  });
+
   await page.getByRole("button", { name: "sample.pdf" }).click();
   await expect(page.getByLabel("PDF preview")).toBeVisible();
   await daemon.waitForRequest(
@@ -353,6 +379,14 @@ test("Files tab previews common document and data formats", async ({ page }) => 
 
   await page.getByRole("button", { name: "old-budget.xls" }).click();
   await expect(page.getByLabel("Legacy Excel preview")).toContainText("Legacy Excel budget");
+
+  await page.getByRole("button", { name: "old-rtf.doc" }).click();
+  await expect(page.getByLabel("Legacy Word preview")).toContainText("Legacy RTF agenda");
+  await expect(page.getByLabel("Legacy Word preview")).toContainText("Second RTF paragraph");
+
+  await page.getByRole("button", { name: "old-html.doc" }).click();
+  await expect(page.getByLabel("Legacy Word preview")).toContainText("Legacy HTML agenda");
+  await expect(page.getByLabel("Legacy Word preview")).toContainText("Owner: Otter");
 });
 
 test("Files tab keeps raw editing available for previewed text files", async ({ page }) => {
