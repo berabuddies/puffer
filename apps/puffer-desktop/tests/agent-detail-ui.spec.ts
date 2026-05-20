@@ -877,3 +877,108 @@ test("browser activity details match recordings by URL when tab ids are absent",
   await expect(recording.getByRole("img", { name: "Beta URL Domain" })).toBeVisible();
   await expect(recording.getByRole("img", { name: "Alpha URL Domain" })).toHaveCount(0);
 });
+
+test("browser activity details keep redirected URL-only recordings scoped", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-browser-redirect-actions",
+        displayName: "Browser redirect actions",
+        title: "Browser redirect actions",
+        cwd: "/tmp/puffer-browser-redirect-actions",
+        folderPath: "/tmp/puffer-browser-redirect-actions",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        timeline: [
+          {
+            kind: "user_message",
+            id: "browser-redirect-user",
+            text: "Open two redirected URL-only pages.",
+            createdAtMs: baseTime - 50_000
+          },
+          {
+            kind: "tool_call",
+            id: "browser-redirect-alpha-tool",
+            toolId: "Browser",
+            status: "success",
+            inputText: JSON.stringify({
+              action: "open",
+              url: "https://alpha-redirect.example"
+            }),
+            inputJson: {
+              action: "open",
+              url: "https://alpha-redirect.example"
+            },
+            outputText: "Done.",
+            createdAtMs: baseTime - 45_000
+          },
+          {
+            kind: "tool_call",
+            id: "browser-redirect-beta-tool",
+            toolId: "Browser",
+            status: "success",
+            inputText: JSON.stringify({
+              action: "open",
+              url: "https://beta-redirect.example"
+            }),
+            inputJson: {
+              action: "open",
+              url: "https://beta-redirect.example"
+            },
+            outputText: "Done.",
+            createdAtMs: baseTime - 40_000
+          },
+          {
+            kind: "assistant_message",
+            id: "browser-redirect-assistant",
+            text: "Opened both redirected URL-only pages.",
+            createdAtMs: baseTime - 35_000
+          }
+        ]
+      }
+    ]
+  });
+  daemon.setBrowserRecording("session-browser-redirect-actions", [
+    {
+      frameId: "browser-redirect-alpha-frame",
+      backendSessionId: "session-browser-redirect-actions:browser:tab-1",
+      rootSessionId: "session-browser-redirect-actions",
+      tabId: "tab-1",
+      url: "https://www.alpha-redirect.example/final",
+      title: "Alpha Redirect Domain",
+      mimeType: "image/png",
+      encoding: "base64",
+      data: ONE_PIXEL_PNG,
+      width: 960,
+      height: 720,
+      recordedAtMs: baseTime - 44_000
+    },
+    {
+      frameId: "browser-redirect-beta-frame",
+      backendSessionId: "session-browser-redirect-actions:browser:tab-2",
+      rootSessionId: "session-browser-redirect-actions",
+      tabId: "tab-2",
+      url: "https://www.beta-redirect.example/final",
+      title: "Beta Redirect Domain",
+      mimeType: "image/png",
+      encoding: "base64",
+      data: ONE_PIXEL_PNG,
+      width: 960,
+      height: 720,
+      recordedAtMs: baseTime - 39_000
+    }
+  ]);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openAgent(page, /^Browser redirect actions\b/);
+  await page.getByRole("button", { name: /Agent activity/ }).click();
+  await page.getByRole("button", { name: /Browser Open https:\/\/alpha-redirect\.example/ }).click();
+  const recording = page.locator(".pf-browser-recording-render");
+  await expect(recording.getByRole("img", { name: "Alpha Redirect Domain" })).toBeVisible();
+  await expect(recording.getByRole("img", { name: "Beta Redirect Domain" })).toHaveCount(0);
+
+  await page.getByRole("button", { name: /Browser Open https:\/\/beta-redirect\.example/ }).click();
+  await expect(recording.getByRole("img", { name: "Beta Redirect Domain" })).toBeVisible();
+  await expect(recording.getByRole("img", { name: "Alpha Redirect Domain" })).toHaveCount(0);
+});

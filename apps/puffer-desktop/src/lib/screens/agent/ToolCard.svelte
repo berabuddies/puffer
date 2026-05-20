@@ -834,13 +834,58 @@
     return true;
   }
 
+  function parseBrowserUrl(value: string): URL | null {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    try {
+      return new URL(trimmed);
+    } catch {
+      try {
+        return new URL(`https://${trimmed}`);
+      } catch {
+        return null;
+      }
+    }
+  }
+
+  function comparableBrowserHost(url: URL): string {
+    return url.hostname.toLowerCase().replace(/^www\./, "");
+  }
+
+  function browserHostsCompatible(actionUrl: URL, frameUrl: URL): boolean {
+    const actionHost = comparableBrowserHost(actionUrl);
+    const frameHost = comparableBrowserHost(frameUrl);
+    return (
+      actionHost === frameHost ||
+      frameHost.endsWith(`.${actionHost}`) ||
+      actionHost.endsWith(`.${frameHost}`)
+    );
+  }
+
+  function browserPathsCompatible(actionUrl: URL, frameUrl: URL): boolean {
+    const actionPath = actionUrl.pathname.replace(/\/+$/, "") || "/";
+    const framePath = frameUrl.pathname.replace(/\/+$/, "") || "/";
+    if (actionPath === "/") return true;
+    return framePath === actionPath || framePath.startsWith(`${actionPath}/`);
+  }
+
+  function browserUrlsCompatible(actionUrlValue: string, frameUrlValue: string): boolean {
+    if (frameUrlValue === actionUrlValue || frameUrlValue.startsWith(`${actionUrlValue}#`)) {
+      return true;
+    }
+    const actionUrl = parseBrowserUrl(actionUrlValue);
+    const frameUrl = parseBrowserUrl(frameUrlValue);
+    if (!actionUrl || !frameUrl) return false;
+    return browserHostsCompatible(actionUrl, frameUrl) && browserPathsCompatible(actionUrl, frameUrl);
+  }
+
   function browserFrameUrlMatchesArgs(
     args: Record<string, unknown> | null,
     frame: BrowserRecordedFrame
   ): boolean {
     const url = stringField(args, ["url"]);
     if (!url) return true;
-    return frame.url === url || frame.url.startsWith(`${url}#`);
+    return browserUrlsCompatible(url, frame.url);
   }
 
   function shouldPreferBrowserUrl(args: Record<string, unknown> | null): boolean {
@@ -858,7 +903,8 @@
     const structural = frames.filter((frame) => browserFrameStructurallyMatchesArgs(args, frame));
     if (!shouldPreferBrowserUrl(args)) return structural;
     const urlMatches = structural.filter((frame) => browserFrameUrlMatchesArgs(args, frame));
-    return urlMatches.length > 0 ? urlMatches : structural;
+    if (urlMatches.length > 0) return urlMatches;
+    return structural.length <= 1 ? structural : [];
   }
 
   function browserRecordingKey(): string {
