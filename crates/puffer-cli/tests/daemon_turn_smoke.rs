@@ -681,6 +681,7 @@ fn handle_mock_openai_stream(
     responses_calls: &AtomicUsize,
     last_body: &Mutex<String>,
 ) {
+    let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let mut request = Vec::new();
     let mut buf = [0_u8; 1024];
@@ -752,6 +753,7 @@ fn handle_mock_anthropic_stream(
     messages_calls: &AtomicUsize,
     last_body: &Mutex<String>,
 ) {
+    let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let request = read_http_request(&mut stream);
     let text = String::from_utf8_lossy(&request);
