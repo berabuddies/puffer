@@ -1,4 +1,4 @@
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 import { deflateRawSync } from "node:zlib";
 import { FakeDaemon } from "./support/fakeDaemon";
 
@@ -18,6 +18,19 @@ async function openCreateProjectDialog(page: Page) {
   const dialog = page.getByRole("dialog", { name: "Create Project" });
   await expect(dialog).toBeVisible();
   return dialog;
+}
+
+async function expectFocusInside(dialog: Locator): Promise<void> {
+  await expect.poll(() =>
+    dialog.evaluate((node) => node.contains(document.activeElement))
+  ).toBe(true);
+}
+
+async function expectTabFocusTrapped(page: Page, dialog: Locator, count: number): Promise<void> {
+  for (let index = 0; index < count; index += 1) {
+    await page.keyboard.press("Tab");
+    await expectFocusInside(dialog);
+  }
 }
 
 const codexAuth = [
@@ -1255,6 +1268,34 @@ test("New agent modal closes with Escape", async ({ page }) => {
   await page.keyboard.press("Escape");
 
   await expect(dialog).toHaveCount(0);
+});
+
+test("New agent modal receives and traps keyboard focus", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "New agent in puffer" }).click();
+  const dialog = page.getByRole("dialog", { name: "New agent" });
+  await expect(dialog).toBeVisible();
+
+  await expectFocusInside(dialog);
+  await expectTabFocusTrapped(page, dialog, 8);
+  await page.keyboard.press("Shift+Tab");
+  await expectFocusInside(dialog);
+});
+
+test("Create Project modal receives and traps keyboard focus", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const dialog = await openCreateProjectDialog(page);
+
+  await expectFocusInside(dialog);
+  await expectTabFocusTrapped(page, dialog, 16);
+  await page.keyboard.press("Shift+Tab");
+  await expectFocusInside(dialog);
 });
 
 test("new agent provider choice is used for the first turn", async ({ page }) => {

@@ -1,7 +1,35 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 import { FakeDaemon } from "./support/fakeDaemon";
 
 const baseTime = Date.now();
+
+async function expectFocusInside(dialog: Locator): Promise<void> {
+  await expect.poll(() =>
+    dialog.evaluate((node) => node.contains(document.activeElement))
+  ).toBe(true);
+}
+
+async function expectTabFocusTrapped(page: Page, dialog: Locator, count: number): Promise<void> {
+  for (let index = 0; index < count; index += 1) {
+    await page.keyboard.press("Tab");
+    await expectFocusInside(dialog);
+  }
+}
+
+test("workspace picker modal receives and traps keyboard focus", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByTitle("Switch workspace").click();
+  const dialog = page.getByRole("dialog", { name: "Switch workspace" });
+  await expect(dialog).toBeVisible();
+
+  await expectFocusInside(dialog);
+  await expectTabFocusTrapped(page, dialog, 12);
+  await page.keyboard.press("Shift+Tab");
+  await expectFocusInside(dialog);
+});
 
 test("workspace picker ignores duplicate local switch submits while restart is in flight", async ({
   page

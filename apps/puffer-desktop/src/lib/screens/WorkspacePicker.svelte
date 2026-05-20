@@ -11,6 +11,7 @@
   import Icon from "../design/Icon.svelte";
   import { connectSshDaemon, restartLocalDaemon } from "../api/desktop";
   import { canInvokeTauri, currentDaemonClient } from "../api/daemonClient";
+  import { focusTrap } from "../focusTrap";
 
   type Props = {
     onClose: () => void;
@@ -121,6 +122,7 @@
     aria-label="Switch workspace"
     aria-modal="true"
     tabindex="-1"
+    use:focusTrap
     onkeydown={() => {}}
   >
     <div class="pf-modal-head">

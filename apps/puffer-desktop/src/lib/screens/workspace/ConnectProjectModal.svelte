@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from "../../design/Icon.svelte";
+  import { focusTrap } from "../../focusTrap";
   import {
     cloneRepo,
     connectSshDaemon,
@@ -415,6 +416,7 @@
     aria-label="Create Project"
     aria-modal="true"
     tabindex="-1"
+    use:focusTrap
     onkeydown={() => {}}
   >
     <div class="pf-modal-head">
