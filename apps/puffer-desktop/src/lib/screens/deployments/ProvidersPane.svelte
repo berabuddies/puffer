@@ -10,13 +10,23 @@
 
   let baseItems = $derived(INTEGRATIONS[d.id] ?? INTEGRATIONS["d-prod-api"]);
   let draftItems = $state<Record<string, Integration[]>>({});
-  let items = $derived([...(draftItems[d.id] ?? []), ...baseItems]);
+  let providerOverrides = $state<Record<string, Record<string, Integration>>>({});
+  let deploymentOverrides = $derived(providerOverrides[d.id] ?? {});
+  let items = $derived(
+    [...(draftItems[d.id] ?? []), ...baseItems].map((provider) =>
+      deploymentOverrides[provider.name] ?? provider
+    )
+  );
   let addProviderOpen = $state(false);
   let providerName = $state("");
   let providerKind = $state("webhook");
   let providerNote = $state("");
   let providerStatus = $state<Integration["status"]>("connected");
   let providerNameInput = $state<HTMLInputElement | null>(null);
+  let editingProviderName = $state<string | null>(null);
+  let editProviderKind = $state("webhook");
+  let editProviderNote = $state("");
+  let editProviderStatus = $state<Integration["status"]>("connected");
   let statusMessage = $state("");
   let statusDeploymentId = $state("");
   let statusTimer = 0;
@@ -25,6 +35,7 @@
       providerNote.trim().length > 0 &&
       !items.some((provider) => provider.name.toLowerCase() === providerName.trim().toLowerCase())
   );
+  let canSaveProviderSettings = $derived(Boolean(editingProviderName && editProviderNote.trim()));
 
   const providerIcon: Record<string, IconName> = {
     postgres: "server", redis: "server", stripe: "coin", sentry: "bug",
@@ -40,10 +51,28 @@
     if (deploymentId === statusDeploymentId) return;
     statusDeploymentId = deploymentId;
     resetAddProvider();
+    resetProviderSettings();
     statusMessage = "";
     if (statusTimer) window.clearTimeout(statusTimer);
     statusTimer = 0;
   });
+
+  $effect(() => {
+    const sourceItems = [...(draftItems[d.id] ?? []), ...baseItems];
+    const existing = editingProviderName
+      ? sourceItems.some((provider) => provider.name === editingProviderName)
+      : true;
+    if (!existing) resetProviderSettings();
+  });
+
+  function showStatus(message: string): void {
+    statusMessage = message;
+    if (statusTimer) window.clearTimeout(statusTimer);
+    statusTimer = window.setTimeout(() => {
+      statusMessage = "";
+      statusTimer = 0;
+    }, 4000);
+  }
 
   function resetAddProvider(): void {
     addProviderOpen = false;
@@ -55,8 +84,24 @@
 
   function openAddProvider(): void {
     resetAddProvider();
+    resetProviderSettings();
     addProviderOpen = true;
     window.setTimeout(() => providerNameInput?.focus({ preventScroll: true }), 20);
+  }
+
+  function resetProviderSettings(): void {
+    editingProviderName = null;
+    editProviderKind = "webhook";
+    editProviderNote = "";
+    editProviderStatus = "connected";
+  }
+
+  function openProviderSettings(provider: Integration): void {
+    resetAddProvider();
+    editingProviderName = provider.name;
+    editProviderKind = provider.kind;
+    editProviderNote = provider.note;
+    editProviderStatus = provider.status;
   }
 
   function createProvider(): void {
@@ -72,13 +117,28 @@
       ...draftItems,
       [d.id]: [next, ...(draftItems[d.id] ?? [])]
     };
-    statusMessage = `Added ${name} provider to ${d.name}.`;
-    if (statusTimer) window.clearTimeout(statusTimer);
-    statusTimer = window.setTimeout(() => {
-      statusMessage = "";
-      statusTimer = 0;
-    }, 4000);
+    showStatus(`Added ${name} provider to ${d.name}.`);
     resetAddProvider();
+  }
+
+  function saveProviderSettings(): void {
+    if (!canSaveProviderSettings || !editingProviderName) return;
+    const name = editingProviderName;
+    const next: Integration = {
+      kind: editProviderKind,
+      name,
+      note: editProviderNote.trim(),
+      status: editProviderStatus
+    };
+    providerOverrides = {
+      ...providerOverrides,
+      [d.id]: {
+        ...(providerOverrides[d.id] ?? {}),
+        [name]: next
+      }
+    };
+    showStatus(`Updated ${name} provider settings for ${d.name}.`);
+    resetProviderSettings();
   }
 </script>
 
@@ -99,6 +159,52 @@
       </button>
     </div>
   </div>
+  {#if editingProviderName}
+    <form
+      class="pf-dep-prov-form"
+      aria-label={`Edit ${editingProviderName} provider settings`}
+      onsubmit={(event) => {
+        event.preventDefault();
+        saveProviderSettings();
+      }}
+    >
+      <label>
+        <span>Name</span>
+        <input aria-label="Provider name" value={editingProviderName} readonly />
+      </label>
+      <label>
+        <span>Type</span>
+        <select aria-label="Provider type" bind:value={editProviderKind}>
+          {#each providerKinds as kind (kind)}
+            <option value={kind}>{kind}</option>
+          {/each}
+        </select>
+      </label>
+      <label>
+        <span>Status</span>
+        <select aria-label="Provider status" bind:value={editProviderStatus}>
+          <option value="connected">connected</option>
+          <option value="degraded">degraded</option>
+        </select>
+      </label>
+      <label class="wide">
+        <span>Connection note</span>
+        <input
+          aria-label="Provider connection note"
+          value={editProviderNote}
+          oninput={(event) => (editProviderNote = event.currentTarget.value)}
+        />
+      </label>
+      <div class="pf-dep-prov-form-actions">
+        <button type="button" class="sc-btn" data-variant="ghost" data-size="sm" onclick={resetProviderSettings}>
+          Cancel
+        </button>
+        <button type="submit" class="sc-btn" data-variant="default" data-size="sm" disabled={!canSaveProviderSettings}>
+          Save settings
+        </button>
+      </div>
+    </form>
+  {/if}
   {#if addProviderOpen}
     <form
       class="pf-dep-prov-form"
@@ -165,7 +271,14 @@
         <span class="pf-dep-prov-status" data-state={p.status === "connected" ? "healthy" : "degraded"}>
           <span class="dot"></span>{p.status}
         </span>
-        <button type="button" class="pf-dep-ico" aria-label="Settings">
+        <button
+          type="button"
+          class="pf-dep-ico"
+          aria-label={`Edit ${p.name} provider settings`}
+          title={`Edit ${p.name} provider settings`}
+          aria-pressed={editingProviderName === p.name}
+          onclick={() => openProviderSettings(p)}
+        >
           <Icon name="settings" size={12} />
         </button>
       </div>

@@ -562,6 +562,35 @@ test("deployment add provider creates a local integration card", async ({ page }
   await expect(provider).toHaveCount(1);
 });
 
+test("deployment provider settings edit the selected integration card", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Deployments" }).click();
+  await page.getByRole("tab", { name: "Providers" }).click();
+
+  const provider = page.locator(".pf-dep-prov").filter({ hasText: "OpenAI" });
+  await expect(provider).toContainText("org-puffer");
+  await expect(provider).toContainText("degraded");
+
+  await provider.getByRole("button", { name: "Edit OpenAI provider settings" }).click();
+  const form = page.getByRole("form", { name: "Edit OpenAI provider settings" });
+  await expect(form).toBeVisible();
+  await expect(form.getByLabel("Provider name")).toHaveValue("OpenAI");
+
+  await form.getByLabel("Provider status").selectOption("connected");
+  await form.getByLabel("Provider connection note").fill("org-puffer-v2");
+  await form.getByRole("button", { name: "Save settings" }).click();
+
+  await expect(form).toHaveCount(0);
+  await expect(page.locator(".pf-dep-pane-status")).toContainText(
+    "Updated OpenAI provider settings for stripe-api · production."
+  );
+  await expect(provider).toContainText("org-puffer-v2");
+  await expect(provider).toContainText("connected");
+});
+
 test("deployment secret reveal controls target one key and toggle their state", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
