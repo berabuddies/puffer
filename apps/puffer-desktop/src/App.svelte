@@ -2214,7 +2214,13 @@
     const selectedForEvent = selectedSession?.id === sid;
     const ignoredForSelected = selectedForEvent && shouldIgnoreTurnEvent(sid, ev.turnId);
     if (!ignoredForSelected) applySidebarSessionEvent(sid, ev);
-    if (!selectedForEvent || ignoredForSelected) return;
+    if (ignoredForSelected) {
+      if (ev.type === "turn-complete" || ev.type === "turn-error") {
+        markTurnSettled(sid, ev.turnId);
+      }
+      return;
+    }
+    if (!selectedForEvent) return;
     switch (ev.type) {
       case "turn-start":
         markTurnActive(sid, ev.turnId);

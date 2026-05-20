@@ -4586,6 +4586,74 @@ test("stale turn reloads do not clear the active streamed answer", async ({ page
   await expect(page.getByText("Current answer must stay visible.")).toBeVisible();
 });
 
+test("late completion for an overlapped turn prevents later stale deltas", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-overlap-complete",
+        displayName: "Overlap completion",
+        title: "Overlap completion",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Overlap completion/);
+  daemon.delayResponse(
+    "load_session_detail",
+    (request) => request.params.sessionId === "session-overlap-complete",
+    180
+  );
+  daemon.setSessionTimeline("session-overlap-complete", [
+    {
+      kind: "assistant_message",
+      id: "persisted-new",
+      text: "Persisted new answer.",
+      createdAtMs: baseTime + 2
+    }
+  ]);
+
+  await page.locator(".pf-composer textarea").fill("start current turn");
+  await page.getByRole("button", { name: "Send" }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.sessionId === "session-overlap-complete"
+  );
+  daemon.emit("session:session-overlap-complete:event", {
+    type: "text-delta",
+    turnId: "turn-session-overlap-complete",
+    delta: "New transient answer."
+  });
+  await expect(page.getByText("New transient answer.")).toBeVisible();
+
+  daemon.emit("session:session-overlap-complete:event", {
+    type: "turn-complete",
+    turnId: "turn-old",
+    assistantText: "Persisted old answer."
+  });
+  daemon.emit("session:session-overlap-complete:event", {
+    type: "turn-complete",
+    turnId: "turn-session-overlap-complete",
+    assistantText: "Persisted new answer."
+  });
+
+  await page.waitForTimeout(260);
+  daemon.emit("session:session-overlap-complete:event", {
+    type: "text-delta",
+    turnId: "turn-old",
+    delta: "Very late old delta should stay ignored."
+  });
+  await expect(page.getByText("Very late old delta should stay ignored.")).toHaveCount(0);
+  await expect(page.getByText("Persisted new answer.")).toBeVisible();
+});
+
 test("streaming agent row keeps its DOM identity without a local user row", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
