@@ -362,6 +362,12 @@
     return framePath === actionPath || framePath.startsWith(`${actionPath}/`);
   }
 
+  function browserSearchAndHashCompatible(actionUrl: URL, frameUrl: URL): boolean {
+    if (actionUrl.search && frameUrl.search !== actionUrl.search) return false;
+    if (actionUrl.hash && frameUrl.hash !== actionUrl.hash) return false;
+    return true;
+  }
+
   function browserUrlsCompatible(actionUrlValue: string, frameUrlValue: string): boolean {
     if (frameUrlValue === actionUrlValue || frameUrlValue.startsWith(`${actionUrlValue}#`)) {
       return true;
@@ -369,7 +375,11 @@
     const actionUrl = parseBrowserUrl(actionUrlValue);
     const frameUrl = parseBrowserUrl(frameUrlValue);
     if (!actionUrl || !frameUrl) return false;
-    return browserHostsCompatible(actionUrl, frameUrl) && browserPathsCompatible(actionUrl, frameUrl);
+    return (
+      browserHostsCompatible(actionUrl, frameUrl) &&
+      browserPathsCompatible(actionUrl, frameUrl) &&
+      browserSearchAndHashCompatible(actionUrl, frameUrl)
+    );
   }
 
   function browserFrameUrlMatchesAction(action: ActionItem, frame: BrowserRecordedFrame): boolean {

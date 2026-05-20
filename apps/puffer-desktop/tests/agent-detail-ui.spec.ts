@@ -878,6 +878,111 @@ test("browser activity details match recordings by URL when tab ids are absent",
   await expect(recording.getByRole("img", { name: "Alpha URL Domain" })).toHaveCount(0);
 });
 
+test("browser activity details keep query-specific URL recordings scoped", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-browser-query-actions",
+        displayName: "Browser query actions",
+        title: "Browser query actions",
+        cwd: "/tmp/puffer-browser-query-actions",
+        folderPath: "/tmp/puffer-browser-query-actions",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        timeline: [
+          {
+            kind: "user_message",
+            id: "browser-query-user",
+            text: "Open two searches.",
+            createdAtMs: baseTime - 50_000
+          },
+          {
+            kind: "tool_call",
+            id: "browser-query-alpha-tool",
+            toolId: "Browser",
+            status: "success",
+            inputText: JSON.stringify({
+              action: "open",
+              url: "https://search.example/results?q=alpha"
+            }),
+            inputJson: {
+              action: "open",
+              url: "https://search.example/results?q=alpha"
+            },
+            outputText: "Done.",
+            createdAtMs: baseTime - 45_000
+          },
+          {
+            kind: "tool_call",
+            id: "browser-query-beta-tool",
+            toolId: "Browser",
+            status: "success",
+            inputText: JSON.stringify({
+              action: "open",
+              url: "https://search.example/results?q=beta"
+            }),
+            inputJson: {
+              action: "open",
+              url: "https://search.example/results?q=beta"
+            },
+            outputText: "Done.",
+            createdAtMs: baseTime - 40_000
+          },
+          {
+            kind: "assistant_message",
+            id: "browser-query-assistant",
+            text: "Opened both searches.",
+            createdAtMs: baseTime - 35_000
+          }
+        ]
+      }
+    ]
+  });
+  daemon.setBrowserRecording("session-browser-query-actions", [
+    {
+      frameId: "browser-query-alpha-frame",
+      backendSessionId: "session-browser-query-actions:browser:tab-1",
+      rootSessionId: "session-browser-query-actions",
+      tabId: "tab-1",
+      url: "https://search.example/results?q=alpha",
+      title: "Alpha Search",
+      mimeType: "image/png",
+      encoding: "base64",
+      data: ONE_PIXEL_PNG,
+      width: 960,
+      height: 720,
+      recordedAtMs: baseTime - 44_000
+    },
+    {
+      frameId: "browser-query-beta-frame",
+      backendSessionId: "session-browser-query-actions:browser:tab-2",
+      rootSessionId: "session-browser-query-actions",
+      tabId: "tab-2",
+      url: "https://search.example/results?q=beta",
+      title: "Beta Search",
+      mimeType: "image/png",
+      encoding: "base64",
+      data: ONE_PIXEL_PNG,
+      width: 960,
+      height: 720,
+      recordedAtMs: baseTime - 39_000
+    }
+  ]);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openAgent(page, /^Browser query actions\b/);
+  await page.getByRole("button", { name: /Agent activity/ }).click();
+  await page.getByRole("button", { name: /Browser Open https:\/\/search\.example\/results\?q=alpha/ }).click();
+  const recording = page.locator(".pf-browser-recording-render");
+  await expect(recording.getByRole("img", { name: "Alpha Search" })).toBeVisible();
+  await expect(recording.getByRole("img", { name: "Beta Search" })).toHaveCount(0);
+
+  await page.getByRole("button", { name: /Browser Open https:\/\/search\.example\/results\?q=beta/ }).click();
+  await expect(recording.getByRole("img", { name: "Beta Search" })).toBeVisible();
+  await expect(recording.getByRole("img", { name: "Alpha Search" })).toHaveCount(0);
+});
+
 test("browser activity details keep redirected URL-only recordings scoped", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
