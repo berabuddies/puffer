@@ -236,7 +236,7 @@
     }
     const cachedModels = providerModels[providerId];
     if (cachedModels) {
-      if (modelPickerProvider === providerId && !modelPickerModel) {
+      if (modelPickerProvider === providerId && !modelIdInList(modelPickerModel, cachedModels)) {
         modelPickerModel = defaultModelId(cachedModels);
       }
       return;
@@ -247,7 +247,7 @@
     try {
       const models = await listProviderModels(providerId);
       providerModels = { ...providerModels, [providerId]: models };
-      if (modelPickerProvider === providerId && !modelPickerModel) {
+      if (modelPickerProvider === providerId && !modelIdInList(modelPickerModel, models)) {
         modelPickerModel = defaultModelId(models);
       }
     } catch (e) {
@@ -261,6 +261,10 @@
 
   function defaultModelId(models: ModelDescriptorInfo[]): string {
     return (models.find((model) => model.isDefault) ?? models[0])?.id ?? "";
+  }
+
+  function modelIdInList(modelId: string, models: ModelDescriptorInfo[]): boolean {
+    return Boolean(modelId && models.some((model) => model.id === modelId));
   }
 
   function addPermissionRow() {

@@ -174,6 +174,71 @@ test("default routing only offers authenticated agent providers", async ({ page 
   });
 });
 
+test("default model picker replaces a cross-provider configured model after load", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "openai",
+        kind: "oauth",
+        email: "tester@example.com",
+        expiresAtMs: null,
+        scopes: [],
+        planType: "test",
+        organizationName: null
+      }
+    ],
+    providers: [
+      {
+        id: "openai",
+        displayName: "OpenAI",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 1,
+        authModes: ["oauth"],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ],
+    providerModels: {
+      openai: [
+        {
+          id: "gpt-5",
+          displayName: "GPT-5",
+          provider: "openai",
+          api: "openai-responses",
+          supportsTools: true,
+          supportsVision: false,
+          contextWindow: null,
+          maxOutputTokens: null,
+          thinkingOptions: [],
+          defaultThinkingOptionId: null,
+          isDefault: true
+        }
+      ]
+    }
+  });
+  daemon.setSettingsConfig({
+    defaultProvider: "openai",
+    defaultModel: "claude-sonnet-4-5"
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Providers" }).click();
+
+  const pane = page.locator(".pf-settings-pane");
+  await expect(pane.getByLabel("Provider")).toHaveValue("openai");
+  await expect(pane.getByLabel("Model")).toHaveValue("gpt-5");
+
+  await pane.getByRole("button", { name: "Save default" }).click();
+  const update = await daemon.waitForRequest("update_config");
+  expect(update.params).toMatchObject({
+    defaultProvider: "openai",
+    defaultModel: "gpt-5"
+  });
+});
+
 test("providers page marks connected and disconnected providers", async ({ page }) => {
   const daemon = new FakeDaemon({
     auth: [
