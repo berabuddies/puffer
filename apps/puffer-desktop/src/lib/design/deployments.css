@@ -92,6 +92,42 @@
 .pf-dep-sync-status[data-state="syncing"] {
   color: var(--muted-foreground);
 }
+.pf-dep-new-modal {
+  width: min(560px, calc(100vw - 28px));
+}
+.pf-dep-new-form {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.pf-dep-new-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.pf-dep-new-modal .pf-field-input select {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 12.5px;
+  padding: 6px 0;
+  appearance: none;
+}
+.pf-dep-new-summary {
+  padding: 9px 10px;
+  border: 1px solid color-mix(in oklab, var(--border) 74%, var(--puffer-accent));
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--background) 92%, var(--puffer-accent) 8%);
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.4;
+}
 
 /* Body split: list (40%) + detail (60%) ------------------------------ */
 .pf-dep-body {
@@ -119,6 +155,7 @@
   .pf-dep-top-right { gap: 4px; }
   .pf-dep-top-right .sc-btn[data-size="sm"] { padding: 0 8px; height: 28px; font-size: 12px; }
   .pf-dep-sync-status { max-width: 140px; height: 26px; padding: 0 7px; font-size: 11px; }
+  .pf-dep-new-grid { grid-template-columns: 1fr; }
   .pf-dep-detail-head { padding: 10px 14px; min-height: auto; }
   .pf-dep-tabs { padding: 0 6px; }
   .pf-dep-tab { padding: 8px 8px; font-size: 12px; }

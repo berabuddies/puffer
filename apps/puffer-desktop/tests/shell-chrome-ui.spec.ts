@@ -203,6 +203,45 @@ test("deployment provider sync button reports progress and completion", async ({
   expect(statusBox!.height).toBeLessThanOrEqual(topbarBox!.height);
 });
 
+test("deployment new deployment button creates a local draft", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Deployments" }).click();
+  const newDeployment = page.locator(".pf-dep-top-right").getByRole("button", { name: "New deployment" });
+
+  await newDeployment.click();
+  let dialog = page.getByRole("dialog", { name: "New deployment" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByLabel("Service name")).toBeFocused();
+  await expect(dialog.getByRole("button", { name: "Create deployment" })).toBeDisabled();
+
+  await dialog.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".pf-dep-row")).toHaveCount(6);
+
+  await newDeployment.click();
+  dialog = page.getByRole("dialog", { name: "New deployment" });
+  await dialog.getByLabel("Service name").fill("checkout-worker");
+  await dialog.getByLabel("Provider").selectOption("fly");
+  await dialog.getByLabel("Environment").selectOption("preview");
+  await dialog.getByLabel("Branch").fill("feature/checkouts");
+  await expect(dialog.getByText("Draft will appear as checkout-worker · preview.")).toBeVisible();
+  await dialog.getByRole("button", { name: "Create deployment" }).click();
+
+  await expect(dialog).toHaveCount(0);
+  await expect(newDeployment).toBeFocused();
+  await expect(page.locator(".pf-dep-top-title")).toContainText("7 environments");
+  const draft = page.locator(".pf-dep-row").filter({ hasText: "checkout-worker · preview" });
+  await expect(draft).toBeVisible();
+  await expect(draft).toContainText("Fly.io Machines");
+  await expect(page.locator(".pf-dep-detail-name")).toContainText("checkout-worker · preview");
+  await expect(page.locator(".pf-dep-detail-name")).toContainText(/deploying/i);
+  await expect(page.locator(".pf-dep-detail-sub")).toContainText("checkout-worker-preview.puffer.app");
+  await expect(page.getByRole("tab", { name: "Deploys" })).toHaveAttribute("aria-selected", "true");
+});
+
 test("deployment detail tabs expose selected state", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

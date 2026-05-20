@@ -3,8 +3,10 @@
 
   import "../design/chat.css";
   import "../design/deployments.css";
+  import "../design/workspace.css";
 
   import Icon, { type IconName } from "../design/Icon.svelte";
+  import { focusTrap } from "../focusTrap";
   import StatePill from "./deployments/StatePill.svelte";
   import ProviderGlyph from "./deployments/ProviderGlyph.svelte";
   import AskPufferPane from "./deployments/AskPufferPane.svelte";
@@ -23,16 +25,35 @@
   let syncState = $state<"idle" | "syncing" | "synced">("idle");
   let syncMessage = $state("");
   let syncTimer = 0;
+  let draftDeployments = $state<Deployment[]>([]);
+  let showNewDeployment = $state(false);
+  let newDeploymentName = $state("");
+  let newDeploymentProvider = $state<Deployment["provider"]>("vercel");
+  let newDeploymentEnvironment = $state("staging");
+  let newDeploymentBranch = $state("main");
+  let newDeploymentNameInput = $state<HTMLInputElement | null>(null);
 
+  const providerOptions: { id: Deployment["provider"]; label: string; region: string }[] = [
+    { id: "vercel", label: "Vercel", region: "iad1 - us-east" },
+    { id: "aws", label: "AWS - ECS Fargate", region: "us-east-1" },
+    { id: "fly", label: "Fly.io Machines", region: "iad" },
+    { id: "railway", label: "Railway", region: "us-east" },
+    { id: "cloudflare", label: "Cloudflare Workers", region: "global" },
+    { id: "supabase", label: "Supabase - Postgres", region: "us-east-1" }
+  ];
+
+  let allDeployments = $derived([...draftDeployments, ...DEPLOYMENTS]);
   let filteredDeployments = $derived.by(() => {
     const query = deploymentQuery.trim().toLowerCase();
-    return query ? DEPLOYMENTS.filter((deployment) => deploymentMatchesQuery(deployment, query)) : DEPLOYMENTS;
+    return query ? allDeployments.filter((deployment) => deploymentMatchesQuery(deployment, query)) : allDeployments;
   });
   let selected = $derived(
     filteredDeployments.find((d) => d.id === selectedId)
-      ?? DEPLOYMENTS.find((d) => d.id === selectedId)
-      ?? DEPLOYMENTS[0]
+      ?? allDeployments.find((d) => d.id === selectedId)
+      ?? allDeployments[0]
   );
+  let providerCount = $derived(new Set(allDeployments.map((deployment) => deployment.provider)).size);
+  let canCreateDeployment = $derived(newDeploymentName.trim().length > 0);
 
   const tabs: { id: Tab; label: string; icon: IconName }[] = [
     { id: "askpuffer", label: "Ask Puffer", icon: "sparkles" },
@@ -41,8 +62,6 @@
     { id: "providers", label: "Providers", icon: "plug" },
     { id: "deploys",   label: "Deploys",   icon: "rocket" }
   ];
-  const providerCount = new Set(DEPLOYMENTS.map((deployment) => deployment.provider)).size;
-
   onDestroy(() => {
     if (syncTimer) window.clearTimeout(syncTimer);
   });
@@ -101,9 +120,56 @@
     syncMessage = "Syncing providers...";
     syncTimer = window.setTimeout(() => {
       syncState = "synced";
-      syncMessage = `Providers synced: ${DEPLOYMENTS.length} environments across ${providerCount} providers refreshed.`;
+      syncMessage = `Providers synced: ${allDeployments.length} environments across ${providerCount} providers refreshed.`;
       syncTimer = 0;
     }, 250);
+  }
+
+  function slugify(value: string): string {
+    return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "deployment";
+  }
+
+  function openNewDeployment(): void {
+    newDeploymentName = "";
+    newDeploymentProvider = "vercel";
+    newDeploymentEnvironment = "staging";
+    newDeploymentBranch = "main";
+    showNewDeployment = true;
+    window.setTimeout(() => newDeploymentNameInput?.focus({ preventScroll: true }), 20);
+  }
+
+  function closeNewDeployment(): void {
+    showNewDeployment = false;
+  }
+
+  function createDraftDeployment(): void {
+    if (!canCreateDeployment) return;
+    const name = newDeploymentName.trim();
+    const provider = providerOptions.find((option) => option.id === newDeploymentProvider) ?? providerOptions[0];
+    const environment = newDeploymentEnvironment.trim() || "staging";
+    const slug = slugify(`${name}-${environment}`);
+    const deployment: Deployment = {
+      id: `draft-${slug}-${Date.now()}`,
+      name: `${name} · ${environment}`,
+      provider: provider.id,
+      providerLabel: provider.label,
+      region: provider.region,
+      url: `${slug}.puffer.app`,
+      branch: newDeploymentBranch.trim() || "main",
+      state: "deploying",
+      lastDeploy: "draft",
+      lastCommit: "new draft deployment",
+      lastDeployer: "Otter",
+      workspaces: [{ id: slug, name: slug, role: "service" }],
+      envCount: 0,
+      integrations: 0,
+      metrics: { rps: "-", p95: "-", error: "-" },
+      alert: "Draft deployment has not been pushed yet"
+    };
+    draftDeployments = [deployment, ...draftDeployments];
+    selectedId = deployment.id;
+    tab = "deploys";
+    closeNewDeployment();
   }
 
   $effect(() => {
@@ -150,8 +216,8 @@
   <div class="pf-dep-top">
     <div class="pf-dep-top-title">
       <span class="pf-pipe-chip">Deployments</span>
-      <strong>{DEPLOYMENTS.length} environments</strong>
-      <span class="pf-dep-top-sub">across 4 providers · 6 workspaces</span>
+      <strong>{allDeployments.length} environments</strong>
+      <span class="pf-dep-top-sub">across {providerCount} providers · 6 workspaces</span>
     </div>
     <div class="pf-dep-top-right">
       {#if searchOpen}
@@ -192,11 +258,125 @@
       >
         <Icon name="refresh" size={12} />{syncState === "syncing" ? "Syncing" : "Sync providers"}
       </button>
-      <button type="button" class="sc-btn" data-variant="default" data-size="sm">
+      <button type="button" class="sc-btn" data-variant="default" data-size="sm" onclick={openNewDeployment}>
         <Icon name="plus" size={12} />New deployment
       </button>
     </div>
   </div>
+
+  {#if showNewDeployment}
+    <div
+      class="pf-modal-scrim"
+      onclick={closeNewDeployment}
+      role="presentation"
+      onkeydown={() => {}}
+    >
+      <div
+        class="pf-modal pf-dep-new-modal"
+        onclick={(event) => event.stopPropagation()}
+        role="dialog"
+        aria-label="New deployment"
+        aria-modal="true"
+        tabindex="-1"
+        use:focusTrap
+        onkeydown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            closeNewDeployment();
+          }
+        }}
+      >
+        <form
+          class="pf-dep-new-form"
+          onsubmit={(event) => {
+            event.preventDefault();
+            createDraftDeployment();
+          }}
+        >
+          <div class="pf-modal-head">
+            <div class="pf-modal-title-group">
+              <div class="pf-modal-eyebrow">Deployment</div>
+              <div class="pf-modal-title">New deployment</div>
+            </div>
+            <button type="button" class="pf-modal-close" onclick={closeNewDeployment} aria-label="Close">
+              <Icon name="x" size={14} />
+            </button>
+          </div>
+
+          <div class="pf-modal-body">
+            <label class="pf-field">
+              <span class="pf-field-label">Service name</span>
+              <span class="pf-field-input">
+                <Icon name="rocket" size={13} />
+                <input
+                  bind:this={newDeploymentNameInput}
+                  aria-label="Service name"
+                  bind:value={newDeploymentName}
+                  placeholder="checkout-worker"
+                />
+              </span>
+            </label>
+
+            <div class="pf-dep-new-grid">
+              <label class="pf-field">
+                <span class="pf-field-label">Provider</span>
+                <span class="pf-field-input">
+                  <Icon name="plug" size={13} />
+                  <select aria-label="Provider" bind:value={newDeploymentProvider}>
+                    {#each providerOptions as provider (provider.id)}
+                      <option value={provider.id}>{provider.label}</option>
+                    {/each}
+                  </select>
+                </span>
+              </label>
+
+              <label class="pf-field">
+                <span class="pf-field-label">Environment</span>
+                <span class="pf-field-input">
+                  <Icon name="globe" size={13} />
+                  <select aria-label="Environment" bind:value={newDeploymentEnvironment}>
+                    <option value="staging">staging</option>
+                    <option value="preview">preview</option>
+                    <option value="production">production</option>
+                  </select>
+                </span>
+              </label>
+            </div>
+
+            <label class="pf-field">
+              <span class="pf-field-label">Branch</span>
+              <span class="pf-field-input">
+                <Icon name="branch" size={13} />
+                <input aria-label="Branch" bind:value={newDeploymentBranch} placeholder="main" />
+              </span>
+            </label>
+
+            <div class="pf-dep-new-summary" role="status" aria-live="polite">
+              {#if canCreateDeployment}
+                Draft will appear as {newDeploymentName.trim()} · {newDeploymentEnvironment}.
+              {:else}
+                Add a service name to create a deployment draft.
+              {/if}
+            </div>
+          </div>
+
+          <div class="pf-modal-foot">
+            <div class="pf-modal-foot-hint">
+              Drafts stay local until provider deployment RPCs are connected.
+            </div>
+            <div class="pf-modal-foot-btns">
+              <button type="button" class="sc-btn" data-variant="ghost" onclick={closeNewDeployment}>
+                Cancel
+              </button>
+              <button type="submit" class="sc-btn" data-variant="default" disabled={!canCreateDeployment}>
+                <Icon name="plus" size={13} />Create deployment
+              </button>
+            </div>
+          </div>
+        </form>
+      </div>
+    </div>
+  {/if}
 
   <div class="pf-dep-body">
     <div class="pf-dep-list">
