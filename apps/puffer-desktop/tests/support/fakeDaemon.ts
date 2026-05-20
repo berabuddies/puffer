@@ -26,6 +26,14 @@ type ResponseFailureDelay = ResponseDelay & {
   error: string;
 };
 
+type FakeFileValue =
+  | string
+  | {
+      encoding: "base64";
+      content: string;
+      size: number;
+    };
+
 type TabSet = {
   activeTabId: string | null;
   tabs: JsonRecord[];
@@ -153,6 +161,15 @@ function defaultFileContent(path: string): string {
   return path.endsWith("lib.rs") ? "pub fn fixture() {}\n" : "fn main() {}\n";
 }
 
+function parentPath(path: string): string {
+  const index = path.lastIndexOf("/");
+  return index <= 0 ? "/" : path.slice(0, index);
+}
+
+function fakeFileSize(value: FakeFileValue): number {
+  return typeof value === "string" ? value.length : value.size;
+}
+
 function response(id: number | string, result: unknown): string {
   return JSON.stringify({ type: "response", id, ok: true, result });
 }
@@ -225,7 +242,7 @@ export class FakeDaemon {
   private readonly timelines = new Map<string, JsonRecord[]>();
   private readonly details = new Map<string, SessionDetailOverrides>();
   private groupedSessionFilter: ((metadata: JsonRecord) => boolean) | null = null;
-  private readonly files = new Map<string, string>();
+  private readonly files = new Map<string, FakeFileValue>();
   private readonly lspLocations = new Map<string, string>();
   private readonly providerModels: Record<string, JsonRecord[]>;
   private readonly providerSummaries: JsonRecord[] | null;
@@ -344,6 +361,14 @@ export class FakeDaemon {
 
   seedFile(path: string, content: string): void {
     this.files.set(path, content);
+  }
+
+  seedBinaryFile(path: string, contentBase64: string, size?: number): void {
+    this.files.set(path, {
+      encoding: "base64",
+      content: contentBase64,
+      size: size ?? Math.ceil((contentBase64.length * 3) / 4)
+    });
   }
 
   setLspLocation(path: string, location: string): void {
@@ -1149,28 +1174,49 @@ export class FakeDaemon {
 
   private listDir(params: JsonRecord): JsonRecord {
     const path = String(params.path ?? "");
+    const entries = new Map<string, JsonRecord>();
     if (path === "/tmp/puffer") {
-      return {
-        entries: [
-          { name: "src", kind: "directory", size: 0, modifiedMs: now }
-        ]
-      };
+      entries.set("src", { name: "src", kind: "directory", size: 0, modifiedMs: now });
     }
     if (path === "/tmp/puffer/src") {
-      return {
-        entries: [
-          { name: "main.rs", kind: "file", size: 42, modifiedMs: now },
-          { name: "lib.rs", kind: "file", size: 41, modifiedMs: now }
-        ]
-      };
+      entries.set("main.rs", { name: "main.rs", kind: "file", size: 42, modifiedMs: now });
+      entries.set("lib.rs", { name: "lib.rs", kind: "file", size: 41, modifiedMs: now });
     }
-    return { entries: [] };
+    for (const [filePath, value] of this.files) {
+      const parent = parentPath(filePath);
+      if (parent !== path) continue;
+      const name = filePath.split("/").pop();
+      if (!name) continue;
+      entries.set(name, {
+        name,
+        kind: "file",
+        size: fakeFileSize(value),
+        modifiedMs: now
+      });
+    }
+    return {
+      entries: Array.from(entries.values()).sort((left, right) => {
+        const leftKind = String(left.kind);
+        const rightKind = String(right.kind);
+        if (leftKind !== rightKind) return leftKind === "directory" ? -1 : 1;
+        return String(left.name).localeCompare(String(right.name));
+      })
+    };
   }
 
   private readFile(params: JsonRecord): JsonRecord {
     const path = String(params.path ?? "");
     const content = this.files.get(path) ?? defaultFileContent(path);
     this.files.set(path, content);
+    if (typeof content !== "string") {
+      return {
+        path,
+        encoding: content.encoding,
+        content: content.content,
+        size: content.size,
+        truncated: false
+      };
+    }
     return {
       path,
       encoding: "utf8",

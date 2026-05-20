@@ -3,6 +3,11 @@
   import HighlightedLine from "../../components/HighlightedLine.svelte";
   import Icon from "../../design/Icon.svelte";
   import {
+    buildFilePreview,
+    hasRichFilePreview,
+    type FilePreview
+  } from "./filePreview";
+  import {
     fsUnwatch,
     fsWatch,
     isDaemonReachable,
@@ -68,6 +73,9 @@
   let activeLoading = $state(false);
   let activeError = $state<string | null>(null);
   let draftContent = $state("");
+  let activePreview = $state<FilePreview | null>(null);
+  let activePreviewLoading = $state(false);
+  let activePreviewError = $state<string | null>(null);
   let saving = $state(false);
   let saveError = $state<string | null>(null);
   let selectedSymbol = $state<string | null>(null);
@@ -76,6 +84,7 @@
   let lspResult = $state<LspInspectResult | null>(null);
   let lspAnchor = $state<{ line: number; character: number } | null>(null);
   let fileReadGeneration = 0;
+  let filePreviewGeneration = 0;
   let lspInspectGeneration = 0;
   let editorEl = $state<HTMLTextAreaElement | null>(null);
   let editorGutterEl = $state<HTMLDivElement | null>(null);
@@ -112,6 +121,7 @@
       activeFile = null;
       activeError = null;
       activeSize = 0;
+      clearActivePreview();
       draftContent = "";
       saving = false;
       saveError = null;
@@ -442,6 +452,55 @@
       activeSize = result.size;
       activeError = null;
       draftContent = draftCache.get(result.path) ?? (result.encoding === "utf8" ? result.content : "");
+      void loadActivePreview(result);
+    }
+  }
+
+  function clearActivePreview() {
+    filePreviewGeneration += 1;
+    activePreview = null;
+    activePreviewLoading = false;
+    activePreviewError = null;
+  }
+
+  async function loadActivePreview(result: ReadFileResult) {
+    if (!hasRichFilePreview(result)) {
+      clearActivePreview();
+      return;
+    }
+    const expectedPath = result.path;
+    const expectedRoot = root;
+    const expectedSessionId = sessionId;
+    const generation = ++filePreviewGeneration;
+    activePreview = null;
+    activePreviewError = null;
+    activePreviewLoading = true;
+    try {
+      const preview = await buildFilePreview(result);
+      if (
+        generation !== filePreviewGeneration ||
+        activePath !== expectedPath ||
+        root !== expectedRoot ||
+        sessionId !== expectedSessionId
+      ) return;
+      activePreview = preview;
+    } catch (err) {
+      if (
+        generation !== filePreviewGeneration ||
+        activePath !== expectedPath ||
+        root !== expectedRoot ||
+        sessionId !== expectedSessionId
+      ) return;
+      activePreviewError = err instanceof Error ? err.message : String(err);
+    } finally {
+      if (
+        generation === filePreviewGeneration &&
+        activePath === expectedPath &&
+        root === expectedRoot &&
+        sessionId === expectedSessionId
+      ) {
+        activePreviewLoading = false;
+      }
     }
   }
 
@@ -556,6 +615,7 @@
     activeSize = size ?? openTabs.find((tab) => tab.path === path)?.size ?? 0;
     activeError = null;
     saveError = null;
+    clearActivePreview();
     clearLspState();
 
     const cached = fileCache.get(path);
@@ -564,6 +624,7 @@
       activeSize = cached.size;
       draftContent = draftCache.get(path) ?? (cached.encoding === "utf8" ? cached.content : "");
       activeLoading = false;
+      void loadActivePreview(cached);
       await focusEditorLine(path, line, character);
       return;
     }
@@ -630,6 +691,7 @@
       activeFile = null;
       activeLoading = false;
       activeError = null;
+      clearActivePreview();
       draftContent = "";
       saveError = null;
       clearLspState();
@@ -675,7 +737,11 @@
       : ""
   );
   let canEdit = $derived(
-    !!activeFile && activeFile.encoding === "utf8" && !activeFile.truncated && !activeLoading
+    !!activeFile &&
+      activeFile.encoding === "utf8" &&
+      !activeFile.truncated &&
+      !activeLoading &&
+      !hasRichFilePreview(activeFile)
   );
   let dirty = $derived(activePath ? isTabDirty(activePath) : false);
 
@@ -1234,6 +1300,86 @@
           <div class="viewer-msg sub">Loading...</div>
         {:else if activeError}
           <div class="viewer-msg err mono">{activeError}</div>
+        {:else if activePreviewLoading}
+          <div class="viewer-msg sub">Preparing preview...</div>
+        {:else if activePreviewError}
+          <div class="viewer-msg err mono">{activePreviewError}</div>
+        {:else if activePreview && activePreview.kind === "markdown"}
+          <article class="file-preview markdown-preview" aria-label="Markdown preview">
+            {@html activePreview.html}
+          </article>
+        {:else if activePreview && activePreview.kind === "csv"}
+          <div class="file-preview table-preview" aria-label="CSV preview">
+            <table>
+              <tbody>
+                {#each activePreview.rows as row, rowIndex}
+                  <tr>
+                    {#each row as cell}
+                      {#if rowIndex === 0}
+                        <th>{cell}</th>
+                      {:else}
+                        <td>{cell}</td>
+                      {/if}
+                    {/each}
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {:else if activePreview && activePreview.kind === "pdf"}
+          <div class="file-preview pdf-shell" aria-label="PDF preview">
+            <object
+              class="pdf-preview"
+              data={activePreview.dataUrl}
+              type="application/pdf"
+              aria-label="PDF document"
+            >
+              <div class="viewer-msg">PDF preview is unavailable in this WebView.</div>
+            </object>
+          </div>
+        {:else if activePreview && activePreview.kind === "docx"}
+          <article class="file-preview office-preview" aria-label="DOCX preview">
+            {#each activePreview.paragraphs as paragraph}
+              <p>{paragraph}</p>
+            {/each}
+          </article>
+        {:else if activePreview && activePreview.kind === "pptx"}
+          <div class="file-preview office-preview" aria-label="PowerPoint preview">
+            {#each activePreview.slides as slide}
+              <section>
+                <h2>{slide.title}</h2>
+                {#each slide.lines as line}
+                  <p>{line}</p>
+                {/each}
+              </section>
+            {/each}
+          </div>
+        {:else if activePreview && activePreview.kind === "xlsx"}
+          <div class="file-preview spreadsheet-preview" aria-label="Excel preview">
+            {#each activePreview.sheets as sheet}
+              <section>
+                <h2>{sheet.name}</h2>
+                <table>
+                  <tbody>
+                    {#each sheet.rows as row}
+                      <tr>
+                        {#each row as cell}
+                          <td>{cell}</td>
+                        {/each}
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+              </section>
+            {/each}
+          </div>
+        {:else if activePreview && activePreview.kind === "office-binary"}
+          <div class="file-preview office-preview" aria-label={activePreview.title}>
+            <section>
+              <h2>{activePreview.title}</h2>
+              <p>{activePreview.message}</p>
+            </section>
+          </div>
         {:else if canEdit}
           <div class="editor-shell">
             <div class="editor-gutter" bind:this={editorGutterEl} aria-hidden="true">
@@ -1626,6 +1772,110 @@
     font-family: var(--font-mono);
     white-space: pre-wrap;
     word-break: break-word;
+  }
+  .file-preview {
+    min-height: 100%;
+    padding: 18px 24px;
+    color: var(--foreground);
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  .markdown-preview {
+    max-width: 860px;
+  }
+  .markdown-preview :global(h1),
+  .markdown-preview :global(h2),
+  .markdown-preview :global(h3),
+  .office-preview h2,
+  .spreadsheet-preview h2 {
+    margin: 0 0 10px;
+    color: var(--foreground);
+    font-weight: 650;
+    line-height: 1.25;
+  }
+  .markdown-preview :global(h1) { font-size: 24px; }
+  .markdown-preview :global(h2),
+  .office-preview h2,
+  .spreadsheet-preview h2 { font-size: 16px; }
+  .markdown-preview :global(h3) { font-size: 14px; }
+  .markdown-preview :global(p),
+  .office-preview p {
+    margin: 0 0 10px;
+  }
+  .markdown-preview :global(ul) {
+    margin: 0 0 12px;
+    padding-left: 20px;
+  }
+  .markdown-preview :global(blockquote) {
+    margin: 0 0 12px;
+    padding: 8px 12px;
+    border-left: 3px solid var(--border);
+    color: var(--muted-foreground);
+    background: color-mix(in oklab, var(--background) 96%, var(--muted));
+  }
+  .markdown-preview :global(code) {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    background: var(--muted);
+    padding: 1px 4px;
+    border-radius: 4px;
+  }
+  .markdown-preview :global(pre) {
+    margin: 0 0 12px;
+    padding: 10px 12px;
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: color-mix(in oklab, var(--background) 95%, var(--muted));
+  }
+  .markdown-preview :global(pre code) {
+    padding: 0;
+    background: transparent;
+  }
+  .table-preview,
+  .spreadsheet-preview {
+    overflow: auto;
+  }
+  .table-preview table,
+  .spreadsheet-preview table {
+    border-collapse: collapse;
+    min-width: min(680px, 100%);
+    font-size: 12.5px;
+  }
+  .table-preview th,
+  .table-preview td,
+  .spreadsheet-preview td {
+    border: 1px solid var(--border);
+    padding: 6px 8px;
+    text-align: left;
+    vertical-align: top;
+    white-space: pre-wrap;
+  }
+  .table-preview th {
+    background: color-mix(in oklab, var(--background) 92%, var(--muted));
+    font-weight: 650;
+  }
+  .pdf-shell {
+    padding: 0;
+    height: 100%;
+  }
+  .pdf-preview {
+    width: 100%;
+    height: 100%;
+    min-height: 520px;
+    border: 0;
+    display: block;
+    background: var(--background);
+  }
+  .office-preview section,
+  .spreadsheet-preview section {
+    margin: 0 0 18px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
+  }
+  .office-preview section:last-child,
+  .spreadsheet-preview section:last-child {
+    border-bottom: 0;
   }
   .editor-shell {
     height: 100%;

@@ -1,4 +1,5 @@
 import { expect, type Page, test } from "@playwright/test";
+import { deflateRawSync } from "node:zlib";
 import { FakeDaemon } from "./support/fakeDaemon";
 
 async function openRegressionAgent(page: Page): Promise<void> {
@@ -75,6 +76,118 @@ const groqAuth = [
   }
 ];
 
+function makePdfBase64(text: string): string {
+  const stream = `BT /F1 18 Tf 20 100 Td (${text.replace(/[()\\]/g, "\\$&")}) Tj ET`;
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 260 160] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+    `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`,
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+  ];
+  let pdf = "%PDF-1.4\n";
+  const offsets: number[] = [];
+  for (const [index, object] of objects.entries()) {
+    offsets.push(Buffer.byteLength(pdf));
+    pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  }
+  const xrefOffset = Buffer.byteLength(pdf);
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  pdf += offsets.map((offset) => `${String(offset).padStart(10, "0")} 00000 n \n`).join("");
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+  return Buffer.from(pdf, "utf8").toString("base64");
+}
+
+function makeZipBase64(entries: Record<string, string>): string {
+  const localParts: Buffer[] = [];
+  const centralParts: Buffer[] = [];
+  let offset = 0;
+
+  for (const [name, text] of Object.entries(entries)) {
+    const nameBytes = Buffer.from(name, "utf8");
+    const content = Buffer.from(text, "utf8");
+    const compressed = deflateRawSync(content);
+
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(0, 6);
+    local.writeUInt16LE(8, 8);
+    local.writeUInt32LE(0, 10);
+    local.writeUInt32LE(0, 14);
+    local.writeUInt32LE(compressed.length, 18);
+    local.writeUInt32LE(content.length, 22);
+    local.writeUInt16LE(nameBytes.length, 26);
+    local.writeUInt16LE(0, 28);
+    localParts.push(local, nameBytes, compressed);
+
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0, 8);
+    central.writeUInt16LE(8, 10);
+    central.writeUInt32LE(0, 12);
+    central.writeUInt32LE(0, 16);
+    central.writeUInt32LE(compressed.length, 20);
+    central.writeUInt32LE(content.length, 24);
+    central.writeUInt16LE(nameBytes.length, 28);
+    central.writeUInt16LE(0, 30);
+    central.writeUInt16LE(0, 32);
+    central.writeUInt16LE(0, 34);
+    central.writeUInt16LE(0, 36);
+    central.writeUInt32LE(0, 38);
+    central.writeUInt32LE(offset, 42);
+    centralParts.push(central, nameBytes);
+    offset += local.length + nameBytes.length + compressed.length;
+  }
+
+  const centralOffset = offset;
+  const centralDirectory = Buffer.concat(centralParts);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(0, 4);
+  end.writeUInt16LE(0, 6);
+  end.writeUInt16LE(Object.keys(entries).length, 8);
+  end.writeUInt16LE(Object.keys(entries).length, 10);
+  end.writeUInt32LE(centralDirectory.length, 12);
+  end.writeUInt32LE(centralOffset, 16);
+  end.writeUInt16LE(0, 20);
+  return Buffer.concat([...localParts, centralDirectory, end]).toString("base64");
+}
+
+function seedPreviewFiles(daemon: FakeDaemon): void {
+  daemon.seedFile(
+    "/tmp/puffer/README.md",
+    "# Project Notes\n\n- Browser actions stay visible\n- Files render documents\n"
+  );
+  daemon.seedFile("/tmp/puffer/locations.csv", "Name,Kind\nLibrary,Food\nCafe,Food\n");
+  const docx = makeZipBase64({
+    "word/document.xml":
+      '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Quarterly planning note</w:t></w:r></w:p></w:body></w:document>'
+  });
+  daemon.seedBinaryFile("/tmp/puffer/brief.docx", docx);
+  const pptx = makeZipBase64({
+    "ppt/slides/slide1.xml":
+      '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>Launch checklist</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>',
+    "ppt/slides/slide2.xml":
+      '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>QA signoff</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>'
+  });
+  daemon.seedBinaryFile("/tmp/puffer/deck.pptx", pptx);
+  const xlsx = makeZipBase64({
+    "xl/sharedStrings.xml":
+      '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>Owner</t></si><si><t>Status</t></si><si><t>Otter</t></si><si><t>Ready</t></si></sst>',
+    "xl/workbook.xml":
+      '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Tasks" sheetId="1" r:id="rId1"/></sheets></workbook>',
+    "xl/_rels/workbook.xml.rels":
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
+    "xl/worksheets/sheet1.xml":
+      '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row><row r="2"><c r="A2" t="s"><v>2</v></c><c r="B2" t="s"><v>3</v></c></row></sheetData></worksheet>'
+  });
+  daemon.seedBinaryFile("/tmp/puffer/tasks.xlsx", xlsx);
+  daemon.seedBinaryFile("/tmp/puffer/sample.pdf", makePdfBase64("Puffer PDF preview"));
+}
+
 test("Files tab close button works from the keyboard", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
@@ -120,6 +233,43 @@ test("Files tab saves text edits through the daemon", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Save" })).toHaveCount(0);
   await expect(page.locator(".file-tab.active .dirty-dot")).toHaveCount(0);
   await expect(editor).toHaveValue(saved);
+});
+
+test("Files tab previews common document and data formats", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  seedPreviewFiles(daemon);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openFilesPanel(page);
+
+  await page.getByRole("button", { name: "README.md" }).click();
+  await expect(page.getByLabel("Markdown preview")).toContainText("Project Notes");
+  await expect(page.getByLabel("Markdown preview")).toContainText("Files render documents");
+
+  await page.getByRole("button", { name: "locations.csv" }).click();
+  await expect(page.getByLabel("CSV preview")).toContainText("Library");
+  await expect(page.getByLabel("CSV preview")).toContainText("Cafe");
+
+  await page.getByRole("button", { name: "sample.pdf" }).click();
+  await expect(page.getByLabel("PDF preview")).toBeVisible();
+  await expect(page.locator("object.pdf-preview")).toHaveAttribute(
+    "data",
+    /^data:application\/pdf;base64,/
+  );
+
+  await page.getByRole("button", { name: "brief.docx" }).click();
+  await expect(page.getByLabel("DOCX preview")).toContainText("Quarterly planning note");
+
+  await page.getByRole("button", { name: "deck.pptx" }).click();
+  await expect(page.getByLabel("PowerPoint preview")).toContainText("Launch checklist");
+  await expect(page.getByLabel("PowerPoint preview")).toContainText("QA signoff");
+
+  await page.getByRole("button", { name: "tasks.xlsx" }).click();
+  await expect(page.getByLabel("Excel preview")).toContainText("Tasks");
+  await expect(page.getByLabel("Excel preview")).toContainText("Otter");
+  await expect(page.getByLabel("Excel preview")).toContainText("Ready");
 });
 
 test("Files tab applies the first watch event before fs_watch resolves", async ({ page }) => {
