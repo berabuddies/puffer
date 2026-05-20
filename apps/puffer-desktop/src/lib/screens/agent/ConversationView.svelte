@@ -150,6 +150,30 @@
       ? thinkingModels.find((model) => model.id === selectedModelId) ?? null
       : null
   );
+  let selectedProviderModelsLoaded = $derived(
+    !selectedProviderModelSourceId ||
+      providerIdsEquivalent(thinkingProviderId, selectedProviderModelSourceId)
+  );
+  let selectedModelReady = $derived.by(() => {
+    const modelId = selectedModelId?.trim();
+    if (!modelId) return false;
+    if (!selectedProviderModelSourceId || isCustomModelId(modelId)) return true;
+    if (!selectedProviderModelsLoaded || thinkingModels.length === 0) return false;
+    return thinkingModels.some((model) => model.id === modelId);
+  });
+  let selectedModelBlockedReason = $derived.by(() => {
+    const label = providerDisplayName(selectedProviderId);
+    const modelId = selectedModelId?.trim();
+    if (!modelId) {
+      return selectedProviderModelsLoaded
+        ? `Pick a ${label} model before sending.`
+        : `Loading ${label} models before sending.`;
+    }
+    if (isCustomModelId(modelId) || !selectedProviderModelSourceId) return null;
+    if (!selectedProviderModelsLoaded) return `Loading ${label} models before sending.`;
+    if (thinkingModels.length === 0) return `No ${label} models available.`;
+    return `Updating ${label} model before sending.`;
+  });
   let thinkingOptions = $derived(selectedModelInfo?.thinkingOptions ?? []);
   let thinkingAvailable = $derived(thinkingOptions.length > 0);
   let conversationStarted = $derived(
@@ -171,7 +195,6 @@
       (providerIdCanRunAgent(selectedProviderId, settingsSnapshot?.providers ?? []) &&
         providerIdInSet(selectedProviderId, authenticatedAgentProviderIds))
   );
-  let selectedModelReady = $derived(Boolean(selectedModelId?.trim()));
   let providerSwitchCanRecover = $derived(
     allowProviderSwitch && authenticatedAgentProviderIds.length > 0
   );
@@ -193,7 +216,7 @@
       : selectedProviderAuthenticated
       ? selectedModelReady
         ? null
-        : `Loading ${providerDisplayName(selectedProviderId)} models before sending.`
+        : selectedModelBlockedReason
       : providerSwitchCanRecover
         ? `Switch to a connected provider to continue this empty session.`
         : `Reconnect ${providerDisplayName(selectedProviderId)} to continue this session.`

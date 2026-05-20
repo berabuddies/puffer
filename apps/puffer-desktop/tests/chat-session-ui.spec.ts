@@ -3525,6 +3525,94 @@ test("composer replaces stale same-provider catalog model before submit", async 
   });
 });
 
+test("composer waits for stale OpenRouter model validation before submit", async ({ page }) => {
+  const model = (id: string, displayName = id) => ({
+    id,
+    displayName,
+    provider: "openrouter",
+    api: "openai-responses",
+    contextWindow: null,
+    maxOutputTokens: null,
+    supportsReasoning: false,
+    thinkingOptions: [],
+    defaultThinkingOptionId: null,
+    isDefault: true
+  });
+  const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "openrouter",
+        kind: "api_key",
+        email: null,
+        expiresAtMs: null,
+        scopes: [],
+        planType: null,
+        organizationName: null
+      }
+    ],
+    providers: [
+      {
+        id: "openrouter",
+        displayName: "OpenRouter",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 1,
+        authModes: ["api_key"],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ],
+    sessions: [
+      {
+        sessionId: "session-stale-openrouter-model",
+        displayName: "Stale OpenRouter model",
+        title: "Stale OpenRouter model",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "openrouter",
+        modelId: "openrouter/owl-alpha",
+        timeline: []
+      }
+    ],
+    providerModels: {
+      openrouter: [model("google/gemini-3.5-flash", "Google: Gemini 3.5 Flash")]
+    }
+  });
+  daemon.delayResponse(
+    "list_provider_models",
+    (request) => request.params.providerId === "openrouter",
+    260
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Stale OpenRouter model/);
+  const composer = page.locator(".pf-composer textarea");
+  await composer.fill("Use validated OpenRouter model");
+  await expect(page.getByRole("button", { name: "Send" })).toBeDisabled();
+  await expect(page.locator(".pf-composer-hint")).toContainText(
+    "Loading OpenRouter models before sending."
+  );
+
+  await expect(page.locator(".pf-composer .picker .trigger")).toContainText(
+    "google/gemini-3.5-flash"
+  );
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+  await page.getByRole("button", { name: "Send" }).click();
+
+  const request = await daemon.waitForRequest(
+    "run_agent_turn",
+    (item) => item.params.message === "Use validated OpenRouter model"
+  );
+  expect(request.params).toMatchObject({
+    providerId: "openrouter",
+    modelId: "google/gemini-3.5-flash"
+  });
+});
+
 test("model picker closes with Escape and can reopen", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
