@@ -278,6 +278,7 @@
 
 <style>
   .pdf-renderer {
+    container-type: inline-size;
     display: grid;
     grid-template-rows: auto auto minmax(0, 1fr);
     gap: 12px;
@@ -300,17 +301,17 @@
     width: 100%;
     max-width: 100%;
     padding: 10px;
-    border: 1px solid #94a3b8;
+    border: 1px solid #64748b;
     border-radius: 8px;
-    background: #f8fafc;
-    box-shadow: 0 14px 34px rgb(15 23 42 / 0.22);
+    background: #ffffff;
+    box-shadow: 0 14px 34px rgb(15 23 42 / 0.24);
     color: #0f172a;
     pointer-events: auto;
   }
 
   :global(html.dark) .pdf-controls-row {
-    border-color: #38bdf8;
-    background: #0f172a;
+    border-color: #64748b;
+    background: #020617;
     color: #f8fafc;
     box-shadow: 0 18px 40px rgb(0 0 0 / 0.42);
   }
@@ -404,6 +405,8 @@
     background: transparent;
     accent-color: #2563eb;
     cursor: pointer;
+    pointer-events: auto;
+    touch-action: none;
   }
 
   .pdf-zoom-value {
@@ -469,21 +472,21 @@
     width: fit-content;
     max-width: 100%;
     padding: 6px 11px;
-    border: 1px solid #f97316;
+    border: 1px solid #020617;
     border-radius: 999px;
-    background: #fff7ed;
-    color: #7c2d12;
+    background: #020617;
+    color: #ffffff;
     font-size: 12px;
     font-weight: 750;
     line-height: 1.35;
-    box-shadow: 0 0 0 2px rgb(124 45 18 / 0.14), 0 8px 18px rgb(15 23 42 / 0.2);
+    box-shadow: 0 0 0 2px rgb(2 6 23 / 0.16), 0 8px 18px rgb(15 23 42 / 0.22);
   }
 
   :global(html.dark) .pdf-status {
-    border-color: #f59e0b;
-    background: #fde68a;
-    color: #422006;
-    box-shadow: 0 0 0 2px rgb(253 230 138 / 0.22), 0 10px 20px rgb(0 0 0 / 0.45);
+    border-color: #f8fafc;
+    background: #f8fafc;
+    color: #020617;
+    box-shadow: 0 0 0 2px rgb(248 250 252 / 0.2), 0 10px 20px rgb(0 0 0 / 0.45);
   }
 
   .pdf-error {
@@ -509,7 +512,32 @@
       margin-left: 0;
     }
 
+    .pdf-status {
+      width: 100%;
+    }
+
     .pdf-zoom-range {
+      width: auto;
+    }
+  }
+
+  @container (max-width: 640px) {
+    .pdf-controls-row {
+      align-items: stretch;
+    }
+
+    .pdf-controls-main,
+    .pdf-status {
+      flex-basis: 100%;
+      margin-left: 0;
+    }
+
+    .pdf-status {
+      width: 100%;
+    }
+
+    .pdf-zoom-range {
+      flex-basis: 100%;
       width: auto;
     }
   }

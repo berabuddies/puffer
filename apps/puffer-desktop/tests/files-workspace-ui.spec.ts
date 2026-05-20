@@ -769,11 +769,14 @@ test("Files tab PDF controls stay usable in compact previews", async ({ page }) 
   await page.addInitScript(() => {
     window.localStorage.setItem("puffer-desktop:tweaks", JSON.stringify({ theme: "dark" }));
   });
-  await page.setViewportSize({ width: 860, height: 620 });
+  await page.setViewportSize({ width: 980, height: 620 });
   await daemon.open(page);
 
   await page.getByRole("button", { name: /^Browser regression\b/ }).first().click();
   await openFilesPanel(page);
+  await page.addStyleTag({
+    content: ".pf-files-pane .tree { width: 420px; }"
+  });
 
   await page.getByRole("button", { name: "compact-long.pdf" }).click();
   const pdfPreview = page.getByLabel("PDF preview");
@@ -788,42 +791,68 @@ test("Files tab PDF controls stay usable in compact previews", async ({ page }) 
   await expect(pages).toBeVisible();
 
   const metrics = await pageLimit.evaluate((node) => {
+    const parseRgb = (value: string): [number, number, number] => {
+      const match = value.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+      if (!match) return [0, 0, 0];
+      return [Number(match[1]), Number(match[2]), Number(match[3])];
+    };
+    const luminance = ([red, green, blue]: [number, number, number]): number => {
+      const channels = [red, green, blue].map((channel) => {
+        const normalized = channel / 255;
+        return normalized <= 0.03928
+          ? normalized / 12.92
+          : ((normalized + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+    };
     const status = node as HTMLElement;
     const preview = status.closest('[aria-label="PDF preview"]') as HTMLElement | null;
     const controlsRow = status.closest(".pdf-controls-row") as HTMLElement | null;
     const pagesRegion = preview?.querySelector(".pdf-page-scroll") as HTMLElement | null;
     const zoomIn = preview?.querySelector('button[aria-label="Zoom in"]') as HTMLElement | null;
+    const zoomRange = preview?.querySelector<HTMLInputElement>(".pdf-zoom-range") ?? null;
     const statusStyle = getComputedStyle(status);
     const controlsStyle = controlsRow ? getComputedStyle(controlsRow) : null;
     const previewStyle = preview ? getComputedStyle(preview) : null;
+    const foreground = luminance(parseRgb(statusStyle.color));
+    const background = luminance(parseRgb(statusStyle.backgroundColor));
     const statusRect = status.getBoundingClientRect();
     const controlsRect = controlsRow?.getBoundingClientRect();
     const pagesRect = pagesRegion?.getBoundingClientRect();
     const zoomRect = zoomIn?.getBoundingClientRect();
+    const rangeRect = zoomRange?.getBoundingClientRect();
     const zoomHit = zoomRect
       ? document.elementFromPoint(zoomRect.left + zoomRect.width / 2, zoomRect.top + zoomRect.height / 2)
       : null;
+    const rangeHit = rangeRect
+      ? document.elementFromPoint(rangeRect.left + rangeRect.width / 2, rangeRect.top + rangeRect.height / 2)
+      : null;
     return {
+      ratio: (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05),
       statusBackground: statusStyle.backgroundColor,
       statusColor: statusStyle.color,
       controlsBackground: controlsStyle?.backgroundColor ?? "",
       previewBackground: previewStyle?.backgroundColor ?? "",
       statusWidth: Math.round(statusRect.width),
+      controlsWidth: Math.round(controlsRect?.width ?? 0),
       controlsTop: Math.round(controlsRect?.top ?? 0),
       pagesTop: Math.round(pagesRect?.top ?? 0),
       pagesHeight: Math.round(pagesRegion?.clientHeight ?? 0),
       pagesScrollable: Boolean(pagesRegion && pagesRegion.scrollHeight > pagesRegion.clientHeight),
-      zoomHit: zoomHit === zoomIn || Boolean(zoomIn?.contains(zoomHit))
+      zoomHit: zoomHit === zoomIn || Boolean(zoomIn?.contains(zoomHit)),
+      rangeHit: rangeHit === zoomRange || Boolean(zoomRange?.contains(rangeHit))
     };
   });
+  expect(metrics.ratio).toBeGreaterThanOrEqual(7);
   expect(metrics.statusBackground).not.toBe(metrics.statusColor);
   expect(metrics.statusBackground).not.toBe(metrics.controlsBackground);
   expect(metrics.statusBackground).not.toBe(metrics.previewBackground);
-  expect(metrics.statusWidth).toBeGreaterThan(150);
+  expect(metrics.statusWidth).toBeGreaterThan(metrics.controlsWidth - 48);
   expect(metrics.pagesTop).toBeGreaterThan(metrics.controlsTop);
   expect(metrics.pagesHeight).toBeGreaterThan(120);
   expect(metrics.pagesScrollable).toBe(true);
   expect(metrics.zoomHit).toBe(true);
+  expect(metrics.rangeHit).toBe(true);
 
   const initialWidth = await page.locator('canvas[aria-label="PDF page 1"]').evaluate((canvas) =>
     Math.round(canvas.getBoundingClientRect().width)
