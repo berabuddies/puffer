@@ -494,6 +494,51 @@ fn pending_turn_opens_config_aliases_instead_of_queueing() {
 }
 
 #[test]
+fn pending_turn_opens_cost_panel_instead_of_mutating_transcript() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let mut state = sample_state();
+    state.cwd = tempdir.path().to_path_buf();
+    state.session.cwd = tempdir.path().to_path_buf();
+    state.push_message(MessageRole::User, "tell me about the code");
+    state.push_message(MessageRole::Assistant, "streaming partial");
+    let transcript_len = state.transcript.len();
+    let mut resources = sample_resources();
+    let mut providers = sample_providers();
+    let mut auth_store = sample_auth_store();
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let commands = supported_commands();
+    let mut tui = TuiState::default();
+    set_pending_turn(&mut tui);
+    tui.input = "/cost".to_string();
+    tui.cursor = tui.input.len();
+
+    handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &commands,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+
+    assert!(matches!(tui.overlay, Some(OverlayState::Text(..))));
+    assert!(tui.queued_prompts.is_empty());
+    assert_eq!(state.transcript.len(), transcript_len);
+    assert_eq!(
+        state.transcript.last().map(|message| message.text.as_str()),
+        Some("streaming partial")
+    );
+}
+
+#[test]
 fn try_open_overlay_builds_session_summary_panel() {
     let overlay = open_panel("/session");
     assert!(matches!(overlay, OverlayState::Text(..)));

@@ -131,6 +131,10 @@ pub(crate) fn try_open_overlay(
     }
     let text_overlay = match (name, args.is_empty()) {
         ("config", true) => Some(TextOverlay::open("Config", render_config_summary(state)?)),
+        ("cost", true) => Some(TextOverlay::open(
+            "Cost",
+            puffer_core::render_cost_summary(state),
+        )),
         ("context", true) => Some(TextOverlay::open(
             "Context",
             render_context_panel(state, resources, providers)?,
