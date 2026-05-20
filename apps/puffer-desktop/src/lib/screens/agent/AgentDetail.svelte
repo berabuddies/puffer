@@ -495,10 +495,10 @@
             <Icon name="x" size={12} />
           </button>
         {:else}
-          <span class="primary-title">{displayName}</span>
+          <span class="primary-title" title={displayName}>{displayName}</span>
           {#if displayTitle}
             <span class="sep">·</span>
-            <span class="title">{displayTitle}</span>
+            <span class="title" title={displayTitle}>{displayTitle}</span>
           {/if}
           {#if onRenameTitle}
             <button
@@ -764,8 +764,7 @@
     flex-direction: column;
     gap: 1px;
     min-width: 0;
-    flex: 0 1 auto;
-    max-width: 420px;
+    flex: 1 1 auto;
   }
   .pf-agent-identity .name {
     font-size: 14px;

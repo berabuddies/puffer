@@ -976,6 +976,44 @@ test("sidebar keeps full session titles for resizable space", async ({ page }) =
   await expect(title).toHaveText(longTitle);
 });
 
+test("agent detail header uses available space before title ellipsis", async ({ page }) => {
+  await page.setViewportSize({ width: 1500, height: 900 });
+  const longTitle =
+    "Long running browser investigation that should not be squeezed before the header runs out of room";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-long-detail-title",
+        displayName: longTitle,
+        title: longTitle,
+        cwd: "/tmp/puffer-active",
+        folderPath: "/tmp/puffer-active",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        activityStatus: "idle"
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page
+    .locator(".pf-sidebar-agent-row")
+    .filter({ hasText: longTitle })
+    .getByRole("button", { name: new RegExp(`^${longTitle}`) })
+    .click();
+
+  const title = page.locator(".pf-agent-detail .primary-title");
+  await expect(title).toHaveText(longTitle);
+  await expect(title).toHaveAttribute("title", longTitle);
+
+  const width = await title.evaluate((node) => {
+    const identity = node.closest(".pf-agent-identity") as HTMLElement | null;
+    return identity?.getBoundingClientRect().width ?? 0;
+  });
+  expect(width).toBeGreaterThan(600);
+});
+
 test("workspace agent cards keep full session titles for responsive ellipsis", async ({ page }) => {
   const longTitle =
     "Long workspace browser investigation title that should remain complete in the DOM and only ellipsize visually when space runs out";
