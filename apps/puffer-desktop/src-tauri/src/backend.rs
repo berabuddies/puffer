@@ -1060,28 +1060,49 @@ impl BackendState {
     }
 
     /// Runs a `puffer auth …` subcommand using the same binary
-    /// `daemon_launcher::resolve_puffer_binary()` would spawn. Inherits
-    /// stdio so the user sees the login URL print + any error output.
+    /// `daemon_launcher::resolve_puffer_binary()` would spawn.
     ///
-    /// `wait = true` blocks until the subcommand exits (with a 30 s cap)
-    /// — only safe for fast commands (`set-api-key`, `clear`).
-    /// `wait = false` detaches: spawn and return immediately. Required
-    /// for `auth login`, which sits on a localhost listener for up to
-    /// 120 s waiting for the browser callback; blocking the Tauri
-    /// command handler that long freezes the GUI. The frontend has to
-    /// re-poll `load_settings_snapshot` (manual Refresh button or its
-    /// own polling) to see the new credential.
+    /// `wait = true` blocks until the subcommand exits (with a 30 s
+    /// cap). Inherits stdio so the user sees output in the dev
+    /// terminal. Only safe for fast commands (`set-api-key`, `clear`).
+    ///
+    /// `wait = false` detaches: spawn, return immediately, and tail
+    /// the child's stdout in a background thread. When the child
+    /// prints a `https://…` URL on its own line (puffer's `Open this
+    /// URL in your browser:` block), corbina itself opens the URL via
+    /// macOS `open`. The CLI's own `open` invocation runs in a
+    /// non-GUI context (subprocess of a Tauri host) and on macOS that
+    /// path silently fails to route through LaunchServices; corbina
+    /// itself is a proper GUI app so its `open` call works.
+    ///
+    /// Required for `auth login`, which sits on a localhost listener
+    /// for up to 120 s waiting for the browser callback; blocking the
+    /// Tauri command handler that long freezes the GUI. The frontend
+    /// has to re-poll `load_settings_snapshot` (manual Refresh button
+    /// or its own polling) to see the new credential.
     fn run_puffer_cli_auth_subcommand(&self, args: &[&str], wait: bool) -> Result<()> {
         let binary = crate::daemon_launcher::resolve_puffer_binary()
             .context("failed to resolve puffer binary for auth subcommand")?;
+        let stdio_stdout = if wait {
+            std::process::Stdio::inherit()
+        } else {
+            std::process::Stdio::piped()
+        };
         let mut child = Command::new(&binary)
             .args(args)
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::inherit())
+            .stdout(stdio_stdout)
             .stderr(std::process::Stdio::inherit())
             .spawn()
             .with_context(|| format!("failed to spawn {} {:?}", binary.display(), args))?;
         if !wait {
+            if let Some(stdout) = child.stdout.take() {
+                std::thread::spawn(move || tail_auth_subcommand_stdout(stdout));
+            }
+            // Reap the child in the background so we don't leave a zombie.
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
             return Ok(());
         }
         let started = std::time::Instant::now();
@@ -1128,6 +1149,34 @@ fn ensure_session_cwd(cwd: &Path) -> Result<()> {
     }
     fs::create_dir_all(cwd)
         .with_context(|| format!("failed to create session cwd {}", cwd.display()))
+}
+
+/// Reads the detached `puffer auth login` child's stdout line by
+/// line and, when it sees a URL (puffer's `Open this URL in your
+/// browser:` block emits one `https://…` line followed by an empty
+/// line), opens that URL via macOS `open` from corbina's own
+/// process. Other stdout lines are forwarded to corbina's stderr so
+/// they remain visible in dev logs without contending with the
+/// detached child's own ttyless context.
+fn tail_auth_subcommand_stdout(stdout: std::process::ChildStdout) {
+    let reader = BufReader::new(stdout);
+    let mut opened = false;
+    for line in reader.lines().map_while(Result::ok) {
+        let trimmed = line.trim();
+        if !opened && trimmed.starts_with("https://") {
+            opened = true;
+            let target = trimmed.to_string();
+            eprintln!("[worldagent oauth] opening browser at {target}");
+            match Command::new("open").arg(&target).spawn() {
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!("[worldagent oauth] failed to launch `open`: {error}");
+                }
+            }
+            continue;
+        }
+        eprintln!("[worldagent oauth] {line}");
+    }
 }
 
 fn run_agent_turn_thread(
