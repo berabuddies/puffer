@@ -1824,6 +1824,16 @@
     remainingLiveItems: TimelineItem[]
   ) {
     if (!hasTurnRuntimeState() || activityStatusIsActive(activityStatus)) return;
+    const orphanedPendingStart =
+      currentTurnId === null &&
+      turnStartedAtMs !== null &&
+      remainingLiveItems.length === 0 &&
+      Object.keys(turnPermissionLookup).length === 0 &&
+      Object.keys(turnQuestionLookup).length === 0;
+    if (orphanedPendingStart) {
+      clearTurnRuntimeState(sessionId, null);
+      return;
+    }
     if (remainingSubmittedMessages.length > 0 || remainingLiveItems.length > 0) return;
     clearTurnRuntimeState(sessionId, currentTurnId);
   }

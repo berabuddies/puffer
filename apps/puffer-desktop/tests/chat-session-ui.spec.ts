@@ -3964,6 +3964,62 @@ test("send in flight stays pending across backend reconnect until transcript rel
   });
 });
 
+test("lost turn-start response clears pending start after idle reconnect", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-lost-start",
+        displayName: "Lost start",
+        title: "Lost start",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        activityStatus: "idle",
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  daemon.delayResponse(
+    "run_agent_turn",
+    (request) => request.params.sessionId === "session-lost-start",
+    500
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Lost start/);
+  await page.locator(".pf-composer textarea").fill("lost during start");
+  await page.getByRole("button", { name: "Send" }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.message === "lost during start"
+  );
+
+  await daemon.dropConnections();
+  await expect(page.locator(".connection-banner")).toContainText("Puffer backend disconnected.");
+  await expect(page.getByRole("button", { name: "Stop turn" })).toBeDisabled();
+
+  daemon.allowConnections();
+  await page.getByRole("button", { name: "Reconnect backend" }).click();
+  await expect(page.locator(".connection-banner")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Stop turn" })).toHaveCount(0);
+  await expect(page.getByText("lost during start")).toBeVisible();
+
+  await page.locator(".pf-composer textarea").fill("retry after reconnect");
+  await page.getByRole("button", { name: "Send" }).click();
+  const retryRequest = await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.message === "retry after reconnect"
+  );
+  expect(retryRequest.params).toMatchObject({
+    sessionId: "session-lost-start"
+  });
+});
+
 test("composer sends fast mode and permission mode with the turn request", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
