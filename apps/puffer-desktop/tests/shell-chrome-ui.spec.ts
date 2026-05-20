@@ -91,6 +91,23 @@ test("sidebar primary navigation exposes the current page", async ({ page }) => 
   await expect(settings).toHaveAttribute("aria-current", "page");
 });
 
+test("sidebar account chip opens account settings", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const sidebar = page.locator(".pf-sidebar");
+  const account = sidebar.getByRole("button", { name: "Open account for tester@example.com" });
+  await expect(account).toBeVisible();
+  await expect(account).toContainText("tester@example.com");
+
+  await account.click();
+
+  await expect(sidebar.getByRole("button", { name: "Settings", exact: true })).toHaveAttribute("aria-current", "page");
+  await expect(page.getByRole("heading", { name: "General" })).toBeVisible();
+  await expect(page.getByText("Signed-in providers and session controls.")).toBeVisible();
+});
+
 test("desktop user-visible copy uses Puffer branding", async () => {
   const userFacingFiles = [
     "src/App.svelte",

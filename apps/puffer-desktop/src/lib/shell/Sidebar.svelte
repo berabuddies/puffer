@@ -320,7 +320,13 @@
 
   {#if user}
     <div class="pf-sidebar-section" style="border-top: 1px solid var(--border);">
-      <div class="pf-sidebar-item" style="cursor: default;">
+      <button
+        type="button"
+        class="pf-sidebar-item pf-sidebar-user"
+        aria-label={`Open account for ${user.name}`}
+        title={`Open account for ${user.name}`}
+        onclick={() => onSelectScreen("settings")}
+      >
         <span
           style="width: 24px; height: 24px; border-radius: 6px; background: color-mix(in oklab, var(--puffer-accent) 18%, var(--background)); display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; color: var(--puffer-accent); flex-shrink: 0;"
         >{user.initials}</span>
@@ -329,7 +335,7 @@
           <span class="pf-task-status">{user.meta}</span>
         </div>
         <Icon name="moreH" size={14} color="var(--muted-foreground)" />
-      </div>
+      </button>
     </div>
   {/if}
   <button

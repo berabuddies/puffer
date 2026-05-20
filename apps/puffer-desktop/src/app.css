@@ -397,6 +397,13 @@ html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
   color: var(--muted-foreground);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+.pf-sidebar-user {
+  margin: 0;
+}
+.pf-sidebar-user svg {
+  margin-left: auto;
+  flex-shrink: 0;
+}
 
 .pf-sidebar-agents { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .pf-sidebar-filters {
