@@ -192,6 +192,8 @@
     class:open
     onclick={toggle}
     disabled={disabled}
+    aria-haspopup="listbox"
+    aria-expanded={open}
     title={providerLabel ? `${providerLabel} · ${activeModel || "Pick model"}` : "Pick a model"}
   >
     <Icon name="sparkles" size={11} color="var(--muted-foreground)" />

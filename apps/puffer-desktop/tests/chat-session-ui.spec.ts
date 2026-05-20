@@ -3533,13 +3533,19 @@ test("model picker closes with Escape and can reopen", async ({ page }) => {
   await openSession(page, /Browser regression/);
   const picker = page.locator(".pf-composer .picker");
   const trigger = picker.locator(".trigger");
+  await expect(trigger).toHaveAttribute("aria-haspopup", "listbox");
+  await expect(trigger).toHaveAttribute("aria-expanded", "false");
+
   await trigger.click();
+  await expect(trigger).toHaveAttribute("aria-expanded", "true");
   await expect(picker.locator(".menu")).toBeVisible();
 
   await page.keyboard.press("Escape");
+  await expect(trigger).toHaveAttribute("aria-expanded", "false");
   await expect(picker.locator(".menu")).toHaveCount(0);
 
   await trigger.click();
+  await expect(trigger).toHaveAttribute("aria-expanded", "true");
   await expect(picker.locator(".menu")).toBeVisible();
 });
 
