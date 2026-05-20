@@ -666,7 +666,7 @@
       favicon: faviconFor(nextUrl)
     });
     currentUrl = nextUrl;
-    urlDraft = nextUrl;
+    if (!isAddressEditing()) urlDraft = nextUrl;
     title = nextTitle;
     loading = false;
     error = null;
@@ -714,7 +714,7 @@
     });
     if (tabId !== activeTabId) return;
     currentUrl = nextUrl;
-    urlDraft = nextUrl;
+    if (!isAddressEditing()) urlDraft = nextUrl;
     title = nextTitle;
     loading = next.loading;
     error = nextError;
@@ -788,6 +788,7 @@
     event.preventDefault();
     const requestedTab = activeTab;
     if (!connected || !activeTabId || !requestedTab) return;
+    addressInput?.blur();
     const requestedGeneration = sessionGeneration;
     const requestedTabId = requestedTab.id;
     const requestedBackendSessionId = requestedTab.backendSessionId || backendSessionId(requestedTabId);
