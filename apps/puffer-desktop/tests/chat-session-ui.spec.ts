@@ -6516,6 +6516,81 @@ test("model guard preserves session model not in provider advertised list", asyn
   });
 });
 
+test("model guard preserves OpenRouter auto route model ids", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "openrouter",
+        kind: "api_key",
+        email: null,
+        expiresAtMs: null,
+        scopes: [],
+        planType: null,
+        organizationName: null
+      }
+    ],
+    providers: [
+      {
+        id: "openrouter",
+        displayName: "OpenRouter",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 1,
+        authModes: ["api_key"],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ],
+    sessions: [
+      {
+        sessionId: "session-openrouter-auto-model",
+        displayName: "OpenRouter auto model",
+        title: "OpenRouter auto model",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "openrouter",
+        modelId: "openrouter/auto",
+        timeline: []
+      }
+    ],
+    providerModels: {
+      openrouter: [
+        {
+          id: "google/gemini-3.5-flash",
+          displayName: "Google: Gemini 3.5 Flash",
+          provider: "openrouter",
+          api: "openai-responses",
+          contextWindow: null,
+          maxOutputTokens: null,
+          supportsReasoning: false,
+          thinkingOptions: [],
+          defaultThinkingOptionId: null,
+          isDefault: true
+        }
+      ]
+    }
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /OpenRouter auto model/);
+  await expect(page.locator(".pf-composer .picker .trigger")).toContainText("openrouter/auto");
+  await page.locator(".pf-composer textarea").fill("use auto route");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  const request = await daemon.waitForRequest(
+    "run_agent_turn",
+    (item) => item.params.message === "use auto route"
+  );
+  expect(request.params).toMatchObject({
+    providerId: "openrouter",
+    modelId: "openrouter/auto"
+  });
+});
+
 test("cancel turn for already-completed turn clears stuck cancel state", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

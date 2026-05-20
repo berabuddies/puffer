@@ -170,7 +170,7 @@
   let selectedModelReady = $derived.by(() => {
     const modelId = selectedModelId?.trim();
     if (!modelId) return false;
-    if (!selectedProviderModelSourceId || isCustomModelId(modelId)) return true;
+    if (!selectedProviderModelSourceId || isCustomModelId(modelId, selectedProviderModelSourceId)) return true;
     if (selectedProviderModelsLoadFailed) return true;
     if (!selectedProviderModelsLoaded || thinkingModels.length === 0) return false;
     return thinkingModels.some((model) => model.id === modelId && modelSupportsAgentTools(model));
@@ -186,7 +186,7 @@
         ? `Pick a ${label} model before sending.`
         : `Loading ${label} models before sending.`;
     }
-    if (isCustomModelId(modelId) || !selectedProviderModelSourceId) return null;
+    if (isCustomModelId(modelId, selectedProviderModelSourceId) || !selectedProviderModelSourceId) return null;
     if (selectedProviderModelsLoadFailed) return null;
     if (!selectedProviderModelsLoaded) return `Loading ${label} models before sending.`;
     if (thinkingModels.length === 0) return `No ${label} models available.`;
@@ -275,20 +275,32 @@
     const prefix = trimmed.slice(0, slashIndex);
     const model = trimmed.slice(slashIndex + 1).trim();
     const provider = providerId?.trim();
+    const canonicalPrefix = canonicalDaemonProviderId(prefix).toLowerCase();
+    const canonicalProvider = provider ? canonicalDaemonProviderId(provider).toLowerCase() : "";
     if (
       provider &&
       model &&
-      canonicalDaemonProviderId(prefix).toLowerCase() ===
-        canonicalDaemonProviderId(provider).toLowerCase()
+      canonicalPrefix === canonicalProvider &&
+      shouldStripModelPrefix(canonicalProvider)
     ) {
       return model;
     }
     return trimmed;
   }
 
-  function isCustomModelId(modelId: string | null | undefined): boolean {
+  function shouldStripModelPrefix(canonicalProviderId: string): boolean {
+    return canonicalProviderId === "openai" || canonicalProviderId === "anthropic";
+  }
+
+  function isCustomModelId(
+    modelId: string | null | undefined,
+    providerId: string | null | undefined = null
+  ): boolean {
     const trimmed = modelId?.trim();
     if (!trimmed) return false;
+    if (providerIdsEquivalent(providerId, "openrouter") && trimmed === "openrouter/auto") {
+      return true;
+    }
     return trimmed.includes(":") || trimmed.startsWith("ft-");
   }
 
@@ -688,7 +700,7 @@
       defaultCanonical &&
       selectedModelId === normalizeModelIdForProvider(selectedProviderId, defaultModel) &&
       selectedCanonical !== defaultCanonical;
-    if (!isDefaultFromOtherProvider && isCustomModelId(selectedModelId)) return;
+    if (!isDefaultFromOtherProvider && isCustomModelId(selectedModelId, selectedProviderModelSourceId)) return;
     const fallback =
       thinkingModels.find((model) => model.isDefault && modelSupportsAgentTools(model)) ??
       thinkingModels.find(modelSupportsAgentTools) ??
