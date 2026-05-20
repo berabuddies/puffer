@@ -68,6 +68,34 @@ fn auth_required_provider_registry() -> ProviderRegistry {
     providers
 }
 
+fn openai_provider_registry() -> ProviderRegistry {
+    let mut providers = ProviderRegistry::default();
+    providers.register(ProviderDescriptor {
+        id: "openai".to_string(),
+        display_name: "OpenAI".to_string(),
+        base_url: "https://api.openai.com".to_string(),
+        default_api: "openai-responses".to_string(),
+        auth_modes: vec![AuthMode::ApiKey, AuthMode::OAuth],
+        headers: Default::default(),
+        query_params: Default::default(),
+        discovery: None,
+        models: vec![ModelDescriptor {
+            id: "gpt-5".to_string(),
+            display_name: "GPT-5".to_string(),
+            provider: "openai".to_string(),
+            api: "openai-responses".to_string(),
+            context_window: 200_000,
+            max_output_tokens: 8_192,
+            supports_reasoning: true,
+            compat: None,
+            input: vec![puffer_provider_registry::Modality::Text],
+            cost: None,
+        }],
+        chat_completions_path: None,
+    });
+    providers
+}
+
 fn resources_with_bash_tool() -> LoadedResources {
     LoadedResources {
         tools: vec![LoadedItem {
@@ -607,6 +635,87 @@ fn handle_prompt_submit_allows_read_only_slash_while_turn_is_running() {
     assert!(tui.has_pending_submit());
     assert!(tui.queued_prompts.is_empty());
     assert!(matches!(tui.overlay, Some(OverlayState::Status(..))));
+}
+
+#[test]
+fn queued_empty_model_command_opens_picker_after_turn_finishes() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = sample_state(session, tempdir.path());
+    state.current_provider = Some("openai".to_string());
+    state.current_model = Some("gpt-5".to_string());
+    let mut resources = LoadedResources::default();
+    let mut providers = openai_provider_registry();
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let mut auth_store = AuthStore::default();
+    let mut tui = TuiState::default();
+    let (_sender, receiver) = mpsc::channel();
+    tui.pending_submit = Some(PendingSubmit {
+        prompt: "first".to_string(),
+        receiver,
+        transcript_persisted_len: state.transcript.len(),
+        pending_tool_calls: Vec::new(),
+        rendered_tool_invocations: 0,
+        started_at: std::time::Instant::now(),
+        thinking_active: false,
+        status_hint: None,
+        cancel: puffer_core::CancelToken::new(),
+    });
+
+    handle_prompt_submit(
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        "/model".to_string(),
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        tui.queued_prompts.front().map(String::as_str),
+        Some("/model")
+    );
+
+    tui.pending_submit = None;
+    assert!(
+        submit_next_queued_prompt(
+            &mut state,
+            &mut resources,
+            &mut providers,
+            &mut auth_store,
+            &auth_path,
+            &session_store,
+            &mut tui,
+            true,
+        )
+        .unwrap()
+    );
+
+    match tui.overlay {
+        Some(OverlayState::ModelPicker {
+            provider_id,
+            entries,
+            ..
+        }) => {
+            assert_eq!(provider_id, "openai");
+            assert!(entries.iter().any(|entry| entry.selector == "gpt-5"));
+        }
+        other => panic!("expected model picker, got {other:?}"),
+    }
+    assert!(
+        !state
+            .transcript
+            .iter()
+            .any(|message| message.text.contains("Current model"))
+    );
 }
 
 #[test]

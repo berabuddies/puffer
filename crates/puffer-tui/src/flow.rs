@@ -491,6 +491,17 @@ pub(crate) fn submit_next_queued_prompt(
     let Some(prompt) = tui.dequeue_prompt() else {
         return Ok(false);
     };
+    if try_open_overlay(
+        state,
+        resources,
+        providers,
+        auth_store,
+        session_store,
+        tui,
+        &prompt,
+    )? {
+        return Ok(true);
+    }
     handle_prompt_submit(
         state,
         resources,
