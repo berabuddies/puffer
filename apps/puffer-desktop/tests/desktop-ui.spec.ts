@@ -856,11 +856,14 @@ test("Browser tab list event can clear stale tabs", async ({ page }) => {
     request.params.sessionId === "session-browser:browser:tab-1"
   );
   await expect(page.locator(".pf-browser-tab")).toHaveCount(1);
+  await page.getByRole("button", { name: "DevTools" }).click();
+  await expect(page.locator(".pf-browser-devtools")).toBeVisible();
 
   daemon.emit("browser:session-browser:tabs", { activeTabId: null, tabs: [] });
 
   await expect(page.locator(".pf-browser-tab")).toHaveCount(0);
   await expect(page.locator(".pf-browser-status")).toHaveText("No pages");
+  await expect(page.locator(".pf-browser-devtools")).toHaveCount(0);
 });
 
 test("Browser paste does not send input after tabs are cleared", async ({ page }) => {

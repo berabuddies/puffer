@@ -246,6 +246,8 @@
       title = "";
       currentUrl = "about:blank";
       urlDraft = "about:blank";
+      showDevtools = false;
+      devtoolsView = "console";
       pendingBrowserCommands = [];
       resetPointer(activePointerId ?? undefined);
       disposeActiveSubscriptions();
