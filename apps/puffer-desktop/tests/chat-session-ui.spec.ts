@@ -458,6 +458,16 @@ test("sidebar keeps non-selected running agent live while another session is ope
     reason: "turn_complete"
   });
   await expect(alphaRow.locator('.state[data-state="idle"]')).toContainText("idle");
+
+  await openSession(page, /Alpha sidebar live/);
+  await expect(
+    page.locator('.pf-msg[data-role="user"]').filter({ hasText: "Keep alpha running in the sidebar" })
+  ).toHaveCount(1);
+  await expect(alphaRow.locator('.state[data-state="idle"]')).toContainText("idle");
+  await expect(page.locator(".pf-agent-status-pill")).toContainText("Idle");
+  await expect(page.getByRole("button", { name: "Stop turn" })).toHaveCount(0);
+  await page.locator(".pf-composer textarea").fill("Follow-up after sidebar completion");
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
 });
 
 test("composer enter does not submit while IME composition is active", async ({ page }) => {

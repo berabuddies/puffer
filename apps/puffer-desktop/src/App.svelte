@@ -380,6 +380,7 @@
       case "turn-complete":
       case "turn-error":
         clearLiveSidebarAgentState(sid, ev.turnId);
+        clearCachedTurnRuntimeState(sid);
         break;
       case "usage":
         break;
@@ -852,11 +853,14 @@
       // workspace board + sidebar. Coalesced by `refreshGroups`'s own
       // loading guard.
       client.on<{ sessionId?: string; reason?: string }>("workspace:sessions:changed", (event) => {
+        const settled =
+          event?.reason === "turn_complete" || event?.reason === "turn_error";
         if (
           event?.sessionId &&
-          (event.reason === "turn_complete" || event.reason === "turn_error")
+          settled
         ) {
           clearLiveSidebarAgentState(event.sessionId, null);
+          clearCachedTurnRuntimeState(event.sessionId);
         }
         void refreshGroups();
         if (
@@ -1369,6 +1373,23 @@
     turnStatusHint = null;
     turnPermissionLookup = {};
     turnQuestionLookup = {};
+  }
+
+  function clearCachedTurnRuntimeState(sessionId: string) {
+    const cached = transientConversationStates[sessionId];
+    if (!cached) return;
+    setTransientConversationState(sessionId, {
+      ...cached,
+      liveStreamItems: [],
+      replayTextByTurn: {},
+      turnPermissionLookup: {},
+      turnQuestionLookup: {},
+      currentTurnId: null,
+      cancelingTurnId: null,
+      turnStartedAtMs: null,
+      turnThinking: false,
+      turnStatusHint: null
+    });
   }
 
   function clearSettledLoadedTurnState(
