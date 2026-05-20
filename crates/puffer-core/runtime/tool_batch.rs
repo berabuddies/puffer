@@ -345,11 +345,32 @@ fn execute_tool_batch_serial(
         ) {
             Ok(exec) => exec,
             Err(error) => {
+                let output_text = process_tool_result(
+                    &format!("Tool execution failed: {error}"),
+                    MAX_TOOL_RESULT_CHARS,
+                    &inputs.state.session.id,
+                );
                 if inputs.observability.is_some() {
-                    tool_span.mark_error(error.to_string());
+                    tool_span.set_content(
+                        puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
+                        puffer_observability::ContentKind::ToolOutput {
+                            tool_id: call.tool_id.clone(),
+                        },
+                        &output_text,
+                    );
+                    tool_span.set_str("puffer.tool.success", "false".to_string());
+                    tool_span.mark_error("tool_failed".to_string());
                     tool_span.end();
                 }
-                return Err(error);
+                invocations.push(ToolInvocation {
+                    call_id: call.call_id.clone(),
+                    tool_id: call.tool_id.clone(),
+                    input: call.input.clone(),
+                    output: output_text,
+                    success: false,
+                    terminate: false,
+                });
+                continue;
             }
         };
         let terminate = extract_terminate(&execution.output.metadata);
