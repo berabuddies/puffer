@@ -449,6 +449,31 @@ test("renders Browser devtools events from the daemon stream", async ({ page }) 
   await expect(page.getByText("hello from browser fixture")).toBeVisible();
 });
 
+test("Browser devtools controls expose selected state", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open");
+
+  const devtoolsToggle = page.getByRole("button", { name: "DevTools" });
+  await expect(devtoolsToggle).toHaveAttribute("aria-pressed", "false");
+
+  await devtoolsToggle.click();
+  await expect(devtoolsToggle).toHaveAttribute("aria-pressed", "true");
+
+  const consoleView = page.getByRole("button", { name: "Console" });
+  const networkView = page.getByRole("button", { name: "Network" });
+  await expect(consoleView).toHaveAttribute("aria-pressed", "true");
+  await expect(networkView).toHaveAttribute("aria-pressed", "false");
+
+  await networkView.click();
+  await expect(consoleView).toHaveAttribute("aria-pressed", "false");
+  await expect(networkView).toHaveAttribute("aria-pressed", "true");
+});
+
 test("late Browser devtools events do not leak into a switched agent", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
