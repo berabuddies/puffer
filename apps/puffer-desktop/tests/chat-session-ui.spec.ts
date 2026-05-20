@@ -4358,6 +4358,67 @@ test("composer waits for stale OpenRouter model validation before submit", async
   });
 });
 
+test("composer can send persisted model when catalog validation fails", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "openrouter",
+        kind: "api_key",
+        email: null,
+        expiresAtMs: null,
+        scopes: [],
+        planType: null,
+        organizationName: null
+      }
+    ],
+    providers: [
+      {
+        id: "openrouter",
+        displayName: "OpenRouter",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 1,
+        authModes: ["api_key"],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ],
+    sessions: [
+      {
+        sessionId: "session-catalog-validation-failure",
+        displayName: "Catalog validation failure",
+        title: "Catalog validation failure",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "openrouter",
+        modelId: "google/gemini-3.5-flash",
+        timeline: []
+      }
+    ]
+  });
+  daemon.failNext("list_provider_models", "OpenRouter catalog unavailable");
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Catalog validation failure/);
+  const composer = page.locator(".pf-composer textarea");
+  await composer.fill("Use persisted model");
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+  await page.getByRole("button", { name: "Send" }).click();
+
+  const request = await daemon.waitForRequest(
+    "run_agent_turn",
+    (item) => item.params.message === "Use persisted model"
+  );
+  expect(request.params).toMatchObject({
+    providerId: "openrouter",
+    modelId: "google/gemini-3.5-flash"
+  });
+});
+
 test("composer skips OpenRouter models that do not support agent tools", async ({ page }) => {
   const model = (
     id: string,

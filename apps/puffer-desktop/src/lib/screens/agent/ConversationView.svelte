@@ -160,10 +160,18 @@
     !selectedProviderModelSourceId ||
       providerIdsEquivalent(thinkingProviderId, selectedProviderModelSourceId)
   );
+  let selectedProviderModelsLoadFailed = $derived(
+    Boolean(
+      thinkingLoadError &&
+        selectedProviderModelSourceId &&
+        providerIdsEquivalent(thinkingProviderId, selectedProviderModelSourceId)
+    )
+  );
   let selectedModelReady = $derived.by(() => {
     const modelId = selectedModelId?.trim();
     if (!modelId) return false;
     if (!selectedProviderModelSourceId || isCustomModelId(modelId)) return true;
+    if (selectedProviderModelsLoadFailed) return true;
     if (!selectedProviderModelsLoaded || thinkingModels.length === 0) return false;
     return thinkingModels.some((model) => model.id === modelId && modelSupportsAgentTools(model));
   });
@@ -179,6 +187,7 @@
         : `Loading ${label} models before sending.`;
     }
     if (isCustomModelId(modelId) || !selectedProviderModelSourceId) return null;
+    if (selectedProviderModelsLoadFailed) return null;
     if (!selectedProviderModelsLoaded) return `Loading ${label} models before sending.`;
     if (thinkingModels.length === 0) return `No ${label} models available.`;
     const current = thinkingModels.find((model) => model.id === modelId);
