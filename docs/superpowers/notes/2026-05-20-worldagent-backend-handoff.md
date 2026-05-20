@@ -160,16 +160,34 @@ Body:  {"key_alias": "puffer-<uuid>"}
 
 **推荐方案 A**，因为 puffer 是桌面端、没 BFF，多一跳 latency 没必要；并且 Auth Station JWT 已经是 RS256 + JWKS 签发的标准 OIDC token，外部服务做 JWT 验签是常态。
 
+### 2026-05-20 实测：完整跑通 e2e 流程，得到决定性证据
+
+puffer 端加了 `PUFFER_WORLDAGENT_TEAM_ID` env 兜底（先不依赖 JWT 的 `default_team_id`），实际触发了一次完整 OAuth → control-api 调用：
+
+```
+POST https://control-api-pre-7f819c.worldrouter.ai/platform/v1/teams/6afdef35-ea87-54a9-9662-8b8bf090c0fd/keys
+Authorization: Bearer <Auth Station JWT, RS256, iss=auth.worldrouter.ai, aud=worldclaw>
+Body: {"key_alias":"puffer-<uuid>"}
+
+← 401 Unauthorized
+  {"detail":{"code":"litellm_unauthorized","message":"Invalid Infer session token"}}
+```
+
+→ **决定性证据**：control-api 路径上挂着一个 litellm gateway，它消费的是内部 Infer session token（HS256, `iss=infer-session`），**不消费 Auth Station JWT**（RS256, `iss=auth.worldrouter.ai`）。即使 puffer 提供了正确的 `team_id`，control-api 也会拒签。
+
+→ 上面"修复方案"表里方案 A / B 不只是「JWT 缺字段」的问题，而是「control-api 不认这条 token」的问题。两个方案都还成立，但 **B 在实现上可能更接近现状**：infer-monorepo 已经有自己的 session token 签发机制，加一个 `POST /auth/exchange { authStationToken }` → 复用现有 litellm 验签链路，比改 control-api 验签更小动作。
+
 ### 验证修复
 
 修完后 puffer 端 e2e 跑通的判据：
 
 ```bash
 cd /Users/shun/Data/Code/tomo/agentenv/puffer
-PUFFER_WORLDAGENT_AUTH_URL=https://auth.worldrouter.ai \
-PUFFER_WORLDAGENT_CONTROL_URL=https://control-api-pre-7f819c.worldrouter.ai \
+PUFFER_WORLDAGENT_TEAM_ID=<your team uuid>  # 方案 A 落地后可去掉
   cargo run -p puffer-cli -- auth login worldagent
 ```
+
+期望 stdout 末行：`stored oauth credentials for worldagent`；`~/Library/Application Support/com.tomo.puffer/auth.json` 应该包含 `worldagent → {kind: api_key, key: sk-worldrouter-...}`。
 
 浏览器打开 puffer 打印的 URL → 用一个 Production 已有的账号登录 → puffer 终端打印：
 

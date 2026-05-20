@@ -329,15 +329,17 @@ pub fn exchange_jwt_for_api_key(access_token: &str) -> Result<ExchangedApiKey> {
         .send()
         .context("failed to send worldagent key creation request")?;
     let status = response.status();
-    let payload: KeyCreationResponse = response
-        .json()
-        .context("failed to parse worldagent key creation response")?;
+    let body = response
+        .text()
+        .context("failed to read worldagent key creation response body")?;
     if !status.is_success() {
         return Err(anyhow!(
-            "worldagent key creation failed with status {status}: {}",
-            payload.error.unwrap_or_default()
+            "worldagent key creation failed: POST {url} -> {status}\nresponse body: {body}"
         ));
     }
+    let payload: KeyCreationResponse = serde_json::from_str(&body).with_context(|| {
+        format!("failed to parse worldagent key creation response body: {body}")
+    })?;
     let api_key = payload
         .key
         .ok_or_else(|| anyhow!("worldagent key creation response missing `key`"))?;
