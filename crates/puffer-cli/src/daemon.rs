@@ -1710,7 +1710,7 @@ fn resolve_create_session_model_id(
     requested_model: Option<&str>,
 ) -> Result<Option<String>> {
     let selected = requested_model
-        .and_then(|model| normalize_provider_model_id(&provider.id, model))
+        .and_then(|model| normalize_provider_model_id(provider, model))
         .or_else(|| {
             config
                 .default_model
@@ -1721,7 +1721,7 @@ fn resolve_create_session_model_id(
                         .as_deref()
                         .is_some_and(|default| desktop_provider_ids_match(default, &provider.id))
                 })
-                .and_then(|model| normalize_provider_model_id(&provider.id, model))
+                .and_then(|model| normalize_provider_model_id(provider, model))
         })
         .or_else(|| provider.models.first().map(|model| model.id.clone()));
 
@@ -1734,19 +1734,44 @@ fn resolve_create_session_model_id(
     anyhow::bail!("unknown model `{model_id}` for provider `{}`", provider.id)
 }
 
-fn normalize_provider_model_id(provider_id: &str, model_id: &str) -> Option<String> {
+fn normalize_provider_model_id(provider: &ProviderDescriptor, model_id: &str) -> Option<String> {
     let trimmed = model_id.trim();
     if trimmed.is_empty() {
         return None;
     }
+    if provider.models.iter().any(|model| model.id == trimmed) {
+        return Some(trimmed.to_string());
+    }
     if let Some((prefix, model)) = trimmed.split_once('/') {
-        let prefix = canonical_desktop_provider_id(prefix);
-        if prefix == provider_id && !model.trim().is_empty() {
-            return Some(model.trim().to_string());
+        let model = model.trim();
+        if model.is_empty() {
+            return None;
         }
-        return None;
+        let prefix = canonical_desktop_provider_id(prefix);
+        let provider_id = canonical_desktop_provider_id(&provider.id);
+        if prefix != provider_id {
+            return None;
+        }
+        if provider
+            .models
+            .iter()
+            .any(|descriptor| descriptor.id == model)
+        {
+            return Some(model.to_string());
+        }
+        if desktop_provider_model_prefix_is_alias(&provider_id) {
+            return Some(model.to_string());
+        }
+        return Some(trimmed.to_string());
     }
     Some(trimmed.to_string())
+}
+
+fn desktop_provider_model_prefix_is_alias(provider_id: &str) -> bool {
+    matches!(
+        canonical_desktop_provider_id(provider_id).as_str(),
+        "anthropic" | "openai"
+    )
 }
 
 /// Reports the daemon's default workspace — the cwd it booted in, which is
@@ -2825,8 +2850,11 @@ fn apply_turn_model_selection(
 ) -> Result<()> {
     let requested = if let Some(provider_id) = provider_id {
         let provider_id = canonical_desktop_provider_id(provider_id);
-        let model_id = normalize_provider_model_id(&provider_id, model_id)
-            .unwrap_or_else(|| model_id.to_string());
+        let provider = providers
+            .provider(&provider_id)
+            .with_context(|| format!("provider {provider_id} not found"))?;
+        let model_id =
+            normalize_provider_model_id(provider, model_id).unwrap_or_else(|| model_id.to_string());
         format!("{provider_id}/{model_id}")
     } else {
         model_id.to_string()
@@ -2889,6 +2917,7 @@ fn resolve_turn_model(providers: &ProviderRegistry, requested: &str) -> Result<(
             .models
             .iter()
             .find(|model| model.id == model_id)
+            .or_else(|| provider.models.iter().find(|model| model.id == requested))
             .with_context(|| format!("model {requested} not found"))?;
         (provider.id.clone(), model.id.clone())
     } else {
@@ -3653,6 +3682,46 @@ mod tests {
     }
 
     #[test]
+    fn turn_request_options_preserve_custom_provider_slash_model_ids() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let metadata = SessionMetadata {
+            id: Uuid::new_v4(),
+            display_name: None,
+            generated_title: None,
+            cwd: temp.path().to_path_buf(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        };
+        let mut state = AppState::new(PufferConfig::default(), temp.path().to_path_buf(), metadata);
+
+        let mut providers = ProviderRegistry::new();
+        providers.register(provider("openrouter", &["openrouter/owl-alpha"]));
+        let options = TurnRequestOptions::from_params(&json!({
+            "providerId": "openrouter",
+            "modelId": "openrouter/owl-alpha",
+        }));
+
+        apply_turn_request_options(&mut state, &providers, &options).expect("turn options");
+
+        assert_eq!(state.current_provider.as_deref(), Some("openrouter"));
+        assert_eq!(
+            state.current_model.as_deref(),
+            Some("openrouter/openrouter/owl-alpha")
+        );
+        let model_id = resolve_create_session_model_id(
+            &state.config,
+            providers.provider("openrouter").expect("provider"),
+            None,
+        )
+        .expect("saved default model");
+        assert_eq!(model_id.as_deref(), Some("openrouter/owl-alpha"));
+    }
+
+    #[test]
     fn model_descriptor_dto_exposes_family_thinking_options() {
         let provider = provider("anthropic", &["claude-sonnet-4-5"]);
         let dto = model_descriptor_dto(ModelPreferenceFamily::Anthropic, &provider.models[0]);
@@ -3710,6 +3779,31 @@ mod tests {
         let model_id = resolve_create_session_model_id(&config, &anthropic_provider, None)
             .expect("default model");
         assert_eq!(model_id.as_deref(), Some("claude-opus-4-6"));
+    }
+
+    #[test]
+    fn create_session_model_routing_preserves_custom_provider_slash_model_ids() {
+        let mut config = PufferConfig::default();
+        config.default_provider = Some("openrouter".to_string());
+        config.default_model = Some("openrouter/owl-alpha".to_string());
+        let openrouter_provider = provider("openrouter", &["openrouter/owl-alpha"]);
+
+        let model_id = resolve_create_session_model_id(&config, &openrouter_provider, None)
+            .expect("default model");
+        assert_eq!(model_id.as_deref(), Some("openrouter/owl-alpha"));
+
+        let model_id = resolve_create_session_model_id(
+            &config,
+            &openrouter_provider,
+            Some("openrouter/owl-alpha"),
+        )
+        .expect("requested model");
+        assert_eq!(model_id.as_deref(), Some("openrouter/owl-alpha"));
+
+        config.default_model = Some("openrouter/openrouter/owl-alpha".to_string());
+        let model_id = resolve_create_session_model_id(&config, &openrouter_provider, None)
+            .expect("wrapped default model");
+        assert_eq!(model_id.as_deref(), Some("openrouter/owl-alpha"));
     }
 
     #[test]
