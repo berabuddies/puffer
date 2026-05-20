@@ -2294,6 +2294,80 @@ test("daemon-running background sessions receive approval events", async ({ page
   });
 });
 
+test("completed background turns ignore replayed approval events", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-background-complete-a",
+        displayName: "Background complete A",
+        title: "Background complete A",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        activityStatus: "running",
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      },
+      {
+        sessionId: "session-background-complete-b",
+        displayName: "Background complete B",
+        title: "Background complete B",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 1,
+        activityStatus: "idle",
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "background-complete-b-seed",
+            text: "Background complete B seed",
+            createdAtMs: baseTime - 90_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Background complete B/);
+  await expect(page.getByText("Background complete B seed")).toBeVisible();
+  const approvalEvent = {
+    type: "permission-request",
+    turnId: "turn-background-complete-a",
+    requestId: "permission-background-complete",
+    toolId: "bash",
+    summary: "Approve stale background command",
+    reason: "This approval should disappear when the turn completes."
+  };
+  daemon.emit("session:session-background-complete-a:event", approvalEvent);
+  const alphaRow = page
+    .locator(".pf-sidebar-agent-row")
+    .filter({ hasText: "Background complete A" });
+  await expect(alphaRow.locator('.state[data-state="awaiting"]')).toContainText("awaiting");
+
+  daemon.emit("session:session-background-complete-a:event", {
+    type: "turn-complete",
+    turnId: "turn-background-complete-a",
+    assistantText: "Background turn finished."
+  });
+  daemon.emit("session:session-background-complete-a:event", {
+    ...approvalEvent,
+    replay: true
+  });
+
+  await openSession(page, /Background complete A/);
+  await expect(page.getByText("This approval should disappear when the turn completes.")).toHaveCount(0);
+  await expect(page.getByText("Approval needed")).toHaveCount(0);
+});
+
 test("late permission response failures do not leak into a switched session", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

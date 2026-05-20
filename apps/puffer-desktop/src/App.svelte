@@ -2517,6 +2517,7 @@
 
   function handleSessionEvent(sid: string, ev: SessionStreamEvent) {
     const selectedForEvent = selectedSession?.id === sid;
+    if (isTurnSettled(sid, ev.turnId)) return;
     const ignoredForSelected = selectedForEvent && shouldIgnoreTurnEvent(sid, ev.turnId);
     if (!ignoredForSelected) applySidebarSessionEvent(sid, ev);
     if (ignoredForSelected) {
@@ -2526,6 +2527,11 @@
       return;
     }
     if (!selectedForEvent) {
+      if (ev.type === "turn-complete" || ev.type === "turn-error") {
+        rememberSettledTurn(sid, ev.turnId);
+        clearCachedTurnRuntimeState(sid);
+        return;
+      }
       cacheBackgroundSessionEvent(sid, ev);
       return;
     }
