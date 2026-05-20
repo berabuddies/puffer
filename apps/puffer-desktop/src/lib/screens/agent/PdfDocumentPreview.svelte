@@ -187,43 +187,48 @@
 </script>
 
 <div class="pdf-renderer" onwheel={handleZoomWheel}>
-  <div class="pdf-controls-row">
-    <div class="pdf-toolbar" role="group" aria-label="PDF zoom controls">
-      <button
-        type="button"
-        aria-label="Zoom out"
-        title="Zoom out"
-        onclick={() => setZoom(zoom - PDF_ZOOM_STEP)}
-        disabled={zoom <= PDF_MIN_ZOOM}
-      >
-        <ZoomOutIcon size={14} strokeWidth={2} />
-      </button>
-      <button type="button" class="zoom-reset" aria-label="Reset zoom" title="Reset zoom" onclick={() => setZoom(1)}>
-        <RotateCcwIcon size={13} strokeWidth={2} />
-        <span>{zoomPercent}%</span>
-      </button>
-      <button
-        type="button"
-        aria-label="Zoom in"
-        title="Zoom in"
-        onclick={() => setZoom(zoom + PDF_ZOOM_STEP)}
-        disabled={zoom >= PDF_MAX_ZOOM}
-      >
-        <ZoomInIcon size={14} strokeWidth={2} />
-      </button>
+  <div class="pdf-controls-row" aria-label="Document controls">
+    <div class="pdf-controls-main">
+      <span class="pdf-zoom-label">Zoom</span>
+      <div class="pdf-toolbar" role="group" aria-label="PDF zoom controls">
+        <button
+          type="button"
+          aria-label="Zoom out"
+          title="Zoom out"
+          onclick={() => setZoom(zoom - PDF_ZOOM_STEP)}
+          disabled={zoom <= PDF_MIN_ZOOM}
+        >
+          <ZoomOutIcon size={15} strokeWidth={2.2} />
+        </button>
+        <button type="button" class="zoom-reset" aria-label="Reset zoom" title="Reset zoom" onclick={() => setZoom(1)}>
+          <RotateCcwIcon size={14} strokeWidth={2.2} />
+          <span>{zoomPercent}%</span>
+        </button>
+        <button
+          type="button"
+          aria-label="Zoom in"
+          title="Zoom in"
+          onclick={() => setZoom(zoom + PDF_ZOOM_STEP)}
+          disabled={zoom >= PDF_MAX_ZOOM}
+        >
+          <ZoomInIcon size={15} strokeWidth={2.2} />
+        </button>
+      </div>
+      <input
+        class="pdf-zoom-range"
+        type="range"
+        min={PDF_MIN_ZOOM * 100}
+        max={PDF_MAX_ZOOM * 100}
+        step={PDF_ZOOM_STEP * 100}
+        value={zoomPercent}
+        aria-label="PDF zoom level"
+        aria-valuetext={`${zoomPercent}%`}
+        title={`PDF zoom ${zoomPercent}%`}
+        oninput={handleZoomInput}
+        onchange={handleZoomInput}
+      />
+      <span class="pdf-zoom-value" aria-hidden="true">{zoomPercent}%</span>
     </div>
-    <input
-      class="pdf-zoom-range"
-      type="range"
-      min={PDF_MIN_ZOOM * 100}
-      max={PDF_MAX_ZOOM * 100}
-      step={PDF_ZOOM_STEP * 100}
-      value={zoomPercent}
-      aria-label="PDF zoom level"
-      aria-valuetext={`${zoomPercent}%`}
-      oninput={handleZoomInput}
-      onchange={handleZoomInput}
-    />
     {#if status}
       <div class="pdf-status" role="status" aria-live="polite">{status}</div>
     {/if}
@@ -261,17 +266,45 @@
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    justify-content: flex-start;
-    gap: 8px;
+    justify-content: space-between;
+    gap: 10px;
     width: 100%;
     max-width: 100%;
-    padding: 8px;
-    border: 1px solid #64748b;
+    padding: 10px;
+    border: 1px solid #94a3b8;
     border-radius: 8px;
-    background: #ffffff;
-    box-shadow: 0 12px 32px rgb(15 23 42 / 0.26);
-    color: #111827;
+    background: #f8fafc;
+    box-shadow: 0 14px 34px rgb(15 23 42 / 0.22);
+    color: #0f172a;
     pointer-events: auto;
+  }
+
+  :global(html.dark) .pdf-controls-row {
+    border-color: #38bdf8;
+    background: #0f172a;
+    color: #f8fafc;
+    box-shadow: 0 18px 40px rgb(0 0 0 / 0.42);
+  }
+
+  .pdf-controls-main {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .pdf-zoom-label {
+    color: #475569;
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    line-height: 1;
+    text-transform: uppercase;
+  }
+
+  :global(html.dark) .pdf-zoom-label {
+    color: #cbd5e1;
   }
 
   .pdf-page-scroll {
@@ -286,9 +319,14 @@
     align-items: center;
     gap: 4px;
     padding: 2px;
-    border: 1px solid var(--border);
+    border: 1px solid #94a3b8;
     border-radius: 7px;
-    background: #eef2f7;
+    background: #e2e8f0;
+  }
+
+  :global(html.dark) .pdf-toolbar {
+    border-color: #475569;
+    background: #1e293b;
   }
 
   .pdf-toolbar button {
@@ -296,12 +334,12 @@
     align-items: center;
     justify-content: center;
     gap: 4px;
-    min-width: 40px;
-    height: 32px;
-    border: 1px solid var(--border);
+    min-width: 42px;
+    height: 34px;
+    border: 1px solid #64748b;
     border-radius: 5px;
     background: #ffffff;
-    color: #111827;
+    color: #0f172a;
     cursor: pointer;
     font: inherit;
     font-size: 12px;
@@ -309,8 +347,14 @@
     line-height: 1;
   }
 
+  :global(html.dark) .pdf-toolbar button {
+    border-color: #38bdf8;
+    background: #f8fafc;
+    color: #0f172a;
+  }
+
   .pdf-toolbar .zoom-reset {
-    min-width: 74px;
+    min-width: 78px;
     padding: 0 8px;
   }
 
@@ -328,6 +372,19 @@
     background: transparent;
     accent-color: #2563eb;
     cursor: pointer;
+  }
+
+  .pdf-zoom-value {
+    min-width: 42px;
+    color: #334155;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    font-weight: 750;
+    text-align: right;
+  }
+
+  :global(html.dark) .pdf-zoom-value {
+    color: #f8fafc;
   }
 
   .pdf-zoom-range::-webkit-slider-runnable-track {
@@ -379,14 +436,14 @@
     width: fit-content;
     max-width: 100%;
     padding: 6px 10px;
-    border: 1px solid #1e40af;
+    border: 1px solid #a16207;
     border-radius: 6px;
-    background: #1d4ed8;
-    color: #ffffff;
+    background: #facc15;
+    color: #111827;
     font-size: 12px;
     font-weight: 700;
     line-height: 1.35;
-    box-shadow: 0 1px 0 rgb(255 255 255 / 0.85), 0 8px 18px rgb(15 23 42 / 0.22);
+    box-shadow: 0 1px 0 rgb(255 255 255 / 0.75), 0 8px 18px rgb(15 23 42 / 0.2);
   }
 
   .pdf-error {

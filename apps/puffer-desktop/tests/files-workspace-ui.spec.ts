@@ -640,6 +640,7 @@ test("Files tab PDF zoom is immediate and page-limit status remains readable", a
 
   const pageLimit = pdfPreview.getByText("Showing first 20 of 29 pages.");
   await expect(pageLimit).toBeVisible();
+  await expect(pdfPreview.getByText("Zoom", { exact: true })).toBeVisible();
   const controls = pdfPreview.getByRole("group", { name: "PDF zoom controls" });
   await expect(controls).toBeVisible();
   await expect(page.locator('canvas[aria-label^="PDF page"]')).toHaveCount(20);
@@ -681,6 +682,7 @@ test("Files tab PDF zoom is immediate and page-limit status remains readable", a
     };
   });
   expect(contrast.ratio).toBeGreaterThanOrEqual(4.5);
+  expect(contrast.backgroundColor).toBe("rgb(250, 204, 21)");
   expect(contrast.backgroundColor).not.toBe(contrast.shellBackgroundColor);
   expect(contrast.backgroundColor).not.toBe(contrast.controlsBackgroundColor);
   expect(contrast.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
@@ -695,6 +697,12 @@ test("Files tab PDF zoom is immediate and page-limit status remains readable", a
   const sliderBox = await zoomSlider.boundingBox();
   expect(sliderBox?.width ?? 0).toBeGreaterThan(100);
   expect(sliderBox?.height ?? 0).toBeGreaterThanOrEqual(30);
+  const sliderReceivesPointer = await zoomSlider.evaluate((input) => {
+    const rect = input.getBoundingClientRect();
+    const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    return hit === input || input.contains(hit);
+  });
+  expect(sliderReceivesPointer).toBe(true);
   await zoomSlider.evaluate((input) => {
     const range = input as HTMLInputElement;
     range.value = "140";
