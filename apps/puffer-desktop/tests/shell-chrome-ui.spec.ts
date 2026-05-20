@@ -186,6 +186,11 @@ test("deployment search filters environments and resets from Escape", async ({ p
   await search.fill("no-match");
   await expect(rows).toHaveCount(0);
   await expect(page.getByText("No deployments match")).toBeVisible();
+  const detail = page.locator(".pf-dep-detail");
+  await expect(detail).toContainText("No deployment selected");
+  await expect(detail).not.toContainText("edge-cdn");
+  await expect(detail.getByRole("button", { name: "Open" })).toHaveCount(0);
+  await expect(detail.getByRole("button", { name: "Redeploy" })).toHaveCount(0);
 
   await search.press("Escape");
   await expect(page.getByRole("searchbox", { name: "Search deployments" })).toHaveCount(0);

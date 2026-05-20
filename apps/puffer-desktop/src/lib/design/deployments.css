@@ -308,6 +308,25 @@
   min-width: 0; min-height: 0;
   background: color-mix(in oklab, var(--background) 96%, var(--muted));
 }
+.pf-dep-detail-empty {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  min-height: 100%;
+  padding: 28px;
+  color: var(--muted-foreground);
+  text-align: center;
+}
+.pf-dep-detail-empty strong {
+  color: var(--foreground);
+  font-size: 15px;
+}
+.pf-dep-detail-empty span {
+  max-width: 300px;
+  font-size: 12px;
+  line-height: 1.45;
+}
 .pf-dep-detail-head {
   display: flex; align-items: center;
   padding: 0 14px;

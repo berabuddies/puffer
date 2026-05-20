@@ -58,6 +58,7 @@
       ?? allDeployments.find((d) => d.id === selectedId)
       ?? allDeployments[0]
   );
+  let selectedForDetail = $derived(filteredDeployments.length === 0 ? null : selected);
   let providerCount = $derived(new Set(allDeployments.map((deployment) => deployment.provider)).size);
   let canCreateDeployment = $derived(newDeploymentName.trim().length > 0);
 
@@ -502,102 +503,111 @@
     </div>
 
     <div class="pf-dep-detail">
-      <div class="pf-dep-detail-head">
-        <div class="pf-dep-detail-head-left">
-          <span class="pf-dep-provider-chip lg" data-provider={selected.provider}>
-            <ProviderGlyph kind={selected.provider} size={18} />
-          </span>
-          <div>
-            <div class="pf-dep-detail-name">
-              {selected.name}
-              <StatePill state={selected.state} />
-            </div>
-            <div class="pf-dep-detail-sub">
-              {selected.providerLabel} · {selected.region} · <span class="mono">{selected.url}</span>
+      {#if selectedForDetail}
+        {@const detail = selectedForDetail}
+        <div class="pf-dep-detail-head">
+          <div class="pf-dep-detail-head-left">
+            <span class="pf-dep-provider-chip lg" data-provider={detail.provider}>
+              <ProviderGlyph kind={detail.provider} size={18} />
+            </span>
+            <div>
+              <div class="pf-dep-detail-name">
+                {detail.name}
+                <StatePill state={detail.state} />
+              </div>
+              <div class="pf-dep-detail-sub">
+                {detail.providerLabel} · {detail.region} · <span class="mono">{detail.url}</span>
+              </div>
             </div>
           </div>
+          <div class="pf-dep-detail-head-right">
+            {#if detailActionStatus}
+              <div class="pf-dep-action-status" role="status" aria-live="polite">
+                {detailActionStatus}
+              </div>
+            {/if}
+            <button
+              type="button"
+              class="sc-btn"
+              data-variant="ghost"
+              data-size="sm"
+              onclick={() => openDeployment(detail)}
+            >
+              <Icon name="external" size={12} />Open
+            </button>
+            <button
+              type="button"
+              class="sc-btn"
+              data-variant="outline"
+              data-size="sm"
+              aria-label="Redeploy"
+              aria-busy={redeployingId === detail.id}
+              disabled={redeployingId !== null}
+              onclick={() => triggerRedeploy(detail)}
+            >
+              <Icon name="refresh" size={12} />{redeployingId === detail.id ? "Redeploying" : "Redeploy"}
+            </button>
+          </div>
         </div>
-        <div class="pf-dep-detail-head-right">
-          {#if detailActionStatus}
-            <div class="pf-dep-action-status" role="status" aria-live="polite">
-              {detailActionStatus}
-            </div>
+
+        <div class="pf-dep-tabs" role="tablist" aria-label="Deployment detail">
+          {#each tabs as t (t.id)}
+            <button
+              type="button"
+              class="pf-dep-tab"
+              role="tab"
+              id={`dep-tab-${t.id}`}
+              data-active={tab === t.id}
+              data-dep-tab={t.id}
+              aria-selected={tab === t.id}
+              aria-controls={`dep-panel-${t.id}`}
+              tabindex={tab === t.id ? 0 : -1}
+              onclick={() => selectTab(t.id)}
+              onkeydown={(event) => handleTabKeydown(event, t.id)}
+            >
+              <Icon name={t.icon} size={12} />{t.label}
+            </button>
+          {/each}
+        </div>
+
+        <div
+          class="pf-dep-pane-wrap"
+          role="tabpanel"
+          id={`dep-panel-${tab}`}
+          aria-labelledby={`dep-tab-${tab}`}
+        >
+          {#if tab === "askpuffer"}
+            <AskPufferPane
+              d={detail}
+              memoryDrafts={memoryDrafts[detail.id] ?? []}
+              onAddMemory={(item) => addMemoryDraft(detail.id, item)}
+            />
+          {:else if tab === "memory"}
+            <MemoryPane
+              d={detail}
+              drafts={memoryDrafts[detail.id] ?? []}
+              onAddMemory={(item) => addMemoryDraft(detail.id, item)}
+            />
+          {:else if tab === "secrets"}
+            <SecretsPane d={detail} />
+          {:else if tab === "providers"}
+            <ProvidersPane d={detail} />
+          {:else if tab === "deploys"}
+            <DeploysPane
+              d={detail}
+              localHistory={redeployHistory[detail.id] ?? []}
+              triggerBusy={redeployingId === detail.id}
+              onTriggerDeploy={() => triggerRedeploy(detail)}
+            />
           {/if}
-          <button
-            type="button"
-            class="sc-btn"
-            data-variant="ghost"
-            data-size="sm"
-            onclick={() => openDeployment(selected)}
-          >
-            <Icon name="external" size={12} />Open
-          </button>
-          <button
-            type="button"
-            class="sc-btn"
-            data-variant="outline"
-            data-size="sm"
-            aria-label="Redeploy"
-            aria-busy={redeployingId === selected.id}
-            disabled={redeployingId !== null}
-            onclick={() => triggerRedeploy(selected)}
-          >
-            <Icon name="refresh" size={12} />{redeployingId === selected.id ? "Redeploying" : "Redeploy"}
-          </button>
         </div>
-      </div>
-
-      <div class="pf-dep-tabs" role="tablist" aria-label="Deployment detail">
-        {#each tabs as t (t.id)}
-          <button
-            type="button"
-            class="pf-dep-tab"
-            role="tab"
-            id={`dep-tab-${t.id}`}
-            data-active={tab === t.id}
-            data-dep-tab={t.id}
-            aria-selected={tab === t.id}
-            aria-controls={`dep-panel-${t.id}`}
-            tabindex={tab === t.id ? 0 : -1}
-            onclick={() => selectTab(t.id)}
-            onkeydown={(event) => handleTabKeydown(event, t.id)}
-          >
-            <Icon name={t.icon} size={12} />{t.label}
-          </button>
-        {/each}
-      </div>
-
-      <div
-        class="pf-dep-pane-wrap"
-        role="tabpanel"
-        id={`dep-panel-${tab}`}
-        aria-labelledby={`dep-tab-${tab}`}
-      >
-        {#if tab === "askpuffer"}
-          <AskPufferPane
-            d={selected}
-            memoryDrafts={memoryDrafts[selected.id] ?? []}
-            onAddMemory={(item) => addMemoryDraft(selected.id, item)}
-          />
-        {:else if tab === "memory"}
-          <MemoryPane
-            d={selected}
-            drafts={memoryDrafts[selected.id] ?? []}
-            onAddMemory={(item) => addMemoryDraft(selected.id, item)}
-          />
-        {:else if tab === "secrets"}
-          <SecretsPane d={selected} />
-        {:else if tab === "providers"}
-          <ProvidersPane d={selected} />
-        {:else if tab === "deploys"}
-          <DeploysPane
-            d={selected}
-            localHistory={redeployHistory[selected.id] ?? []}
-            triggerBusy={redeployingId === selected.id}
-            onTriggerDeploy={() => triggerRedeploy(selected)}
-          />
-        {/if}
-      </div>
+      {:else}
+        <div class="pf-dep-detail-empty" role="status">
+          <Icon name="search" size={18} />
+          <strong>No deployment selected</strong>
+          <span>Clear or change the search to inspect deployment details.</span>
+        </div>
+      {/if}
     </div>
   </div>
 </div>
