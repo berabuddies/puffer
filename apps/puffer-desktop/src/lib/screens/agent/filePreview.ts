@@ -324,6 +324,7 @@ function isReadablePdfPreviewLine(line: string): boolean {
 
 function isInternalPdfToken(line: string): boolean {
   const lower = line.toLowerCase();
+  if (/^extracted\s+text:?$/i.test(line)) return true;
   if (lower.includes("cidinit")) return true;
   if (lower.includes("tex-t1") || /^tex(?:\b|-)/i.test(line)) return true;
   return /^(?:begin|end)(?:cmap|bfchar|bfrange|codespacerange)$/i.test(line) ||

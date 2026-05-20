@@ -264,7 +264,18 @@ function seedPreviewFiles(daemon: FakeDaemon): void {
     "/tmp/puffer/tex-garbage.pdf",
     makePdfBase64("Clean PDF preview"),
     undefined,
-    ["CIDInit", "TeX-T1-0", "TeX-T1-0 TeX T1 0", "ÿ", "\u000e", "9", "\u0010", "a", "~"]
+    [
+      "EXTRACTED TEXT",
+      "CIDInit",
+      "TeX-T1-0",
+      "TeX-T1-0 TeX T1 0",
+      "ÿ",
+      "\u000e",
+      "9",
+      "\u0010",
+      "a",
+      "~"
+    ]
   );
   daemon.seedFile(
     "/tmp/puffer/ascii-sniffed.pdf",
@@ -506,6 +517,7 @@ test("Files tab previews common document and data formats", async ({ page }) => 
   await expectCanvasHasInk(page, 'canvas[aria-label="PDF page 1"]');
   const fallback = page.getByLabel("PDF text fallback");
   await expect(fallback).toContainText("Clean PDF preview");
+  await expect(fallback).not.toContainText("EXTRACTED TEXT");
   await expect(fallback).not.toContainText("CIDInit");
   await expect(fallback).not.toContainText("TeX-T1-0");
 
