@@ -2489,6 +2489,10 @@ test("completed background turns keep tool activity until persistence catches up
     turnId: "turn-session-alpha-bg-tool-complete",
     assistantText: "Completed background answer."
   });
+  daemon.emit("workspace:sessions:changed", {
+    sessionId: "session-alpha-bg-tool-complete",
+    reason: "turn_complete"
+  });
 
   await openSession(page, /Alpha bg complete tool/);
   await expect(page.getByText("Completed background answer.")).toBeVisible();

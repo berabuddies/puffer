@@ -1809,9 +1809,12 @@
   function clearCachedTurnRuntimeState(sessionId: string) {
     const cached = transientConversationStates[sessionId];
     if (!cached) return;
+    const settledLiveItems = cached.liveStreamItems.filter(
+      (item) => item.kind !== "permission" && item.kind !== "question"
+    );
     setTransientConversationState(sessionId, {
       ...cached,
-      liveStreamItems: [],
+      liveStreamItems: settledLiveItems,
       replayTextByTurn: {},
       turnPermissionLookup: {},
       turnQuestionLookup: {},
