@@ -53,6 +53,23 @@ test("pipeline graph agent nodes expose selected state", async ({ page }) => {
   await expect(page.getByLabel("Agent name")).toHaveValue("Claude reviewer");
 });
 
+test("pipeline refresh is disabled while the workflow snapshot loads", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.delayFailure("workflow_list", () => true, "slow workflow snapshot", 250);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const refresh = page.getByRole("button", { name: "Refresh workflows" });
+  await expect(refresh).toBeDisabled();
+  await expect(refresh).toHaveAttribute("aria-busy", "true");
+
+  await expect(refresh).toBeEnabled();
+  await expect(refresh).toHaveAttribute("aria-busy", "false");
+  expect(daemon.requests.filter((request) => request.method === "workflow_list")).toHaveLength(1);
+});
+
 test("pipeline wiring disables already connected output targets", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

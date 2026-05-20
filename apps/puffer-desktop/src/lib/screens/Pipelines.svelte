@@ -87,7 +87,7 @@
   let selectedNodeId = $state<string | null>("codex-implement");
   let runIdx = $state<number | null>(null);
   let stepIdx = $state<number | null>(null);
-  let loading = $state(true);
+  let loading = $state(false);
   let error = $state<string | null>(null);
   let saveNotice = $state("Draft changes are local until workflow save lands in the daemon.");
 
@@ -239,6 +239,7 @@
   });
 
   async function refresh() {
+    if (loading) return;
     loading = true;
     error = null;
     try {
@@ -604,8 +605,17 @@
           <Icon name="plus" size={12} />{provider.short}
         </button>
       {/each}
-      <button type="button" class="sc-btn" data-variant="ghost" data-size="sm" onclick={refresh}>
-        <Icon name="refresh" size={12} />Refresh
+      <button
+        type="button"
+        class="sc-btn"
+        data-variant="ghost"
+        data-size="sm"
+        aria-label="Refresh workflows"
+        aria-busy={loading}
+        disabled={loading}
+        onclick={refresh}
+      >
+        <Icon name="refresh" size={12} />{loading ? "Refreshing" : "Refresh"}
       </button>
     </div>
   </div>
