@@ -1,20 +1,103 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import Icon, { type IconName } from "../../design/Icon.svelte";
-  import { KIND_META, MEMORY, type Deployment } from "../../data/mockDeployments";
+  import { KIND_META, MEMORY, type Deployment, type MemoryItem } from "../../data/mockDeployments";
 
   type Props = { d: Deployment };
   let { d }: Props = $props();
 
-  let items = $derived(MEMORY[d.id] ?? MEMORY["d-prod-api"]);
+  const kindOptions: MemoryItem["kind"][] = ["incident", "runbook", "fact", "pitfall", "convention"];
+
+  let baseItems = $derived(MEMORY[d.id] ?? MEMORY["d-prod-api"]);
+  let draftItems = $state<Record<string, MemoryItem[]>>({});
+  let items = $derived([...(draftItems[d.id] ?? []), ...baseItems]);
   let filter = $state<string>("all");
-  const kinds = ["all", ...Object.keys(KIND_META)];
+  let addNoteOpen = $state(false);
+  let noteTitle = $state("");
+  let noteBody = $state("");
+  let noteKind = $state<MemoryItem["kind"]>("fact");
+  let noteConfidence = $state<MemoryItem["confidence"]>("medium");
+  let noteTags = $state("");
+  let noteTitleInput = $state<HTMLInputElement | null>(null);
+  let memoryStatus = $state("");
+  let statusDeploymentId = $state("");
+  let statusTimer = 0;
+  const kinds = ["all", ...kindOptions];
   let filtered = $derived(filter === "all" ? items : items.filter((m) => m.kind === filter));
+  let canAddNote = $derived(noteTitle.trim().length > 0 && noteBody.trim().length > 0);
+
+  onDestroy(() => {
+    if (statusTimer) window.clearTimeout(statusTimer);
+  });
+
+  $effect(() => {
+    const deploymentId = d.id;
+    if (deploymentId === statusDeploymentId) return;
+    statusDeploymentId = deploymentId;
+    resetAddNote();
+    memoryStatus = "";
+    if (statusTimer) window.clearTimeout(statusTimer);
+    statusTimer = 0;
+  });
 
   function srcIcon(kind: string): IconName {
     if (kind === "deploy") return "rocket";
     if (kind === "pr") return "git";
     if (kind === "logs") return "logs";
     return "bolt";
+  }
+
+  function resetAddNote(): void {
+    addNoteOpen = false;
+    noteTitle = "";
+    noteBody = "";
+    noteKind = "fact";
+    noteConfidence = "medium";
+    noteTags = "";
+  }
+
+  function openAddNote(): void {
+    resetAddNote();
+    addNoteOpen = true;
+    window.setTimeout(() => noteTitleInput?.focus({ preventScroll: true }), 20);
+  }
+
+  function tagList(value: string): string[] {
+    const tags = value
+      .split(/[,\s]+/)
+      .map((tag) => tag.trim().replace(/^#/, "").toLowerCase())
+      .filter(Boolean);
+    return Array.from(new Set(tags));
+  }
+
+  function createNote(): void {
+    if (!canAddNote) return;
+    const title = noteTitle.trim();
+    const body = noteBody.trim();
+    const next: MemoryItem = {
+      id: `draft-${d.id}-${Date.now()}`,
+      kind: noteKind,
+      title,
+      body,
+      source: { kind: "manual", ref: "local draft" },
+      confidence: noteConfidence,
+      savedBy: "Otter",
+      time: "just now",
+      tags: tagList(noteTags),
+      uses: 0
+    };
+    draftItems = {
+      ...draftItems,
+      [d.id]: [next, ...(draftItems[d.id] ?? [])]
+    };
+    if (filter !== "all" && filter !== next.kind) filter = next.kind;
+    memoryStatus = `Added memory note "${title}" to ${d.name}.`;
+    if (statusTimer) window.clearTimeout(statusTimer);
+    statusTimer = window.setTimeout(() => {
+      memoryStatus = "";
+      statusTimer = 0;
+    }, 4000);
+    resetAddNote();
   }
 </script>
 
@@ -26,10 +109,81 @@
         {items.length} notes Puffer has learned running <strong>{d.name}</strong> — surfaced automatically on future deploys and debug sessions.
       </p>
     </div>
-    <button type="button" class="sc-btn" data-variant="default" data-size="sm">
-      <Icon name="plus" size={12} />Add note
-    </button>
+    <div class="pf-dep-pane-actions">
+      {#if memoryStatus}
+        <div class="pf-dep-pane-status" role="status" aria-live="polite">
+          {memoryStatus}
+        </div>
+      {/if}
+      <button type="button" class="sc-btn" data-variant="default" data-size="sm" onclick={openAddNote}>
+        <Icon name="plus" size={12} />Add note
+      </button>
+    </div>
   </div>
+
+  {#if addNoteOpen}
+    <form
+      class="pf-dep-mem-form"
+      aria-label="Add deployment memory note"
+      onsubmit={(event) => {
+        event.preventDefault();
+        createNote();
+      }}
+    >
+      <label>
+        <span>Title</span>
+        <input
+          bind:this={noteTitleInput}
+          aria-label="Memory note title"
+          value={noteTitle}
+          placeholder="Runbook shortcut"
+          oninput={(event) => (noteTitle = event.currentTarget.value)}
+        />
+      </label>
+      <label>
+        <span>Kind</span>
+        <select aria-label="Memory note kind" bind:value={noteKind}>
+          {#each kindOptions as kind (kind)}
+            <option value={kind}>{KIND_META[kind].label}</option>
+          {/each}
+        </select>
+      </label>
+      <label>
+        <span>Confidence</span>
+        <select aria-label="Memory note confidence" bind:value={noteConfidence}>
+          <option value="high">high</option>
+          <option value="medium">medium</option>
+          <option value="low">low</option>
+        </select>
+      </label>
+      <label class="wide">
+        <span>Body</span>
+        <textarea
+          aria-label="Memory note body"
+          value={noteBody}
+          placeholder="What should Puffer remember for this deployment?"
+          oninput={(event) => (noteBody = event.currentTarget.value)}
+        ></textarea>
+      </label>
+      <label>
+        <span>Tags</span>
+        <input
+          aria-label="Memory note tags"
+          value={noteTags}
+          placeholder="stripe, queue"
+          oninput={(event) => (noteTags = event.currentTarget.value)}
+        />
+      </label>
+      <div class="pf-dep-mem-form-actions">
+        <button type="button" class="sc-btn" data-variant="ghost" data-size="sm" onclick={resetAddNote}>
+          Cancel
+        </button>
+        <button type="submit" class="sc-btn" data-variant="default" data-size="sm" disabled={!canAddNote}>
+          Add note
+        </button>
+      </div>
+    </form>
+  {/if}
 
   <div class="pf-dep-mem-filters">
     {#each kinds as k (k)}

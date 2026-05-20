@@ -462,6 +462,46 @@ test("deployment add secret creates a local masked secret row", async ({ page })
   await expect(row).toContainText("tok_live_123");
 });
 
+test("deployment add memory note creates a local filtered note", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Deployments" }).click();
+  await page.getByRole("tab", { name: "Memory" }).click();
+
+  await page.locator(".pf-dep-pane-head").getByRole("button", { name: "Add note" }).click();
+  const form = page.locator(".pf-dep-mem-form");
+  await expect(form).toBeVisible();
+  await expect(form.getByLabel("Memory note title")).toBeFocused();
+  await expect(form.getByRole("button", { name: "Add note" })).toBeDisabled();
+
+  await form.getByLabel("Memory note title").fill("Queue drain shortcut");
+  await form.getByLabel("Memory note kind").selectOption("runbook");
+  await form.getByLabel("Memory note confidence").selectOption("high");
+  await form.getByLabel("Memory note body").fill("Use scripts/drain-webhooks.ts after invoices lag clears.");
+  await form.getByLabel("Memory note tags").fill("stripe queue");
+  await form.getByRole("button", { name: "Add note" }).click();
+
+  await expect(form).toHaveCount(0);
+  await expect(page.locator(".pf-dep-pane-head .sub")).toContainText("7 notes");
+  await expect(page.locator(".pf-dep-pane-status")).toContainText(
+    'Added memory note "Queue drain shortcut" to stripe-api · production.'
+  );
+  const note = page.locator(".pf-dep-mem").filter({ hasText: "Queue drain shortcut" });
+  await expect(note).toBeVisible();
+  await expect(note).toContainText("Runbook");
+  await expect(note).toContainText("Use scripts/drain-webhooks.ts after invoices lag clears.");
+  await expect(note).toContainText("#stripe");
+  await expect(note).toContainText("#queue");
+  await expect(note).toContainText("manual:");
+  await expect(note).toContainText("local draft");
+
+  await page.getByRole("button", { name: /Runbook\s+2/ }).click();
+  await expect(page.locator(".pf-dep-mem")).toHaveCount(2);
+  await expect(note).toBeVisible();
+});
+
 test("deployment secret reveal controls target one key and toggle their state", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
