@@ -22,4 +22,6 @@ droid.resume.txt
 env.txt
 audits/
 bugs/
+fuzz/
+apps/puffer-desktop/tests/*.tmp.spec.ts
 test-results/
