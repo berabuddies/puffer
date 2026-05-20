@@ -1385,6 +1385,93 @@
     return [...state.liveStreamItems, item];
   }
 
+  function withCachedTurnState(
+    state: TransientConversationState,
+    turnId: string,
+    updates: Partial<TransientConversationState>
+  ): TransientConversationState {
+    return {
+      ...state,
+      ...updates,
+      currentTurnId: turnId,
+      cancelingTurnId: null,
+      turnStartedAtMs: state.turnStartedAtMs ?? Date.now()
+    };
+  }
+
+  function replaySafeCachedDelta(
+    state: TransientConversationState,
+    turnId: string,
+    delta: string
+  ): { delta: string; replayTextByTurn: Record<string, string> } {
+    const replayText = `${state.replayTextByTurn[turnId] ?? ""}${delta}`;
+    const replayTextByTurn = { ...state.replayTextByTurn, [turnId]: replayText };
+    const currentItem = state.liveStreamItems.find((item) => item.id === streamingAssistantId(turnId));
+    if (!currentItem || currentItem.kind !== "assistant") {
+      return { delta, replayTextByTurn };
+    }
+    const current = currentItem.body;
+    if (current.startsWith(replayText)) return { delta: "", replayTextByTurn };
+    if (replayText.startsWith(current)) {
+      return { delta: replayText.slice(current.length), replayTextByTurn };
+    }
+    return { delta, replayTextByTurn };
+  }
+
+  function upsertCachedStreamingAssistant(
+    state: TransientConversationState,
+    turnId: string,
+    delta: string
+  ): TimelineItem[] {
+    const id = streamingAssistantId(turnId);
+    const existingIdx = state.liveStreamItems.findIndex(
+      (item) => item.id === id && item.kind === "assistant"
+    );
+    if (existingIdx >= 0) {
+      const existing = state.liveStreamItems[existingIdx];
+      if (existing.kind !== "assistant") return state.liveStreamItems;
+      const body = existing.body + delta;
+      return [
+        ...state.liveStreamItems.slice(0, existingIdx),
+        {
+          ...existing,
+          body,
+          summary: body
+        },
+        ...state.liveStreamItems.slice(existingIdx + 1)
+      ];
+    }
+    return appendCachedLiveItem(state, {
+      id,
+      kind: "assistant",
+      title: "Assistant",
+      summary: delta,
+      body: delta,
+      meta: []
+    });
+  }
+
+  function cacheBackgroundTextDelta(
+    sessionId: string,
+    ev: Extract<SessionStreamEvent, { type: "text-delta" }>
+  ) {
+    const cached = transientConversationStates[sessionId] ?? emptyTransientConversationState();
+    const replay = ev.replay
+      ? replaySafeCachedDelta(cached, ev.turnId, ev.delta)
+      : { delta: ev.delta, replayTextByTurn: cached.replayTextByTurn };
+    setTransientConversationState(
+      sessionId,
+      withCachedTurnState(cached, ev.turnId, {
+        liveStreamItems: replay.delta
+          ? upsertCachedStreamingAssistant(cached, ev.turnId, replay.delta)
+          : cached.liveStreamItems,
+        replayTextByTurn: replay.replayTextByTurn,
+        turnThinking: false,
+        turnStatusHint: null
+      })
+    );
+  }
+
   function cacheBackgroundPermissionRequest(
     sessionId: string,
     ev: Extract<SessionStreamEvent, { type: "permission-request" }>
@@ -1458,10 +1545,36 @@
 
   function cacheBackgroundSessionEvent(sessionId: string, ev: SessionStreamEvent) {
     if (isTurnSettled(sessionId, ev.turnId)) return;
-    if (ev.type === "permission-request") {
-      cacheBackgroundPermissionRequest(sessionId, ev);
-    } else if (ev.type === "user-question-request") {
-      cacheBackgroundUserQuestionRequest(sessionId, ev);
+    switch (ev.type) {
+      case "turn-start":
+      case "thinking-delta":
+      case "reflection-checkpoint":
+      case "retry-attempt": {
+        const cached = transientConversationStates[sessionId] ?? emptyTransientConversationState();
+        setTransientConversationState(
+          sessionId,
+          withCachedTurnState(cached, ev.turnId, {
+            turnThinking: true,
+            turnStatusHint: ev.type === "retry-attempt"
+              ? `Retrying ${ev.attempt}/${ev.maxAttempts}`
+              : "Thinking"
+          })
+        );
+        break;
+      }
+      case "text-delta":
+        cacheBackgroundTextDelta(sessionId, ev);
+        break;
+      case "permission-request":
+        cacheBackgroundPermissionRequest(sessionId, ev);
+        break;
+      case "user-question-request":
+        cacheBackgroundUserQuestionRequest(sessionId, ev);
+        break;
+      case "tool-calls-requested":
+      case "tool-invocations":
+      case "usage":
+        break;
     }
   }
 

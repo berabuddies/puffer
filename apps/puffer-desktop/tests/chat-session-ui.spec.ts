@@ -2235,6 +2235,70 @@ test("background permission request is available when returning to that session"
   });
 });
 
+test("background streamed assistant text is restored when switching back before persistence", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-alpha-bg-stream",
+        displayName: "Alpha bg stream",
+        title: "Alpha bg stream",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      },
+      {
+        sessionId: "session-beta-bg-stream",
+        displayName: "Beta bg stream",
+        title: "Beta bg stream",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 1,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "beta-bg-stream-seed",
+            text: "Beta seed",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Alpha bg stream/);
+  await page.locator(".pf-composer textarea").fill("Alpha prompt");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.sessionId === "session-alpha-bg-stream"
+  );
+
+  await openSession(page, /Beta bg stream/);
+  await expect(page.getByText("Beta seed")).toBeVisible();
+
+  daemon.emit("session:session-alpha-bg-stream:event", {
+    type: "text-delta",
+    turnId: "turn-session-alpha-bg-stream",
+    delta: "Streamed while Alpha was hidden."
+  });
+
+  await openSession(page, /Alpha bg stream/);
+  await expect(page.getByText("Streamed while Alpha was hidden.")).toBeVisible();
+});
+
 test("daemon-running background sessions receive approval events", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
