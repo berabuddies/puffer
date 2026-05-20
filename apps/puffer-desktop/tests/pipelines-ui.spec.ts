@@ -52,3 +52,25 @@ test("pipeline graph agent nodes expose selected state", async ({ page }) => {
   await expect(claudeNode).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByLabel("Agent name")).toHaveValue("Claude reviewer");
 });
+
+test("pipeline wiring disables already connected output targets", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const wiring = page.locator(".pf-editor-wiring");
+  const claudeTarget = wiring.getByRole("button", { name: /Claude reviewer/ });
+  const pufferTarget = wiring.getByRole("button", { name: /Puffer shipper/ });
+
+  await expect(claudeTarget).toBeDisabled();
+  await expect(claudeTarget).toHaveAttribute("aria-pressed", "true");
+  await expect(pufferTarget).toBeEnabled();
+  await expect(pufferTarget).toHaveAttribute("aria-pressed", "false");
+
+  await pufferTarget.click();
+
+  await expect(pufferTarget).toBeDisabled();
+  await expect(pufferTarget).toHaveAttribute("aria-pressed", "true");
+});

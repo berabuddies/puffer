@@ -428,6 +428,10 @@
     toggleDependency(targetId, selectedNode.id, true);
   }
 
+  function dependsOn(node: EditablePipelineNode, dependencyId: string): boolean {
+    return (node.depends_on ?? []).includes(dependencyId);
+  }
+
   function toolsText(node: EditablePipelineNode): string {
     return (node.tools ?? []).join(", ");
   }
@@ -862,7 +866,14 @@
                 <span>Send selected output to</span>
               </div>
               {#each workflow.pipeline.nodes.filter((node) => node.id !== selectedNode?.id) as node (node.id)}
-                <button type="button" class="pf-wire-connect" onclick={() => connectSelectedTo(node.id)}>
+                {@const alreadyConnected = dependsOn(node, selectedNode.id)}
+                <button
+                  type="button"
+                  class="pf-wire-connect"
+                  onclick={() => connectSelectedTo(node.id)}
+                  disabled={alreadyConnected}
+                  aria-pressed={alreadyConnected}
+                >
                   <Icon name="link" size={12} />
                   {node.agent ?? node.id}
                 </button>
@@ -1284,6 +1295,24 @@
     border-color: transparent;
     background: var(--pf-selected-bg-hover);
     font-weight: 700;
+  }
+
+  .pf-wire-connect:disabled {
+    cursor: default;
+    color: var(--muted-foreground);
+    border-color: color-mix(in oklab, var(--border) 80%, var(--puffer-accent));
+    background: color-mix(in oklab, var(--puffer-accent) 8%, var(--card));
+    font-weight: 600;
+  }
+
+  .pf-wire-connect:disabled::after {
+    content: "connected";
+    margin-left: auto;
+    color: var(--puffer-accent);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
   }
 
   .pf-editor-runs {
