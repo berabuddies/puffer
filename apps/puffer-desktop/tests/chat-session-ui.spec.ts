@@ -4980,6 +4980,77 @@ test("stop turn is disabled while cancellation is in flight", async ({ page }) =
   expect(daemon.requests.filter((request) => request.method === "cancel_turn")).toHaveLength(1);
 });
 
+test("stop turn stays disabled when delayed start response follows cancel request", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-cancel-start-race",
+        displayName: "Cancel start race",
+        title: "Cancel start race",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  daemon.delayResponse(
+    "run_agent_turn",
+    (request) => request.params.sessionId === "session-cancel-start-race",
+    260
+  );
+  daemon.delayResponse(
+    "cancel_turn",
+    (request) => request.params.turnId === "turn-session-cancel-start-race",
+    520
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Cancel start race/);
+  await page.locator(".pf-composer textarea").fill("Cancel after early turn start");
+  await page.getByRole("button", { name: "Send" }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-cancel-start-race" &&
+      request.params.message === "Cancel after early turn start"
+  );
+
+  daemon.emit("session:session-cancel-start-race:event", {
+    type: "turn-start",
+    turnId: "turn-session-cancel-start-race"
+  });
+
+  const stop = page.getByRole("button", { name: "Stop turn" });
+  await expect(stop).toBeEnabled();
+  await stop.click();
+  await daemon.waitForRequest(
+    "cancel_turn",
+    (request) => request.params.turnId === "turn-session-cancel-start-race"
+  );
+  await expect(stop).toBeDisabled();
+
+  await page.waitForTimeout(320);
+  await expect(stop).toBeDisabled();
+  await stop.click({ force: true });
+  await page.waitForTimeout(40);
+
+  expect(
+    daemon.requests.filter(
+      (request) =>
+        request.method === "cancel_turn" &&
+        request.params.turnId === "turn-session-cancel-start-race"
+    )
+  ).toHaveLength(1);
+});
+
 test("canceled idle session does not revive running state when reopened", async ({ page }) => {
   const prompt = "Cancel then reopen idle";
   const daemon = new FakeDaemon({

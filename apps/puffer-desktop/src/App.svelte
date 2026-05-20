@@ -1999,7 +1999,9 @@
         return true;
       }
       currentTurnId = turnId;
-      cancelingTurnId = null;
+      if (cancelingTurnId !== turnId) {
+        cancelingTurnId = null;
+      }
       forgetSettledTurn(submitSessionId, turnId);
       statusMessage = `Agent turn ${turnId.slice(0, 8)} started.`;
       return true;
