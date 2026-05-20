@@ -122,7 +122,7 @@
     if (!viewport || !canvas) return;
     mounted = true;
     if (!isDaemonReachable()) {
-      status = "Browser is available when connected to the Corbina backend.";
+      status = "Browser is available when connected to the Puffer backend.";
       error = "No backend connection is configured for this preview.";
       return;
     }

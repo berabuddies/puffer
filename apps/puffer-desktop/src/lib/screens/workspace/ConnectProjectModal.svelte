@@ -513,7 +513,7 @@
             >Browse…</button>
           </div>
           <div class="pf-field-hint">
-            If this directory doesn't exist Corbina will create it. Must be empty if a git URL is set below.
+            If this directory doesn't exist Puffer will create it. Must be empty if a git URL is set below.
           </div>
         </div>
         <div class="pf-field">
@@ -548,7 +548,7 @@
             />
           </div>
           <div class="pf-field-hint">
-            Corbina will connect over your existing SSH config and port-forward the workspace runtime locally.
+            Puffer will connect over your existing SSH config and port-forward the workspace runtime locally.
           </div>
         </div>
         <div class="pf-field">

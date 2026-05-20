@@ -63,6 +63,21 @@ test("desktop minimum width keeps primary navigation visible", async ({ page }) 
   await expect(sidebar.getByRole("button", { name: "Settings" })).toBeVisible();
 });
 
+test("desktop user-visible copy uses Puffer branding", async () => {
+  const userFacingFiles = [
+    "src/App.svelte",
+    "src/lib/screens/agent/BrowserPane.svelte",
+    "src/lib/screens/agent/FilesPane.svelte",
+    "src/lib/screens/agent/TerminalPane.svelte",
+    "src/lib/screens/workspace/ConnectProjectModal.svelte"
+  ];
+
+  for (const file of userFacingFiles) {
+    const source = await readFile(file, "utf8");
+    expect(source, file).not.toContain("Corbina");
+  }
+});
+
 test("sidebar width can be resized and persists as a local shell tweak", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

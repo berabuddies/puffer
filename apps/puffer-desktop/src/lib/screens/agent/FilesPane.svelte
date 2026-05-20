@@ -1158,7 +1158,7 @@
       {#if previewMode}
         <div class="tree-empty">
           <div class="msg">Files view is live in the desktop app</div>
-          <div class="sub">Launch Corbina locally to browse this session's working directory.</div>
+          <div class="sub">Launch Puffer locally to browse this session's working directory.</div>
         </div>
       {:else if errors.has(root) && !cache.has(root)}
         <div class="tree-empty">
@@ -1230,7 +1230,7 @@
       <div class="viewer-empty">
         <Icon name="file" size={20} color="var(--muted-foreground)" />
         <div class="title">File preview is live in the desktop app</div>
-        <div class="sub">Open Corbina locally to preview files from this session.</div>
+        <div class="sub">Open Puffer locally to preview files from this session.</div>
       </div>
     {:else if !activePath}
       <div class="viewer-empty">

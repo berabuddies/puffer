@@ -2664,10 +2664,10 @@
   <div class="connection-banner" role="status" aria-live="polite">
     {#if connectionState === "reconnecting"}
       <span class="dot"></span>
-      Lost connection to Corbina backend. Reconnecting…
+      Lost connection to Puffer backend. Reconnecting…
     {:else}
       <span class="dot err"></span>
-      Corbina backend disconnected.
+      Puffer backend disconnected.
       <button
         type="button"
         class="sc-btn"
