@@ -1,17 +1,29 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
   import Icon from "../../design/Icon.svelte";
-  import { SECRETS, type Deployment } from "../../data/mockDeployments";
+  import { SECRETS, type Deployment, type Secret } from "../../data/mockDeployments";
 
   type Props = { d: Deployment };
   let { d }: Props = $props();
 
-  let secrets = $derived(SECRETS[d.id] ?? SECRETS["d-prod-api"]);
+  let baseSecrets = $derived(SECRETS[d.id] ?? SECRETS["d-prod-api"]);
+  let draftSecrets = $state<Record<string, Secret[]>>({});
+  let secrets = $derived([...(draftSecrets[d.id] ?? []), ...baseSecrets]);
   let revealed = $state<Record<string, boolean>>({});
   let syncState = $state<"idle" | "syncing" | "synced">("idle");
   let syncMessage = $state("");
   let syncTimer = 0;
   let statusDeploymentId = $state("");
+  let addSecretOpen = $state(false);
+  let newSecretKey = $state("");
+  let newSecretPreview = $state("");
+  let newSecretScope = $state<Secret["scope"]>("runtime");
+  let newSecretKeyInput = $state<HTMLInputElement | null>(null);
+  let canAddSecret = $derived(
+    newSecretKey.trim().length > 0 &&
+      newSecretPreview.trim().length > 0 &&
+      !secrets.some((secret) => secret.key.toLowerCase() === newSecretKey.trim().toLowerCase())
+  );
 
   onDestroy(() => {
     if (syncTimer) window.clearTimeout(syncTimer);
@@ -25,6 +37,11 @@
     syncTimer = 0;
     syncState = "idle";
     syncMessage = "";
+    addSecretOpen = false;
+    newSecretKey = "";
+    newSecretPreview = "";
+    newSecretScope = "runtime";
+    revealed = {};
   });
 
   function toggle(key: string) {
@@ -45,6 +62,38 @@
       syncMessage = `Secrets synced: ${keyCount} keys refreshed for ${deploymentName}.`;
       syncTimer = 0;
     }, 250);
+  }
+
+  function openAddSecret(): void {
+    addSecretOpen = true;
+    newSecretKey = "";
+    newSecretPreview = "";
+    newSecretScope = "runtime";
+    window.setTimeout(() => newSecretKeyInput?.focus({ preventScroll: true }), 20);
+  }
+
+  function closeAddSecret(): void {
+    addSecretOpen = false;
+  }
+
+  function createSecret(): void {
+    if (!canAddSecret) return;
+    const key = newSecretKey.trim().toUpperCase().replace(/[^A-Z0-9_]+/g, "_");
+    const preview = newSecretPreview.trim();
+    const next: Secret = {
+      key,
+      preview,
+      scope: newSecretScope,
+      updated: "just now",
+      by: "Otter"
+    };
+    draftSecrets = {
+      ...draftSecrets,
+      [d.id]: [next, ...(draftSecrets[d.id] ?? [])]
+    };
+    syncMessage = `Added ${key} to ${d.name}.`;
+    syncState = "synced";
+    closeAddSecret();
   }
 </script>
 
@@ -72,11 +121,57 @@
       >
         <Icon name="refresh" size={12} />{syncState === "syncing" ? "Syncing" : "Sync"}
       </button>
-      <button type="button" class="sc-btn" data-variant="default" data-size="sm">
+      <button type="button" class="sc-btn" data-variant="default" data-size="sm" onclick={openAddSecret}>
         <Icon name="plus" size={12} />Add secret
       </button>
     </div>
   </div>
+
+  {#if addSecretOpen}
+    <form
+      class="pf-dep-secret-form"
+      aria-label="Add deployment secret"
+      onsubmit={(event) => {
+        event.preventDefault();
+        createSecret();
+      }}
+    >
+      <label>
+        <span>Key</span>
+        <input
+          bind:this={newSecretKeyInput}
+          aria-label="Secret key"
+          value={newSecretKey}
+          placeholder="WEBHOOK_TOKEN"
+          oninput={(event) => (newSecretKey = event.currentTarget.value)}
+        />
+      </label>
+      <label>
+        <span>Preview value</span>
+        <input
+          aria-label="Secret preview value"
+          value={newSecretPreview}
+          placeholder="tok_live_..."
+          oninput={(event) => (newSecretPreview = event.currentTarget.value)}
+        />
+      </label>
+      <label>
+        <span>Scope</span>
+        <select aria-label="Secret scope" bind:value={newSecretScope}>
+          <option value="runtime">runtime</option>
+          <option value="build">build</option>
+        </select>
+      </label>
+      <div class="pf-dep-secret-form-actions">
+        <button type="button" class="sc-btn" data-variant="ghost" data-size="sm" onclick={closeAddSecret}>
+          Cancel
+        </button>
+        <button type="submit" class="sc-btn" data-variant="default" data-size="sm" disabled={!canAddSecret}>
+          Add secret
+        </button>
+      </div>
+    </form>
+  {/if}
 
   <div class="pf-dep-secrets">
     <div class="pf-dep-secrets-head">

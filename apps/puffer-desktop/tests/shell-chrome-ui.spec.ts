@@ -429,6 +429,39 @@ test("deployment secrets sync button reports progress and completion", async ({ 
   await expect(syncButton).toHaveAttribute("aria-busy", "false");
 });
 
+test("deployment add secret creates a local masked secret row", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Deployments" }).click();
+  await page.getByRole("tab", { name: "Secrets" }).click();
+
+  await page.locator(".pf-dep-pane-head").getByRole("button", { name: "Add secret" }).click();
+  const form = page.locator(".pf-dep-secret-form");
+  await expect(form).toBeVisible();
+  await expect(form.getByLabel("Secret key")).toBeFocused();
+  await expect(form.getByRole("button", { name: "Add secret" })).toBeDisabled();
+
+  await form.getByLabel("Secret key").fill("webhook-token");
+  await form.getByLabel("Secret preview value").fill("tok_live_123");
+  await form.getByLabel("Secret scope").selectOption("build");
+  await form.getByRole("button", { name: "Add secret" }).click();
+
+  await expect(form).toHaveCount(0);
+  await expect(page.locator(".pf-dep-pane-head .sub")).toContainText("9 keys");
+  await expect(page.locator(".pf-dep-pane-status")).toContainText(
+    "Added WEBHOOK_TOKEN to stripe-api · production."
+  );
+  const row = page.locator(".pf-dep-secrets-row").filter({ hasText: "WEBHOOK_TOKEN" });
+  await expect(row).toBeVisible();
+  await expect(row).toContainText("••••••••••••••");
+  await expect(row).toContainText("build");
+
+  await row.getByRole("button", { name: "Reveal WEBHOOK_TOKEN" }).click();
+  await expect(row).toContainText("tok_live_123");
+});
+
 test("deployment secret reveal controls target one key and toggle their state", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
