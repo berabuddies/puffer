@@ -126,3 +126,32 @@ test("sidebar can open the deployments screen", async ({ page }) => {
   await expect(page.getByText(/environments/)).toBeVisible();
   await expect(page.getByRole("button", { name: /New deployment/ })).toBeVisible();
 });
+
+test("deployment secret reveal controls target one key and toggle their state", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const sidebar = page.locator(".pf-sidebar");
+  await sidebar.getByRole("button", { name: "Deployments" }).click();
+  await page.getByRole("button", { name: "Secrets" }).click();
+
+  const row = page.locator(".pf-dep-secrets-row").filter({ hasText: "DATABASE_URL" });
+  await expect(row).toContainText("••••••••••••••");
+  await expect(page.getByRole("button", { name: "Reveal", exact: true })).toHaveCount(0);
+
+  const revealDatabaseUrl = page.getByRole("button", { name: "Reveal DATABASE_URL", exact: true });
+  await expect(revealDatabaseUrl).toHaveCount(1);
+  await revealDatabaseUrl.click();
+
+  await expect(row).toContainText(/postgres:\/\/.*db\.puffer\.app\/prod/);
+  const hideDatabaseUrl = page.getByRole("button", { name: "Hide DATABASE_URL", exact: true });
+  await expect(hideDatabaseUrl).toHaveAttribute("aria-pressed", "true");
+  await hideDatabaseUrl.click();
+
+  await expect(row).toContainText("••••••••••••••");
+  await expect(page.getByRole("button", { name: "Reveal DATABASE_URL", exact: true })).toHaveAttribute(
+    "aria-pressed",
+    "false"
+  );
+});

@@ -31,6 +31,7 @@
     | "cpu"
     | "moreH"
     | "eye"
+    | "eyeOff"
     | "panel"
     | "panelOpen"
     | "panelClose"
@@ -69,6 +70,7 @@
   import CopyIcon from "lucide-svelte/icons/copy";
   import CpuIcon from "lucide-svelte/icons/cpu";
   import EyeIcon from "lucide-svelte/icons/eye";
+  import EyeOffIcon from "lucide-svelte/icons/eye-off";
   import ExternalLinkIcon from "lucide-svelte/icons/external-link";
   import FileIcon from "lucide-svelte/icons/file";
   import FlameIcon from "lucide-svelte/icons/flame";
@@ -146,6 +148,7 @@
     cpu: CpuIcon,
     moreH: MoreHorizontalIcon,
     eye: EyeIcon,
+    eyeOff: EyeOffIcon,
     panel: LayoutPanelLeftIcon,
     panelOpen: PanelLeftOpenIcon,
     panelClose: PanelLeftCloseIcon,

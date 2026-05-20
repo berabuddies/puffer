@@ -38,14 +38,22 @@
       <span></span>
     </div>
     {#each secrets as s (s.key)}
+      {@const secretRevealed = revealed[s.key] === true}
       <div class="pf-dep-secrets-row" data-rotate={s.rotate ?? false}>
         <span class="mono key">
           <Icon name="key" size={11} color="var(--muted-foreground)" />{s.key}
         </span>
         <span class="mono val">
-          {revealed[s.key] ? s.preview : "••••••••••••••"}
-          <button type="button" class="pf-dep-ico" onclick={() => toggle(s.key)} aria-label="Reveal">
-            <Icon name="eye" size={11} />
+          {secretRevealed ? s.preview : "••••••••••••••"}
+          <button
+            type="button"
+            class="pf-dep-ico"
+            onclick={() => toggle(s.key)}
+            aria-label={`${secretRevealed ? "Hide" : "Reveal"} ${s.key}`}
+            aria-pressed={secretRevealed}
+            title={`${secretRevealed ? "Hide" : "Reveal"} ${s.key}`}
+          >
+            <Icon name={secretRevealed ? "eyeOff" : "eye"} size={11} />
           </button>
         </span>
         <span class="pf-dep-scope" data-scope={s.scope}>{s.scope}</span>
