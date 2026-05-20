@@ -1,0 +1,23 @@
+id: worldagent
+display_name: WorldAgent
+base_url: https://inference-api.worldrouter.ai
+default_api: openai-completions
+oauth_family: worldagent
+auth_modes:
+  - api_key
+  - oauth
+discovery:
+  path: /v1/models
+  response: open_ai_models
+  api: openai-completions
+  context_window: 200000
+  max_output_tokens: 8192
+  supports_reasoning: true
+models:
+  - id: gpt-5
+    display_name: GPT-5 (via WorldRouter)
+    provider: worldagent
+    api: openai-completions
+    context_window: 200000
+    max_output_tokens: 8192
+    supports_reasoning: true
