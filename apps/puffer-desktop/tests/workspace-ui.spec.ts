@@ -123,7 +123,7 @@ test("workspace picker clears local errors when switching modes", async ({ page 
   await expect(dialog.getByLabel("SSH target")).toBeVisible();
 });
 
-test("agent pin ignores duplicate clicks while the pin save is in flight", async ({ page }) => {
+test("agent pin accepts a confirmed opposite toggle before the save response returns", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayResponse("set_desktop_pin", () => true, 500);
   await daemon.install(page);
@@ -132,23 +132,29 @@ test("agent pin ignores duplicate clicks while the pin save is in flight", async
   await page.getByRole("button", { name: /Browser regression/ }).first().click();
   const agentRow = page.locator(".pf-sidebar-agent-row").filter({ hasText: "Browser regression" });
   await expect(agentRow).toBeVisible();
-  await agentRow.getByRole("button", { name: "Pin agent" }).evaluate((button) => {
-    (button as HTMLButtonElement).click();
-    (button as HTMLButtonElement).click();
-  });
+  await agentRow.getByRole("button", { name: "Pin agent" }).click();
 
   const request = await daemon.waitForRequest("set_desktop_pin");
-  await expect(agentRow.getByRole("button", { name: "Unpin agent" })).toBeDisabled();
+  await expect(agentRow.getByRole("button", { name: "Unpin agent" })).toBeEnabled();
   expect(request.params).toMatchObject({
     kind: "agent",
     id: "session-browser",
     pinned: true
   });
-  await page.waitForTimeout(50);
-  expect(daemon.requests.filter((request) => request.method === "set_desktop_pin")).toHaveLength(1);
+
+  await agentRow.getByRole("button", { name: "Unpin agent" }).click();
+  const unpin = await daemon.waitForRequest(
+    "set_desktop_pin",
+    (request) => request.params.pinned === false
+  );
+  expect(unpin.params).toMatchObject({
+    kind: "agent",
+    id: "session-browser",
+    pinned: false
+  });
 });
 
-test("workspace pin control is disabled while the pin save is in flight", async ({ page }) => {
+test("workspace pin control is re-enabled by the confirming pin event", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayResponse("set_desktop_pin", () => true, 500);
   await daemon.install(page);
@@ -161,7 +167,7 @@ test("workspace pin control is disabled while the pin save is in flight", async 
   await pinWorkspace.click();
   await daemon.waitForRequest("set_desktop_pin");
 
-  await expect(project.getByRole("button", { name: "Unpin workspace" })).toBeDisabled();
+  await expect(project.getByRole("button", { name: "Unpin workspace" })).toBeEnabled();
 });
 
 test("workspace pin save stays guarded after opening an agent", async ({ page }) => {
@@ -201,7 +207,7 @@ test("workspace pin save stays guarded after opening an agent", async ({ page })
   await expect(page.locator(".pf-agent-detail")).toBeVisible();
   await page.getByRole("button", { name: "Back" }).click();
 
-  await expect(project.getByRole("button", { name: "Unpin workspace" })).toBeDisabled();
+  await expect(project.getByRole("button", { name: "Unpin workspace" })).toBeEnabled();
   expect(daemon.requests.filter((request) => request.method === "set_desktop_pin")).toHaveLength(1);
 });
 

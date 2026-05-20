@@ -190,6 +190,8 @@
   let liveErrorSeq = 0;
   let desktopPins = $state<DesktopPinState>({ pinnedAgentIds: [], pinnedWorkspacePaths: [] });
   let desktopPinInFlightKeys = $state<string[]>([]);
+  let desktopPinInFlightStates = $state<Record<string, boolean>>({});
+  let desktopPinQueuedStates = $state<Record<string, boolean>>({});
   const submitMessageInFlightGuards = new Set<string>();
 
   let settingsSnapshot = $state<SettingsSnapshot | null>(null);
@@ -836,6 +838,8 @@
         // selected session so the UI catches up.
         if (s === "open" && !onboarding) {
           desktopPinInFlightKeys = [];
+          desktopPinInFlightStates = {};
+          desktopPinQueuedStates = {};
           void refreshPins();
           void refreshSettings();
           void refreshGroups();
@@ -868,6 +872,23 @@
           pinnedAgentIds: Array.isArray(pins?.pinnedAgentIds) ? pins.pinnedAgentIds : [],
           pinnedWorkspacePaths: Array.isArray(pins?.pinnedWorkspacePaths) ? pins.pinnedWorkspacePaths : []
         };
+        const remainingInFlight = desktopPinInFlightKeys.filter((key) => {
+          if (key in desktopPinQueuedStates) return true;
+          const [kind, ...idParts] = key.split(":");
+          const id = idParts.join(":");
+          const expected = desktopPinInFlightStates[key];
+          if (expected === undefined) return true;
+          const confirmed = isDesktopPinned(kind === "workspace" ? "workspace" : "agent", id);
+          return confirmed !== expected;
+        });
+        if (remainingInFlight.length !== desktopPinInFlightKeys.length) {
+          desktopPinInFlightKeys = remainingInFlight;
+          desktopPinInFlightStates = Object.fromEntries(
+            Object.entries(desktopPinInFlightStates).filter(([key]) =>
+              remainingInFlight.includes(key)
+            )
+          );
+        }
       })
     ];
   }
@@ -1163,10 +1184,27 @@
     return `${kind}:${id}`;
   }
 
+  function isDesktopPinned(kind: "agent" | "workspace", id: string): boolean {
+    return kind === "agent"
+      ? desktopPins.pinnedAgentIds.includes(id)
+      : desktopPins.pinnedWorkspacePaths.includes(id);
+  }
+
+  function removeDesktopPinKey<T>(record: Record<string, T>, key: string): Record<string, T> {
+    const { [key]: _removed, ...rest } = record;
+    return rest;
+  }
+
   async function toggleDesktopPin(kind: "agent" | "workspace", id: string, pinned: boolean) {
     const key = desktopPinKey(kind, id);
-    if (desktopPinInFlightKeys.includes(key)) return;
+    if (desktopPinInFlightKeys.includes(key)) {
+      if (isDesktopPinned(kind, id) !== pinned) applyPin(kind, id, pinned);
+      desktopPinQueuedStates = { ...desktopPinQueuedStates, [key]: pinned };
+      statusMessage = `${pinned ? "Pin" : "Unpin"} ${kind} queued.`;
+      return;
+    }
     desktopPinInFlightKeys = [...desktopPinInFlightKeys, key];
+    desktopPinInFlightStates = { ...desktopPinInFlightStates, [key]: pinned };
     applyPin(kind, id, pinned);
     try {
       desktopPins = await setDesktopPin(kind, id, pinned);
@@ -1176,6 +1214,12 @@
       statusMessage = `Failed to update pin: ${error}`;
     } finally {
       desktopPinInFlightKeys = desktopPinInFlightKeys.filter((value) => value !== key);
+      desktopPinInFlightStates = removeDesktopPinKey(desktopPinInFlightStates, key);
+      const queued = desktopPinQueuedStates[key];
+      desktopPinQueuedStates = removeDesktopPinKey(desktopPinQueuedStates, key);
+      if (queued !== undefined && isDesktopPinned(kind, id) !== queued) {
+        void toggleDesktopPin(kind, id, queued);
+      }
     }
   }
 
@@ -1474,6 +1518,8 @@
     resolvingPermissionIds = [];
     resolvingQuestionIds = [];
     desktopPinInFlightKeys = [];
+    desktopPinInFlightStates = {};
+    desktopPinQueuedStates = {};
     liveStreamItems = [];
     replayTextByTurn = {};
     turnPermissionLookup = {};
