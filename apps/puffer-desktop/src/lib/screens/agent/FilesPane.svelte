@@ -1933,6 +1933,7 @@
     font-weight: 650;
   }
   .pdf-shell {
+    position: relative;
     padding: 20px;
     height: 100%;
     overflow: auto;

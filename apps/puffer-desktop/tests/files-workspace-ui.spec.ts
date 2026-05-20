@@ -622,13 +622,14 @@ test("Files tab previews common document and data formats", async ({ page }) => 
 test("Files tab PDF zoom is immediate and page-limit status remains readable", async ({ page }) => {
   const daemon = new FakeDaemon();
   seedPreviewFiles(daemon);
+  daemon.seedBinaryFile("/tmp/puffer/wide-long.pdf", makePdfBase64("Wide long PDF preview", 29, 960, 620));
   await daemon.install(page);
   await daemon.open(page);
 
   await openRegressionAgent(page);
   await openFilesPanel(page);
 
-  await page.getByRole("button", { name: "long.pdf" }).click();
+  await page.getByRole("button", { name: "wide-long.pdf" }).click();
   const pdfPreview = page.getByLabel("PDF preview");
   await expect(pdfPreview).toBeVisible();
   await expectCanvasHasInk(page, 'canvas[aria-label="PDF page 1"]');
@@ -655,20 +656,39 @@ test("Files tab PDF zoom is immediate and page-limit status remains readable", a
       return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
     };
     const style = getComputedStyle(node);
+    const shell = node.closest(".pdf-shell");
+    const shellStyle = shell ? getComputedStyle(shell) : null;
     const foreground = luminance(parseRgb(style.color));
     const background = luminance(parseRgb(style.backgroundColor));
-    return (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05);
+    return {
+      ratio: (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05),
+      backgroundColor: style.backgroundColor,
+      shellBackgroundColor: shellStyle?.backgroundColor ?? ""
+    };
   });
-  expect(contrast).toBeGreaterThanOrEqual(4.5);
+  expect(contrast.ratio).toBeGreaterThanOrEqual(4.5);
+  expect(contrast.backgroundColor).not.toBe(contrast.shellBackgroundColor);
+  expect(contrast.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
 
   const initialWidth = await page.locator('canvas[aria-label="PDF page 1"]').evaluate((canvas) =>
     Math.round(canvas.getBoundingClientRect().width)
   );
-  await pdfPreview.evaluate((node) => {
+  const scrollState = await pdfPreview.evaluate((node) => {
     node.scrollTop = 520;
+    node.scrollLeft = 420;
+    return { left: node.scrollLeft, top: node.scrollTop };
   });
+  expect(scrollState.left).toBeGreaterThan(0);
+  expect(scrollState.top).toBeGreaterThan(0);
   await expect(controls).toBeVisible();
-  await controls.getByRole("button", { name: "Zoom in" }).click();
+  const zoomIn = controls.getByRole("button", { name: "Zoom in" });
+  const zoomButtonReceivesPointer = await zoomIn.evaluate((button) => {
+    const rect = button.getBoundingClientRect();
+    const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    return hit === button || button.contains(hit);
+  });
+  expect(zoomButtonReceivesPointer).toBe(true);
+  await zoomIn.click();
   await expect(controls.getByText("110%")).toBeVisible();
   await expect(pageLimit).toBeVisible({ timeout: 100 });
   await expect(page.locator('canvas[aria-label^="PDF page"]')).toHaveCount(20, { timeout: 100 });

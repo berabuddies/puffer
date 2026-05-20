@@ -222,14 +222,15 @@
   .pdf-renderer {
     display: grid;
     gap: 14px;
+    position: relative;
     width: 100%;
   }
 
   .pdf-controls-row {
     position: sticky;
-    top: 8px;
-    left: 8px;
-    z-index: 3;
+    top: 0;
+    left: 0;
+    z-index: 20;
     display: inline-flex;
     flex-wrap: wrap;
     align-items: center;
@@ -237,12 +238,13 @@
     justify-self: start;
     gap: 8px;
     max-width: 100%;
-    padding: 6px;
-    border: 1px solid #cbd5e1;
+    padding: 7px;
+    border: 1px solid #94a3b8;
     border-radius: 8px;
-    background: #ffffff;
-    box-shadow: 0 10px 28px rgb(15 23 42 / 0.22);
+    background: #f8fafc;
+    box-shadow: 0 12px 32px rgb(15 23 42 / 0.26);
     color: #111827;
+    pointer-events: auto;
   }
 
   .pdf-toolbar {
@@ -260,8 +262,8 @@
     align-items: center;
     justify-content: center;
     gap: 4px;
-    min-width: 34px;
-    height: 28px;
+    min-width: 36px;
+    height: 30px;
     border: 1px solid var(--border);
     border-radius: 5px;
     background: #ffffff;
@@ -291,15 +293,15 @@
   .pdf-status {
     width: fit-content;
     max-width: 100%;
-    padding: 4px 10px;
-    border: 1px solid #111827;
+    padding: 5px 10px;
+    border: 1px solid #1d4ed8;
     border-radius: 6px;
-    background: #111827;
-    color: #ffffff;
+    background: #172554;
+    color: #eff6ff;
     font-size: 12px;
     font-weight: 650;
     line-height: 1.35;
-    box-shadow: 0 1px 0 rgb(255 255 255 / 0.25);
+    box-shadow: 0 1px 0 rgb(255 255 255 / 0.45);
   }
 
   .pdf-error {
