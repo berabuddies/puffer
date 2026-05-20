@@ -4,6 +4,8 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "build:puffer-cli:dev": "cargo build -p puffer-cli",
+    "build:puffer-cli:release": "cargo build --release -p puffer-cli",
     "dev": "vite --host 127.0.0.1 --port 1420",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1 --port 1420",
