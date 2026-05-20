@@ -502,6 +502,39 @@ test("deployment add memory note creates a local filtered note", async ({ page }
   await expect(note).toBeVisible();
 });
 
+test("deployment add provider creates a local integration card", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Deployments" }).click();
+  await page.getByRole("tab", { name: "Providers" }).click();
+
+  await expect(page.locator(".pf-dep-prov")).toHaveCount(8);
+  await page.locator(".pf-dep-pane-head").getByRole("button", { name: "Add provider" }).click();
+  const form = page.locator(".pf-dep-prov-form");
+  await expect(form).toBeVisible();
+  await expect(form.getByLabel("Provider name")).toBeFocused();
+  await expect(form.getByRole("button", { name: "Add provider" })).toBeDisabled();
+
+  await form.getByLabel("Provider name").fill("Webhook relay");
+  await form.getByLabel("Provider type").selectOption("webhook");
+  await form.getByLabel("Provider status").selectOption("degraded");
+  await form.getByLabel("Provider connection note").fill("https://hooks.example.com/live");
+  await form.getByRole("button", { name: "Add provider" }).click();
+
+  await expect(form).toHaveCount(0);
+  await expect(page.locator(".pf-dep-pane-status")).toContainText(
+    "Added Webhook relay provider to stripe-api · production."
+  );
+  await expect(page.locator(".pf-dep-prov")).toHaveCount(9);
+  const provider = page.locator(".pf-dep-prov").filter({ hasText: "Webhook relay" });
+  await expect(provider).toBeVisible();
+  await expect(provider).toContainText("https://hooks.example.com/live");
+  await expect(provider).toContainText("degraded");
+  await expect(provider).toHaveCount(1);
+});
+
 test("deployment secret reveal controls target one key and toggle their state", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
