@@ -89,6 +89,8 @@
   let stepIdx = $state<number | null>(null);
   let loading = $state(false);
   let error = $state<string | null>(null);
+  let refreshGeneration = 0;
+  let dirtyWorkflowSlugs = $state<string[]>([]);
   let saveNotice = $state("Draft changes are local until workflow save lands in the daemon.");
 
   let workflows = $derived(editorWorkflows);
@@ -240,27 +242,45 @@
 
   async function refresh() {
     if (loading) return;
+    const generation = ++refreshGeneration;
     loading = true;
     error = null;
     try {
       const next = await loadWorkflowSnapshot();
+      if (generation !== refreshGeneration) return;
+      const incoming = next.workflows.length > 0 ? next.workflows.map(editableFromWorkflow) : [starterWorkflow()];
+      const dirtyBySlug = new Map(
+        editorWorkflows
+          .filter((item) => dirtyWorkflowSlugs.includes(item.slug))
+          .map((item) => [item.slug, item])
+      );
+      const merged = incoming.map((item) => dirtyBySlug.get(item.slug) ?? item);
+      for (const dirty of dirtyBySlug.values()) {
+        if (!merged.some((item) => item.slug === dirty.slug)) merged.push(dirty);
+      }
       snapshot = {
         workflows: next.workflows,
         runs: [...next.runs].sort((a, b) => b.idx - a.idx)
       };
-      editorWorkflows = next.workflows.length > 0 ? next.workflows.map(editableFromWorkflow) : [starterWorkflow()];
+      editorWorkflows = merged;
       if (!workflowSlug || !editorWorkflows.some((item) => item.slug === workflowSlug)) {
         workflowSlug = editorWorkflows[0]?.slug ?? "agent-review-pipeline";
       }
-      selectedNodeId = editorWorkflows[0]?.pipeline.nodes[0]?.id ?? null;
+      const activeWorkflow = editorWorkflows.find((item) => item.slug === workflowSlug) ?? editorWorkflows[0];
+      if (!activeWorkflow?.pipeline.nodes.some((node) => node.id === selectedNodeId)) {
+        selectedNodeId = activeWorkflow?.pipeline.nodes[0]?.id ?? null;
+      }
     } catch (err) {
+      if (generation !== refreshGeneration) return;
       error = err instanceof Error ? err.message : String(err);
-      editorWorkflows = [starterWorkflow()];
+      if (editorWorkflows.length === 0) editorWorkflows = [starterWorkflow()];
       workflowSlug = editorWorkflows[0].slug;
       selectedNodeId = editorWorkflows[0].pipeline.nodes[0]?.id ?? null;
     } finally {
-      loading = false;
-      setTimeout(measure, 0);
+      if (generation === refreshGeneration) {
+        loading = false;
+        setTimeout(measure, 0);
+      }
     }
   }
 
@@ -281,7 +301,11 @@
 
   function updateCurrentWorkflow(mutator: (item: EditableWorkflow) => EditableWorkflow) {
     if (!workflow) return;
-    editorWorkflows = editorWorkflows.map((item) => (item.slug === workflow.slug ? mutator(item) : item));
+    const dirtySlug = workflow.slug;
+    editorWorkflows = editorWorkflows.map((item) => (item.slug === dirtySlug ? mutator(item) : item));
+    if (!dirtyWorkflowSlugs.includes(dirtySlug)) {
+      dirtyWorkflowSlugs = [...dirtyWorkflowSlugs, dirtySlug];
+    }
     saveNotice = "Edited locally. Save/export wiring can use this workflow shape.";
   }
 

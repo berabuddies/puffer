@@ -91,3 +91,46 @@ test("pipeline wiring disables already connected output targets", async ({ page 
   await expect(pufferTarget).toBeDisabled();
   await expect(pufferTarget).toHaveAttribute("aria-pressed", "true");
 });
+
+test("pipeline refresh preserves unsaved node drafts", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const prompt = page.getByLabel("Prompt");
+  await expect(prompt).toHaveValue("Implement the requested change.");
+  await prompt.fill("local draft that must survive refresh");
+
+  daemon.setWorkflowSnapshot({
+    workflows: [
+      {
+        schema: "puffer.workflow.v1",
+        slug: "agent-review-pipeline",
+        enabled: true,
+        trigger: { type: "subscription", source_topic: "workspace.task.created", pattern: "review" },
+        pipeline: {
+          name: "Agent review pipeline",
+          working_dir: "/tmp/puffer",
+          concurrency: 1,
+          nodes: [
+            {
+              id: "codex-implement",
+              type: "codex",
+              agent: "Codex implementer",
+              model: "gpt-5.4-codex",
+              tools: ["read", "edit"],
+              prompt: "server refresh should not clobber local draft"
+            }
+          ]
+        }
+      }
+    ],
+    runs: []
+  });
+
+  await page.getByRole("button", { name: "Refresh workflows" }).click();
+
+  await expect(prompt).toHaveValue("local draft that must survive refresh");
+});

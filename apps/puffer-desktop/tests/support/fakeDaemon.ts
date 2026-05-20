@@ -47,6 +47,11 @@ type PtySet = {
   tabs: JsonRecord[];
 };
 
+type WorkflowSnapshotFixture = {
+  workflows: JsonRecord[];
+  runs: JsonRecord[];
+};
+
 type SessionDetailOverrides = {
   latestDiff: JsonRecord | null;
   diffHistory: JsonRecord[];
@@ -285,6 +290,50 @@ export class FakeDaemon {
   ];
   private readonly protocol: "legacy" | "real";
   private readonly activeTurnIds = new Set<string>();
+  private workflowSnapshot: WorkflowSnapshotFixture = {
+    workflows: [
+      {
+        schema: "puffer.workflow.v1",
+        slug: "agent-review-pipeline",
+        enabled: true,
+        trigger: { type: "subscription", source_topic: "workspace.task.created", pattern: "review" },
+        pipeline: {
+          name: "Agent review pipeline",
+          working_dir: "/tmp/puffer",
+          concurrency: 1,
+          nodes: [
+            {
+              id: "codex-implement",
+              type: "codex",
+              agent: "Codex implementer",
+              model: "gpt-5.4-codex",
+              tools: ["read", "edit"],
+              prompt: "Implement the requested change."
+            },
+            {
+              id: "claude-review",
+              type: "claude",
+              agent: "Claude reviewer",
+              model: "claude-sonnet-4-5",
+              tools: ["read", "diff"],
+              depends_on: ["codex-implement"],
+              prompt: "Review the implementation."
+            },
+            {
+              id: "puffer-ship",
+              type: "puffer",
+              agent: "Puffer shipper",
+              model: "puffer-default",
+              tools: ["git", "test"],
+              depends_on: ["claude-review"],
+              prompt: "Prepare the handoff."
+            }
+          ]
+        }
+      }
+    ],
+    runs: []
+  };
   private nextTab = 2;
   private nextPty = 1;
   private rejectConnections = false;
@@ -402,6 +451,27 @@ export class FakeDaemon {
 
   setAuthStatuses(auth: JsonRecord[]): void {
     this.authStatuses = auth;
+  }
+
+  setWorkflowSnapshot(snapshot: WorkflowSnapshotFixture): void {
+    this.workflowSnapshot = {
+      workflows: snapshot.workflows.map((workflow) => ({ ...workflow })),
+      runs: snapshot.runs.map((run) => ({ ...run }))
+    };
+  }
+
+  socketCount(): number {
+    return this.sockets.size;
+  }
+
+  async disconnectAllSockets(): Promise<void> {
+    const sockets = [...this.sockets];
+    await Promise.all(
+      sockets.map((socket) =>
+        socket.close({ code: 1011, reason: "fake daemon forced reconnect" }).catch(() => undefined)
+      )
+    );
+    for (const socket of sockets) this.sockets.delete(socket);
   }
 
   async install(page: Page): Promise<void> {
@@ -701,6 +771,11 @@ export class FakeDaemon {
         return {};
       case "browser_recording":
         return { frames: this.browserRecordings.get(String(request.params.sessionId ?? "")) ?? [] };
+      case "workflow_list":
+        return {
+          workflows: this.workflowSnapshot.workflows.map((workflow) => ({ ...workflow })),
+          runs: this.workflowSnapshot.runs.map((run) => ({ ...run }))
+        };
       case "list_dir":
         return this.listDir(request.params);
       case "load_file_tabs":
