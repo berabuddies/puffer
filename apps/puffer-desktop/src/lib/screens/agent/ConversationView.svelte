@@ -93,6 +93,7 @@
   let userInitial = $derived(displayUserName.trim().charAt(0).toUpperCase() || "O");
 
   let draft = $state("");
+  let draftBySessionId = $state<Record<string, string>>({});
   let threadEl: HTMLDivElement | undefined;
   let lastSessionId: string | null = null;
   let nowMs = $state(Date.now());
@@ -464,11 +465,26 @@
     return elapsed < 10 ? `${elapsed.toFixed(1)}s` : `${Math.floor(elapsed)}s`;
   }
 
+  function setDraftForSession(sessionId: string | null | undefined, value: string) {
+    if (!sessionId) return;
+    if (value.length > 0) {
+      draftBySessionId = { ...draftBySessionId, [sessionId]: value };
+      return;
+    }
+    const { [sessionId]: _removed, ...rest } = draftBySessionId;
+    draftBySessionId = rest;
+  }
+
+  function updateDraft(value: string) {
+    draft = value;
+    setDraftForSession(session?.id, value);
+  }
+
   $effect(() => {
-    // On session change, reset local composer state and scroll to the start.
+    // Keep unsent composer text isolated per session while switching threads.
     const nextSessionId = session?.id ?? null;
     if (nextSessionId !== lastSessionId) {
-      draft = "";
+      draft = nextSessionId ? draftBySessionId[nextSessionId] ?? "" : "";
       expandedActivityIds = [];
       selectedActivityChildren = {};
       lastSessionId = nextSessionId;
@@ -625,9 +641,11 @@
     const previousDraft = draft;
     setSubmitInFlight(targetSessionId, true);
     draft = "";
+    setDraftForSession(targetSessionId, "");
     try {
       const accepted = await onSubmitMessage(v, composerOptions());
       if (accepted === false) {
+        setDraftForSession(targetSessionId, previousDraft);
         if ((session?.id ?? null) === targetSessionId && !draft.trim()) draft = previousDraft;
         return;
       }
@@ -1456,8 +1474,9 @@
   <div class="pf-composer-wrap">
     <div class="pf-composer">
       <textarea
-        bind:value={draft}
+        value={draft}
         placeholder={session ? `Reply to ${engineerName}…` : "Select a session to continue"}
+        oninput={(event) => updateDraft(event.currentTarget.value)}
         onkeydown={onKeydown}
         disabled={composerDisabled}
       ></textarea>

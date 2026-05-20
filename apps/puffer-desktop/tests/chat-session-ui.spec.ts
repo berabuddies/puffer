@@ -1778,7 +1778,7 @@ test("rapid turn errors keep separate inline error rows", async ({ page }) => {
   await expect(page.getByText("Second rapid turn failure.")).toBeVisible();
 });
 
-test("unsent composer draft clears when switching sessions", async ({ page }) => {
+test("unsent composer drafts are preserved per session while switching", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
       {
@@ -1832,9 +1832,31 @@ test("unsent composer draft clears when switching sessions", async ({ page }) =>
   await expect(page.getByText("Beta draft seed")).toBeVisible();
   await expect(composer).toHaveValue("");
   await expect(page.getByRole("button", { name: "Send" })).toBeDisabled();
-  await page.keyboard.press("Enter");
-  await page.waitForTimeout(50);
-  expect(daemon.requests.filter((request) => request.method === "run_agent_turn")).toHaveLength(0);
+  await composer.fill("beta-only draft");
+  await expect(composer).toHaveValue("beta-only draft");
+
+  await openSession(page, /Alpha draft/);
+  await expect(page.getByText("Alpha draft seed")).toBeVisible();
+  await expect(composer).toHaveValue("alpha-only draft");
+
+  await openSession(page, /Beta draft/);
+  await expect(page.getByText("Beta draft seed")).toBeVisible();
+  await expect(composer).toHaveValue("beta-only draft");
+
+  await page.getByRole("button", { name: "Send" }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-beta-draft" &&
+      request.params.message === "beta-only draft"
+  );
+  expect(
+    daemon.requests.filter(
+      (request) =>
+        request.method === "run_agent_turn" &&
+        request.params.sessionId === "session-alpha-draft"
+    )
+  ).toHaveLength(0);
 });
 
 test("resolved transcript permissions do not reappear as pending approvals", async ({ page }) => {
