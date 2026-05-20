@@ -27,7 +27,8 @@
   let gestureStartZoom = 1;
   let generation = 0;
   let loadingTask: PDFDocumentLoadingTask | null = null;
-  let showTextFallback = $derived(textLines.some((line) => line.trim() && line.trim() !== "No text found."));
+  let hasTextFallback = $derived(textLines.some((line) => line.trim() && line.trim() !== "No text found."));
+  let showTextFallback = $derived(hasTextFallback && (renderedPages === 0 || Boolean(error)));
 
   type PdfJsModule = typeof import("pdfjs-dist");
   type PdfWorkerModule = { WorkerMessageHandler: unknown };

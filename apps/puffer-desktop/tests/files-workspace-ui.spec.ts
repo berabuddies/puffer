@@ -463,7 +463,7 @@ test("Files tab previews common document and data formats", async ({ page }) => 
     (request) => request.params.path === "/tmp/puffer/sample.pdf" && request.params.maxBytes === 24 * 1024 * 1024
   );
   await expectCanvasHasInk(page, 'canvas[aria-label="PDF page 1"]');
-  await expect(page.getByLabel("PDF text fallback")).toContainText("Puffer PDF preview");
+  await expect(page.getByLabel("PDF text fallback")).toHaveCount(0);
   expect(pdfRendererRequests.length).toBeGreaterThan(0);
 
   const pdfPreview = page.getByLabel("PDF preview");
@@ -510,16 +510,15 @@ test("Files tab previews common document and data formats", async ({ page }) => 
       request.params.maxBytes === 24 * 1024 * 1024
   );
   await expectCanvasHasInk(page, 'canvas[aria-label="PDF page 1"]');
-  await expect(page.getByLabel("PDF text fallback")).toContainText("ASCII sniffed PDF preview");
+  await expect(page.getByLabel("PDF text fallback")).toHaveCount(0);
 
   await page.getByRole("button", { name: "tex-garbage.pdf" }).click();
   await expect(page.getByLabel("PDF preview")).toBeVisible();
   await expectCanvasHasInk(page, 'canvas[aria-label="PDF page 1"]');
-  const fallback = page.getByLabel("PDF text fallback");
-  await expect(fallback).toContainText("Clean PDF preview");
-  await expect(fallback).not.toContainText("EXTRACTED TEXT");
-  await expect(fallback).not.toContainText("CIDInit");
-  await expect(fallback).not.toContainText("TeX-T1-0");
+  await expect(page.getByLabel("PDF text fallback")).toHaveCount(0);
+  await expect(page.getByLabel("PDF preview")).not.toContainText("EXTRACTED TEXT");
+  await expect(page.getByLabel("PDF preview")).not.toContainText("CIDInit");
+  await expect(page.getByLabel("PDF preview")).not.toContainText("TeX-T1-0");
 
   await page.getByRole("button", { name: "long.pdf" }).click();
   await expect(page.getByLabel("PDF preview")).toBeVisible();
@@ -1030,10 +1029,14 @@ test("Files tab shows PDF text fallback when renderer assets fail to load", asyn
   await openRegressionAgent(page);
   await openFilesPanel(page);
 
-  await page.getByRole("button", { name: "sample.pdf" }).click();
+  await page.getByRole("button", { name: "tex-garbage.pdf" }).click();
   await expect(page.getByLabel("PDF preview")).toBeVisible();
   await expect(page.getByText("PDF renderer failed:")).toBeVisible();
-  await expect(page.getByLabel("PDF text fallback")).toContainText("Puffer PDF preview");
+  const fallback = page.getByLabel("PDF text fallback");
+  await expect(fallback).toContainText("Clean PDF preview");
+  await expect(fallback).not.toContainText("EXTRACTED TEXT");
+  await expect(fallback).not.toContainText("CIDInit");
+  await expect(fallback).not.toContainText("TeX-T1-0");
 });
 
 test("Files tab keeps raw editing available for previewed text files", async ({ page }) => {
