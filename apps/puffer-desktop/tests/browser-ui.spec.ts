@@ -143,3 +143,37 @@ test("Status bar shows loading state on back/forward navigation", async ({ page 
   // The status bar should show "Loading"
   await expect(statusBar).toContainText("Loading");
 });
+
+test("Stale Browser tab list does not clear reload loading feedback", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openBrowserAgent(page);
+  await openBrowserPane(page, daemon);
+
+  const statusBar = page.locator(".pf-browser-status");
+  await expect(statusBar).toContainText("Connected");
+
+  await page.locator("button[title='Reload']").click();
+  await daemon.waitForRequest("browser_reload");
+  await expect(statusBar).toContainText("Loading");
+
+  daemon.emit("browser:session-browser:tabs", {
+    activeTabId: "tab-1",
+    tabs: [
+      {
+        tabId: "tab-1",
+        label: "New tab",
+        url: "about:blank",
+        title: "",
+        loading: false,
+        connected: true,
+        active: true,
+        backendSessionId: "session-browser:browser:tab-1"
+      }
+    ]
+  });
+
+  await expect(statusBar).toContainText("Loading");
+});

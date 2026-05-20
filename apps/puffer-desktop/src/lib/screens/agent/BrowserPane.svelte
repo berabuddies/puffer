@@ -108,6 +108,7 @@
   let pendingCursorSessionId: string | null = null;
   let tabStateVersion = 0;
   const handledBrowserShortcutCodes = new Set<string>();
+  const pendingNavigationSessions = new Set<string>();
   let pendingFrame: BrowserFrameEvent | null = null;
   let frameDecodeInFlight = false;
 
@@ -193,15 +194,18 @@
 
   function tabFromInfo(info: BrowserTabInfo): BrowserTab {
     const existing = tabs.find((tab) => tab.id === info.tabId);
+    const backendId = info.backendSessionId || existing?.backendSessionId || backendSessionId(info.tabId);
+    const pendingNavigation = pendingNavigationSessions.has(backendId);
+    const loading = Boolean(info.loading || pendingNavigation);
     return {
       ...(existing ?? newBrowserTab(info.tabId, info.label || "New tab")),
       id: info.tabId,
-      backendSessionId: info.backendSessionId || existing?.backendSessionId || backendSessionId(info.tabId),
+      backendSessionId: backendId,
       label: info.label || existing?.label || "New tab",
       url: info.url || "about:blank",
       title: info.title || "",
-      loading: info.loading,
-      status: info.connected ? (info.loading ? "Loading" : "Connected") : "Disconnected",
+      loading,
+      status: info.connected ? (loading ? "Loading" : "Connected") : "Disconnected",
       connected: info.connected,
       favicon: faviconFor(info.url || "about:blank"),
       error: null
@@ -213,6 +217,7 @@
     if (state.tabs.length === 0) {
       if (!options.allowEmpty) return;
       tabStateVersion += 1;
+      pendingNavigationSessions.clear();
       tabs = [];
       activeTabId = "";
       nextTabNumber = 2;
@@ -252,6 +257,7 @@
     activeEventSessionId = "";
     disposeSessionSubscriptions();
     clearCursorTimer();
+    pendingNavigationSessions.clear();
     resetPointer(activePointerId ?? undefined);
     const restored = loadSavedTabsFor(nextSessionId);
     tabs = restored;
@@ -481,12 +487,31 @@
     );
   }
 
+  function tabIdForBackendSession(backendId: string): string | null {
+    return tabs.find((tab) => tab.backendSessionId === backendId)?.id ?? null;
+  }
+
+  function markNavigationPending(target: BrowserCommandTarget) {
+    pendingNavigationSessions.add(target.backendSessionId);
+    const tabId = tabIdForBackendSession(target.backendSessionId);
+    if (tabId) updateTab(tabId, { loading: true, status: "Loading", error: null }, false);
+    if (targetStillActive(target)) {
+      loading = true;
+      status = "Loading";
+      error = null;
+    }
+  }
+
+  function clearNavigationPending(backendId: string) {
+    pendingNavigationSessions.delete(backendId);
+  }
+
   function runHistory(direction: "back" | "forward") {
     const target = activeCommandTarget();
     if (!target) return;
-    loading = true;
-    status = "Loading";
+    markNavigationPending(target);
     void browserHistory(target.backendSessionId, direction).catch((err) => {
+      clearNavigationPending(target.backendSessionId);
       reportCommandError(target, err);
     });
   }
@@ -494,9 +519,9 @@
   function reloadActiveTab() {
     const target = activeCommandTarget();
     if (!target) return;
-    loading = true;
-    status = "Loading";
+    markNavigationPending(target);
     void browserReload(target.backendSessionId).catch((err) => {
+      clearNavigationPending(target.backendSessionId);
       reportCommandError(target, err);
     });
   }
@@ -702,6 +727,7 @@
   function applyState(next: BrowserState, tabId = activeTabId) {
     if (disposed || !tabId) return;
     const existing = tabs.find((tab) => tab.id === tabId);
+    clearNavigationPending(existing?.backendSessionId || backendSessionId(tabId));
     const nextUrl = next.url || existing?.url || "about:blank";
     const nextTitle = next.title ?? "";
     const nextError = next.error ?? null;
@@ -797,9 +823,9 @@
     const requestedTabId = requestedTab.id;
     const requestedBackendSessionId = requestedTab.backendSessionId || backendSessionId(requestedTabId);
     const requestedUrl = urlDraft;
+    const target = { backendSessionId: requestedBackendSessionId, generation: requestedGeneration };
     error = null;
-    loading = true;
-    status = "Loading";
+    markNavigationPending(target);
     try {
       updateTab(requestedTabId, {
         url: requestedUrl,
@@ -809,6 +835,7 @@
       });
       await browserNavigate(requestedBackendSessionId, requestedUrl);
     } catch (err) {
+      clearNavigationPending(requestedBackendSessionId);
       if (disposed || requestedGeneration !== sessionGeneration) return;
       const message = String(err);
       updateTab(requestedTabId, { error: message, status: "Chrome error", loading: false });
