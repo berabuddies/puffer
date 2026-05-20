@@ -118,6 +118,32 @@ pub(crate) fn store_ready_credential_from_anthropic(
     }
 }
 
+/// Converts worldagent OAuth credentials into the registry storage shape.
+/// The Auth Station `sub` claim is stored as `account_id` so the
+/// existing AuthStore reuse path (organization_id, plan_type, etc.)
+/// stays untouched. `name` is intentionally not persisted yet — the
+/// existing `OAuthCredential` shape has no slot for it; if the UI
+/// needs the display name later, we can either reuse `email` or
+/// extend the struct.
+pub(crate) fn to_registry_oauth_credential_worldagent(
+    credential: puffer_provider_worldagent::WorldAgentOAuthCredentials,
+) -> puffer_provider_registry::OAuthCredential {
+    puffer_provider_registry::OAuthCredential {
+        access_token: credential.access_token,
+        refresh_token: credential.refresh_token,
+        expires_at_ms: credential.expires_at_ms,
+        account_id: credential.sub,
+        organization_id: None,
+        email: credential.email,
+        plan_type: None,
+        rate_limit_tier: None,
+        scopes: Vec::new(),
+        organization_name: None,
+        organization_role: None,
+        workspace_role: None,
+    }
+}
+
 /// Writes a resolved stored credential into the auth store.
 pub(crate) fn set_stored_credential(
     auth_store: &mut AuthStore,
@@ -127,5 +153,29 @@ pub(crate) fn set_stored_credential(
     match credential {
         StoredCredential::ApiKey { key } => auth_store.set_api_key(provider, key),
         StoredCredential::OAuth(credential) => auth_store.set_oauth(provider, credential),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use puffer_provider_worldagent::WorldAgentOAuthCredentials;
+
+    #[test]
+    fn worldagent_credential_maps_email_and_account_id() {
+        let credential = WorldAgentOAuthCredentials {
+            access_token: "acc".to_string(),
+            refresh_token: "ref".to_string(),
+            expires_at_ms: 42,
+            sub: Some("user_01".to_string()),
+            email: Some("dev@example.com".to_string()),
+            name: Some("Dev".to_string()),
+        };
+        let stored = to_registry_oauth_credential_worldagent(credential);
+        assert_eq!(stored.access_token, "acc");
+        assert_eq!(stored.refresh_token, "ref");
+        assert_eq!(stored.expires_at_ms, 42);
+        assert_eq!(stored.account_id.as_deref(), Some("user_01"));
+        assert_eq!(stored.email.as_deref(), Some("dev@example.com"));
     }
 }
