@@ -192,13 +192,13 @@
     class:open
     onclick={toggle}
     disabled={disabled}
-    title={activeModel ? `${providerLabel} · ${activeModel}` : "Pick a model"}
+    title={providerLabel ? `${providerLabel} · ${activeModel || "Pick model"}` : "Pick a model"}
   >
     <Icon name="sparkles" size={11} color="var(--muted-foreground)" />
     <span class="model" class:placeholder={!activeModel}>
       {activeModel || (busy ? "Loading models" : "Pick model")}
     </span>
-    {#if providerLabel && (activeModel || pendingProviderId)}
+    {#if providerLabel}
       <span class="provider">{providerLabel}</span>
     {/if}
     <Icon name="chevD" size={10} color="var(--muted-foreground)" />
