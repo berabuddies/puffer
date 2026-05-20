@@ -294,10 +294,38 @@ test("Files tab close button works from the keyboard", async ({ page }) => {
   const libTab = page.getByRole("tab", { name: /lib\.rs/ });
   await expect(libTab).toBeVisible();
 
-  await libTab.getByRole("button", { name: "Close lib.rs" }).focus();
+  await libTab.getByRole("button", { name: "Close src/lib.rs" }).focus();
   await page.keyboard.press("Enter");
 
   await expect(page.getByRole("tab", { name: /lib\.rs/ })).toHaveCount(0);
+});
+
+test("Files tab close controls include paths for duplicate file names", async ({ page }) => {
+  const duplicatePath = "/tmp/puffer/tests/main.rs";
+  const daemon = new FakeDaemon();
+  daemon.seedFile(duplicatePath, "fn duplicate_main() {}\n");
+  daemon.setFileTabs(
+    [
+      { path: "/tmp/puffer/src/main.rs", pinned: true },
+      { path: duplicatePath, pinned: true },
+      { path: "/tmp/puffer/src/lib.rs", pinned: true }
+    ],
+    "/tmp/puffer/src/main.rs"
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openFilesPanel(page);
+
+  await expect(page.getByRole("button", { name: "Close main.rs", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Close src/main.rs", exact: true })).toHaveCount(1);
+  const closeDuplicate = page.getByRole("button", { name: "Close tests/main.rs", exact: true });
+  await expect(closeDuplicate).toHaveCount(1);
+  await closeDuplicate.click();
+
+  await expect(page.getByRole("button", { name: "Close tests/main.rs", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Close src/main.rs", exact: true })).toHaveCount(1);
 });
 
 test("Files tab saves text edits through the daemon", async ({ page }) => {

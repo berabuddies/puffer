@@ -417,6 +417,15 @@
     return path.split("/").pop() || path;
   }
 
+  function fileTabPathLabel(path: string): string {
+    if (root && path.startsWith(`${root}/`)) return path.slice(root.length + 1);
+    return path || "file";
+  }
+
+  function closeFileTabLabel(path: string): string {
+    return `Close ${fileTabPathLabel(path)}`;
+  }
+
   function readPreviewFile(path: string): Promise<ReadFileResult> {
     return readFile(path, hasRichFilePreviewPath(path) ? RICH_PREVIEW_MAX_BYTES : undefined);
   }
@@ -1249,6 +1258,7 @@
     {:else}
       <div class="file-tabs" role="tablist" aria-label="Open files">
         {#each openTabs as tab (tab.path)}
+          {@const closeLabel = closeFileTabLabel(tab.path)}
           <div
             role="tab"
             tabindex="0"
@@ -1270,7 +1280,8 @@
             <button
               type="button"
               class="tab-close"
-              aria-label="Close {tab.name}"
+              aria-label={closeLabel}
+              title={closeLabel}
               onclick={(event) => void closeTab(event, tab.path)}
             >
               <Icon name="x" size={11} />

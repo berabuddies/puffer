@@ -2047,6 +2047,6 @@ test("Files tab close controls are native buttons", async ({ page }) => {
 
   const closeControls = page.getByRole("button", { name: /Close .*\.rs/ });
   await expect(closeControls.first()).toHaveJSProperty("tagName", "BUTTON");
-  await closeControls.nth(1).click();
+  await page.getByRole("button", { name: "Close src/lib.rs" }).click();
   await expect(page.getByRole("tab", { name: /lib\.rs/ })).toHaveCount(0);
 });

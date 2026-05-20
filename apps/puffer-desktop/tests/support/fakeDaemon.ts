@@ -159,6 +159,11 @@ const fileTabs = [
   { path: "/tmp/puffer/src/lib.rs", pinned: true }
 ];
 
+type FakeFileTab = {
+  path: string;
+  pinned: boolean;
+};
+
 function defaultFileContent(path: string): string {
   return path.endsWith("lib.rs") ? "pub fn fixture() {}\n" : "fn main() {}\n";
 }
@@ -245,6 +250,7 @@ export class FakeDaemon {
   private readonly details = new Map<string, SessionDetailOverrides>();
   private groupedSessionFilter: ((metadata: JsonRecord) => boolean) | null = null;
   private readonly files = new Map<string, FakeFileValue>();
+  private fileTabsState: JsonRecord | null = null;
   private readonly lspLocations = new Map<string, string>();
   private readonly providerModels: Record<string, JsonRecord[]>;
   private readonly providerSummaries: JsonRecord[] | null;
@@ -363,6 +369,13 @@ export class FakeDaemon {
 
   seedFile(path: string, content: string): void {
     this.files.set(path, content);
+  }
+
+  setFileTabs(tabs: FakeFileTab[], activePath: string | null = tabs[0]?.path ?? null): void {
+    this.fileTabsState = {
+      tabs: tabs.map((tab) => ({ ...tab })),
+      activePath
+    };
   }
 
   seedBinaryFile(
@@ -662,7 +675,7 @@ export class FakeDaemon {
       case "list_dir":
         return this.listDir(request.params);
       case "load_file_tabs":
-        return { tabs: fileTabs, activePath: fileTabs[0].path };
+        return this.fileTabsState ?? { tabs: fileTabs, activePath: fileTabs[0].path };
       case "save_file_tabs":
         return { tabs: request.params.tabs ?? [], activePath: request.params.activePath ?? null };
       case "read_file":
