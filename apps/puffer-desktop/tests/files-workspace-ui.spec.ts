@@ -98,6 +98,14 @@ function makePdfBase64(text: string): string {
   return Buffer.from(pdf, "utf8").toString("base64");
 }
 
+function makeLegacyOfficeBase64(text: string): string {
+  return Buffer.concat([
+    Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]),
+    Buffer.from("Puffer legacy Office fixture", "utf8"),
+    Buffer.from(text, "utf16le")
+  ]).toString("base64");
+}
+
 function makeZipBase64(entries: Record<string, string>): string {
   const localParts: Buffer[] = [];
   const centralParts: Buffer[] = [];
@@ -186,6 +194,12 @@ function seedPreviewFiles(daemon: FakeDaemon): void {
   });
   daemon.seedBinaryFile("/tmp/puffer/tasks.xlsx", xlsx);
   daemon.seedBinaryFile("/tmp/puffer/sample.pdf", makePdfBase64("Puffer PDF preview"));
+  daemon.seedBinaryFile("/tmp/puffer/old-plan.doc", makeLegacyOfficeBase64("Legacy Word agenda"));
+  daemon.seedBinaryFile(
+    "/tmp/puffer/old-deck.ppt",
+    makeLegacyOfficeBase64("Legacy PowerPoint agenda")
+  );
+  daemon.seedBinaryFile("/tmp/puffer/old-budget.xls", makeLegacyOfficeBase64("Legacy Excel budget"));
 }
 
 test("Files tab close button works from the keyboard", async ({ page }) => {
@@ -257,10 +271,7 @@ test("Files tab previews common document and data formats", async ({ page }) => 
 
   await page.getByRole("button", { name: "sample.pdf" }).click();
   await expect(page.getByLabel("PDF preview")).toBeVisible();
-  await expect(page.locator("object.pdf-preview")).toHaveAttribute(
-    "data",
-    /^data:application\/pdf;base64,/
-  );
+  await expect(page.getByLabel("PDF preview")).toContainText("Puffer PDF preview");
 
   await page.getByRole("button", { name: "brief.docx" }).click();
   await expect(page.getByLabel("DOCX preview")).toContainText("Quarterly planning note");
@@ -273,6 +284,17 @@ test("Files tab previews common document and data formats", async ({ page }) => 
   await expect(page.getByLabel("Excel preview")).toContainText("Tasks");
   await expect(page.getByLabel("Excel preview")).toContainText("Otter");
   await expect(page.getByLabel("Excel preview")).toContainText("Ready");
+
+  await page.getByRole("button", { name: "old-plan.doc" }).click();
+  await expect(page.getByLabel("Legacy Word preview")).toContainText("Legacy Word agenda");
+
+  await page.getByRole("button", { name: "old-deck.ppt" }).click();
+  await expect(page.getByLabel("Legacy PowerPoint preview")).toContainText(
+    "Legacy PowerPoint agenda"
+  );
+
+  await page.getByRole("button", { name: "old-budget.xls" }).click();
+  await expect(page.getByLabel("Legacy Excel preview")).toContainText("Legacy Excel budget");
 });
 
 test("Files tab keeps raw editing available for previewed text files", async ({ page }) => {

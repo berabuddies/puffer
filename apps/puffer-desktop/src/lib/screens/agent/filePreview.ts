@@ -1,4 +1,4 @@
-import { inflateSync } from "fflate";
+import { decompressSync, inflateSync } from "fflate";
 import type { ReadFileResult } from "../../api/desktop";
 
 export type CsvPreview = {
@@ -11,14 +11,25 @@ export type DocxPreview = {
   paragraphs: string[];
 };
 
+export type PdfPreview = {
+  kind: "pdf";
+  lines: string[];
+};
+
+export type LegacyOfficePreview = {
+  kind: "office-binary";
+  title: string;
+  lines: string[];
+};
+
 export type FilePreview =
   | { kind: "markdown"; html: string }
   | CsvPreview
-  | { kind: "pdf"; dataUrl: string }
+  | PdfPreview
   | DocxPreview
   | { kind: "pptx"; slides: { title: string; lines: string[] }[] }
   | { kind: "xlsx"; sheets: { name: string; rows: string[][] }[] }
-  | { kind: "office-binary"; title: string; message: string };
+  | LegacyOfficePreview;
 
 type ZipEntry = {
   name: string;
@@ -31,6 +42,7 @@ type ZipEntry = {
 type RelationshipMap = Map<string, string>;
 
 const utf8Decoder = new TextDecoder("utf-8");
+const utf8Encoder = new TextEncoder();
 
 /** Return true when the Files pane has a richer preview than the code editor. */
 export function hasRichFilePreview(file: ReadFileResult): boolean {
@@ -46,9 +58,7 @@ export async function buildFilePreview(file: ReadFileResult): Promise<FilePrevie
     case "csv":
       return file.encoding === "utf8" ? { kind: "csv", rows: parseCsv(file.content) } : null;
     case "pdf":
-      return file.encoding === "base64"
-        ? { kind: "pdf", dataUrl: `data:application/pdf;base64,${file.content}` }
-        : null;
+      return file.encoding === "base64" ? previewPdf(file.content) : null;
     case "docx":
       return file.encoding === "base64" ? previewDocx(file.content) : null;
     case "pptx":
@@ -56,7 +66,7 @@ export async function buildFilePreview(file: ReadFileResult): Promise<FilePrevie
     case "xlsx":
       return file.encoding === "base64" ? previewXlsx(file.content) : null;
     case "legacy-office":
-      return legacyOfficePreview(file.path);
+      return legacyOfficePreview(file);
     case "text":
       return null;
   }
@@ -84,18 +94,25 @@ function previewFormat(path: string):
   return "text";
 }
 
-function legacyOfficePreview(path: string): FilePreview {
-  const lower = path.toLowerCase();
+function previewPdf(base64: string): PdfPreview {
+  const lines = extractPdfText(base64ToBytes(base64));
+  return { kind: "pdf", lines: lines.length > 0 ? lines : ["No text found."] };
+}
+
+function legacyOfficePreview(file: ReadFileResult): LegacyOfficePreview {
+  const lower = file.path.toLowerCase();
   const title = lower.endsWith(".ppt")
-    ? "PowerPoint preview"
+    ? "Legacy PowerPoint preview"
     : lower.endsWith(".xls")
-      ? "Excel preview"
-      : "Word preview";
+      ? "Legacy Excel preview"
+      : "Legacy Word preview";
+  const bytes =
+    file.encoding === "base64" ? base64ToBytes(file.content) : utf8StringToBytes(file.content);
+  const lines = extractLegacyOfficeText(bytes);
   return {
     kind: "office-binary",
     title,
-    message:
-      "Legacy binary Office files are visible in the file pane, but rich text extraction requires saving as DOCX, PPTX, or XLSX."
+    lines: lines.length > 0 ? lines : ["No text found."]
   };
 }
 
@@ -223,6 +240,216 @@ function parseCsv(content: string): string[][] {
     rows.push(row);
   }
   return rows.slice(0, 200).map((cells) => cells.slice(0, 40));
+}
+
+function extractPdfText(bytes: Uint8Array): string[] {
+  const streamTexts = decodePdfStreams(bytes);
+  const values = streamTexts.flatMap((stream) => extractPdfStrings(stream));
+  return normalizePreviewLines(values, 200);
+}
+
+function decodePdfStreams(bytes: Uint8Array): string[] {
+  const binary = bytesToBinaryString(bytes);
+  const streams: string[] = [];
+  const streamMarker = /stream\r?\n?/g;
+  let match: RegExpExecArray | null;
+  while ((match = streamMarker.exec(binary))) {
+    const streamStart = match.index + match[0].length;
+    const streamEnd = binary.indexOf("endstream", streamStart);
+    if (streamEnd < 0) break;
+    const header = binary.slice(Math.max(0, match.index - 320), match.index);
+    const raw = trimPdfStreamBytes(bytes.slice(streamStart, streamEnd));
+    streams.push(bytesToBinaryString(decodePdfStream(raw, header)));
+    streamMarker.lastIndex = streamEnd + "endstream".length;
+  }
+  return streams;
+}
+
+function decodePdfStream(bytes: Uint8Array, header: string): Uint8Array {
+  if (!/\/FlateDecode\b/.test(header)) return bytes;
+  try {
+    return decompressSync(bytes);
+  } catch (_err) {
+    try {
+      return inflateSync(bytes);
+    } catch (_fallbackErr) {
+      return bytes;
+    }
+  }
+}
+
+function trimPdfStreamBytes(bytes: Uint8Array): Uint8Array {
+  let start = 0;
+  let end = bytes.length;
+  while (start < end && (bytes[start] === 0x0a || bytes[start] === 0x0d)) start += 1;
+  while (end > start && (bytes[end - 1] === 0x0a || bytes[end - 1] === 0x0d)) end -= 1;
+  return bytes.slice(start, end);
+}
+
+function extractPdfStrings(stream: string): string[] {
+  const values: string[] = [];
+  for (let index = 0; index < stream.length; index += 1) {
+    const char = stream[index];
+    if (char === "(") {
+      const literal = readPdfLiteral(stream, index);
+      values.push(literal.value);
+      index = literal.nextIndex;
+    } else if (char === "<" && stream[index + 1] !== "<") {
+      const end = stream.indexOf(">", index + 1);
+      if (end > index) {
+        const decoded = decodePdfHexString(stream.slice(index + 1, end));
+        if (decoded) values.push(decoded);
+        index = end;
+      }
+    }
+  }
+  return values;
+}
+
+function readPdfLiteral(input: string, start: number): { value: string; nextIndex: number } {
+  let value = "";
+  let depth = 1;
+  let index = start + 1;
+  while (index < input.length && depth > 0) {
+    const char = input[index];
+    index += 1;
+    if (char === "\\") {
+      const escaped = readPdfEscape(input, index);
+      value += escaped.value;
+      index = escaped.nextIndex;
+      continue;
+    }
+    if (char === "(") {
+      depth += 1;
+      value += char;
+      continue;
+    }
+    if (char === ")") {
+      depth -= 1;
+      if (depth > 0) value += char;
+      continue;
+    }
+    value += char;
+  }
+  return { value, nextIndex: index - 1 };
+}
+
+function readPdfEscape(input: string, start: number): { value: string; nextIndex: number } {
+  const char = input[start];
+  if (char == null) return { value: "", nextIndex: start };
+  if (char === "\r" || char === "\n") {
+    const nextIndex = char === "\r" && input[start + 1] === "\n" ? start + 2 : start + 1;
+    return { value: "", nextIndex };
+  }
+  const mapped = new Map([
+    ["n", "\n"],
+    ["r", "\r"],
+    ["t", "\t"],
+    ["b", "\b"],
+    ["f", "\f"]
+  ]).get(char);
+  if (mapped != null) return { value: mapped, nextIndex: start + 1 };
+  if (/[0-7]/.test(char)) {
+    let octal = char;
+    let index = start + 1;
+    while (index < start + 3 && /[0-7]/.test(input[index] ?? "")) {
+      octal += input[index];
+      index += 1;
+    }
+    return { value: String.fromCharCode(parseInt(octal, 8)), nextIndex: index };
+  }
+  return { value: char, nextIndex: start + 1 };
+}
+
+function decodePdfHexString(input: string): string {
+  let hex = input.replace(/\s+/g, "");
+  if (hex.length < 2 || /[^0-9a-f]/i.test(hex)) return "";
+  if (hex.length % 2 === 1) hex += "0";
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+  }
+  if (bytes[0] === 0xfe && bytes[1] === 0xff) return decodeUtf16Bytes(bytes.slice(2), true);
+  if (bytes[0] === 0xff && bytes[1] === 0xfe) return decodeUtf16Bytes(bytes.slice(2), false);
+  return bytesToBinaryString(bytes);
+}
+
+function extractLegacyOfficeText(bytes: Uint8Array): string[] {
+  return normalizePreviewLines(
+    [...extractUtf16Runs(bytes, false), ...extractUtf16Runs(bytes, true), ...extractAsciiRuns(bytes)],
+    160
+  );
+}
+
+function extractAsciiRuns(bytes: Uint8Array): string[] {
+  const runs: string[] = [];
+  let value = "";
+  const flush = () => {
+    const normalized = value.replace(/\s+/g, " ").trim();
+    if (normalized.length >= 4) runs.push(normalized);
+    value = "";
+  };
+  for (const byte of bytes) {
+    if (byte === 0x09 || byte === 0x0a || byte === 0x0d || (byte >= 0x20 && byte <= 0x7e)) {
+      value += String.fromCharCode(byte);
+    } else {
+      flush();
+    }
+  }
+  flush();
+  return runs;
+}
+
+function extractUtf16Runs(bytes: Uint8Array, bigEndian: boolean): string[] {
+  const runs: string[] = [];
+  for (let offset = 0; offset < 2; offset += 1) {
+    let value = "";
+    const flush = () => {
+      const normalized = value.replace(/\s+/g, " ").trim();
+      if (normalized.length >= 4) runs.push(normalized);
+      value = "";
+    };
+    for (let index = offset; index + 1 < bytes.length; index += 2) {
+      const code = bigEndian
+        ? (bytes[index] << 8) | bytes[index + 1]
+        : bytes[index] | (bytes[index + 1] << 8);
+      if (isReadableUtf16Code(code)) {
+        value += String.fromCharCode(code);
+      } else {
+        flush();
+      }
+    }
+    flush();
+  }
+  return runs;
+}
+
+function decodeUtf16Bytes(bytes: Uint8Array, bigEndian: boolean): string {
+  let value = "";
+  for (let index = 0; index + 1 < bytes.length; index += 2) {
+    const code = bigEndian
+      ? (bytes[index] << 8) | bytes[index + 1]
+      : bytes[index] | (bytes[index + 1] << 8);
+    if (isReadableUtf16Code(code)) value += String.fromCharCode(code);
+  }
+  return value;
+}
+
+function isReadableUtf16Code(code: number): boolean {
+  return code === 0x09 || code === 0x0a || code === 0x0d || (code >= 0x20 && code < 0xd800);
+}
+
+function normalizePreviewLines(values: string[], limit: number): string[] {
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  for (const value of values) {
+    const normalized = value.replace(/\0/g, "").replace(/\s+/g, " ").trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    lines.push(normalized.slice(0, 600));
+    if (lines.length >= limit) break;
+  }
+  return lines;
 }
 
 async function previewDocx(base64: string): Promise<DocxPreview> {
@@ -403,6 +630,18 @@ function decodeEntry(entries: Map<string, Uint8Array>, name: string): string {
 
 function decodeBytes(bytes: Uint8Array): string {
   return utf8Decoder.decode(bytes);
+}
+
+function bytesToBinaryString(bytes: Uint8Array): string {
+  const chunks: string[] = [];
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    chunks.push(String.fromCharCode(...bytes.slice(offset, offset + 0x8000)));
+  }
+  return chunks.join("");
+}
+
+function utf8StringToBytes(value: string): Uint8Array {
+  return utf8Encoder.encode(value);
 }
 
 function base64ToBytes(base64: string): Uint8Array {

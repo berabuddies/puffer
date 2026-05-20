@@ -1378,14 +1378,11 @@
           </div>
         {:else if activePreview && activePreview.kind === "pdf"}
           <div class="file-preview pdf-shell" aria-label="PDF preview">
-            <object
-              class="pdf-preview"
-              data={activePreview.dataUrl}
-              type="application/pdf"
-              aria-label="PDF document"
-            >
-              <div class="viewer-msg">PDF preview is unavailable in this WebView.</div>
-            </object>
+            <article class="pdf-page" aria-label="PDF text">
+              {#each activePreview.lines as line}
+                <p>{line}</p>
+              {/each}
+            </article>
           </div>
         {:else if activePreview && activePreview.kind === "docx"}
           <article class="file-preview office-preview" aria-label="DOCX preview">
@@ -1427,7 +1424,9 @@
           <div class="file-preview office-preview" aria-label={activePreview.title}>
             <section>
               <h2>{activePreview.title}</h2>
-              <p>{activePreview.message}</p>
+              {#each activePreview.lines as line}
+                <p>{line}</p>
+              {/each}
             </section>
           </div>
         {:else if activeFile && activeFile.encoding === "utf8"}
@@ -1914,17 +1913,28 @@
     font-weight: 650;
   }
   .pdf-shell {
-    padding: 0;
+    padding: 20px;
     height: 100%;
+    overflow: auto;
+    background: color-mix(in oklab, var(--background) 94%, var(--muted));
   }
-  .pdf-preview {
-    width: 100%;
-    height: 100%;
+  .pdf-page {
+    width: min(760px, 100%);
     min-height: 520px;
-    border: 0;
-    display: block;
+    margin: 0 auto;
+    padding: 36px 42px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
     background: var(--background);
+    box-shadow: 0 12px 32px color-mix(in oklab, var(--foreground) 10%, transparent);
+    color: var(--foreground);
   }
+  .pdf-page p {
+    margin: 0 0 12px;
+    white-space: pre-wrap;
+    line-height: 1.55;
+  }
+  .pdf-page p:last-child { margin-bottom: 0; }
   .office-preview section,
   .spreadsheet-preview section {
     margin: 0 0 18px;
