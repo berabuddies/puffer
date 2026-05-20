@@ -222,6 +222,7 @@
       aria-label="PDF zoom level"
       aria-valuetext={`${zoomPercent}%`}
       oninput={handleZoomInput}
+      onchange={handleZoomInput}
     />
     {#if status}
       <div class="pdf-status" role="status" aria-live="polite">{status}</div>
@@ -295,8 +296,8 @@
     align-items: center;
     justify-content: center;
     gap: 4px;
-    min-width: 36px;
-    height: 30px;
+    min-width: 40px;
+    height: 32px;
     border: 1px solid var(--border);
     border-radius: 5px;
     background: #ffffff;
@@ -309,7 +310,7 @@
   }
 
   .pdf-toolbar .zoom-reset {
-    min-width: 66px;
+    min-width: 74px;
     padding: 0 8px;
   }
 
@@ -321,8 +322,46 @@
   .pdf-zoom-range {
     width: clamp(130px, 20vw, 240px);
     min-width: 120px;
+    height: 32px;
+    padding: 0 2px;
+    appearance: none;
+    background: transparent;
     accent-color: #2563eb;
     cursor: pointer;
+  }
+
+  .pdf-zoom-range::-webkit-slider-runnable-track {
+    height: 7px;
+    border: 1px solid #60a5fa;
+    border-radius: 999px;
+    background: #bfdbfe;
+  }
+
+  .pdf-zoom-range::-webkit-slider-thumb {
+    width: 20px;
+    height: 20px;
+    margin-top: -7px;
+    appearance: none;
+    border: 2px solid #1d4ed8;
+    border-radius: 999px;
+    background: #ffffff;
+    box-shadow: 0 2px 6px rgb(15 23 42 / 0.28);
+  }
+
+  .pdf-zoom-range::-moz-range-track {
+    height: 7px;
+    border: 1px solid #60a5fa;
+    border-radius: 999px;
+    background: #bfdbfe;
+  }
+
+  .pdf-zoom-range::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    border: 2px solid #1d4ed8;
+    border-radius: 999px;
+    background: #ffffff;
+    box-shadow: 0 2px 6px rgb(15 23 42 / 0.28);
   }
 
   .pdf-zoom-range:focus-visible {
@@ -340,9 +379,9 @@
     width: fit-content;
     max-width: 100%;
     padding: 6px 10px;
-    border: 1px solid #0f172a;
+    border: 1px solid #1e40af;
     border-radius: 6px;
-    background: #111827;
+    background: #1d4ed8;
     color: #ffffff;
     font-size: 12px;
     font-weight: 700;

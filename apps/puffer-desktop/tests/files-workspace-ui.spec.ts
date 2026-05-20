@@ -624,8 +624,12 @@ test("Files tab PDF zoom is immediate and page-limit status remains readable", a
   seedPreviewFiles(daemon);
   daemon.seedBinaryFile("/tmp/puffer/wide-long.pdf", makePdfBase64("Wide long PDF preview", 29, 960, 620));
   await daemon.install(page);
+  await page.addInitScript(() => {
+    window.localStorage.setItem("puffer-desktop:tweaks", JSON.stringify({ theme: "dark" }));
+  });
   await daemon.open(page);
 
+  await expect(page.locator("html")).toHaveClass(/dark/);
   await openRegressionAgent(page);
   await openFilesPanel(page);
 
@@ -688,6 +692,9 @@ test("Files tab PDF zoom is immediate and page-limit status remains readable", a
   );
   const zoomSlider = pdfPreview.getByLabel("PDF zoom level");
   await expect(zoomSlider).toBeVisible();
+  const sliderBox = await zoomSlider.boundingBox();
+  expect(sliderBox?.width ?? 0).toBeGreaterThan(100);
+  expect(sliderBox?.height ?? 0).toBeGreaterThanOrEqual(30);
   await zoomSlider.evaluate((input) => {
     const range = input as HTMLInputElement;
     range.value = "140";
