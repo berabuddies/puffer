@@ -539,21 +539,6 @@
     );
   }
 
-  function tabIdForBackendSession(backendId: string): string | null {
-    return tabs.find((tab) => tab.backendSessionId === backendId)?.id ?? null;
-  }
-
-  function markNavigationPending(target: BrowserCommandTarget) {
-    pendingNavigationSessions.add(target.backendSessionId);
-    const tabId = tabIdForBackendSession(target.backendSessionId);
-    if (tabId) updateTab(tabId, { loading: true, status: "Loading", error: null }, false);
-    if (targetStillActive(target)) {
-      loading = true;
-      status = "Loading";
-      error = null;
-    }
-  }
-
   function isBrowserCommandPending(target: BrowserCommandTarget): boolean {
     return pendingBrowserCommands.some(
       (item) =>
