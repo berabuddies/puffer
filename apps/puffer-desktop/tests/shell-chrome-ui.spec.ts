@@ -49,6 +49,12 @@ test("Tauri capability permits data drag regions to move the native window", asy
   expect(capability.permissions).toContain("core:window:allow-start-dragging");
 });
 
+test("Playwright does not reuse stale Vite servers in Codex automation", async () => {
+  const raw = await readFile("playwright.config.ts", "utf8");
+  expect(raw).toContain("process.env.CODEX_CI");
+  expect(raw).toContain("reuseExistingServer: shouldReuseExistingServer");
+});
+
 test("desktop minimum width keeps primary navigation visible", async ({ page }) => {
   const daemon = new FakeDaemon();
   await page.setViewportSize({ width: 720, height: 480 });
