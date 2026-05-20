@@ -149,6 +149,33 @@ test("sidebar can open the deployments screen", async ({ page }) => {
   await expect(page.getByRole("button", { name: /New deployment/ })).toBeVisible();
 });
 
+test("deployment search filters environments and resets from Escape", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Deployments" }).click();
+  await page.locator(".pf-dep-top-right").getByRole("button", { name: "Search" }).click();
+
+  const search = page.getByRole("searchbox", { name: "Search deployments" });
+  await expect(search).toBeFocused();
+  await search.fill("cloudflare");
+
+  const rows = page.locator(".pf-dep-row");
+  await expect(rows).toHaveCount(1);
+  await expect(rows.first()).toContainText("edge-cdn");
+  await expect(page.locator(".pf-dep-detail-name")).toContainText("edge-cdn");
+
+  await search.fill("no-match");
+  await expect(rows).toHaveCount(0);
+  await expect(page.getByText("No deployments match")).toBeVisible();
+
+  await search.press("Escape");
+  await expect(page.getByRole("searchbox", { name: "Search deployments" })).toHaveCount(0);
+  await expect(page.locator(".pf-dep-row")).toHaveCount(6);
+  await expect(page.locator(".pf-dep-row").filter({ hasText: "stripe-api · production" })).toBeVisible();
+});
+
 test("deployment detail tabs expose selected state", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

@@ -35,6 +35,43 @@
   display: flex; gap: 6px; align-items: center;
   flex-shrink: 0;
 }
+.pf-dep-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  width: clamp(180px, 22vw, 280px);
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--background);
+  color: var(--foreground);
+  box-shadow: var(--shadow-xs);
+}
+.pf-dep-search input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--foreground);
+  font-size: 12.5px;
+}
+.pf-dep-search input::placeholder {
+  color: var(--muted-foreground);
+}
+.pf-dep-search button {
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0;
+}
+.pf-dep-search button:hover {
+  color: var(--foreground);
+}
 
 /* Body split: list (40%) + detail (60%) ------------------------------ */
 .pf-dep-body {
@@ -102,6 +139,20 @@
 .pf-dep-row[data-selected="true"] {
   background: color-mix(in oklab, var(--puffer-accent) 6%, var(--background));
   box-shadow: inset 3px 0 0 var(--puffer-accent);
+}
+.pf-dep-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 18px 16px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.pf-dep-empty strong {
+  color: var(--foreground);
+  font-size: 13px;
 }
 
 .pf-dep-row-left {

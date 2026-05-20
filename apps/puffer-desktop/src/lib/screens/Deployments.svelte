@@ -10,13 +10,24 @@
   import SecretsPane from "./deployments/SecretsPane.svelte";
   import ProvidersPane from "./deployments/ProvidersPane.svelte";
   import DeploysPane from "./deployments/DeploysPane.svelte";
-  import { DEPLOYMENTS } from "../data/mockDeployments";
+  import { DEPLOYMENTS, type Deployment } from "../data/mockDeployments";
 
   type Tab = "askpuffer" | "memory" | "secrets" | "providers" | "deploys";
   let selectedId = $state("d-prod-api");
   let tab = $state<Tab>("askpuffer");
+  let searchOpen = $state(false);
+  let deploymentQuery = $state("");
+  let searchInput = $state<HTMLInputElement | null>(null);
 
-  let selected = $derived(DEPLOYMENTS.find((d) => d.id === selectedId) ?? DEPLOYMENTS[0]);
+  let filteredDeployments = $derived.by(() => {
+    const query = deploymentQuery.trim().toLowerCase();
+    return query ? DEPLOYMENTS.filter((deployment) => deploymentMatchesQuery(deployment, query)) : DEPLOYMENTS;
+  });
+  let selected = $derived(
+    filteredDeployments.find((d) => d.id === selectedId)
+      ?? DEPLOYMENTS.find((d) => d.id === selectedId)
+      ?? DEPLOYMENTS[0]
+  );
 
   const tabs: { id: Tab; label: string; icon: IconName }[] = [
     { id: "askpuffer", label: "Ask Puffer", icon: "sparkles" },
@@ -34,6 +45,52 @@
   function selectTab(id: Tab) {
     tab = id;
   }
+
+  function deploymentMatchesQuery(deployment: Deployment, query: string): boolean {
+    const fields = [
+      deployment.name,
+      deployment.provider,
+      deployment.providerLabel,
+      deployment.region,
+      deployment.url,
+      deployment.branch,
+      deployment.state,
+      deployment.alert ?? "",
+      ...deployment.workspaces.flatMap((workspace) => [workspace.name, workspace.role])
+    ];
+    return fields.some((field) => field.toLowerCase().includes(query));
+  }
+
+  function openSearch(): void {
+    searchOpen = true;
+    setTimeout(() => searchInput?.focus(), 0);
+  }
+
+  function closeSearch(): void {
+    searchOpen = false;
+    deploymentQuery = "";
+  }
+
+  function toggleSearch(): void {
+    if (searchOpen) {
+      closeSearch();
+    } else {
+      openSearch();
+    }
+  }
+
+  function handleSearchKeydown(event: KeyboardEvent): void {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    closeSearch();
+  }
+
+  $effect(() => {
+    if (filteredDeployments.length === 0) return;
+    if (filteredDeployments.some((deployment) => deployment.id === selectedId)) return;
+    selectedId = filteredDeployments[0].id;
+    tab = "askpuffer";
+  });
 
   function focusTab(id: Tab) {
     document.querySelector<HTMLButtonElement>(`[data-dep-tab="${id}"]`)?.focus();
@@ -76,7 +133,25 @@
       <span class="pf-dep-top-sub">across 4 providers · 6 workspaces</span>
     </div>
     <div class="pf-dep-top-right">
-      <button type="button" class="sc-btn" data-variant="ghost" data-size="sm">
+      {#if searchOpen}
+        <div class="pf-dep-search">
+          <Icon name="search" size={12} color="var(--muted-foreground)" />
+          <input
+            bind:this={searchInput}
+            type="search"
+            bind:value={deploymentQuery}
+            aria-label="Search deployments"
+            placeholder="Search deployments"
+            onkeydown={handleSearchKeydown}
+          />
+          {#if deploymentQuery.trim()}
+            <button type="button" aria-label="Clear deployment search" onclick={() => (deploymentQuery = "")}>
+              Clear
+            </button>
+          {/if}
+        </div>
+      {/if}
+      <button type="button" class="sc-btn" data-variant="ghost" data-size="sm" aria-pressed={searchOpen} onclick={toggleSearch}>
         <Icon name="search" size={12} />Search
       </button>
       <button type="button" class="sc-btn" data-variant="outline" data-size="sm">
@@ -94,7 +169,7 @@
         <span>Environment</span>
         <span>Status</span>
       </div>
-      {#each DEPLOYMENTS as d (d.id)}
+      {#each filteredDeployments as d (d.id)}
         <div
           class="pf-dep-row"
           data-selected={selectedId === d.id}
@@ -138,6 +213,12 @@
           </div>
         </div>
       {/each}
+      {#if filteredDeployments.length === 0}
+        <div class="pf-dep-empty" role="status">
+          <strong>No deployments match</strong>
+          <span>Try a service name, provider, branch, region, status, or workspace.</span>
+        </div>
+      {/if}
     </div>
 
     <div class="pf-dep-detail">
