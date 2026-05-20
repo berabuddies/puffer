@@ -328,7 +328,7 @@
         {#if hasPageLimitStatus}
           <span class="pdf-status-label">Page limit</span>
         {/if}
-        <span>{status}</span>
+        {status}
       </div>
     {/if}
   </div>
