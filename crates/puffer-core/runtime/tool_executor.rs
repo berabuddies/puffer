@@ -21,6 +21,7 @@ use puffer_resources::LoadedResources;
 use puffer_tools::{ToolExecutionResult, ToolOutput, ToolRegistry};
 use puffer_transport_anthropic::AnthropicRequestConfig;
 use serde_json::Value;
+use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 /// Identifies which provider loop is currently executing a tool call.
@@ -141,6 +142,10 @@ pub(super) fn execute_tool_call(
     let result = if definition.handler == "runtime:agent" {
         let output = execute_agent_tool(state, resources, providers, auth_store, cwd, input)?;
         successful_runtime_tool(tool_id, output)
+    } else if let Some(result) =
+        execute_legacy_builtin_alias(&definition, cwd, &filesystem_policy, &input)?
+    {
+        result
     } else {
         claude_tools::execute_tool(
             state,
@@ -373,6 +378,7 @@ fn filesystem_path_request(
         "Read" | "Write" | "Edit" => "file_path",
         "NotebookEdit" => "notebook_path",
         "Glob" | "Grep" => "path",
+        "read_file" | "list_dir" | "search_text" => "path",
         _ => return None,
     };
     let raw = input.get(field)?.as_str()?.trim();
@@ -382,6 +388,90 @@ fn filesystem_path_request(
     let path = normalize_permission_path(cwd, raw);
     let grant_root = grant_root_for_path(&path);
     Some(FilesystemPathRequest { path, grant_root })
+}
+
+fn execute_legacy_builtin_alias(
+    definition: &puffer_tools::ToolDefinition,
+    cwd: &Path,
+    filesystem_policy: &FilesystemPermissionPolicy,
+    input: &Value,
+) -> Result<Option<ToolExecutionResult>> {
+    match definition.id.as_str() {
+        "read_file" => {
+            let mut mapped = serde_json::Map::new();
+            let Some(path) = input.get("path").and_then(Value::as_str) else {
+                return Err(anyhow!("read_file requires path"));
+            };
+            mapped.insert("file_path".to_string(), Value::String(path.to_string()));
+            if let Some(offset) = input.get("offset") {
+                mapped.insert("offset".to_string(), offset.clone());
+            }
+            if let Some(limit) = input.get("limit") {
+                mapped.insert("limit".to_string(), limit.clone());
+            }
+            let stdout = claude_tools::read::execute_claude_read_tool(
+                cwd,
+                &filesystem_policy.workspace_roots,
+                &filesystem_policy.runner_policy(),
+                Value::Object(mapped),
+            )?;
+            Ok(Some(successful_runtime_tool(&definition.id, stdout)))
+        }
+        "search_text" => {
+            let Some(query) = input.get("query").and_then(Value::as_str) else {
+                return Err(anyhow!("search_text requires query"));
+            };
+            let mut mapped = serde_json::Map::new();
+            mapped.insert("pattern".to_string(), Value::String(query.to_string()));
+            mapped.insert(
+                "output_mode".to_string(),
+                Value::String("content".to_string()),
+            );
+            if let Some(path) = input.get("path").and_then(Value::as_str) {
+                mapped.insert("path".to_string(), Value::String(path.to_string()));
+            }
+            let stdout = claude_tools::grep::execute_claude_grep(
+                cwd,
+                &filesystem_policy.workspace_roots,
+                &filesystem_policy.runner_policy(),
+                Value::Object(mapped),
+            )?;
+            Ok(Some(successful_runtime_tool(&definition.id, stdout)))
+        }
+        "list_dir" => {
+            let path = input
+                .get("path")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(|path| {
+                    crate::workspace_paths::resolve_path_for_filesystem_policy(
+                        cwd,
+                        &filesystem_policy.workspace_roots,
+                        filesystem_policy.runner_policy().sandbox_mode,
+                        Path::new(path),
+                    )
+                })
+                .transpose()?
+                .unwrap_or_else(|| cwd.to_path_buf());
+            let mut entries = fs::read_dir(&path)
+                .map_err(|error| anyhow!("failed to list directory {}: {error}", path.display()))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            entries.sort_by_key(|entry| entry.file_name());
+            let stdout = entries
+                .into_iter()
+                .map(|entry| {
+                    let suffix = entry
+                        .file_type()
+                        .map(|kind| if kind.is_dir() { "/" } else { "" })
+                        .unwrap_or("");
+                    format!("{}{}", entry.file_name().to_string_lossy(), suffix)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            Ok(Some(successful_runtime_tool(&definition.id, stdout)))
+        }
+        _ => Ok(None),
+    }
 }
 
 fn filesystem_policy_allows_path(

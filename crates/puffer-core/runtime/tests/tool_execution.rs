@@ -9,6 +9,8 @@ use uuid::Uuid;
 
 #[path = "tool_execution/agent_team_e2e.rs"]
 mod agent_team_e2e;
+#[path = "tool_execution/legacy_alias_permissions.rs"]
+mod legacy_alias_permissions;
 #[path = "tool_execution/multi_agent_e2e.rs"]
 mod multi_agent_e2e;
 #[path = "tool_execution/request_scope_tests.rs"]
