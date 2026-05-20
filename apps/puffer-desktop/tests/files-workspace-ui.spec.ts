@@ -876,6 +876,106 @@ test("Files tab PDF controls stay usable in compact previews", async ({ page }) 
   ).toBeGreaterThan(initialWidth);
 });
 
+test("Files tab PDF limit badge and zoom controls stay obvious in narrow light previews", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  seedPreviewFiles(daemon);
+  daemon.seedBinaryFile("/tmp/puffer/narrow-long.pdf", makePdfBase64("Narrow long PDF preview", 29, 960, 620));
+  await daemon.install(page);
+  await page.setViewportSize({ width: 820, height: 540 });
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: /^Browser regression\b/ }).first().click();
+  await openFilesPanel(page);
+  await page.addStyleTag({
+    content: ".pf-files-pane .tree { width: 360px; }"
+  });
+
+  await page.getByRole("button", { name: "narrow-long.pdf" }).click();
+  const pdfPreview = page.getByLabel("PDF preview");
+  await expect(pdfPreview).toBeVisible();
+  await expectCanvasHasInk(page, 'canvas[aria-label="PDF page 1"]');
+
+  const pageLimit = pdfPreview.getByText("Showing first 20 of 29 pages.");
+  const controls = pdfPreview.getByRole("group", { name: "PDF zoom controls" });
+  const zoomIn = controls.getByRole("button", { name: "Zoom in" });
+  const zoomSlider = pdfPreview.getByLabel("PDF zoom level");
+  await expect(pageLimit).toBeVisible();
+  await expect(controls).toBeVisible();
+  await expect(zoomSlider).toBeVisible();
+
+  const metrics = await pageLimit.evaluate((node) => {
+    const parseRgb = (value: string): [number, number, number] => {
+      const match = value.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+      if (!match) return [0, 0, 0];
+      return [Number(match[1]), Number(match[2]), Number(match[3])];
+    };
+    const luminance = ([red, green, blue]: [number, number, number]): number => {
+      const channels = [red, green, blue].map((channel) => {
+        const normalized = channel / 255;
+        return normalized <= 0.03928
+          ? normalized / 12.92
+          : ((normalized + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+    };
+    const status = node as HTMLElement;
+    const preview = status.closest('[aria-label="PDF preview"]') as HTMLElement | null;
+    const controlsRow = status.closest(".pdf-controls-row") as HTMLElement | null;
+    const toolbar = preview?.querySelector(".pdf-toolbar") as HTMLElement | null;
+    const zoomButton = preview?.querySelector('button[aria-label="Zoom in"]') as HTMLElement | null;
+    const zoomRange = preview?.querySelector<HTMLInputElement>(".pdf-zoom-range") ?? null;
+    const statusStyle = getComputedStyle(status);
+    const previewStyle = preview ? getComputedStyle(preview) : null;
+    const foreground = luminance(parseRgb(statusStyle.color));
+    const background = luminance(parseRgb(statusStyle.backgroundColor));
+    const controlsRect = controlsRow?.getBoundingClientRect();
+    const toolbarRect = toolbar?.getBoundingClientRect();
+    const rangeRect = zoomRange?.getBoundingClientRect();
+    const zoomRect = zoomButton?.getBoundingClientRect();
+    const zoomHit = zoomRect
+      ? document.elementFromPoint(zoomRect.left + zoomRect.width / 2, zoomRect.top + zoomRect.height / 2)
+      : null;
+    const rangeHit = rangeRect
+      ? document.elementFromPoint(rangeRect.left + rangeRect.width / 2, rangeRect.top + rangeRect.height / 2)
+      : null;
+    return {
+      ratio: (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05),
+      backgroundLuminance: background,
+      statusBackground: statusStyle.backgroundColor,
+      previewBackground: previewStyle?.backgroundColor ?? "",
+      controlsWidth: Math.round(controlsRect?.width ?? 0),
+      toolbarWidth: Math.round(toolbarRect?.width ?? 0),
+      rangeWidth: Math.round(rangeRect?.width ?? 0),
+      zoomHit: zoomHit === zoomButton || Boolean(zoomButton?.contains(zoomHit)),
+      rangeHit: rangeHit === zoomRange || Boolean(zoomRange?.contains(rangeHit))
+    };
+  });
+  expect(metrics.ratio).toBeGreaterThanOrEqual(7);
+  expect(metrics.backgroundLuminance).toBeLessThan(0.35);
+  expect(metrics.statusBackground).not.toBe(metrics.previewBackground);
+  expect(metrics.toolbarWidth).toBeGreaterThan(metrics.controlsWidth - 40);
+  expect(metrics.rangeWidth).toBeGreaterThan(110);
+  expect(metrics.zoomHit).toBe(true);
+  expect(metrics.rangeHit).toBe(true);
+
+  const initialWidth = await page.locator('canvas[aria-label="PDF page 1"]').evaluate((canvas) =>
+    Math.round(canvas.getBoundingClientRect().width)
+  );
+  await zoomIn.click();
+  await expect(controls.getByText("110%")).toBeVisible();
+  await expect.poll(async () =>
+    page.locator('canvas[aria-label="PDF page 1"]').evaluate((canvas) =>
+      Math.round(canvas.getBoundingClientRect().width)
+    )
+  ).toBeGreaterThan(initialWidth);
+  await zoomSlider.evaluate((input) => {
+    const range = input as HTMLInputElement;
+    range.value = "130";
+    range.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await expect(controls.getByText("130%")).toBeVisible();
+});
+
 test("Files tab shows PDF text fallback while renderer assets are still loading", async ({ page }) => {
   const daemon = new FakeDaemon();
   seedPreviewFiles(daemon);

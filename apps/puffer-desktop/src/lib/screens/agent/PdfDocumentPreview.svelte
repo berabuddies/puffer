@@ -488,14 +488,15 @@
     width: fit-content;
     max-width: 100%;
     padding: 6px 11px;
-    border: 1px solid #b45309;
+    border: 1px solid #fdba74;
     border-radius: 999px;
-    background: #fef3c7;
-    color: #78350f;
+    background: #7c2d12;
+    color: #fff7ed;
     font-size: 12px;
     font-weight: 750;
     line-height: 1.35;
-    box-shadow: 0 0 0 2px rgb(180 83 9 / 0.18), 0 8px 18px rgb(146 64 14 / 0.22);
+    text-align: center;
+    box-shadow: 0 0 0 2px rgb(251 146 60 / 0.26), 0 8px 18px rgb(124 45 18 / 0.28);
   }
 
   :global(html.dark) .pdf-status {
@@ -555,6 +556,41 @@
     .pdf-zoom-range {
       flex-basis: 100%;
       width: auto;
+    }
+  }
+
+  @container (max-width: 520px) {
+    .pdf-controls-main {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      flex-basis: 100%;
+    }
+
+    .pdf-zoom-label,
+    .pdf-toolbar,
+    .pdf-zoom-range,
+    .pdf-zoom-value {
+      grid-column: 1 / -1;
+    }
+
+    .pdf-toolbar {
+      display: grid;
+      grid-template-columns: minmax(44px, 1fr) minmax(92px, 1.45fr) minmax(44px, 1fr);
+      width: 100%;
+    }
+
+    .pdf-toolbar button {
+      width: 100%;
+      min-width: 0;
+    }
+
+    .pdf-zoom-range {
+      min-width: 0;
+      width: 100%;
+    }
+
+    .pdf-zoom-value {
+      justify-self: end;
     }
   }
 
