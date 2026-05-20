@@ -51,6 +51,7 @@ use puffer_provider_worldagent::{
     decode_jwt_profile as decode_worldagent_jwt_profile,
     parse_callback_input as parse_worldagent_callback_input,
     refresh_oauth_token as refresh_worldagent_oauth_token,
+    worldagent_access_token_expires_at_ms,
     WorldAgentOAuthCredentials, WORLDAGENT_CALLBACK_PATH, WORLDAGENT_CALLBACK_PORT,
 };
 use puffer_resources::load_resources;
@@ -1036,16 +1037,6 @@ fn resolve_provider_id(providers: &ProviderRegistry, provider: &str) -> String {
         .unwrap_or_else(|| canonical_provider_id(provider))
 }
 
-/// Returns the Unix epoch millis at which an Auth Station access
-/// token issued **now** will expire (24 hours per the API doc).
-fn worldagent_expires_at_ms() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64 + 24 * 3600 * 1000)
-        .unwrap_or(24 * 3600 * 1000)
-}
-
 fn run_login_flow(
     provider: &str,
     value: Option<String>,
@@ -1151,7 +1142,7 @@ fn run_login_flow(
             let credential = WorldAgentOAuthCredentials {
                 access_token,
                 refresh_token,
-                expires_at_ms: worldagent_expires_at_ms(),
+                expires_at_ms: worldagent_access_token_expires_at_ms(),
                 sub: profile.sub,
                 email: profile.email,
                 name: profile.name,

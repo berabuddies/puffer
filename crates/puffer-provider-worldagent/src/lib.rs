@@ -10,6 +10,7 @@ mod auth;
 pub use auth::{
     build_login_url, decode_jwt_profile, exchange_jwt_for_api_key,
     generate_client_state, parse_callback_input, refresh_oauth_token,
+    worldagent_access_token_expires_at_ms,
     WorldAgentCallback, WorldAgentJwtProfile, WorldAgentLoginConfig,
     WorldAgentOAuthCredentials, WORLDAGENT_AUTH_BASE_URL,
     WORLDAGENT_AUTH_URL_OVERRIDE_ENV, WORLDAGENT_CALLBACK_PATH,

@@ -220,7 +220,7 @@ pub fn refresh_oauth_token(
     Ok(WorldAgentOAuthCredentials {
         access_token,
         refresh_token: refresh_token.to_string(),
-        expires_at_ms: now_ms() + 24 * 3600 * 1000,
+        expires_at_ms: worldagent_access_token_expires_at_ms(),
         sub: profile.sub,
         email: profile.email,
         name: profile.name,
@@ -242,11 +242,15 @@ pub fn exchange_jwt_for_api_key(_access_token: &str) -> Result<String> {
     ))
 }
 
-fn now_ms() -> u64 {
+/// Returns the Unix epoch milliseconds at which an Auth Station
+/// access token issued **now** expires. Auth Station access tokens
+/// have a 24-hour lifetime per the public API doc; this helper
+/// centralizes that constant.
+pub fn worldagent_access_token_expires_at_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+        .map(|duration| duration.as_millis() as u64 + 24 * 3600 * 1000)
+        .unwrap_or(24 * 3600 * 1000)
 }
 
 #[derive(Debug, Deserialize)]
