@@ -215,6 +215,25 @@ test("Agent detail find covers chat plus side panel diff without corrupting text
   await expect(page.locator(".pf-side-panel")).toHaveCount(0);
 });
 
+test("opening a side panel tab as the main tab closes the duplicate side panel", async ({ page }) => {
+  const daemon = agentDetailDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openAgent(page, /Agent detail/);
+  const tabs = page.locator(".pf-agent-tabs");
+  const diffTab = tabs.getByRole("button", { name: /Diff/ });
+
+  await diffTab.click({ modifiers: ["Meta"] });
+  await expect(page.locator(".pf-side-panel")).toBeVisible();
+  await expect(page.locator(".pf-side-head")).toContainText("Diff");
+
+  await diffTab.click();
+
+  await expect(page.locator(".pf-agent-detail-body")).toContainText("new needle agent note");
+  await expect(page.locator(".pf-side-panel")).toHaveCount(0);
+});
+
 test("find query clears when switching sessions", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

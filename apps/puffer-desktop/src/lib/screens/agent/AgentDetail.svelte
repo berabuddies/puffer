@@ -252,6 +252,7 @@
       return;
     }
     tab = nextTab;
+    if (sideTab === nextTab) sideTab = null;
     if (searchOpen) void refreshSearch(false);
   }
 
