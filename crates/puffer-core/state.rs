@@ -5,7 +5,8 @@ use crate::runtime::ReflectionConfig;
 use puffer_config::PufferConfig;
 use puffer_runner_api::ToolRunner;
 use puffer_session_store::{
-    ClaudeReadSnapshotEvent, SessionMetadata, SessionRecord, TranscriptEvent, TranscriptRewrite,
+    ClaudeReadSnapshotEvent, MessageActor, MessageActorKind, SessionMetadata, SessionRecord,
+    TranscriptEvent, TranscriptRewrite,
 };
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -186,6 +187,7 @@ pub struct AppState {
     pub remote_session_url: Option<String>,
     pub remote_session_status: Option<String>,
     pub active_team_name: Option<String>,
+    pub current_actor: Option<MessageActor>,
     pub statusline_enabled: bool,
     pub status_line_text: Option<String>,
     pub project_memory: Option<ProjectMemoryContext>,
@@ -297,6 +299,7 @@ impl AppState {
             remote_session_url: None,
             remote_session_status: None,
             active_team_name: None,
+            current_actor: None,
             statusline_enabled: true,
             status_line_text: None,
             project_memory,
@@ -358,13 +361,14 @@ impl AppState {
         let mut state = Self::new(config, cwd, session.metadata);
         for event in session.events {
             match event {
-                TranscriptEvent::UserMessage { text } => {
+                TranscriptEvent::UserMessage { text, .. } => {
                     state.push_message(MessageRole::User, text)
                 }
-                TranscriptEvent::AssistantMessage { text } => {
+                TranscriptEvent::AssistantMessage { text, actor } => {
+                    state.restore_current_actor(actor);
                     state.push_message(MessageRole::Assistant, text)
                 }
-                TranscriptEvent::SystemMessage { text } => {
+                TranscriptEvent::SystemMessage { text, .. } => {
                     state.push_message(MessageRole::System, text)
                 }
                 TranscriptEvent::ToolInvocation {
@@ -373,7 +377,10 @@ impl AppState {
                     input,
                     output,
                     success,
+                    actor,
+                    ..
                 } => {
+                    state.restore_current_actor(actor);
                     state.push_tool_invocation(&call_id, &tool_id, &input, &output, success);
                 }
                 TranscriptEvent::CommandInvoked { .. } => {}
@@ -657,6 +664,122 @@ impl AppState {
         }
     }
 
+    /// Returns the actor that owns assistant/tool output for this state.
+    pub fn assistant_actor(&self) -> MessageActor {
+        self.current_actor.clone().unwrap_or_else(|| {
+            let parent_session_id = self.session.parent_session_id;
+            let kind = if parent_session_id.is_some() {
+                MessageActorKind::Subagent
+            } else {
+                MessageActorKind::Agent
+            };
+            MessageActor {
+                kind,
+                id: self.session.id.to_string(),
+                agent_id: None,
+                agent_type: None,
+                name: None,
+                team_name: self.active_team_name.clone(),
+                session_id: Some(self.session.id),
+                parent_session_id,
+            }
+        })
+    }
+
+    /// Returns the actor used for user-authored transcript events.
+    pub fn user_actor(&self) -> MessageActor {
+        MessageActor {
+            kind: MessageActorKind::User,
+            id: "user".to_string(),
+            agent_id: None,
+            agent_type: None,
+            name: None,
+            team_name: self.active_team_name.clone(),
+            session_id: Some(self.session.id),
+            parent_session_id: self.session.parent_session_id,
+        }
+    }
+
+    /// Returns the actor used for runtime/system transcript events.
+    pub fn system_actor(&self) -> MessageActor {
+        MessageActor {
+            kind: MessageActorKind::System,
+            id: "system".to_string(),
+            agent_id: None,
+            agent_type: None,
+            name: None,
+            team_name: self.active_team_name.clone(),
+            session_id: Some(self.session.id),
+            parent_session_id: self.session.parent_session_id,
+        }
+    }
+
+    /// Sets the actor for a spawned agent or teammate state.
+    pub fn set_current_actor(&mut self, actor: MessageActor) {
+        self.current_actor = Some(actor);
+    }
+
+    /// Returns the workflow message sender id for the current actor context.
+    pub fn workflow_sender_id(&self) -> String {
+        if let Some(actor) = self.current_actor.as_ref() {
+            return actor.agent_id.clone().unwrap_or_else(|| actor.id.clone());
+        }
+        if let Some(team_name) = self.active_team_name.as_deref() {
+            return format!("team-lead@{team_name}");
+        }
+        "user".to_string()
+    }
+
+    /// Returns a subject actor for tool calls that spawn or manage another agent.
+    pub fn tool_subject_actor(&self, tool_id: &str, output: &str) -> Option<MessageActor> {
+        let normalized_tool = tool_id.trim().to_ascii_lowercase();
+        if !matches!(normalized_tool.as_str(), "agent" | "task") {
+            return None;
+        }
+        let value = serde_json::from_str::<serde_json::Value>(output).ok()?;
+        let agent_id = value
+            .get("agentId")
+            .or_else(|| value.get("agent_id"))
+            .and_then(serde_json::Value::as_str)?
+            .to_string();
+        let agent_type = value
+            .get("agentType")
+            .or_else(|| value.get("agent_type"))
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned);
+        let name = value
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned);
+        let team_name = value
+            .get("teamName")
+            .or_else(|| value.get("team_name"))
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned);
+        Some(MessageActor {
+            kind: MessageActorKind::Subagent,
+            id: agent_id.clone(),
+            agent_id: Some(agent_id),
+            agent_type,
+            name,
+            team_name,
+            session_id: None,
+            parent_session_id: Some(self.session.id),
+        })
+    }
+
+    fn restore_current_actor(&mut self, actor: Option<MessageActor>) {
+        let Some(actor) = actor else {
+            return;
+        };
+        if matches!(
+            actor.kind,
+            MessageActorKind::Agent | MessageActorKind::Subagent | MessageActorKind::TeamLead
+        ) {
+            self.current_actor = Some(actor);
+        }
+    }
+
     pub(crate) fn tasks(&self) -> &[TaskRecord] {
         &self.tasks
     }
@@ -817,21 +940,25 @@ mod tests {
             events: vec![
                 TranscriptEvent::UserMessage {
                     text: "u1".to_string(),
+                    actor: None,
                 },
                 TranscriptEvent::AssistantMessage {
                     text: "a1".to_string(),
+                    actor: None,
                 },
                 TranscriptEvent::TranscriptRewritten {
                     rewrite: TranscriptRewrite::PopLast { count: 1 },
                 },
                 TranscriptEvent::SystemMessage {
                     text: "after-pop".to_string(),
+                    actor: None,
                 },
                 TranscriptEvent::TranscriptRewritten {
                     rewrite: TranscriptRewrite::Clear,
                 },
                 TranscriptEvent::SystemMessage {
                     text: "after-clear".to_string(),
+                    actor: None,
                 },
             ],
         };
@@ -848,13 +975,16 @@ mod tests {
             events: vec![
                 TranscriptEvent::UserMessage {
                     text: "before".to_string(),
+                    actor: None,
                 },
                 TranscriptEvent::CommandInvoked {
                     name: "help".to_string(),
                     args: String::new(),
+                    actor: None,
                 },
                 TranscriptEvent::SystemMessage {
                     text: "done".to_string(),
+                    actor: None,
                 },
             ],
         };
@@ -865,6 +995,79 @@ mod tests {
             .map(|message| message.text.as_str())
             .collect::<Vec<_>>();
         assert_eq!(lines, vec!["before", "done"]);
+    }
+
+    #[test]
+    fn assistant_actor_defaults_to_agent_for_root_sessions() {
+        let state = AppState::new(
+            PufferConfig::default(),
+            PathBuf::from("."),
+            sample_metadata(),
+        );
+        let actor = state.assistant_actor();
+        assert_eq!(actor.kind, MessageActorKind::Agent);
+        assert_eq!(actor.session_id, Some(state.session.id));
+        assert_eq!(actor.parent_session_id, None);
+    }
+
+    #[test]
+    fn assistant_actor_defaults_to_subagent_for_child_sessions() {
+        let mut metadata = sample_metadata();
+        let parent_id = Uuid::new_v4();
+        metadata.parent_session_id = Some(parent_id);
+        let state = AppState::new(PufferConfig::default(), PathBuf::from("."), metadata);
+        let actor = state.assistant_actor();
+        assert_eq!(actor.kind, MessageActorKind::Subagent);
+        assert_eq!(actor.session_id, Some(state.session.id));
+        assert_eq!(actor.parent_session_id, Some(parent_id));
+    }
+
+    #[test]
+    fn workflow_sender_preserves_root_user_and_subagent_agent_ids() {
+        let mut state = AppState::new(
+            PufferConfig::default(),
+            PathBuf::from("."),
+            sample_metadata(),
+        );
+        assert_eq!(state.workflow_sender_id(), "user");
+
+        state.active_team_name = Some("dockyard".to_string());
+        assert_eq!(state.workflow_sender_id(), "team-lead@dockyard");
+
+        state.set_current_actor(MessageActor {
+            kind: MessageActorKind::Subagent,
+            id: "agent-1".to_string(),
+            agent_id: Some("agent-1".to_string()),
+            agent_type: Some("reviewer".to_string()),
+            name: Some("Reviewer".to_string()),
+            team_name: Some("dockyard".to_string()),
+            session_id: Some(state.session.id),
+            parent_session_id: Some(Uuid::new_v4()),
+        });
+        assert_eq!(state.workflow_sender_id(), "agent-1");
+    }
+
+    #[test]
+    fn session_restore_recovers_last_agent_actor() {
+        let actor = MessageActor {
+            kind: MessageActorKind::Subagent,
+            id: "agent-1".to_string(),
+            agent_id: Some("agent-1".to_string()),
+            agent_type: Some("reviewer".to_string()),
+            name: None,
+            team_name: None,
+            session_id: None,
+            parent_session_id: None,
+        };
+        let record = SessionRecord {
+            metadata: sample_metadata(),
+            events: vec![TranscriptEvent::AssistantMessage {
+                text: "done".to_string(),
+                actor: Some(actor.clone()),
+            }],
+        };
+        let state = AppState::from_session_record(PufferConfig::default(), record);
+        assert_eq!(state.current_actor, Some(actor));
     }
 
     #[test]

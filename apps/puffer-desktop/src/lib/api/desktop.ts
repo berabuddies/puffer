@@ -15,6 +15,7 @@ import type {
   SessionDetail,
   SessionListItem,
   SettingsSnapshot,
+  MessageActor,
   TimelineItem,
   WorkflowRun,
   WorkflowSnapshot
@@ -108,11 +109,37 @@ type BackendRepoActionResult = {
   pullRequest: BackendPullRequest | null;
 };
 
+type BackendActorFields = {
+  actor?: MessageActor | null;
+  subject?: MessageActor | null;
+};
+
 type BackendTimelineItem =
-  | { kind: "user_message"; id: string; text: string; createdAtMs?: number | null }
-  | { kind: "assistant_message"; id: string; text: string; createdAtMs?: number | null }
-  | { kind: "system_message"; id: string; text: string; createdAtMs?: number | null }
-  | { kind: "command"; id: string; commandName: string; commandArgs: string; createdAtMs?: number | null }
+  | ({
+      kind: "user_message";
+      id: string;
+      text: string;
+      createdAtMs?: number | null;
+    } & BackendActorFields)
+  | ({
+      kind: "assistant_message";
+      id: string;
+      text: string;
+      createdAtMs?: number | null;
+    } & BackendActorFields)
+  | ({
+      kind: "system_message";
+      id: string;
+      text: string;
+      createdAtMs?: number | null;
+    } & BackendActorFields)
+  | ({
+      kind: "command";
+      id: string;
+      commandName: string;
+      commandArgs: string;
+      createdAtMs?: number | null;
+    } & BackendActorFields)
   | {
       kind: "tool_call";
       id: string;
@@ -127,8 +154,8 @@ type BackendTimelineItem =
       input_json?: Record<string, unknown> | null;
       outputText?: string;
       output_text?: string;
-    }
-  | {
+    } & BackendActorFields
+  | ({
       kind: "permission_dialog";
       id: string;
       createdAtMs?: number | null;
@@ -137,7 +164,7 @@ type BackendTimelineItem =
       summary: string | null;
       reason: string;
       inputText: string | null;
-    }
+    } & BackendActorFields)
   | { kind: "diff_snapshot"; id: string; snapshot: BackendDiff; createdAtMs?: number | null };
 
 type BackendAgentDiffFile = {
@@ -342,6 +369,7 @@ function normalizeAskUserQuestionTool(
     body: "",
     meta: [],
     status: pending ? "pending" : "answered",
+    actor: value.actor ?? null,
     questions,
     answers
   };
@@ -377,7 +405,8 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         title: "User message",
         summary: preview(value.text),
         body: value.text,
-        meta: []
+        meta: [],
+        actor: value.actor ?? null
       };
     case "assistant_message":
       return {
@@ -387,7 +416,8 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         title: "Assistant response",
         summary: preview(value.text),
         body: value.text,
-        meta: []
+        meta: [],
+        actor: value.actor ?? null
       };
     case "system_message":
       return {
@@ -397,7 +427,8 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         title: "System message",
         summary: preview(value.text),
         body: value.text,
-        meta: []
+        meta: [],
+        actor: value.actor ?? null
       };
     case "command":
       return {
@@ -407,7 +438,8 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         title: `/${value.commandName}`,
         summary: preview(value.commandArgs || `/${value.commandName}`),
         body: [value.commandName, value.commandArgs].filter(Boolean).join(" "),
-        meta: ["slash command"]
+        meta: ["slash command"],
+        actor: value.actor ?? null
       };
     case "tool_call":
       const toolId = value.toolId ?? value.tool_id ?? "";
@@ -436,7 +468,9 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         status: value.status,
         input: inputText,
         output: outputText,
-        inputJson
+        inputJson,
+        actor: value.actor ?? null,
+        subject: value.subject ?? null
       };
     case "permission_dialog":
       return {
@@ -449,6 +483,7 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         meta: [value.state],
         toolName: value.toolId,
         status: value.state,
+        actor: value.actor ?? null,
         permissionDialog: {
           state: value.state,
           reason: value.reason,

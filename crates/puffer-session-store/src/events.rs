@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 /// Describes one append-only transcript rewrite operation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -35,18 +36,59 @@ pub struct ClaudeReadSnapshotEvent {
     pub is_partial_view: bool,
 }
 
+/// Identifies the actor that produced or owns a transcript message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageActor {
+    pub kind: MessageActorKind,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<Uuid>,
+}
+
+/// Coarse category for a transcript actor.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageActorKind {
+    User,
+    Assistant,
+    Agent,
+    Subagent,
+    TeamLead,
+    System,
+    Runtime,
+    #[serde(other)]
+    Unknown,
+}
+
 /// Stores a transcript event in append-only session history.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TranscriptEvent {
     UserMessage {
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        actor: Option<MessageActor>,
     },
     AssistantMessage {
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        actor: Option<MessageActor>,
     },
     SystemMessage {
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        actor: Option<MessageActor>,
     },
     /// Structured tool invocation — preserves call_id, tool name, input/output
     /// so the Responses API can reconstruct FunctionCall/FunctionCallOutput
@@ -57,10 +99,16 @@ pub enum TranscriptEvent {
         input: String,
         output: String,
         success: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        actor: Option<MessageActor>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subject: Option<MessageActor>,
     },
     CommandInvoked {
         name: String,
         args: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        actor: Option<MessageActor>,
     },
     SessionRenamed {
         name: String,
@@ -107,4 +155,117 @@ pub enum TranscriptEvent {
         #[serde(default)]
         claude_read_state: Vec<ClaudeReadSnapshotEvent>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MessageActor, MessageActorKind, TranscriptEvent};
+
+    #[test]
+    fn user_message_without_actor_deserializes_for_old_sessions() {
+        let event: TranscriptEvent =
+            serde_json::from_str(r#"{"type":"user_message","text":"hello"}"#).unwrap();
+        assert_eq!(
+            event,
+            TranscriptEvent::UserMessage {
+                text: "hello".to_string(),
+                actor: None,
+            }
+        );
+    }
+
+    #[test]
+    fn changed_variants_without_actor_deserialize_for_old_sessions() {
+        let assistant: TranscriptEvent =
+            serde_json::from_str(r#"{"type":"assistant_message","text":"hello"}"#).unwrap();
+        assert_eq!(
+            assistant,
+            TranscriptEvent::AssistantMessage {
+                text: "hello".to_string(),
+                actor: None,
+            }
+        );
+
+        let system: TranscriptEvent =
+            serde_json::from_str(r#"{"type":"system_message","text":"note"}"#).unwrap();
+        assert_eq!(
+            system,
+            TranscriptEvent::SystemMessage {
+                text: "note".to_string(),
+                actor: None,
+            }
+        );
+
+        let tool: TranscriptEvent = serde_json::from_str(
+            r#"{"type":"tool_invocation","call_id":"call-1","tool_id":"Read","input":"{}","output":"ok","success":true}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            tool,
+            TranscriptEvent::ToolInvocation {
+                call_id: "call-1".to_string(),
+                tool_id: "Read".to_string(),
+                input: "{}".to_string(),
+                output: "ok".to_string(),
+                success: true,
+                actor: None,
+                subject: None,
+            }
+        );
+
+        let command: TranscriptEvent =
+            serde_json::from_str(r#"{"type":"command_invoked","name":"help","args":""}"#).unwrap();
+        assert_eq!(
+            command,
+            TranscriptEvent::CommandInvoked {
+                name: "help".to_string(),
+                args: String::new(),
+                actor: None,
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_actor_kind_deserializes_for_future_compatibility() {
+        let event: TranscriptEvent = serde_json::from_str(
+            r#"{"type":"assistant_message","text":"hello","actor":{"kind":"external_agent","id":"agent-x"}}"#,
+        )
+        .unwrap();
+        let TranscriptEvent::AssistantMessage {
+            actor: Some(actor), ..
+        } = event
+        else {
+            panic!("expected assistant message with actor");
+        };
+        assert_eq!(actor.kind, MessageActorKind::Unknown);
+        assert_eq!(actor.id, "agent-x");
+    }
+
+    #[test]
+    fn message_actor_round_trips_on_tool_invocation() {
+        let actor = MessageActor {
+            kind: MessageActorKind::Subagent,
+            id: "agent-1".to_string(),
+            agent_id: Some("agent-1".to_string()),
+            agent_type: Some("reviewer".to_string()),
+            name: Some("Reviewer".to_string()),
+            team_name: Some("team".to_string()),
+            session_id: None,
+            parent_session_id: None,
+        };
+        let event = TranscriptEvent::ToolInvocation {
+            call_id: "call-1".to_string(),
+            tool_id: "Read".to_string(),
+            input: "{}".to_string(),
+            output: "ok".to_string(),
+            success: true,
+            actor: Some(actor),
+            subject: None,
+        };
+
+        let encoded = serde_json::to_string(&event).unwrap();
+        assert!(encoded.contains(r#""agentId":"agent-1""#));
+        let decoded: TranscriptEvent = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, event);
+    }
 }

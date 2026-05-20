@@ -83,6 +83,8 @@ pub(crate) fn append_tool_invocations(
                 input: invocation.input.clone(),
                 output: invocation.output.clone(),
                 success: invocation.success,
+                actor: Some(state.assistant_actor()),
+                subject: state.tool_subject_actor(&invocation.tool_id, &invocation.output),
             },
         )?;
     }

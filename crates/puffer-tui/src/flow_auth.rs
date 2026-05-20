@@ -32,7 +32,10 @@ pub(crate) fn handle_auth_command(
         state.push_message(MessageRole::System, message.clone());
         session_store.append_event(
             state.session.id,
-            TranscriptEvent::SystemMessage { text: message },
+            TranscriptEvent::SystemMessage {
+                text: message,
+                actor: Some(state.system_actor()),
+            },
         )?;
         return Ok(true);
     }
@@ -51,7 +54,10 @@ pub(crate) fn handle_auth_command(
     state.push_message(MessageRole::System, message.clone());
     session_store.append_event(
         state.session.id,
-        TranscriptEvent::SystemMessage { text: message },
+        TranscriptEvent::SystemMessage {
+            text: message,
+            actor: Some(state.system_actor()),
+        },
     )?;
     Ok(true)
 }

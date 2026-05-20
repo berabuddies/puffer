@@ -20,6 +20,7 @@ use crate::runtime::permission_prompt::{prompt_for_user_question, UserQuestionPr
 use crate::AppState;
 use anyhow::{anyhow, bail, Context, Result};
 use puffer_config::{ensure_workspace_dirs, ConfigPaths};
+use puffer_session_store::MessageActor;
 use serde_json::{json, Value};
 use std::fs;
 use std::fs::OpenOptions;
@@ -163,11 +164,8 @@ pub(super) fn execute_send_message(
     }
 
     // --- Sender identity ---
-    let from = if let Some(ref team_name) = state.active_team_name {
-        team_lead_agent_id(team_name)
-    } else {
-        "user".to_string()
-    };
+    let from = state.workflow_sender_id();
+    let actor = Some(state.assistant_actor());
 
     let store_cwd = state.session.cwd.as_path();
     let recipients = resolve_recipients(store_cwd, state.active_team_name.as_deref(), &to)?;
@@ -184,13 +182,13 @@ pub(super) fn execute_send_message(
 
     match message_type.as_deref() {
         Some("shutdown_request") => {
-            return handle_shutdown_request(store_cwd, &from, &recipients, &parsed);
+            return handle_shutdown_request(store_cwd, &from, &recipients, &parsed, actor);
         }
         Some("shutdown_response") => {
-            return handle_shutdown_response(store_cwd, &from, &parsed);
+            return handle_shutdown_response(store_cwd, &from, &parsed, actor);
         }
         Some("plan_approval_response") => {
-            return handle_plan_approval_response(store_cwd, &from, &recipients, &parsed);
+            return handle_plan_approval_response(store_cwd, &from, &recipients, &parsed, actor);
         }
         _ => {}
     }
@@ -210,6 +208,7 @@ pub(super) fn execute_send_message(
             read: false,
             summary: parsed.summary.clone(),
             message: parsed.message.clone(),
+            actor: actor.clone(),
             created_at_ms: now_ms(),
         };
         // Try in-process delivery via teammate registry.
@@ -262,6 +261,7 @@ fn handle_shutdown_request(
     from: &str,
     recipients: &[String],
     parsed: &SendMessageInput,
+    actor: Option<MessageActor>,
 ) -> Result<String> {
     let request_id = format!("shutdown-{}", Uuid::new_v4().simple());
     let reason = parsed
@@ -299,6 +299,7 @@ fn handle_shutdown_request(
             read: false,
             summary: Some("shutdown request".to_string()),
             message: enriched.clone(),
+            actor: actor.clone(),
             created_at_ms: now_ms(),
         });
         if let Some(agent) = agents
@@ -323,6 +324,7 @@ fn handle_shutdown_response(
     store_cwd: &Path,
     from: &str,
     parsed: &SendMessageInput,
+    actor: Option<MessageActor>,
 ) -> Result<String> {
     let request_id = parsed
         .message
@@ -383,6 +385,7 @@ fn handle_shutdown_response(
             "shutdown rejected".to_string()
         }),
         message: response_msg,
+        actor,
         created_at_ms: now_ms(),
     });
     save_store(&messages_path(store_cwd), &messages)?;
@@ -400,6 +403,7 @@ fn handle_plan_approval_response(
     from: &str,
     recipients: &[String],
     parsed: &SendMessageInput,
+    actor: Option<MessageActor>,
 ) -> Result<String> {
     let request_id = parsed
         .message
@@ -439,6 +443,7 @@ fn handle_plan_approval_response(
                 format!("plan rejected: {}", feedback.as_deref().unwrap_or(""))
             }),
             message: response_msg.clone(),
+            actor: actor.clone(),
             created_at_ms: now_ms(),
         });
         if let Some(agent) = agents

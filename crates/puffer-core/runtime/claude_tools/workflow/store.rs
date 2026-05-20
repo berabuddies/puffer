@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use puffer_config::{ensure_workspace_dirs, ConfigPaths};
+use puffer_session_store::MessageActor;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -127,6 +128,8 @@ pub(crate) struct StoredMessage {
     pub(crate) read: bool,
     pub(crate) summary: Option<String>,
     pub(crate) message: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) actor: Option<MessageActor>,
     pub(crate) created_at_ms: u64,
 }
 

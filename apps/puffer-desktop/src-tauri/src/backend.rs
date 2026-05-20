@@ -375,16 +375,19 @@ impl BackendState {
                 StoredEvent::User { text, .. } => items.push(TimelineItemDto::UserMessage {
                     id,
                     text: text.clone(),
+                    actor: None,
                 }),
                 StoredEvent::Assistant { text, .. } => {
                     items.push(TimelineItemDto::AssistantMessage {
                         id,
                         text: text.clone(),
+                        actor: None,
                     })
                 }
                 StoredEvent::System { text, .. } => items.push(TimelineItemDto::SystemMessage {
                     id,
                     text: text.clone(),
+                    actor: None,
                 }),
                 StoredEvent::Tool {
                     tool_id,
@@ -400,6 +403,8 @@ impl BackendState {
                     input_text: input.clone(),
                     input_json: serde_json::from_str(input).ok(),
                     output_text: output.clone(),
+                    actor: None,
+                    subject: None,
                 }),
             }
         }

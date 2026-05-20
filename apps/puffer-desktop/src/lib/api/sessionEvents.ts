@@ -1,4 +1,9 @@
 import { ensureLocalDaemonClient } from "./daemonClient";
+import type { MessageActor } from "../types";
+
+type StreamActorFields = {
+  actor?: MessageActor | null;
+};
 
 /** Any session event may arrive with `replay: true` when the daemon is
  *  catching up a newly-connected client via the replay ring buffer. UIs
@@ -8,15 +13,15 @@ import { ensureLocalDaemonClient } from "./daemonClient";
  *  / bump notifications can suppress those side effects on replay. */
 export type SessionStreamEvent =
   | { type: "turn-start"; turnId: string; replay?: boolean }
-  | { type: "text-delta"; turnId: string; delta: string; replay?: boolean }
-  | { type: "thinking-delta"; turnId: string; delta: string; replay?: boolean }
+  | ({ type: "text-delta"; turnId: string; delta: string; replay?: boolean } & StreamActorFields)
+  | ({ type: "thinking-delta"; turnId: string; delta: string; replay?: boolean } & StreamActorFields)
   | {
       type: "tool-calls-requested";
       turnId: string;
       requests: { callId: string; toolId: string; input: string }[];
       replay?: boolean;
-    }
-  | {
+    } & StreamActorFields
+  | ({
       type: "tool-invocations";
       turnId: string;
       invocations: {
@@ -27,8 +32,8 @@ export type SessionStreamEvent =
         success: boolean;
       }[];
       replay?: boolean;
-    }
-  | {
+    } & StreamActorFields)
+  | ({
       type: "usage";
       turnId: string;
       report: {
@@ -38,17 +43,22 @@ export type SessionStreamEvent =
         cacheCreationTokens: number;
       };
       replay?: boolean;
-    }
-  | { type: "reflection-checkpoint"; turnId: string; summary: string; replay?: boolean }
-  | {
+    } & StreamActorFields)
+  | ({
+      type: "reflection-checkpoint";
+      turnId: string;
+      summary: string;
+      replay?: boolean;
+    } & StreamActorFields)
+  | ({
       type: "retry-attempt";
       turnId: string;
       attempt: number;
       maxAttempts: number;
       error: string;
       replay?: boolean;
-    }
-  | {
+    } & StreamActorFields)
+  | ({
       type: "permission-request";
       turnId: string;
       requestId: string;
@@ -56,15 +66,20 @@ export type SessionStreamEvent =
       summary: string;
       reason: string | null;
       replay?: boolean;
-    }
-  | {
+    } & StreamActorFields)
+  | ({
       type: "user-question-request";
       turnId: string;
       requestId: string;
       questions: unknown[];
       replay?: boolean;
-    }
-  | { type: "turn-complete"; turnId: string; assistantText: string; replay?: boolean }
+    } & StreamActorFields)
+  | ({
+      type: "turn-complete";
+      turnId: string;
+      assistantText: string;
+      replay?: boolean;
+    } & StreamActorFields)
   | { type: "turn-error"; turnId: string; error: string; replay?: boolean };
 
 type Unlisten = () => void;

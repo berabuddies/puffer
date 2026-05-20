@@ -9,6 +9,7 @@ use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use puffer_resources::{
     agent_by_id, plugin_mcp_servers, skill_by_name, AgentSpec, LoadedResources, ToolSpec,
 };
+use puffer_session_store::{MessageActor, MessageActorKind};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::fs;
@@ -295,6 +296,19 @@ fn prepare_agent_execution(
         &agent.value.tools,
         &agent.value.disallowed_tools,
     );
+    let agent_id = format!("agent-{}", Uuid::new_v4().simple());
+    let agent_name = input
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let team_name = input
+        .team_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
     let mut nested_state = state.clone();
     // Mint a fresh session id for the subagent and link back to the
     // parent via the canonical `SessionMetadata::parent_session_id`
@@ -338,12 +352,17 @@ fn prepare_agent_execution(
     if effective_mode == Some("plan") {
         enter_plan_mode(&mut nested_state)?;
     }
-    nested_state.active_team_name = input
-        .team_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
+    nested_state.active_team_name = team_name.clone();
+    nested_state.set_current_actor(MessageActor {
+        kind: MessageActorKind::Subagent,
+        id: agent_id.clone(),
+        agent_id: Some(agent_id.clone()),
+        agent_type: Some(agent.value.id.clone()),
+        name: agent_name.clone(),
+        team_name: team_name.clone(),
+        session_id: Some(nested_state.session.id),
+        parent_session_id: Some(state.session.id),
+    });
     if let Some(effort) = input
         .effort
         .as_ref()
@@ -385,14 +404,11 @@ fn prepare_agent_execution(
         &input.prompt,
     );
     Ok(PreparedAgentExecution {
-        agent_id: format!("agent-{}", Uuid::new_v4().simple()),
+        agent_id,
         agent_type: agent.value.id.clone(),
         description: input.description.trim().to_string(),
         prompt,
-        name: input
-            .name
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty()),
+        name: agent_name,
         run_in_background: input.run_in_background || agent.value.background,
         nested_cwd,
         resolved_model: nested_state.current_model.clone(),
@@ -400,10 +416,7 @@ fn prepare_agent_execution(
         nested_state,
         nested_resources,
         isolation: effective_isolation,
-        team_name: input
-            .team_name
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty()),
+        team_name,
         mode: effective_mode
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty()),
@@ -580,6 +593,7 @@ fn launch_background_agent(
         let notification_cwd = prepared.nested_state.session.cwd.clone();
         let agent_id_for_notify = prepared.agent_id.clone();
         let description_for_notify = prepared.description.clone();
+        let actor_for_notify = prepared.nested_state.assistant_actor();
 
         thread::spawn(move || {
             let mut nested_state = prepared.nested_state;
@@ -706,6 +720,7 @@ fn launch_background_agent(
                 &description_for_notify,
                 if failed { "failed" } else { "completed" },
                 &last_text,
+                actor_for_notify,
             );
 
             // Periodic cleanup of old completed tasks to prevent unbounded growth.
@@ -724,6 +739,7 @@ fn write_agent_completion_notification(
     description: &str,
     status: &str,
     result_summary: &str,
+    actor: MessageActor,
 ) {
     use crate::runtime::claude_tools::workflow::store::{
         load_store, messages_path, now_ms, save_store, MessageStore, StoredMessage,
@@ -750,6 +766,7 @@ fn write_agent_completion_notification(
             "description": description,
             "result": preview,
         }),
+        actor: Some(actor),
         created_at_ms: now_ms(),
     });
     let _ = save_store(&messages_path(cwd), &store);

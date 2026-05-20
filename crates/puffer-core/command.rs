@@ -517,6 +517,7 @@ pub fn dispatch_command(
             TranscriptEvent::CommandInvoked {
                 name: format!("skill:{skill_name}"),
                 args: args.to_string(),
+                actor: Some(state.user_actor()),
             },
         )?;
         execute_skill_command(
@@ -543,6 +544,7 @@ pub fn dispatch_command(
                 TranscriptEvent::CommandInvoked {
                     name: name.to_string(),
                     args: args.to_string(),
+                    actor: Some(state.user_actor()),
                 },
             )?;
             execute_skill_command(
@@ -564,6 +566,7 @@ pub fn dispatch_command(
         TranscriptEvent::CommandInvoked {
             name: command.name.to_string(),
             args: args.to_string(),
+            actor: Some(state.user_actor()),
         },
     )?;
 
@@ -630,6 +633,7 @@ fn execute_prompt_command(
                     state.session.id,
                     TranscriptEvent::AssistantMessage {
                         text: turn.assistant_text,
+                        actor: Some(state.assistant_actor()),
                     },
                 )?;
             }
@@ -736,6 +740,7 @@ fn execute_prompt_command(
         state.session.id,
         TranscriptEvent::UserMessage {
             text: rendered.clone(),
+            actor: Some(state.user_actor()),
         },
     )?;
 
@@ -755,6 +760,7 @@ fn execute_prompt_command(
                 state.session.id,
                 TranscriptEvent::AssistantMessage {
                     text: turn.assistant_text,
+                    actor: Some(state.assistant_actor()),
                 },
             )?;
             if command.name == "statusline" {

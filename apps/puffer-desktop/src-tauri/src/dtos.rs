@@ -1,3 +1,4 @@
+use puffer_session_store::MessageActor;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -100,19 +101,27 @@ pub(crate) enum TimelineItemDto {
     UserMessage {
         id: String,
         text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        actor: Option<MessageActor>,
     },
     AssistantMessage {
         id: String,
         text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        actor: Option<MessageActor>,
     },
     SystemMessage {
         id: String,
         text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        actor: Option<MessageActor>,
     },
     Command {
         id: String,
         command_name: String,
         command_args: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        actor: Option<MessageActor>,
     },
     ToolCall {
         id: String,
@@ -122,6 +131,10 @@ pub(crate) enum TimelineItemDto {
         input_text: String,
         input_json: Option<Value>,
         output_text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        actor: Option<MessageActor>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        subject: Option<MessageActor>,
     },
     PermissionDialog {
         id: String,
@@ -130,6 +143,8 @@ pub(crate) enum TimelineItemDto {
         summary: Option<String>,
         reason: String,
         input_text: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        actor: Option<MessageActor>,
     },
     DiffSnapshot {
         id: String,

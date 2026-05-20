@@ -46,7 +46,7 @@ use puffer_provider_openai::{
 };
 use puffer_provider_registry::{AuthStore, ProviderRegistry, StoredCredential};
 use puffer_resources::{load_resources, LoadedResources, McpServerSpec};
-use puffer_session_store::{SessionStore, TranscriptEvent};
+use puffer_session_store::{MessageActor, SessionStore, TranscriptEvent};
 use puffer_transport_anthropic::{
     exchange_authorization_code as exchange_anthropic_authorization_code,
     parse_authorization_input as parse_anthropic_authorization_input, ANTHROPIC_API_BASE_URL,
@@ -470,6 +470,13 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         x |= ai ^ bi;
     }
     x == 0
+}
+
+fn event_payload_with_actor(mut payload: Value, actor: &MessageActor) -> Value {
+    if let Some(map) = payload.as_object_mut() {
+        map.insert("actor".to_string(), json!(actor));
+    }
+    payload
 }
 
 async fn handle_socket(socket: WebSocket, state: Arc<DaemonState>) {
@@ -2104,13 +2111,16 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
             session_uuid,
             TranscriptEvent::UserMessage {
                 text: message_for_thread.clone(),
+                actor: Some(app_state.user_actor()),
             },
         );
         let _ = &session_id_for_thread; // keep the String alive for logging
 
+        let stream_actor = app_state.assistant_actor();
         let ev_state = setup_state.clone();
         let ev_channel = channel_thread.clone();
         let ev_turn = turn_id_thread.clone();
+        let ev_actor = stream_actor.clone();
         let on_event = move |event: TurnStreamEvent| {
             let payload = match event {
                 TurnStreamEvent::TextDelta(delta) => {
@@ -2167,6 +2177,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                     "error": error,
                 }),
             };
+            let payload = event_payload_with_actor(payload, &ev_actor);
             ev_state.publish_event(ServerEnvelope::Event {
                 event: ev_channel.clone(),
                 payload,
@@ -2177,6 +2188,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         let perm_channel = channel_thread.clone();
         let perm_turn = turn_id_thread.clone();
         let perm_pending = pending.clone();
+        let perm_actor = stream_actor.clone();
         let on_permission = move |req: PermissionPromptRequest| -> PermissionPromptAction {
             let request_id = next_req_id.fetch_add(1, Ordering::SeqCst).to_string();
             let (tx, rx) = std::sync::mpsc::channel();
@@ -2184,14 +2196,17 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
 
             perm_state.publish_event(ServerEnvelope::Event {
                 event: perm_channel.clone(),
-                payload: json!({
-                    "type": "permission-request",
-                    "turnId": perm_turn,
-                    "requestId": request_id,
-                    "toolId": req.tool_id,
-                    "summary": req.summary,
-                    "reason": req.reason,
-                }),
+                payload: event_payload_with_actor(
+                    json!({
+                        "type": "permission-request",
+                        "turnId": perm_turn,
+                        "requestId": request_id,
+                        "toolId": req.tool_id,
+                        "summary": req.summary,
+                        "reason": req.reason,
+                    }),
+                    &perm_actor,
+                ),
             });
 
             rx.recv().unwrap_or(PermissionPromptAction::Deny)
@@ -2202,6 +2217,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         let question_turn = turn_id_thread.clone();
         let question_pending = pending_questions.clone();
         let question_next_id = setup_state.next_request_id.clone();
+        let question_actor = stream_actor.clone();
         let on_user_question = move |req: UserQuestionPromptRequest| -> UserQuestionPromptResponse {
             let request_id = question_next_id.fetch_add(1, Ordering::SeqCst).to_string();
             let (tx, rx) = std::sync::mpsc::channel();
@@ -2212,12 +2228,15 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
 
             question_state.publish_event(ServerEnvelope::Event {
                 event: question_channel.clone(),
-                payload: json!({
-                    "type": "user-question-request",
-                    "turnId": question_turn.clone(),
-                    "requestId": request_id,
-                    "questions": req.questions,
-                }),
+                payload: event_payload_with_actor(
+                    json!({
+                        "type": "user-question-request",
+                        "turnId": question_turn.clone(),
+                        "requestId": request_id,
+                        "questions": req.questions,
+                    }),
+                    &question_actor,
+                ),
             });
 
             rx.recv().unwrap_or(UserQuestionPromptResponse {
@@ -2252,6 +2271,8 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                             input: inv.input.clone(),
                             output: inv.output.clone(),
                             success: inv.success,
+                            actor: Some(stream_actor.clone()),
+                            subject: app_state.tool_subject_actor(&inv.tool_id, &inv.output),
                         },
                     );
                 }
@@ -2261,6 +2282,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                         session_uuid,
                         TranscriptEvent::AssistantMessage {
                             text: turn.assistant_text.clone(),
+                            actor: Some(stream_actor.clone()),
                         },
                     );
                 }
@@ -2273,11 +2295,14 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                 }
                 setup_state.publish_event(ServerEnvelope::Event {
                     event: channel_thread.clone(),
-                    payload: json!({
-                        "type": "turn-complete",
-                        "turnId": turn_id_thread,
-                        "assistantText": turn.assistant_text,
-                    }),
+                    payload: event_payload_with_actor(
+                        json!({
+                            "type": "turn-complete",
+                            "turnId": turn_id_thread,
+                            "assistantText": turn.assistant_text,
+                        }),
+                        &stream_actor,
+                    ),
                 });
                 // Transcript mutated — let boards / sidebars re-render.
                 setup_state.publish_event(ServerEnvelope::Event {
