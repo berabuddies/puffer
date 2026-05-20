@@ -1619,6 +1619,33 @@
     });
   }
 
+  function cacheBackgroundTurnComplete(
+    sessionId: string,
+    ev: Extract<SessionStreamEvent, { type: "turn-complete" }>
+  ) {
+    const cached = transientConversationStates[sessionId] ?? emptyTransientConversationState();
+    const { [ev.turnId]: _dropReplay, ...replayTextByTurn } = cached.replayTextByTurn;
+    const settledLiveItems = cached.liveStreamItems.filter(
+      (item) => item.kind !== "permission" && item.kind !== "question"
+    );
+    setTransientConversationState(sessionId, {
+      ...cached,
+      liveStreamItems: withCompletionAssistantFallback(
+        settledLiveItems,
+        ev.assistantText,
+        ev.turnId
+      ),
+      replayTextByTurn,
+      turnPermissionLookup: {},
+      turnQuestionLookup: {},
+      currentTurnId: null,
+      cancelingTurnId: null,
+      turnStartedAtMs: null,
+      turnThinking: false,
+      turnStatusHint: null
+    });
+  }
+
   function cacheBackgroundSessionEvent(sessionId: string, ev: SessionStreamEvent) {
     if (isTurnSettled(sessionId, ev.turnId)) return;
     switch (ev.type) {
@@ -2722,7 +2749,12 @@
       return;
     }
     if (!selectedForEvent) {
-      if (ev.type === "turn-complete" || ev.type === "turn-error") {
+      if (ev.type === "turn-complete") {
+        rememberSettledTurn(sid, ev.turnId);
+        cacheBackgroundTurnComplete(sid, ev);
+        return;
+      }
+      if (ev.type === "turn-error") {
         rememberSettledTurn(sid, ev.turnId);
         clearCachedTurnRuntimeState(sid);
         return;

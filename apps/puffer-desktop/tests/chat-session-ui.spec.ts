@@ -2520,6 +2520,7 @@ test("completed background turns ignore replayed approval events", async ({ page
   });
 
   await openSession(page, /Background complete A/);
+  await expect(page.getByText("Background turn finished.")).toBeVisible();
   await expect(page.getByText("This approval should disappear when the turn completes.")).toHaveCount(0);
   await expect(page.getByText("Approval needed")).toHaveCount(0);
 });
