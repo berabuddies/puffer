@@ -124,6 +124,7 @@
   let pendingFrame: BrowserFrameEvent | null = null;
   let frameDecodeInFlight = false;
   const NAVIGATION_IDLE_FALLBACK_MS = 1_200;
+  const TAB_INFO_STALE_GRACE_MS = 250;
 
   let activeTab = $derived(tabs.find((tab) => tab.id === activeTabId) ?? tabs[0]);
   let browserCommandPending = $derived(
@@ -220,14 +221,16 @@
     };
   }
 
+  function isStaleTabInfo(info: BrowserTabInfo, existing: BrowserTab | null): boolean {
+    if (!existing || typeof info.updatedAtMs !== "number" || info.updatedAtMs <= 0) {
+      return false;
+    }
+    return existing.updatedAtMs - info.updatedAtMs > TAB_INFO_STALE_GRACE_MS;
+  }
+
   function tabFromInfo(info: BrowserTabInfo): BrowserTab {
     const existing = tabs.find((tab) => tab.id === info.tabId);
-    if (
-      existing &&
-      typeof info.updatedAtMs === "number" &&
-      info.updatedAtMs > 0 &&
-      existing.updatedAtMs > info.updatedAtMs
-    ) {
+    if (existing && isStaleTabInfo(info, existing)) {
       return existing;
     }
     const backendId = info.backendSessionId || existing?.backendSessionId || backendSessionId(info.tabId);
@@ -287,14 +290,9 @@
     const connectedTabId = nextTabs.find((tab) => tab.connected)?.id;
     const activeEvent = state.tabs.find((tab) => tab.tabId === state.activeTabId);
     const existingActive = activeEvent
-      ? tabs.find((tab) => tab.id === activeEvent.tabId)
+      ? tabs.find((tab) => tab.id === activeEvent.tabId) ?? null
       : null;
-    const activeEventFresh =
-      !activeEvent ||
-      !existingActive ||
-      typeof activeEvent.updatedAtMs !== "number" ||
-      activeEvent.updatedAtMs <= 0 ||
-      activeEvent.updatedAtMs >= existingActive.updatedAtMs;
+    const activeEventFresh = !activeEvent || !isStaleTabInfo(activeEvent, existingActive);
     const validActiveTabId = state.activeTabId && activeEventFresh && nextTabs.some((tab) => tab.id === state.activeTabId)
       ? state.activeTabId
       : null;
