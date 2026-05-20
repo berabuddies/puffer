@@ -3008,6 +3008,122 @@ test("composer routing controls stay scoped to each session", async ({ page }) =
   );
 });
 
+test("started sessions ignore stale local routing preference", async ({ page }) => {
+  const model = (provider: string, id: string, displayName = id) => ({
+    id,
+    displayName,
+    provider,
+    api: "openai-responses",
+    supportsTools: true,
+    supportsVision: false,
+    contextWindow: null,
+    maxOutputTokens: null,
+    thinkingOptions: [],
+    defaultThinkingOptionId: null,
+    isDefault: true
+  });
+  const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "codex",
+        kind: "oauth",
+        email: "tester@example.com",
+        expiresAtMs: null,
+        scopes: [],
+        planType: "test",
+        organizationName: null
+      },
+      {
+        providerId: "openrouter",
+        kind: "api_key",
+        email: null,
+        expiresAtMs: null,
+        scopes: [],
+        planType: null,
+        organizationName: null
+      }
+    ],
+    providers: [
+      {
+        id: "codex",
+        displayName: "Codex",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 1,
+        authModes: ["oauth"],
+        sourceKind: "test",
+        sourcePath: null
+      },
+      {
+        id: "openrouter",
+        displayName: "OpenRouter",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 1,
+        authModes: ["api_key"],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ],
+    sessions: [
+      {
+        sessionId: "session-started-routing",
+        displayName: "Started routing",
+        title: "Started routing",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        providerId: "codex",
+        modelId: "codex-default",
+        timeline: [
+          {
+            kind: "user_message",
+            id: "started-routing-user",
+            text: "This session already started on Codex.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ],
+    providerModels: {
+      codex: [model("codex", "codex-default", "Codex Default")],
+      openrouter: [
+        model("openrouter", "google/gemini-3.5-flash", "Google: Gemini 3.5 Flash")
+      ]
+    }
+  });
+  await daemon.install(page);
+  await page.addInitScript(() => {
+    window.localStorage.setItem(
+      "puffer-agent:session:session-started-routing:routing",
+      JSON.stringify({
+        providerId: "openrouter",
+        modelId: "google/gemini-3.5-flash"
+      })
+    );
+  });
+  await daemon.open(page);
+
+  await openSession(page, /Started routing/);
+  const picker = page.locator(".pf-composer .picker");
+  await expect(picker.locator(".trigger")).toContainText("codex-default");
+  await expect(picker.locator(".providers")).toHaveCount(0);
+  await page.locator(".pf-composer textarea").fill("Continue locked session");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  const request = await daemon.waitForRequest(
+    "run_agent_turn",
+    (item) => item.params.message === "Continue locked session"
+  );
+  expect(request.params).toMatchObject({
+    sessionId: "session-started-routing",
+    providerId: "codex",
+    modelId: "codex-default"
+  });
+});
+
 test("stale provider model fetch does not rewrite a switched session", async ({ page }) => {
   const model = (provider: string, id: string, displayName = id) => ({
     id,

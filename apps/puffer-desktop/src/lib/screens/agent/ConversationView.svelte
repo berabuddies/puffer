@@ -610,7 +610,10 @@
 
   $effect(() => {
     const sessionId = session?.id ?? null;
-    const saved = sessionId ? readRoutingPreference(sessionId) : null;
+    const saved =
+      sessionId && (session?.eventCount ?? 0) === 0
+        ? readRoutingPreference(sessionId)
+        : null;
     const sessionHasRoute = Boolean(session?.providerId || session?.modelId);
     const source = saved ? "saved" : sessionHasRoute ? "session" : "default";
     const providerId = saved
