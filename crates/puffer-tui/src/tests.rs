@@ -623,6 +623,41 @@ fn try_open_overlay_builds_fast_mode_picker_for_current_model() {
 }
 
 #[test]
+fn try_open_overlay_builds_fast_mode_picker_for_unscoped_current_model() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+
+    let mut state = sample_state();
+    state.current_provider = Some("openai".to_string());
+    state.current_model = Some("gpt-5".to_string());
+    let resources = sample_resources();
+    let mut providers = sample_providers();
+    let auth_store = sample_auth_store();
+    let mut tui = TuiState::default();
+    let opened = try_open_overlay(
+        &state,
+        &resources,
+        &mut providers,
+        &auth_store,
+        &session_store,
+        &mut tui,
+        "/fast",
+    )
+    .unwrap();
+    assert!(opened);
+    assert!(matches!(
+        tui.overlay,
+        Some(OverlayState::FastModePicker {
+            ref provider_id,
+            ref model_id,
+            ..
+        }) if provider_id == "openai" && model_id == "gpt-5"
+    ));
+}
+
+#[test]
 fn codex_import_without_base_url_clears_previous_openai_override() {
     let tempdir = tempdir().unwrap();
     let _home = crate::test_env::ScopedPufferHome::new("codex-import-openai");

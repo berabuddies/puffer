@@ -569,7 +569,21 @@ pub(crate) fn fast_mode_picker_for_current_selection(
     providers: &ProviderRegistry,
 ) -> Option<OverlayState> {
     let model_selector = state.current_model.as_deref()?;
-    let (provider_id, model_id) = model_selector.split_once('/')?;
+    let (provider_id, model_id) = match model_selector.split_once('/') {
+        Some((provider_id, model_id)) => (provider_id, model_id),
+        None => {
+            let provider_id = state.current_provider.as_deref()?;
+            let provider = providers.provider(provider_id)?;
+            if !provider
+                .models
+                .iter()
+                .any(|model| model.id == model_selector)
+            {
+                return None;
+            }
+            (provider_id, model_selector)
+        }
+    };
     let effort = normalized_effort_level(
         provider_preference_family(providers, provider_id),
         &state.effort_level,
