@@ -21,7 +21,7 @@ pub(crate) fn session_activity_status(events: &[TranscriptEvent]) -> &'static st
 fn latest_action_requires_permission(events: &[TranscriptEvent]) -> bool {
     for event in events.iter().rev() {
         match event {
-            TranscriptEvent::SystemMessage { text } => {
+            TranscriptEvent::SystemMessage { text, .. } => {
                 return text_requires_permission(text);
             }
             TranscriptEvent::ToolInvocation { output, .. } => {
@@ -110,6 +110,7 @@ mod tests {
     fn detects_unanswered_user_turns_as_running() {
         let events = vec![TranscriptEvent::UserMessage {
             text: "continue".to_string(),
+            actor: None,
         }];
 
         assert_eq!(session_activity_status(&events), ACTIVITY_RUNNING);
@@ -123,6 +124,8 @@ mod tests {
             input: r#"{"command":"cargo test"}"#.to_string(),
             output: "Permission required: command needs approval".to_string(),
             success: false,
+            actor: None,
+            subject: None,
         }];
 
         assert_eq!(session_activity_status(&events), ACTIVITY_AWAITING);
@@ -133,9 +136,11 @@ mod tests {
         let events = vec![
             TranscriptEvent::UserMessage {
                 text: "edit".to_string(),
+                actor: None,
             },
             TranscriptEvent::AssistantMessage {
                 text: "done".to_string(),
+                actor: None,
             },
             TranscriptEvent::GitDiffSnapshot {
                 snapshot: GitDiffSnapshot {
@@ -157,9 +162,11 @@ mod tests {
         let events = vec![
             TranscriptEvent::UserMessage {
                 text: "hello".to_string(),
+                actor: None,
             },
             TranscriptEvent::AssistantMessage {
                 text: "hi".to_string(),
+                actor: None,
             },
         ];
 

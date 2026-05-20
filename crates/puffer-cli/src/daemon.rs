@@ -2594,6 +2594,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                     session_uuid,
                     TranscriptEvent::SystemMessage {
                         text: friendly.clone(),
+                        actor: Some(stream_actor.clone()),
                     },
                 );
                 publish_turn_error_event(
