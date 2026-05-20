@@ -58,13 +58,8 @@ pub(crate) fn build_codex_openai_request_body(
     body
 }
 
-fn reasoning_encrypted_content_include(base_url: &str) -> &'static str {
-    let trimmed = base_url.trim_end_matches('/');
-    if trimmed.contains("/backend-api") || trimmed.contains("/api/codex") {
-        "reasoning.encryptedcontent"
-    } else {
-        "reasoning.encrypted_content"
-    }
+fn reasoning_encrypted_content_include(_base_url: &str) -> &'static str {
+    "reasoning.encryptedcontent"
 }
 
 pub(super) fn prefer_native_structured_output(
@@ -579,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn public_responses_request_uses_official_reasoning_include_selector() {
+    fn public_responses_request_uses_compact_reasoning_include_selector() {
         let state = state();
 
         let body = build_codex_openai_request_body(
@@ -594,7 +589,7 @@ mod tests {
             true,
         );
 
-        assert_eq!(body["include"][0], json!("reasoning.encrypted_content"));
+        assert_eq!(body["include"][0], json!("reasoning.encryptedcontent"));
     }
 
     #[test]
