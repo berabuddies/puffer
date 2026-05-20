@@ -99,7 +99,9 @@
         try {
           next[provider.id] = await listProviderModels(provider.id);
         } catch (error) {
-          next[provider.id] = [];
+          if (!Object.prototype.hasOwnProperty.call(next, provider.id)) {
+            next[provider.id] = [];
+          }
           loadError = `${provider.id}: ${error}`;
         }
       }
