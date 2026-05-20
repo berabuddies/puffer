@@ -135,7 +135,9 @@
     )
   );
   let browserControlsEnabled = $derived(Boolean(activeTab && connected && !browserCommandPending));
-  let browserAddressEnabled = $derived(Boolean(activeTab && !activeTab.error && !browserCommandPending));
+  let browserAddressEnabled = $derived(
+    Boolean(activeTab && (activeTab.connected || !activeTab.error) && !browserCommandPending)
+  );
   let activeDevtools = $derived(activeTab?.devtools ?? []);
   let consoleEvents = $derived(activeDevtools.filter((item) => item.kind === "console"));
   let networkEvents = $derived(activeDevtools.filter((item) => item.kind === "network"));
