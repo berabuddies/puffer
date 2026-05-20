@@ -2525,6 +2525,64 @@ test("completed background turns ignore replayed approval events", async ({ page
   await expect(page.getByText("Approval needed")).toHaveCount(0);
 });
 
+test("background turn errors are restored when switching back before persistence", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-background-error-a",
+        displayName: "Background error A",
+        title: "Background error A",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        activityStatus: "running",
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      },
+      {
+        sessionId: "session-background-error-b",
+        displayName: "Background error B",
+        title: "Background error B",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 1,
+        activityStatus: "idle",
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "background-error-b-seed",
+            text: "Background error B seed",
+            createdAtMs: baseTime - 90_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Background error B/);
+  await expect(page.getByText("Background error B seed")).toBeVisible();
+  daemon.emit("session:session-background-error-a:event", {
+    type: "turn-error",
+    turnId: "turn-background-error-a",
+    error: "background provider exploded"
+  });
+
+  await openSession(page, /Background error A/);
+  await expect(page.getByText("Agent error")).toBeVisible();
+  await expect(page.getByText("background provider exploded")).toBeVisible();
+});
+
 test("late permission response failures do not leak into a switched session", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

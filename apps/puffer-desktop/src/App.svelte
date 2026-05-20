@@ -1646,6 +1646,41 @@
     });
   }
 
+  function cacheBackgroundTurnError(
+    sessionId: string,
+    ev: Extract<SessionStreamEvent, { type: "turn-error" }>
+  ) {
+    const cached = transientConversationStates[sessionId] ?? emptyTransientConversationState();
+    const detail = ev.error?.trim() || "Unknown agent error.";
+    const { [ev.turnId]: _dropReplay, ...replayTextByTurn } = cached.replayTextByTurn;
+    const settledLiveItems = cached.liveStreamItems.filter(
+      (item) => item.kind !== "permission" && item.kind !== "question"
+    );
+    setTransientConversationState(sessionId, {
+      ...cached,
+      liveStreamItems: appendCachedLiveItem(
+        { ...cached, liveStreamItems: settledLiveItems },
+        {
+          id: `live-error-turn-error-${ev.turnId}`,
+          kind: "system",
+          title: "Agent error",
+          summary: detail,
+          body: detail,
+          meta: ["error", "turn-error"],
+          status: "error"
+        }
+      ),
+      replayTextByTurn,
+      turnPermissionLookup: {},
+      turnQuestionLookup: {},
+      currentTurnId: null,
+      cancelingTurnId: null,
+      turnStartedAtMs: null,
+      turnThinking: false,
+      turnStatusHint: null
+    });
+  }
+
   function cacheBackgroundSessionEvent(sessionId: string, ev: SessionStreamEvent) {
     if (isTurnSettled(sessionId, ev.turnId)) return;
     switch (ev.type) {
@@ -2756,7 +2791,7 @@
       }
       if (ev.type === "turn-error") {
         rememberSettledTurn(sid, ev.turnId);
-        clearCachedTurnRuntimeState(sid);
+        cacheBackgroundTurnError(sid, ev);
         return;
       }
       cacheBackgroundSessionEvent(sid, ev);
