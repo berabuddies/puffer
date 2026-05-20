@@ -1862,7 +1862,16 @@
     cancelingTurnId = turnId;
     turnStatusHint = "Cancel requested";
     try {
-      await cancelTurn(turnId);
+      const result = await cancelTurn(turnId);
+      if (!result.ok && currentTurnId === turnId) {
+        cancelingTurnId = null;
+        currentTurnId = null;
+        turnStartedAtMs = null;
+        turnThinking = false;
+        turnStatusHint = null;
+        statusMessage = `Turn ${turnId.slice(0, 8)} already finished.`;
+        return;
+      }
       statusMessage = `Cancel requested for turn ${turnId.slice(0, 8)}.`;
     } catch (error) {
       if (currentTurnId !== turnId) return;

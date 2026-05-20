@@ -284,6 +284,7 @@ export class FakeDaemon {
     }
   ];
   private readonly protocol: "legacy" | "real";
+  private readonly activeTurnIds = new Set<string>();
   private nextTab = 2;
   private nextPty = 1;
 
@@ -454,6 +455,10 @@ export class FakeDaemon {
   }
 
   emit(event: string, payload: unknown): void {
+    const p = payload as Record<string, unknown> | null;
+    if (p && (p.type === "turn-complete" || p.type === "turn-error") && typeof p.turnId === "string") {
+      this.activeTurnIds.delete(p.turnId);
+    }
     const message = this.protocol === "real"
       ? JSON.stringify({ event, payload })
       : JSON.stringify({ type: "event", event, payload });
@@ -617,10 +622,18 @@ export class FakeDaemon {
         return this.renameSession(request.params);
       case "create_session":
         return this.createSession(request.params);
-      case "run_agent_turn":
-        return { turnId: `turn-${String(request.params.sessionId ?? session.sessionId)}` };
-      case "cancel_turn":
-        return {};
+      case "run_agent_turn": {
+        const turnId = `turn-${String(request.params.sessionId ?? session.sessionId)}`;
+        this.activeTurnIds.add(turnId);
+        return { turnId };
+      }
+      case "cancel_turn": {
+        const turnId = String(request.params.turnId ?? "");
+        if (this.activeTurnIds.has(turnId)) {
+          return { ok: true };
+        }
+        return { ok: false, error: "turn not found" };
+      }
       case "resolve_permission":
       case "resolve_user_question":
         return {};

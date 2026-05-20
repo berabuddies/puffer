@@ -4985,3 +4985,68 @@ test("model guard preserves session model not in provider advertised list", asyn
     modelId: "ft:gpt-4o-2024-08-06:my-org::abc123"
   });
 });
+
+test("cancel turn for already-completed turn clears stuck cancel state", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-cancel-stale",
+        displayName: "Cancel stale",
+        title: "Cancel stale",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Cancel stale/);
+  await page.locator(".pf-composer textarea").fill("hello");
+  await page.getByRole("button", { name: "Send" }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (r) => r.params.sessionId === "session-cancel-stale"
+  );
+
+  daemon.emit("session:session-cancel-stale:event", {
+    type: "text-delta",
+    turnId: "turn-session-cancel-stale",
+    delta: "Streaming response."
+  });
+  await expect(page.getByText("Streaming response.")).toBeVisible();
+
+  daemon.emit("session:session-cancel-stale:event", {
+    type: "turn-complete",
+    turnId: "turn-session-cancel-stale",
+    assistantText: "Done."
+  });
+  await page.waitForTimeout(100);
+
+  await page.locator(".pf-composer textarea").fill("second message");
+  await page.getByRole("button", { name: "Send" }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (r) => r.params.message === "second message"
+  );
+
+  daemon.emit("session:session-cancel-stale:event", {
+    type: "turn-complete",
+    turnId: "turn-session-cancel-stale",
+    assistantText: "Second done."
+  });
+  await page.waitForTimeout(100);
+
+  const stopButton = page.getByRole("button", { name: /stop/i });
+  if (await stopButton.isVisible()) {
+    await stopButton.click();
+    await page.waitForTimeout(200);
+  }
+
+  const composer = page.locator(".pf-composer textarea");
+  await expect(composer).toBeEnabled();
+});

@@ -2135,8 +2135,10 @@ fn handle_cancel_turn(state: &DaemonState, params: &Value) -> Result<Value> {
                 annotations: serde_json::Map::new(),
             });
         }
+        Ok(json!({"ok": true}))
+    } else {
+        Ok(json!({"ok": false, "error": "turn not found"}))
     }
-    Ok(json!({"ok": true}))
 }
 
 // ---------------------------------------------------------------------------

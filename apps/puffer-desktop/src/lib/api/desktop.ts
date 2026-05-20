@@ -1169,14 +1169,15 @@ export async function resolveUserQuestion(
 
 /** Best-effort cancel: the current model/tool step completes then the turn
  *  exits. Any pending permission is treated as Deny. */
-export async function cancelTurn(turnId: string): Promise<void> {
+export async function cancelTurn(turnId: string): Promise<{ ok: boolean }> {
   try {
     const client = await ensureLocalDaemonClient();
-    await client.request("cancel_turn", { turnId });
-    return;
+    const result = await client.request<{ ok?: boolean }>("cancel_turn", { turnId });
+    return { ok: result?.ok !== false };
   } catch (daemonError) {
     if (!canInvokeTauri()) throw daemonError;
     await invoke("cancel_turn", { turnId });
+    return { ok: true };
   }
 }
 
