@@ -27,14 +27,6 @@ pub const WORLDAGENT_CONTROL_BASE_URL: &str = "https://control-api-pre-7f819c.wo
 /// Env var name that overrides the control-api base URL.
 pub const WORLDAGENT_CONTROL_URL_OVERRIDE_ENV: &str = "PUFFER_WORLDAGENT_CONTROL_URL";
 
-/// Env var name that overrides which team_id is used when minting an
-/// inference api_key. Temporary workaround: Auth Station JWTs do not
-/// currently carry a `default_team_id` claim, and the control-api
-/// path segment still requires one. Set this to your team UUID
-/// (e.g. `6afdef35-ea87-54a9-9662-8b8bf090c0fd`) until backend
-/// either adds the claim or moves to a teamless endpoint.
-pub const WORLDAGENT_TEAM_ID_OVERRIDE_ENV: &str = "PUFFER_WORLDAGENT_TEAM_ID";
-
 /// Prefix applied to every generated `key_alias` so backend can
 /// distinguish keys minted for the puffer desktop client.
 pub const WORLDAGENT_KEY_ALIAS_PREFIX: &str = "puffer-";
@@ -272,20 +264,18 @@ pub struct ExchangedApiKey {
 
 /// Exchanges an Auth Station JWT for a WorldRouter inference api_key.
 ///
-/// Calls `POST {control_base}/platform/v1/teams/{default_team_id}/keys`
-/// with the JWT in `Authorization: Bearer …` and a fresh
-/// `key_alias = "puffer-<uuid>"` body. Returns the `api_key` from the
-/// response.
+/// Two-hop flow:
+/// 1. `POST {control_base}/auth/exchange` body `{ "access_token": <jwt> }`
+///    → infer-monorepo recognises the Auth Station issuer, verifies
+///    the RS256 signature against the Auth Station JWKS, and returns
+///    `{ session_token, default_team_id, ... }` where `session_token`
+///    is an HS256 Infer Session JWT that the litellm gateway in front
+///    of control-api accepts.
+/// 2. `POST {control_base}/platform/v1/teams/{default_team_id}/keys`
+///    with `Authorization: Bearer <session_token>` and a fresh
+///    `key_alias = "puffer-<uuid>"` body → returns `{ key: "sk-worldrouter-..." }`.
 ///
-/// TODO(worldagent): API will change — backend confirmed this is a
-/// preview shape. Open questions:
-/// - Auth Station JWTs do NOT yet carry `default_team_id`; we fall
-///   back to the [`WORLDAGENT_TEAM_ID_OVERRIDE_ENV`] env var as a
-///   stopgap. Proper fix lives backend-side: either control-api
-///   resolves the team from the JWT `sub` (WorkOS user_id) and the
-///   endpoint becomes `POST /platform/v1/keys` (no team segment), or
-///   Auth Station adds the claim. Remove the env-var path once that
-///   ships.
+/// TODO(worldagent): preview-stage shape. Open questions:
 /// - idempotent get-or-create per (user, device) instead of always
 ///   minting a new key (avoid leaking dead keys when user re-logins
 ///   on the same machine)
@@ -293,26 +283,37 @@ pub struct ExchangedApiKey {
 /// - production base URL (currently `control-api-pre-7f819c…`)
 /// Re-evaluate when backend lands the stable shape.
 pub fn exchange_jwt_for_api_key(access_token: &str) -> Result<ExchangedApiKey> {
-    let profile = decode_jwt_profile(access_token);
-    let team_id = std::env::var(WORLDAGENT_TEAM_ID_OVERRIDE_ENV)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or(profile.default_team_id)
-        .ok_or_else(|| {
-            anyhow!(
-                "worldagent JWT did not include default_team_id and \
-                 {WORLDAGENT_TEAM_ID_OVERRIDE_ENV} is unset; set it to \
-                 your team UUID as a temporary workaround"
-            )
-        })?;
     let base = std::env::var(WORLDAGENT_CONTROL_URL_OVERRIDE_ENV)
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| WORLDAGENT_CONTROL_BASE_URL.to_string());
-    let url = format!(
-        "{}/platform/v1/teams/{}/keys",
-        base.trim_end_matches('/'),
-        team_id
+    let base = base.trim_end_matches('/').to_string();
+    let client = Client::new();
+
+    // Hop 1: Auth Station JWT → Infer Session JWT
+    let exchange_url = format!("{base}/auth/exchange");
+    let exchange_response = client
+        .post(&exchange_url)
+        .json(&serde_json::json!({ "access_token": access_token }))
+        .send()
+        .context("failed to send worldagent /auth/exchange request")?;
+    let exchange_status = exchange_response.status();
+    let exchange_body = exchange_response
+        .text()
+        .context("failed to read worldagent /auth/exchange response body")?;
+    if !exchange_status.is_success() {
+        return Err(anyhow!(
+            "worldagent /auth/exchange failed: POST {exchange_url} -> {exchange_status}\nresponse body: {exchange_body}"
+        ));
+    }
+    let envelope: SessionEnvelopeResponse = serde_json::from_str(&exchange_body).with_context(
+        || format!("failed to parse worldagent /auth/exchange response body: {exchange_body}"),
+    )?;
+
+    // Hop 2: Infer Session JWT → WR inference api_key
+    let key_url = format!(
+        "{base}/platform/v1/teams/{team_id}/keys",
+        team_id = envelope.default_team_id
     );
     let key_alias = format!(
         "{}{}",
@@ -322,23 +323,23 @@ pub fn exchange_jwt_for_api_key(access_token: &str) -> Result<ExchangedApiKey> {
             .to_string()
             .to_uppercase()
     );
-    let response = Client::new()
-        .post(&url)
-        .bearer_auth(access_token)
+    let key_response = client
+        .post(&key_url)
+        .bearer_auth(&envelope.session_token)
         .json(&serde_json::json!({ "key_alias": key_alias }))
         .send()
         .context("failed to send worldagent key creation request")?;
-    let status = response.status();
-    let body = response
+    let key_status = key_response.status();
+    let key_body = key_response
         .text()
         .context("failed to read worldagent key creation response body")?;
-    if !status.is_success() {
+    if !key_status.is_success() {
         return Err(anyhow!(
-            "worldagent key creation failed: POST {url} -> {status}\nresponse body: {body}"
+            "worldagent key creation failed: POST {key_url} -> {key_status}\nresponse body: {key_body}"
         ));
     }
-    let payload: KeyCreationResponse = serde_json::from_str(&body).with_context(|| {
-        format!("failed to parse worldagent key creation response body: {body}")
+    let payload: KeyCreationResponse = serde_json::from_str(&key_body).with_context(|| {
+        format!("failed to parse worldagent key creation response body: {key_body}")
     })?;
     let api_key = payload
         .key
@@ -354,13 +355,17 @@ pub fn exchange_jwt_for_api_key(access_token: &str) -> Result<ExchangedApiKey> {
 }
 
 #[derive(Debug, Deserialize)]
+struct SessionEnvelopeResponse {
+    session_token: String,
+    default_team_id: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct KeyCreationResponse {
     #[serde(default)]
     token_id: Option<String>,
     #[serde(default)]
     key: Option<String>,
-    #[serde(default)]
-    error: Option<String>,
 }
 
 /// Returns the Unix epoch milliseconds at which an Auth Station
@@ -452,24 +457,9 @@ mod tests {
         assert!(profile.name.is_none());
     }
 
-    #[test]
-    fn exchange_jwt_for_api_key_rejects_when_team_id_unavailable() {
-        // JWT payload missing default_team_id, and we explicitly clear
-        // the env-var override so the no-fallback path is exercised.
-        // Tests can run in parallel and share process env; if another
-        // test ever sets WORLDAGENT_TEAM_ID_OVERRIDE_ENV in the same
-        // process, hoist this into a serial_test block.
-        std::env::remove_var(WORLDAGENT_TEAM_ID_OVERRIDE_ENV);
-        let payload = serde_json::json!({
-            "sub": "user_01",
-            "email": "dev@example.com",
-        });
-        let encoded = URL_SAFE_NO_PAD.encode(payload.to_string());
-        let token = format!("header.{encoded}.sig");
-        let result = exchange_jwt_for_api_key(&token);
-        assert!(result.is_err());
-        let err = format!("{}", result.unwrap_err());
-        assert!(err.contains("default_team_id"));
-        assert!(err.contains(WORLDAGENT_TEAM_ID_OVERRIDE_ENV));
-    }
+    // Note: `exchange_jwt_for_api_key` now does two real HTTP hops
+    // (`/auth/exchange` then `/platform/v1/teams/{team_id}/keys`).
+    // Unit tests would need an HTTP mock server; we exercise the
+    // function through the manual e2e probe in `puffer auth login
+    // worldagent` instead.
 }
