@@ -80,6 +80,7 @@ use crate::auth_provider::{
 use crate::daemon_browser::BrowserRegistry;
 use crate::daemon_fs_watch::FsWatchRegistry;
 use crate::daemon_pty::PtyRegistry;
+use crate::daemon_turn_routing::persist_explicit_turn_routing;
 use crate::daemon_ui_state::{
     load_file_tabs_state, load_pin_state, load_session_routing_state, set_file_tabs_state,
     set_pin_state, set_session_routing_state, DesktopFileTab, DesktopFileTabsState,
@@ -2279,6 +2280,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
             None
         };
         let mut effective_turn_options = turn_options_for_thread.clone();
+        let explicit_turn_routing = effective_turn_options.has_explicit_routing();
         if effective_turn_options.model_override.is_none()
             && effective_turn_options.provider_id.is_none()
             && effective_turn_options.model_id.is_none()
@@ -2319,6 +2321,35 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
             );
             setup_state.turns.lock().unwrap().remove(&turn_id_thread);
             return;
+        }
+        match persist_explicit_turn_routing(
+            &setup_state.paths.user_config_dir,
+            &session_id_for_thread,
+            explicit_turn_routing,
+            app_state.current_provider.as_deref(),
+            app_state.current_model.as_deref(),
+        ) {
+            Ok(true) => setup_state.publish_event(ServerEnvelope::Event {
+                event: "workspace:sessions:changed".to_string(),
+                payload: json!({
+                    "reason": "session_routing",
+                    "sessionId": session_id_for_thread.clone(),
+                }),
+            }),
+            Ok(false) => {}
+            Err(err) => {
+                publish_turn_error_event(
+                    &setup_state,
+                    &channel_thread,
+                    &session_id_for_thread,
+                    &turn_id_thread,
+                    format!("persist session routing: {err:#}"),
+                    None,
+                    None,
+                );
+                setup_state.turns.lock().unwrap().remove(&turn_id_thread);
+                return;
+            }
         }
         if setup_state.yolo {
             apply_daemon_yolo_mode(&mut app_state);
@@ -2706,6 +2737,10 @@ impl TurnRequestOptions {
         if self.model_id.is_none() {
             self.model_id = routing.model_id;
         }
+    }
+
+    fn has_explicit_routing(&self) -> bool {
+        self.model_override.is_some() || self.provider_id.is_some() || self.model_id.is_some()
     }
 }
 

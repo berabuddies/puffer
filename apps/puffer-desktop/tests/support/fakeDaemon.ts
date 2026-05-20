@@ -716,11 +716,8 @@ export class FakeDaemon {
         return this.renameSession(request.params);
       case "create_session":
         return this.createSession(request.params);
-      case "run_agent_turn": {
-        const turnId = `turn-${String(request.params.sessionId ?? session.sessionId)}`;
-        this.activeTurnIds.add(turnId);
-        return { turnId };
-      }
+      case "run_agent_turn":
+        return this.runAgentTurn(request.params);
       case "cancel_turn": {
         const turnId = String(request.params.turnId ?? "");
         if (this.activeTurnIds.has(turnId)) {
@@ -878,6 +875,22 @@ export class FakeDaemon {
       providerId,
       modelId
     };
+  }
+
+  private runAgentTurn(params: JsonRecord): JsonRecord {
+    const sessionId = String(params.sessionId ?? session.sessionId);
+    const turnId = `turn-${sessionId}`;
+    const metadata = this.sessions.get(sessionId);
+    if (metadata) {
+      const providerId = typeof params.providerId === "string" ? params.providerId.trim() : "";
+      const modelId = typeof params.modelId === "string" ? params.modelId.trim() : "";
+      if (providerId) metadata.providerId = providerId;
+      if (modelId) metadata.modelId = modelId;
+      if (providerId || modelId) metadata.updatedAtMs = Date.now();
+      this.sessions.set(sessionId, metadata);
+    }
+    this.activeTurnIds.add(turnId);
+    return { turnId };
   }
 
   private renameSession(params: JsonRecord): JsonRecord {

@@ -2858,6 +2858,18 @@ test("composer routing controls stay scoped to each session", async ({ page }) =
     providerId: "openrouter",
     modelId: "google/gemini-3.5-flash"
   });
+
+  await page.evaluate(() => {
+    window.localStorage.removeItem("puffer-agent:session:session-routing-alpha:routing");
+  });
+  await daemon.open(page);
+
+  await openSession(page, /Routing Alpha/);
+  await expect(picker.locator(".trigger")).toContainText("google/gemini-3.5-flash");
+  await expect(page.locator(".pf-composer textarea")).toHaveAttribute(
+    "placeholder",
+    /Engineer \(OpenRouter\)/
+  );
 });
 
 test("stale provider model fetch does not rewrite a switched session", async ({ page }) => {

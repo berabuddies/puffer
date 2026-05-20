@@ -14,6 +14,7 @@ mod daemon_fs_watch;
 mod daemon_lsp;
 mod daemon_pty;
 mod daemon_title;
+mod daemon_turn_routing;
 mod daemon_ui_state;
 mod desktop_activity;
 mod desktop_api;
