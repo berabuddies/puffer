@@ -1428,9 +1428,13 @@
           <div class="file-preview office-preview" aria-label={activePreview.title}>
             <section>
               <h2>{activePreview.title}</h2>
-              {#each activePreview.lines as line}
-                <p>{line}</p>
-              {/each}
+              {#if activePreview.html}
+                <div class="legacy-office-html">{@html activePreview.html}</div>
+              {:else}
+                {#each activePreview.lines as line}
+                  <p>{line}</p>
+                {/each}
+              {/if}
             </section>
           </div>
         {:else if activeFile && activeFile.encoding === "utf8"}
@@ -1931,6 +1935,23 @@
   .office-preview section:last-child,
   .spreadsheet-preview section:last-child {
     border-bottom: 0;
+  }
+  .legacy-office-html {
+    color: var(--ink);
+  }
+  .legacy-office-html :global(p),
+  .legacy-office-html :global(div) {
+    margin: 0 0 8px;
+  }
+  .legacy-office-html :global(table) {
+    border-collapse: collapse;
+    width: 100%;
+  }
+  .legacy-office-html :global(td),
+  .legacy-office-html :global(th) {
+    border: 1px solid var(--border);
+    padding: 6px 8px;
+    vertical-align: top;
   }
   .editor-shell {
     height: 100%;

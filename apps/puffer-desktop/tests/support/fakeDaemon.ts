@@ -33,6 +33,7 @@ type FakeFileValue =
       content: string;
       size: number;
       textPreview?: string[];
+      htmlPreview?: string;
     };
 
 type TabSet = {
@@ -364,12 +365,19 @@ export class FakeDaemon {
     this.files.set(path, content);
   }
 
-  seedBinaryFile(path: string, contentBase64: string, size?: number, textPreview?: string[]): void {
+  seedBinaryFile(
+    path: string,
+    contentBase64: string,
+    size?: number,
+    textPreview?: string[],
+    htmlPreview?: string
+  ): void {
     this.files.set(path, {
       encoding: "base64",
       content: contentBase64,
       size: size ?? Math.ceil((contentBase64.length * 3) / 4),
-      ...(textPreview ? { textPreview } : {})
+      ...(textPreview ? { textPreview } : {}),
+      ...(htmlPreview ? { htmlPreview } : {})
     });
   }
 
@@ -1223,7 +1231,8 @@ export class FakeDaemon {
         content: visible.toString("base64"),
         size: content.size,
         truncated: visible.length < bytes.length,
-        ...(content.textPreview ? { textPreview: content.textPreview } : {})
+        ...(content.textPreview ? { textPreview: content.textPreview } : {}),
+        ...(content.htmlPreview ? { htmlPreview: content.htmlPreview } : {})
       };
     }
     const bytes = Buffer.from(content, "utf8");

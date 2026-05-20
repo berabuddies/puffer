@@ -21,6 +21,7 @@ export type LegacyOfficePreview = {
   kind: "office-binary";
   title: string;
   lines: string[];
+  html?: string;
 };
 
 export type FilePreview =
@@ -132,11 +133,22 @@ function legacyOfficePreview(file: ReadFileResult): LegacyOfficePreview {
       ? "Legacy Excel preview"
       : "Legacy Word preview";
   const nativeLines = normalizedProvidedPreviewLines(file.textPreview);
+  const nativeHtml = normalizedProvidedPreviewHtml(file.htmlPreview);
   if (nativeLines.length > 0) {
     return {
       kind: "office-binary",
       title,
-      lines: nativeLines
+      lines: nativeLines,
+      ...(nativeHtml ? { html: nativeHtml } : {})
+    };
+  }
+  if (nativeHtml) {
+    const htmlLines = extractHtmlDocumentText(nativeHtml);
+    return {
+      kind: "office-binary",
+      title,
+      lines: htmlLines.length > 0 ? htmlLines : ["No text found."],
+      html: nativeHtml
     };
   }
   const bytes =
@@ -152,6 +164,11 @@ function legacyOfficePreview(file: ReadFileResult): LegacyOfficePreview {
 function normalizedProvidedPreviewLines(lines: string[] | undefined): string[] {
   if (!lines) return [];
   return normalizePreviewLines(lines, 200);
+}
+
+function normalizedProvidedPreviewHtml(html: string | undefined): string | undefined {
+  if (!html) return undefined;
+  return sanitizePreviewHtml(html);
 }
 
 function renderMarkdown(markdown: string): string {
@@ -505,6 +522,56 @@ function decodeHtmlEntities(input: string): string {
   const textarea = document.createElement("textarea");
   textarea.innerHTML = input;
   return textarea.value;
+}
+
+function sanitizePreviewHtml(input: string): string | undefined {
+  const parsed = new DOMParser().parseFromString(input, "text/html");
+  for (const node of Array.from(parsed.querySelectorAll("script, iframe, object, embed, link, meta"))) {
+    node.remove();
+  }
+  for (const element of Array.from(parsed.body.querySelectorAll("*"))) {
+    for (const attr of Array.from(element.attributes)) {
+      const name = attr.name.toLowerCase();
+      const value = attr.value.trim();
+      if (name.startsWith("on")) {
+        element.removeAttribute(attr.name);
+      } else if ((name === "href" || name === "src") && /^javascript:/i.test(value)) {
+        element.removeAttribute(attr.name);
+      } else if (name === "style") {
+        const style = sanitizeStyleAttribute(value);
+        if (style) element.setAttribute("style", style);
+        else element.removeAttribute(attr.name);
+      } else if (!["class", "colspan", "rowspan", "title", "alt"].includes(name)) {
+        element.removeAttribute(attr.name);
+      }
+    }
+  }
+  const html = parsed.body.innerHTML.trim();
+  return html ? html.slice(0, 200_000) : undefined;
+}
+
+function sanitizeStyleAttribute(input: string): string {
+  const allowed = new Set([
+    "background-color",
+    "color",
+    "font-family",
+    "font-size",
+    "font-style",
+    "font-weight",
+    "margin-left",
+    "padding-left",
+    "text-align",
+    "text-decoration"
+  ]);
+  return input
+    .split(";")
+    .map((rule) => rule.trim())
+    .filter((rule) => {
+      const [property, ...rest] = rule.split(":");
+      const value = rest.join(":").trim();
+      return allowed.has(property.trim().toLowerCase()) && value.length > 0 && !/url\s*\(|expression\s*\(/i.test(value);
+    })
+    .join("; ");
 }
 
 const RTF_DESTINATIONS = new Set([

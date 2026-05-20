@@ -12,23 +12,24 @@
   let host = $state<HTMLDivElement | null>(null);
   let status = $state("Loading PDF...");
   let error = $state<string | null>(null);
+  let renderedPages = $state(0);
   let generation = 0;
   let loadingTask: PDFDocumentLoadingTask | null = null;
-  let showTextFallback = $derived(textLines.length > 0 && (Boolean(error) || Boolean(status)));
+  let showTextFallback = $derived(textLines.some((line) => line.trim() && line.trim() !== "No text found."));
 
   type PdfJsModule = typeof import("pdfjs-dist");
-  type PdfWorkerUrlModule = { default: string };
+  type PdfWorkerModule = { WorkerMessageHandler: unknown };
+  type PdfWorkerGlobal = typeof globalThis & { pdfjsWorker?: PdfWorkerModule };
 
   let pdfJsModulePromise: Promise<PdfJsModule> | null = null;
 
   function loadPdfJs(): Promise<PdfJsModule> {
     pdfJsModulePromise ??= Promise.all([
       import("pdfjs-dist/legacy/build/pdf.mjs"),
-      import("pdfjs-dist/legacy/build/pdf.worker.mjs?url")
+      import("pdfjs-dist/legacy/build/pdf.worker.mjs")
     ]).then(([module, worker]) => {
-      const pdfJs = module as unknown as PdfJsModule;
-      pdfJs.GlobalWorkerOptions.workerSrc = (worker as PdfWorkerUrlModule).default;
-      return pdfJs;
+      (globalThis as PdfWorkerGlobal).pdfjsWorker = worker as PdfWorkerModule;
+      return module as unknown as PdfJsModule;
     });
     return pdfJsModulePromise;
   }
@@ -60,6 +61,7 @@
   async function renderPdf(target: HTMLDivElement, source: string, current: number): Promise<void> {
     target.replaceChildren();
     error = null;
+    renderedPages = 0;
     status = "Loading PDF renderer...";
     void loadingTask?.destroy();
 
@@ -110,6 +112,7 @@
           viewport,
           transform: outputScale === 1 ? undefined : [outputScale, 0, 0, outputScale, 0, 0]
         }).promise;
+        renderedPages = pageNumber;
       }
 
       status = maxPages < pdf.numPages ? `Showing first ${maxPages} of ${pdf.numPages} pages.` : "";
@@ -131,6 +134,7 @@
   <div bind:this={host} class="pdf-canvas-stack" aria-label="PDF rendered pages"></div>
   {#if showTextFallback}
     <article class="pdf-text-fallback" aria-label="PDF text fallback">
+      <h2>Extracted text</h2>
       {#each textLines as line}
         <p>{line}</p>
       {/each}
@@ -189,6 +193,13 @@
     border-radius: 6px;
     color: var(--ink);
     padding: 20px 24px;
+  }
+
+  .pdf-text-fallback h2 {
+    font-size: 12px;
+    margin: 0 0 12px;
+    text-transform: uppercase;
+    color: var(--muted);
   }
 
   .pdf-text-fallback p {

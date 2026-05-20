@@ -252,6 +252,13 @@ function seedPreviewFiles(daemon: FakeDaemon): void {
     ["Native textutil Word agenda", "Native textutil follow-up"]
   );
   daemon.seedBinaryFile(
+    "/tmp/puffer/styled-old-word.doc",
+    makeLegacyOfficeBase64("unstyled fallback"),
+    undefined,
+    ["Styled legacy Word heading", "Bold legacy note"],
+    "<h1>Styled legacy Word heading</h1><p><b>Bold legacy note</b></p>"
+  );
+  daemon.seedBinaryFile(
     "/tmp/puffer/old-deck.ppt",
     makeLegacyOfficeBase64("Legacy PowerPoint agenda")
   );
@@ -343,6 +350,12 @@ test("Files tab previews common document and data formats", async ({ page }) => 
 
   await page.evaluate(() => {
     Object.defineProperty(Promise, "withResolvers", { value: undefined, configurable: true });
+    class BlockedWorker {
+      constructor() {
+        throw new Error("Worker constructors are blocked in this regression");
+      }
+    }
+    Object.defineProperty(window, "Worker", { value: BlockedWorker, configurable: true });
   });
 
   await page.getByRole("button", { name: "sample.pdf" }).click();
@@ -352,6 +365,7 @@ test("Files tab previews common document and data formats", async ({ page }) => 
     (request) => request.params.path === "/tmp/puffer/sample.pdf" && request.params.maxBytes === 24 * 1024 * 1024
   );
   await expectCanvasHasInk(page, 'canvas[aria-label="PDF page 1"]');
+  await expect(page.getByLabel("PDF text fallback")).toContainText("Puffer PDF preview");
   expect(pdfRendererRequests.length).toBeGreaterThan(0);
 
   await page.getByRole("button", { name: "ascii-sniffed.pdf" }).click();
@@ -363,6 +377,7 @@ test("Files tab previews common document and data formats", async ({ page }) => 
       request.params.maxBytes === 24 * 1024 * 1024
   );
   await expectCanvasHasInk(page, 'canvas[aria-label="PDF page 1"]');
+  await expect(page.getByLabel("PDF text fallback")).toContainText("ASCII sniffed PDF preview");
 
   await page.getByRole("button", { name: "brief.docx" }).click();
   await expect(page.getByLabel("DOCX preview")).toContainText("Quarterly planning note");
@@ -393,6 +408,11 @@ test("Files tab previews common document and data formats", async ({ page }) => 
   await page.getByRole("button", { name: "native-old-word.doc" }).click();
   await expect(page.getByLabel("Legacy Word preview")).toContainText("Native textutil Word agenda");
   await expect(page.getByLabel("Legacy Word preview")).toContainText("Native textutil follow-up");
+
+  await page.getByRole("button", { name: "styled-old-word.doc" }).click();
+  const styledPreview = page.getByLabel("Legacy Word preview");
+  await expect(styledPreview.locator("h1")).toContainText("Styled legacy Word heading");
+  await expect(styledPreview.locator("b")).toContainText("Bold legacy note");
 
   await page.getByRole("button", { name: "old-deck.ppt" }).click();
   await expect(page.getByLabel("Legacy PowerPoint preview")).toContainText(

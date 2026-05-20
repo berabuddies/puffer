@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use serde_json::{json, Value};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::UNIX_EPOCH;
@@ -11,6 +12,7 @@ const READ_HARD_MAX_BYTES: u64 = 24 * 1024 * 1024;
 const WRITE_HARD_MAX_BYTES: u64 = 5 * 1024 * 1024;
 const TEXT_SNIFF_BYTES: usize = 8 * 1024;
 const NATIVE_TEXT_PREVIEW_MAX_LINES: usize = 200;
+const NATIVE_HTML_PREVIEW_MAX_BYTES: usize = 256 * 1024;
 
 pub(crate) fn list_dir(params: &Value, allowed_roots: &[PathBuf]) -> Result<Value> {
     let raw = params
@@ -171,19 +173,9 @@ fn read_file_path(path: &Path, max_bytes: usize) -> Result<Value> {
         bail!("path is a directory, not a file: {}", path.display());
     }
     let size = meta.len();
-    if size > READ_HARD_MAX_BYTES {
-        bail!(
-            "file is too large to preview ({} bytes, hard limit {} bytes)",
-            size,
-            READ_HARD_MAX_BYTES
-        );
-    }
-    let cap = std::cmp::min(size as usize, max_bytes);
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("reading {}", path.display()))?
-        .into_iter()
-        .take(cap)
-        .collect::<Vec<_>>();
+    let requested_cap = std::cmp::min(max_bytes, READ_HARD_MAX_BYTES as usize);
+    let cap = std::cmp::min(size, requested_cap as u64) as usize;
+    let bytes = read_file_prefix(path, cap)?;
     let truncated = (size as usize) > bytes.len();
     let (encoding, content) = if !should_return_base64(path, &bytes) {
         match std::str::from_utf8(&bytes) {
@@ -203,7 +195,21 @@ fn read_file_path(path: &Path, max_bytes: usize) -> Result<Value> {
     if let Some(lines) = native_text_preview(path) {
         result["textPreview"] = json!(lines);
     }
+    if let Some(html) = native_html_preview(path) {
+        result["htmlPreview"] = json!(html);
+    }
     Ok(result)
+}
+
+fn read_file_prefix(path: &Path, cap: usize) -> Result<Vec<u8>> {
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let mut bytes = Vec::with_capacity(cap);
+    file.by_ref()
+        .take(cap as u64)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("reading {}", path.display()))?;
+    Ok(bytes)
 }
 
 fn looks_like_text(bytes: &[u8]) -> bool {
@@ -226,7 +232,7 @@ fn is_document_preview_binary(path: &Path) -> bool {
 }
 
 fn native_text_preview(path: &Path) -> Option<Vec<String>> {
-    if !is_native_text_preview_candidate(path) {
+    if !is_native_preview_candidate(path) {
         return None;
     }
     let output = Command::new("textutil")
@@ -244,7 +250,29 @@ fn native_text_preview(path: &Path) -> Option<Vec<String>> {
     (!lines.is_empty()).then_some(lines)
 }
 
-fn is_native_text_preview_candidate(path: &Path) -> bool {
+fn native_html_preview(path: &Path) -> Option<String> {
+    if !is_native_preview_candidate(path) {
+        return None;
+    }
+    let output = Command::new("textutil")
+        .args([
+            "-convert", "html", "-stdout", "-noload", "-timeout", "5", "--",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return None;
+    }
+    let html = String::from_utf8_lossy(&output.stdout);
+    let normalized = html.trim();
+    if normalized.is_empty() {
+        return None;
+    }
+    Some(normalized.chars().take(NATIVE_HTML_PREVIEW_MAX_BYTES).collect())
+}
+
+fn is_native_preview_candidate(path: &Path) -> bool {
     path.extension()
         .and_then(|value| value.to_str())
         .map(|value| matches!(value.to_ascii_lowercase().as_str(), "doc" | "dot" | "rtf"))
@@ -305,20 +333,20 @@ mod tests {
     }
 
     #[test]
-    fn native_text_preview_targets_legacy_word_files() {
-        assert!(is_native_text_preview_candidate(Path::new(
+    fn native_preview_targets_legacy_word_files() {
+        assert!(is_native_preview_candidate(Path::new(
             "/tmp/puffer/legacy.DOC"
         )));
-        assert!(is_native_text_preview_candidate(Path::new(
+        assert!(is_native_preview_candidate(Path::new(
             "/tmp/puffer/template.dot"
         )));
-        assert!(is_native_text_preview_candidate(Path::new(
+        assert!(is_native_preview_candidate(Path::new(
             "/tmp/puffer/rich-text.rtf"
         )));
-        assert!(!is_native_text_preview_candidate(Path::new(
+        assert!(!is_native_preview_candidate(Path::new(
             "/tmp/puffer/report.docx"
         )));
-        assert!(!is_native_text_preview_candidate(Path::new(
+        assert!(!is_native_preview_candidate(Path::new(
             "/tmp/puffer/slides.ppt"
         )));
     }
@@ -342,5 +370,32 @@ mod tests {
         assert!(preview
             .iter()
             .any(|line| line.as_str() == Some("Native legacy doc text")));
+    }
+
+    #[test]
+    fn read_file_caps_large_document_previews_instead_of_rejecting() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("large.pdf");
+        let mut file = std::fs::File::create(&path).unwrap();
+        std::io::Write::write_all(&mut file, b"%PDF-1.4\n").unwrap();
+        file.set_len(READ_HARD_MAX_BYTES + 1).unwrap();
+        let result = read_file_path(&path, 32).unwrap();
+        assert_eq!(result.get("encoding").and_then(Value::as_str), Some("base64"));
+        assert_eq!(result.get("size").and_then(Value::as_u64), Some(READ_HARD_MAX_BYTES + 1));
+        assert_eq!(result.get("truncated").and_then(Value::as_bool), Some(true));
+    }
+
+    #[test]
+    fn legacy_doc_read_includes_native_html_preview_when_available() {
+        if Command::new("textutil").arg("-help").output().is_err() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("legacy.doc");
+        std::fs::write(&path, r"{\rtf1\ansi Native \b styled\b0 legacy doc text}").unwrap();
+        let result = read_file_path(&path, DEFAULT_MAX_BYTES).unwrap();
+        let html = result.get("htmlPreview").and_then(Value::as_str).unwrap();
+        assert!(html.contains("styled"));
+        assert!(html.contains("<html"));
     }
 }
