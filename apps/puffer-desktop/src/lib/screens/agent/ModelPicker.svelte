@@ -207,11 +207,12 @@
   {#if open}
     <div bind:this={menuEl} class="menu" role="listbox">
       {#if allowProviderSwitch}
-        <div class="providers" aria-label="Provider">
+        <div class="providers" role="group" aria-label="Model provider">
           {#each authedProviders as provider (provider.id)}
             <button
               type="button"
               class:on={providerIdsEquivalent(provider.id, activeProvider)}
+              aria-pressed={providerIdsEquivalent(provider.id, activeProvider)}
               onclick={() => selectProvider(provider.id)}
             >
               {provider.displayName}

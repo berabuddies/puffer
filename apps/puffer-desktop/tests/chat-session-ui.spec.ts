@@ -2898,6 +2898,104 @@ test("model picker only offers authenticated agent providers", async ({ page }) 
   await expect(providerList.getByRole("button", { name: "GitHub", exact: true })).toHaveCount(0);
 });
 
+test("model picker provider buttons expose selected state", async ({ page }) => {
+  const model = (provider: string, id: string) => ({
+    id,
+    displayName: id,
+    provider,
+    api: provider === "anthropic" ? "anthropic-messages" : "openai-responses",
+    supportsTools: true,
+    supportsVision: false,
+    contextWindow: null,
+    maxOutputTokens: null,
+    thinkingOptions: [],
+    defaultThinkingOptionId: null,
+    isDefault: true
+  });
+  const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "codex",
+        kind: "oauth",
+        email: "tester@example.com",
+        expiresAtMs: null,
+        scopes: [],
+        planType: "test",
+        organizationName: null
+      },
+      {
+        providerId: "anthropic",
+        kind: "api_key",
+        email: null,
+        expiresAtMs: null,
+        scopes: [],
+        planType: null,
+        organizationName: null
+      }
+    ],
+    providers: [
+      {
+        id: "codex",
+        displayName: "Codex",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 1,
+        authModes: ["oauth"],
+        sourceKind: "test",
+        sourcePath: null
+      },
+      {
+        id: "anthropic",
+        displayName: "Anthropic",
+        baseUrl: "",
+        defaultApi: "anthropic-messages",
+        modelCount: 1,
+        authModes: ["api_key"],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ],
+    sessions: [
+      {
+        sessionId: "session-picker-provider-state",
+        displayName: "Picker provider state",
+        title: "Picker provider state",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "codex-default",
+        timeline: []
+      }
+    ],
+    providerModels: {
+      codex: [model("codex", "codex-default")],
+      anthropic: [model("anthropic", "anthropic-default")]
+    }
+  });
+  daemon.delayResponse(
+    "list_provider_models",
+    (request) => request.params.providerId === "anthropic",
+    250
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Picker provider state/);
+  const picker = page.locator(".pf-composer .picker");
+  await picker.locator(".trigger").click();
+  const codex = picker.getByRole("button", { name: "Codex", exact: true });
+  const anthropic = picker.getByRole("button", { name: "Anthropic", exact: true });
+  await expect(codex).toHaveAttribute("aria-pressed", "true");
+  await expect(anthropic).toHaveAttribute("aria-pressed", "false");
+
+  await anthropic.click();
+  await expect(codex).toHaveAttribute("aria-pressed", "false");
+  await expect(anthropic).toHaveAttribute("aria-pressed", "true");
+});
+
 test("model picker loads inactive provider models only after provider selection", async ({ page }) => {
   const model = (provider: string, id: string) => ({
     id,
