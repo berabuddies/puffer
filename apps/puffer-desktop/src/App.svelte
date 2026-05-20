@@ -1313,6 +1313,22 @@
     };
   }
 
+  function emptyTransientConversationState(): TransientConversationState {
+    return {
+      submittedMessages: [],
+      submittedMessageBaselineIds: {},
+      liveStreamItems: [],
+      replayTextByTurn: {},
+      turnPermissionLookup: {},
+      turnQuestionLookup: {},
+      currentTurnId: null,
+      cancelingTurnId: null,
+      turnStartedAtMs: null,
+      turnThinking: false,
+      turnStatusHint: null
+    };
+  }
+
   function transientStateHasContent(state: TransientConversationState): boolean {
     return (
       state.submittedMessages.length > 0 ||
@@ -1341,6 +1357,101 @@
   function saveCurrentTransientConversationState(sessionId: string | null | undefined) {
     if (!sessionId) return;
     setTransientConversationState(sessionId, captureTransientConversationState());
+  }
+
+  function appendCachedLiveItem(
+    state: TransientConversationState,
+    item: TimelineItem
+  ): TimelineItem[] {
+    const existingIdx = state.liveStreamItems.findIndex((existing) => existing.id === item.id);
+    if (existingIdx >= 0) {
+      return [
+        ...state.liveStreamItems.slice(0, existingIdx),
+        item,
+        ...state.liveStreamItems.slice(existingIdx + 1)
+      ];
+    }
+    return [...state.liveStreamItems, item];
+  }
+
+  function cacheBackgroundPermissionRequest(
+    sessionId: string,
+    ev: Extract<SessionStreamEvent, { type: "permission-request" }>
+  ) {
+    const id = livePermissionId(ev.turnId, ev.requestId);
+    const cached = transientConversationStates[sessionId] ?? emptyTransientConversationState();
+    setTransientConversationState(sessionId, {
+      ...cached,
+      liveStreamItems: appendCachedLiveItem(cached, {
+        id,
+        kind: "permission",
+        title: `Permission · ${ev.toolId}`,
+        summary: ev.summary,
+        body: ev.reason ?? ev.summary,
+        meta: [],
+        toolName: ev.toolId,
+        status: "pending",
+        permissionDialog: {
+          state: "pending",
+          reason: ev.reason ?? ev.summary,
+          summary: ev.summary,
+          inputText: null,
+          toolName: ev.toolId,
+          choices: ["Allow once", "Always allow", "Deny"]
+        },
+        scopeLabel: null,
+        choices: ["Allow once", "Always allow", "Deny"]
+      }),
+      turnPermissionLookup: {
+        ...cached.turnPermissionLookup,
+        [id]: { turnId: ev.turnId, requestId: ev.requestId }
+      },
+      currentTurnId: ev.turnId,
+      cancelingTurnId: null,
+      turnStartedAtMs: cached.turnStartedAtMs ?? Date.now(),
+      turnThinking: false,
+      turnStatusHint: "Awaiting approval"
+    });
+  }
+
+  function cacheBackgroundUserQuestionRequest(
+    sessionId: string,
+    ev: Extract<SessionStreamEvent, { type: "user-question-request" }>
+  ) {
+    const id = liveQuestionId(ev.turnId, ev.requestId);
+    const questions = normalizeUserQuestions(ev.questions);
+    const cached = transientConversationStates[sessionId] ?? emptyTransientConversationState();
+    setTransientConversationState(sessionId, {
+      ...cached,
+      liveStreamItems: appendCachedLiveItem(cached, {
+        id,
+        kind: "question",
+        title: "Question",
+        summary: questions.map((q) => q.question).join("\n"),
+        body: "",
+        meta: [],
+        status: "pending",
+        questions
+      }),
+      turnQuestionLookup: {
+        ...cached.turnQuestionLookup,
+        [id]: { turnId: ev.turnId, requestId: ev.requestId }
+      },
+      currentTurnId: ev.turnId,
+      cancelingTurnId: null,
+      turnStartedAtMs: cached.turnStartedAtMs ?? Date.now(),
+      turnThinking: false,
+      turnStatusHint: "Waiting for answer"
+    });
+  }
+
+  function cacheBackgroundSessionEvent(sessionId: string, ev: SessionStreamEvent) {
+    if (isTurnSettled(sessionId, ev.turnId)) return;
+    if (ev.type === "permission-request") {
+      cacheBackgroundPermissionRequest(sessionId, ev);
+    } else if (ev.type === "user-question-request") {
+      cacheBackgroundUserQuestionRequest(sessionId, ev);
+    }
   }
 
   function restoreTransientConversationState(sessionId: string) {
@@ -2387,7 +2498,10 @@
       }
       return;
     }
-    if (!selectedForEvent) return;
+    if (!selectedForEvent) {
+      cacheBackgroundSessionEvent(sid, ev);
+      return;
+    }
     switch (ev.type) {
       case "turn-start":
         markTurnActive(sid, ev.turnId);

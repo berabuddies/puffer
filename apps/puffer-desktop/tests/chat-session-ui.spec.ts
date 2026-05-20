@@ -2154,6 +2154,82 @@ test("failed permission responses keep the approval prompt retryable", async ({ 
   await expect(deny).toBeEnabled();
 });
 
+test("background permission request is available when returning to that session", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-permission-background-a",
+        displayName: "Permission background A",
+        title: "Permission background A",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        activityStatus: "idle",
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      },
+      {
+        sessionId: "session-permission-background-b",
+        displayName: "Permission background B",
+        title: "Permission background B",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 0,
+        activityStatus: "idle",
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Permission background A/);
+  await page.locator(".pf-composer textarea").fill("Ask permission in background");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-permission-background-a" &&
+      request.params.message === "Ask permission in background"
+  );
+
+  const alphaRow = page
+    .locator(".pf-sidebar-agent-row")
+    .filter({ hasText: "Permission background A" });
+  await openSession(page, /Permission background B/);
+  await expect(alphaRow.locator('.state[data-state="thinking"]')).toContainText("thinking");
+
+  daemon.emit("session:session-permission-background-a:event", {
+    type: "permission-request",
+    turnId: "turn-session-permission-background-a",
+    requestId: "permission-background-1",
+    toolId: "bash",
+    summary: "Run background command",
+    reason: "Needs approval after switching away."
+  });
+  await expect(alphaRow.locator('.state[data-state="awaiting"]')).toContainText("awaiting");
+
+  await openSession(page, /Permission background A/);
+  await expect(page.getByText("Approval needed")).toBeVisible();
+  await page.getByRole("button", { name: "Allow once" }).click();
+
+  const request = await daemon.waitForRequest("resolve_permission");
+  expect(request.params).toMatchObject({
+    turnId: "turn-session-permission-background-a",
+    requestId: "permission-background-1",
+    action: "allow_once"
+  });
+});
+
 test("late permission response failures do not leak into a switched session", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
