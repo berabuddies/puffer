@@ -60,31 +60,34 @@ puffer-cli auth login worldagent
 
   → 证明 cookie / silent SSO / 白名单校验逻辑全都正常。**只是当前运行的 deployment 不认识 `http://127.0.0.1:1456`。**
 
-### 推断
+### 推断（修正版 2026-05-20）
 
-Vercel deployment 在构建时把 env vars 快照打包；env vars 之后改了但**没有触发重新部署**，所以 runtime 拿的是旧快照。`vercel env pull` 显示的是 Vercel UI 当前值，与运行时不一定一致。
+**不是** "Vercel redeploy 复用旧 env snapshot"，**不是** "Vercel 过滤 loopback IP literal"。
 
-### 修复
+真实根因：Vercel UI 上对 env entry 做 **edit + append + save** 时，CLI / `vercel env pull` 能立即读到新值（UI 状态层），但 **deployment build 注入用的是上一个真正持久化版本**（存储层）。前者快、后者慢，两层不同步。
 
-在 `nubit/auth-worldrouter` Vercel project 里 **redeploy 当前 Production deployment**（不需要新代码，纯重新启动一份让它读最新 env）：
+### 修复（已生效）
 
-- Dashboard 路径：Deployments → 最新 Production deployment → ⋯ → **Redeploy**
-- 或 CLI：
-  ```bash
-  cd /Users/shun/Data/Code/tomo/worldclaw/infer-monorepo/auth
-  vercel redeploy <production-deployment-url> --prod
-  ```
+在 Vercel UI Settings → Environment Variables 找到 `ALLOWED_REDIRECT_ORIGINS` Production → **⋯ Remove** 整条 → 重新 **Add** 同名 entry 写入完整新 value（一次性写全所有条目）→ **Save** → Redeploy 一次。
 
-### 验证修复
+**仅 edit + 末尾 append + save 不可靠** — `vercel env pull` 能立刻看到新值，但 deployment 注入有同步延迟。
 
-修完后用 cookie 重跑探针 A，**期望**：
+### 当前 Production 状态（2026-05-20 已验）
 
+- Latest deployment: `dpl_CSjGzTPKpUn6aSye3QetZnqLfe9q` (`auth-worldrouter-gsih04aqk-nubit.vercel.app`)
+- `auth.worldrouter.ai` alias 已切到此 deployment
+- `ALLOWED_REDIRECT_ORIGINS` 包含 13 项，其中：
+  - `http://127.0.0.1:1456` ✓ ACCEPTED
+  - `http://localhost:1456` ✓ ACCEPTED（兜底）
+  - 其他 11 项 ✓
+
+### 验证（无需 cookie）
+
+```bash
+curl -sS -o /dev/null -w "%{http_code}\n" \
+  'https://auth.worldrouter.ai/session/check?redirect_uri=http%3A%2F%2F127.0.0.1%3A1456%2Fcallback&client_state=p'
+# 期望: 307（实测通过）
 ```
-HTTP/2 302
-location: http://127.0.0.1:1456/callback?state=probeA&token=<JWT>&refresh_token=<...>
-```
-
-只要 Location header 出来即代表 redirect_uri 通过白名单。
 
 ---
 

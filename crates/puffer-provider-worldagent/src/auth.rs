@@ -8,10 +8,13 @@ use reqwest::blocking::Client;
 use serde::Deserialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Default Auth Station base URL (Sandbox). Production is
-/// `https://auth.worldrouter.ai`. The env var named by
+/// Default Auth Station base URL (Production). Sandbox is
+/// `https://auth-worldrouter.vercel.app`. The env var named by
 /// [`WORLDAGENT_AUTH_URL_OVERRIDE_ENV`] overrides this at runtime.
-pub const WORLDAGENT_AUTH_BASE_URL: &str = "https://auth-worldrouter.vercel.app";
+/// `http://127.0.0.1:1456` must be in the target environment's
+/// `ALLOWED_REDIRECT_ORIGINS` allow-list (confirmed for Production
+/// 2026-05-20).
+pub const WORLDAGENT_AUTH_BASE_URL: &str = "https://auth.worldrouter.ai";
 
 /// Env var name that overrides the Auth Station base URL.
 pub const WORLDAGENT_AUTH_URL_OVERRIDE_ENV: &str = "PUFFER_WORLDAGENT_AUTH_URL";
@@ -23,6 +26,14 @@ pub const WORLDAGENT_CONTROL_BASE_URL: &str = "https://control-api-pre-7f819c.wo
 
 /// Env var name that overrides the control-api base URL.
 pub const WORLDAGENT_CONTROL_URL_OVERRIDE_ENV: &str = "PUFFER_WORLDAGENT_CONTROL_URL";
+
+/// Env var name that overrides which team_id is used when minting an
+/// inference api_key. Temporary workaround: Auth Station JWTs do not
+/// currently carry a `default_team_id` claim, and the control-api
+/// path segment still requires one. Set this to your team UUID
+/// (e.g. `6afdef35-ea87-54a9-9662-8b8bf090c0fd`) until backend
+/// either adds the claim or moves to a teamless endpoint.
+pub const WORLDAGENT_TEAM_ID_OVERRIDE_ENV: &str = "PUFFER_WORLDAGENT_TEAM_ID";
 
 /// Prefix applied to every generated `key_alias` so backend can
 /// distinguish keys minted for the puffer desktop client.
@@ -268,19 +279,32 @@ pub struct ExchangedApiKey {
 ///
 /// TODO(worldagent): API will change — backend confirmed this is a
 /// preview shape. Open questions:
+/// - Auth Station JWTs do NOT yet carry `default_team_id`; we fall
+///   back to the [`WORLDAGENT_TEAM_ID_OVERRIDE_ENV`] env var as a
+///   stopgap. Proper fix lives backend-side: either control-api
+///   resolves the team from the JWT `sub` (WorkOS user_id) and the
+///   endpoint becomes `POST /platform/v1/keys` (no team segment), or
+///   Auth Station adds the claim. Remove the env-var path once that
+///   ships.
 /// - idempotent get-or-create per (user, device) instead of always
 ///   minting a new key (avoid leaking dead keys when user re-logins
 ///   on the same machine)
 /// - DELETE/revoke endpoint to call on logout
 /// - production base URL (currently `control-api-pre-7f819c…`)
-/// - whether `team_id` should come from JWT `default_team_id` or be
-///   user-selectable (multi-team users)
 /// Re-evaluate when backend lands the stable shape.
 pub fn exchange_jwt_for_api_key(access_token: &str) -> Result<ExchangedApiKey> {
     let profile = decode_jwt_profile(access_token);
-    let team_id = profile.default_team_id.ok_or_else(|| {
-        anyhow!("worldagent JWT did not include default_team_id claim")
-    })?;
+    let team_id = std::env::var(WORLDAGENT_TEAM_ID_OVERRIDE_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or(profile.default_team_id)
+        .ok_or_else(|| {
+            anyhow!(
+                "worldagent JWT did not include default_team_id and \
+                 {WORLDAGENT_TEAM_ID_OVERRIDE_ENV} is unset; set it to \
+                 your team UUID as a temporary workaround"
+            )
+        })?;
     let base = std::env::var(WORLDAGENT_CONTROL_URL_OVERRIDE_ENV)
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -427,8 +451,13 @@ mod tests {
     }
 
     #[test]
-    fn exchange_jwt_for_api_key_rejects_jwt_without_default_team_id() {
-        // JWT payload missing default_team_id.
+    fn exchange_jwt_for_api_key_rejects_when_team_id_unavailable() {
+        // JWT payload missing default_team_id, and we explicitly clear
+        // the env-var override so the no-fallback path is exercised.
+        // Tests can run in parallel and share process env; if another
+        // test ever sets WORLDAGENT_TEAM_ID_OVERRIDE_ENV in the same
+        // process, hoist this into a serial_test block.
+        std::env::remove_var(WORLDAGENT_TEAM_ID_OVERRIDE_ENV);
         let payload = serde_json::json!({
             "sub": "user_01",
             "email": "dev@example.com",
@@ -439,5 +468,6 @@ mod tests {
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
         assert!(err.contains("default_team_id"));
+        assert!(err.contains(WORLDAGENT_TEAM_ID_OVERRIDE_ENV));
     }
 }
