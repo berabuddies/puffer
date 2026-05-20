@@ -8,9 +8,9 @@ mod summary;
 mod tool_messages;
 mod top_panel;
 use self::composer::{
-    composer_area_height, inline_dropdown_height, overlay_prompt_cursor, overlay_prompt_input,
-    overlay_prompt_placeholder, overlay_renders_inline_dropdown, prompt_line_count,
-    render_inline_dropdown,
+    composer_area_height, inline_dropdown_height, multiline_prompt_text, overlay_hint_line,
+    overlay_prompt_cursor, overlay_prompt_input, overlay_prompt_line, overlay_prompt_placeholder,
+    overlay_renders_inline_dropdown, prompt_line_count, render_inline_dropdown,
 };
 use self::helpers::{help_pane_active, separator_line};
 #[cfg(test)]
@@ -396,7 +396,7 @@ pub(crate) fn render(
                 "❯ /help".len() as u16,
             )
         } else {
-            multiline_prompt_text(input, cursor)
+            multiline_prompt_text(input, cursor, prompt_row.width)
         };
         // When the input is taller than the prompt area, scroll so the cursor
         // line stays visible.
@@ -689,78 +689,6 @@ fn pending_submit_lines(pending_submit: &PendingSubmitRenderState) -> Vec<Line<'
         ]));
     }
     lines
-}
-
-/// Renders the composer input as a possibly multi-line `Text`, and returns
-/// the cursor's row and column inside that rendered block. The first line is
-/// prefixed with `"❯ "`; continuation lines are indented two spaces so the
-/// text aligns under the prompt arrow.
-fn multiline_prompt_text(input: &str, cursor: usize) -> (Text<'static>, u16, u16) {
-    if input.is_empty() {
-        let line = Line::from(vec![
-            Span::raw("❯ "),
-            Span::styled(
-                "Review changes, ask a question, or type /",
-                Style::default().add_modifier(Modifier::DIM),
-            ),
-        ]);
-        return (Text::from(line), 0, 2);
-    }
-
-    let cursor = cursor.min(input.len());
-    let prefix = &input[..cursor];
-    let cursor_row = prefix.matches('\n').count() as u16;
-    let last_newline = prefix.rfind('\n').map(|idx| idx + 1).unwrap_or(0);
-    let row_prefix = &prefix[last_newline..];
-    // Both the first line ("❯ ") and continuation lines ("  ") are 2 cols wide.
-    let cursor_col = (UnicodeWidthStr::width(row_prefix) + 2) as u16;
-
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    for (idx, segment) in input.split('\n').enumerate() {
-        let body = segment.to_string();
-        if idx == 0 {
-            lines.push(Line::from(format!("❯ {body}")));
-        } else {
-            lines.push(Line::from(format!("  {body}")));
-        }
-    }
-    (Text::from(lines), cursor_row, cursor_col)
-}
-
-fn overlay_prompt_line(input: &str, placeholder: &str) -> Line<'static> {
-    if input.is_empty() {
-        Line::from(vec![
-            Span::raw("❯ "),
-            Span::styled(
-                placeholder.to_string(),
-                Style::default().add_modifier(Modifier::DIM),
-            ),
-        ])
-    } else {
-        Line::from(format!("❯ {input}"))
-    }
-}
-
-fn overlay_hint_line(
-    input: &str,
-    onboarding_active: bool,
-    overlay: Option<&OverlayState>,
-) -> String {
-    if overlay
-        .is_some_and(|overlay| !overlay.accepts_text_input() && !overlay.accepts_filter_input())
-    {
-        return "Esc closes · / starts a command".to_string();
-    }
-    let prefix = if input.is_empty() {
-        "Type to jump"
-    } else {
-        "Typing jumps selection"
-    };
-    if onboarding_active {
-        format!("{prefix} · Enter to continue · Esc to go back")
-    } else {
-        format!("{prefix} · Enter to select · Esc to close")
-    }
 }
 
 fn render_overlay(frame: &mut Frame<'_>, viewport: Rect, overlay: &OverlayState) {
@@ -1059,6 +987,8 @@ fn onboarding_body_lines(overlay: &OverlayState, max_rows: usize) -> Vec<Line<'s
 
 #[cfg(test)]
 mod overlay_tests;
+#[cfg(test)]
+mod prompt_tests;
 #[cfg(test)]
 mod scroll_tests;
 #[cfg(test)]
