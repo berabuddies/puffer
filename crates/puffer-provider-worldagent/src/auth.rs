@@ -1,8 +1,12 @@
 //! Auth Station login URL building, callback parsing, JWT decoding.
 
+use anyhow::{anyhow, Context, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use rand::RngCore;
+use reqwest::blocking::Client;
+use serde::Deserialize;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Default Auth Station base URL (Sandbox). Production is
 /// `https://auth.worldrouter.ai`. The env var named by
@@ -158,6 +162,101 @@ pub fn decode_jwt_profile(access_token: &str) -> WorldAgentJwtProfile {
     }
 }
 
+/// Persisted Auth Station credentials for the worldagent provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorldAgentOAuthCredentials {
+    /// Auth Station access token (24h validity per current docs).
+    pub access_token: String,
+    /// Auth Station refresh token (7d validity).
+    pub refresh_token: String,
+    /// Unix epoch milliseconds when the access token expires.
+    pub expires_at_ms: u64,
+    /// `sub` claim from the access token JWT.
+    pub sub: Option<String>,
+    /// `email` claim from the access token JWT.
+    pub email: Option<String>,
+    /// `name` claim from the access token JWT.
+    pub name: Option<String>,
+}
+
+/// Exchanges a stored refresh token for a new access token via
+/// `POST <auth>/token/refresh`. Preserves the existing
+/// `refresh_token` (Auth Station does not rotate refresh tokens, and
+/// `/token/refresh` returns only `{ "token": ... }`).
+pub fn refresh_oauth_token(
+    refresh_token: &str,
+    auth_base_url: Option<&str>,
+) -> Result<WorldAgentOAuthCredentials> {
+    let base = auth_base_url
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| {
+            std::env::var(WORLDAGENT_AUTH_URL_OVERRIDE_ENV)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| WORLDAGENT_AUTH_BASE_URL.to_string())
+        });
+    let url = format!("{}/token/refresh", base.trim_end_matches('/'));
+    let response = Client::new()
+        .post(&url)
+        .json(&serde_json::json!({ "refresh_token": refresh_token }))
+        .send()
+        .context("failed to send worldagent refresh request")?;
+    let status = response.status();
+    let payload: RefreshResponse = response
+        .json()
+        .context("failed to parse worldagent refresh response")?;
+    if !status.is_success() {
+        return Err(anyhow!(
+            "worldagent token refresh failed with status {status}: {}",
+            payload.error.unwrap_or_default()
+        ));
+    }
+    let access_token = payload
+        .token
+        .ok_or_else(|| anyhow!("worldagent refresh response missing token"))?;
+    let profile = decode_jwt_profile(&access_token);
+    Ok(WorldAgentOAuthCredentials {
+        access_token,
+        refresh_token: refresh_token.to_string(),
+        expires_at_ms: now_ms() + 24 * 3600 * 1000,
+        sub: profile.sub,
+        email: profile.email,
+        name: profile.name,
+    })
+}
+
+/// Exchanges an Auth Station JWT for an inference API key.
+///
+/// **TODO (waiting on worldrouter backend):** the endpoint and
+/// request shape are not yet finalized. Once defined, this function
+/// will `POST <worldrouter>/api/v1/keys/exchange` (or whatever the
+/// backend picks) with `Authorization: Bearer <access_token>` and
+/// return the `api_key` string. The login handler will then upgrade
+/// the stored credential to an `ApiKey { key }` variant.
+pub fn exchange_jwt_for_api_key(_access_token: &str) -> Result<String> {
+    Err(anyhow!(
+        "worldagent JWT-to-api-key exchange is not yet implemented; \
+         paste your WorldRouter API key for now"
+    ))
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+#[derive(Debug, Deserialize)]
+struct RefreshResponse {
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,5 +323,13 @@ mod tests {
         assert!(profile.sub.is_none());
         assert!(profile.email.is_none());
         assert!(profile.name.is_none());
+    }
+
+    #[test]
+    fn exchange_jwt_for_api_key_is_a_placeholder() {
+        let result = exchange_jwt_for_api_key("any.access.token");
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("not yet implemented"));
     }
 }
