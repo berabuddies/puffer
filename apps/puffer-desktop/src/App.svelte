@@ -158,6 +158,7 @@
   let submitMessageInFlightSessionIds = $state<string[]>([]);
   let dismissedPermissionIds = $state<string[]>([]);
   let dismissedQuestionIds = $state<string[]>([]);
+  const DISMISSED_IDS_CAP = 200;
   let resolvingPermissionIds = $state<string[]>([]);
   let resolvingQuestionIds = $state<string[]>([]);
 
@@ -1804,7 +1805,7 @@
         try {
           await resolveTurnPermission(mapping.turnId, mapping.requestId, mapPermissionAction(choice));
           if (selectedSession?.id !== responseSessionId) return;
-          dismissedPermissionIds = [...dismissedPermissionIds, scopedPermissionId];
+          dismissedPermissionIds = [...dismissedPermissionIds, scopedPermissionId].slice(-DISMISSED_IDS_CAP);
           statusMessage = `${choice} sent to agent.`;
           if (currentTurnId === mapping.turnId) {
             turnThinking = false;
@@ -1819,7 +1820,7 @@
           appendAgentError("Permission response failed", detail, "permission-error");
         }
       } else {
-        dismissedPermissionIds = [...dismissedPermissionIds, scopedPermissionId];
+        dismissedPermissionIds = [...dismissedPermissionIds, scopedPermissionId].slice(-DISMISSED_IDS_CAP);
         statusMessage = `${choice} selected (no in-flight turn).`;
       }
     } finally {
@@ -1842,7 +1843,7 @@
         try {
           await resolveTurnUserQuestion(mapping.turnId, mapping.requestId, answers, annotations);
           if (selectedSession?.id !== responseSessionId) return;
-          dismissedQuestionIds = [...dismissedQuestionIds, scopedQuestionId];
+          dismissedQuestionIds = [...dismissedQuestionIds, scopedQuestionId].slice(-DISMISSED_IDS_CAP);
           statusMessage = "Answer sent to agent.";
           if (currentTurnId === mapping.turnId) {
             turnThinking = false;
@@ -1857,7 +1858,7 @@
           appendAgentError("Question response failed", detail, "question-error");
         }
       } else {
-        dismissedQuestionIds = [...dismissedQuestionIds, scopedQuestionId];
+        dismissedQuestionIds = [...dismissedQuestionIds, scopedQuestionId].slice(-DISMISSED_IDS_CAP);
         statusMessage = "Answer selected (no in-flight turn).";
       }
     } finally {
