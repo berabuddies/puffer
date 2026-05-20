@@ -44,6 +44,8 @@
     timeline: TimelineItem[];
     pendingPermissions: PermissionTimelineItem[];
     pendingQuestions: UserQuestionTimelineItem[];
+    resolvingPermissionIds?: string[];
+    resolvingQuestionIds?: string[];
     loading: boolean;
     /** True while an agent turn is running on the current session. Flips
      *  the composer's send button into a red "Stop" so the user can
@@ -74,6 +76,8 @@
     timeline,
     pendingPermissions,
     pendingQuestions,
+    resolvingPermissionIds = [],
+    resolvingQuestionIds = [],
     loading,
     turnRunning = false,
     turnCancelable = true,
@@ -91,6 +95,18 @@
 
   let displayUserName = $derived(userDisplayName.trim() || "Otter");
   let userInitial = $derived(displayUserName.trim().charAt(0).toUpperCase() || "O");
+
+  function scopedSessionItemId(itemId: string): string {
+    return session?.id ? `${session.id}::${itemId}` : itemId;
+  }
+
+  function isPermissionResolving(item: PermissionTimelineItem): boolean {
+    return resolvingPermissionIds.includes(scopedSessionItemId(item.id));
+  }
+
+  function isQuestionResolving(item: UserQuestionTimelineItem): boolean {
+    return resolvingQuestionIds.includes(scopedSessionItemId(item.id));
+  }
 
   let draft = $state("");
   let draftBySessionId = $state<Record<string, string>>({});
@@ -1442,10 +1458,10 @@
                       {/if}
                     {/if}
                     {#each row.approvals as p (p.id)}
-                      <Approval item={p} onResolve={onResolvePermission} />
+                      <Approval item={p} disabled={isPermissionResolving(p)} onResolve={onResolvePermission} />
                     {/each}
                     {#each row.questions as q (q.id)}
-                      <QuestionPrompt item={q} onResolve={onResolveUserQuestion} />
+                      <QuestionPrompt item={q} disabled={isQuestionResolving(q)} onResolve={onResolveUserQuestion} />
                     {/each}
                   </div>
                 {/if}

@@ -2133,17 +2133,19 @@ test("failed permission responses keep the approval prompt retryable", async ({ 
   });
 
   await expect(page.getByText("Approval needed")).toBeVisible();
-  daemon.failNext("resolve_permission", "permission channel closed");
-  await page.getByRole("button", { name: "Deny" }).click();
+  daemon.delayFailure("resolve_permission", () => true, "permission channel closed", 200);
+  const deny = page.getByRole("button", { name: "Deny" });
+  await deny.click();
 
   const request = await daemon.waitForRequest("resolve_permission");
+  await expect(deny).toBeDisabled();
   expect(request.params).toMatchObject({
     turnId: "turn-permission",
     requestId: "permission-1",
     action: "deny"
   });
   await expect(page.getByText("Approval needed")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Deny" })).toBeVisible();
+  await expect(deny).toBeEnabled();
 });
 
 test("late permission response failures do not leak into a switched session", async ({ page }) => {
@@ -2275,7 +2277,7 @@ test("permission responses ignore duplicate clicks while the choice is in flight
   await expect(page.getByText("Needs a single approval.")).toBeVisible();
   const allowOnce = page.getByRole("button", { name: "Allow once" });
   await allowOnce.click();
-  await allowOnce.click();
+  await expect(allowOnce).toBeDisabled();
 
   const request = await daemon.waitForRequest("resolve_permission");
   expect(request.params).toMatchObject({
@@ -2354,10 +2356,12 @@ test("failed question responses keep the question prompt retryable", async ({ pa
 
   await expect(page.getByText("Which path should I use?")).toBeVisible();
   await page.getByPlaceholder("Type another answer").fill("examples");
-  daemon.failNext("resolve_user_question", "question channel closed");
-  await page.getByRole("button", { name: "Send answer" }).click();
+  daemon.delayFailure("resolve_user_question", () => true, "question channel closed", 200);
+  const submit = page.getByRole("button", { name: "Send answer" });
+  await submit.click();
 
   const request = await daemon.waitForRequest("resolve_user_question");
+  await expect(submit).toBeDisabled();
   expect(request.params).toMatchObject({
     turnId: "turn-question",
     requestId: "question-1",
@@ -2365,7 +2369,7 @@ test("failed question responses keep the question prompt retryable", async ({ pa
     annotations: {}
   });
   await expect(page.getByText("Which path should I use?")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Send answer" })).toBeEnabled();
+  await expect(submit).toBeEnabled();
 });
 
 test("late question response failures do not leak into a switched session", async ({ page }) => {
@@ -2483,7 +2487,7 @@ test("question responses ignore duplicate sends while the answer is in flight", 
   await page.getByPlaceholder("Type another answer").fill("examples");
   const submit = page.getByRole("button", { name: "Send answer" });
   await submit.click();
-  await submit.click();
+  await expect(submit).toBeDisabled();
 
   const request = await daemon.waitForRequest("resolve_user_question");
   expect(request.params).toMatchObject({

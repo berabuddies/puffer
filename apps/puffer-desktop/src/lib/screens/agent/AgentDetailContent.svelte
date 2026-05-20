@@ -29,6 +29,8 @@
     timeline: TimelineItem[];
     pendingPermissions: PermissionTimelineItem[];
     pendingQuestions: UserQuestionTimelineItem[];
+    resolvingPermissionIds?: string[];
+    resolvingQuestionIds?: string[];
     loading: boolean;
     displayName: string;
     pufferState: AgentState;
@@ -60,6 +62,8 @@
     timeline,
     pendingPermissions,
     pendingQuestions,
+    resolvingPermissionIds = [],
+    resolvingQuestionIds = [],
     loading,
     displayName,
     pufferState,
@@ -146,6 +150,8 @@
       timeline={timeline}
       pendingPermissions={pendingPermissions}
       pendingQuestions={pendingQuestions}
+      resolvingPermissionIds={resolvingPermissionIds}
+      resolvingQuestionIds={resolvingQuestionIds}
       loading={loading}
       turnRunning={turnRunning}
       turnCancelable={turnCancelable}

@@ -28,6 +28,8 @@
     timeline: TimelineItem[];
     pendingPermissions: PermissionTimelineItem[];
     pendingQuestions: UserQuestionTimelineItem[];
+    resolvingPermissionIds?: string[];
+    resolvingQuestionIds?: string[];
     loading: boolean;
     turnRunning?: boolean;
     turnCancelable?: boolean;
@@ -55,6 +57,8 @@
     timeline,
     pendingPermissions,
     pendingQuestions,
+    resolvingPermissionIds = [],
+    resolvingQuestionIds = [],
     loading,
     turnRunning = false,
     turnCancelable = true,
@@ -572,6 +576,8 @@
         {timeline}
         {pendingPermissions}
         {pendingQuestions}
+        {resolvingPermissionIds}
+        {resolvingQuestionIds}
         {loading}
         {displayName}
         {pufferState}
@@ -621,6 +627,8 @@
           {timeline}
           {pendingPermissions}
           {pendingQuestions}
+          {resolvingPermissionIds}
+          {resolvingQuestionIds}
           {loading}
           {displayName}
           {pufferState}

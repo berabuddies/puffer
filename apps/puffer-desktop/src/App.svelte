@@ -2538,6 +2538,8 @@
                 timeline={combinedTimeline}
                 pendingPermissions={pendingPermissions}
                 pendingQuestions={pendingQuestions}
+                resolvingPermissionIds={resolvingPermissionIds}
+                resolvingQuestionIds={resolvingQuestionIds}
                 loading={sessionLoading}
                 turnRunning={turnRunning}
                 turnCancelable={currentTurnId !== null && cancelingTurnId !== currentTurnId}

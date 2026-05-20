@@ -7,10 +7,11 @@
 
   type Props = {
     item: UserQuestionTimelineItem;
+    disabled?: boolean;
     onResolve: (questionId: string, answers: Answers, annotations?: Annotations) => void;
   };
 
-  let { item, onResolve }: Props = $props();
+  let { item, disabled = false, onResolve }: Props = $props();
   let selectedAnswers = $state<Answers>({});
   let customText = $state<Record<string, string>>({});
   let customActive = $state<Record<string, boolean>>({});
@@ -118,12 +119,12 @@
   }
 
   function canSubmit(): boolean {
-    if (answered) return false;
+    if (answered || disabled) return false;
     return item.questions.every((question) => hasAnswer(question));
   }
 
   function submit() {
-    if (answered || !canSubmit()) return;
+    if (answered || disabled || !canSubmit()) return;
     onResolve(item.id, buildAnswers(), {});
   }
 </script>
@@ -167,13 +168,13 @@
             <label
               class="pf-question-option"
               data-selected={checked(question, option.label)}
-              data-readonly={answered}
+              data-readonly={answered || disabled}
             >
               <input
                 type={question.multiSelect ? "checkbox" : "radio"}
                 name={`question-${item.id}-${index}`}
                 checked={checked(question, option.label)}
-                disabled={answered}
+                disabled={answered || disabled}
                 onchange={() =>
                   question.multiSelect
                     ? toggleMulti(question, option.label)
@@ -193,13 +194,13 @@
           {/each}
         </div>
         {#if !answered || customAnswers(question).length > 0}
-          <label class="pf-question-other" data-selected={customChecked(question)} data-readonly={answered}>
+          <label class="pf-question-other" data-selected={customChecked(question)} data-readonly={answered || disabled}>
             <input
               class="pf-question-other-choice"
               type={question.multiSelect ? "checkbox" : "radio"}
               name={`question-${item.id}-${index}`}
               checked={customChecked(question)}
-              disabled={answered}
+              disabled={answered || disabled}
               onchange={(event) => {
                 const checked = (event.currentTarget as HTMLInputElement).checked;
                 if (question.multiSelect) {
@@ -218,6 +219,7 @@
               <input
                 class="pf-question-other-input"
                 value={customValue(question)}
+                disabled={disabled}
                 placeholder="Type another answer"
                 onfocus={() => {
                   if (!question.multiSelect) customActive = { ...customActive, [keyFor(question)]: true };
