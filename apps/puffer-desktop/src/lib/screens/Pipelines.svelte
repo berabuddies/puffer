@@ -711,6 +711,7 @@
                   data-type={node.type}
                   data-provider={node.provider ?? "trigger"}
                   data-state={st}
+                  aria-pressed={node.id === selectedNodeId}
                   onclick={() => node.node ? (selectedNodeId = node.id) : null}
                 >
                   <div class="pf-pipe-node-head">
