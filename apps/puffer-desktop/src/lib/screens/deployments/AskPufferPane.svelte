@@ -7,6 +7,9 @@
   let { d }: Props = $props();
 
   let draft = $state("");
+  let localTurns = $state<{ id: number; prompt: string; response: string }[]>([]);
+  let localTurnId = 0;
+  let lastDeploymentId = $state<string | null>(null);
 
   type Line = { type?: "cmd" | "dim"; text: string };
   let terminalLines = $derived<Line[]>([
@@ -32,6 +35,42 @@
           "Summarize last failed deploy"
         ]
   );
+
+  $effect(() => {
+    if (lastDeploymentId === null) {
+      lastDeploymentId = d.id;
+      return;
+    }
+    if (d.id === lastDeploymentId) return;
+    lastDeploymentId = d.id;
+    draft = "";
+    localTurns = [];
+  });
+
+  function responseFor(prompt: string): string {
+    return `I queued an investigation for ${d.name}: ${prompt}. I'll use logs, metrics, env, and deploy history for this environment.`;
+  }
+
+  function submitDraft(): void {
+    const prompt = draft.trim();
+    if (!prompt) return;
+    localTurnId += 1;
+    localTurns = [
+      ...localTurns,
+      {
+        id: localTurnId,
+        prompt,
+        response: responseFor(prompt)
+      }
+    ];
+    draft = "";
+  }
+
+  function handleComposerKeydown(event: KeyboardEvent): void {
+    if (event.key !== "Enter" || event.shiftKey) return;
+    event.preventDefault();
+    submitDraft();
+  }
 </script>
 
 <div class="pf-dep-pane pf-dep-ask">
@@ -110,6 +149,24 @@
           </div>
         </div>
       </div>
+
+      {#each localTurns as turn (turn.id)}
+        <div class="pf-msg" data-role="user">
+          <div class="pf-msg-avatar">Y</div>
+          <div class="pf-msg-body">
+            <div class="pf-msg-meta"><span class="name">you</span><span class="time">now</span></div>
+            <div class="pf-msg-text"><p>{turn.prompt}</p></div>
+          </div>
+        </div>
+
+        <div class="pf-msg" data-role="agent">
+          <div class="pf-msg-avatar"><Puffer size={26} state="idle" /></div>
+          <div class="pf-msg-body">
+            <div class="pf-msg-meta"><span class="name">Puffer</span><span class="time">now</span></div>
+            <div class="pf-msg-text"><p>{turn.response}</p></div>
+          </div>
+        </div>
+      {/each}
     </div>
   </div>
 
@@ -123,15 +180,20 @@
       {/each}
     </div>
     <div class="pf-composer">
-      <textarea placeholder={`Ask about ${d.name}…`} bind:value={draft}></textarea>
+      <textarea
+        placeholder={`Ask about ${d.name}...`}
+        bind:value={draft}
+        aria-label="Ask Puffer"
+        onkeydown={handleComposerKeydown}
+      ></textarea>
       <div class="pf-composer-foot">
         <button type="button" class="pf-chip"><Icon name="logs" size={11} />logs</button>
         <button type="button" class="pf-chip"><Icon name="cpu" size={11} />metrics</button>
         <button type="button" class="pf-chip"><Icon name="key" size={11} />env</button>
         <button type="button" class="pf-chip"><Icon name="rocket" size={11} />deploys</button>
         <span class="spacer"></span>
-        <span style="font-size: 11px; color: var(--muted-foreground); font-family: var(--font-mono);">⏎ to send</span>
-        <button type="button" class="pf-send-btn" disabled={!draft.trim()} aria-label="Send">
+        <span style="font-size: 11px; color: var(--muted-foreground); font-family: var(--font-mono);">Enter to send</span>
+        <button type="button" class="pf-send-btn" disabled={!draft.trim()} aria-label="Send" onclick={submitDraft}>
           <Icon name="arrowUp" size={15} />
         </button>
       </div>

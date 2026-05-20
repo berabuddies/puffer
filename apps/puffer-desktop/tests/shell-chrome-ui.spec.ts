@@ -178,6 +178,36 @@ test("deployment detail tabs expose selected state", async ({ page }) => {
   await expect(askTab).toHaveAttribute("aria-selected", "true");
 });
 
+test("deployment Ask Puffer composer sends prompts from button and Enter", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Deployments" }).click();
+  const composer = page.locator(".pf-dep-ask-composer");
+  const thread = page.locator(".pf-dep-ask-thread");
+  const textbox = composer.getByRole("textbox", { name: "Ask Puffer" });
+
+  await textbox.fill("Check failed deploys");
+  await composer.getByRole("button", { name: "Send" }).click();
+
+  await expect(textbox).toHaveValue("");
+  await expect(thread.locator('.pf-msg[data-role="user"] .pf-msg-text').filter({ hasText: "Check failed deploys" })).toHaveCount(1);
+  await expect(thread).toContainText("I queued an investigation for stripe-api · production: Check failed deploys.");
+
+  await textbox.fill("Summarize logs");
+  await textbox.press("Enter");
+
+  await expect(textbox).toHaveValue("");
+  await expect(thread.locator('.pf-msg[data-role="user"] .pf-msg-text').filter({ hasText: "Summarize logs" })).toHaveCount(1);
+  await expect(thread).toContainText("I queued an investigation for stripe-api · production: Summarize logs.");
+
+  await page.locator(".pf-dep-row").filter({ hasText: "puffer-web · production" }).click();
+  await expect(thread).not.toContainText("Check failed deploys");
+  await expect(thread).not.toContainText("Summarize logs");
+  await expect(textbox).toHaveValue("");
+});
+
 test("deployment secret reveal controls target one key and toggle their state", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
