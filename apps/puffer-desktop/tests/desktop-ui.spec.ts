@@ -346,6 +346,52 @@ test("sends Browser tab navigation through the daemon bridge", async ({ page }) 
   await expect(page.getByLabel("URL")).toHaveValue("https://example.com");
 });
 
+test("Browser toolbar ignores repeated commands while a request is in flight", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open");
+
+  daemon.delayResponse(
+    "browser_navigate",
+    (request) => request.params.sessionId === "session-browser:browser:tab-1",
+    250
+  );
+  await page.getByLabel("URL").fill("example.com");
+  await page.locator(".pf-browser-toolbar").evaluate((form) => {
+    form.dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
+    form.dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
+  });
+
+  await daemon.waitForRequest("browser_navigate");
+  await expect(page.getByLabel("URL")).toBeDisabled();
+  await expect.poll(() =>
+    daemon.requests.filter((request) => request.method === "browser_navigate").length
+  ).toBe(1);
+  await expect(page.getByLabel("URL")).toBeEnabled();
+
+  daemon.delayResponse(
+    "browser_reload",
+    (request) => request.params.sessionId === "session-browser:browser:tab-1",
+    250
+  );
+  const reload = page.locator(".pf-browser-toolbar").getByRole("button", { name: "Reload" });
+  await reload.evaluate((button) => {
+    (button as HTMLButtonElement).click();
+    (button as HTMLButtonElement).click();
+  });
+
+  await daemon.waitForRequest("browser_reload");
+  await expect(reload).toBeDisabled();
+  await expect.poll(() =>
+    daemon.requests.filter((request) => request.method === "browser_reload").length
+  ).toBe(1);
+  await expect(reload).toBeEnabled();
+});
+
 test("late Browser navigation failures stay scoped to the submitted tab", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

@@ -54,6 +54,12 @@
     generation: number;
   };
 
+  type BrowserCommandKind = "navigate" | "history" | "reload";
+
+  type PendingBrowserCommand = BrowserCommandTarget & {
+    kind: BrowserCommandKind;
+  };
+
   type ClosingTabTarget = {
     sessionId: string;
     tabId: string;
@@ -80,6 +86,7 @@
   let showDevtools = $state(false);
   let devtoolsView = $state<"console" | "network">("console");
   let closingTabs = $state<ClosingTabTarget[]>([]);
+  let pendingBrowserCommands = $state<PendingBrowserCommand[]>([]);
 
   let disposers: Array<() => void> = [];
   let activeDisposers: Array<() => void> = [];
@@ -113,7 +120,17 @@
   let frameDecodeInFlight = false;
 
   let activeTab = $derived(tabs.find((tab) => tab.id === activeTabId) ?? tabs[0]);
-  let browserControlsEnabled = $derived(Boolean(activeTab && connected));
+  let browserCommandPending = $derived(
+    Boolean(
+      activeTab &&
+        pendingBrowserCommands.some(
+          (target) =>
+            target.generation === sessionGeneration &&
+            target.backendSessionId === activeBackendSessionId()
+        )
+    )
+  );
+  let browserControlsEnabled = $derived(Boolean(activeTab && connected && !browserCommandPending));
   let activeDevtools = $derived(activeTab?.devtools ?? []);
   let consoleEvents = $derived(activeDevtools.filter((item) => item.kind === "console"));
   let networkEvents = $derived(activeDevtools.filter((item) => item.kind === "network"));
@@ -229,6 +246,7 @@
       title = "";
       currentUrl = "about:blank";
       urlDraft = "about:blank";
+      pendingBrowserCommands = [];
       resetPointer(activePointerId ?? undefined);
       disposeActiveSubscriptions();
       clearCanvas();
@@ -256,6 +274,7 @@
     activeRootSessionId = nextSessionId;
     activeEventSessionId = "";
     disposeSessionSubscriptions();
+    pendingBrowserCommands = [];
     clearCursorTimer();
     pendingNavigationSessions.clear();
     resetPointer(activePointerId ?? undefined);
@@ -506,24 +525,55 @@
     pendingNavigationSessions.delete(backendId);
   }
 
+  function isBrowserCommandPending(target: BrowserCommandTarget): boolean {
+    return pendingBrowserCommands.some(
+      (item) =>
+        item.generation === target.generation &&
+        item.backendSessionId === target.backendSessionId
+    );
+  }
+
+  function beginBrowserCommand(target: BrowserCommandTarget, kind: BrowserCommandKind): boolean {
+    if (isBrowserCommandPending(target)) return false;
+    pendingBrowserCommands = [...pendingBrowserCommands, { ...target, kind }];
+    return true;
+  }
+
+  function finishBrowserCommand(target: BrowserCommandTarget, kind: BrowserCommandKind) {
+    pendingBrowserCommands = pendingBrowserCommands.filter(
+      (item) =>
+        item.kind !== kind ||
+        item.generation !== target.generation ||
+        item.backendSessionId !== target.backendSessionId
+    );
+  }
+
   function runHistory(direction: "back" | "forward") {
     const target = activeCommandTarget();
-    if (!target) return;
+    if (!target || !beginBrowserCommand(target, "history")) return;
     markNavigationPending(target);
-    void browserHistory(target.backendSessionId, direction).catch((err) => {
-      clearNavigationPending(target.backendSessionId);
-      reportCommandError(target, err);
-    });
+    void browserHistory(target.backendSessionId, direction)
+      .catch((err) => {
+        clearNavigationPending(target.backendSessionId);
+        reportCommandError(target, err);
+      })
+      .finally(() => {
+        finishBrowserCommand(target, "history");
+      });
   }
 
   function reloadActiveTab() {
     const target = activeCommandTarget();
-    if (!target) return;
+    if (!target || !beginBrowserCommand(target, "reload")) return;
     markNavigationPending(target);
-    void browserReload(target.backendSessionId).catch((err) => {
-      clearNavigationPending(target.backendSessionId);
-      reportCommandError(target, err);
-    });
+    void browserReload(target.backendSessionId)
+      .catch((err) => {
+        clearNavigationPending(target.backendSessionId);
+        reportCommandError(target, err);
+      })
+      .finally(() => {
+        finishBrowserCommand(target, "reload");
+      });
   }
 
   function sendBrowserInput(event: Parameters<typeof browserInput>[1]) {
@@ -823,9 +873,13 @@
     const requestedTabId = requestedTab.id;
     const requestedBackendSessionId = requestedTab.backendSessionId || backendSessionId(requestedTabId);
     const requestedUrl = urlDraft;
-    const target = { backendSessionId: requestedBackendSessionId, generation: requestedGeneration };
+    const commandTarget = {
+      backendSessionId: requestedBackendSessionId,
+      generation: requestedGeneration
+    };
+    if (!beginBrowserCommand(commandTarget, "navigate")) return;
     error = null;
-    markNavigationPending(target);
+    markNavigationPending(commandTarget);
     try {
       updateTab(requestedTabId, {
         url: requestedUrl,
@@ -844,6 +898,8 @@
         status = "Chrome error";
         loading = false;
       }
+    } finally {
+      finishBrowserCommand(commandTarget, "navigate");
     }
   }
 
