@@ -703,12 +703,14 @@
     if (turnRunning || composerHasDraft) return;
     if (recapBlurTimer != null) return;
     const sessionIdAtBlur = selectedSession?.id ?? null;
+    if (!sessionIdAtBlur || openAgentSessionId !== sessionIdAtBlur) return;
     recapBlurSessionId = sessionIdAtBlur;
     recapBlurTimer = setTimeout(() => {
       recapBlurTimer = null;
       recapBlurSessionId = null;
       if (!selectedSession || turnRunning || composerHasDraft) return;
       if (selectedSession.id !== sessionIdAtBlur) return;
+      if (openAgentSessionId !== sessionIdAtBlur) return;
       void submitMessage("/recap", {});
     }, RECAP_IDLE_MS);
   }
