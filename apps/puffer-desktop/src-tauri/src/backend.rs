@@ -107,16 +107,35 @@ impl BackendState {
                 ))
             }
             "load_settings_snapshot" => serde_value(self.load_settings_snapshot()?),
-            "login_with_oauth" => serde_value(self.load_settings_snapshot()?),
+            "login_with_oauth" => {
+                let provider_id = string_param(&params, &["providerId", "provider_id"])?;
+                if provider_id == "worldagent" {
+                    self.run_puffer_cli_auth_subcommand(&["auth", "login", "worldagent"], 180)?;
+                }
+                // For other providers (puffer/codex/claude), the existing behavior was a
+                // no-op — keep it as such; native CLI integrations handle their own login.
+                serde_value(self.load_settings_snapshot()?)
+            }
             "login_with_api_key" => {
                 let provider_id = string_param(&params, &["providerId", "provider_id"])?;
                 let api_key = string_param(&params, &["apiKey", "api_key"])?;
-                self.store_api_key(&provider_id, &api_key)?;
+                if provider_id == "worldagent" {
+                    self.run_puffer_cli_auth_subcommand(
+                        &["auth", "set-api-key", "worldagent", &api_key],
+                        30,
+                    )?;
+                } else {
+                    self.store_api_key(&provider_id, &api_key)?;
+                }
                 serde_value(self.load_settings_snapshot()?)
             }
             "logout_provider" => {
                 let provider_id = string_param(&params, &["providerId", "provider_id"])?;
-                self.remove_api_key(&provider_id)?;
+                if provider_id == "worldagent" {
+                    self.run_puffer_cli_auth_subcommand(&["auth", "clear", "worldagent"], 10)?;
+                } else {
+                    self.remove_api_key(&provider_id)?;
+                }
                 serde_value(self.load_settings_snapshot()?)
             }
             "list_external_credentials" => serde_value(self.list_external_credentials()?),
@@ -561,6 +580,20 @@ impl BackendState {
                     organization_name: None,
                 });
             }
+        }
+        // worldagent lives in puffer-cli's AuthStore (~/.puffer/auth.json),
+        // not in corbina's own credentials file. Surface it so the GUI shows
+        // "Connected" after a successful `puffer auth login worldagent`.
+        if let Some(entry) = read_puffer_cli_credential("worldagent") {
+            out.push(AuthProviderStatusDto {
+                provider_id: "worldagent".to_string(),
+                kind: entry.kind,
+                email: None,
+                expires_at_ms: None,
+                scopes: Vec::new(),
+                plan_type: Some(entry.summary),
+                organization_name: None,
+            });
         }
         Ok(out)
     }
@@ -1019,6 +1052,54 @@ impl BackendState {
 
     fn save_sessions(&self, sessions: &[SessionRecord]) -> Result<()> {
         write_json(&sessions_file()?, sessions)
+    }
+
+    /// Runs a `puffer auth …` subcommand using the same binary
+    /// `daemon_launcher::resolve_puffer_binary()` would spawn. Inherits
+    /// stdio so the user sees the login URL print + any error output;
+    /// blocks until the subcommand exits.
+    fn run_puffer_cli_auth_subcommand(
+        &self,
+        args: &[&str],
+        timeout_secs: u64,
+    ) -> Result<()> {
+        let binary = crate::daemon_launcher::resolve_puffer_binary()
+            .context("failed to resolve puffer binary for auth subcommand")?;
+        let mut child = Command::new(&binary)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .with_context(|| format!("failed to spawn {} {:?}", binary.display(), args))?;
+        let started = std::time::Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if !status.success() {
+                        anyhow::bail!("`puffer {}` exited with {}", args.join(" "), status);
+                    }
+                    return Ok(());
+                }
+                Ok(None) => {
+                    if started.elapsed().as_secs() >= timeout_secs {
+                        let _ = child.kill();
+                        anyhow::bail!(
+                            "`puffer {}` did not finish within {}s",
+                            args.join(" "),
+                            timeout_secs
+                        );
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
+                Err(error) => {
+                    return Err(anyhow::Error::new(error).context(format!(
+                        "wait failed for `puffer {}`",
+                        args.join(" ")
+                    )));
+                }
+            }
+        }
     }
 }
 
@@ -2200,6 +2281,16 @@ fn provider_summaries() -> Vec<ProviderSummaryDto> {
             source_kind: "builtin".to_string(),
             source_path: None,
         },
+        ProviderSummaryDto {
+            id: "worldagent".to_string(),
+            display_name: "WorldAgent".to_string(),
+            base_url: "https://inference-api.worldrouter.ai".to_string(),
+            default_api: "openai-completions".to_string(),
+            model_count: provider_models("worldagent").len(),
+            auth_modes: vec!["oauth".to_string(), "api_key".to_string()],
+            source_kind: "builtin".to_string(),
+            source_path: None,
+        },
     ]
 }
 
@@ -2207,6 +2298,10 @@ fn provider_models(provider_id: &str) -> Vec<Value> {
     match canonical_backend_provider_id(provider_id).as_str() {
         "puffer" => vec![model("default", "Default", "puffer", false)],
         "claude" => claude_models(),
+        "worldagent" => vec![
+            model("kimi-k2.6", "Kimi K2.6", "worldagent", true),
+            model("qwen3.5-flash", "Qwen 3.5 Flash", "worldagent", true),
+        ],
         _ => codex_app_server_models().unwrap_or_default(),
     }
 }
@@ -2909,4 +3004,34 @@ fn apply_codex_permission_args(args: &mut Vec<String>, permission_mode: Option<&
 enum ProcessLine {
     Stdout(String),
     Stderr(String),
+}
+
+struct PufferCliCredentialSummary {
+    kind: String,
+    summary: String,
+}
+
+fn read_puffer_cli_credential(provider_id: &str) -> Option<PufferCliCredentialSummary> {
+    let path = home_dir().join(".puffer/auth.json");
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let provider = parsed.get("providers")?.get(provider_id)?;
+    let kind = provider.get("kind")?.as_str()?.to_string();
+    let summary = match kind.as_str() {
+        "api_key" => {
+            let key = provider.get("key").and_then(|v| v.as_str()).unwrap_or("");
+            let tail = key
+                .chars()
+                .rev()
+                .take(4)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect::<String>();
+            format!("api_key \u{2026}{}", tail)
+        }
+        "oauth" => "oauth credential stored".to_string(),
+        other => other.to_string(),
+    };
+    Some(PufferCliCredentialSummary { kind, summary })
 }

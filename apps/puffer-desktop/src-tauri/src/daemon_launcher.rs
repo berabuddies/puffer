@@ -465,7 +465,7 @@ fn shell_quote(s: &str) -> String {
 /// sibling `puffer` binary next to the Tauri process (i.e. `cargo run`'s
 /// target directory); in release builds we fall back to the first `puffer`
 /// on `PATH`.
-fn resolve_puffer_binary() -> Result<PathBuf> {
+pub(crate) fn resolve_puffer_binary() -> Result<PathBuf> {
     let bin_name = if cfg!(windows) { "puffer.exe" } else { "puffer" };
     if let Ok(explicit) = std::env::var("PUFFER_BINARY") {
         let path = PathBuf::from(explicit);
