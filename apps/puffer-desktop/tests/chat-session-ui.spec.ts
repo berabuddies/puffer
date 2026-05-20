@@ -5586,6 +5586,63 @@ test("stop turn stays disabled when delayed start response follows cancel reques
   ).toHaveLength(1);
 });
 
+test("workspace settled event clears selected canceled turn state", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-cancel-workspace-settled",
+        displayName: "Cancel workspace settled",
+        title: "Cancel workspace settled",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        activityStatus: "idle",
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Cancel workspace settled/);
+  await page.locator(".pf-composer textarea").fill("Cancel via workspace event");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-cancel-workspace-settled" &&
+      request.params.message === "Cancel via workspace event"
+  );
+
+  await page.getByRole("button", { name: "Stop turn" }).click();
+  await daemon.waitForRequest(
+    "cancel_turn",
+    (request) => request.params.turnId === "turn-session-cancel-workspace-settled"
+  );
+
+  const previousRefreshes = daemon.requests.filter(
+    (request) => request.method === "list_grouped_sessions"
+  ).length;
+  daemon.emit("workspace:sessions:changed", {
+    sessionId: "session-cancel-workspace-settled",
+    reason: "turn_complete"
+  });
+  await daemon.waitForRequest(
+    "list_grouped_sessions",
+    (request) =>
+      daemon.requests.filter((candidate) => candidate.method === "list_grouped_sessions")
+        .indexOf(request) >= previousRefreshes
+  );
+
+  await expect(page.getByRole("button", { name: "Stop turn" })).toHaveCount(0);
+  await expect(page.locator(".pf-composer textarea")).toBeEnabled();
+  await expect(page.locator(".pf-agent-status-pill")).toContainText("Idle");
+});
+
 test("canceled idle session does not revive running state when reopened", async ({ page }) => {
   const prompt = "Cancel then reopen idle";
   const daemon = new FakeDaemon({

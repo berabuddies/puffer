@@ -922,12 +922,12 @@
           clearCachedTurnRuntimeState(event.sessionId);
         }
         void refreshGroups();
-        if (
-          selectedSession &&
-          event?.sessionId === selectedSession.id &&
-          (event.reason === "generated_title" || event.reason === "rename_session")
-        ) {
-          void openSession(selectedSession, { showLoading: false, resetLiveState: false });
+        if (selectedSession && event?.sessionId === selectedSession.id) {
+          if (settled) {
+            void openSession(selectedSession, { showLoading: false, resetLiveState: true });
+          } else if (event.reason === "generated_title" || event.reason === "rename_session") {
+            void openSession(selectedSession, { showLoading: false, resetLiveState: false });
+          }
         }
       }),
       client.on<DesktopPinState>("desktop:pins:changed", (pins) => {
