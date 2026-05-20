@@ -896,6 +896,7 @@
     } catch (err) {
       clearNavigationPending(requestedBackendSessionId);
       if (disposed || requestedGeneration !== sessionGeneration) return;
+      if (!tabs.some((tab) => tab.id === requestedTabId)) return;
       const message = String(err);
       updateTab(requestedTabId, { error: message, status: "Chrome error", loading: false });
       if (activeTabId === requestedTabId) {
