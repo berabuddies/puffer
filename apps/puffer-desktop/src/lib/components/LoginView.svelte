@@ -56,6 +56,13 @@
     return `connected via ${details.join(" · ")}`;
   }
 
+  function providerDisplayName(providerId: string): string {
+    const provider = snapshot?.providers.find((candidate) =>
+      providerIdsEquivalent(candidate.id, providerId)
+    );
+    return provider?.displayName ?? providerId;
+  }
+
   $: filteredProviders = (() => {
     const all = snapshot?.providers ?? [];
     const needle = query.trim().toLowerCase();
@@ -68,6 +75,8 @@
       );
     });
   })();
+
+  $: connectedAuth = snapshot?.auth ?? [];
 
   $: importsByProvider = (() => {
     const map: Record<string, ExternalCredential[]> = {};
@@ -108,6 +117,31 @@
     <div class="remote-banner">
       Remote mode is active. API keys are stored on the remote host; OAuth opens locally then
       syncs the credential back over SSH.
+    </div>
+  {/if}
+
+  {#if !loading && snapshot}
+    <div class="connection-summary" role="status" aria-label="Credential connections">
+      <div class="connection-copy">
+        <strong>
+          {connectedAuth.length} provider{connectedAuth.length === 1 ? "" : "s"} connected
+        </strong>
+        <span>
+          {connectedAuth.length
+            ? "Ready for new sessions and provider switches."
+            : "Connect a provider before starting an agent."}
+        </span>
+      </div>
+      {#if connectedAuth.length}
+        <div class="connection-pills" aria-label="Credential list">
+          {#each connectedAuth as auth (auth.providerId)}
+            <span class="connection-pill">
+              <span class="pill-name">{providerDisplayName(auth.providerId)}</span>
+              <span class="pill-kind">{auth.kind}</span>
+            </span>
+          {/each}
+        </div>
+      {/if}
     </div>
   {/if}
 
@@ -250,6 +284,61 @@
     color: var(--text-muted);
   }
 
+  .connection-summary {
+    border-radius: 12px;
+    border: 1px solid rgba(111, 101, 89, 0.14);
+    background: rgba(255, 255, 255, 0.74);
+    padding: 0.85rem 0.95rem;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.85rem;
+  }
+  .connection-copy {
+    min-width: 0;
+    display: grid;
+    gap: 0.18rem;
+  }
+  .connection-copy strong {
+    font-size: 0.92rem;
+    line-height: 1.2;
+  }
+  .connection-copy span {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    line-height: 1.35;
+  }
+  .connection-pills {
+    display: flex;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+  .connection-pill {
+    border-radius: 999px;
+    border: 1px solid rgba(111, 101, 89, 0.14);
+    background: color-mix(in oklab, var(--accent) 8%, white);
+    padding: 0.38rem 0.55rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    max-width: 220px;
+    font-size: 0.78rem;
+    line-height: 1;
+  }
+  .pill-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 700;
+  }
+  .pill-kind {
+    color: var(--text-muted);
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 0.72rem;
+  }
+
   .search-row {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
@@ -280,6 +369,16 @@
   .refresh-btn:disabled {
     opacity: 0.6;
     cursor: progress;
+  }
+
+  @media (max-width: 680px) {
+    .connection-summary {
+      grid-template-columns: 1fr;
+      align-items: stretch;
+    }
+    .connection-pills {
+      justify-content: flex-start;
+    }
   }
 
   .provider-grid {

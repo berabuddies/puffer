@@ -302,6 +302,11 @@ test("providers page marks connected and disconnected providers", async ({ page 
   await page.getByRole("button", { name: "Settings" }).click();
   await page.getByRole("button", { name: "Providers" }).click();
 
+  const connectionSummary = page.getByRole("status", { name: "Credential connections" });
+  await expect(connectionSummary).toContainText("1 provider connected");
+  await expect(connectionSummary.getByText("OpenRouter")).toBeVisible();
+  await expect(connectionSummary.getByText("api_key")).toBeVisible();
+
   const openRouterCard = page.locator(".provider-card").filter({ hasText: "OpenRouter" });
   await expect(openRouterCard.locator(".status")).toHaveText("Connected");
   await expect(openRouterCard.getByText("connected via api_key")).toBeVisible();
