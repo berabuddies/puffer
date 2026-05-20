@@ -222,6 +222,45 @@ test("Browser panel restores a recorded agent tab when daemon tab state is empty
   ).toBe(321);
 });
 
+test("Browser panel adopts a newly recorded agent tab while already open", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    emitBrowserOpenFrame: false,
+    emitBrowserResizeFrame: false
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1"
+  );
+
+  daemon.emit("browser:session-browser:recording", {
+    frameId: "agent-created-tab-frame",
+    backendSessionId: "session-browser:browser:agent-tab",
+    rootSessionId: "session-browser",
+    tabId: "agent-tab",
+    url: "https://agent-open.example/results",
+    title: "Agent opened tab",
+    mimeType: "image/png",
+    encoding: "base64",
+    data: ONE_PIXEL_PNG,
+    width: 444,
+    height: 333,
+    recordedAtMs: Date.now()
+  });
+
+  await expect(page.getByRole("tab", { name: /Agent opened tab/ })).toHaveAttribute(
+    "aria-selected",
+    "true"
+  );
+  await expect(page.getByLabel("URL")).toHaveValue("https://agent-open.example/results");
+  await expect.poll(async () =>
+    page.locator(".pf-browser-canvas").evaluate((node) => (node as HTMLCanvasElement).width)
+  ).toBe(444);
+});
+
 test("Browser controls target daemon-provided backend tab ids", async ({ page }) => {
   const backendSessionId = "browser-worker-opaque-tab-1";
   const daemon = new FakeDaemon({

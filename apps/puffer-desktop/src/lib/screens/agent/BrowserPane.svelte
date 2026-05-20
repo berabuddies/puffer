@@ -731,14 +731,14 @@
 
   function applyRecordingFrame(rootSessionId: string, frame: BrowserRecordedFrame) {
     if (disposed || activeRootSessionId !== rootSessionId || frame.rootSessionId !== rootSessionId) return;
-    if (!frame.tabId || frame.tabId !== activeTabId) return;
+    if (!frame.tabId) return;
+    const existing = tabs.find((tab) => tab.id === frame.tabId);
     const frameBackendSessionId = recordingBackendSessionId(frame);
-    if (activeEventSessionId && activeEventSessionId !== frameBackendSessionId) return;
     const nextFrame = frameFromRecording(frame);
-    const nextUrl = frame.url || activeTab?.url || currentUrl || "about:blank";
-    const nextTitle = frame.title || activeTab?.title || title || "";
-    renderFrame(nextFrame);
-    updateTab(frame.tabId, {
+    const nextUrl = frame.url || existing?.url || currentUrl || "about:blank";
+    const nextTitle = frame.title || existing?.title || title || "";
+    const nextTab = {
+      ...(existing ?? newBrowserTab(frame.tabId, nextTitle || nextUrl || "Recorded tab", rootSessionId)),
       backendSessionId: frameBackendSessionId,
       frame: nextFrame,
       url: nextUrl,
@@ -748,7 +748,19 @@
       status: "Connected",
       connected: true,
       favicon: faviconFor(nextUrl)
-    });
+    };
+    const shouldActivate = frame.tabId === activeTabId || !existing;
+    tabs = existing
+      ? tabs.map((tab) => (tab.id === frame.tabId ? nextTab : tab))
+      : [...tabs, nextTab];
+    nextTabNumber = nextTabIndex(tabs);
+    if (!existing) tabStateVersion += 1;
+    saveTabs(tabs);
+    if (!shouldActivate) return;
+    const switchedTabs = activeTabId !== frame.tabId;
+    activeTabId = frame.tabId;
+    activeEventSessionId = frameBackendSessionId;
+    renderFrame(nextFrame);
     currentUrl = nextUrl;
     if (!isAddressEditing()) urlDraft = nextUrl;
     title = nextTitle;
@@ -756,6 +768,10 @@
     error = null;
     status = "Connected";
     connected = true;
+    if (switchedTabs) {
+      resetPointer(activePointerId ?? undefined);
+      void connectActiveTab();
+    }
   }
 
   function disposeActiveSubscriptions() {
