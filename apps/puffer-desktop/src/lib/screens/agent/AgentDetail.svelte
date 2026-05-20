@@ -535,29 +535,51 @@
       {/if}
       {statusLabel}
     </span>
-    <div class="pf-agent-tabs">
-      <button class="pf-agent-tab" class:on={tab === "chat"} onclick={(event) => handleTabClick(event, "chat")}>
+    <div class="pf-agent-tabs" role="group" aria-label="Agent detail panes">
+      <button
+        type="button"
+        class="pf-agent-tab"
+        class:on={tab === "chat"}
+        aria-pressed={tab === "chat"}
+        onclick={(event) => handleTabClick(event, "chat")}
+      >
         <Icon name="sparkles" size={12} />Chat
       </button>
-      <button class="pf-agent-tab" class:on={tab === "diff"} onclick={(event) => handleTabClick(event, "diff")}>
+      <button
+        type="button"
+        class="pf-agent-tab"
+        class:on={tab === "diff"}
+        aria-pressed={tab === "diff"}
+        onclick={(event) => handleTabClick(event, "diff")}
+      >
         <Icon name="git" size={12} />Diff
         {#if diffCount > 0}
           <span class="pf-agent-tab-badge">{diffCount}</span>
         {/if}
       </button>
       <button
+        type="button"
         class="pf-agent-tab"
         class:on={tab === "terminal"}
+        aria-pressed={tab === "terminal"}
         onclick={(event) => handleTabClick(event, "terminal")}
       >
         <Icon name="terminal" size={12} />Terminal
       </button>
-      <button class="pf-agent-tab" class:on={tab === "files"} onclick={(event) => handleTabClick(event, "files")}>
+      <button
+        type="button"
+        class="pf-agent-tab"
+        class:on={tab === "files"}
+        aria-pressed={tab === "files"}
+        onclick={(event) => handleTabClick(event, "files")}
+      >
         <Icon name="folder" size={12} />Files
       </button>
       <button
+        type="button"
         class="pf-agent-tab"
         class:on={tab === "browser"}
+        aria-pressed={tab === "browser"}
         onclick={(event) => handleTabClick(event, "browser")}
       >
         <Icon name="globe" size={12} />Browser
