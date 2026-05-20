@@ -36,6 +36,10 @@
 
   const ENGINEER_NAME = "Engineer";
   type SubmitMessageResult = boolean | void | Promise<boolean | void>;
+  type ComposerRoutingPreference = {
+    providerId: string | null;
+    modelId: string | null;
+  };
 
   type Props = {
     session: SessionListItem | null;
@@ -127,6 +131,7 @@
   let thinkingLoadError = $state<string | null>(null);
   let composerPreferencesSessionId = $state<string | null>(null);
   let loadedThinkingPreferenceKey = $state<string | null>(null);
+  let routingBySessionId = $state<Record<string, ComposerRoutingPreference>>({});
   let submitInFlight = $derived(
     Boolean(session?.id && submitInFlightSessionIds.includes(session.id))
   );
@@ -310,6 +315,43 @@
     return `puffer-agent:session:${sessionId}:${name}`;
   }
 
+  function routingPreferenceKey(sessionId: string): string {
+    return sessionPreferenceKey(sessionId, "routing");
+  }
+
+  function readRoutingPreference(sessionId: string): ComposerRoutingPreference | null {
+    const cached = routingBySessionId[sessionId];
+    if (cached) return cached;
+    if (typeof window === "undefined") return null;
+    try {
+      const raw = window.localStorage.getItem(routingPreferenceKey(sessionId));
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as Partial<ComposerRoutingPreference> | null;
+      if (!parsed || typeof parsed.providerId !== "string") return null;
+      return {
+        providerId: parsed.providerId,
+        modelId: typeof parsed.modelId === "string" ? parsed.modelId : ""
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  function rememberRoutingPreference(
+    sessionId: string,
+    providerId: string | null,
+    modelId: string | null
+  ) {
+    const preference = {
+      providerId,
+      modelId: normalizeModelIdForProvider(providerId, modelId) ?? ""
+    };
+    routingBySessionId = { ...routingBySessionId, [sessionId]: preference };
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(routingPreferenceKey(sessionId), JSON.stringify(preference));
+    }
+  }
+
   function thinkingPreferenceKey(): string | null {
     const sessionId = session?.id;
     const providerId = selectedProviderModelSourceId ?? selectedProviderId;
@@ -329,9 +371,13 @@
   }
 
   function pickModel(providerId: string, modelId: string) {
+    const normalizedModelId = normalizeModelIdForProvider(providerId, modelId) ?? "";
     selectedProviderId = providerId;
-    selectedModelId = modelId;
+    selectedModelId = normalizedModelId;
     selectedThinkingOptionId = "";
+    if (session?.id) {
+      rememberRoutingPreference(session.id, providerId, normalizedModelId);
+    }
   }
 
   function setSubmitInFlight(sessionId: string, inFlight: boolean) {
@@ -554,11 +600,17 @@
     const sessionId = session?.id ?? null;
     if (sessionId === routingSessionId) return;
     routingSessionId = sessionId;
-    const providerId = session?.providerId ?? settingsSnapshot?.config.defaultProvider ?? null;
+    const saved = sessionId ? readRoutingPreference(sessionId) : null;
+    const providerId = saved
+      ? saved.providerId
+      : session?.providerId ?? settingsSnapshot?.config.defaultProvider ?? null;
+    const modelId = saved
+      ? saved.modelId
+      : session?.modelId ?? settingsSnapshot?.config.defaultModel ?? null;
     selectedProviderId = providerId;
     selectedModelId = normalizeModelIdForProvider(
       providerId,
-      session?.modelId ?? settingsSnapshot?.config.defaultModel ?? null
+      modelId
     );
     selectedThinkingOptionId = "";
   });
@@ -618,8 +670,12 @@
       thinkingModels.find((model) => model.isDefault && modelSupportsAgentTools(model)) ??
       thinkingModels.find(modelSupportsAgentTools) ??
       null;
-    selectedModelId = fallback?.id ?? "";
+    const nextModelId = fallback?.id ?? "";
+    selectedModelId = nextModelId;
     selectedThinkingOptionId = "";
+    if (session?.id && selectedProviderId) {
+      rememberRoutingPreference(session.id, selectedProviderId, nextModelId);
+    }
   });
 
   $effect(() => {
