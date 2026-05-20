@@ -596,6 +596,82 @@ test("close session clears remembered restore target without removing history", 
   );
 });
 
+test("closed remembered session stays closed after backend reconnect", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-close-reconnect",
+        displayName: "Reconnect closed session",
+        title: "Reconnect closed session",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "user_message",
+            id: "reconnect-close-user",
+            text: "This closed session should not be remembered again.",
+            createdAtMs: baseTime - 50_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await page.addInitScript(() => {
+    window.localStorage.setItem(
+      "puffer-desktop:preferences",
+      JSON.stringify({ rememberSession: true })
+    );
+  });
+  await daemon.open(page);
+
+  const history = page.getByRole("region", { name: "Session history" });
+  await history.getByRole("button", { name: /Reconnect closed session/ }).click();
+  await expect(page.locator(".pf-agent-detail .primary-title")).toContainText(
+    "Reconnect closed session"
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(() => window.localStorage.getItem("puffer-desktop:remembered-session"))
+    )
+    .toContain("session-close-reconnect");
+
+  await page.getByRole("button", { name: "Close session" }).click();
+  await expect(page.locator(".pf-agent-detail")).toHaveCount(0);
+  await expect(
+    page.evaluate(() => window.localStorage.getItem("puffer-desktop:remembered-session"))
+  ).resolves.toBeNull();
+
+  const settingsLoadsBefore = daemon.requests.filter(
+    (request) => request.method === "load_settings_snapshot"
+  ).length;
+  const detailLoadsBefore = daemon.requests.filter(
+    (request) => request.method === "load_session_detail"
+  ).length;
+  await daemon.dropConnections();
+  const banner = page.locator(".connection-banner");
+  await expect(banner).toContainText("Puffer backend disconnected.");
+  daemon.allowConnections();
+  await banner.getByRole("button", { name: "Reconnect backend" }).click();
+  await expect.poll(() =>
+    daemon.requests.filter((request) => request.method === "load_settings_snapshot").length
+  ).toBeGreaterThan(settingsLoadsBefore);
+  await expect(page.locator(".connection-banner")).toHaveCount(0);
+  await page.waitForTimeout(150);
+
+  await expect(page.locator(".pf-agent-detail")).toHaveCount(0);
+  expect(daemon.requests.filter((request) => request.method === "load_session_detail")).toHaveLength(
+    detailLoadsBefore
+  );
+  await expect(
+    page.evaluate(() => window.localStorage.getItem("puffer-desktop:remembered-session"))
+  ).resolves.toBeNull();
+  await expect(history).toContainText("Reconnect closed session");
+});
+
 test("late workspace refresh does not hide a newly created session", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

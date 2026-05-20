@@ -883,8 +883,8 @@
         connectionState = s;
         if (s === "open" || s === "reconnecting") reconnectError = null;
         updateDaemonIdentity(client);
-        // When we reconnect after a drop, refresh groups + re-open the
-        // selected session so the UI catches up.
+        // When we reconnect after a drop, refresh groups + reload the session
+        // detail only if the user still has that detail view open.
         if (s === "open" && !onboarding) {
           desktopPinInFlightKeys = [];
           desktopPinInFlightStates = {};
@@ -892,7 +892,7 @@
           void refreshPins();
           void refreshSettings();
           void refreshGroups();
-          if (selectedSession) {
+          if (selectedSession && openAgentSessionId === selectedSession.id) {
             void openSession(selectedSession, { showLoading: false, resetLiveState: true });
           }
         }
