@@ -222,6 +222,66 @@ test("Browser panel restores a recorded agent tab when daemon tab state is empty
   ).toBe(321);
 });
 
+test("Browser panel prefers recorded agent frames over stale saved tabs", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    emitBrowserOpenFrame: false,
+    emitBrowserResizeFrame: false
+  });
+  daemon.setBrowserRecording("session-browser", [
+    {
+      frameId: "recorded-over-stale-frame",
+      backendSessionId: "session-browser:browser:agent-tab",
+      rootSessionId: "session-browser",
+      tabId: "agent-tab",
+      url: "https://agent-recorded.example/results",
+      title: "Agent recorded results",
+      mimeType: "image/png",
+      encoding: "base64",
+      data: ONE_PIXEL_PNG,
+      width: 418,
+      height: 260,
+      recordedAtMs: Date.now()
+    }
+  ]);
+  await daemon.install(page);
+  await page.addInitScript(() => {
+    window.localStorage.setItem(
+      "puffer-browser-tabs:session-browser",
+      JSON.stringify({
+        tabs: [
+          {
+            id: "stale-tab",
+            label: "Stale tab",
+            url: "https://stale-saved.example",
+            title: "Stale saved tab",
+            favicon: ""
+          }
+        ]
+      })
+    );
+  });
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
+
+  await expect.poll(
+    () => daemon.requests.some((request) =>
+      request.method === "browser_recording" &&
+      request.params.sessionId === "session-browser"
+    ),
+    { timeout: 1000 }
+  ).toBe(true);
+  await expect(page.getByLabel("URL")).toHaveValue("https://agent-recorded.example/results");
+  await expect(page.getByRole("tab", { name: /Agent recorded results/ })).toHaveAttribute(
+    "aria-selected",
+    "true"
+  );
+  await expect.poll(async () =>
+    page.locator(".pf-browser-canvas").evaluate((node) => (node as HTMLCanvasElement).width)
+  ).toBe(418);
+});
+
 test("Browser panel adopts a newly recorded agent tab while already open", async ({ page }) => {
   const daemon = new FakeDaemon({
     emitBrowserOpenFrame: false,

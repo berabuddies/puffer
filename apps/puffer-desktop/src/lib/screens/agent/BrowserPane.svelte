@@ -377,14 +377,7 @@
 
   function shouldHydrateFallbackFromRecording(): boolean {
     if (tabs.length === 0) return true;
-    if (tabs.length !== 1) return false;
-    const [tab] = tabs;
-    return (
-      tab.id === "tab-1" &&
-      tab.url === "about:blank" &&
-      !tab.connected &&
-      !tab.frame
-    );
+    return tabs.every((tab) => !tab.connected && !tab.frame);
   }
 
   async function hydrateTabsFromRecording(
