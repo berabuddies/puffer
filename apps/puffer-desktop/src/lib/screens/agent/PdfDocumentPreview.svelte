@@ -24,6 +24,7 @@
   let renderedPages = $state(0);
   let zoom = $state(1);
   let zoomPercent = $derived(Math.round(zoom * 100));
+  let gestureStartZoom = 1;
   let generation = 0;
   let loadingTask: PDFDocumentLoadingTask | null = null;
   let showTextFallback = $derived(textLines.some((line) => line.trim() && line.trim() !== "No text found."));
@@ -69,6 +70,19 @@
     applyZoom(target, currentZoom);
   });
 
+  $effect(() => {
+    const target = renderer;
+    if (!target) return;
+    target.addEventListener("gesturestart", handleGestureStart as EventListener, { passive: false });
+    target.addEventListener("gesturechange", handleGestureChange as EventListener, { passive: false });
+    target.addEventListener("gestureend", handleGestureEnd as EventListener, { passive: false });
+    return () => {
+      target.removeEventListener("gesturestart", handleGestureStart as EventListener);
+      target.removeEventListener("gesturechange", handleGestureChange as EventListener);
+      target.removeEventListener("gestureend", handleGestureEnd as EventListener);
+    };
+  });
+
   onDestroy(() => {
     generation += 1;
     void loadingTask?.destroy();
@@ -98,6 +112,26 @@
     event.preventDefault();
     const direction = event.deltaY < 0 ? 1 : -1;
     setZoom(zoom + PDF_ZOOM_STEP * direction);
+  }
+
+  function readGestureScale(event: Event): number {
+    const scale = (event as { scale?: unknown }).scale;
+    return typeof scale === "number" && Number.isFinite(scale) && scale > 0 ? scale : 1;
+  }
+
+  function handleGestureStart(event: Event): void {
+    event.preventDefault();
+    gestureStartZoom = zoom;
+  }
+
+  function handleGestureChange(event: Event): void {
+    event.preventDefault();
+    setZoom(gestureStartZoom * readGestureScale(event));
+  }
+
+  function handleGestureEnd(event: Event): void {
+    event.preventDefault();
+    gestureStartZoom = zoom;
   }
 
   function handleZoomKeydown(event: KeyboardEvent): void {
@@ -483,9 +517,11 @@
   }
 
   .pdf-status {
-    flex: 0 0 auto;
-    margin-left: auto;
-    width: fit-content;
+    flex: 1 0 100%;
+    order: 2;
+    box-sizing: border-box;
+    margin-left: 0;
+    width: 100%;
     max-width: 100%;
     padding: 6px 11px;
     border: 1px solid #fdba74;
@@ -495,7 +531,7 @@
     font-size: 12px;
     font-weight: 750;
     line-height: 1.35;
-    text-align: center;
+    text-align: left;
     box-shadow: 0 0 0 2px rgb(251 146 60 / 0.26), 0 8px 18px rgb(124 45 18 / 0.28);
   }
 

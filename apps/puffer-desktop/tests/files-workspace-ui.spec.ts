@@ -665,6 +665,7 @@ test("Files tab PDF zoom is immediate and page-limit status remains readable", a
     const style = getComputedStyle(node);
     const shell = node.closest(".pdf-shell");
     const controls = node.closest(".pdf-controls-row");
+    const controlsMain = controls?.querySelector(".pdf-controls-main");
     const shellStyle = shell ? getComputedStyle(shell) : null;
     const controlsStyle = controls ? getComputedStyle(controls) : null;
     const statusBackground = parseRgb(style.backgroundColor);
@@ -674,6 +675,9 @@ test("Files tab PDF zoom is immediate and page-limit status remains readable", a
     const controlsBackground = parseRgb(controlsStyle?.backgroundColor ?? "");
     const zoomButton = (controls as HTMLElement | null)?.querySelector<HTMLButtonElement>('button[aria-label="Zoom in"]');
     const zoomButtonRect = zoomButton?.getBoundingClientRect();
+    const statusRect = (node as HTMLElement).getBoundingClientRect();
+    const controlsRect = (controls as HTMLElement | null)?.getBoundingClientRect();
+    const controlsMainRect = (controlsMain as HTMLElement | null)?.getBoundingClientRect();
     return {
       ratio: (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05),
       backgroundColor: style.backgroundColor,
@@ -684,7 +688,11 @@ test("Files tab PDF zoom is immediate and page-limit status remains readable", a
       controlsDelta: channelDelta(statusBackground, controlsBackground),
       statusLooksAmber: statusBackground[0] > statusBackground[2] + 20 && statusBackground[1] > statusBackground[2] + 10,
       zoomButtonWidth: Math.round(zoomButtonRect?.width ?? 0),
-      zoomButtonHeight: Math.round(zoomButtonRect?.height ?? 0)
+      zoomButtonHeight: Math.round(zoomButtonRect?.height ?? 0),
+      statusWidth: Math.round(statusRect.width),
+      controlsWidth: Math.round(controlsRect?.width ?? 0),
+      statusTop: Math.round(statusRect.top),
+      controlsMainBottom: Math.round(controlsMainRect?.bottom ?? 0)
     };
   });
   expect(contrast.ratio).toBeGreaterThanOrEqual(4.5);
@@ -697,6 +705,8 @@ test("Files tab PDF zoom is immediate and page-limit status remains readable", a
   expect(contrast.controlsDelta).toBeGreaterThan(60);
   expect(contrast.zoomButtonWidth).toBeGreaterThanOrEqual(44);
   expect(contrast.zoomButtonHeight).toBeGreaterThanOrEqual(40);
+  expect(contrast.statusWidth).toBeGreaterThan(contrast.controlsWidth - 28);
+  expect(contrast.statusTop).toBeGreaterThanOrEqual(contrast.controlsMainBottom - 2);
 
   const initialWidth = await page.locator('canvas[aria-label="PDF page 1"]').evaluate((canvas) =>
     Math.round(canvas.getBoundingClientRect().width)
@@ -732,6 +742,17 @@ test("Files tab PDF zoom is immediate and page-limit status remains readable", a
   await page.keyboard.press("Control+-");
   await expect(controls.getByText("100%")).toBeVisible();
   await page.keyboard.press("Control+0");
+  await expect(controls.getByText("100%")).toBeVisible();
+  await pdfPreview.getByLabel("PDF pages").evaluate((node) => {
+    const start = new Event("gesturestart", { bubbles: true, cancelable: true });
+    Object.defineProperty(start, "scale", { value: 1 });
+    node.dispatchEvent(start);
+    const change = new Event("gesturechange", { bubbles: true, cancelable: true });
+    Object.defineProperty(change, "scale", { value: 1.4 });
+    node.dispatchEvent(change);
+  });
+  await expect(controls.getByText("140%")).toBeVisible();
+  await controls.getByRole("button", { name: "Reset zoom" }).click();
   await expect(controls.getByText("100%")).toBeVisible();
 
   const controlsTop = await controls.evaluate((node) => Math.round(node.getBoundingClientRect().top));
