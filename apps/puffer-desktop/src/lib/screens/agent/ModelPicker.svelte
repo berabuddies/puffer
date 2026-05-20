@@ -36,6 +36,7 @@
   let menuEl: HTMLDivElement | null = $state(null);
   let pendingProviderId = $state<string | null>(null);
   let activeContextKey = $state<string | null>(null);
+  let providerSwitchRollback = $state<{ providerId: string; modelId: string } | null>(null);
   let modelLoadGeneration = 0;
   let providerSwitchGeneration = 0;
 
@@ -118,8 +119,10 @@
     if (!allowProviderSwitch || disabled) return;
     if (providerIdsEquivalent(providerId, activeProvider)) return;
     const generation = ++providerSwitchGeneration;
-    const previousProviderId = currentProvider;
-    const previousModelId = currentModel;
+    if (providerSwitchRollback === null) {
+      providerSwitchRollback = { providerId: currentProvider, modelId: currentModel };
+    }
+    const rollback = providerSwitchRollback;
     modelLoadGeneration += 1;
     pendingProviderId = providerId;
     query = "";
@@ -135,7 +138,8 @@
       if (generation !== providerSwitchGeneration) return;
       modelsByProvider = { ...modelsByProvider, [providerId]: [] };
       loadError = `${providerId}: ${error}`;
-      onChange(previousProviderId, previousModelId);
+      onChange(rollback.providerId, rollback.modelId);
+      providerSwitchRollback = null;
       pendingProviderId = null;
       return;
     } finally {
@@ -148,6 +152,7 @@
       models.find((model) => model.isDefault && modelSupportsAgentTools(model)) ??
       models.find(modelSupportsAgentTools);
     onChange(providerId, defaultModel?.id ?? "");
+    providerSwitchRollback = null;
     pendingProviderId = null;
   }
 
@@ -169,6 +174,7 @@
     const model = providerModels.find((entry) => entry.id === modelId);
     if (model && !modelSupportsAgentTools(model)) return;
     pendingProviderId = null;
+    providerSwitchRollback = null;
     open = false;
     query = "";
     onChange(providerId, modelId);
@@ -198,6 +204,7 @@
     modelLoadGeneration += 1;
     providerSwitchGeneration += 1;
     pendingProviderId = null;
+    providerSwitchRollback = null;
     busy = false;
     loadError = null;
     query = "";
