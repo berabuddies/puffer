@@ -107,6 +107,39 @@ test("Browser tab event refreshes a connected blank canvas", async ({ page }) =>
   ).toBe(960);
 });
 
+test("Browser panel coalesces rapid screencast frames to the newest frame", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    emitBrowserOpenFrame: false,
+    emitBrowserResizeFrame: false
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1"
+  );
+
+  for (let index = 0; index < 20; index += 1) {
+    daemon.emit("browser:session-browser:browser:tab-1:frame", {
+      frameId: `rapid-${index}`,
+      mimeType: "image/png",
+      encoding: "base64",
+      data: ONE_PIXEL_PNG,
+      width: 100 + index,
+      height: 200 + index
+    });
+  }
+
+  await expect.poll(async () =>
+    page.locator(".pf-browser-canvas").evaluate((node) => (node as HTMLCanvasElement).width)
+  ).toBe(119);
+  await expect.poll(async () =>
+    page.locator(".pf-browser-canvas").evaluate((node) => (node as HTMLCanvasElement).height)
+  ).toBe(219);
+});
+
 test("Browser panel hydrates a connected agent tab from recorded frames", async ({ page }) => {
   const daemon = new FakeDaemon({
     emitBrowserOpenFrame: false,

@@ -18,9 +18,19 @@ pub(super) fn execute_browser_tool(
     let mut params: BrowserToolInput =
         serde_json::from_value(input).context("invalid Browser tool input")?;
     normalize_session_id(&mut params, current_session_id);
-    let handshake = read_handshake(cwd)?;
-    let response = send_daemon_request(&handshake, "browser_agent", serde_json::to_value(params)?)?;
-    Ok(serde_json::to_string_pretty(&response)?)
+    let payload = serde_json::to_value(params)?;
+    let handshakes = read_handshake_candidates(cwd)?;
+    let mut last_error = None;
+    for handshake in &handshakes {
+        match send_daemon_request(handshake, "browser_agent", payload.clone()) {
+            Ok(response) => return Ok(serde_json::to_string_pretty(&response)?),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    if let Some(error) = last_error {
+        return Err(error);
+    }
+    bail!("Browser tool found no daemon handshakes")
 }
 
 fn normalize_session_id(params: &mut BrowserToolInput, current_session_id: &Uuid) {
@@ -92,7 +102,7 @@ struct DaemonError {
     message: String,
 }
 
-fn read_handshake(cwd: &Path) -> Result<DaemonHandshake> {
+fn read_handshake_candidates(cwd: &Path) -> Result<Vec<DaemonHandshake>> {
     let paths = ConfigPaths::discover(cwd);
     let workspace_root = canonical_workspace_root(&paths.workspace_root);
     let workspace_path = paths.workspace_config_dir.join("daemon.handshake");
@@ -113,10 +123,13 @@ fn read_handshake(cwd: &Path) -> Result<DaemonHandshake> {
             None
         }
     };
-    if let Some(handshake) =
-        select_handshake_for_browser(workspace_handshake, user_handshake, &workspace_root)
-    {
-        return Ok(handshake);
+    let handshakes = select_handshake_candidates_for_browser(
+        workspace_handshake,
+        user_handshake,
+        &workspace_root,
+    );
+    if !handshakes.is_empty() {
+        return Ok(handshakes);
     }
 
     if let Some(error) = last_error {
@@ -143,14 +156,32 @@ fn read_handshake_file(path: &Path) -> Result<Option<DaemonHandshake>> {
         .context(format!("decode daemon handshake {}", path.display()))
 }
 
+#[cfg(test)]
 fn select_handshake_for_browser(
     workspace_handshake: Option<DaemonHandshake>,
     user_handshake: Option<DaemonHandshake>,
     workspace_root: &Path,
 ) -> Option<DaemonHandshake> {
-    workspace_handshake
+    select_handshake_candidates_for_browser(workspace_handshake, user_handshake, workspace_root)
+        .into_iter()
+        .next()
+}
+
+fn select_handshake_candidates_for_browser(
+    workspace_handshake: Option<DaemonHandshake>,
+    user_handshake: Option<DaemonHandshake>,
+    workspace_root: &Path,
+) -> Vec<DaemonHandshake> {
+    let mut candidates = Vec::new();
+    if let Some(handshake) = workspace_handshake
         .filter(|handshake| handshake_matches_workspace(handshake, workspace_root))
-        .or(user_handshake)
+    {
+        candidates.push(handshake);
+    }
+    if let Some(handshake) = user_handshake {
+        candidates.push(handshake);
+    }
+    candidates
 }
 
 fn handshake_matches_workspace(handshake: &DaemonHandshake, workspace_root: &Path) -> bool {
@@ -325,6 +356,29 @@ mod tests {
         let selected =
             select_handshake_for_browser(Some(matching), Some(user), workspace.path()).unwrap();
         assert_eq!(selected.token, "workspace");
+    }
+
+    #[test]
+    fn browser_handshake_keeps_user_fallback_after_matching_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let matching = DaemonHandshake {
+            url: "ws://127.0.0.1:1/ws".to_string(),
+            token: "workspace".to_string(),
+            workspace_root: Some(workspace.path().display().to_string()),
+        };
+        let user = DaemonHandshake {
+            url: "ws://127.0.0.1:2/ws".to_string(),
+            token: "user".to_string(),
+            workspace_root: Some("/desktop/global".to_string()),
+        };
+
+        let selected =
+            select_handshake_candidates_for_browser(Some(matching), Some(user), workspace.path());
+        let tokens = selected
+            .iter()
+            .map(|handshake| handshake.token.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(tokens, vec!["workspace", "user"]);
     }
 
     #[test]

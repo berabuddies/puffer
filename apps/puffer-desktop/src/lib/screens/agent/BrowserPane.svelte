@@ -108,6 +108,8 @@
   let pendingCursorSessionId: string | null = null;
   let tabStateVersion = 0;
   const handledBrowserShortcutCodes = new Set<string>();
+  let pendingFrame: BrowserFrameEvent | null = null;
+  let frameDecodeInFlight = false;
 
   let activeTab = $derived(tabs.find((tab) => tab.id === activeTabId) ?? tabs[0]);
   let browserControlsEnabled = $derived(Boolean(activeTab && connected));
@@ -508,10 +510,14 @@
     if (persist) saveTabs();
   }
 
+  function isAddressEditing(): boolean {
+    return addressInput !== null && document.activeElement === addressInput;
+  }
+
   function syncFromActiveTab() {
     const tab = activeTab;
     if (!tab) return;
-    urlDraft = tab.url;
+    if (!isAddressEditing()) urlDraft = tab.url;
     currentUrl = tab.url;
     title = tab.title;
     status = tab.status;
@@ -729,6 +735,24 @@
     if (!canvas || disposed) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    pendingFrame = frame;
+    if (frameDecodeInFlight) return;
+    frameDecodeInFlight = true;
+    requestAnimationFrame(() => renderPendingFrame());
+  }
+
+  function renderPendingFrame() {
+    const frame = pendingFrame;
+    pendingFrame = null;
+    if (!frame || !canvas || disposed) {
+      frameDecodeInFlight = false;
+      return;
+    }
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      frameDecodeInFlight = false;
+      return;
+    }
     frameWidth = Math.max(1, frame.width);
     frameHeight = Math.max(1, frame.height);
     if (canvas.width !== frameWidth) canvas.width = frameWidth;
@@ -736,14 +760,24 @@
     const serial = ++drawSerial;
     const image = new Image();
     image.onload = () => {
-      if (disposed || serial !== drawSerial) return;
-      ctx.drawImage(image, 0, 0, frameWidth, frameHeight);
+      if (!disposed && serial === drawSerial) {
+        ctx.drawImage(image, 0, 0, frameWidth, frameHeight);
+      }
+      frameDecodeInFlight = false;
+      if (pendingFrame && !disposed) requestAnimationFrame(() => renderPendingFrame());
+    };
+    image.onerror = () => {
+      if (serial === drawSerial) {
+        frameDecodeInFlight = false;
+        if (pendingFrame && !disposed) requestAnimationFrame(() => renderPendingFrame());
+      }
     };
     image.src = `data:${frame.mimeType};base64,${frame.data}`;
   }
 
   function clearCanvas() {
     drawSerial += 1;
+    pendingFrame = null;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
