@@ -19,11 +19,13 @@
 
   let host = $state<HTMLDivElement | null>(null);
   let renderer = $state<HTMLDivElement | null>(null);
+  let pageScroll = $state<HTMLDivElement | null>(null);
   let status = $state("Loading PDF...");
   let error = $state<string | null>(null);
   let renderedPages = $state(0);
   let zoom = $state(1);
   let zoomPercent = $derived(Math.round(zoom * 100));
+  let hasPageLimitStatus = $derived(status.startsWith("Showing first "));
   let gestureStartZoom = 1;
   let generation = 0;
   let loadingTask: PDFDocumentLoadingTask | null = null;
@@ -72,15 +74,27 @@
   });
 
   $effect(() => {
-    const target = renderer;
-    if (!target) return;
-    target.addEventListener("gesturestart", handleGestureStart as EventListener, { passive: false });
-    target.addEventListener("gesturechange", handleGestureChange as EventListener, { passive: false });
-    target.addEventListener("gestureend", handleGestureEnd as EventListener, { passive: false });
+    const targets = [renderer, pageScroll].filter(
+      (target): target is HTMLDivElement => Boolean(target)
+    );
+    if (!targets.length) return;
+    for (const target of targets) {
+      target.addEventListener("gesturestart", handleGestureStart as EventListener, {
+        passive: false
+      });
+      target.addEventListener("gesturechange", handleGestureChange as EventListener, {
+        passive: false
+      });
+      target.addEventListener("gestureend", handleGestureEnd as EventListener, {
+        passive: false
+      });
+    }
     return () => {
-      target.removeEventListener("gesturestart", handleGestureStart as EventListener);
-      target.removeEventListener("gesturechange", handleGestureChange as EventListener);
-      target.removeEventListener("gestureend", handleGestureEnd as EventListener);
+      for (const target of targets) {
+        target.removeEventListener("gesturestart", handleGestureStart as EventListener);
+        target.removeEventListener("gesturechange", handleGestureChange as EventListener);
+        target.removeEventListener("gestureend", handleGestureEnd as EventListener);
+      }
     };
   });
 
@@ -121,16 +135,19 @@
   }
 
   function handleGestureStart(event: Event): void {
+    event.stopPropagation();
     event.preventDefault();
     gestureStartZoom = zoom;
   }
 
   function handleGestureChange(event: Event): void {
+    event.stopPropagation();
     event.preventDefault();
     setZoom(gestureStartZoom * readGestureScale(event));
   }
 
   function handleGestureEnd(event: Event): void {
+    event.stopPropagation();
     event.preventDefault();
     gestureStartZoom = zoom;
   }
@@ -268,8 +285,15 @@
           disabled={zoom <= PDF_MIN_ZOOM}
         >
           <ZoomOutIcon size={15} strokeWidth={2.2} />
+          <span class="zoom-symbol" aria-hidden="true">-</span>
         </button>
-        <button type="button" class="zoom-reset" aria-label="Reset zoom" title="Reset zoom" onclick={() => setZoom(1)}>
+        <button
+          type="button"
+          class="zoom-reset"
+          aria-label="Reset zoom"
+          title="Reset zoom"
+          onclick={() => setZoom(1)}
+        >
           <RotateCcwIcon size={14} strokeWidth={2.2} />
           <span>{zoomPercent}%</span>
         </button>
@@ -281,6 +305,7 @@
           disabled={zoom >= PDF_MAX_ZOOM}
         >
           <ZoomInIcon size={15} strokeWidth={2.2} />
+          <span class="zoom-symbol" aria-hidden="true">+</span>
         </button>
       </div>
       <input
@@ -299,13 +324,24 @@
       <span class="pdf-zoom-value" aria-hidden="true">{zoomPercent}%</span>
     </div>
     {#if status}
-      <div class="pdf-status" role="status" aria-live="polite">{status}</div>
+      <div class="pdf-status" role="status" aria-live="polite">
+        {#if hasPageLimitStatus}
+          <span class="pdf-status-label">Page limit</span>
+        {/if}
+        <span>{status}</span>
+      </div>
     {/if}
   </div>
   {#if error}
     <div class="pdf-error">PDF renderer failed: {error}</div>
   {/if}
-  <div class="pdf-page-scroll" role="group" aria-label="PDF pages" onpointerdown={focusViewer}>
+  <div
+    bind:this={pageScroll}
+    class="pdf-page-scroll"
+    role="group"
+    aria-label="PDF pages"
+    onpointerdown={focusViewer}
+  >
     <div bind:this={host} class="pdf-canvas-stack" aria-label="PDF rendered pages"></div>
     {#if showTextFallback}
       <article class="pdf-text-fallback" aria-label="PDF text fallback">
@@ -417,8 +453,8 @@
     align-items: center;
     justify-content: center;
     gap: 4px;
-    min-width: 44px;
-    height: 40px;
+    min-width: 48px;
+    height: 42px;
     border: 1px solid #64748b;
     border-radius: 5px;
     background: #ffffff;
@@ -437,8 +473,14 @@
   }
 
   .pdf-toolbar .zoom-reset {
-    min-width: 92px;
+    min-width: 96px;
     padding: 0 8px;
+  }
+
+  .zoom-symbol {
+    font-size: 14px;
+    font-weight: 850;
+    line-height: 1;
   }
 
   .pdf-toolbar button:hover:not(:disabled) {
@@ -521,26 +563,47 @@
     flex: 1 0 100%;
     order: 2;
     box-sizing: border-box;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
     margin-left: 0;
     width: 100%;
     max-width: 100%;
-    padding: 6px 11px;
-    border: 1px solid #fef08a;
-    border-radius: 999px;
-    background: #facc15;
+    padding: 7px 11px;
+    border: 1px solid #f59e0b;
+    border-left-width: 4px;
+    border-radius: 8px;
+    background: #fef3c7;
     color: #1f1300;
     font-size: 12px;
-    font-weight: 750;
+    font-weight: 760;
     line-height: 1.35;
     text-align: left;
-    box-shadow: 0 0 0 2px rgb(250 204 21 / 0.35), 0 8px 18px rgb(15 23 42 / 0.24);
+    box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.82), 0 0 0 3px rgb(245 158 11 / 0.28),
+      0 8px 18px rgb(15 23 42 / 0.24);
   }
 
   :global(html.dark) .pdf-status {
-    border-color: #facc15;
-    background: #fde047;
+    border-color: #f59e0b;
+    background: #fef3c7;
     color: #1f1300;
-    box-shadow: 0 0 0 2px rgb(250 204 21 / 0.35), 0 10px 24px rgb(0 0 0 / 0.48);
+    box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.82), 0 0 0 3px rgb(245 158 11 / 0.36),
+      0 10px 24px rgb(0 0 0 / 0.48);
+  }
+
+  .pdf-status-label {
+    flex: 0 0 auto;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: #7c2d12;
+    color: #fff7ed;
+    font-size: 10px;
+    font-weight: 850;
+    letter-spacing: 0.06em;
+    line-height: 1.25;
+    text-transform: uppercase;
+    white-space: nowrap;
   }
 
   .pdf-error {
@@ -612,7 +675,7 @@
 
     .pdf-toolbar {
       display: grid;
-      grid-template-columns: minmax(44px, 1fr) minmax(92px, 1.45fr) minmax(44px, 1fr);
+      grid-template-columns: minmax(48px, 1fr) minmax(96px, 1.45fr) minmax(48px, 1fr);
       width: 100%;
     }
 

@@ -687,7 +687,8 @@ test("Files tab PDF zoom is immediate and page-limit status remains readable", a
       });
       return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
     };
-    const style = getComputedStyle(node);
+    const status = node.closest(".pdf-status") as HTMLElement | null;
+    const style = status ? getComputedStyle(status) : getComputedStyle(node);
     const shell = node.closest(".pdf-shell");
     const controls = node.closest(".pdf-controls-row");
     const controlsMain = controls?.querySelector(".pdf-controls-main");
@@ -700,7 +701,7 @@ test("Files tab PDF zoom is immediate and page-limit status remains readable", a
     const controlsBackground = parseRgb(controlsStyle?.backgroundColor ?? "");
     const zoomButton = (controls as HTMLElement | null)?.querySelector<HTMLButtonElement>('button[aria-label="Zoom in"]');
     const zoomButtonRect = zoomButton?.getBoundingClientRect();
-    const statusRect = (node as HTMLElement).getBoundingClientRect();
+    const statusRect = (status ?? (node as HTMLElement)).getBoundingClientRect();
     const controlsRect = (controls as HTMLElement | null)?.getBoundingClientRect();
     const controlsMainRect = (controlsMain as HTMLElement | null)?.getBoundingClientRect();
     return {
@@ -712,6 +713,7 @@ test("Files tab PDF zoom is immediate and page-limit status remains readable", a
       shellDelta: channelDelta(statusBackground, shellBackground),
       controlsDelta: channelDelta(statusBackground, controlsBackground),
       statusLooksAmber: statusBackground[0] > statusBackground[2] + 20 && statusBackground[1] > statusBackground[2] + 10,
+      statusLabel: Boolean((controls as HTMLElement | null)?.querySelector(".pdf-status-label")),
       zoomButtonWidth: Math.round(zoomButtonRect?.width ?? 0),
       zoomButtonHeight: Math.round(zoomButtonRect?.height ?? 0),
       statusWidth: Math.round(statusRect.width),
@@ -728,8 +730,9 @@ test("Files tab PDF zoom is immediate and page-limit status remains readable", a
   expect(contrast.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
   expect(contrast.shellDelta).toBeGreaterThan(60);
   expect(contrast.controlsDelta).toBeGreaterThan(60);
-  expect(contrast.zoomButtonWidth).toBeGreaterThanOrEqual(44);
-  expect(contrast.zoomButtonHeight).toBeGreaterThanOrEqual(40);
+  expect(contrast.statusLabel).toBe(true);
+  expect(contrast.zoomButtonWidth).toBeGreaterThanOrEqual(48);
+  expect(contrast.zoomButtonHeight).toBeGreaterThanOrEqual(42);
   expect(contrast.statusWidth).toBeGreaterThan(contrast.controlsWidth - 28);
   expect(contrast.statusTop).toBeGreaterThanOrEqual(contrast.controlsMainBottom - 2);
 
@@ -769,10 +772,10 @@ test("Files tab PDF zoom is immediate and page-limit status remains readable", a
   await page.keyboard.press("Control+0");
   await expect(controls.getByText("100%")).toBeVisible();
   await pdfPreview.getByLabel("PDF pages").evaluate((node) => {
-    const start = new Event("gesturestart", { bubbles: true, cancelable: true });
+    const start = new Event("gesturestart", { bubbles: false, cancelable: true });
     Object.defineProperty(start, "scale", { value: 1 });
     node.dispatchEvent(start);
-    const change = new Event("gesturechange", { bubbles: true, cancelable: true });
+    const change = new Event("gesturechange", { bubbles: false, cancelable: true });
     Object.defineProperty(change, "scale", { value: 1.4 });
     node.dispatchEvent(change);
   });
@@ -861,18 +864,19 @@ test("Files tab PDF controls stay usable in compact previews", async ({ page }) 
       });
       return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
     };
-    const status = node as HTMLElement;
-    const preview = status.closest('[aria-label="PDF preview"]') as HTMLElement | null;
-    const controlsRow = status.closest(".pdf-controls-row") as HTMLElement | null;
+    const status = node.closest(".pdf-status") as HTMLElement | null;
+    const statusElement = status ?? (node as HTMLElement);
+    const preview = statusElement.closest('[aria-label="PDF preview"]') as HTMLElement | null;
+    const controlsRow = statusElement.closest(".pdf-controls-row") as HTMLElement | null;
     const pagesRegion = preview?.querySelector(".pdf-page-scroll") as HTMLElement | null;
     const zoomIn = preview?.querySelector('button[aria-label="Zoom in"]') as HTMLElement | null;
     const zoomRange = preview?.querySelector<HTMLInputElement>(".pdf-zoom-range") ?? null;
-    const statusStyle = getComputedStyle(status);
+    const statusStyle = getComputedStyle(statusElement);
     const controlsStyle = controlsRow ? getComputedStyle(controlsRow) : null;
     const previewStyle = preview ? getComputedStyle(preview) : null;
     const foreground = luminance(parseRgb(statusStyle.color));
     const background = luminance(parseRgb(statusStyle.backgroundColor));
-    const statusRect = status.getBoundingClientRect();
+    const statusRect = statusElement.getBoundingClientRect();
     const controlsRect = controlsRow?.getBoundingClientRect();
     const pagesRect = pagesRegion?.getBoundingClientRect();
     const zoomRect = zoomIn?.getBoundingClientRect();
@@ -964,13 +968,14 @@ test("Files tab PDF limit badge and zoom controls stay obvious in narrow light p
       });
       return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
     };
-    const status = node as HTMLElement;
-    const preview = status.closest('[aria-label="PDF preview"]') as HTMLElement | null;
-    const controlsRow = status.closest(".pdf-controls-row") as HTMLElement | null;
+    const status = node.closest(".pdf-status") as HTMLElement | null;
+    const statusElement = status ?? (node as HTMLElement);
+    const preview = statusElement.closest('[aria-label="PDF preview"]') as HTMLElement | null;
+    const controlsRow = statusElement.closest(".pdf-controls-row") as HTMLElement | null;
     const toolbar = preview?.querySelector(".pdf-toolbar") as HTMLElement | null;
     const zoomButton = preview?.querySelector('button[aria-label="Zoom in"]') as HTMLElement | null;
     const zoomRange = preview?.querySelector<HTMLInputElement>(".pdf-zoom-range") ?? null;
-    const statusStyle = getComputedStyle(status);
+    const statusStyle = getComputedStyle(statusElement);
     const previewStyle = preview ? getComputedStyle(preview) : null;
     const foreground = luminance(parseRgb(statusStyle.color));
     const background = luminance(parseRgb(statusStyle.backgroundColor));
