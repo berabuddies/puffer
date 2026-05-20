@@ -50,10 +50,9 @@ use puffer_provider_registry::{
     AuthStore, ModelDescriptor, ProviderDescriptor, ProviderRegistry, StoredCredential,
 };
 use puffer_provider_worldagent::{
-    decode_jwt_profile as decode_worldagent_jwt_profile,
+    exchange_jwt_for_api_key as exchange_worldagent_jwt_for_api_key,
     parse_callback_input as parse_worldagent_callback_input,
-    worldagent_access_token_expires_at_ms,
-    WorldAgentOAuthCredentials, WORLDAGENT_CALLBACK_PATH, WORLDAGENT_CALLBACK_PORT,
+    WORLDAGENT_CALLBACK_PATH, WORLDAGENT_CALLBACK_PORT,
 };
 use puffer_resources::{load_resources, LoadedResources, McpServerSpec};
 use puffer_session_store::{MessageActor, SessionStore, TranscriptEvent};
@@ -79,7 +78,7 @@ use uuid::Uuid;
 
 use crate::auth_credentials::{
     inferred_anthropic_redirect_uri, set_stored_credential, store_anthropic_credential,
-    to_registry_oauth_credential_openai, to_registry_oauth_credential_worldagent,
+    to_registry_oauth_credential_openai,
 };
 use crate::auth_provider::{
     oauth_family_for_provider, oauth_login_bundle_for_provider, OauthFamily,
@@ -1172,21 +1171,11 @@ fn handle_login_with_oauth(state: &DaemonState, params: &Value) -> Result<Value>
             let access_token = parsed
                 .token
                 .ok_or_else(|| anyhow::anyhow!("worldagent callback missing token"))?;
-            let refresh_token = parsed.refresh_token.unwrap_or_default();
-            let profile = decode_worldagent_jwt_profile(&access_token);
-            let credential = WorldAgentOAuthCredentials {
-                access_token,
-                refresh_token,
-                expires_at_ms: worldagent_access_token_expires_at_ms(),
-                sub: profile.sub,
-                email: profile.email,
-                name: profile.name,
-            };
-            set_stored_credential(
-                &mut inputs.auth_store,
-                provider_id.to_string(),
-                StoredCredential::OAuth(to_registry_oauth_credential_worldagent(credential)),
-            );
+            let exchanged = exchange_worldagent_jwt_for_api_key(&access_token)
+                .context("worldagent JWT→api_key exchange failed")?;
+            inputs
+                .auth_store
+                .set_api_key(provider_id.to_string(), exchanged.api_key);
         }
         None => anyhow::bail!("oauth login is not implemented for {provider_id}"),
     }

@@ -386,7 +386,10 @@ Each component spec is concise (≤ 60 lines) per existing style.
 
 ## 13. Future work (post-MVP)
 
-- JWT → api_key exchange (waits on backend).
+### Done
+- ~~JWT → api_key exchange (waits on backend).~~ Implemented in `exchange_jwt_for_api_key` against the control-api preview endpoint. OAuth login now stores `StoredCredential::ApiKey` (sk-worldrouter-…) directly; JWT is not persisted.
+
+### Remaining
 - Profile UI showing the authenticated email / org from the JWT.
 - Refresh token rotation when access_token expires (one-line cron in
   daemon: call `refresh_oauth_token` and re-store the credential).

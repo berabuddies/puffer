@@ -48,11 +48,10 @@ use puffer_provider_registry::{
     canonical_provider_id, AuthMode, AuthStore, ProviderRegistry, StoredCredential,
 };
 use puffer_provider_worldagent::{
-    decode_jwt_profile as decode_worldagent_jwt_profile,
+    exchange_jwt_for_api_key as exchange_worldagent_jwt_for_api_key,
     parse_callback_input as parse_worldagent_callback_input,
     refresh_oauth_token as refresh_worldagent_oauth_token,
-    worldagent_access_token_expires_at_ms,
-    WorldAgentOAuthCredentials, WORLDAGENT_CALLBACK_PATH, WORLDAGENT_CALLBACK_PORT,
+    WORLDAGENT_CALLBACK_PATH, WORLDAGENT_CALLBACK_PORT,
 };
 use puffer_resources::load_resources;
 use puffer_session_store::{SessionMetadata, SessionStore};
@@ -1137,20 +1136,9 @@ fn run_login_flow(
             let access_token = parsed
                 .token
                 .ok_or_else(|| anyhow::anyhow!("worldagent callback missing token"))?;
-            let refresh_token = parsed.refresh_token.unwrap_or_default();
-            let profile = decode_worldagent_jwt_profile(&access_token);
-            let credential = WorldAgentOAuthCredentials {
-                access_token,
-                refresh_token,
-                expires_at_ms: worldagent_access_token_expires_at_ms(),
-                sub: profile.sub,
-                email: profile.email,
-                name: profile.name,
-            };
-            auth_store.set_oauth(
-                provider.to_string(),
-                to_registry_oauth_credential_worldagent(credential),
-            );
+            let exchanged = exchange_worldagent_jwt_for_api_key(&access_token)
+                .context("worldagent JWT→api_key exchange failed")?;
+            auth_store.set_api_key(provider.to_string(), exchanged.api_key);
         }
         None => anyhow::bail!("oauth login is not implemented for {provider}"),
     }

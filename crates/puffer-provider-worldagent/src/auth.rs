@@ -16,6 +16,18 @@ pub const WORLDAGENT_AUTH_BASE_URL: &str = "https://auth-worldrouter.vercel.app"
 /// Env var name that overrides the Auth Station base URL.
 pub const WORLDAGENT_AUTH_URL_OVERRIDE_ENV: &str = "PUFFER_WORLDAGENT_AUTH_URL";
 
+/// Default WR control-api base URL (preview deployment). Backend
+/// will move this to a stable URL — keep the env override available
+/// for swapping without a rebuild.
+pub const WORLDAGENT_CONTROL_BASE_URL: &str = "https://control-api-pre-7f819c.worldrouter.ai";
+
+/// Env var name that overrides the control-api base URL.
+pub const WORLDAGENT_CONTROL_URL_OVERRIDE_ENV: &str = "PUFFER_WORLDAGENT_CONTROL_URL";
+
+/// Prefix applied to every generated `key_alias` so backend can
+/// distinguish keys minted for the puffer desktop client.
+pub const WORLDAGENT_KEY_ALIAS_PREFIX: &str = "puffer-";
+
 /// Fixed loopback callback path used by Puffer desktop. The auth
 /// team must allow-list the full URI on both Sandbox and Production.
 pub const WORLDAGENT_CALLBACK_PATH: &str = "/callback";
@@ -132,6 +144,9 @@ pub struct WorldAgentJwtProfile {
     pub email: Option<String>,
     /// JWT `name` claim — may be an empty string upstream.
     pub name: Option<String>,
+    /// `default_team_id` claim — used as the path segment for the
+    /// control-api key creation endpoint.
+    pub default_team_id: Option<String>,
 }
 
 /// Decodes `sub` / `email` / `name` from the access token JWT
@@ -157,6 +172,10 @@ pub fn decode_jwt_profile(access_token: &str) -> WorldAgentJwtProfile {
             .map(ToString::to_string),
         name: value
             .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string),
+        default_team_id: value
+            .get("default_team_id")
             .and_then(serde_json::Value::as_str)
             .map(ToString::to_string),
     }
@@ -227,19 +246,95 @@ pub fn refresh_oauth_token(
     })
 }
 
-/// Exchanges an Auth Station JWT for an inference API key.
+/// Output of a successful JWT→api_key exchange.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExchangedApiKey {
+    /// The WR api_key to send as `Authorization: Bearer <key>` against
+    /// the inference endpoint.
+    pub api_key: String,
+    /// Server-assigned identifier for the key. Useful for future
+    /// revoke calls.
+    pub token_id: String,
+    /// Client-chosen alias used to create the key.
+    pub key_alias: String,
+}
+
+/// Exchanges an Auth Station JWT for a WorldRouter inference api_key.
 ///
-/// **TODO (waiting on worldrouter backend):** the endpoint and
-/// request shape are not yet finalized. Once defined, this function
-/// will `POST <worldrouter>/api/v1/keys/exchange` (or whatever the
-/// backend picks) with `Authorization: Bearer <access_token>` and
-/// return the `api_key` string. The login handler will then upgrade
-/// the stored credential to an `ApiKey { key }` variant.
-pub fn exchange_jwt_for_api_key(_access_token: &str) -> Result<String> {
-    Err(anyhow!(
-        "worldagent JWT-to-api-key exchange is not yet implemented; \
-         paste your WorldRouter API key for now"
-    ))
+/// Calls `POST {control_base}/platform/v1/teams/{default_team_id}/keys`
+/// with the JWT in `Authorization: Bearer …` and a fresh
+/// `key_alias = "puffer-<uuid>"` body. Returns the `api_key` from the
+/// response.
+///
+/// TODO(worldagent): API will change — backend confirmed this is a
+/// preview shape. Open questions:
+/// - idempotent get-or-create per (user, device) instead of always
+///   minting a new key (avoid leaking dead keys when user re-logins
+///   on the same machine)
+/// - DELETE/revoke endpoint to call on logout
+/// - production base URL (currently `control-api-pre-7f819c…`)
+/// - whether `team_id` should come from JWT `default_team_id` or be
+///   user-selectable (multi-team users)
+/// Re-evaluate when backend lands the stable shape.
+pub fn exchange_jwt_for_api_key(access_token: &str) -> Result<ExchangedApiKey> {
+    let profile = decode_jwt_profile(access_token);
+    let team_id = profile.default_team_id.ok_or_else(|| {
+        anyhow!("worldagent JWT did not include default_team_id claim")
+    })?;
+    let base = std::env::var(WORLDAGENT_CONTROL_URL_OVERRIDE_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| WORLDAGENT_CONTROL_BASE_URL.to_string());
+    let url = format!(
+        "{}/platform/v1/teams/{}/keys",
+        base.trim_end_matches('/'),
+        team_id
+    );
+    let key_alias = format!(
+        "{}{}",
+        WORLDAGENT_KEY_ALIAS_PREFIX,
+        uuid::Uuid::new_v4()
+            .as_hyphenated()
+            .to_string()
+            .to_uppercase()
+    );
+    let response = Client::new()
+        .post(&url)
+        .bearer_auth(access_token)
+        .json(&serde_json::json!({ "key_alias": key_alias }))
+        .send()
+        .context("failed to send worldagent key creation request")?;
+    let status = response.status();
+    let payload: KeyCreationResponse = response
+        .json()
+        .context("failed to parse worldagent key creation response")?;
+    if !status.is_success() {
+        return Err(anyhow!(
+            "worldagent key creation failed with status {status}: {}",
+            payload.error.unwrap_or_default()
+        ));
+    }
+    let api_key = payload
+        .key
+        .ok_or_else(|| anyhow!("worldagent key creation response missing `key`"))?;
+    let token_id = payload
+        .token_id
+        .ok_or_else(|| anyhow!("worldagent key creation response missing `token_id`"))?;
+    Ok(ExchangedApiKey {
+        api_key,
+        token_id,
+        key_alias,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct KeyCreationResponse {
+    #[serde(default)]
+    token_id: Option<String>,
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
 }
 
 /// Returns the Unix epoch milliseconds at which an Auth Station
@@ -312,6 +407,7 @@ mod tests {
             "sub": "user_01ABC",
             "email": "dev@example.com",
             "name": "Dev User",
+            "default_team_id": "team-abc-123",
         });
         let encoded = URL_SAFE_NO_PAD.encode(payload.to_string());
         let token = format!("header.{encoded}.sig");
@@ -319,6 +415,7 @@ mod tests {
         assert_eq!(profile.sub.as_deref(), Some("user_01ABC"));
         assert_eq!(profile.email.as_deref(), Some("dev@example.com"));
         assert_eq!(profile.name.as_deref(), Some("Dev User"));
+        assert_eq!(profile.default_team_id.as_deref(), Some("team-abc-123"));
     }
 
     #[test]
@@ -330,10 +427,17 @@ mod tests {
     }
 
     #[test]
-    fn exchange_jwt_for_api_key_is_a_placeholder() {
-        let result = exchange_jwt_for_api_key("any.access.token");
+    fn exchange_jwt_for_api_key_rejects_jwt_without_default_team_id() {
+        // JWT payload missing default_team_id.
+        let payload = serde_json::json!({
+            "sub": "user_01",
+            "email": "dev@example.com",
+        });
+        let encoded = URL_SAFE_NO_PAD.encode(payload.to_string());
+        let token = format!("header.{encoded}.sig");
+        let result = exchange_jwt_for_api_key(&token);
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
-        assert!(err.contains("not yet implemented"));
+        assert!(err.contains("default_team_id"));
     }
 }
