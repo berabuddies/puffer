@@ -8,6 +8,7 @@
     snapshot: SettingsSnapshot | null;
     currentProvider?: string | null;
     currentModel?: string | null;
+    contextKey?: string | null;
     allowProviderSwitch?: boolean;
     disabled?: boolean;
     onChange: (providerId: string, modelId: string) => void;
@@ -17,6 +18,7 @@
     snapshot,
     currentProvider: currentProviderOverride = null,
     currentModel: currentModelOverride = null,
+    contextKey = null,
     allowProviderSwitch = true,
     disabled = false,
     onChange
@@ -33,6 +35,7 @@
   let triggerEl: HTMLButtonElement | null = $state(null);
   let menuEl: HTMLDivElement | null = $state(null);
   let pendingProviderId = $state<string | null>(null);
+  let activeContextKey = $state<string | null>(null);
   let modelLoadGeneration = 0;
   let providerSwitchGeneration = 0;
 
@@ -181,6 +184,19 @@
     open = false;
     triggerEl?.focus();
   }
+
+  $effect(() => {
+    const nextContextKey = contextKey ?? null;
+    if (nextContextKey === activeContextKey) return;
+    activeContextKey = nextContextKey;
+    modelLoadGeneration += 1;
+    providerSwitchGeneration += 1;
+    pendingProviderId = null;
+    busy = false;
+    loadError = null;
+    query = "";
+    open = false;
+  });
 
   $effect(() => {
     if (typeof document === "undefined") return;

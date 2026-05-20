@@ -2771,6 +2771,128 @@ test("composer routing controls stay scoped to each session", async ({ page }) =
   });
 });
 
+test("stale provider model fetch does not rewrite a switched session", async ({ page }) => {
+  const model = (provider: string, id: string, displayName = id) => ({
+    id,
+    displayName,
+    provider,
+    api: "openai-responses",
+    supportsTools: true,
+    supportsVision: false,
+    contextWindow: null,
+    maxOutputTokens: null,
+    thinkingOptions: [],
+    defaultThinkingOptionId: null,
+    isDefault: true
+  });
+  const sessionInput = (sessionId: string, title: string) => ({
+    sessionId,
+    displayName: title,
+    title,
+    cwd: "/tmp/puffer",
+    folderPath: "/tmp/puffer",
+    updatedAtMs: baseTime,
+    createdAtMs: baseTime - 60_000,
+    eventCount: 0,
+    providerId: "codex",
+    modelId: "codex-default",
+    timeline: []
+  });
+  const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "codex",
+        kind: "oauth",
+        email: "tester@example.com",
+        expiresAtMs: null,
+        scopes: [],
+        planType: "test",
+        organizationName: null
+      },
+      {
+        providerId: "openrouter",
+        kind: "api_key",
+        email: null,
+        expiresAtMs: null,
+        scopes: [],
+        planType: null,
+        organizationName: null
+      }
+    ],
+    providers: [
+      {
+        id: "codex",
+        displayName: "Codex",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 1,
+        authModes: ["oauth"],
+        sourceKind: "test",
+        sourcePath: null
+      },
+      {
+        id: "openrouter",
+        displayName: "OpenRouter",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 1,
+        authModes: ["api_key"],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ],
+    sessions: [
+      sessionInput("session-provider-race-alpha", "Provider Race Alpha"),
+      sessionInput("session-provider-race-beta", "Provider Race Beta")
+    ],
+    providerModels: {
+      codex: [model("codex", "codex-default", "Codex Default")],
+      openrouter: [
+        model("openrouter", "google/gemini-3.5-flash", "Google: Gemini 3.5 Flash")
+      ]
+    }
+  });
+  daemon.delayResponse(
+    "list_provider_models",
+    (request) => request.params.providerId === "openrouter",
+    260
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Provider Race Alpha/);
+  const picker = page.locator(".pf-composer .picker");
+  await picker.locator(".trigger").click();
+  await picker.getByRole("button", { name: "OpenRouter", exact: true }).click();
+  await expect(picker.locator(".trigger")).toContainText("OpenRouter");
+
+  await openSession(page, /Provider Race Beta/);
+  await expect(picker.locator(".trigger")).toContainText("codex-default");
+  await expect(page.locator(".pf-composer textarea")).toHaveAttribute(
+    "placeholder",
+    /Engineer \(Codex\)/
+  );
+  await page.waitForTimeout(340);
+
+  await expect(picker.locator(".trigger")).toContainText("codex-default");
+  await expect(page.locator(".pf-composer textarea")).toHaveAttribute(
+    "placeholder",
+    /Engineer \(Codex\)/
+  );
+
+  await page.locator(".pf-composer textarea").fill("Use beta routing");
+  await page.getByRole("button", { name: "Send" }).click();
+  const request = await daemon.waitForRequest(
+    "run_agent_turn",
+    (item) => item.params.message === "Use beta routing"
+  );
+  expect(request.params).toMatchObject({
+    sessionId: "session-provider-race-beta",
+    providerId: "codex",
+    modelId: "codex-default"
+  });
+});
+
 test("composer sends fast mode and permission mode with the turn request", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

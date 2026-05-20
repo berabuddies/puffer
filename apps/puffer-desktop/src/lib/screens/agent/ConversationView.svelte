@@ -1660,6 +1660,7 @@
           snapshot={settingsSnapshot}
           currentProvider={selectedProviderId}
           currentModel={selectedModelId}
+          contextKey={session?.id ?? null}
           allowProviderSwitch={allowProviderSwitch}
           disabled={modelPickerDisabled}
           onChange={pickModel}
