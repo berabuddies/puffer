@@ -110,7 +110,12 @@ impl BackendState {
             "login_with_oauth" => {
                 let provider_id = string_param(&params, &["providerId", "provider_id"])?;
                 if provider_id == "worldagent" {
-                    self.run_puffer_cli_auth_subcommand(&["auth", "login", "worldagent"], 180)?;
+                    // Detach: OAuth blocks up to 120 s on the localhost
+                    // callback listener, which would freeze the GUI.
+                    self.run_puffer_cli_auth_subcommand(
+                        &["auth", "login", "worldagent"],
+                        false,
+                    )?;
                 }
                 // For other providers (puffer/codex/claude), the existing behavior was a
                 // no-op — keep it as such; native CLI integrations handle their own login.
@@ -122,7 +127,7 @@ impl BackendState {
                 if provider_id == "worldagent" {
                     self.run_puffer_cli_auth_subcommand(
                         &["auth", "set-api-key", "worldagent", &api_key],
-                        30,
+                        true,
                     )?;
                 } else {
                     self.store_api_key(&provider_id, &api_key)?;
@@ -132,7 +137,7 @@ impl BackendState {
             "logout_provider" => {
                 let provider_id = string_param(&params, &["providerId", "provider_id"])?;
                 if provider_id == "worldagent" {
-                    self.run_puffer_cli_auth_subcommand(&["auth", "clear", "worldagent"], 10)?;
+                    self.run_puffer_cli_auth_subcommand(&["auth", "clear", "worldagent"], true)?;
                 } else {
                     self.remove_api_key(&provider_id)?;
                 }
@@ -1056,13 +1061,17 @@ impl BackendState {
 
     /// Runs a `puffer auth …` subcommand using the same binary
     /// `daemon_launcher::resolve_puffer_binary()` would spawn. Inherits
-    /// stdio so the user sees the login URL print + any error output;
-    /// blocks until the subcommand exits.
-    fn run_puffer_cli_auth_subcommand(
-        &self,
-        args: &[&str],
-        timeout_secs: u64,
-    ) -> Result<()> {
+    /// stdio so the user sees the login URL print + any error output.
+    ///
+    /// `wait = true` blocks until the subcommand exits (with a 30 s cap)
+    /// — only safe for fast commands (`set-api-key`, `clear`).
+    /// `wait = false` detaches: spawn and return immediately. Required
+    /// for `auth login`, which sits on a localhost listener for up to
+    /// 120 s waiting for the browser callback; blocking the Tauri
+    /// command handler that long freezes the GUI. The frontend has to
+    /// re-poll `load_settings_snapshot` (manual Refresh button or its
+    /// own polling) to see the new credential.
+    fn run_puffer_cli_auth_subcommand(&self, args: &[&str], wait: bool) -> Result<()> {
         let binary = crate::daemon_launcher::resolve_puffer_binary()
             .context("failed to resolve puffer binary for auth subcommand")?;
         let mut child = Command::new(&binary)
@@ -1072,7 +1081,11 @@ impl BackendState {
             .stderr(std::process::Stdio::inherit())
             .spawn()
             .with_context(|| format!("failed to spawn {} {:?}", binary.display(), args))?;
+        if !wait {
+            return Ok(());
+        }
         let started = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(30);
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
@@ -1082,15 +1095,15 @@ impl BackendState {
                     return Ok(());
                 }
                 Ok(None) => {
-                    if started.elapsed().as_secs() >= timeout_secs {
+                    if started.elapsed() >= timeout {
                         let _ = child.kill();
                         anyhow::bail!(
-                            "`puffer {}` did not finish within {}s",
+                            "`puffer {}` did not finish within {:?}",
                             args.join(" "),
-                            timeout_secs
+                            timeout
                         );
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    std::thread::sleep(std::time::Duration::from_millis(100));
                 }
                 Err(error) => {
                     return Err(anyhow::Error::new(error).context(format!(
