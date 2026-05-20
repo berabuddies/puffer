@@ -85,6 +85,84 @@ test("workspace picker ignores duplicate local switch submits while restart is i
   expect(calls[0].args.cwd).toBe("/tmp/puffer-next");
 });
 
+test("workspace switch clears live agents from the previous daemon", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-old-workspace-live",
+        displayName: "Old workspace live agent",
+        title: "Old workspace live agent",
+        cwd: "/tmp/puffer-old",
+        folderPath: "/tmp/puffer-old",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  await page.addInitScript((daemonUrl) => {
+    const win = window as unknown as {
+      __TAURI__?: unknown;
+      __TAURI_INTERNALS__?: {
+        invoke?: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+      };
+    };
+    win.__TAURI__ = {};
+    win.__TAURI_INTERNALS__ = {
+      invoke: async (cmd: string, args: Record<string, unknown> = {}) => {
+        if (cmd !== "restart_local_daemon") throw new Error(`unexpected invoke: ${cmd}`);
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        return {
+          url: daemonUrl,
+          token: "test",
+          protocolVersion: "2025-01-01",
+          workspaceRoot: String(args.cwd ?? "/tmp/puffer-next")
+        };
+      }
+    };
+  }, daemon.url);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page
+    .locator(".pf-sidebar-agent-row")
+    .filter({ hasText: "Old workspace live agent" })
+    .getByRole("button", { name: /Old workspace live agent/ })
+    .click();
+  await page.locator(".pf-composer textarea").fill("Keep the old workspace busy");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-old-workspace-live" &&
+      request.params.message === "Keep the old workspace busy"
+  );
+  await expect(
+    page.locator(".pf-sidebar-agent-row").filter({ hasText: "Old workspace live agent" })
+      .locator('.state[data-state="thinking"]')
+  ).toContainText("thinking");
+
+  await page.getByRole("button", { name: "Back" }).click();
+  await page.getByTitle("Switch workspace").click();
+  const dialog = page.getByRole("dialog", { name: "Switch workspace" });
+  await dialog.getByRole("tab", { name: /Local/ }).click();
+  await dialog.getByLabel("Workspace directory").fill("/tmp/puffer-next");
+  await dialog.getByRole("button", { name: "Switch local workspace" }).click();
+  await page.waitForTimeout(50);
+  daemon.setWorkspaceRoot("/tmp/puffer-next");
+  daemon.setGroupedSessionFilter(() => false);
+
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Session history" })).toHaveCount(0);
+  await expect(
+    page.locator(".pf-sidebar-agent-row").filter({ hasText: "Old workspace live agent" })
+  ).toHaveCount(0);
+  await expect(page.locator(".pf-sidebar-empty")).toContainText("No agents match");
+});
+
 test("workspace picker clears local errors when switching modes", async ({ page }) => {
   const daemon = new FakeDaemon();
   await page.addInitScript(() => {

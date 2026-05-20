@@ -1951,7 +1951,10 @@
 
   function resetDaemonScopedSessionState() {
     selectedSession = null;
+    groups = [];
+    groupsLoading = false;
     fallbackSessionsById = {};
+    liveSidebarAgentsById = {};
     sessionDetail = null;
     openAgentSessionId = null;
     openProjectId = null;
@@ -1976,6 +1979,7 @@
     turnThinking = false;
     turnStatusHint = null;
     settledTurnKeys = new Set();
+    groupsRefreshGeneration += 1;
     sessionLoadGeneration += 1;
     sessionSubscriptionGeneration += 1;
     if (sessionEventUnlisten) {
