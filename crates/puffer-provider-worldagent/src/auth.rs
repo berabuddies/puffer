@@ -119,6 +119,45 @@ pub fn parse_callback_input(input: &str) -> WorldAgentCallback {
     callback
 }
 
+/// Decoded JWT profile fields, best-effort.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorldAgentJwtProfile {
+    /// JWT `sub` claim — Auth Station user id (WorkOS user id).
+    pub sub: Option<String>,
+    /// JWT `email` claim.
+    pub email: Option<String>,
+    /// JWT `name` claim — may be an empty string upstream.
+    pub name: Option<String>,
+}
+
+/// Decodes `sub` / `email` / `name` from the access token JWT
+/// payload. Any decode/parse failure yields an empty profile.
+pub fn decode_jwt_profile(access_token: &str) -> WorldAgentJwtProfile {
+    let Some(payload_b64) = access_token.split('.').nth(1) else {
+        return WorldAgentJwtProfile::default();
+    };
+    let Ok(payload_bytes) = URL_SAFE_NO_PAD.decode(payload_b64.as_bytes()) else {
+        return WorldAgentJwtProfile::default();
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&payload_bytes) else {
+        return WorldAgentJwtProfile::default();
+    };
+    WorldAgentJwtProfile {
+        sub: value
+            .get("sub")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string),
+        email: value
+            .get("email")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string),
+        name: value
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,5 +201,28 @@ mod tests {
         let parsed = parse_callback_input("token=acc&state=xyz");
         assert_eq!(parsed.token.as_deref(), Some("acc"));
         assert_eq!(parsed.state.as_deref(), Some("xyz"));
+    }
+
+    #[test]
+    fn decode_jwt_profile_reads_sub_email_name() {
+        let payload = serde_json::json!({
+            "sub": "user_01ABC",
+            "email": "dev@example.com",
+            "name": "Dev User",
+        });
+        let encoded = URL_SAFE_NO_PAD.encode(payload.to_string());
+        let token = format!("header.{encoded}.sig");
+        let profile = decode_jwt_profile(&token);
+        assert_eq!(profile.sub.as_deref(), Some("user_01ABC"));
+        assert_eq!(profile.email.as_deref(), Some("dev@example.com"));
+        assert_eq!(profile.name.as_deref(), Some("Dev User"));
+    }
+
+    #[test]
+    fn decode_jwt_profile_handles_malformed_token() {
+        let profile = decode_jwt_profile("not-a-jwt");
+        assert!(profile.sub.is_none());
+        assert!(profile.email.is_none());
+        assert!(profile.name.is_none());
     }
 }
