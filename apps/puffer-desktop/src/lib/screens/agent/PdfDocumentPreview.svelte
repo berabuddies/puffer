@@ -207,29 +207,32 @@
   {#if error}
     <div class="pdf-error">PDF renderer failed: {error}</div>
   {/if}
-  <div bind:this={host} class="pdf-canvas-stack" aria-label="PDF rendered pages"></div>
-  {#if showTextFallback}
-    <article class="pdf-text-fallback" aria-label="PDF text fallback">
-      <h2>Extracted text</h2>
-      {#each textLines as line}
-        <p>{line}</p>
-      {/each}
-    </article>
-  {/if}
+  <div class="pdf-page-scroll" aria-label="PDF pages">
+    <div bind:this={host} class="pdf-canvas-stack" aria-label="PDF rendered pages"></div>
+    {#if showTextFallback}
+      <article class="pdf-text-fallback" aria-label="PDF text fallback">
+        <h2>Extracted text</h2>
+        {#each textLines as line}
+          <p>{line}</p>
+        {/each}
+      </article>
+    {/if}
+  </div>
 </div>
 
 <style>
   .pdf-renderer {
     display: grid;
-    gap: 14px;
+    grid-template-rows: auto auto minmax(0, 1fr);
+    gap: 12px;
+    height: 100%;
+    min-height: 0;
     position: relative;
     width: 100%;
   }
 
   .pdf-controls-row {
-    position: sticky;
-    top: 0;
-    left: 0;
+    position: relative;
     z-index: 20;
     display: inline-flex;
     flex-wrap: wrap;
@@ -245,6 +248,13 @@
     box-shadow: 0 12px 32px rgb(15 23 42 / 0.26);
     color: #111827;
     pointer-events: auto;
+  }
+
+  .pdf-page-scroll {
+    min-height: 0;
+    overflow: auto;
+    padding: 2px 2px 18px;
+    overscroll-behavior: contain;
   }
 
   .pdf-toolbar {
@@ -346,6 +356,8 @@
   }
 
   .pdf-text-fallback {
+    margin: 18px auto 0;
+    max-width: 860px;
     background: #fff;
     border: 1px solid var(--border);
     border-radius: 6px;

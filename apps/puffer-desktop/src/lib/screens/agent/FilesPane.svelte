@@ -1936,7 +1936,7 @@
     position: relative;
     padding: 20px;
     height: 100%;
-    overflow: auto;
+    overflow: hidden;
     background: color-mix(in oklab, var(--background) 94%, var(--muted));
   }
   .office-preview section,

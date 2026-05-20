@@ -549,7 +549,7 @@ test("Files tab previews common document and data formats", async ({ page }) => 
   const longInitialWidth = await page.locator('canvas[aria-label="PDF page 1"]').evaluate((canvas) =>
     Math.round(canvas.getBoundingClientRect().width)
   );
-  await pdfPreview.evaluate((node) => {
+  await pdfPreview.getByLabel("PDF pages").evaluate((node) => {
     node.scrollTop = 480;
     node.scrollLeft = 0;
   });
@@ -673,7 +673,8 @@ test("Files tab PDF zoom is immediate and page-limit status remains readable", a
   const initialWidth = await page.locator('canvas[aria-label="PDF page 1"]').evaluate((canvas) =>
     Math.round(canvas.getBoundingClientRect().width)
   );
-  const scrollState = await pdfPreview.evaluate((node) => {
+  const controlsTop = await controls.evaluate((node) => Math.round(node.getBoundingClientRect().top));
+  const scrollState = await pdfPreview.getByLabel("PDF pages").evaluate((node) => {
     node.scrollTop = 520;
     node.scrollLeft = 420;
     return { left: node.scrollLeft, top: node.scrollTop };
@@ -681,6 +682,8 @@ test("Files tab PDF zoom is immediate and page-limit status remains readable", a
   expect(scrollState.left).toBeGreaterThan(0);
   expect(scrollState.top).toBeGreaterThan(0);
   await expect(controls).toBeVisible();
+  const controlsTopAfterScroll = await controls.evaluate((node) => Math.round(node.getBoundingClientRect().top));
+  expect(Math.abs(controlsTopAfterScroll - controlsTop)).toBeLessThanOrEqual(1);
   const zoomIn = controls.getByRole("button", { name: "Zoom in" });
   const zoomButtonReceivesPointer = await zoomIn.evaluate((button) => {
     const rect = button.getBoundingClientRect();
