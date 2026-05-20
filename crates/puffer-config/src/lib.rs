@@ -1,4 +1,5 @@
 pub mod env_vars;
+mod home_override;
 mod settings_catalog;
 
 use anyhow::Context;
@@ -13,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 const BUILTIN_RESOURCES_DIR_ENV: &str = "PUFFER_BUILTIN_RESOURCES_DIR";
 
+pub use home_override::{set_puffer_home_override, PufferHomeOverride};
 pub use settings_catalog::{
     config_setting_persists_to_workspace_file, config_setting_scope, config_setting_spec,
     normalize_config_setting_key, parse_config_cli_value, supported_config_settings,
@@ -298,8 +300,8 @@ impl ConfigPaths {
     pub fn discover(workspace_root: impl Into<PathBuf>) -> Self {
         let workspace_root = workspace_root.into();
         let workspace_config_dir = workspace_root.join(".puffer");
-        let user_config_dir = std::env::var_os("PUFFER_HOME")
-            .map(PathBuf::from)
+        let user_config_dir = home_override::puffer_home_override()
+            .or_else(|| std::env::var_os("PUFFER_HOME").map(PathBuf::from))
             .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
             .or_else(dirs::home_dir)
             .unwrap_or_else(|| PathBuf::from("."))

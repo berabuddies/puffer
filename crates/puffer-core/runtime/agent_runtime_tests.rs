@@ -211,10 +211,9 @@ fn execute_agent_tool_background_returns_async_payload_and_output_file() {
 fn execute_agent_tool_sync_reports_worktree_isolation_metadata() {
     let temp = tempfile::tempdir().unwrap();
     let _guard = refresh_env_lock().lock().unwrap();
-    let old_home = std::env::var_os("PUFFER_HOME");
     let home = temp.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
-    std::env::set_var("PUFFER_HOME", &home);
+    let _home = puffer_config::set_puffer_home_override(&home);
     init_git_repo(temp.path());
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -312,11 +311,6 @@ fn execute_agent_tool_sync_reports_worktree_isolation_metadata() {
     assert!(team_file["members"]
         .as_array()
         .is_some_and(|members| members.iter().any(|member| member["name"] == "researcher")));
-    if let Some(value) = old_home {
-        std::env::set_var("PUFFER_HOME", value);
-    } else {
-        std::env::remove_var("PUFFER_HOME");
-    }
     server.join().unwrap();
 }
 

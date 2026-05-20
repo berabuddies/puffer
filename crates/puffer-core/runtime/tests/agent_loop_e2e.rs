@@ -63,7 +63,6 @@ fn session_for(cwd: &std::path::Path) -> SessionMetadata {
         note: None,
     }
 }
-
 /// Scripted HTTP server: serves `expected_requests` mock responses,
 /// recording each raw request body so tests can assert on wire shape.
 fn spawn_server<F>(
@@ -85,6 +84,7 @@ where
         while handled < expected_requests && Instant::now() < deadline {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
                     let mut buffer = vec![0_u8; 65_536];
                     let bytes = stream.read(&mut buffer).unwrap();
                     let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();

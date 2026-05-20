@@ -3,10 +3,6 @@ use puffer_config::ConfigPaths;
 use std::fs;
 use std::time::Duration;
 
-fn puffer_home_lock() -> &'static std::sync::Mutex<()> {
-    crate::test_locks::env_lock()
-}
-
 #[test]
 fn todo_write_rejects_multiple_in_progress_items() {
     let mut state = temp_state();
@@ -174,11 +170,9 @@ fn config_tool_supports_copy_full_response_alias() {
 #[test]
 fn config_tool_persists_user_settings_to_user_config() {
     let tempdir = tempfile::tempdir().unwrap();
-    let _lock = puffer_home_lock().lock().unwrap();
-    let old_home = std::env::var_os("PUFFER_HOME");
     let home = tempdir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
-    std::env::set_var("PUFFER_HOME", &home);
+    let _home = puffer_config::set_puffer_home_override(&home);
     let mut state = temp_state();
     let cwd = state.cwd.clone();
     let output = crate::runtime::claude_tools::workflow::config::execute_config(
@@ -207,11 +201,6 @@ fn config_tool_persists_user_settings_to_user_config() {
             .unwrap()
             .contains("fast_mode = true")
     );
-    if let Some(value) = old_home {
-        std::env::set_var("PUFFER_HOME", value);
-    } else {
-        std::env::remove_var("PUFFER_HOME");
-    }
 }
 
 #[test]
@@ -274,11 +263,9 @@ fn config_tool_supports_integer_status_line_padding() {
 #[test]
 fn config_tool_allows_null_to_clear_model_override() {
     let tempdir = tempfile::tempdir().unwrap();
-    let _lock = puffer_home_lock().lock().unwrap();
-    let old_home = std::env::var_os("PUFFER_HOME");
     let home = tempdir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
-    std::env::set_var("PUFFER_HOME", &home);
+    let _home = puffer_config::set_puffer_home_override(&home);
     let mut state = temp_state();
     state.current_model = Some("openai/gpt-5".to_string());
     state.current_provider = Some("openai".to_string());
@@ -296,11 +283,6 @@ fn config_tool_allows_null_to_clear_model_override() {
     assert_eq!(parsed["success"], true);
     assert_eq!(parsed["value"], Value::Null);
     assert_eq!(state.current_model, None);
-    if let Some(value) = old_home {
-        std::env::set_var("PUFFER_HOME", value);
-    } else {
-        std::env::remove_var("PUFFER_HOME");
-    }
 }
 
 #[test]
@@ -376,11 +358,9 @@ fn ask_user_question_uses_prompt_handler_answers() {
 #[test]
 fn team_create_makes_dirs_and_team_delete_removes_them() {
     let tempdir = tempfile::tempdir().unwrap();
-    let _lock = puffer_home_lock().lock().unwrap();
-    let old_home = std::env::var_os("PUFFER_HOME");
     let home = tempdir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
-    std::env::set_var("PUFFER_HOME", &home);
+    let _home = puffer_config::set_puffer_home_override(&home);
     let mut state = temp_state();
     let cwd = state.cwd.clone();
     let created = crate::runtime::claude_tools::workflow::team_create::execute_team_create(
@@ -417,11 +397,6 @@ fn team_create_makes_dirs_and_team_delete_removes_them() {
     assert!(!std::path::Path::new(team_file_path).exists());
     assert!(!task_dir.exists());
     assert!(state.active_team_name.is_none());
-    if let Some(value) = old_home {
-        std::env::set_var("PUFFER_HOME", value);
-    } else {
-        std::env::remove_var("PUFFER_HOME");
-    }
 }
 
 #[test]
@@ -459,11 +434,9 @@ fn enter_worktree_rejects_path_components_in_name() {
 #[test]
 fn team_delete_only_removes_the_current_session_team() {
     let tempdir = tempfile::tempdir().unwrap();
-    let _lock = puffer_home_lock().lock().unwrap();
-    let old_home = std::env::var_os("PUFFER_HOME");
     let home = tempdir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
-    std::env::set_var("PUFFER_HOME", &home);
+    let _home = puffer_config::set_puffer_home_override(&home);
     let mut first = temp_state();
     let mut second = temp_state();
     second.cwd = first.cwd.clone();
@@ -494,12 +467,6 @@ fn team_delete_only_removes_the_current_session_team() {
     assert_eq!(deleted["team_name"], "alpha");
     assert!(!home.join(".claude/teams/alpha").exists());
     assert!(home.join(".claude/teams/beta").exists());
-
-    if let Some(value) = old_home {
-        std::env::set_var("PUFFER_HOME", value);
-    } else {
-        std::env::remove_var("PUFFER_HOME");
-    }
 }
 
 #[test]

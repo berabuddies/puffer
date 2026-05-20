@@ -997,7 +997,9 @@ fn parse_openai_sse_response_streaming_emits_text_deltas() {
 
 #[test]
 fn execute_user_prompt_refreshes_openai_oauth_after_401() {
-    let _guard = refresh_env_lock().lock().unwrap();
+    let _guard = refresh_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let requests = Arc::new(Mutex::new(Vec::new()));

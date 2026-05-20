@@ -18,6 +18,7 @@ fn execute_user_prompt_streaming_surfaces_anthropic_error_type() {
             }
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
                     let mut buffer = [0_u8; 32_768];
                     let _ = stream.read(&mut buffer).unwrap();
                     let body = concat!(
