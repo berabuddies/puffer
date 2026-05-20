@@ -170,10 +170,13 @@
   let selectedModelReady = $derived.by(() => {
     const modelId = selectedModelId?.trim();
     if (!modelId) return false;
-    if (!selectedProviderModelSourceId || isCustomModelId(modelId, selectedProviderModelSourceId)) return true;
+    if (!selectedProviderModelSourceId) return true;
     if (selectedProviderModelsLoadFailed) return true;
-    if (!selectedProviderModelsLoaded || thinkingModels.length === 0) return false;
-    return thinkingModels.some((model) => model.id === modelId && modelSupportsAgentTools(model));
+    if (!selectedProviderModelsLoaded) return false;
+    const current = thinkingModels.find((model) => model.id === modelId);
+    if (current) return modelSupportsAgentTools(current);
+    if (isCustomModelId(modelId, selectedProviderModelSourceId)) return true;
+    return false;
   });
   let selectedModelBlockedReason = $derived.by(() => {
     const label = providerDisplayName(selectedProviderId);
@@ -186,14 +189,15 @@
         ? `Pick a ${label} model before sending.`
         : `Loading ${label} models before sending.`;
     }
-    if (isCustomModelId(modelId, selectedProviderModelSourceId) || !selectedProviderModelSourceId) return null;
+    if (!selectedProviderModelSourceId) return null;
     if (selectedProviderModelsLoadFailed) return null;
     if (!selectedProviderModelsLoaded) return `Loading ${label} models before sending.`;
-    if (thinkingModels.length === 0) return `No ${label} models available.`;
     const current = thinkingModels.find((model) => model.id === modelId);
     if (current && !modelSupportsAgentTools(current)) {
       return `${current.displayName || current.id} does not support agent tools.`;
     }
+    if (isCustomModelId(modelId, selectedProviderModelSourceId)) return null;
+    if (thinkingModels.length === 0) return `No ${label} models available.`;
     return `Updating ${label} model before sending.`;
   });
   let thinkingOptions = $derived(selectedModelInfo?.thinkingOptions ?? []);
@@ -718,6 +722,9 @@
     ) {
       return;
     }
+    const selectedCatalogModel = selectedModelId
+      ? thinkingModels.find((model) => model.id === selectedModelId)
+      : null;
     const defaultModel = settingsSnapshot?.config.defaultModel ?? null;
     const defaultProvider = settingsSnapshot?.config.defaultProvider ?? null;
     const selectedCanonical = canonicalDaemonProviderId(selectedProviderId);
@@ -727,7 +734,13 @@
       defaultCanonical &&
       selectedModelId === normalizeModelIdForProvider(selectedProviderId, defaultModel) &&
       selectedCanonical !== defaultCanonical;
-    if (!isDefaultFromOtherProvider && isCustomModelId(selectedModelId, selectedProviderModelSourceId)) return;
+    if (
+      !selectedCatalogModel &&
+      !isDefaultFromOtherProvider &&
+      isCustomModelId(selectedModelId, selectedProviderModelSourceId)
+    ) {
+      return;
+    }
     const fallback =
       thinkingModels.find((model) => model.isDefault && modelSupportsAgentTools(model)) ??
       thinkingModels.find(modelSupportsAgentTools) ??
