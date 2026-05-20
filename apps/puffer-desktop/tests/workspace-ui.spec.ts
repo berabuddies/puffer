@@ -892,6 +892,34 @@ test("sidebar keeps full session titles for resizable space", async ({ page }) =
   await expect(title).toHaveText(longTitle);
 });
 
+test("workspace agent cards keep full session titles for responsive ellipsis", async ({ page }) => {
+  const longTitle =
+    "Long workspace browser investigation title that should remain complete in the DOM and only ellipsize visually when space runs out";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-long-project-card-title",
+        displayName: longTitle,
+        title: longTitle,
+        cwd: "/tmp/puffer-long-card",
+        folderPath: "/tmp/puffer-long-card",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        activityStatus: "running"
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const project = page.locator(".pf-pw-project").filter({ hasText: "puffer-long-card" });
+  const agent = project.locator(".pf-pw-agent");
+
+  await expect(agent.locator(".title")).toHaveText(longTitle);
+  await expect(agent).toHaveAttribute("type", "button");
+  await expect(agent).toHaveAttribute("title", new RegExp(`^${longTitle} - Running -`));
+});
+
 test("running daemon sessions keep the composer from starting another turn", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
