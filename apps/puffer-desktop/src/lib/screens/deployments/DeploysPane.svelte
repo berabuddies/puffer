@@ -1,12 +1,22 @@
 <script lang="ts">
   import Icon from "../../design/Icon.svelte";
   import StatePill from "./StatePill.svelte";
-  import { historyFor, type Deployment } from "../../data/mockDeployments";
+  import { historyFor, type DeployHistoryItem, type Deployment } from "../../data/mockDeployments";
 
-  type Props = { d: Deployment };
-  let { d }: Props = $props();
+  type Props = {
+    d: Deployment;
+    localHistory?: DeployHistoryItem[];
+    triggerBusy?: boolean;
+    onTriggerDeploy?: () => void;
+  };
+  let {
+    d,
+    localHistory = [],
+    triggerBusy = false,
+    onTriggerDeploy
+  }: Props = $props();
 
-  let history = $derived(historyFor(d));
+  let history = $derived([...localHistory, ...historyFor(d)]);
 </script>
 
 <div class="pf-dep-pane">
@@ -15,8 +25,17 @@
       <h3>Deploy history</h3>
       <p class="sub">{history.length} deploys · keeping last 50</p>
     </div>
-    <button type="button" class="sc-btn" data-variant="outline" data-size="sm">
-      <Icon name="refresh" size={12} />Trigger deploy
+    <button
+      type="button"
+      class="sc-btn"
+      data-variant="outline"
+      data-size="sm"
+      aria-label="Trigger deploy"
+      aria-busy={triggerBusy}
+      disabled={triggerBusy}
+      onclick={() => onTriggerDeploy?.()}
+    >
+      <Icon name="refresh" size={12} />{triggerBusy ? "Triggering" : "Trigger deploy"}
     </button>
   </div>
   <div class="pf-dep-history">

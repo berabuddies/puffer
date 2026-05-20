@@ -14,7 +14,7 @@
   import SecretsPane from "./deployments/SecretsPane.svelte";
   import ProvidersPane from "./deployments/ProvidersPane.svelte";
   import DeploysPane from "./deployments/DeploysPane.svelte";
-  import { DEPLOYMENTS, type Deployment } from "../data/mockDeployments";
+  import { DEPLOYMENTS, type DeployHistoryItem, type Deployment } from "../data/mockDeployments";
 
   type Tab = "askpuffer" | "memory" | "secrets" | "providers" | "deploys";
   let selectedId = $state("d-prod-api");
@@ -32,6 +32,11 @@
   let newDeploymentEnvironment = $state("staging");
   let newDeploymentBranch = $state("main");
   let newDeploymentNameInput = $state<HTMLInputElement | null>(null);
+  let redeployingId = $state<string | null>(null);
+  let redeployStatus = $state("");
+  let redeployTimer = 0;
+  let redeploySequence = $state(1429);
+  let redeployHistory = $state<Record<string, DeployHistoryItem[]>>({});
 
   const providerOptions: { id: Deployment["provider"]; label: string; region: string }[] = [
     { id: "vercel", label: "Vercel", region: "iad1 - us-east" },
@@ -64,6 +69,7 @@
   ];
   onDestroy(() => {
     if (syncTimer) window.clearTimeout(syncTimer);
+    if (redeployTimer) window.clearTimeout(redeployTimer);
   });
 
   function select(id: string) {
@@ -170,6 +176,41 @@
     selectedId = deployment.id;
     tab = "deploys";
     closeNewDeployment();
+  }
+
+  function triggerRedeploy(deployment: Deployment = selected): void {
+    if (!deployment || redeployingId) return;
+    if (redeployTimer) window.clearTimeout(redeployTimer);
+    const nextSequence = redeploySequence + 1;
+    redeploySequence = nextSequence;
+    const run: DeployHistoryItem = {
+      id: `manual-${nextSequence}`,
+      commit: deployment.lastCommit,
+      branch: deployment.branch || "main",
+      deployer: "Otter",
+      state: "deploying",
+      time: "just now",
+      dur: "running",
+      current: true
+    };
+    redeployingId = deployment.id;
+    redeployStatus = `Redeploying ${deployment.name} from ${run.branch}.`;
+    redeployHistory = {
+      ...redeployHistory,
+      [deployment.id]: [run, ...(redeployHistory[deployment.id] ?? [])]
+    };
+    tab = "deploys";
+    redeployTimer = window.setTimeout(() => {
+      redeployHistory = {
+        ...redeployHistory,
+        [deployment.id]: (redeployHistory[deployment.id] ?? []).map((item) =>
+          item.id === run.id ? { ...item, state: "healthy", dur: "0m 12s" } : item
+        )
+      };
+      redeployStatus = `Redeploy complete for ${deployment.name}.`;
+      redeployingId = null;
+      redeployTimer = 0;
+    }, 350);
   }
 
   $effect(() => {
@@ -453,11 +494,25 @@
           </div>
         </div>
         <div class="pf-dep-detail-head-right">
+          {#if redeployStatus}
+            <div class="pf-dep-action-status" role="status" aria-live="polite">
+              {redeployStatus}
+            </div>
+          {/if}
           <button type="button" class="sc-btn" data-variant="ghost" data-size="sm">
             <Icon name="external" size={12} />Open
           </button>
-          <button type="button" class="sc-btn" data-variant="outline" data-size="sm">
-            <Icon name="refresh" size={12} />Redeploy
+          <button
+            type="button"
+            class="sc-btn"
+            data-variant="outline"
+            data-size="sm"
+            aria-label="Redeploy"
+            aria-busy={redeployingId === selected.id}
+            disabled={redeployingId !== null}
+            onclick={() => triggerRedeploy(selected)}
+          >
+            <Icon name="refresh" size={12} />{redeployingId === selected.id ? "Redeploying" : "Redeploy"}
           </button>
         </div>
       </div>
@@ -497,7 +552,12 @@
         {:else if tab === "providers"}
           <ProvidersPane d={selected} />
         {:else if tab === "deploys"}
-          <DeploysPane d={selected} />
+          <DeploysPane
+            d={selected}
+            localHistory={redeployHistory[selected.id] ?? []}
+            triggerBusy={redeployingId === selected.id}
+            onTriggerDeploy={() => triggerRedeploy(selected)}
+          />
         {/if}
       </div>
     </div>

@@ -242,6 +242,38 @@ test("deployment new deployment button creates a local draft", async ({ page }) 
   await expect(page.getByRole("tab", { name: "Deploys" })).toHaveAttribute("aria-selected", "true");
 });
 
+test("deployment redeploy controls insert a live deploy history item", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Deployments" }).click();
+  const detailHeader = page.locator(".pf-dep-detail-head");
+  const redeploy = detailHeader.getByRole("button", { name: "Redeploy" });
+
+  await redeploy.click();
+
+  await expect(page.getByRole("tab", { name: "Deploys" })).toHaveAttribute("aria-selected", "true");
+  await expect(redeploy).toBeDisabled();
+  await expect(redeploy).toHaveAttribute("aria-busy", "true");
+  await expect(detailHeader.getByRole("status")).toContainText("Redeploying stripe-api · production from main.");
+  const firstRun = page.locator(".pf-dep-history-row").first();
+  await expect(firstRun).toContainText("manual-1430");
+  await expect(firstRun).toContainText("Otter");
+  await expect(firstRun).toContainText(/deploying/i);
+
+  await expect(detailHeader.getByRole("status")).toContainText("Redeploy complete for stripe-api · production.");
+  await expect(redeploy).toBeEnabled();
+  await expect(redeploy).toHaveAttribute("aria-busy", "false");
+  await expect(firstRun).toContainText(/healthy/i);
+  await expect(firstRun).toContainText("0m 12s");
+
+  const trigger = page.getByRole("button", { name: "Trigger deploy" });
+  await trigger.click();
+  await expect(trigger).toBeDisabled();
+  await expect(page.locator(".pf-dep-history-row").first()).toContainText("manual-1431");
+});
+
 test("deployment detail tabs expose selected state", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
