@@ -86,6 +86,7 @@
   let showDevtools = $state(false);
   let devtoolsView = $state<"console" | "network">("console");
   let closingTabs = $state<ClosingTabTarget[]>([]);
+  let tabOpenPending = $state(false);
   let pendingBrowserCommands = $state<PendingBrowserCommand[]>([]);
 
   let disposers: Array<() => void> = [];
@@ -248,6 +249,7 @@
       urlDraft = "about:blank";
       showDevtools = false;
       devtoolsView = "console";
+      tabOpenPending = false;
       pendingBrowserCommands = [];
       resetPointer(activePointerId ?? undefined);
       disposeActiveSubscriptions();
@@ -276,6 +278,7 @@
     activeRootSessionId = nextSessionId;
     activeEventSessionId = "";
     disposeSessionSubscriptions();
+    tabOpenPending = false;
     pendingBrowserCommands = [];
     clearCursorTimer();
     pendingNavigationSessions.clear();
@@ -913,12 +916,14 @@
   }
 
   async function addTab() {
+    if (tabOpenPending) return;
     const size = measureViewport() ?? lastResize;
     const tabId = `tab-${nextTabNumber}`;
     nextTabNumber += 1;
     const requestedAtVersion = tabStateVersion;
     const requestedAtGeneration = sessionGeneration;
     const requestedSessionId = sessionId;
+    tabOpenPending = true;
     try {
       const info = await browserTabOpen({
         sessionId: requestedSessionId,
@@ -948,6 +953,14 @@
         activeRootSessionId !== requestedSessionId
       ) return;
       error = String(err);
+    } finally {
+      if (
+        !disposed &&
+        requestedAtGeneration === sessionGeneration &&
+        activeRootSessionId === requestedSessionId
+      ) {
+        tabOpenPending = false;
+      }
     }
   }
 
@@ -1421,7 +1434,7 @@
         </button>
       </div>
     {/each}
-    <button class="pf-browser-tab-add" type="button" title="New tab" onclick={() => void addTab()}>
+    <button class="pf-browser-tab-add" type="button" title="New tab" disabled={tabOpenPending} onclick={() => void addTab()}>
       <Icon name="plus" size={13} />
     </button>
   </div>
@@ -1499,7 +1512,7 @@
       ></canvas>
       {#if !activeTab}
         <div class="pf-browser-empty">
-          <button class="pf-browser-empty-action" type="button" onclick={() => void addTab()}>New tab</button>
+          <button class="pf-browser-empty-action" type="button" disabled={tabOpenPending} onclick={() => void addTab()}>New tab</button>
         </div>
       {:else if !connected && !error}
         <div class="pf-browser-empty">Starting Chrome...</div>
