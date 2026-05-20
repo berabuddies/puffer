@@ -66,6 +66,59 @@ pub fn build_login_url(config: &WorldAgentLoginConfig) -> String {
     url.to_string()
 }
 
+/// Parsed callback fields. Each field is `None` when its parameter
+/// was absent from the callback URL.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorldAgentCallback {
+    /// `token` query parameter — the access token JWT.
+    pub token: Option<String>,
+    /// `refresh_token` query parameter — the refresh token JWT.
+    pub refresh_token: Option<String>,
+    /// `state` query parameter — original `client_state` echoed back.
+    pub state: Option<String>,
+    /// `error` query parameter — populated when login failed.
+    pub error: Option<String>,
+    /// `error_description` query parameter — populated on failure.
+    pub error_description: Option<String>,
+}
+
+/// Extracts `token`, `refresh_token`, `state`, `error`, and
+/// `error_description` from a callback URL or raw query string.
+pub fn parse_callback_input(input: &str) -> WorldAgentCallback {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return WorldAgentCallback::default();
+    }
+    let mut callback = WorldAgentCallback::default();
+    let pairs: Box<dyn Iterator<Item = (String, String)>> =
+        if let Ok(url) = url::Url::parse(trimmed) {
+            Box::new(
+                url.query_pairs()
+                    .into_owned()
+                    .collect::<Vec<_>>()
+                    .into_iter(),
+            )
+        } else {
+            Box::new(
+                url::form_urlencoded::parse(trimmed.as_bytes())
+                    .into_owned()
+                    .collect::<Vec<_>>()
+                    .into_iter(),
+            )
+        };
+    for (key, value) in pairs {
+        match key.as_str() {
+            "token" => callback.token = Some(value),
+            "refresh_token" => callback.refresh_token = Some(value),
+            "state" => callback.state = Some(value),
+            "error" => callback.error = Some(value),
+            "error_description" => callback.error_description = Some(value),
+            _ => {}
+        }
+    }
+    callback
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,5 +134,33 @@ mod tests {
         assert!(url.starts_with("https://auth-worldrouter.vercel.app/login?"));
         assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A1456%2Fcallback"));
         assert!(url.contains("client_state=state-xyz"));
+    }
+
+    #[test]
+    fn parse_callback_input_extracts_token_refresh_state() {
+        let parsed = parse_callback_input(
+            "http://127.0.0.1:1456/callback?token=acc&refresh_token=ref&state=xyz",
+        );
+        assert_eq!(parsed.token.as_deref(), Some("acc"));
+        assert_eq!(parsed.refresh_token.as_deref(), Some("ref"));
+        assert_eq!(parsed.state.as_deref(), Some("xyz"));
+        assert!(parsed.error.is_none());
+    }
+
+    #[test]
+    fn parse_callback_input_extracts_error() {
+        let parsed = parse_callback_input(
+            "http://127.0.0.1:1456/callback?error=invalid_state&error_description=bad+state&state=xyz",
+        );
+        assert_eq!(parsed.error.as_deref(), Some("invalid_state"));
+        assert_eq!(parsed.error_description.as_deref(), Some("bad state"));
+        assert!(parsed.token.is_none());
+    }
+
+    #[test]
+    fn parse_callback_input_handles_raw_query_string() {
+        let parsed = parse_callback_input("token=acc&state=xyz");
+        assert_eq!(parsed.token.as_deref(), Some("acc"));
+        assert_eq!(parsed.state.as_deref(), Some("xyz"));
     }
 }

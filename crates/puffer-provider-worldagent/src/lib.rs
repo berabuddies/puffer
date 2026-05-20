@@ -8,7 +8,8 @@
 mod auth;
 
 pub use auth::{
-    build_login_url, generate_client_state, WorldAgentLoginConfig,
+    build_login_url, generate_client_state, parse_callback_input,
+    WorldAgentCallback, WorldAgentLoginConfig,
     WORLDAGENT_AUTH_BASE_URL, WORLDAGENT_AUTH_URL_OVERRIDE_ENV,
     WORLDAGENT_CALLBACK_PATH, WORLDAGENT_CALLBACK_PORT,
     WORLDAGENT_DEFAULT_REDIRECT_URI,
