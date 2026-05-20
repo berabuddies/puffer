@@ -20,7 +20,10 @@ function focusableElements(node: HTMLElement): HTMLElement[] {
 }
 
 function focusInitial(node: HTMLElement) {
-  const first = focusableElements(node)[0] ?? node;
+  const preferred = node.querySelector<HTMLElement>("[data-autofocus], [autofocus]");
+  const first = preferred && isFocusable(preferred)
+    ? preferred
+    : focusableElements(node)[0] ?? node;
   first.focus({ preventScroll: true });
 }
 

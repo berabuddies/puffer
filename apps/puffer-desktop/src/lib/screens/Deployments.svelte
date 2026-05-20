@@ -32,7 +32,6 @@
   let newDeploymentEnvironment = $state("staging");
   let newDeploymentBranch = $state("main");
   let newDeploymentTrigger = $state<HTMLButtonElement | null>(null);
-  let newDeploymentNameInput = $state<HTMLInputElement | null>(null);
   let redeployingId = $state<string | null>(null);
   let detailActionStatus = $state("");
   let redeployTimer = 0;
@@ -144,7 +143,6 @@
     newDeploymentEnvironment = "staging";
     newDeploymentBranch = "main";
     showNewDeployment = true;
-    window.setTimeout(() => newDeploymentNameInput?.focus({ preventScroll: true }), 20);
   }
 
   function closeNewDeployment(): void {
@@ -388,8 +386,8 @@
               <span class="pf-field-input">
                 <Icon name="rocket" size={13} />
                 <input
-                  bind:this={newDeploymentNameInput}
                   aria-label="Service name"
+                  data-autofocus
                   bind:value={newDeploymentName}
                   placeholder="checkout-worker"
                 />
