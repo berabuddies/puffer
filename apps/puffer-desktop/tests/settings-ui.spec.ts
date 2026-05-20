@@ -312,6 +312,52 @@ test("providers page marks connected and disconnected providers", async ({ page 
   await expect(anthropicCard.getByRole("button", { name: "Connect" })).toBeVisible();
 });
 
+test("provider model picker recovers when refreshed auth changes providers", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "anthropic",
+        kind: "api_key",
+        email: null,
+        expiresAtMs: null,
+        scopes: [],
+        planType: null,
+        organizationName: null
+      }
+    ]
+  });
+  daemon.setSettingsConfig({
+    defaultProvider: "codex",
+    defaultModel: "test-model"
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Providers" }).click();
+
+  const pane = page.locator(".pf-settings-pane");
+  await expect(pane.getByLabel("Provider")).toHaveValue("anthropic");
+  await expect(pane.getByLabel("Model")).toHaveValue("test-model");
+
+  daemon.setAuthStatuses([
+    {
+      providerId: "codex",
+      kind: "oauth",
+      email: "tester@example.com",
+      expiresAtMs: null,
+      scopes: [],
+      planType: "test",
+      organizationName: null
+    }
+  ]);
+  await pane.getByRole("button", { name: "Refresh" }).click();
+
+  await expect(pane.getByLabel("Provider")).toHaveValue("codex");
+  await expect(pane.getByLabel("Model")).toHaveValue("test-model");
+  await expect(pane.getByRole("button", { name: "Save default" })).toBeEnabled();
+});
+
 test("default model save is ignored while already saving", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayResponse("update_config", () => true, 500);

@@ -378,6 +378,8 @@
     const nextKey = [
       props.daemonUrl ?? "",
       props.snapshot?.workspaceRoot ?? "",
+      (props.snapshot?.auth ?? []).map((auth) => auth.providerId).sort().join(","),
+      (props.snapshot?.providers ?? []).map((provider) => provider.id).sort().join(","),
       props.snapshot?.config.defaultProvider ?? "",
       props.snapshot?.config.defaultModel ?? ""
     ].join("\0");
@@ -431,6 +433,9 @@
   // initial settings render stays a single RPC (the snapshot).
   $effect(() => {
     if (!daemonReachable) return;
+    if (section === "providers" && !modelPickerProvider && defaultRouteProviders.length > 0) {
+      modelPickerProvider = defaultRouteProviderId();
+    }
     if (section === "permissions" && permissionSnapshot === null && !permissionLoading) {
       void loadPermissionSnapshot();
     }
