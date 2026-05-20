@@ -179,6 +179,8 @@
   let sessionEventUnlisten: UnlistenFn | null = null;
   let subscribedSessionId: string | null = null;
   let sessionSubscriptionGeneration = 0;
+  let liveSidebarSessionEventUnlisteners: Record<string, UnlistenFn> = {};
+  let liveSidebarSessionSubscriptionGeneration = 0;
   let connectionState = $state<ConnectionState>("idle");
   let reconnectBusy = $state(false);
   let reconnectError = $state<string | null>(null);
@@ -358,6 +360,52 @@
     if (turnId && live.turnId && live.turnId !== turnId) return;
     const { [sessionId]: _drop, ...rest } = liveSidebarAgentsById;
     liveSidebarAgentsById = rest;
+  }
+
+  function clearLiveSidebarSessionSubscriptions() {
+    liveSidebarSessionSubscriptionGeneration += 1;
+    for (const unlisten of Object.values(liveSidebarSessionEventUnlisteners)) {
+      unlisten();
+    }
+    liveSidebarSessionEventUnlisteners = {};
+  }
+
+  function liveSidebarSessionSubscriptionTargets(): string[] {
+    return Object.keys(liveSidebarAgentsById)
+      .sort();
+  }
+
+  async function ensureLiveSidebarSessionSubscriptions(targetIds: string[]) {
+    const generation = ++liveSidebarSessionSubscriptionGeneration;
+    const targets = new Set(targetIds);
+    const retained: Record<string, UnlistenFn> = {};
+    for (const [sessionId, unlisten] of Object.entries(liveSidebarSessionEventUnlisteners)) {
+      if (targets.has(sessionId)) {
+        retained[sessionId] = unlisten;
+      } else {
+        unlisten();
+      }
+    }
+    liveSidebarSessionEventUnlisteners = retained;
+
+    for (const sessionId of targetIds) {
+      if (liveSidebarSessionEventUnlisteners[sessionId]) continue;
+      const unlisten = await subscribeSessionEvents(sessionId, (ev) => {
+        if (selectedSession?.id === sessionId) return;
+        handleSessionEvent(sessionId, ev);
+      });
+      if (
+        generation !== liveSidebarSessionSubscriptionGeneration ||
+        !liveSidebarSessionSubscriptionTargets().includes(sessionId)
+      ) {
+        unlisten();
+        continue;
+      }
+      liveSidebarSessionEventUnlisteners = {
+        ...liveSidebarSessionEventUnlisteners,
+        [sessionId]: unlisten
+      };
+    }
   }
 
   function applySidebarSessionEvent(sid: string, ev: SessionStreamEvent) {
@@ -935,6 +983,7 @@
         sessionEventUnlisten();
         sessionEventUnlisten = null;
       }
+      clearLiveSidebarSessionSubscriptions();
       window.removeEventListener("blur", armRecapBlurTimer);
       window.removeEventListener("focus", cancelRecapBlurTimer);
       window.removeEventListener("keydown", handleShellKeydown, true);
@@ -1557,6 +1606,7 @@
       sessionEventUnlisten();
       sessionEventUnlisten = null;
     }
+    clearLiveSidebarSessionSubscriptions();
     subscribedSessionId = null;
   }
 
@@ -2601,6 +2651,11 @@
 
   $effect(() => {
     void ensureSessionSubscription();
+  });
+
+  $effect(() => {
+    const targetIds = liveSidebarSessionSubscriptionTargets();
+    void ensureLiveSidebarSessionSubscriptions(targetIds);
   });
 </script>
 

@@ -453,10 +453,6 @@ test("sidebar keeps non-selected running agent live while another session is ope
     turnId: "turn-session-alpha-sidebar-live",
     assistantText: "Alpha sidebar turn complete"
   });
-  daemon.emit("workspace:sessions:changed", {
-    sessionId: "session-alpha-sidebar-live",
-    reason: "turn_complete"
-  });
   await expect(alphaRow.locator('.state[data-state="idle"]')).toContainText("idle");
 
   await openSession(page, /Alpha sidebar live/);
