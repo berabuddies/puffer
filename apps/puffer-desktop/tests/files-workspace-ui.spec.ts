@@ -255,8 +255,16 @@ function seedPreviewFiles(daemon: FakeDaemon): void {
     "/tmp/puffer/styled-old-word.doc",
     makeLegacyOfficeBase64("unstyled fallback"),
     undefined,
-    ["Styled legacy Word heading", "Bold legacy note"],
-    "<h1>Styled legacy Word heading</h1><p><b>Bold legacy note</b></p>"
+    ["Styled legacy Word heading", "Italic class note"],
+    [
+      "<html><head><style>",
+      "p.p1 {font-weight: bold; text-align: center; margin: 0px 0px 12px 0px;}",
+      "span.s1 {font-style: italic; color: #334155;}",
+      "</style></head><body>",
+      '<p class="p1">Styled legacy Word heading</p>',
+      '<p><span class="s1">Italic class note</span></p>',
+      "</body></html>"
+    ].join("")
   );
   daemon.seedBinaryFile(
     "/tmp/puffer/old-deck.ppt",
@@ -411,8 +419,13 @@ test("Files tab previews common document and data formats", async ({ page }) => 
 
   await page.getByRole("button", { name: "styled-old-word.doc" }).click();
   const styledPreview = page.getByLabel("Legacy Word preview");
-  await expect(styledPreview.locator("h1")).toContainText("Styled legacy Word heading");
-  await expect(styledPreview.locator("b")).toContainText("Bold legacy note");
+  const styledHeading = styledPreview.getByText("Styled legacy Word heading");
+  const styledNote = styledPreview.getByText("Italic class note");
+  await expect(styledHeading).toBeVisible();
+  await expect(styledNote).toBeVisible();
+  await expect(styledHeading).toHaveCSS("text-align", "center");
+  await expect(styledHeading).toHaveCSS("font-weight", /^(700|bold)$/);
+  await expect(styledNote).toHaveCSS("font-style", "italic");
 
   await page.getByRole("button", { name: "old-deck.ppt" }).click();
   await expect(page.getByLabel("Legacy PowerPoint preview")).toContainText(

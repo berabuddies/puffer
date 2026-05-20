@@ -526,7 +526,8 @@ function decodeHtmlEntities(input: string): string {
 
 function sanitizePreviewHtml(input: string): string | undefined {
   const parsed = new DOMParser().parseFromString(input, "text/html");
-  for (const node of Array.from(parsed.querySelectorAll("script, iframe, object, embed, link, meta"))) {
+  inlinePreviewClassStyles(parsed);
+  for (const node of Array.from(parsed.querySelectorAll("script, iframe, object, embed, link, meta, style"))) {
     node.remove();
   }
   for (const element of Array.from(parsed.body.querySelectorAll("*"))) {
@@ -550,15 +551,50 @@ function sanitizePreviewHtml(input: string): string | undefined {
   return html ? html.slice(0, 200_000) : undefined;
 }
 
+function inlinePreviewClassStyles(document: Document): void {
+  const classStyles = collectPreviewClassStyles(document);
+  if (classStyles.size === 0) return;
+  for (const element of Array.from(document.body.querySelectorAll("*"))) {
+    const rules = Array.from(element.classList).flatMap((className) => classStyles.get(className) ?? []);
+    if (rules.length === 0) continue;
+    const existing = element.getAttribute("style") ?? "";
+    const style = sanitizeStyleAttribute([...rules, existing].filter(Boolean).join("; "));
+    if (style) element.setAttribute("style", style);
+  }
+}
+
+function collectPreviewClassStyles(document: Document): Map<string, string[]> {
+  const classStyles = new Map<string, string[]>();
+  for (const style of Array.from(document.querySelectorAll("style"))) {
+    const css = style.textContent ?? "";
+    const rules = css.matchAll(/([^{}]+)\{([^}]*)\}/g);
+    for (const match of rules) {
+      const selector = match[1].trim();
+      const className = selector.match(/^(?:[a-z][\w-]*)?\.([A-Za-z0-9_-]+)$/i)?.[1];
+      if (!className) continue;
+      const declarations = sanitizeStyleAttribute(match[2]);
+      if (!declarations) continue;
+      classStyles.set(className, [...(classStyles.get(className) ?? []), declarations]);
+    }
+  }
+  return classStyles;
+}
+
 function sanitizeStyleAttribute(input: string): string {
   const allowed = new Set([
     "background-color",
     "color",
+    "font",
     "font-family",
     "font-size",
     "font-style",
     "font-weight",
+    "line-height",
+    "margin",
+    "margin-bottom",
     "margin-left",
+    "margin-right",
+    "margin-top",
     "padding-left",
     "text-align",
     "text-decoration"
