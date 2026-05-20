@@ -33,7 +33,7 @@
   let newDeploymentBranch = $state("main");
   let newDeploymentNameInput = $state<HTMLInputElement | null>(null);
   let redeployingId = $state<string | null>(null);
-  let redeployStatus = $state("");
+  let detailActionStatus = $state("");
   let redeployTimer = 0;
   let redeploySequence = $state(1429);
   let redeployHistory = $state<Record<string, DeployHistoryItem[]>>({});
@@ -178,6 +178,22 @@
     closeNewDeployment();
   }
 
+  function deploymentPublicUrl(value: string): string | null {
+    const trimmed = value.trim();
+    if (!trimmed || trimmed === "—") return null;
+    return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  }
+
+  function openDeployment(deployment: Deployment = selected): void {
+    const url = deploymentPublicUrl(deployment.url);
+    if (!url) {
+      detailActionStatus = `${deployment.name} has no public URL to open.`;
+      return;
+    }
+    window.open(url, "_blank", "noopener,noreferrer");
+    detailActionStatus = `Opened ${deployment.name} at ${url}.`;
+  }
+
   function triggerRedeploy(deployment: Deployment = selected): void {
     if (!deployment || redeployingId) return;
     if (redeployTimer) window.clearTimeout(redeployTimer);
@@ -194,7 +210,7 @@
       current: true
     };
     redeployingId = deployment.id;
-    redeployStatus = `Redeploying ${deployment.name} from ${run.branch}.`;
+    detailActionStatus = `Redeploying ${deployment.name} from ${run.branch}.`;
     redeployHistory = {
       ...redeployHistory,
       [deployment.id]: [run, ...(redeployHistory[deployment.id] ?? [])]
@@ -207,7 +223,7 @@
           item.id === run.id ? { ...item, state: "healthy", dur: "0m 12s" } : item
         )
       };
-      redeployStatus = `Redeploy complete for ${deployment.name}.`;
+      detailActionStatus = `Redeploy complete for ${deployment.name}.`;
       redeployingId = null;
       redeployTimer = 0;
     }, 350);
@@ -494,12 +510,18 @@
           </div>
         </div>
         <div class="pf-dep-detail-head-right">
-          {#if redeployStatus}
+          {#if detailActionStatus}
             <div class="pf-dep-action-status" role="status" aria-live="polite">
-              {redeployStatus}
+              {detailActionStatus}
             </div>
           {/if}
-          <button type="button" class="sc-btn" data-variant="ghost" data-size="sm">
+          <button
+            type="button"
+            class="sc-btn"
+            data-variant="ghost"
+            data-size="sm"
+            onclick={() => openDeployment(selected)}
+          >
             <Icon name="external" size={12} />Open
           </button>
           <button

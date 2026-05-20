@@ -274,6 +274,56 @@ test("deployment redeploy controls insert a live deploy history item", async ({ 
   await expect(page.locator(".pf-dep-history-row").first()).toContainText("manual-1431");
 });
 
+test("deployment open button opens public URLs and reports unavailable targets", async ({ page }) => {
+  await page.addInitScript(() => {
+    const target = window as typeof window & {
+      __openedDeploymentUrls?: Array<{ url: string; target?: string; features?: string }>;
+    };
+    target.__openedDeploymentUrls = [];
+    target.open = ((url?: string | URL, frameTarget?: string, features?: string) => {
+      target.__openedDeploymentUrls?.push({
+        url: String(url),
+        target: frameTarget,
+        features
+      });
+      return null;
+    }) as typeof window.open;
+  });
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Deployments" }).click();
+  const detailHeader = page.locator(".pf-dep-detail-head");
+
+  await detailHeader.getByRole("button", { name: "Open" }).click();
+
+  await expect(detailHeader.getByRole("status")).toContainText(
+    "Opened stripe-api · production at https://api.puffer.app."
+  );
+  await expect.poll(async () =>
+    page.evaluate(() =>
+      (window as typeof window & {
+        __openedDeploymentUrls?: Array<{ url: string; target?: string; features?: string }>;
+      }).__openedDeploymentUrls ?? []
+    )
+  ).toEqual([{ url: "https://api.puffer.app", target: "_blank", features: "noopener,noreferrer" }]);
+
+  await page.locator(".pf-dep-row").filter({ hasText: "infra · shared" }).click();
+  await detailHeader.getByRole("button", { name: "Open" }).click();
+
+  await expect(detailHeader.getByRole("status")).toContainText(
+    "infra · shared has no public URL to open."
+  );
+  await expect.poll(async () =>
+    page.evaluate(() =>
+      (window as typeof window & {
+        __openedDeploymentUrls?: Array<{ url: string; target?: string; features?: string }>;
+      }).__openedDeploymentUrls ?? []
+    )
+  ).toEqual([{ url: "https://api.puffer.app", target: "_blank", features: "noopener,noreferrer" }]);
+});
+
 test("deployment detail tabs expose selected state", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
