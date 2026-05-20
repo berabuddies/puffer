@@ -594,6 +594,66 @@ test("Files tab previews common document and data formats", async ({ page }) => 
   await expect(page.getByLabel("Legacy Word preview")).toContainText("Owner: Otter");
 });
 
+test("Files tab PDF zoom is immediate and page-limit status remains readable", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  seedPreviewFiles(daemon);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openFilesPanel(page);
+
+  await page.getByRole("button", { name: "long.pdf" }).click();
+  const pdfPreview = page.getByLabel("PDF preview");
+  await expect(pdfPreview).toBeVisible();
+  await expectCanvasHasInk(page, 'canvas[aria-label="PDF page 1"]');
+
+  const pageLimit = pdfPreview.getByText("Showing first 20 of 29 pages.");
+  await expect(pageLimit).toBeVisible();
+  const controls = pdfPreview.getByRole("group", { name: "PDF zoom controls" });
+  await expect(controls).toBeVisible();
+  await expect(page.locator('canvas[aria-label^="PDF page"]')).toHaveCount(20);
+
+  const contrast = await pageLimit.evaluate((node) => {
+    const parseRgb = (value: string): [number, number, number] => {
+      const match = value.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+      if (!match) return [0, 0, 0];
+      return [Number(match[1]), Number(match[2]), Number(match[3])];
+    };
+    const luminance = ([red, green, blue]: [number, number, number]): number => {
+      const channels = [red, green, blue].map((channel) => {
+        const normalized = channel / 255;
+        return normalized <= 0.03928
+          ? normalized / 12.92
+          : ((normalized + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+    };
+    const style = getComputedStyle(node);
+    const foreground = luminance(parseRgb(style.color));
+    const background = luminance(parseRgb(style.backgroundColor));
+    return (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05);
+  });
+  expect(contrast).toBeGreaterThanOrEqual(4.5);
+
+  const initialWidth = await page.locator('canvas[aria-label="PDF page 1"]').evaluate((canvas) =>
+    Math.round(canvas.getBoundingClientRect().width)
+  );
+  await pdfPreview.evaluate((node) => {
+    node.scrollTop = 520;
+  });
+  await expect(controls).toBeVisible();
+  await controls.getByRole("button", { name: "Zoom in" }).click();
+  await expect(controls.getByText("110%")).toBeVisible();
+  await expect(pageLimit).toBeVisible({ timeout: 100 });
+  await expect(page.locator('canvas[aria-label^="PDF page"]')).toHaveCount(20, { timeout: 100 });
+  await expect.poll(async () =>
+    page.locator('canvas[aria-label="PDF page 1"]').evaluate((canvas) =>
+      Math.round(canvas.getBoundingClientRect().width)
+    )
+  ).toBeGreaterThan(initialWidth);
+});
+
 test("Files tab shows PDF text fallback while renderer assets are still loading", async ({ page }) => {
   const daemon = new FakeDaemon();
   seedPreviewFiles(daemon);

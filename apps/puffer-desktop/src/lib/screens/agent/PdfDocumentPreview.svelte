@@ -1,11 +1,19 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
+  import RotateCcwIcon from "lucide-svelte/icons/rotate-ccw";
+  import ZoomInIcon from "lucide-svelte/icons/zoom-in";
+  import ZoomOutIcon from "lucide-svelte/icons/zoom-out";
   import type { PDFDocumentLoadingTask } from "pdfjs-dist";
 
   type Props = {
     base64: string;
     textLines?: string[];
   };
+
+  const PDF_RENDER_SCALE = 1.35;
+  const PDF_MIN_ZOOM = 0.5;
+  const PDF_MAX_ZOOM = 2;
+  const PDF_ZOOM_STEP = 0.1;
 
   let { base64, textLines = [] }: Props = $props();
 
@@ -15,7 +23,6 @@
   let renderedPages = $state(0);
   let zoom = $state(1);
   let zoomPercent = $derived(Math.round(zoom * 100));
-  let renderScale = $derived(1.35 * zoom);
   let generation = 0;
   let loadingTask: PDFDocumentLoadingTask | null = null;
   let showTextFallback = $derived(textLines.some((line) => line.trim() && line.trim() !== "No text found."));
@@ -40,11 +47,10 @@
   $effect(() => {
     const target = host;
     const source = base64;
-    const scale = renderScale;
     if (!target || !source) return;
 
     const current = ++generation;
-    renderPdf(target, source, current, scale);
+    renderPdf(target, source, current);
   });
 
   let lastSource = $state("");
@@ -53,6 +59,13 @@
     if (source === lastSource) return;
     lastSource = source;
     zoom = 1;
+  });
+
+  $effect(() => {
+    const target = host;
+    const currentZoom = zoom;
+    if (!target) return;
+    applyZoom(target, currentZoom);
   });
 
   onDestroy(() => {
@@ -71,14 +84,27 @@
   }
 
   function setZoom(next: number): void {
-    zoom = Math.max(0.5, Math.min(2, Math.round(next * 10) / 10));
+    zoom = Math.max(PDF_MIN_ZOOM, Math.min(PDF_MAX_ZOOM, Math.round(next * 10) / 10));
+  }
+
+  function applyCanvasZoom(canvas: HTMLCanvasElement, currentZoom: number): void {
+    const baseWidth = Number(canvas.dataset.pdfBaseWidth ?? 0);
+    const baseHeight = Number(canvas.dataset.pdfBaseHeight ?? 0);
+    if (!baseWidth || !baseHeight) return;
+    canvas.style.width = `${Math.floor(baseWidth * currentZoom)}px`;
+    canvas.style.height = `${Math.floor(baseHeight * currentZoom)}px`;
+  }
+
+  function applyZoom(target: HTMLDivElement, currentZoom: number): void {
+    target
+      .querySelectorAll<HTMLCanvasElement>("canvas[data-pdf-base-width][data-pdf-base-height]")
+      .forEach((canvas) => applyCanvasZoom(canvas, currentZoom));
   }
 
   async function renderPdf(
     target: HTMLDivElement,
     source: string,
-    current: number,
-    scale: number
+    current: number
   ): Promise<void> {
     target.replaceChildren();
     error = null;
@@ -105,7 +131,7 @@
       for (let pageNumber = 1; pageNumber <= maxPages; pageNumber += 1) {
         if (current !== generation) return;
         const page = await pdf.getPage(pageNumber);
-        const viewport = page.getViewport({ scale });
+        const viewport = page.getViewport({ scale: PDF_RENDER_SCALE });
         const wrapper = document.createElement("section");
         wrapper.className = "pdf-canvas-page";
 
@@ -120,10 +146,13 @@
         const context = canvas.getContext("2d");
         if (!context) throw new Error("Canvas rendering is unavailable");
         const outputScale = window.devicePixelRatio || 1;
+        const baseWidth = Math.floor(viewport.width);
+        const baseHeight = Math.floor(viewport.height);
         canvas.width = Math.floor(viewport.width * outputScale);
         canvas.height = Math.floor(viewport.height * outputScale);
-        canvas.style.width = `${Math.floor(viewport.width)}px`;
-        canvas.style.height = `${Math.floor(viewport.height)}px`;
+        canvas.dataset.pdfBaseWidth = String(baseWidth);
+        canvas.dataset.pdfBaseHeight = String(baseHeight);
+        applyCanvasZoom(canvas, zoom);
         wrapper.appendChild(canvas);
         target.appendChild(wrapper);
 
@@ -148,14 +177,27 @@
 <div class="pdf-renderer">
   <div class="pdf-controls-row">
     <div class="pdf-toolbar" role="group" aria-label="PDF zoom controls">
-      <button type="button" aria-label="Zoom out" onclick={() => setZoom(zoom - 0.1)} disabled={zoom <= 0.5}>
-        -
+      <button
+        type="button"
+        aria-label="Zoom out"
+        title="Zoom out"
+        onclick={() => setZoom(zoom - PDF_ZOOM_STEP)}
+        disabled={zoom <= PDF_MIN_ZOOM}
+      >
+        <ZoomOutIcon size={14} strokeWidth={2} />
       </button>
-      <button type="button" aria-label="Reset zoom" onclick={() => setZoom(1)}>
-        {zoomPercent}%
+      <button type="button" class="zoom-reset" aria-label="Reset zoom" title="Reset zoom" onclick={() => setZoom(1)}>
+        <RotateCcwIcon size={13} strokeWidth={2} />
+        <span>{zoomPercent}%</span>
       </button>
-      <button type="button" aria-label="Zoom in" onclick={() => setZoom(zoom + 0.1)} disabled={zoom >= 2}>
-        +
+      <button
+        type="button"
+        aria-label="Zoom in"
+        title="Zoom in"
+        onclick={() => setZoom(zoom + PDF_ZOOM_STEP)}
+        disabled={zoom >= PDF_MAX_ZOOM}
+      >
+        <ZoomInIcon size={14} strokeWidth={2} />
       </button>
     </div>
     {#if status}
@@ -185,20 +227,21 @@
 
   .pdf-controls-row {
     position: sticky;
-    top: 0;
+    top: 8px;
+    left: 8px;
     z-index: 3;
     display: inline-flex;
     flex-wrap: wrap;
     align-items: center;
-    justify-content: center;
-    justify-self: center;
+    justify-content: flex-start;
+    justify-self: start;
     gap: 8px;
     max-width: 100%;
     padding: 6px;
-    border: 1px solid #d1d5db;
+    border: 1px solid #cbd5e1;
     border-radius: 8px;
-    background: #fff;
-    box-shadow: 0 8px 24px rgb(15 23 42 / 0.18);
+    background: #ffffff;
+    box-shadow: 0 10px 28px rgb(15 23 42 / 0.22);
     color: #111827;
   }
 
@@ -207,17 +250,21 @@
     align-items: center;
     gap: 4px;
     padding: 2px;
-    border: 1px solid #d1d5db;
+    border: 1px solid var(--border);
     border-radius: 7px;
-    background: #f3f4f6;
+    background: #eef2f7;
   }
 
   .pdf-toolbar button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
     min-width: 34px;
-    height: 26px;
-    border: 1px solid transparent;
+    height: 28px;
+    border: 1px solid var(--border);
     border-radius: 5px;
-    background: #fff;
+    background: #ffffff;
     color: #111827;
     cursor: pointer;
     font: inherit;
@@ -226,9 +273,14 @@
     line-height: 1;
   }
 
+  .pdf-toolbar .zoom-reset {
+    min-width: 66px;
+    padding: 0 8px;
+  }
+
   .pdf-toolbar button:hover:not(:disabled) {
     background: #e5e7eb;
-    border-color: #cbd5e1;
+    border-color: #94a3b8;
   }
 
   .pdf-toolbar button:disabled {
@@ -240,14 +292,14 @@
     width: fit-content;
     max-width: 100%;
     padding: 4px 10px;
-    border: 1px solid #cbd5e1;
+    border: 1px solid #111827;
     border-radius: 6px;
-    background: #f8fafc;
-    color: #111827;
+    background: #111827;
+    color: #ffffff;
     font-size: 12px;
-    font-weight: 500;
+    font-weight: 650;
     line-height: 1.35;
-    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.75);
+    box-shadow: 0 1px 0 rgb(255 255 255 / 0.25);
   }
 
   .pdf-error {
