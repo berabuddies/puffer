@@ -133,6 +133,7 @@
     generation = restoreGeneration
   ) {
     if (!terminalContextCurrent(targetSessionId, generation)) return;
+    if (ptyId === activePtyId && term && dataDisposer) return;
     activePtyId = ptyId;
     ptyTabs = ptyTabs.map((tab) => ({ ...tab, active: tab.ptyId === ptyId }));
     await focusPty(ptyId).catch(() => {});

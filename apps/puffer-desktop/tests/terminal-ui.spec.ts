@@ -226,6 +226,41 @@ test("Terminal input keeps global find shortcuts while focused", async ({ page }
   await expect(page.getByRole("search", { name: "Find in agent view" })).toHaveCount(0);
 });
 
+test("clicking the active Terminal tab does not reattach the PTY", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: /Browser regression/ }).first().click();
+  await page.locator(".pf-agent-tabs").getByRole("button", { name: "Terminal", exact: true }).click();
+  await daemon.waitForRequest("pty_open", (request) => request.params.sessionId === "session-browser");
+  await daemon.waitForRequest("pty_focus", (request) => request.params.ptyId === "pty-1");
+  await daemon.waitForRequest("pty_replay", (request) => request.params.ptyId === "pty-1");
+
+  const focusCount = daemon.requests.filter(
+    (request) => request.method === "pty_focus" && request.params.ptyId === "pty-1"
+  ).length;
+  const replayCount = daemon.requests.filter(
+    (request) => request.method === "pty_replay" && request.params.ptyId === "pty-1"
+  ).length;
+
+  const activeTab = page.getByRole("tab", { name: /Terminal 1/ });
+  await activeTab.click();
+  await activeTab.click();
+  await page.waitForTimeout(50);
+
+  expect(
+    daemon.requests.filter(
+      (request) => request.method === "pty_focus" && request.params.ptyId === "pty-1"
+    )
+  ).toHaveLength(focusCount);
+  expect(
+    daemon.requests.filter(
+      (request) => request.method === "pty_replay" && request.params.ptyId === "pty-1"
+    )
+  ).toHaveLength(replayCount);
+});
+
 test("Terminal new tab ignores repeated clicks while create is in flight", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
