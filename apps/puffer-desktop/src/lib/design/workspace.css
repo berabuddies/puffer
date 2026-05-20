@@ -773,8 +773,11 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.pf-pmem-detail-head .sc-btn {
+.pf-pmem-actions {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 .pf-pmem-kind {
   display: inline-flex;
@@ -830,6 +833,44 @@
 .pf-pmem-body p {
   margin: 0 0 14px;
   white-space: pre-wrap;
+}
+.pf-pmem-body p.muted {
+  color: var(--muted-foreground);
+  font-style: italic;
+}
+.pf-pmem-status {
+  margin-bottom: 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: color-mix(in oklab, var(--muted) 55%, var(--background));
+  color: var(--muted-foreground);
+  padding: 9px 11px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.pf-pmem-status[data-kind="error"] {
+  border-color: color-mix(in oklab, var(--destructive) 35%, var(--border));
+  background: color-mix(in oklab, var(--destructive) 8%, var(--background));
+  color: color-mix(in oklab, var(--destructive) 75%, var(--foreground));
+}
+.pf-pmem-editor {
+  width: 100%;
+  min-height: 360px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  padding: 12px 13px;
+  font: 12.5px/1.55 var(--font-mono);
+  outline: none;
+}
+.pf-pmem-editor:focus {
+  border-color: color-mix(in oklab, var(--puffer-accent) 55%, var(--border));
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--puffer-accent) 12%, transparent);
+}
+.pf-pmem-editor:disabled {
+  opacity: 0.7;
 }
 .pf-pmem-tags {
   display: flex;

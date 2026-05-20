@@ -898,8 +898,12 @@ test("running daemon sessions keep the composer from starting another turn", asy
   expect(daemon.requests.filter((request) => request.method === "run_agent_turn")).toHaveLength(0);
 });
 
-test("project memory edit control is disabled until file editing is wired", async ({ page }) => {
+test("project memory file can be loaded and edited", async ({ page }) => {
   const daemon = new FakeDaemon();
+  daemon.seedFile(
+    "/tmp/puffer/.puffer/memory/project.md",
+    "Initial project memory body.\n\nKeep the browser regression notes close."
+  );
   await daemon.install(page);
   await daemon.open(page);
 
@@ -907,5 +911,17 @@ test("project memory edit control is disabled until file editing is wired", asyn
   await page.getByRole("button", { name: /Memory/ }).click();
 
   const memoryDetail = page.locator(".pf-pmem-detail");
-  await expect(memoryDetail.getByRole("button", { name: "Edit" })).toBeDisabled();
+  await expect(memoryDetail.getByText("Initial project memory body.")).toBeVisible();
+  await expect(memoryDetail.getByRole("button", { name: "Edit" })).toBeEnabled();
+
+  await memoryDetail.getByRole("button", { name: "Edit" }).click();
+  await memoryDetail.getByLabel("Memory file content").fill("Updated memory from the UI.");
+  await memoryDetail.getByRole("button", { name: "Save" }).click();
+
+  await expect(memoryDetail.getByText("Updated memory from the UI.")).toBeVisible();
+  const writes = daemon.requests.filter((request) => request.method === "write_file");
+  expect(writes.at(-1)?.params).toMatchObject({
+    path: "/tmp/puffer/.puffer/memory/project.md",
+    content: "Updated memory from the UI."
+  });
 });
