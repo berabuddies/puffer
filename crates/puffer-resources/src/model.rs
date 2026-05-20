@@ -529,4 +529,22 @@ mod tests {
             "chat_completions_path must flow through into_descriptor"
         );
     }
+
+    /// Confirms the bundled OpenAI fallback list does not default the desktop
+    /// UI to an older model before runtime discovery can refresh availability.
+    #[test]
+    fn openai_yaml_prefers_current_public_responses_models() {
+        let yaml = include_str!("../../../resources/providers/openai.yaml");
+        let pack: ProviderPack = serde_yaml::from_str(yaml).expect("openai.yaml parses");
+        assert_eq!(pack.id, "openai");
+        assert_eq!(pack.discovery.as_ref().expect("discovery").max_output_tokens, 128_000);
+        let first = pack.models.first().expect("at least one fallback model");
+        assert_eq!(first.id, "gpt-5.5");
+        assert_eq!(first.max_output_tokens, 128_000);
+        assert!(first.context_window >= 1_000_000);
+        assert!(
+            pack.models.iter().any(|model| model.id == "gpt-5.4-nano"),
+            "fallback list should include the current nano model"
+        );
+    }
 }
