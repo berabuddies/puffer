@@ -21,6 +21,7 @@
   export let onLoginOauth: (providerId: string) => void = () => {};
   export let onLoginApiKey: (providerId: string, apiKey: string) => void = () => {};
   export let onImportExternal: (providerId: string, source: "claude" | "codex") => void = () => {};
+  export let onLogout: (providerId: string) => void = () => {};
   export let onRefresh: () => void = () => {};
 
   let apiKeys: Record<string, string> = {};
@@ -45,6 +46,11 @@
   function submitOauth(providerId: string) {
     if (credentialBusy) return;
     onLoginOauth(providerId);
+  }
+
+  function submitLogout(providerId: string) {
+    if (busyProviderId) return;
+    onLogout(providerId);
   }
 
   function supports(provider: ProviderSummary, mode: string): boolean {
@@ -206,6 +212,8 @@
         {@const candidates = importsByProvider[provider.id] ?? []}
         {@const auth = authForProvider(provider.id)}
         {@const authFree = providerRunsWithoutAuth(provider)}
+        {@const isBusy = busyProviderId === provider.id}
+        {@const pendingKey = (apiKeys[provider.id] ?? "").trim()}
         <article class="provider-card" style="--provider-accent: {visual.accent};">
           <header class="card-head">
             <span class="logo" aria-hidden="true">
@@ -220,69 +228,89 @@
             </span>
           </header>
 
-          {#if candidates.length}
-            <div class="imports">
-              {#each candidates as candidate (importKey(candidate.providerId, candidate.source))}
-                <button
-                  type="button"
-                  class="import"
-                  disabled={credentialBusy}
-                  on:click={() => submitImport(candidate.providerId, candidate.source)}
-                  title={candidate.sourcePath}
-                >
-                  {#if busyImportKey === importKey(candidate.providerId, candidate.source)}
-                    Importing…
-                  {:else}
-                    Use credentials from {sourceLabel(candidate.source)}
-                  {/if}
-                </button>
-              {/each}
-            </div>
-          {/if}
-
-          <div class="actions">
-            {#if supports(provider, "oauth")}
+          {#if auth}
+            <div class="actions">
+              <div class="connected-summary">
+                <span class="status-dot" data-connected="true" aria-hidden="true"></span>
+                <span>{connectedHint(auth)}</span>
+                {#if auth.planType}
+                  <span class="connected-detail">· {auth.planType}</span>
+                {/if}
+              </div>
               <button
-                class="oauth-btn"
-                disabled={credentialBusy}
-                on:click={() => submitOauth(provider.id)}
+                class="logout-btn"
+                disabled={isBusy}
+                on:click={() => submitLogout(provider.id)}
               >
-                {busyProviderId === provider.id
-                  ? "Opening browser…"
-                  : auth
-                    ? remoteEnabled
-                      ? "Reconnect with OAuth (remote)"
-                      : "Reconnect with OAuth"
+                {isBusy ? "Disconnecting…" : "Disconnect"}
+              </button>
+            </div>
+          {:else}
+            {#if candidates.length}
+              <div class="imports">
+                {#each candidates as candidate (importKey(candidate.providerId, candidate.source))}
+                  <button
+                    type="button"
+                    class="import"
+                    disabled={credentialBusy}
+                    on:click={() => submitImport(candidate.providerId, candidate.source)}
+                    title={candidate.sourcePath}
+                  >
+                    {#if busyImportKey === importKey(candidate.providerId, candidate.source)}
+                      Importing…
+                    {:else}
+                      Use credentials from {sourceLabel(candidate.source)}
+                    {/if}
+                  </button>
+                {/each}
+              </div>
+            {/if}
+
+            <div class="actions">
+              {#if supports(provider, "oauth")}
+                <button
+                  class="oauth-btn"
+                  disabled={credentialBusy || pendingKey.length > 0}
+                  on:click={() => submitOauth(provider.id)}
+                  title={pendingKey.length > 0
+                    ? "Clear the API key field to use OAuth"
+                    : undefined}
+                >
+                  {isBusy
+                    ? provider.id === "worldagent"
+                      ? "Waiting for browser login…"
+                      : "Opening browser…"
                     : remoteEnabled
                       ? "Connect with OAuth (remote)"
                       : "Connect with OAuth"}
-              </button>
-            {/if}
-
-            {#if supports(provider, "api_key")}
-              <div class="api-key-row">
-                <input
-                  type="password"
-                  aria-label={`API key for ${provider.displayName}`}
-                  value={apiKeys[provider.id] ?? ""}
-                  placeholder={auth ? "Replace API key" : "Paste API key"}
-                  disabled={credentialBusy}
-                  on:input={(event) =>
-                    updateApiKey(provider.id, (event.currentTarget as HTMLInputElement).value)}
-                  on:keydown={(event) => {
-                    if (event.key === "Enter") submitApiKey(provider.id);
-                  }}
-                />
-                <button
-                  class="apikey-btn"
-                  disabled={credentialBusy || !(apiKeys[provider.id] ?? "").trim()}
-                  on:click={() => submitApiKey(provider.id)}
-                >
-                  {auth ? "Update key" : "Connect"}
                 </button>
-              </div>
-            {/if}
-          </div>
+              {/if}
+
+              {#if supports(provider, "api_key")}
+                <div class="api-key-row">
+                  <input
+                    type="password"
+                    aria-label={`API key for ${provider.displayName}`}
+                    value={apiKeys[provider.id] ?? ""}
+                    placeholder="Paste API key"
+                    disabled={credentialBusy}
+                    on:input={(event) =>
+                      updateApiKey(provider.id, (event.currentTarget as HTMLInputElement).value)}
+                    on:keydown={(event) => {
+                      if (event.key === "Enter") submitApiKey(provider.id);
+                    }}
+                  />
+                  <button
+                    class="apikey-btn"
+                    disabled={credentialBusy || pendingKey.length === 0}
+                    on:click={() => submitApiKey(provider.id)}
+                  >
+                    Connect
+                  </button>
+                </div>
+              {/if}
+            </div>
+          {/if}
 
           <p class="hint">
             {auth
@@ -459,6 +487,50 @@
     align-items: center;
     gap: 0.7rem;
   }
+  .connected-summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.85rem;
+    color: var(--text);
+  }
+  .connected-detail {
+    color: var(--text-muted);
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 0.78rem;
+  }
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    background: var(--text-muted);
+    flex: 0 0 auto;
+  }
+  .status-dot[data-connected="true"] {
+    background: #4caf50;
+    box-shadow: 0 0 0 3px rgba(76, 175, 80, 0.18);
+  }
+  .logout-btn {
+    border: 1px solid rgba(111, 101, 89, 0.22);
+    border-radius: 10px;
+    padding: 0.5rem 0.85rem;
+    background: rgba(255, 255, 255, 0.92);
+    color: var(--text);
+    font: inherit;
+    font-weight: 500;
+    cursor: pointer;
+    justify-self: start;
+  }
+  .logout-btn:hover:not(:disabled) {
+    background: rgba(247, 225, 220, 0.45);
+    border-color: rgba(157, 58, 43, 0.3);
+    color: var(--danger, #9d3a2b);
+  }
+  .logout-btn:disabled {
+    opacity: 0.6;
+    cursor: progress;
+  }
   .logo {
     width: 36px;
     height: 36px;
@@ -589,6 +661,10 @@
     outline: 2px solid color-mix(in oklab, var(--provider-accent) 40%, transparent);
     outline-offset: 1px;
     border-color: var(--provider-accent);
+  }
+  .api-key-row input:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
   }
 
   .hint {

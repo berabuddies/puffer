@@ -694,6 +694,7 @@
         onLoginOauth={props.onLoginOauth ?? (() => {})}
         onLoginApiKey={props.onApiKeyLogin ?? (() => {})}
         onImportExternal={props.onImportExternal ?? (() => {})}
+        onLogout={props.onLogout}
         onRefresh={props.onRefresh}
       />
 

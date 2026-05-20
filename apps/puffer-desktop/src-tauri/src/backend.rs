@@ -111,10 +111,15 @@ impl BackendState {
                 let provider_id = string_param(&params, &["providerId", "provider_id"])?;
                 if provider_id == "worldagent" {
                     // Detach: OAuth blocks up to 120 s on the localhost
-                    // callback listener, which would freeze the GUI.
+                    // callback listener, which would freeze the GUI. The
+                    // event emitter lets the spawned reaper thread fire
+                    // `worldagent:oauth-completed` so the GUI can swap
+                    // the spinner for the "Connected" affordance the
+                    // moment the puffer subprocess exits.
                     self.run_puffer_cli_auth_subcommand(
                         &["auth", "login", "worldagent"],
                         false,
+                        Some(events.clone()),
                     )?;
                 }
                 // For other providers (puffer/codex/claude), the existing behavior was a
@@ -128,6 +133,7 @@ impl BackendState {
                     self.run_puffer_cli_auth_subcommand(
                         &["auth", "set-api-key", "worldagent", &api_key],
                         true,
+                        None,
                     )?;
                 } else {
                     self.store_api_key(&provider_id, &api_key)?;
@@ -137,7 +143,11 @@ impl BackendState {
             "logout_provider" => {
                 let provider_id = string_param(&params, &["providerId", "provider_id"])?;
                 if provider_id == "worldagent" {
-                    self.run_puffer_cli_auth_subcommand(&["auth", "clear", "worldagent"], true)?;
+                    self.run_puffer_cli_auth_subcommand(
+                        &["auth", "clear", "worldagent"],
+                        true,
+                        None,
+                    )?;
                 } else {
                     self.remove_api_key(&provider_id)?;
                 }
@@ -589,10 +599,21 @@ impl BackendState {
         // worldagent lives in puffer-cli's AuthStore (~/.puffer/auth.json),
         // not in corbina's own credentials file. Surface it so the GUI shows
         // "Connected" after a successful `puffer auth login worldagent`.
+        //
+        // We override `kind` to "oauth" when the stored key is an
+        // `sk-worldrouter-…` token (minted via the /auth/exchange flow),
+        // even though AuthStore tags it as `api_key`. This lets the
+        // LoginView hide the "Paste API key" affordance for OAuth users
+        // and only show "Disconnect".
         if let Some(entry) = read_puffer_cli_credential("worldagent") {
+            let surfaced_kind = if entry.oauth_derived {
+                "oauth".to_string()
+            } else {
+                entry.kind
+            };
             out.push(AuthProviderStatusDto {
                 provider_id: "worldagent".to_string(),
-                kind: entry.kind,
+                kind: surfaced_kind,
                 email: None,
                 expires_at_ms: None,
                 scopes: Vec::new(),
@@ -1077,10 +1098,17 @@ impl BackendState {
     ///
     /// Required for `auth login`, which sits on a localhost listener
     /// for up to 120 s waiting for the browser callback; blocking the
-    /// Tauri command handler that long freezes the GUI. The frontend
-    /// has to re-poll `load_settings_snapshot` (manual Refresh button
-    /// or its own polling) to see the new credential.
-    fn run_puffer_cli_auth_subcommand(&self, args: &[&str], wait: bool) -> Result<()> {
+    /// Tauri command handler that long freezes the GUI. When `events`
+    /// is supplied with `wait = false`, the reaper thread fires
+    /// `worldagent:oauth-completed` once the child exits so the
+    /// frontend can clear its "Opening browser…" spinner without
+    /// having to poll `load_settings_snapshot`.
+    fn run_puffer_cli_auth_subcommand(
+        &self,
+        args: &[&str],
+        wait: bool,
+        events: Option<EventEmitter>,
+    ) -> Result<()> {
         let binary = crate::daemon_launcher::resolve_puffer_binary()
             .context("failed to resolve puffer binary for auth subcommand")?;
         let stdio_stdout = if wait {
@@ -1099,9 +1127,29 @@ impl BackendState {
             if let Some(stdout) = child.stdout.take() {
                 std::thread::spawn(move || tail_auth_subcommand_stdout(stdout));
             }
-            // Reap the child in the background so we don't leave a zombie.
+            // Reap the child in the background so we don't leave a
+            // zombie, and (when we have an emitter) fan out the exit
+            // status as a Tauri event so the GUI can react.
+            let args_label = args.join(" ");
             std::thread::spawn(move || {
-                let _ = child.wait();
+                let outcome = child.wait();
+                if let Some(events) = events {
+                    let (success, error) = match outcome {
+                        Ok(status) if status.success() => (true, None),
+                        Ok(status) => (
+                            false,
+                            Some(format!("puffer {} exited with {}", args_label, status)),
+                        ),
+                        Err(err) => (
+                            false,
+                            Some(format!("wait failed for puffer {}: {}", args_label, err)),
+                        ),
+                    };
+                    events.emit(
+                        "worldagent:oauth-completed",
+                        json!({"success": success, "error": error}),
+                    );
+                }
             });
             return Ok(());
         }
@@ -3069,8 +3117,16 @@ enum ProcessLine {
 }
 
 struct PufferCliCredentialSummary {
+    /// Raw `kind` field from puffer-cli's AuthStore (`"api_key"` or
+    /// `"oauth"` today). Preserved verbatim for callers that want the
+    /// untouched on-disk value.
     kind: String,
+    /// Human-friendly one-liner suitable for the GUI's plan-type slot.
     summary: String,
+    /// True when the stored credential is an `sk-worldrouter-…` token
+    /// minted by the corbina OAuth exchange flow (worldrouter writes
+    /// these into the same `api_key` slot as a manually pasted key).
+    oauth_derived: bool,
 }
 
 fn read_puffer_cli_credential(provider_id: &str) -> Option<PufferCliCredentialSummary> {
@@ -3079,9 +3135,17 @@ fn read_puffer_cli_credential(provider_id: &str) -> Option<PufferCliCredentialSu
     let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let provider = parsed.get("providers")?.get(provider_id)?;
     let kind = provider.get("kind")?.as_str()?.to_string();
+    let mut oauth_derived = kind == "oauth";
     let summary = match kind.as_str() {
         "api_key" => {
             let key = provider.get("key").and_then(|v| v.as_str()).unwrap_or("");
+            // worldrouter mints OAuth-exchanged tokens with the
+            // `sk-worldrouter-` prefix and persists them through the
+            // same `api_key` slot as manually pasted keys. Tagging them
+            // as OAuth lets the GUI render the right affordance.
+            if key.starts_with("sk-worldrouter-") {
+                oauth_derived = true;
+            }
             let tail = key
                 .chars()
                 .rev()
@@ -3090,10 +3154,18 @@ fn read_puffer_cli_credential(provider_id: &str) -> Option<PufferCliCredentialSu
                 .chars()
                 .rev()
                 .collect::<String>();
-            format!("api_key \u{2026}{}", tail)
+            if oauth_derived {
+                format!("oauth \u{2026}{}", tail)
+            } else {
+                format!("api_key \u{2026}{}", tail)
+            }
         }
         "oauth" => "oauth credential stored".to_string(),
         other => other.to_string(),
     };
-    Some(PufferCliCredentialSummary { kind, summary })
+    Some(PufferCliCredentialSummary {
+        kind,
+        summary,
+        oauth_derived,
+    })
 }
