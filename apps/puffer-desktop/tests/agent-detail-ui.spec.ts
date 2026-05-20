@@ -118,6 +118,71 @@ test("Diff timeline items stay visible in the chat activity stream", async ({ pa
   await expect(page.getByText("Updated 1 diff")).toBeVisible();
 });
 
+test("sub-agent tool activity renders spawn_agent as a sub-agent action", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-subagent-activity",
+        displayName: "Subagent activity",
+        title: "Subagent activity",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        timeline: [
+          {
+            kind: "user_message",
+            id: "subagent-user",
+            text: "Use a helper agent.",
+            createdAtMs: baseTime - 50_000
+          },
+          {
+            kind: "tool_call",
+            id: "subagent-spawn",
+            toolId: "spawn_agent",
+            status: "success",
+            inputText: JSON.stringify({
+              agent_type: "worker",
+              model: "gpt-5.4",
+              reasoning_effort: "high",
+              message: "Audit provider picker"
+            }),
+            outputText: JSON.stringify({
+              status: "completed",
+              receiverThreadIds: ["agent-thread-1"]
+            }),
+            createdAtMs: baseTime - 45_000
+          },
+          {
+            kind: "assistant_message",
+            id: "subagent-assistant",
+            text: "The helper agent finished.",
+            createdAtMs: baseTime - 40_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openAgent(page, /Subagent activity/);
+  const activity = page.getByRole("button", { name: /Agent activity/ });
+  await expect(activity).toContainText("Used subagent");
+  await expect(activity).not.toContainText("Used 1 tool");
+
+  await activity.click();
+  const action = page.locator(".activity-action").filter({ hasText: "Spawn sub-agent" });
+  await expect(action).toBeVisible();
+  await expect(action).toContainText("worker");
+  await expect(action).toContainText("gpt-5.4");
+  await expect(action).not.toContainText("spawn_agent");
+
+  await action.click();
+  const panel = page.locator(".activity-panel").filter({ hasText: "Spawn sub-agent" });
+  await expect(panel).toContainText("Audit provider picker");
+});
+
 function agentDetailDaemon(): FakeDaemon {
   return new FakeDaemon({
     sessions: [

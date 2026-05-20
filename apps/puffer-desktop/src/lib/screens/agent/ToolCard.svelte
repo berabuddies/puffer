@@ -37,7 +37,7 @@
     if (t.includes("browser") || t.includes("fetch") || t.includes("web")) return "globe";
     if (t.includes("git") || t.includes("diff")) return "git";
     if (t.includes("plan") || t.includes("thinking")) return "cpu";
-    if (t.includes("sub_agent") || t.includes("mcp__")) return "plug";
+    if (isSubagentToolName(name) || t.includes("mcp__")) return "plug";
     if (t.includes("list") || t.includes("ls")) return "folder";
     return "bolt";
   }
@@ -143,10 +143,11 @@
   }
 
   function subAgentArgLine(input: Record<string, unknown> | null): string {
-    const tool = stringField(input, ["tool"]) ?? "spawnAgent";
+    const tool = stringField(input, ["agent_type", "agentType", "tool", "role"]) ?? "spawn";
     const model = stringField(input, ["model"]);
     const effort = stringField(input, ["reasoningEffort", "reasoning_effort"]);
-    return [tool, model, effort].filter(Boolean).join(" · ");
+    const prompt = shortValue(stringField(input, ["message", "prompt"]), 72);
+    return [tool, model, effort, prompt].filter(Boolean).join(" · ");
   }
 
   function statusLabel(s: string): string {
@@ -251,10 +252,37 @@
     return { server: match[1] || "mcp", tool: match[2] || "tool" };
   }
 
+  function compactToolName(name: string | null | undefined): string {
+    return (name ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  }
+
+  function isSubagentToolName(name: string | null | undefined): boolean {
+    const compact = compactToolName(name);
+    return (
+      compact === "subagent" ||
+      compact === "spawnagent" ||
+      compact === "waitagent" ||
+      compact === "sendinput" ||
+      compact === "closeagent" ||
+      compact === "resumeagent" ||
+      compact.includes("collab")
+    );
+  }
+
+  function subagentDisplayToolName(name: string): string {
+    const compact = compactToolName(name);
+    if (compact === "spawnagent" || compact === "subagent") return "Spawn sub-agent";
+    if (compact === "waitagent") return "Wait for sub-agent";
+    if (compact === "sendinput") return "Message sub-agent";
+    if (compact === "closeagent") return "Close sub-agent";
+    if (compact === "resumeagent") return "Resume sub-agent";
+    return "Sub-agent";
+  }
+
   function displayToolName(name: string, input: Record<string, unknown> | null): string {
     const mcp = mcpParts(name, input);
     if (mcp) return `${smartTitle(mcp.server)} · ${smartTitle(mcp.tool)}`;
-    if (name.toLowerCase() === "sub_agent") return "Sub-agent";
+    if (isSubagentToolName(name)) return subagentDisplayToolName(name);
     return name && name !== "undefined" ? name : "Tool";
   }
 
@@ -692,7 +720,7 @@
         body: summary.length || content.length ? null : toolOutput
       };
     }
-    if (normalized === "sub_agent") {
+    if (isSubagentToolName(name)) {
       const states = asRecord(output?.agentsStates);
       const rows = states
         ? Object.entries(states).map(([id, state]) => {
@@ -704,14 +732,15 @@
         : stringArrayField(output, ["receiverThreadIds"]);
       return {
         mode: "list",
-        title: `Sub-agent ${stringField(input, ["tool"]) ?? "task"}`,
+        title: subagentDisplayToolName(name),
         meta: [
+          stringField(input, ["agent_type", "agentType", "tool", "role"]) ?? "",
           stringField(input, ["model"]) ?? "",
           stringField(input, ["reasoningEffort", "reasoning_effort"]) ?? "",
           stringField(output, ["status"]) ?? ""
         ].filter(Boolean),
         rows,
-        body: stringField(input, ["prompt"])
+        body: stringField(input, ["message", "prompt"])
       };
     }
     if (normalized === "view_image" || normalized === "image_generation") {
@@ -916,7 +945,7 @@
   let toggleable = $derived(hasOutput || isPending || isBrowserTool);
 
   let arg = $derived(
-    toolName.toLowerCase() === "sub_agent"
+    isSubagentToolName(toolName)
       ? subAgentArgLine(inputJson)
       : mcpArgLine(toolName, inputJson)
         ?? (isBrowserTool

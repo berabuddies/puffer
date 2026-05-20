@@ -909,12 +909,39 @@
     return "bolt";
   }
 
+  function compactToolName(name: string | null | undefined): string {
+    return (name ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  }
+
+  function isSubagentToolName(name: string | null | undefined): boolean {
+    const compact = compactToolName(name);
+    return (
+      compact === "subagent" ||
+      compact === "spawnagent" ||
+      compact === "waitagent" ||
+      compact === "sendinput" ||
+      compact === "closeagent" ||
+      compact === "resumeagent" ||
+      compact.includes("collab")
+    );
+  }
+
+  function subagentActivityName(name: string): string {
+    const compact = compactToolName(name);
+    if (compact === "spawnagent" || compact === "subagent") return "Spawn sub-agent";
+    if (compact === "waitagent") return "Wait for sub-agent";
+    if (compact === "sendinput") return "Message sub-agent";
+    if (compact === "closeagent") return "Close sub-agent";
+    if (compact === "resumeagent") return "Resume sub-agent";
+    return "Sub-agent";
+  }
+
   function childActivityCategory(child: ActivityChild): ActivityCategory {
     if (child.kind === "diff") return "diff";
     if (child.kind !== "tool") return "message";
     const name = child.toolName.toLowerCase();
     if (name === "thinking") return "thought";
-    if (name.includes("sub_agent") || name.includes("collab") || name.includes("spawnagent")) return "agent";
+    if (isSubagentToolName(child.toolName)) return "agent";
     if (name.includes("browser") || name.includes("web") || name.includes("fetch")) return "browser";
     if (name.includes("mcp__") && (name.includes("__list") || name.includes("__read"))) return "read";
     if (name.includes("edit") || name.includes("write") || name.includes("replace") || name.includes("patch")) return "write";
@@ -1313,8 +1340,43 @@
     if (generic) return generic.name;
     const mcpName = mcpActivityName(child.toolName, input);
     if (mcpName) return mcpName;
-    if (child.toolName.toLowerCase() === "sub_agent") return "Sub-agent";
+    if (isSubagentToolName(child.toolName)) return subagentActivityName(child.toolName);
     return child.toolName && child.toolName !== "undefined" ? child.toolName : "Tool";
+  }
+
+  function arrayInputString(input: Record<string, unknown> | null, name: string): string | null {
+    const value = input?.[name];
+    if (!Array.isArray(value)) return null;
+    const strings = value
+      .map((item) => (typeof item === "string" ? item.trim() : ""))
+      .filter(Boolean);
+    if (strings.length === 0) return null;
+    return strings.length === 1 ? strings[0] : `${strings.length} targets`;
+  }
+
+  function subagentActivityArg(name: string, input: Record<string, unknown> | null): string {
+    const compact = compactToolName(name);
+    if (compact === "waitagent") {
+      return [
+        arrayInputString(input, "targets"),
+        inputString(input, ["timeoutMs", "timeout_ms"])
+      ].filter(Boolean).join(" · ");
+    }
+    if (compact === "sendinput") {
+      return [
+        inputString(input, ["target", "agentId", "agent_id"]),
+        valuePreview(inputString(input, ["message"]), 80)
+      ].filter(Boolean).join(" · ");
+    }
+    if (compact === "closeagent" || compact === "resumeagent") {
+      return inputString(input, ["target", "id", "agentId", "agent_id"]) ?? "";
+    }
+    return [
+      inputString(input, ["agent_type", "agentType", "tool", "role"]),
+      inputString(input, ["model"]),
+      inputString(input, ["reasoningEffort", "reasoning_effort"]),
+      valuePreview(inputString(input, ["message", "prompt"]), 80)
+    ].filter(Boolean).join(" · ");
   }
 
   function activityActionArg(child: ActivityChild): string {
@@ -1330,12 +1392,7 @@
     if (generic) return generic.arg;
     const mcpArg = mcpActivityArg(child.toolName, input);
     if (mcpArg) return mcpArg;
-    if (child.toolName.toLowerCase() === "sub_agent") {
-      const tool = inputString(input, ["tool"]) ?? "spawn";
-      const model = inputString(input, ["model"]);
-      const effort = inputString(input, ["reasoningEffort", "reasoning_effort"]);
-      return [tool, model, effort].filter(Boolean).join(" · ");
-    }
+    if (isSubagentToolName(child.toolName)) return subagentActivityArg(child.toolName, input);
     if (child.toolName.toLowerCase() === "browser") return browserActionArg(input) ?? "Action";
     const value = inputString(input, ["path", "file_path", "url", "command", "pattern", "query", "cwd"]);
     const fallback = value ?? child.summary ?? child.title ?? "";
