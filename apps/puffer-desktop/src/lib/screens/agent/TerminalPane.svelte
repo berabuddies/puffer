@@ -387,7 +387,7 @@
           <button
             type="button"
             class="terminal-tab-close"
-            title="Close terminal"
+            title={`Close ${tab.title}`}
             aria-label="Close {tab.title}"
             disabled={closingPtyIds.includes(tab.ptyId)}
             onclick={(event) => void closeTerminalTab(event, tab.ptyId)}

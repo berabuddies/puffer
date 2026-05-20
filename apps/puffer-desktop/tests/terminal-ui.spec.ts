@@ -338,6 +338,28 @@ test("Terminal close ignores repeated clicks while close is in flight", async ({
   expect(daemon.requests.filter((request) => request.method === "pty_close")).toHaveLength(1);
 });
 
+test("Terminal tab close controls include tab titles", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: /Browser regression/ }).first().click();
+  await page.locator(".pf-agent-tabs").getByRole("button", { name: "Terminal", exact: true }).click();
+  await daemon.waitForRequest("pty_open", (request) => request.params.title === "Terminal 1");
+
+  await page.getByRole("button", { name: "New terminal" }).click();
+  await daemon.waitForRequest("pty_open", (request) => request.params.title === "Terminal 2");
+
+  await expect(page.getByRole("button", { name: "Close Terminal 1" })).toHaveAttribute(
+    "title",
+    "Close Terminal 1"
+  );
+  await expect(page.getByRole("button", { name: "Close Terminal 2" })).toHaveAttribute(
+    "title",
+    "Close Terminal 2"
+  );
+});
+
 test("Terminal close failure keeps the tab retryable", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
