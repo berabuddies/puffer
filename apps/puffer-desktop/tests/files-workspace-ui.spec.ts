@@ -678,10 +678,12 @@ test("Files tab PDF zoom is immediate and page-limit status remains readable", a
       shellBackgroundColor: shellStyle?.backgroundColor ?? "",
       controlsBackgroundColor: controlsStyle?.backgroundColor ?? "",
       shellDelta: channelDelta(statusBackground, shellBackground),
-      controlsDelta: channelDelta(statusBackground, controlsBackground)
+      controlsDelta: channelDelta(statusBackground, controlsBackground),
+      statusLooksAmber: statusBackground[0] > statusBackground[2] + 20 && statusBackground[1] > statusBackground[2] + 10
     };
   });
   expect(contrast.ratio).toBeGreaterThanOrEqual(4.5);
+  expect(contrast.statusLooksAmber).toBe(true);
   expect(contrast.backgroundColor).not.toBe(contrast.shellBackgroundColor);
   expect(contrast.backgroundColor).not.toBe(contrast.controlsBackgroundColor);
   expect(contrast.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
@@ -716,7 +718,7 @@ test("Files tab PDF zoom is immediate and page-limit status remains readable", a
   ).toBeGreaterThan(initialWidth);
   await controls.getByRole("button", { name: "Reset zoom" }).click();
   await expect(controls.getByText("100%")).toBeVisible();
-  await controls.getByRole("button", { name: "Reset zoom" }).focus();
+  await page.locator('canvas[aria-label="PDF page 1"]').click();
   await page.keyboard.press("Control+=");
   await expect(controls.getByText("110%")).toBeVisible();
   await page.keyboard.press("Control+-");

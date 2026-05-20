@@ -120,6 +120,10 @@
     handleZoomKeydown(event);
   }
 
+  function focusViewer(): void {
+    renderer?.focus({ preventScroll: true });
+  }
+
   function applyCanvasZoom(canvas: HTMLCanvasElement, currentZoom: number): void {
     const baseWidth = Number(canvas.dataset.pdfBaseWidth ?? 0);
     const baseHeight = Number(canvas.dataset.pdfBaseHeight ?? 0);
@@ -212,6 +216,9 @@
 <div
   bind:this={renderer}
   class="pdf-renderer"
+  role="region"
+  aria-label="PDF document viewer"
+  tabindex="-1"
   onwheel={handleZoomWheel}
 >
   <div class="pdf-controls-row" aria-label="Document controls">
@@ -263,7 +270,7 @@
   {#if error}
     <div class="pdf-error">PDF renderer failed: {error}</div>
   {/if}
-  <div class="pdf-page-scroll" aria-label="PDF pages">
+  <div class="pdf-page-scroll" role="group" aria-label="PDF pages" onpointerdown={focusViewer}>
     <div bind:this={host} class="pdf-canvas-stack" aria-label="PDF rendered pages"></div>
     {#if showTextFallback}
       <article class="pdf-text-fallback" aria-label="PDF text fallback">
@@ -286,6 +293,15 @@
     min-height: 0;
     position: relative;
     width: 100%;
+  }
+
+  .pdf-renderer:focus {
+    outline: none;
+  }
+
+  .pdf-renderer:focus-visible {
+    outline: 2px solid #2563eb;
+    outline-offset: 3px;
   }
 
   .pdf-controls-row {
@@ -472,21 +488,21 @@
     width: fit-content;
     max-width: 100%;
     padding: 6px 11px;
-    border: 1px solid #020617;
+    border: 1px solid #b45309;
     border-radius: 999px;
-    background: #020617;
-    color: #ffffff;
+    background: #fef3c7;
+    color: #78350f;
     font-size: 12px;
     font-weight: 750;
     line-height: 1.35;
-    box-shadow: 0 0 0 2px rgb(2 6 23 / 0.16), 0 8px 18px rgb(15 23 42 / 0.22);
+    box-shadow: 0 0 0 2px rgb(180 83 9 / 0.18), 0 8px 18px rgb(146 64 14 / 0.22);
   }
 
   :global(html.dark) .pdf-status {
-    border-color: #f8fafc;
-    background: #f8fafc;
-    color: #020617;
-    box-shadow: 0 0 0 2px rgb(248 250 252 / 0.2), 0 10px 20px rgb(0 0 0 / 0.45);
+    border-color: #fbbf24;
+    background: #451a03;
+    color: #fde68a;
+    box-shadow: 0 0 0 2px rgb(251 191 36 / 0.2), 0 10px 20px rgb(0 0 0 / 0.45);
   }
 
   .pdf-error {
