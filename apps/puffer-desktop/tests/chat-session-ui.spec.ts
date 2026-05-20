@@ -2632,6 +2632,112 @@ test("custom-only question requires a typed answer", async ({ page }) => {
   });
 });
 
+test("duplicate question text keeps prompt draft state independent", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /^Browser regression\b/);
+  daemon.emit("session:session-browser:event", {
+    type: "user-question-request",
+    turnId: "turn-question-duplicate-text",
+    requestId: "question-duplicate-text",
+    questions: [
+      {
+        header: "First",
+        question: "Which path should I use?",
+        options: [
+          { label: "src", description: "Use the src directory." },
+          { label: "tests", description: "Use the tests directory." }
+        ]
+      },
+      {
+        header: "Second",
+        question: "Which path should I use?",
+        options: [
+          { label: "docs", description: "Use documentation." },
+          { label: "examples", description: "Use examples." }
+        ]
+      }
+    ]
+  });
+
+  const blocks = page.locator(".pf-question-block");
+  await expect(blocks).toHaveCount(2);
+  const firstBlock = blocks.nth(0);
+  const secondBlock = blocks.nth(1);
+  const firstSrc = firstBlock.locator(".pf-question-option").filter({ hasText: "src" });
+  const secondDocs = secondBlock.locator(".pf-question-option").filter({ hasText: "docs" });
+
+  await firstSrc.click();
+  await expect(firstSrc).toHaveAttribute("data-selected", "true");
+  await expect(secondDocs).toHaveAttribute("data-selected", "false");
+  await expect(page.getByRole("button", { name: "Send answer" })).toBeDisabled();
+
+  await secondDocs.click();
+  await expect(firstSrc).toHaveAttribute("data-selected", "true");
+  await expect(secondDocs).toHaveAttribute("data-selected", "true");
+});
+
+test("multiple user questions submit daemon-compatible text-keyed answers", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /^Browser regression\b/);
+  daemon.emit("session:session-browser:event", {
+    type: "user-question-request",
+    turnId: "turn-question-multiple",
+    requestId: "question-multiple",
+    questions: [
+      {
+        header: "Source",
+        question: "Which source path should I use?",
+        options: [
+          { label: "src", description: "Use the src directory." },
+          { label: "tests", description: "Use the tests directory." }
+        ]
+      },
+      {
+        header: "Output",
+        question: "Which output path should I use?",
+        options: [
+          { label: "docs", description: "Use documentation." },
+          { label: "examples", description: "Use examples." }
+        ]
+      }
+    ]
+  });
+
+  const submit = page.getByRole("button", { name: "Send answer" });
+  await page
+    .locator(".pf-question-block")
+    .nth(0)
+    .locator(".pf-question-option")
+    .filter({ hasText: "src" })
+    .click();
+  await expect(submit).toBeDisabled();
+  await page
+    .locator(".pf-question-block")
+    .nth(1)
+    .locator(".pf-question-option")
+    .filter({ hasText: "examples" })
+    .click();
+  await expect(submit).toBeEnabled();
+  await submit.click();
+
+  const request = await daemon.waitForRequest("resolve_user_question");
+  expect(request.params).toMatchObject({
+    turnId: "turn-question-multiple",
+    requestId: "question-multiple",
+    answers: {
+      "Which source path should I use?": "src",
+      "Which output path should I use?": "examples"
+    },
+    annotations: {}
+  });
+});
+
 test("late question response failures do not leak into a switched session", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
