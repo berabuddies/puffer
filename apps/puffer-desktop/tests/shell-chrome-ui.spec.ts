@@ -407,6 +407,34 @@ test("deployment Ask Puffer composer sends prompts from button and Enter", async
   await expect(textbox).toHaveValue("");
 });
 
+test("deployment Ask Puffer quick actions give visible feedback", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Deployments" }).click();
+  const composer = page.locator(".pf-dep-ask-composer");
+  const thread = page.locator(".pf-dep-ask-thread");
+
+  await page.getByRole("button", { name: "Open fix PR" }).click();
+  await expect(thread).toContainText("I drafted the fix path for stripe-api · production");
+  await expect(thread.locator('.pf-msg[data-role="user"] .pf-msg-text').filter({ hasText: "Open fix PR" })).toHaveCount(1);
+
+  await page.getByRole("button", { name: "Roll back to 6f8c120" }).click();
+  await expect(thread).toContainText("I staged the rollback plan for stripe-api · production");
+  await expect(thread.locator('.pf-msg[data-role="user"] .pf-msg-text').filter({ hasText: "Roll back to 6f8c120" })).toHaveCount(1);
+
+  await composer.getByRole("button", { name: "logs" }).click();
+  await composer.getByRole("button", { name: "metrics" }).click();
+  await expect(composer.getByRole("button", { name: "logs" })).toHaveAttribute("aria-pressed", "true");
+  await expect(composer.getByRole("button", { name: "metrics" })).toHaveAttribute("aria-pressed", "true");
+
+  await composer.getByRole("textbox", { name: "Ask Puffer" }).fill("Use selected context");
+  await composer.getByRole("button", { name: "Send" }).click();
+  await expect(thread).toContainText("I'll use logs and metrics for this environment.");
+  await expect(composer.getByRole("button", { name: "logs" })).toHaveAttribute("aria-pressed", "false");
+});
+
 test("deployment Ask Puffer saves diagnostic output into Memory", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
