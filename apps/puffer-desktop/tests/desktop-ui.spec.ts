@@ -153,6 +153,42 @@ test("Browser panel hydrates a connected agent tab from recorded frames", async 
   ).toBe(222);
 });
 
+test("Browser panel restores a recorded agent tab when daemon tab state is empty", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    emitBrowserOpenFrame: false,
+    emitBrowserResizeFrame: false
+  });
+  daemon.setBrowserRecording("session-browser", [
+    {
+      frameId: "recorded-only-frame",
+      backendSessionId: "session-browser:browser:t1",
+      rootSessionId: "session-browser",
+      tabId: "t1",
+      url: "https://recorded.example",
+      title: "Recorded page",
+      mimeType: "image/png",
+      encoding: "base64",
+      data: ONE_PIXEL_PNG,
+      width: 321,
+      height: 210,
+      recordedAtMs: Date.now()
+    }
+  ]);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openAgentPanel(page, "Browser");
+
+  await daemon.waitForRequest("browser_recording", (request) =>
+    request.params.sessionId === "session-browser"
+  );
+  await expect(page.getByLabel("URL")).toHaveValue("https://recorded.example", { timeout: 1000 });
+  await expect.poll(async () =>
+    page.locator(".pf-browser-canvas").evaluate((node) => (node as HTMLCanvasElement).width)
+  ).toBe(321);
+});
+
 test("Browser controls target daemon-provided backend tab ids", async ({ page }) => {
   const backendSessionId = "browser-worker-opaque-tab-1";
   const daemon = new FakeDaemon({

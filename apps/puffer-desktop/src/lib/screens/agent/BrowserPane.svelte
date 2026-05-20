@@ -264,6 +264,10 @@
     }
     await syncDaemonTabs(generation, nextSessionId);
     if (generation !== sessionGeneration || disposed) return;
+    if (shouldHydrateFallbackFromRecording()) {
+      await hydrateTabsFromRecording(generation, nextSessionId);
+      if (generation !== sessionGeneration || disposed) return;
+    }
     const client = await ensureLocalDaemonClient();
     if (generation !== sessionGeneration || disposed) return;
     disposers.push(
@@ -337,6 +341,79 @@
     } catch {
       return [newBrowserTab("tab-1", "New tab")];
     }
+  }
+
+  function shouldHydrateFallbackFromRecording(): boolean {
+    if (tabs.length === 0) return true;
+    if (tabs.length !== 1) return false;
+    const [tab] = tabs;
+    return (
+      tab.id === "tab-1" &&
+      tab.url === "about:blank" &&
+      !tab.connected &&
+      !tab.frame
+    );
+  }
+
+  async function hydrateTabsFromRecording(
+    generation: number,
+    rootSessionId: string
+  ): Promise<void> {
+    try {
+      const snapshot = await browserRecording(rootSessionId);
+      if (
+        generation !== sessionGeneration ||
+        activeRootSessionId !== rootSessionId ||
+        disposed
+      ) return;
+      const recordedTabs = latestRecordedTabs(rootSessionId, snapshot.frames);
+      if (recordedTabs.length === 0) return;
+      const activeRecordedTab = recordedTabs.at(-1)!;
+      tabs = recordedTabs.map(recordedTabFromFrame);
+      activeTabId = activeRecordedTab.tabId;
+      nextTabNumber = nextTabIndex(tabs);
+      tabStateVersion += 1;
+      saveTabs(tabs);
+      syncFromActiveTab();
+      if (activeTab?.frame) renderFrame(activeTab.frame);
+    } catch {
+      /* A live daemon tab list may still arrive after the first paint. */
+    }
+  }
+
+  function latestRecordedTabs(
+    rootSessionId: string,
+    frames: BrowserRecordedFrame[]
+  ): BrowserRecordedFrame[] {
+    const latestByTab = new Map<string, BrowserRecordedFrame>();
+    for (const frame of frames) {
+      if (frame.rootSessionId !== rootSessionId || !frame.tabId) continue;
+      const existing = latestByTab.get(frame.tabId);
+      if (!existing || frame.recordedAtMs >= existing.recordedAtMs) {
+        latestByTab.set(frame.tabId, frame);
+      }
+    }
+    return [...latestByTab.values()].sort(
+      (left, right) => left.recordedAtMs - right.recordedAtMs
+    );
+  }
+
+  function recordedTabFromFrame(frame: BrowserRecordedFrame): BrowserTab {
+    const url = frame.url || "about:blank";
+    const title = frame.title || "";
+    return {
+      ...newBrowserTab(frame.tabId, title || url || "Recorded tab", frame.rootSessionId),
+      backendSessionId:
+        frame.backendSessionId || backendSessionId(frame.tabId, frame.rootSessionId),
+      url,
+      title,
+      loading: false,
+      error: null,
+      status: "Connected",
+      connected: true,
+      favicon: faviconFor(url),
+      frame: frameFromRecording(frame)
+    };
   }
 
   function saveTabs(nextTabs = tabs) {
