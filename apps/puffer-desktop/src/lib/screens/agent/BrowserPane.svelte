@@ -88,6 +88,7 @@
   let closingTabs = $state<ClosingTabTarget[]>([]);
   let tabOpenPending = $state(false);
   let pendingBrowserCommands = $state<PendingBrowserCommand[]>([]);
+  let navigationFallbackTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   let disposers: Array<() => void> = [];
   let activeDisposers: Array<() => void> = [];
@@ -119,6 +120,7 @@
   const pendingNavigationSessions = new Set<string>();
   let pendingFrame: BrowserFrameEvent | null = null;
   let frameDecodeInFlight = false;
+  const NAVIGATION_IDLE_FALLBACK_MS = 1_200;
 
   let activeTab = $derived(tabs.find((tab) => tab.id === activeTabId) ?? tabs[0]);
   let browserCommandPending = $derived(
@@ -173,6 +175,7 @@
     window.removeEventListener("pointerup", globalPointerUp);
     window.removeEventListener("pointercancel", globalPointerCancel);
     clearCursorTimer();
+    clearNavigationFallbackTimers();
     disposeActiveSubscriptions();
     for (const dispose of disposers) {
       try {
@@ -251,6 +254,8 @@
       devtoolsView = "console";
       tabOpenPending = false;
       pendingBrowserCommands = [];
+      pendingNavigationSessions.clear();
+      clearNavigationFallbackTimers();
       resetPointer(activePointerId ?? undefined);
       disposeActiveSubscriptions();
       clearCanvas();
@@ -282,6 +287,7 @@
     pendingBrowserCommands = [];
     clearCursorTimer();
     pendingNavigationSessions.clear();
+    clearNavigationFallbackTimers();
     resetPointer(activePointerId ?? undefined);
     const restored = loadSavedTabsFor(nextSessionId);
     tabs = restored;
@@ -519,10 +525,6 @@
     }
   }
 
-  function clearNavigationPending(backendId: string) {
-    pendingNavigationSessions.delete(backendId);
-  }
-
   function isBrowserCommandPending(target: BrowserCommandTarget): boolean {
     return pendingBrowserCommands.some(
       (item) =>
@@ -544,6 +546,63 @@
         item.generation !== target.generation ||
         item.backendSessionId !== target.backendSessionId
     );
+  }
+
+  function tabIdForBackendSession(backendId: string): string | null {
+    return tabs.find((tab) => tab.backendSessionId === backendId)?.id ?? null;
+  }
+
+  function markNavigationPending(target: BrowserCommandTarget) {
+    pendingNavigationSessions.add(target.backendSessionId);
+    scheduleNavigationFallback(target);
+    const tabId = tabIdForBackendSession(target.backendSessionId);
+    if (tabId) updateTab(tabId, { loading: true, status: "Loading", error: null }, false);
+    if (targetStillActive(target)) {
+      loading = true;
+      status = "Loading";
+      error = null;
+    }
+  }
+
+  function clearNavigationPending(backendId: string) {
+    pendingNavigationSessions.delete(backendId);
+    const timer = navigationFallbackTimers.get(backendId);
+    if (timer) clearTimeout(timer);
+    navigationFallbackTimers.delete(backendId);
+  }
+
+  function clearNavigationFallbackTimers() {
+    for (const timer of navigationFallbackTimers.values()) {
+      clearTimeout(timer);
+    }
+    navigationFallbackTimers = new Map();
+  }
+
+  function scheduleNavigationFallback(target: BrowserCommandTarget) {
+    const existing = navigationFallbackTimers.get(target.backendSessionId);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      navigationFallbackTimers.delete(target.backendSessionId);
+      settleStaleNavigation(target);
+    }, NAVIGATION_IDLE_FALLBACK_MS);
+    navigationFallbackTimers.set(target.backendSessionId, timer);
+  }
+
+  function settleStaleNavigation(target: BrowserCommandTarget) {
+    if (
+      disposed ||
+      target.generation !== sessionGeneration ||
+      !pendingNavigationSessions.has(target.backendSessionId)
+    ) return;
+    pendingNavigationSessions.delete(target.backendSessionId);
+    const tabId = tabIdForBackendSession(target.backendSessionId);
+    const tab = tabId ? tabs.find((candidate) => candidate.id === tabId) : null;
+    const nextStatus = tab?.connected === false ? "Disconnected" : "Connected";
+    if (tabId) updateTab(tabId, { loading: false, status: nextStatus }, false);
+    if (targetStillActive(target)) {
+      loading = false;
+      status = nextStatus;
+    }
   }
 
   function runHistory(direction: "back" | "forward") {
