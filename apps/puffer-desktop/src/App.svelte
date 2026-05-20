@@ -767,9 +767,13 @@
       if (!raw) return null;
       const parsed = JSON.parse(raw) as Partial<RememberedSession>;
       if (typeof parsed.sessionId !== "string" || !parsed.sessionId) return null;
+      if (typeof parsed.workspaceRoot !== "string" || !parsed.workspaceRoot) {
+        clearRememberedSession();
+        return null;
+      }
       return {
         sessionId: parsed.sessionId,
-        workspaceRoot: typeof parsed.workspaceRoot === "string" ? parsed.workspaceRoot : ""
+        workspaceRoot: parsed.workspaceRoot
       };
     } catch {
       return null;

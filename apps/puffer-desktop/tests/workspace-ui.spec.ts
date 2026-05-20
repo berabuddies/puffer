@@ -672,6 +672,38 @@ test("closed remembered session stays closed after backend reconnect", async ({ 
   await expect(history).toContainText("Reconnect closed session");
 });
 
+test("legacy remembered session without workspace root is ignored", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [],
+    workspaceRoot: "/tmp/puffer-current-workspace"
+  });
+  await daemon.install(page);
+  await page.addInitScript(() => {
+    window.localStorage.setItem(
+      "puffer-desktop:remembered-session",
+      JSON.stringify({ sessionId: "session-legacy-rootless" })
+    );
+    window.localStorage.setItem(
+      "puffer-desktop:preferences",
+      JSON.stringify({ rememberSession: true })
+    );
+  });
+  await daemon.open(page);
+
+  await page.waitForTimeout(300);
+  await expect(page.locator(".pf-agent-detail")).toHaveCount(0);
+  expect(
+    daemon.requests.filter(
+      (request) =>
+        request.method === "load_session_detail" &&
+        request.params.sessionId === "session-legacy-rootless"
+    )
+  ).toHaveLength(0);
+  await expect(
+    page.evaluate(() => window.localStorage.getItem("puffer-desktop:remembered-session"))
+  ).resolves.toBeNull();
+});
+
 test("late workspace refresh does not hide a newly created session", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
