@@ -672,23 +672,31 @@ test("Files tab PDF zoom is immediate and page-limit status remains readable", a
     const background = luminance(statusBackground);
     const shellBackground = parseRgb(shellStyle?.backgroundColor ?? "");
     const controlsBackground = parseRgb(controlsStyle?.backgroundColor ?? "");
+    const zoomButton = (controls as HTMLElement | null)?.querySelector<HTMLButtonElement>('button[aria-label="Zoom in"]');
+    const zoomButtonRect = zoomButton?.getBoundingClientRect();
     return {
       ratio: (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05),
       backgroundColor: style.backgroundColor,
+      backgroundLuminance: background,
       shellBackgroundColor: shellStyle?.backgroundColor ?? "",
       controlsBackgroundColor: controlsStyle?.backgroundColor ?? "",
       shellDelta: channelDelta(statusBackground, shellBackground),
       controlsDelta: channelDelta(statusBackground, controlsBackground),
-      statusLooksAmber: statusBackground[0] > statusBackground[2] + 20 && statusBackground[1] > statusBackground[2] + 10
+      statusLooksAmber: statusBackground[0] > statusBackground[2] + 20 && statusBackground[1] > statusBackground[2] + 10,
+      zoomButtonWidth: Math.round(zoomButtonRect?.width ?? 0),
+      zoomButtonHeight: Math.round(zoomButtonRect?.height ?? 0)
     };
   });
   expect(contrast.ratio).toBeGreaterThanOrEqual(4.5);
+  expect(contrast.backgroundLuminance).toBeGreaterThan(0.45);
   expect(contrast.statusLooksAmber).toBe(true);
   expect(contrast.backgroundColor).not.toBe(contrast.shellBackgroundColor);
   expect(contrast.backgroundColor).not.toBe(contrast.controlsBackgroundColor);
   expect(contrast.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
   expect(contrast.shellDelta).toBeGreaterThan(60);
   expect(contrast.controlsDelta).toBeGreaterThan(60);
+  expect(contrast.zoomButtonWidth).toBeGreaterThanOrEqual(44);
+  expect(contrast.zoomButtonHeight).toBeGreaterThanOrEqual(40);
 
   const initialWidth = await page.locator('canvas[aria-label="PDF page 1"]').evaluate((canvas) =>
     Math.round(canvas.getBoundingClientRect().width)

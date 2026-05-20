@@ -382,8 +382,8 @@
     align-items: center;
     justify-content: center;
     gap: 4px;
-    min-width: 42px;
-    height: 36px;
+    min-width: 44px;
+    height: 40px;
     border: 1px solid #64748b;
     border-radius: 5px;
     background: #ffffff;
@@ -402,7 +402,7 @@
   }
 
   .pdf-toolbar .zoom-reset {
-    min-width: 84px;
+    min-width: 92px;
     padding: 0 8px;
   }
 
@@ -415,7 +415,7 @@
     flex: 1 1 150px;
     width: clamp(150px, 22vw, 260px);
     min-width: 140px;
-    height: 36px;
+    height: 40px;
     padding: 0 2px;
     appearance: none;
     background: transparent;
@@ -499,10 +499,10 @@
   }
 
   :global(html.dark) .pdf-status {
-    border-color: #fbbf24;
-    background: #451a03;
-    color: #fde68a;
-    box-shadow: 0 0 0 2px rgb(251 191 36 / 0.2), 0 10px 20px rgb(0 0 0 / 0.45);
+    border-color: #facc15;
+    background: #fde047;
+    color: #1f1300;
+    box-shadow: 0 0 0 2px rgb(250 204 21 / 0.35), 0 10px 24px rgb(0 0 0 / 0.48);
   }
 
   .pdf-error {
