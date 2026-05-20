@@ -47,6 +47,7 @@
 
   type ApplyTabsOptions = {
     allowEmpty?: boolean;
+    allowLocalTransitionShrink?: boolean;
   };
 
   type BrowserCommandTarget = {
@@ -240,7 +241,7 @@
       tabOpenPending || closingTabs.length > 0 || pendingBrowserCommands.length > 0;
     if (state.tabs.length === 0) {
       if (!options.allowEmpty) return;
-      if (hasLocalTransition && tabs.length > 0) return;
+      if (hasLocalTransition && tabs.length > 0 && !options.allowLocalTransitionShrink) return;
       tabStateVersion += 1;
       pendingNavigationSessions.clear();
       tabs = [];
@@ -268,7 +269,7 @@
     tabStateVersion += 1;
     const previousActiveTabId = activeTabId;
     const nextTabs = state.tabs.map(tabFromInfo);
-    if (hasLocalTransition && nextTabs.length < tabs.length) return;
+    if (hasLocalTransition && nextTabs.length < tabs.length && !options.allowLocalTransitionShrink) return;
     const connectedTabId = nextTabs.find((tab) => tab.connected)?.id;
     const validActiveTabId = state.activeTabId && nextTabs.some((tab) => tab.id === state.activeTabId)
       ? state.activeTabId
@@ -1147,7 +1148,7 @@
         requestedVersion !== tabStateVersion
       ) return;
       error = null;
-      applyTabsState(state, { allowEmpty: true });
+      applyTabsState(state, { allowEmpty: true, allowLocalTransitionShrink: true });
     } catch (err) {
       if (shouldUseLegacyTabClose(err)) {
         try {
