@@ -997,7 +997,7 @@ test("Files tab PDF limit badge and zoom controls stay obvious in narrow light p
     };
   });
   expect(metrics.ratio).toBeGreaterThanOrEqual(7);
-  expect(metrics.backgroundLuminance).toBeLessThan(0.35);
+  expect(metrics.backgroundLuminance).toBeGreaterThan(0.45);
   expect(metrics.statusBackground).not.toBe(metrics.previewBackground);
   expect(metrics.toolbarWidth).toBeGreaterThan(metrics.controlsWidth - 40);
   expect(metrics.rangeWidth).toBeGreaterThan(110);

@@ -352,17 +352,17 @@
     width: 100%;
     max-width: 100%;
     padding: 10px;
-    border: 1px solid #64748b;
+    border: 1px solid #38bdf8;
     border-radius: 8px;
-    background: #ffffff;
+    background: #0f172a;
     box-shadow: 0 14px 34px rgb(15 23 42 / 0.24);
-    color: #0f172a;
+    color: #f8fafc;
     pointer-events: auto;
   }
 
   :global(html.dark) .pdf-controls-row {
-    border-color: #64748b;
-    background: #020617;
+    border-color: #38bdf8;
+    background: #0f172a;
     color: #f8fafc;
     box-shadow: 0 18px 40px rgb(0 0 0 / 0.42);
   }
@@ -377,7 +377,7 @@
   }
 
   .pdf-zoom-label {
-    color: #475569;
+    color: #dbeafe;
     font-size: 11px;
     font-weight: 800;
     letter-spacing: 0.08em;
@@ -386,7 +386,7 @@
   }
 
   :global(html.dark) .pdf-zoom-label {
-    color: #cbd5e1;
+    color: #dbeafe;
   }
 
   .pdf-page-scroll {
@@ -404,12 +404,12 @@
     padding: 2px;
     border: 1px solid #94a3b8;
     border-radius: 7px;
-    background: #e2e8f0;
+    background: #334155;
   }
 
   :global(html.dark) .pdf-toolbar {
-    border-color: #475569;
-    background: #1e293b;
+    border-color: #94a3b8;
+    background: #334155;
   }
 
   .pdf-toolbar button {
@@ -462,7 +462,7 @@
 
   .pdf-zoom-value {
     min-width: 42px;
-    color: #334155;
+    color: #f8fafc;
     font-size: 12px;
     font-variant-numeric: tabular-nums;
     font-weight: 750;
@@ -525,15 +525,15 @@
     width: 100%;
     max-width: 100%;
     padding: 6px 11px;
-    border: 1px solid #fdba74;
+    border: 1px solid #fef08a;
     border-radius: 999px;
-    background: #7c2d12;
-    color: #fff7ed;
+    background: #facc15;
+    color: #1f1300;
     font-size: 12px;
     font-weight: 750;
     line-height: 1.35;
     text-align: left;
-    box-shadow: 0 0 0 2px rgb(251 146 60 / 0.26), 0 8px 18px rgb(124 45 18 / 0.28);
+    box-shadow: 0 0 0 2px rgb(250 204 21 / 0.35), 0 8px 18px rgb(15 23 42 / 0.24);
   }
 
   :global(html.dark) .pdf-status {

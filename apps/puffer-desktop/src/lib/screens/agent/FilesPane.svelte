@@ -1939,7 +1939,7 @@
   }
   .pdf-shell {
     position: relative;
-    padding: 20px;
+    padding: clamp(10px, 2vw, 20px);
     height: 100%;
     overflow: hidden;
     background: color-mix(in oklab, var(--background) 94%, var(--muted));
