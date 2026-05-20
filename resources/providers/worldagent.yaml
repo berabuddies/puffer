@@ -14,10 +14,20 @@ discovery:
   max_output_tokens: 8192
   supports_reasoning: true
 models:
-  - id: gpt-5
-    display_name: GPT-5 (via WorldRouter)
+  # Seed list — runtime /v1/models discovery overrides at startup.
+  # Pick a couple of reasoning-capable defaults verified live 2026-05-21
+  # (kimi-k2.6 and qwen3.5-flash both return 200 on /v1/chat/completions).
+  - id: kimi-k2.6
+    display_name: Kimi K2.6
     provider: worldagent
     api: openai-completions
-    context_window: 200000
+    context_window: 128000
+    max_output_tokens: 8192
+    supports_reasoning: true
+  - id: qwen3.5-flash
+    display_name: Qwen 3.5 Flash
+    provider: worldagent
+    api: openai-completions
+    context_window: 128000
     max_output_tokens: 8192
     supports_reasoning: true

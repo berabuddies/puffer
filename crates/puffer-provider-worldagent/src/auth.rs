@@ -19,10 +19,18 @@ pub const WORLDAGENT_AUTH_BASE_URL: &str = "https://auth.worldrouter.ai";
 /// Env var name that overrides the Auth Station base URL.
 pub const WORLDAGENT_AUTH_URL_OVERRIDE_ENV: &str = "PUFFER_WORLDAGENT_AUTH_URL";
 
-/// Default WR control-api base URL (preview deployment). Backend
-/// will move this to a stable URL — keep the env override available
-/// for swapping without a rebuild.
-pub const WORLDAGENT_CONTROL_BASE_URL: &str = "https://control-api-pre-7f819c.worldrouter.ai";
+/// Default WR control-api base URL (Production). Backend's preview
+/// deployment lives at `https://control-api-pre-7f819c.worldrouter.ai`
+/// and supports the same `/auth/exchange` shape — set the env
+/// override [`WORLDAGENT_CONTROL_URL_OVERRIDE_ENV`] to swap.
+///
+/// Important: preview control-api mints keys into a preview
+/// LiteLLM DB that the production `inference-api.worldrouter.ai`
+/// does NOT read; preview keys hit `token_not_found_in_db` 401
+/// against prod inference. Always pair preview-control with the
+/// matching preview-inference (when one exists) or use production
+/// control. Verified 2026-05-21.
+pub const WORLDAGENT_CONTROL_BASE_URL: &str = "https://control-api.worldrouter.ai";
 
 /// Env var name that overrides the control-api base URL.
 pub const WORLDAGENT_CONTROL_URL_OVERRIDE_ENV: &str = "PUFFER_WORLDAGENT_CONTROL_URL";
