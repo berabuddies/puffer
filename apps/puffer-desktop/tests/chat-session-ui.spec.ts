@@ -5135,3 +5135,39 @@ test("auto-recap timer does not fire on a different session after switch", async
   );
   expect(recapRequests.length).toBe(0);
 });
+
+test("remembered session with workspace root is not restored when current root is empty", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-remembered",
+        displayName: "Remembered",
+        title: "Remembered",
+        cwd: "/projects/alpha",
+        folderPath: "/projects/alpha",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        timeline: []
+      }
+    ],
+    workspaceRoot: ""
+  });
+  await daemon.install(page);
+
+  await page.addInitScript(() => {
+    window.localStorage.setItem(
+      "puffer-desktop:remembered-session",
+      JSON.stringify({ sessionId: "session-remembered", workspaceRoot: "/projects/alpha" })
+    );
+    window.localStorage.setItem(
+      "puffer-desktop:preferences",
+      JSON.stringify({ rememberSession: true })
+    );
+  });
+  await daemon.open(page);
+
+  await page.waitForTimeout(500);
+  const composer = page.locator(".pf-composer textarea");
+  await expect(composer).toHaveCount(0);
+});

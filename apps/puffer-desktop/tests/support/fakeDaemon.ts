@@ -414,7 +414,7 @@ export class FakeDaemon {
       if (this.protocol === "real") {
         socket.send(JSON.stringify({
           event: "hello",
-          payload: { protocolVersion: "1", workspaceRoot: "/tmp/puffer" }
+          payload: { protocolVersion: "1", workspaceRoot: this.workspaceRoot }
         }));
       }
       socket.onMessage((message) => this.handleMessage(socket, String(message)));

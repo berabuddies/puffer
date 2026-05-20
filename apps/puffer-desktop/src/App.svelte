@@ -745,7 +745,10 @@
     const remembered = loadRememberedSession();
     if (!remembered) return false;
     const workspaceRoot = workspaceIdentity();
-    if (remembered.workspaceRoot && workspaceRoot && remembered.workspaceRoot !== workspaceRoot) {
+    if (remembered.workspaceRoot && remembered.workspaceRoot !== workspaceRoot) {
+      return false;
+    }
+    if (!workspaceRoot && remembered.workspaceRoot) {
       return false;
     }
     const session = findSessionById(remembered.sessionId);
