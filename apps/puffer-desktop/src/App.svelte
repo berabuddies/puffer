@@ -180,6 +180,8 @@
   let subscribedSessionId: string | null = null;
   let sessionSubscriptionGeneration = 0;
   let connectionState = $state<ConnectionState>("idle");
+  let reconnectBusy = $state(false);
+  let reconnectError = $state<string | null>(null);
   let daemonUrl = $state<string | null>(null);
   let daemonWorkspaceRoot = $state<string | null>(null);
   let daemonClientFingerprint = $state<string | null>(null);
@@ -828,6 +830,7 @@
     daemonClientUnlisteners = [
       client.onConnectionChange((s) => {
         connectionState = s;
+        if (s === "open" || s === "reconnecting") reconnectError = null;
         updateDaemonIdentity(client);
         // When we reconnect after a drop, refresh groups + re-open the
         // selected session so the UI catches up.
@@ -867,6 +870,26 @@
         };
       })
     ];
+  }
+
+  function reconnectFailureMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  async function reconnectBackend(): Promise<void> {
+    if (reconnectBusy) return;
+    reconnectBusy = true;
+    reconnectError = null;
+    try {
+      const client = await ensureLocalDaemonClient();
+      attachDaemonClient(client);
+      await client.connect();
+    } catch (error) {
+      reconnectError = `Reconnect failed: ${reconnectFailureMessage(error)}`;
+      connectionState = "closed";
+    } finally {
+      reconnectBusy = false;
+    }
   }
 
   onMount(() => {
@@ -2702,8 +2725,14 @@
         class="sc-btn"
         data-variant="outline"
         data-size="sm"
-        onclick={() => void ensureLocalDaemonClient().then((c) => c.connect()).catch(() => {})}
-      >Reconnect</button>
+        aria-label="Reconnect backend"
+        aria-busy={reconnectBusy}
+        disabled={reconnectBusy}
+        onclick={() => void reconnectBackend()}
+      >{reconnectBusy ? "Reconnecting..." : "Reconnect"}</button>
+      {#if reconnectError}
+        <span class="connection-error">{reconnectError}</span>
+      {/if}
     {/if}
   </div>
 {/if}
@@ -2729,8 +2758,11 @@
     left: 50%;
     transform: translateX(-50%);
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
+    justify-content: center;
     gap: 10px;
+    max-width: min(760px, calc(100vw - 32px));
     padding: 6px 14px;
     font-size: 12px;
     color: var(--foreground);
@@ -2740,6 +2772,14 @@
     box-shadow: var(--shadow-md);
     z-index: 80;
     font-family: var(--font-sans);
+  }
+  .connection-banner .connection-error {
+    max-width: 520px;
+    overflow: hidden;
+    color: color-mix(in oklab, oklch(0.62 0.22 25) 78%, var(--foreground));
+    font-weight: 650;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .connection-banner .dot {
     width: 8px;

@@ -53,3 +53,25 @@ test("desktop client speaks the real daemon WebSocket protocol", async ({ page }
 
   await expect(page.getByText("Real daemon completion arrived.")).toBeVisible();
 });
+
+test("backend reconnect button reports failed retries", async ({ page }) => {
+  const daemon = new FakeDaemon({ protocol: "real" });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await expect.poll(() => daemon.socketUrls.length).toBeGreaterThan(0);
+  await daemon.dropConnections();
+
+  const banner = page.locator(".connection-banner");
+  await expect(banner).toContainText("Puffer backend disconnected.");
+
+  await banner.getByRole("button", { name: "Reconnect backend" }).click();
+  await expect(banner).toContainText("Reconnect failed:");
+  await expect(banner).toContainText("Unable to connect to Puffer daemon");
+
+  daemon.allowConnections();
+  await banner.getByRole("button", { name: "Reconnect backend" }).click();
+
+  await expect.poll(() => daemon.socketUrls.length).toBeGreaterThan(1);
+  await expect(page.locator(".connection-banner")).toHaveCount(0);
+});

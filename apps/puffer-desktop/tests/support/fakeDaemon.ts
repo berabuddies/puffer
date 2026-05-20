@@ -287,6 +287,7 @@ export class FakeDaemon {
   private readonly activeTurnIds = new Set<string>();
   private nextTab = 2;
   private nextPty = 1;
+  private rejectConnections = false;
 
   constructor(options: {
     sessions?: FakeDaemonSessionInput[];
@@ -406,7 +407,8 @@ export class FakeDaemon {
   async install(page: Page): Promise<void> {
     const expectedUrl = new URL(this.url);
     await page.routeWebSocket((url) => {
-      const matches = url.origin === expectedUrl.origin && url.pathname === expectedUrl.pathname;
+      const matches =
+        !this.rejectConnections && url.origin === expectedUrl.origin && url.pathname === expectedUrl.pathname;
       if (matches) this.socketUrls.push(url.toString());
       return matches;
     }, (socket) => {
@@ -422,6 +424,20 @@ export class FakeDaemon {
         this.sockets.delete(socket);
       });
     });
+  }
+
+  async dropConnections(): Promise<void> {
+    this.rejectConnections = true;
+    await Promise.all(
+      Array.from(this.sockets, (socket) =>
+        socket.close({ code: 1011, reason: "test disconnect" }).catch(() => {})
+      )
+    );
+    this.sockets.clear();
+  }
+
+  allowConnections(): void {
+    this.rejectConnections = false;
   }
 
   async open(
