@@ -47,6 +47,12 @@ use puffer_provider_openai::{
 use puffer_provider_registry::{
     canonical_provider_id, AuthMode, AuthStore, ProviderRegistry, StoredCredential,
 };
+use puffer_provider_worldagent::{
+    decode_jwt_profile as decode_worldagent_jwt_profile,
+    parse_callback_input as parse_worldagent_callback_input,
+    refresh_oauth_token as refresh_worldagent_oauth_token,
+    WorldAgentOAuthCredentials, WORLDAGENT_CALLBACK_PATH, WORLDAGENT_CALLBACK_PORT,
+};
 use puffer_resources::load_resources;
 use puffer_session_store::{SessionMetadata, SessionStore};
 use puffer_tools::ToolRegistry;
@@ -67,6 +73,7 @@ use crate::auth_credentials::{
     anthropic_refresh_scopes, inferred_anthropic_redirect_uri,
     registry_to_anthropic_oauth_credential, set_stored_credential, store_anthropic_credential,
     store_ready_credential_from_anthropic, to_registry_oauth_credential_openai,
+    to_registry_oauth_credential_worldagent,
 };
 use crate::auth_provider::{
     oauth_family_for_provider, oauth_login_bundle_for_provider, oauth_start_bundle_for_provider,
@@ -964,7 +971,10 @@ fn run_auth_command(
                     store_anthropic_credential(auth_store, &provider, credential)?;
                 }
                 Some(OauthFamily::WorldAgent) => {
-                    todo!("worldagent oauth exchange — implemented in Task 10")
+                    anyhow::bail!(
+                        "worldagent does not use the OAuth code-exchange flow; \
+                         run `puffer auth login worldagent` instead"
+                    );
                 }
                 None => anyhow::bail!("oauth exchange is not implemented for {provider}"),
             }
@@ -994,7 +1004,9 @@ fn run_auth_command(
                     )?)?
                 }
                 Some(OauthFamily::WorldAgent) => {
-                    todo!("worldagent oauth refresh — implemented in Task 10")
+                    StoredCredential::OAuth(to_registry_oauth_credential_worldagent(
+                        refresh_worldagent_oauth_token(&existing.refresh_token, None)?,
+                    ))
                 }
                 None => anyhow::bail!("oauth refresh is not implemented for {provider}"),
             };
@@ -1024,6 +1036,16 @@ fn resolve_provider_id(providers: &ProviderRegistry, provider: &str) -> String {
         .unwrap_or_else(|| canonical_provider_id(provider))
 }
 
+/// Returns the Unix epoch millis at which an Auth Station access
+/// token issued **now** will expire (24 hours per the API doc).
+fn worldagent_expires_at_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64 + 24 * 3600 * 1000)
+        .unwrap_or(24 * 3600 * 1000)
+}
+
 fn run_login_flow(
     provider: &str,
     value: Option<String>,
@@ -1034,6 +1056,14 @@ fn run_login_flow(
 ) -> Result<()> {
     let callback_listener = if stdin || value.is_some() {
         None
+    } else if matches!(
+        oauth_family_for_provider(providers, provider),
+        Some(OauthFamily::WorldAgent)
+    ) {
+        Some(authflow::CallbackListener::bind_localhost_port(
+            WORLDAGENT_CALLBACK_PATH,
+            WORLDAGENT_CALLBACK_PORT,
+        )?)
     } else {
         Some(authflow::CallbackListener::bind_localhost("/callback")?)
     };
@@ -1105,7 +1135,31 @@ fn run_login_flow(
             store_anthropic_credential(auth_store, provider, credential)?;
         }
         Some(OauthFamily::WorldAgent) => {
-            todo!("worldagent oauth login — implemented in Task 10")
+            let parsed = parse_worldagent_callback_input(&input);
+            if let Some(err) = parsed.error.as_deref() {
+                let desc = parsed.error_description.as_deref().unwrap_or("");
+                anyhow::bail!("worldagent login failed: {err} {desc}");
+            }
+            if parsed.state.as_deref() != Some(bundle.state.as_str()) {
+                anyhow::bail!("oauth state mismatch for worldagent");
+            }
+            let access_token = parsed
+                .token
+                .ok_or_else(|| anyhow::anyhow!("worldagent callback missing token"))?;
+            let refresh_token = parsed.refresh_token.unwrap_or_default();
+            let profile = decode_worldagent_jwt_profile(&access_token);
+            let credential = WorldAgentOAuthCredentials {
+                access_token,
+                refresh_token,
+                expires_at_ms: worldagent_expires_at_ms(),
+                sub: profile.sub,
+                email: profile.email,
+                name: profile.name,
+            };
+            auth_store.set_oauth(
+                provider.to_string(),
+                to_registry_oauth_credential_worldagent(credential),
+            );
         }
         None => anyhow::bail!("oauth login is not implemented for {provider}"),
     }
