@@ -238,6 +238,7 @@
         type="button"
         class="pf-sidebar-item"
         data-active={screen === s.id}
+        aria-current={screen === s.id ? "page" : undefined}
         aria-label={s.label}
         title={s.label}
         onclick={() => onSelectScreen(s.id)}

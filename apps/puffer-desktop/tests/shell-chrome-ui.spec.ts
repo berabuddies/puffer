@@ -69,6 +69,28 @@ test("desktop minimum width keeps primary navigation visible", async ({ page }) 
   await expect(sidebar.getByRole("button", { name: "Settings" })).toBeVisible();
 });
 
+test("sidebar primary navigation exposes the current page", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const sidebar = page.locator(".pf-sidebar");
+  const project = sidebar.getByRole("button", { name: "Project" });
+  const pipelines = sidebar.getByRole("button", { name: "Pipelines" });
+  const settings = sidebar.getByRole("button", { name: "Settings" });
+
+  await expect(project).toHaveAttribute("aria-current", "page");
+  await expect(pipelines).not.toHaveAttribute("aria-current", "page");
+
+  await pipelines.click();
+  await expect(project).not.toHaveAttribute("aria-current", "page");
+  await expect(pipelines).toHaveAttribute("aria-current", "page");
+
+  await settings.click();
+  await expect(pipelines).not.toHaveAttribute("aria-current", "page");
+  await expect(settings).toHaveAttribute("aria-current", "page");
+});
+
 test("desktop user-visible copy uses Puffer branding", async () => {
   const userFacingFiles = [
     "src/App.svelte",
