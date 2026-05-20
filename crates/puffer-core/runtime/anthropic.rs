@@ -1087,6 +1087,7 @@ mod thinking_gate_tests {
                 compat: model_compat,
             }],
             chat_completions_path: None,
+            oauth_family: None,
         }
     }
 

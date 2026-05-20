@@ -846,6 +846,7 @@ pub(super) fn sample_providers() -> ProviderRegistry {
             cost: None,
         }],
         chat_completions_path: None,
+        oauth_family: None,
     });
     registry.register(ProviderDescriptor {
         id: "openai".to_string(),
@@ -869,6 +870,7 @@ pub(super) fn sample_providers() -> ProviderRegistry {
             cost: None,
         }],
         chat_completions_path: None,
+        oauth_family: None,
     });
     registry
 }

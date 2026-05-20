@@ -43,6 +43,7 @@ fn status_command_reports_richer_session_and_resource_status() {
             cost: None,
         }],
         chat_completions_path: None,
+        oauth_family: None,
     });
     let mut auth_store = AuthStore::default();
     auth_store.set_api_key("openai".to_string(), "sk-test".to_string());

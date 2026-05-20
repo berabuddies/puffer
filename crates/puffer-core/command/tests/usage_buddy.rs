@@ -51,6 +51,7 @@ fn usage_command_reports_runtime_and_resource_counts() {
             cost: None,
         }],
         chat_completions_path: None,
+        oauth_family: None,
     });
     let mut auth_store = AuthStore::default();
     auth_store.set_api_key("anthropic", "sk-ant");
@@ -382,6 +383,7 @@ fn anthropic_provider() -> ProviderDescriptor {
             cost: None,
         }],
         chat_completions_path: None,
+        oauth_family: None,
     }
 }
 
@@ -408,6 +410,7 @@ fn openai_provider() -> ProviderDescriptor {
             cost: None,
         }],
         chat_completions_path: None,
+        oauth_family: None,
     }
 }
 

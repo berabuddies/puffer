@@ -36,6 +36,7 @@ fn provider(id: &str, auth_modes: Vec<AuthMode>) -> ProviderDescriptor {
             cost: None,
         }],
         chat_completions_path: None,
+        oauth_family: None,
     }
 }
 

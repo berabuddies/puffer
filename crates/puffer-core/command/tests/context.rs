@@ -87,6 +87,7 @@ fn context_command_renders_anthropic_context_breakdown() {
             cost: None,
         }],
         chat_completions_path: None,
+        oauth_family: None,
     });
 
     dispatch_command(
@@ -166,6 +167,7 @@ fn context_command_renders_openai_context_breakdown() {
             cost: None,
         }],
         chat_completions_path: None,
+        oauth_family: None,
     });
 
     dispatch_command(

@@ -30,6 +30,7 @@ fn provider(id: &str, models: &[&str]) -> puffer_provider_registry::ProviderDesc
             })
             .collect(),
         chat_completions_path: None,
+        oauth_family: None,
     }
 }
 

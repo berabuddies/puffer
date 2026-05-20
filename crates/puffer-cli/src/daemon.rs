@@ -4224,6 +4224,7 @@ mod tests {
             display_name: id.to_string(),
             base_url: "https://example.invalid".to_string(),
             chat_completions_path: None,
+            oauth_family: None,
             default_api: "openai-responses".to_string(),
             auth_modes: Vec::new(),
             headers: IndexMap::new(),

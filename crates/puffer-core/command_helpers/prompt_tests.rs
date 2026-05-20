@@ -701,6 +701,7 @@ fn local_provider(base_url: String) -> ProviderDescriptor {
             compat: None,
         }],
         chat_completions_path: None,
+        oauth_family: None,
     }
 }
 

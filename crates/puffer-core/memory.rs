@@ -985,6 +985,7 @@ mod tests {
                 compat: None,
             }],
             chat_completions_path: None,
+            oauth_family: None,
         }
     }
 

@@ -463,6 +463,8 @@ pub struct ProviderPack {
     /// so we don't double up to `/v4/v1/chat/completions`.
     #[serde(default)]
     pub chat_completions_path: Option<String>,
+    /// OAuth family tag for this provider. See `ProviderDescriptor::oauth_family`
+    /// for the canonical description of this field.
     #[serde(default)]
     pub oauth_family: Option<String>,
     #[serde(default)]

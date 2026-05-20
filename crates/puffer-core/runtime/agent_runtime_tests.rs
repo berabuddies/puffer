@@ -35,6 +35,7 @@ fn provider() -> ProviderDescriptor {
             cost: None,
         }],
         chat_completions_path: None,
+        oauth_family: None,
     }
 }
 

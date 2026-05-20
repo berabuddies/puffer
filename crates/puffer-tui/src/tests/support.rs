@@ -202,6 +202,7 @@ pub(super) fn openai_provider_resources() -> LoadedResources {
                     cost: None,
                 }],
                 chat_completions_path: None,
+                oauth_family: None,
             },
         )],
         ..LoadedResources::default()
@@ -246,6 +247,7 @@ pub(super) fn sample_providers() -> ProviderRegistry {
             },
         ],
         chat_completions_path: None,
+        oauth_family: None,
     });
     providers.register(ProviderDescriptor {
         id: "openai".to_string(),
@@ -269,6 +271,7 @@ pub(super) fn sample_providers() -> ProviderRegistry {
             cost: None,
         }],
         chat_completions_path: None,
+        oauth_family: None,
     });
     providers.register(ProviderDescriptor {
         id: "ollama".to_string(),
@@ -292,6 +295,7 @@ pub(super) fn sample_providers() -> ProviderRegistry {
             cost: None,
         }],
         chat_completions_path: None,
+        oauth_family: None,
     });
     providers
 }
