@@ -3774,6 +3774,116 @@ test("model picker keeps the selected provider visible when no models load", asy
   );
 });
 
+test("model picker keeps current provider after provider switch load failure", async ({ page }) => {
+  const model = (provider: string, id: string) => ({
+    id,
+    displayName: id,
+    provider,
+    api: "openai-responses",
+    supportsTools: true,
+    supportsVision: false,
+    contextWindow: null,
+    maxOutputTokens: null,
+    thinkingOptions: [],
+    defaultThinkingOptionId: null,
+    isDefault: true
+  });
+  const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "codex",
+        kind: "oauth",
+        email: "tester@example.com",
+        expiresAtMs: null,
+        scopes: [],
+        planType: "test",
+        organizationName: null
+      },
+      {
+        providerId: "openrouter",
+        kind: "api_key",
+        email: null,
+        expiresAtMs: null,
+        scopes: [],
+        planType: null,
+        organizationName: null
+      }
+    ],
+    providers: [
+      {
+        id: "codex",
+        displayName: "Codex",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 1,
+        authModes: ["oauth"],
+        sourceKind: "test",
+        sourcePath: null
+      },
+      {
+        id: "openrouter",
+        displayName: "OpenRouter",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 1,
+        authModes: ["api_key"],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ],
+    sessions: [
+      {
+        sessionId: "session-provider-switch-failure",
+        displayName: "Provider switch failure",
+        title: "Provider switch failure",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "codex-default",
+        timeline: []
+      }
+    ],
+    providerModels: {
+      codex: [model("codex", "codex-default")],
+      openrouter: [model("openrouter", "google/gemini-3.5-flash")]
+    }
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Provider switch failure/);
+  const picker = page.locator(".pf-composer .picker");
+  await picker.locator(".trigger").click();
+  await expect(picker.locator(".trigger")).toContainText("codex-default");
+  await expect(picker.locator(".row-name").filter({ hasText: /^codex-default$/ })).toBeVisible();
+
+  daemon.failNext("list_provider_models", "transient OpenRouter model load failure");
+  daemon.failNext("list_provider_models", "transient OpenRouter model validation failure");
+  await picker.getByRole("button", { name: "OpenRouter", exact: true }).click();
+  await daemon.waitForRequest(
+    "list_provider_models",
+    (request) => request.params.providerId === "openrouter"
+  );
+
+  await expect(picker.getByText("Some models failed to load")).toBeVisible();
+  await expect(picker.locator(".trigger")).toContainText("codex-default");
+  await expect(picker.locator(".trigger")).toContainText("Codex");
+  await page.locator(".pf-composer textarea").fill("Keep using Codex");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  const request = await daemon.waitForRequest(
+    "run_agent_turn",
+    (item) => item.params.message === "Keep using Codex"
+  );
+  expect(request.params).toMatchObject({
+    providerId: "codex",
+    modelId: "codex-default"
+  });
+});
+
 test("model picker marks alias-equivalent provider models as selected", async ({ page }) => {
   const daemon = new FakeDaemon({
     auth: [

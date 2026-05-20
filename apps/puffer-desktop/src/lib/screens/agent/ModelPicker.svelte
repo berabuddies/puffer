@@ -118,6 +118,8 @@
     if (!allowProviderSwitch || disabled) return;
     if (providerIdsEquivalent(providerId, activeProvider)) return;
     const generation = ++providerSwitchGeneration;
+    const previousProviderId = currentProvider;
+    const previousModelId = currentModel;
     modelLoadGeneration += 1;
     pendingProviderId = providerId;
     query = "";
@@ -133,7 +135,9 @@
       if (generation !== providerSwitchGeneration) return;
       modelsByProvider = { ...modelsByProvider, [providerId]: [] };
       loadError = `${providerId}: ${error}`;
-      models = [];
+      onChange(previousProviderId, previousModelId);
+      pendingProviderId = null;
+      return;
     } finally {
       if (generation === providerSwitchGeneration) {
         busy = false;
