@@ -1998,7 +1998,9 @@
         setLiveSidebarAgentState(submitSessionId, "thinking", turnId, sessionAtSubmit);
       }
       if (selectedSession?.id !== submitSessionId) {
-        markCachedTurnStarted(submitSessionId, turnId);
+        if (!settledBeforeRpcReturned) {
+          markCachedTurnStarted(submitSessionId, turnId);
+        }
         return false;
       }
       if (settledBeforeRpcReturned) {

@@ -817,6 +817,11 @@ test("early completed turn does not revive sidebar state after switching session
   await page.waitForTimeout(320);
   const alphaRow = page.locator(".pf-sidebar-agent-row").filter({ hasText: "Early alpha" });
   await expect(alphaRow.locator('.state[data-state="idle"]')).toContainText("idle");
+
+  await openSession(page, /Early alpha/);
+  await expect(page.getByRole("button", { name: "Stop turn" })).toHaveCount(0);
+  await page.locator(".pf-composer textarea").fill("Follow-up after alpha finished");
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeEnabled();
 });
 
 test("sidebar marks the selected agent thinking while turn start is pending", async ({ page }) => {
