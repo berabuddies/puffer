@@ -272,6 +272,39 @@ test("Files tab previews common document and data formats", async ({ page }) => 
   await expect(page.getByLabel("Excel preview")).toContainText("Ready");
 });
 
+test("Files tab keeps raw editing available for previewed text files", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  seedPreviewFiles(daemon);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openFilesPanel(page);
+
+  await page.getByRole("button", { name: "README.md" }).click();
+  await expect(page.getByLabel("Markdown preview")).toContainText("Project Notes");
+
+  await page.getByRole("button", { name: "Raw" }).click();
+  const editor = page.getByLabel("Edit file contents");
+  await expect(editor).toHaveValue(/# Project Notes/);
+
+  const draft = "# Project Notes\n\n- Edited in raw mode\n";
+  await editor.fill(draft);
+  await page.getByRole("button", { name: "Save" }).click();
+
+  const request = await daemon.waitForRequest(
+    "write_file",
+    (candidate) => candidate.params.path === "/tmp/puffer/README.md"
+  );
+  expect(request.params).toMatchObject({
+    path: "/tmp/puffer/README.md",
+    content: draft
+  });
+
+  await page.getByRole("button", { name: "Preview" }).click();
+  await expect(page.getByLabel("Markdown preview")).toContainText("Edited in raw mode");
+});
+
 test("Files tab applies the first watch event before fs_watch resolves", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayResponse("fs_watch", () => true, 250);

@@ -76,6 +76,7 @@
   let activePreview = $state<FilePreview | null>(null);
   let activePreviewLoading = $state(false);
   let activePreviewError = $state<string | null>(null);
+  let viewerMode = $state<"preview" | "raw">("preview");
   let saving = $state(false);
   let saveError = $state<string | null>(null);
   let selectedSymbol = $state<string | null>(null);
@@ -122,6 +123,7 @@
       activeError = null;
       activeSize = 0;
       clearActivePreview();
+      viewerMode = "preview";
       draftContent = "";
       saving = false;
       saveError = null;
@@ -616,6 +618,7 @@
     activeError = null;
     saveError = null;
     clearActivePreview();
+    viewerMode = "preview";
     clearLspState();
 
     const cached = fileCache.get(path);
@@ -692,6 +695,7 @@
       activeLoading = false;
       activeError = null;
       clearActivePreview();
+      viewerMode = "preview";
       draftContent = "";
       saveError = null;
       clearLspState();
@@ -740,9 +744,11 @@
     !!activeFile &&
       activeFile.encoding === "utf8" &&
       !activeFile.truncated &&
-      !activeLoading &&
-      !hasRichFilePreview(activeFile)
+      !activeLoading
   );
+  let hasPreview = $derived(!!activeFile && hasRichFilePreview(activeFile));
+  let canToggleRaw = $derived(canEdit && hasPreview);
+  let showRawEditor = $derived(canEdit && (!hasPreview || viewerMode === "raw"));
   let dirty = $derived(activePath ? isTabDirty(activePath) : false);
 
   function cancelEditing() {
@@ -1275,6 +1281,26 @@
           <span class="save-error mono">{saveError}</span>
         {/if}
         <div class="viewer-actions">
+          {#if canToggleRaw}
+            <div class="viewer-mode" aria-label="File view mode">
+              <button
+                type="button"
+                class:active={viewerMode === "preview"}
+                aria-pressed={viewerMode === "preview"}
+                onclick={() => (viewerMode = "preview")}
+              >
+                Preview
+              </button>
+              <button
+                type="button"
+                class:active={viewerMode === "raw"}
+                aria-pressed={viewerMode === "raw"}
+                onclick={() => (viewerMode = "raw")}
+              >
+                Raw
+              </button>
+            </div>
+          {/if}
           {#if canEdit && dirty}
             <button
               type="button"
@@ -1304,6 +1330,30 @@
           <div class="viewer-msg sub">Preparing preview...</div>
         {:else if activePreviewError}
           <div class="viewer-msg err mono">{activePreviewError}</div>
+        {:else if showRawEditor}
+          <div class="editor-shell">
+            <div class="editor-gutter" bind:this={editorGutterEl} aria-hidden="true">
+              {#each draftLineNumbers as lineNumber}
+                <span>{lineNumber}</span>
+              {/each}
+            </div>
+            <div class="editor-stack">
+              <pre class="editor-highlight" bind:this={editorHighlightEl} aria-hidden="true">{#each draftLines as line}<span class:symbol-line={lineHasSymbol(line, selectedSymbol)}><HighlightedLine text={line || " "} path={activePath} highlight={selectedSymbol} /></span>{/each}</pre>
+              <textarea
+                class="editor"
+                bind:this={editorEl}
+                value={draftContent}
+                spellcheck="false"
+                wrap="off"
+                oninput={(event) => setDraft((event.currentTarget as HTMLTextAreaElement).value)}
+                onkeydown={handleEditorKeydown}
+                onkeyup={handleEditorKeyup}
+                onmouseup={handleEditorCursorInspect}
+                onscroll={syncEditorScroll}
+                aria-label="Edit file contents"
+              ></textarea>
+            </div>
+          </div>
         {:else if activePreview && activePreview.kind === "markdown"}
           <article class="file-preview markdown-preview" aria-label="Markdown preview">
             {@html activePreview.html}
@@ -1379,30 +1429,6 @@
               <h2>{activePreview.title}</h2>
               <p>{activePreview.message}</p>
             </section>
-          </div>
-        {:else if canEdit}
-          <div class="editor-shell">
-            <div class="editor-gutter" bind:this={editorGutterEl} aria-hidden="true">
-              {#each draftLineNumbers as lineNumber}
-                <span>{lineNumber}</span>
-              {/each}
-            </div>
-            <div class="editor-stack">
-              <pre class="editor-highlight" bind:this={editorHighlightEl} aria-hidden="true">{#each draftLines as line}<span class:symbol-line={lineHasSymbol(line, selectedSymbol)}><HighlightedLine text={line || " "} path={activePath} highlight={selectedSymbol} /></span>{/each}</pre>
-              <textarea
-                class="editor"
-                bind:this={editorEl}
-                value={draftContent}
-                spellcheck="false"
-                wrap="off"
-                oninput={(event) => setDraft((event.currentTarget as HTMLTextAreaElement).value)}
-                onkeydown={handleEditorKeydown}
-                onkeyup={handleEditorKeyup}
-                onmouseup={handleEditorCursorInspect}
-                onscroll={syncEditorScroll}
-                aria-label="Edit file contents"
-              ></textarea>
-            </div>
           </div>
         {:else if activeFile && activeFile.encoding === "utf8"}
           <pre class="code"><!--
@@ -1716,6 +1742,38 @@
     align-items: center;
     gap: 6px;
     flex-shrink: 0;
+  }
+  .viewer-mode {
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--background);
+  }
+  .viewer-mode button {
+    height: 22px;
+    min-width: 54px;
+    padding: 0 8px;
+    border: 0;
+    border-right: 1px solid var(--border);
+    background: transparent;
+    color: var(--muted-foreground);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .viewer-mode button:last-child {
+    border-right: 0;
+  }
+  .viewer-mode button:hover {
+    background: var(--accent);
+    color: var(--foreground);
+  }
+  .viewer-mode button.active {
+    background: var(--foreground);
+    color: var(--background);
   }
   .file-action {
     height: 24px;
