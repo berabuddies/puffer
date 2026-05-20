@@ -703,6 +703,8 @@
         selectedThinkingOptionId = saved;
         return;
       }
+      selectedThinkingOptionId = "";
+      return;
     }
     if (
       selectedThinkingOptionId &&
@@ -710,10 +712,7 @@
     ) {
       return;
     }
-    selectedThinkingOptionId =
-      selectedModelInfo?.defaultThinkingOptionId ??
-      thinkingOptions.find((option) => option.isDefault)?.id ??
-      "";
+    selectedThinkingOptionId = "";
   });
 
   $effect(() => {
@@ -751,10 +750,14 @@
 
   $effect(() => {
     if (typeof window === "undefined") return;
-    if (!thinkingAvailable || !selectedThinkingOptionId) return;
-    if (!thinkingOptions.some((option) => option.id === selectedThinkingOptionId)) return;
+    if (!thinkingAvailable) return;
     const preferenceKey = thinkingPreferenceKey();
     if (!preferenceKey) return;
+    if (!selectedThinkingOptionId) {
+      window.localStorage.removeItem(preferenceKey);
+      return;
+    }
+    if (!thinkingOptions.some((option) => option.id === selectedThinkingOptionId)) return;
     window.localStorage.setItem(preferenceKey, selectedThinkingOptionId);
   });
 

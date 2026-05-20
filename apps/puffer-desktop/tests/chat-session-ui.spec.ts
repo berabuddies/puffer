@@ -2562,7 +2562,7 @@ test("composer sends selected thinking option with the turn request", async ({ p
   await openSession(page, /^Browser regression\b/);
   const thinkingSelect = page.getByLabel("Thinking level");
   await expect(thinkingSelect).toBeEnabled();
-  await expect(thinkingSelect).toHaveValue("low");
+  await expect(thinkingSelect).toHaveValue("");
   await thinkingSelect.selectOption("high");
 
   await page.locator(".pf-composer textarea").fill("Use high reasoning");
@@ -2633,13 +2633,13 @@ test("composer thinking and access controls stay scoped to each session", async 
   await openSession(page, /Controls Alpha/);
   const thinkingSelect = page.getByLabel("Thinking level");
   const accessSelect = page.getByLabel("Codex permissions");
-  await expect(thinkingSelect).toHaveValue("low");
+  await expect(thinkingSelect).toHaveValue("");
   await expect(accessSelect).toHaveValue("workspace-write");
   await thinkingSelect.selectOption("high");
   await accessSelect.selectOption("full-access");
 
   await openSession(page, /Controls Beta/);
-  await expect(thinkingSelect).toHaveValue("low");
+  await expect(thinkingSelect).toHaveValue("");
   await expect(accessSelect).toHaveValue("workspace-write");
 
   await openSession(page, /Controls Alpha/);
@@ -2658,6 +2658,85 @@ test("composer thinking and access controls stay scoped to each session", async 
     modelId: "test-model",
     thinkingOptionId: "high",
     permissionMode: "full-access"
+  });
+});
+
+test("composer thinking default clears the saved session override", async ({ page }) => {
+  const model = {
+    id: "test-model",
+    displayName: "Test model",
+    provider: "codex",
+    api: "openai-responses",
+    contextWindow: 128000,
+    maxOutputTokens: 4096,
+    supportsReasoning: true,
+    thinkingOptions: [
+      {
+        id: "low",
+        label: "Low",
+        description: "Use low reasoning effort for this turn.",
+        isDefault: true
+      },
+      {
+        id: "high",
+        label: "High",
+        description: "Use high reasoning effort for this turn.",
+        isDefault: false
+      }
+    ],
+    defaultThinkingOptionId: "low",
+    isDefault: true
+  };
+  const sessionInput = (sessionId: string, title: string) => ({
+    sessionId,
+    displayName: title,
+    title,
+    cwd: "/tmp/puffer",
+    folderPath: "/tmp/puffer",
+    updatedAtMs: baseTime,
+    createdAtMs: baseTime - 60_000,
+    eventCount: 0,
+    providerId: "codex",
+    modelId: "test-model",
+    timeline: []
+  });
+  const daemon = new FakeDaemon({
+    sessions: [
+      sessionInput("session-thinking-default-alpha", "Thinking Default Alpha"),
+      sessionInput("session-thinking-default-beta", "Thinking Default Beta")
+    ],
+    providerModels: {
+      codex: [model]
+    }
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Thinking Default Alpha/);
+  const thinkingSelect = page.getByLabel("Thinking level");
+  await expect(thinkingSelect).toHaveValue("");
+  await thinkingSelect.selectOption("high");
+  await expect(thinkingSelect).toHaveValue("high");
+  await thinkingSelect.selectOption("");
+  await expect(thinkingSelect).toHaveValue("");
+
+  await openSession(page, /Thinking Default Beta/);
+  await expect(thinkingSelect).toHaveValue("");
+
+  await openSession(page, /Thinking Default Alpha/);
+  await expect(thinkingSelect).toHaveValue("");
+
+  await page.locator(".pf-composer textarea").fill("Use provider default thinking");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  const request = await daemon.waitForRequest(
+    "run_agent_turn",
+    (item) => item.params.message === "Use provider default thinking"
+  );
+  expect(request.params).toMatchObject({
+    providerId: "codex",
+    modelId: "test-model",
+    thinkingOptionId: null
   });
 });
 
@@ -3174,7 +3253,7 @@ test("composer controls handle provider-prefixed session model ids", async ({ pa
   await expect(fastToggle.locator("input")).toBeEnabled();
   const thinkingSelect = page.getByLabel("Thinking level");
   await expect(thinkingSelect).toBeEnabled();
-  await expect(thinkingSelect).toHaveValue("medium");
+  await expect(thinkingSelect).toHaveValue("");
   await thinkingSelect.selectOption("high");
 
   await page.locator(".pf-composer textarea").fill("Use normalized model");
