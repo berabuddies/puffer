@@ -422,6 +422,21 @@ test("advertised settings shortcut opens settings", async ({ page }) => {
   await expect(page.getByText("Open settings")).toBeVisible();
 });
 
+test("settings shortcut is ignored while the new-agent modal is open", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: /^New agent in / }).first().click();
+  const dialog = page.getByRole("dialog", { name: "New agent" });
+  await expect(dialog).toBeVisible();
+
+  await page.keyboard.press("Control+,");
+
+  await expect(dialog).toBeVisible();
+  await expect(page.getByRole("heading", { name: "General" })).toHaveCount(0);
+});
+
 test("provider API key connect requires a non-empty key", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

@@ -723,9 +723,16 @@
     }
   }
 
+  function modalDialogOpen(): boolean {
+    if (showWorkspacePicker || newSessionCwd !== null) return true;
+    if (typeof document === "undefined") return false;
+    return document.querySelector("[role='dialog'][aria-modal='true']") !== null;
+  }
+
   function handleShellKeydown(event: KeyboardEvent) {
     if (event.defaultPrevented || onboarding) return;
     if ((event.metaKey || event.ctrlKey) && event.key === ",") {
+      if (modalDialogOpen()) return;
       event.preventDefault();
       onSelectScreen("settings");
     }
