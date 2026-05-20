@@ -464,6 +464,8 @@ pub struct ProviderPack {
     #[serde(default)]
     pub chat_completions_path: Option<String>,
     #[serde(default)]
+    pub oauth_family: Option<String>,
+    #[serde(default)]
     pub discovery: Option<ModelDiscoveryConfig>,
     #[serde(default)]
     pub models: Vec<ModelDescriptor>,
@@ -481,6 +483,7 @@ impl ProviderPack {
             headers: self.headers,
             query_params: self.query_params,
             chat_completions_path: self.chat_completions_path,
+            oauth_family: self.oauth_family,
             discovery: self.discovery,
             models: self.models,
         }

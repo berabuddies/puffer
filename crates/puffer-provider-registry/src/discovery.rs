@@ -422,9 +422,10 @@ mod tests {
             auth_modes: vec![AuthMode::ApiKey],
             headers: IndexMap::new(),
             query_params: IndexMap::new(),
+            chat_completions_path: None,
+            oauth_family: None,
             discovery: Some(discovery),
             models: Vec::new(),
-            chat_completions_path: None,
         }
     }
 
@@ -654,6 +655,8 @@ mod tests {
             auth_modes: vec![crate::auth::AuthMode::ApiKey],
             headers: IndexMap::new(),
             query_params: IndexMap::new(),
+            chat_completions_path: None,
+            oauth_family: None,
             discovery: Some(ModelDiscoveryConfig {
                 path: "/v1/models".to_string(),
                 response: ModelDiscoveryFormat::AnthropicModels,
@@ -667,7 +670,6 @@ mod tests {
                 headers: IndexMap::new(),
             }),
             models: Vec::new(),
-            chat_completions_path: None,
         };
         let mut auth = AuthStore::default();
         auth.set_api_key("custom-anthropic", "sk-ant-custom");
@@ -773,9 +775,10 @@ mod tests {
             auth_modes: vec![AuthMode::OAuth],
             headers: IndexMap::new(),
             query_params: IndexMap::new(),
+            chat_completions_path: None,
+            oauth_family: None,
             discovery: None,
             models: Vec::new(),
-            chat_completions_path: None,
         };
 
         assert_eq!(
@@ -818,6 +821,8 @@ mod tests {
             auth_modes: vec![AuthMode::ApiKey],
             headers: IndexMap::new(),
             query_params: IndexMap::new(),
+            chat_completions_path: None,
+            oauth_family: None,
             discovery: Some(ModelDiscoveryConfig {
                 path: "/v1/models".to_string(),
                 response: ModelDiscoveryFormat::OpenAiModels,
@@ -831,7 +836,6 @@ mod tests {
                 headers: IndexMap::new(),
             }),
             models: Vec::new(),
-            chat_completions_path: None,
         };
         let mut auth = AuthStore::default();
         auth.set_api_key("openai", "sk-test");

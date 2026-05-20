@@ -485,6 +485,7 @@ mod tests {
                 cost: None,
             }],
             chat_completions_path: None,
+            oauth_family: None,
         }
     }
 
@@ -619,9 +620,10 @@ mod tests {
             auth_modes: vec![AuthMode::ApiKey, AuthMode::OAuth],
             headers: IndexMap::new(),
             query_params: IndexMap::new(),
+            chat_completions_path: None,
+            oauth_family: None,
             discovery: None,
             models: Vec::new(),
-            chat_completions_path: None,
         });
 
         registry.apply_openai_base_url_override(Some("https://proxy.example/v1"));
@@ -645,9 +647,10 @@ mod tests {
             auth_modes: vec![AuthMode::ApiKey, AuthMode::OAuth],
             headers: IndexMap::new(),
             query_params: IndexMap::new(),
+            chat_completions_path: None,
+            oauth_family: None,
             discovery: None,
             models: Vec::new(),
-            chat_completions_path: None,
         });
 
         registry.set_openai_headers(IndexMap::from([(
@@ -675,9 +678,10 @@ mod tests {
             auth_modes: vec![AuthMode::ApiKey, AuthMode::OAuth],
             headers: IndexMap::new(),
             query_params: IndexMap::new(),
+            chat_completions_path: None,
+            oauth_family: None,
             discovery: None,
             models: Vec::new(),
-            chat_completions_path: None,
         });
 
         registry.set_openai_query_params(IndexMap::from([(

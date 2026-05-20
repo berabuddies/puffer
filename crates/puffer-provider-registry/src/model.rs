@@ -331,6 +331,14 @@ pub struct ProviderDescriptor {
     /// to a free-form string here too.
     #[serde(default)]
     pub chat_completions_path: Option<String>,
+    /// Optional explicit OAuth family for this provider. When `None`,
+    /// callers infer the family from `default_api` (preserving every
+    /// yaml that did not opt in). When `Some`, callers use the named
+    /// family directly. Known values today: `"openai"`, `"anthropic"`,
+    /// `"worldagent"`. This is the seam that lets a provider whose
+    /// transport is `openai-completions` use a non-OpenAI OAuth flow.
+    #[serde(default)]
+    pub oauth_family: Option<String>,
     #[serde(default)]
     pub discovery: Option<ModelDiscoveryConfig>,
     #[serde(default)]
@@ -350,4 +358,41 @@ fn default_items_field() -> String {
 
 fn default_id_field() -> String {
     "id".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_yaml;
+
+    #[test]
+    fn provider_descriptor_deserializes_oauth_family_field() {
+        let yaml = r#"
+id: example
+display_name: Example
+base_url: https://example.invalid
+default_api: openai-completions
+oauth_family: worldagent
+auth_modes:
+  - oauth
+"#;
+        let provider: ProviderDescriptor =
+            serde_yaml::from_str(yaml).expect("provider yaml parses");
+        assert_eq!(provider.oauth_family.as_deref(), Some("worldagent"));
+    }
+
+    #[test]
+    fn provider_descriptor_oauth_family_defaults_to_none() {
+        let yaml = r#"
+id: example
+display_name: Example
+base_url: https://example.invalid
+default_api: openai-completions
+auth_modes:
+  - oauth
+"#;
+        let provider: ProviderDescriptor =
+            serde_yaml::from_str(yaml).expect("provider yaml parses");
+        assert!(provider.oauth_family.is_none());
+    }
 }
