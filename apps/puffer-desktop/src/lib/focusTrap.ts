@@ -24,6 +24,16 @@ function focusInitial(node: HTMLElement) {
   first.focus({ preventScroll: true });
 }
 
+function restoreFocus(element: HTMLElement | null) {
+  if (!element?.isConnected) return;
+  element.focus({ preventScroll: true });
+  window.requestAnimationFrame(() => {
+    if (element.isConnected && document.activeElement !== element) {
+      element.focus({ preventScroll: true });
+    }
+  });
+}
+
 /** Keeps keyboard focus inside a modal dialog while it is mounted. */
 export function focusTrap(node: HTMLElement) {
   const previousFocus = document.activeElement instanceof HTMLElement
@@ -67,9 +77,7 @@ export function focusTrap(node: HTMLElement) {
       window.clearTimeout(initialTimer);
       node.removeEventListener("keydown", onKeydown);
       document.removeEventListener("focusin", onFocusIn);
-      if (previousFocus?.isConnected) {
-        previousFocus.focus({ preventScroll: true });
-      }
+      restoreFocus(previousFocus);
     }
   };
 }

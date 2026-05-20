@@ -31,6 +31,7 @@
   let newDeploymentProvider = $state<Deployment["provider"]>("vercel");
   let newDeploymentEnvironment = $state("staging");
   let newDeploymentBranch = $state("main");
+  let newDeploymentTrigger = $state<HTMLButtonElement | null>(null);
   let newDeploymentNameInput = $state<HTMLInputElement | null>(null);
   let redeployingId = $state<string | null>(null);
   let detailActionStatus = $state("");
@@ -148,6 +149,11 @@
 
   function closeNewDeployment(): void {
     showNewDeployment = false;
+    window.requestAnimationFrame(() => {
+      if (newDeploymentTrigger?.isConnected) {
+        newDeploymentTrigger.focus({ preventScroll: true });
+      }
+    });
   }
 
   function createDraftDeployment(): void {
@@ -324,7 +330,14 @@
       >
         <Icon name="refresh" size={12} />{syncState === "syncing" ? "Syncing" : "Sync providers"}
       </button>
-      <button type="button" class="sc-btn" data-variant="default" data-size="sm" onclick={openNewDeployment}>
+      <button
+        bind:this={newDeploymentTrigger}
+        type="button"
+        class="sc-btn"
+        data-variant="default"
+        data-size="sm"
+        onclick={openNewDeployment}
+      >
         <Icon name="plus" size={12} />New deployment
       </button>
     </div>
