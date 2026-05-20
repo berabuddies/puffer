@@ -32,6 +32,23 @@ impl CallbackListener {
         })
     }
 
+    /// Binds a fixed loopback port. Used for redirect URIs that must
+    /// match an Auth Station allow-list entry exactly (such as the
+    /// worldagent provider). Returns an error if the port is in use.
+    pub(crate) fn bind_localhost_port(path: &str, port: u16) -> Result<Self> {
+        let listener = TcpListener::bind(("127.0.0.1", port)).with_context(|| {
+            format!("failed to bind callback listener on 127.0.0.1:{port} for {path}")
+        })?;
+        listener.set_nonblocking(true)?;
+        Ok(Self {
+            listener,
+            host: "127.0.0.1".to_string(),
+            port,
+            expected_path: path.to_string(),
+            redirect_uri: format!("http://127.0.0.1:{port}{path}"),
+        })
+    }
+
     /// Returns the automatic redirect URI associated with this listener.
     pub(crate) fn redirect_uri(&self) -> &str {
         &self.redirect_uri
@@ -173,5 +190,20 @@ mod tests {
         let expected =
             format!("http://127.0.0.1:{callback_port}/callback?code=test-code&state=test-state");
         assert_eq!(callback.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn bind_localhost_port_uses_requested_port() {
+        // Find a free port by binding 0, then drop and rebind on it.
+        let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let listener = CallbackListener::bind_localhost_port("/callback", port)
+            .expect("bind_localhost_port succeeds on a free port");
+        let redirect_uri = listener.redirect_uri();
+        assert_eq!(
+            redirect_uri,
+            format!("http://127.0.0.1:{port}/callback")
+        );
     }
 }
