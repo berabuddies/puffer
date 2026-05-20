@@ -94,6 +94,7 @@ impl OpenAIResponsesTurnSession {
     fn build_request_body(&self, wire_input: Value, state: &AppState, stream: bool) -> Value {
         let mut body = build_codex_openai_request_body(
             state,
+            &self.execution.request_config.base_url,
             &self.model_id,
             &self.instructions,
             wire_input,

@@ -14,6 +14,7 @@ pub(super) const OPENAI_STRUCTURED_OUTPUT_FAMILY: &str = "openai";
 
 pub(crate) fn build_codex_openai_request_body(
     state: &AppState,
+    base_url: &str,
     model_id: &str,
     instructions: &str,
     input: Value,
@@ -25,7 +26,7 @@ pub(crate) fn build_codex_openai_request_body(
     let reasoning = codex_reasoning_config(state, supports_reasoning);
     let mut include: Vec<Value> = Vec::new();
     if reasoning.is_some() {
-        include.push(json!("reasoning.encryptedcontent"));
+        include.push(json!(reasoning_encrypted_content_include(base_url)));
     }
     let store = std::env::var("PUFFER_OPENAI_STORE_RESPONSES")
         .ok()
@@ -55,6 +56,15 @@ pub(crate) fn build_codex_openai_request_body(
         body["service_tier"] = json!("priority");
     }
     body
+}
+
+fn reasoning_encrypted_content_include(base_url: &str) -> &'static str {
+    let trimmed = base_url.trim_end_matches('/');
+    if trimmed.contains("/backend-api") || trimmed.contains("/api/codex") {
+        "reasoning.encryptedcontent"
+    } else {
+        "reasoning.encrypted_content"
+    }
 }
 
 pub(super) fn prefer_native_structured_output(
@@ -479,6 +489,7 @@ mod tests {
     use super::is_retryable_openai_transport_error;
     use super::openai_supports_response_threading;
     use crate::runtime::tests::state;
+    use crate::runtime::OPENAI_CHATGPT_BASE_URL;
     use anyhow::anyhow;
     use puffer_provider_registry::ProviderDescriptor;
     use serde_json::{json, Value};
@@ -554,6 +565,7 @@ mod tests {
 
         let body = build_codex_openai_request_body(
             &state,
+            "https://api.openai.com",
             "gpt-5",
             "instructions",
             Value::String("hello".to_string()),
@@ -564,6 +576,44 @@ mod tests {
         );
 
         assert_eq!(body["prompt_cache_key"], json!("benchmark-cache-key"));
+    }
+
+    #[test]
+    fn public_responses_request_uses_official_reasoning_include_selector() {
+        let state = state();
+
+        let body = build_codex_openai_request_body(
+            &state,
+            "https://api.openai.com",
+            "gpt-5",
+            "instructions",
+            Value::String("hello".to_string()),
+            &Vec::new(),
+            true,
+            None,
+            true,
+        );
+
+        assert_eq!(body["include"][0], json!("reasoning.encrypted_content"));
+    }
+
+    #[test]
+    fn codex_backend_request_uses_compact_reasoning_include_selector() {
+        let state = state();
+
+        let body = build_codex_openai_request_body(
+            &state,
+            OPENAI_CHATGPT_BASE_URL,
+            "gpt-5",
+            "instructions",
+            Value::String("hello".to_string()),
+            &Vec::new(),
+            true,
+            None,
+            true,
+        );
+
+        assert_eq!(body["include"][0], json!("reasoning.encryptedcontent"));
     }
 
     #[test]
@@ -583,6 +633,7 @@ mod tests {
 
         let body = build_codex_openai_request_body(
             &state,
+            "https://api.openai.com",
             "gpt-5",
             "instructions",
             Value::String("hello".to_string()),
@@ -601,6 +652,7 @@ mod tests {
         let state = state();
         let body = build_codex_openai_request_body(
             &state,
+            "https://api.openai.com",
             "gpt-5",
             "instructions",
             Value::String("hello".to_string()),

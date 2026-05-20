@@ -261,6 +261,7 @@ where
                     |request_config| {
                         let mut body = build_codex_openai_request_body(
                             state,
+                            &request_config.base_url,
                             &model_id,
                             &instructions,
                             wire_input.clone(),

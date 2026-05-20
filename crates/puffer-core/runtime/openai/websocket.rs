@@ -295,6 +295,7 @@ where
         // Build the request body (same as the SSE path).
         let mut body = super::build_codex_openai_request_body(
             state,
+            &execution.request_config.base_url,
             &model_id,
             &instructions,
             wire_input,
