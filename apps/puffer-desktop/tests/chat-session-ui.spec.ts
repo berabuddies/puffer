@@ -5088,3 +5088,50 @@ test("session list renders when a session has null routing fields", async ({ pag
   await expect(page.getByRole("button", { name: /Good routing/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /Null routing/ })).toBeVisible();
 });
+
+test("auto-recap timer does not fire on a different session after switch", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-recap-a",
+        displayName: "Recap A",
+        title: "Recap A",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        timeline: []
+      },
+      {
+        sessionId: "session-recap-b",
+        displayName: "Recap B",
+        title: "Recap B",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 0,
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Recap A/);
+
+  await page.evaluate(() => {
+    (window as unknown as { __RECAP_IDLE_MS_OVERRIDE: number }).__RECAP_IDLE_MS_OVERRIDE = 200;
+  });
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+  await page.waitForTimeout(50);
+
+  await openSession(page, /Recap B/);
+  await page.waitForTimeout(300);
+
+  const recapRequests = daemon.requests.filter(
+    (r) => r.method === "run_agent_turn" && r.params.message === "/recap"
+  );
+  expect(recapRequests.length).toBe(0);
+});

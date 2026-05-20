@@ -635,14 +635,19 @@
   // "is the window away long enough to be worth asking."
   const RECAP_IDLE_MS = 180_000;
   let recapBlurTimer: ReturnType<typeof setTimeout> | null = null;
+  let recapBlurSessionId: string | null = null;
   let composerHasDraft = $state(false);
 
   function armRecapBlurTimer() {
     if (turnRunning || composerHasDraft) return;
     if (recapBlurTimer != null) return;
+    const sessionIdAtBlur = selectedSession?.id ?? null;
+    recapBlurSessionId = sessionIdAtBlur;
     recapBlurTimer = setTimeout(() => {
       recapBlurTimer = null;
+      recapBlurSessionId = null;
       if (!selectedSession || turnRunning || composerHasDraft) return;
+      if (selectedSession.id !== sessionIdAtBlur) return;
       void submitMessage("/recap", {});
     }, RECAP_IDLE_MS);
   }
@@ -651,6 +656,7 @@
     if (recapBlurTimer != null) {
       clearTimeout(recapBlurTimer);
       recapBlurTimer = null;
+      recapBlurSessionId = null;
     }
   }
 
