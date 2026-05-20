@@ -682,7 +682,6 @@ test("Files tab PDF zoom is immediate and page-limit status remains readable", a
     };
   });
   expect(contrast.ratio).toBeGreaterThanOrEqual(4.5);
-  expect(contrast.backgroundColor).toBe("rgb(250, 204, 21)");
   expect(contrast.backgroundColor).not.toBe(contrast.shellBackgroundColor);
   expect(contrast.backgroundColor).not.toBe(contrast.controlsBackgroundColor);
   expect(contrast.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
@@ -716,6 +715,13 @@ test("Files tab PDF zoom is immediate and page-limit status remains readable", a
     )
   ).toBeGreaterThan(initialWidth);
   await controls.getByRole("button", { name: "Reset zoom" }).click();
+  await expect(controls.getByText("100%")).toBeVisible();
+  await controls.getByRole("button", { name: "Reset zoom" }).focus();
+  await page.keyboard.press("Control+=");
+  await expect(controls.getByText("110%")).toBeVisible();
+  await page.keyboard.press("Control+-");
+  await expect(controls.getByText("100%")).toBeVisible();
+  await page.keyboard.press("Control+0");
   await expect(controls.getByText("100%")).toBeVisible();
 
   const controlsTop = await controls.evaluate((node) => Math.round(node.getBoundingClientRect().top));

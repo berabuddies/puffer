@@ -18,6 +18,7 @@
   let { base64, textLines = [] }: Props = $props();
 
   let host = $state<HTMLDivElement | null>(null);
+  let renderer = $state<HTMLDivElement | null>(null);
   let status = $state("Loading PDF...");
   let error = $state<string | null>(null);
   let renderedPages = $state(0);
@@ -97,6 +98,26 @@
     event.preventDefault();
     const direction = event.deltaY < 0 ? 1 : -1;
     setZoom(zoom + PDF_ZOOM_STEP * direction);
+  }
+
+  function handleZoomKeydown(event: KeyboardEvent): void {
+    if (!event.metaKey && !event.ctrlKey) return;
+    if (event.key === "+" || event.key === "=") {
+      event.preventDefault();
+      setZoom(zoom + PDF_ZOOM_STEP);
+    } else if (event.key === "-") {
+      event.preventDefault();
+      setZoom(zoom - PDF_ZOOM_STEP);
+    } else if (event.key === "0") {
+      event.preventDefault();
+      setZoom(1);
+    }
+  }
+
+  function handleWindowKeydown(event: KeyboardEvent): void {
+    const active = document.activeElement;
+    if (!renderer || !active || !renderer.contains(active)) return;
+    handleZoomKeydown(event);
   }
 
   function applyCanvasZoom(canvas: HTMLCanvasElement, currentZoom: number): void {
@@ -186,7 +207,13 @@
   }
 </script>
 
-<div class="pdf-renderer" onwheel={handleZoomWheel}>
+<svelte:window onkeydown={handleWindowKeydown} />
+
+<div
+  bind:this={renderer}
+  class="pdf-renderer"
+  onwheel={handleZoomWheel}
+>
   <div class="pdf-controls-row" aria-label="Document controls">
     <div class="pdf-controls-main">
       <span class="pdf-zoom-label">Zoom</span>
@@ -261,7 +288,8 @@
   }
 
   .pdf-controls-row {
-    position: relative;
+    position: sticky;
+    top: 0;
     z-index: 20;
     display: flex;
     flex-wrap: wrap;
@@ -335,7 +363,7 @@
     justify-content: center;
     gap: 4px;
     min-width: 42px;
-    height: 34px;
+    height: 36px;
     border: 1px solid #64748b;
     border-radius: 5px;
     background: #ffffff;
@@ -354,7 +382,7 @@
   }
 
   .pdf-toolbar .zoom-reset {
-    min-width: 78px;
+    min-width: 84px;
     padding: 0 8px;
   }
 
@@ -364,9 +392,9 @@
   }
 
   .pdf-zoom-range {
-    width: clamp(130px, 20vw, 240px);
-    min-width: 120px;
-    height: 32px;
+    width: clamp(150px, 22vw, 260px);
+    min-width: 140px;
+    height: 36px;
     padding: 0 2px;
     appearance: none;
     background: transparent;
@@ -435,15 +463,22 @@
     margin-left: auto;
     width: fit-content;
     max-width: 100%;
-    padding: 6px 10px;
-    border: 1px solid #a16207;
-    border-radius: 6px;
-    background: #facc15;
-    color: #111827;
+    padding: 6px 11px;
+    border: 1px solid #38bdf8;
+    border-radius: 999px;
+    background: #020617;
+    color: #f8fafc;
     font-size: 12px;
-    font-weight: 700;
+    font-weight: 750;
     line-height: 1.35;
-    box-shadow: 0 1px 0 rgb(255 255 255 / 0.75), 0 8px 18px rgb(15 23 42 / 0.2);
+    box-shadow: 0 0 0 2px rgb(248 250 252 / 0.9), 0 8px 18px rgb(15 23 42 / 0.2);
+  }
+
+  :global(html.dark) .pdf-status {
+    border-color: #f8fafc;
+    background: #e0f2fe;
+    color: #020617;
+    box-shadow: 0 0 0 2px rgb(15 23 42 / 0.95), 0 10px 20px rgb(0 0 0 / 0.45);
   }
 
   .pdf-error {
