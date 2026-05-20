@@ -61,7 +61,7 @@ export type SessionListItem = {
   tags: string[];
   note: string | null;
   parentSessionId: string | null;
-  providerId: string;
+  providerId: string | null;
   modelId: string | null;
 };
 

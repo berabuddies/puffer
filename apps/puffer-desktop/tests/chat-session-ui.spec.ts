@@ -2893,6 +2893,135 @@ test("stale provider model fetch does not rewrite a switched session", async ({ 
   });
 });
 
+test("default routing refresh updates an open session without explicit routing", async ({ page }) => {
+  const model = (provider: string, id: string, displayName = id) => ({
+    id,
+    displayName,
+    provider,
+    api: "openai-responses",
+    supportsTools: true,
+    supportsVision: false,
+    contextWindow: null,
+    maxOutputTokens: null,
+    thinkingOptions: [],
+    defaultThinkingOptionId: null,
+    isDefault: true
+  });
+  const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "codex",
+        kind: "oauth",
+        email: "tester@example.com",
+        expiresAtMs: null,
+        scopes: [],
+        planType: "test",
+        organizationName: null
+      },
+      {
+        providerId: "openrouter",
+        kind: "api_key",
+        email: null,
+        expiresAtMs: null,
+        scopes: [],
+        planType: null,
+        organizationName: null
+      }
+    ],
+    providers: [
+      {
+        id: "codex",
+        displayName: "Codex",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 1,
+        authModes: ["oauth"],
+        sourceKind: "test",
+        sourcePath: null
+      },
+      {
+        id: "openrouter",
+        displayName: "OpenRouter",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 1,
+        authModes: ["api_key"],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ],
+    sessions: [
+      {
+        sessionId: "session-default-refresh",
+        displayName: "Default refresh",
+        title: "Default refresh",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: null,
+        modelId: null,
+        timeline: []
+      }
+    ],
+    providerModels: {
+      codex: [model("codex", "codex-default", "Codex Default")],
+      openrouter: [
+        model("openrouter", "google/gemini-3.5-flash", "Google: Gemini 3.5 Flash")
+      ]
+    }
+  });
+  daemon.setSettingsConfig({
+    defaultProvider: "codex",
+    defaultModel: "codex-default"
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Default refresh/);
+  const picker = page.locator(".pf-composer .picker");
+  await expect(picker.locator(".trigger")).toContainText("codex-default");
+  await expect(page.locator(".pf-composer textarea")).toHaveAttribute(
+    "placeholder",
+    /Engineer \(Codex\)/
+  );
+
+  const settingsLoadsBefore = daemon.requests.filter(
+    (request) => request.method === "load_settings_snapshot"
+  ).length;
+  daemon.setSettingsConfig({
+    defaultProvider: "openrouter",
+    defaultModel: "google/gemini-3.5-flash"
+  });
+  await daemon.dropConnections();
+  const banner = page.locator(".connection-banner");
+  await expect(banner).toContainText("Puffer backend disconnected.");
+  daemon.allowConnections();
+  await banner.getByRole("button", { name: "Reconnect backend" }).click();
+  await expect.poll(() =>
+    daemon.requests.filter((request) => request.method === "load_settings_snapshot").length
+  ).toBeGreaterThan(settingsLoadsBefore);
+
+  await expect(picker.locator(".trigger")).toContainText("google/gemini-3.5-flash");
+  await expect(page.locator(".pf-composer textarea")).toHaveAttribute(
+    "placeholder",
+    /Engineer \(OpenRouter\)/
+  );
+
+  await page.locator(".pf-composer textarea").fill("Use refreshed default route");
+  await page.getByRole("button", { name: "Send" }).click();
+  const request = await daemon.waitForRequest(
+    "run_agent_turn",
+    (item) => item.params.message === "Use refreshed default route"
+  );
+  expect(request.params).toMatchObject({
+    sessionId: "session-default-refresh",
+    providerId: "openrouter",
+    modelId: "google/gemini-3.5-flash"
+  });
+});
+
 test("composer sends fast mode and permission mode with the turn request", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

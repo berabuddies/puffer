@@ -121,7 +121,7 @@
   let selectedActivityChildren = $state<Record<string, string>>({});
   let fastMode = $state(false);
   let permissionMode = $state<AgentPermissionMode>("workspace-write");
-  let routingSessionId = $state<string | null>(null);
+  let routingSelectionKey = $state<string | null>(null);
   let selectedProviderId = $state<string | null>(null);
   let selectedModelId = $state<string | null>(null);
   let selectedThinkingOptionId = $state("");
@@ -601,15 +601,23 @@
 
   $effect(() => {
     const sessionId = session?.id ?? null;
-    if (sessionId === routingSessionId) return;
-    routingSessionId = sessionId;
     const saved = sessionId ? readRoutingPreference(sessionId) : null;
+    const sessionHasRoute = Boolean(session?.providerId || session?.modelId);
+    const source = saved ? "saved" : sessionHasRoute ? "session" : "default";
     const providerId = saved
       ? saved.providerId
       : session?.providerId ?? settingsSnapshot?.config.defaultProvider ?? null;
     const modelId = saved
       ? saved.modelId
       : session?.modelId ?? settingsSnapshot?.config.defaultModel ?? null;
+    const nextSelectionKey = [
+      sessionId ?? "",
+      source,
+      providerId ?? "",
+      modelId ?? ""
+    ].join("\0");
+    if (nextSelectionKey === routingSelectionKey) return;
+    routingSelectionKey = nextSelectionKey;
     selectedProviderId = providerId;
     selectedModelId = normalizeModelIdForProvider(
       providerId,

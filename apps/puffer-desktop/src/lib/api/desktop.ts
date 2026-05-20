@@ -397,7 +397,7 @@ function normalizeSessionListItem(value: BackendSessionListItem): SessionListIte
     tags: value.tags,
     note: value.note,
     parentSessionId: value.parentSessionId,
-    providerId: value.providerId ?? "codex",
+    providerId: value.providerId ?? null,
     modelId: value.modelId ?? null
   };
 }

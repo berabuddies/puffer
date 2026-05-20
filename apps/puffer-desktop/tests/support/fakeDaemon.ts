@@ -139,6 +139,8 @@ function sessionMeta(input: FakeDaemonSessionInput): JsonRecord {
   const title = metadataInput.title ?? metadataInput.displayName ?? session.title;
   const cwd = metadataInput.cwd ?? session.cwd;
   const folderPath = metadataInput.folderPath ?? cwd;
+  const hasProviderId = Object.prototype.hasOwnProperty.call(metadataInput, "providerId");
+  const hasModelId = Object.prototype.hasOwnProperty.call(metadataInput, "modelId");
   return {
     ...session,
     ...metadataInput,
@@ -154,8 +156,8 @@ function sessionMeta(input: FakeDaemonSessionInput): JsonRecord {
     tags: metadataInput.tags ?? session.tags,
     note: metadataInput.note ?? null,
     parentSessionId: metadataInput.parentSessionId ?? null,
-    providerId: metadataInput.providerId ?? session.providerId,
-    modelId: metadataInput.modelId ?? session.modelId
+    providerId: hasProviderId ? metadataInput.providerId ?? null : session.providerId,
+    modelId: hasModelId ? metadataInput.modelId ?? null : session.modelId
   };
 }
 
