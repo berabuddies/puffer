@@ -462,6 +462,31 @@ test("idle sessions with dirty repositories stay idle in detail", async ({ page 
   await expect(page.locator(".pf-composer textarea")).toBeEnabled();
 });
 
+test("Review sessions keep review state in the agent detail orb", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-review-detail",
+        displayName: "Review detail",
+        title: "Review detail",
+        cwd: "/tmp/puffer-review",
+        folderPath: "/tmp/puffer-review",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        activityStatus: "review"
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openAgent(page, /^Review detail\b/);
+  const status = page.locator(".pf-agent-status-pill");
+  await expect(status).toHaveAttribute("data-status", "review");
+  await expect(status).toContainText("Ready to review");
+  await expect(page.locator(".pf-agent-detail .pf-puffer").first()).toHaveAttribute("data-state", "review");
+});
+
 test("Side panel does not duplicate effectful Browser or Terminal panes", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

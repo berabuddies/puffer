@@ -708,6 +708,8 @@ html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
 .pf-puffer[data-state="running"]  .body  { animation: pf-breathe 0.8s ease-in-out infinite; }
 .pf-puffer[data-state="running"]  .spike { animation: pf-spike-out 0.8s ease-in-out infinite; }
 .pf-puffer[data-state="awaiting"] .body  { animation: pf-breathe 1.6s ease-in-out infinite; }
+.pf-puffer[data-state="review"]   .body  { animation: pf-breathe 2.4s ease-in-out infinite; }
+.pf-puffer[data-state="review"]   .spike { animation: pf-spike-out 2.4s ease-in-out infinite; }
 
 .pf-puffer .pulse-ring {
   position: absolute; inset: -25%;
