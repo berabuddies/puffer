@@ -1208,21 +1208,29 @@ export class FakeDaemon {
     const path = String(params.path ?? "");
     const content = this.files.get(path) ?? defaultFileContent(path);
     this.files.set(path, content);
+    const maxBytesValue = Number(params.maxBytes ?? params.max_bytes ?? Number.POSITIVE_INFINITY);
+    const maxBytes = Number.isFinite(maxBytesValue) && maxBytesValue >= 0
+      ? Math.floor(maxBytesValue)
+      : Number.POSITIVE_INFINITY;
     if (typeof content !== "string") {
+      const bytes = Buffer.from(content.content, "base64");
+      const visible = maxBytes === Number.POSITIVE_INFINITY ? bytes : bytes.subarray(0, maxBytes);
       return {
         path,
         encoding: content.encoding,
-        content: content.content,
+        content: visible.toString("base64"),
         size: content.size,
-        truncated: false
+        truncated: visible.length < bytes.length
       };
     }
+    const bytes = Buffer.from(content, "utf8");
+    const visible = maxBytes === Number.POSITIVE_INFINITY ? bytes : bytes.subarray(0, maxBytes);
     return {
       path,
       encoding: "utf8",
-      content,
-      size: content.length,
-      truncated: false
+      content: visible.toString("utf8"),
+      size: bytes.length,
+      truncated: visible.length < bytes.length
     };
   }
 

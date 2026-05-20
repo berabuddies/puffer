@@ -106,6 +106,35 @@ function makeLegacyOfficeBase64(text: string): string {
   ]).toString("base64");
 }
 
+function makeLargeLegacyOfficeBase64(text: string): string {
+  return Buffer.concat([
+    Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]),
+    Buffer.alloc(300_000, 0),
+    Buffer.from(text, "utf16le")
+  ]).toString("base64");
+}
+
+async function expectCanvasHasInk(page: Page, selector: string): Promise<void> {
+  const canvas = page.locator(selector);
+  await expect(canvas).toBeVisible();
+  await expect.poll(async () =>
+    canvas.evaluate((node: HTMLCanvasElement) => {
+      const context = node.getContext("2d");
+      if (!context || node.width === 0 || node.height === 0) return 0;
+      const pixels = context.getImageData(0, 0, node.width, node.height).data;
+      let nonWhite = 0;
+      for (let offset = 0; offset < pixels.length; offset += 16) {
+        const red = pixels[offset];
+        const green = pixels[offset + 1];
+        const blue = pixels[offset + 2];
+        const alpha = pixels[offset + 3];
+        if (alpha > 0 && (red < 248 || green < 248 || blue < 248)) nonWhite += 1;
+      }
+      return nonWhite;
+    })
+  ).toBeGreaterThan(25);
+}
+
 function makeZipBase64(entries: Record<string, string>): string {
   const localParts: Buffer[] = [];
   const centralParts: Buffer[] = [];
@@ -194,7 +223,7 @@ function seedPreviewFiles(daemon: FakeDaemon): void {
   });
   daemon.seedBinaryFile("/tmp/puffer/tasks.xlsx", xlsx);
   daemon.seedBinaryFile("/tmp/puffer/sample.pdf", makePdfBase64("Puffer PDF preview"));
-  daemon.seedBinaryFile("/tmp/puffer/old-plan.doc", makeLegacyOfficeBase64("Legacy Word agenda"));
+  daemon.seedBinaryFile("/tmp/puffer/old-plan.doc", makeLargeLegacyOfficeBase64("Legacy Word agenda"));
   daemon.seedBinaryFile(
     "/tmp/puffer/old-deck.ppt",
     makeLegacyOfficeBase64("Legacy PowerPoint agenda")
@@ -271,7 +300,11 @@ test("Files tab previews common document and data formats", async ({ page }) => 
 
   await page.getByRole("button", { name: "sample.pdf" }).click();
   await expect(page.getByLabel("PDF preview")).toBeVisible();
-  await expect(page.getByLabel("PDF preview")).toContainText("Puffer PDF preview");
+  await daemon.waitForRequest(
+    "read_file",
+    (request) => request.params.path === "/tmp/puffer/sample.pdf" && request.params.maxBytes === 24 * 1024 * 1024
+  );
+  await expectCanvasHasInk(page, 'canvas[aria-label="PDF page 1"]');
 
   await page.getByRole("button", { name: "brief.docx" }).click();
   await expect(page.getByLabel("DOCX preview")).toContainText("Quarterly planning note");
@@ -286,6 +319,10 @@ test("Files tab previews common document and data formats", async ({ page }) => 
   await expect(page.getByLabel("Excel preview")).toContainText("Ready");
 
   await page.getByRole("button", { name: "old-plan.doc" }).click();
+  await daemon.waitForRequest(
+    "read_file",
+    (request) => request.params.path === "/tmp/puffer/old-plan.doc" && request.params.maxBytes === 24 * 1024 * 1024
+  );
   await expect(page.getByLabel("Legacy Word preview")).toContainText("Legacy Word agenda");
 
   await page.getByRole("button", { name: "old-deck.ppt" }).click();

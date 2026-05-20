@@ -1274,7 +1274,7 @@ export async function listDir(path: string): Promise<DirEntry[]> {
 
 /** Read a file. `maxBytes` caps the returned content (default 256 KiB);
  *  larger files are truncated and returned with `truncated: true`. Files
- *  larger than 5 MiB are refused outright with an error. Binary files
+ *  larger than the daemon hard limit are refused outright with an error. Binary files
  *  come back base64-encoded with `encoding: "base64"`. */
 export async function readFile(path: string, maxBytes?: number): Promise<ReadFileResult> {
   const client = await ensureLocalDaemonClient();

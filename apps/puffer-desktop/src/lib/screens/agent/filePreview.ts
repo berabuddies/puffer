@@ -13,6 +13,7 @@ export type DocxPreview = {
 
 export type PdfPreview = {
   kind: "pdf";
+  base64: string;
   lines: string[];
 };
 
@@ -46,7 +47,12 @@ const utf8Encoder = new TextEncoder();
 
 /** Return true when the Files pane has a richer preview than the code editor. */
 export function hasRichFilePreview(file: ReadFileResult): boolean {
-  return previewFormat(file.path) !== "text";
+  return hasRichFilePreviewPath(file.path);
+}
+
+/** Return true when the path maps to a richer document preview. */
+export function hasRichFilePreviewPath(path: string): boolean {
+  return previewFormat(path) !== "text";
 }
 
 /** Build a display preview for common document and data formats. */
@@ -96,7 +102,7 @@ function previewFormat(path: string):
 
 function previewPdf(base64: string): PdfPreview {
   const lines = extractPdfText(base64ToBytes(base64));
-  return { kind: "pdf", lines: lines.length > 0 ? lines : ["No text found."] };
+  return { kind: "pdf", base64, lines: lines.length > 0 ? lines : ["No text found."] };
 }
 
 function legacyOfficePreview(file: ReadFileResult): LegacyOfficePreview {
@@ -375,10 +381,217 @@ function decodePdfHexString(input: string): string {
 }
 
 function extractLegacyOfficeText(bytes: Uint8Array): string[] {
+  const structured = extractCompoundOfficeText(bytes);
+  if (structured.length > 0) return structured;
   return normalizePreviewLines(
     [...extractUtf16Runs(bytes, false), ...extractUtf16Runs(bytes, true), ...extractAsciiRuns(bytes)],
     160
   );
+}
+
+function extractCompoundOfficeText(bytes: Uint8Array): string[] {
+  const streams = readCompoundFileStreams(bytes);
+  if (!streams) return [];
+  const wordDocument = streams.get("worddocument");
+  if (wordDocument) {
+    const wordLines = extractWordDocumentStreamText(wordDocument);
+    if (wordLines.length > 0) return wordLines;
+  }
+  const candidates = ["powerpoint document", "workbook", "book"]
+    .map((name) => streams.get(name))
+    .filter((stream): stream is Uint8Array => stream != null);
+  return normalizePreviewLines(
+    candidates.flatMap((stream) => [
+      ...extractUtf16Runs(stream, false),
+      ...extractUtf16Runs(stream, true),
+      ...extractAsciiRuns(stream)
+    ]),
+    160
+  );
+}
+
+function extractWordDocumentStreamText(stream: Uint8Array): string[] {
+  if (stream.length < 0x20) return [];
+  const fcMin = readU32(stream, 0x18);
+  const fcMac = readU32(stream, 0x1c);
+  const textBytes = fcMac > fcMin && fcMac <= stream.length ? stream.slice(fcMin, fcMac) : stream;
+  return normalizePreviewLines(
+    [...extractUtf16Runs(textBytes, false), ...extractAsciiRuns(textBytes)],
+    160
+  );
+}
+
+type CompoundDirectoryEntry = {
+  name: string;
+  objectType: number;
+  startSector: number;
+  streamSize: number;
+};
+
+const CFB_SIGNATURE = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
+const CFB_FREE_SECTOR = 0xffffffff;
+const CFB_END_OF_CHAIN = 0xfffffffe;
+const CFB_MAX_REGULAR_SECTOR = 0xfffffffa;
+
+function readCompoundFileStreams(bytes: Uint8Array): Map<string, Uint8Array> | null {
+  if (!CFB_SIGNATURE.every((byte, index) => bytes[index] === byte)) return null;
+  const sectorSize = 1 << readU16(bytes, 30);
+  const miniSectorSize = 1 << readU16(bytes, 32);
+  if (![512, 4096].includes(sectorSize) || miniSectorSize !== 64) return null;
+
+  const fatSectorCount = readU32(bytes, 44);
+  const firstDirectorySector = readU32(bytes, 48);
+  const miniStreamCutoff = readU32(bytes, 56);
+  const firstMiniFatSector = readU32(bytes, 60);
+  const miniFatSectorCount = readU32(bytes, 64);
+  const fatSectorIds = readDifatSectorIds(bytes, sectorSize, fatSectorCount);
+  const fatEntries = readFatEntries(bytes, sectorSize, fatSectorIds);
+  const directoryBytes = readRegularSectorChain(bytes, sectorSize, fatEntries, firstDirectorySector);
+  if (!directoryBytes) return null;
+
+  const entries = readCompoundDirectoryEntries(directoryBytes);
+  const root = entries.find((entry) => entry.objectType === 5) ?? null;
+  const rootMiniStream =
+    root && isRegularSector(root.startSector)
+      ? readRegularSectorChain(bytes, sectorSize, fatEntries, root.startSector)?.slice(0, root.streamSize)
+      : null;
+  const miniFatBytes =
+    isRegularSector(firstMiniFatSector) && miniFatSectorCount > 0
+      ? readRegularSectorChain(bytes, sectorSize, fatEntries, firstMiniFatSector)
+      : null;
+  const miniFatEntries = miniFatBytes ? readSectorIds(miniFatBytes, miniFatBytes.length / 4) : [];
+  const streams = new Map<string, Uint8Array>();
+
+  for (const entry of entries) {
+    if (entry.objectType !== 2 || !entry.name || entry.streamSize <= 0) continue;
+    let content: Uint8Array | null = null;
+    if (entry.streamSize < miniStreamCutoff && rootMiniStream && miniFatEntries.length > 0) {
+      content = readMiniSectorChain(rootMiniStream, miniSectorSize, miniFatEntries, entry.startSector);
+    } else if (isRegularSector(entry.startSector)) {
+      content = readRegularSectorChain(bytes, sectorSize, fatEntries, entry.startSector);
+    }
+    if (content) streams.set(entry.name.toLowerCase(), content.slice(0, entry.streamSize));
+  }
+
+  return streams;
+}
+
+function readDifatSectorIds(bytes: Uint8Array, sectorSize: number, fatSectorCount: number): number[] {
+  const sectorIds: number[] = [];
+  for (let offset = 76; offset + 3 < 512 && sectorIds.length < fatSectorCount; offset += 4) {
+    const sectorId = readU32(bytes, offset);
+    if (isRegularSector(sectorId)) sectorIds.push(sectorId);
+  }
+  let nextDifatSector = readU32(bytes, 68);
+  const difatSectorCount = readU32(bytes, 72);
+  for (
+    let sectorIndex = 0;
+    sectorIndex < difatSectorCount && isRegularSector(nextDifatSector) && sectorIds.length < fatSectorCount;
+    sectorIndex += 1
+  ) {
+    const sector = regularSectorBytes(bytes, sectorSize, nextDifatSector);
+    if (!sector) break;
+    for (let offset = 0; offset + 7 < sector.length && sectorIds.length < fatSectorCount; offset += 4) {
+      const sectorId = readU32(sector, offset);
+      if (isRegularSector(sectorId)) sectorIds.push(sectorId);
+    }
+    nextDifatSector = readU32(sector, sector.length - 4);
+  }
+  return sectorIds;
+}
+
+function readFatEntries(bytes: Uint8Array, sectorSize: number, fatSectorIds: number[]): number[] {
+  const entries: number[] = [];
+  for (const sectorId of fatSectorIds) {
+    const sector = regularSectorBytes(bytes, sectorSize, sectorId);
+    if (!sector) continue;
+    entries.push(...readSectorIds(sector, sector.length / 4));
+  }
+  return entries;
+}
+
+function readSectorIds(bytes: Uint8Array, count: number): number[] {
+  const entries: number[] = [];
+  for (let index = 0; index < count; index += 1) {
+    entries.push(readU32(bytes, index * 4));
+  }
+  return entries;
+}
+
+function readRegularSectorChain(
+  bytes: Uint8Array,
+  sectorSize: number,
+  fatEntries: number[],
+  startSector: number
+): Uint8Array | null {
+  const chunks: Uint8Array[] = [];
+  let sectorId = startSector;
+  const seen = new Set<number>();
+  while (isRegularSector(sectorId) && !seen.has(sectorId) && seen.size <= fatEntries.length) {
+    seen.add(sectorId);
+    const sector = regularSectorBytes(bytes, sectorSize, sectorId);
+    if (!sector) return null;
+    chunks.push(sector);
+    sectorId = fatEntries[sectorId] ?? CFB_END_OF_CHAIN;
+  }
+  return concatBytes(chunks);
+}
+
+function readMiniSectorChain(
+  rootMiniStream: Uint8Array,
+  miniSectorSize: number,
+  miniFatEntries: number[],
+  startSector: number
+): Uint8Array | null {
+  const chunks: Uint8Array[] = [];
+  let sectorId = startSector;
+  const seen = new Set<number>();
+  while (isRegularSector(sectorId) && !seen.has(sectorId) && seen.size <= miniFatEntries.length) {
+    seen.add(sectorId);
+    const offset = sectorId * miniSectorSize;
+    if (offset + miniSectorSize > rootMiniStream.length) return null;
+    chunks.push(rootMiniStream.slice(offset, offset + miniSectorSize));
+    sectorId = miniFatEntries[sectorId] ?? CFB_END_OF_CHAIN;
+  }
+  return concatBytes(chunks);
+}
+
+function regularSectorBytes(bytes: Uint8Array, sectorSize: number, sectorId: number): Uint8Array | null {
+  const offset = (sectorId + 1) * sectorSize;
+  if (offset + sectorSize > bytes.length) return null;
+  return bytes.slice(offset, offset + sectorSize);
+}
+
+function readCompoundDirectoryEntries(directoryBytes: Uint8Array): CompoundDirectoryEntry[] {
+  const entries: CompoundDirectoryEntry[] = [];
+  for (let offset = 0; offset + 127 < directoryBytes.length; offset += 128) {
+    const entry = directoryBytes.slice(offset, offset + 128);
+    const nameLength = readU16(entry, 64);
+    const nameBytes = nameLength >= 2 ? entry.slice(0, Math.min(nameLength - 2, 64)) : new Uint8Array();
+    const streamSizeHigh = readU32(entry, 124);
+    entries.push({
+      name: decodeUtf16Bytes(nameBytes, false),
+      objectType: entry[66],
+      startSector: readU32(entry, 116),
+      streamSize: streamSizeHigh === 0 ? readU32(entry, 120) : 0
+    });
+  }
+  return entries;
+}
+
+function isRegularSector(sectorId: number): boolean {
+  return sectorId < CFB_MAX_REGULAR_SECTOR && sectorId !== CFB_FREE_SECTOR && sectorId !== CFB_END_OF_CHAIN;
+}
+
+function concatBytes(chunks: Uint8Array[]): Uint8Array {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const output = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return output;
 }
 
 function extractAsciiRuns(bytes: Uint8Array): string[] {

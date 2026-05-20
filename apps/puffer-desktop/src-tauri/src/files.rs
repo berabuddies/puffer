@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 const DEFAULT_MAX_BYTES: usize = 262_144;
-const HARD_MAX_BYTES: u64 = 5 * 1024 * 1024;
+const READ_HARD_MAX_BYTES: u64 = 24 * 1024 * 1024;
+const WRITE_HARD_MAX_BYTES: u64 = 5 * 1024 * 1024;
 const TEXT_SNIFF_BYTES: usize = 8 * 1024;
 
 pub(crate) fn list_dir(params: &Value, allowed_roots: &[PathBuf]) -> Result<Value> {
@@ -97,11 +98,11 @@ pub(crate) fn write_file(params: &Value, allowed_roots: &[PathBuf]) -> Result<Va
         .get("content")
         .and_then(Value::as_str)
         .context("missing content")?;
-    if content.len() as u64 > HARD_MAX_BYTES {
+    if content.len() as u64 > WRITE_HARD_MAX_BYTES {
         bail!(
             "file is too large to write ({} bytes, hard limit {} bytes)",
             content.len(),
-            HARD_MAX_BYTES
+            WRITE_HARD_MAX_BYTES
         );
     }
     let path = validate_path(allowed_roots, raw)?;
@@ -168,11 +169,11 @@ fn read_file_path(path: &Path, max_bytes: usize) -> Result<Value> {
         bail!("path is a directory, not a file: {}", path.display());
     }
     let size = meta.len();
-    if size > HARD_MAX_BYTES {
+    if size > READ_HARD_MAX_BYTES {
         bail!(
             "file is too large to preview ({} bytes, hard limit {} bytes)",
             size,
-            HARD_MAX_BYTES
+            READ_HARD_MAX_BYTES
         );
     }
     let cap = std::cmp::min(size as usize, max_bytes);

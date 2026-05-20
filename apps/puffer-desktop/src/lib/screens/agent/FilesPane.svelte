@@ -2,9 +2,11 @@
   import { onDestroy, tick, untrack } from "svelte";
   import HighlightedLine from "../../components/HighlightedLine.svelte";
   import Icon from "../../design/Icon.svelte";
+  import PdfDocumentPreview from "./PdfDocumentPreview.svelte";
   import {
     buildFilePreview,
     hasRichFilePreview,
+    hasRichFilePreviewPath,
     type FilePreview
   } from "./filePreview";
   import {
@@ -52,6 +54,8 @@
     line?: number | null;
     character?: number | null;
   };
+
+  const RICH_PREVIEW_MAX_BYTES = 24 * 1024 * 1024;
 
   // Directory cache: absolute path → its (already-loaded) entries. Keeps
   // the tree interactions snappy across expand/collapse cycles and lets
@@ -326,7 +330,7 @@
     const expectedSessionId = sessionId;
     const generation = fileReadGeneration;
     try {
-      const result = await readFile(target);
+      const result = await readPreviewFile(target);
       if (
         generation === fileReadGeneration &&
         activePath === target &&
@@ -411,6 +415,10 @@
 
   function fileName(path: string): string {
     return path.split("/").pop() || path;
+  }
+
+  function readPreviewFile(path: string): Promise<ReadFileResult> {
+    return readFile(path, hasRichFilePreviewPath(path) ? RICH_PREVIEW_MAX_BYTES : undefined);
   }
 
   function tabFor(path: string, size: number, pinned: boolean): OpenFileTab {
@@ -637,7 +645,7 @@
     activeLoading = true;
     let loaded = false;
     try {
-      const result = await readFile(path);
+      const result = await readPreviewFile(path);
       if (
         generation === fileReadGeneration &&
         activePath === path &&
@@ -1378,11 +1386,7 @@
           </div>
         {:else if activePreview && activePreview.kind === "pdf"}
           <div class="file-preview pdf-shell" aria-label="PDF preview">
-            <article class="pdf-page" aria-label="PDF text">
-              {#each activePreview.lines as line}
-                <p>{line}</p>
-              {/each}
-            </article>
+            <PdfDocumentPreview base64={activePreview.base64} textLines={activePreview.lines} />
           </div>
         {:else if activePreview && activePreview.kind === "docx"}
           <article class="file-preview office-preview" aria-label="DOCX preview">
@@ -1918,23 +1922,6 @@
     overflow: auto;
     background: color-mix(in oklab, var(--background) 94%, var(--muted));
   }
-  .pdf-page {
-    width: min(760px, 100%);
-    min-height: 520px;
-    margin: 0 auto;
-    padding: 36px 42px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--background);
-    box-shadow: 0 12px 32px color-mix(in oklab, var(--foreground) 10%, transparent);
-    color: var(--foreground);
-  }
-  .pdf-page p {
-    margin: 0 0 12px;
-    white-space: pre-wrap;
-    line-height: 1.55;
-  }
-  .pdf-page p:last-child { margin-bottom: 0; }
   .office-preview section,
   .spreadsheet-preview section {
     margin: 0 0 18px;

@@ -21,7 +21,8 @@ use std::time::UNIX_EPOCH;
 use crate::daemon::DaemonState;
 
 const DEFAULT_MAX_BYTES: usize = 262_144; // 256 KiB
-const HARD_MAX_BYTES: u64 = 5 * 1024 * 1024; // 5 MiB refusal threshold
+const READ_HARD_MAX_BYTES: u64 = 24 * 1024 * 1024; // 24 MiB preview refusal threshold
+const WRITE_HARD_MAX_BYTES: u64 = 5 * 1024 * 1024;
 const TEXT_SNIFF_BYTES: usize = 8 * 1024;
 
 pub(crate) fn handle_list_dir(state: &DaemonState, params: &Value) -> Result<Value> {
@@ -132,11 +133,11 @@ pub(crate) fn handle_read_file(state: &DaemonState, params: &Value) -> Result<Va
         bail!("path is a directory, not a file: {}", path.display());
     }
     let size = meta.len();
-    if size > HARD_MAX_BYTES {
+    if size > READ_HARD_MAX_BYTES {
         bail!(
             "file is too large to preview ({} bytes, hard limit {} bytes)",
             size,
-            HARD_MAX_BYTES
+            READ_HARD_MAX_BYTES
         );
     }
 
@@ -197,11 +198,11 @@ pub(crate) fn handle_write_file(state: &DaemonState, params: &Value) -> Result<V
     if meta.is_dir() {
         bail!("path is a directory, not a file: {}", path.display());
     }
-    if content.len() as u64 > HARD_MAX_BYTES {
+    if content.len() as u64 > WRITE_HARD_MAX_BYTES {
         bail!(
             "file is too large to write ({} bytes, hard limit {} bytes)",
             content.len(),
-            HARD_MAX_BYTES
+            WRITE_HARD_MAX_BYTES
         );
     }
 
