@@ -5085,8 +5085,8 @@ test("session list renders when a session has null routing fields", async ({ pag
   await daemon.install(page);
   await daemon.open(page);
 
-  await expect(page.getByRole("button", { name: /Good routing/ })).toBeVisible();
-  await expect(page.getByRole("button", { name: /Null routing/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Good routing/ }).first()).toBeVisible();
+  await expect(page.getByRole("button", { name: /Null routing/ }).first()).toBeVisible();
 });
 
 test("auto-recap timer does not fire on a different session after switch", async ({ page }) => {
