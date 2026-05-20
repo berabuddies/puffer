@@ -176,6 +176,33 @@ test("deployment search filters environments and resets from Escape", async ({ p
   await expect(page.locator(".pf-dep-row").filter({ hasText: "stripe-api · production" })).toBeVisible();
 });
 
+test("deployment provider sync button reports progress and completion", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Deployments" }).click();
+  const syncButton = page.locator(".pf-dep-top-right").getByRole("button", { name: "Sync providers" });
+  const syncStatus = page.locator(".pf-dep-sync-status");
+
+  await expect(syncStatus).toHaveCount(0);
+  await syncButton.click();
+
+  await expect(syncButton).toBeDisabled();
+  await expect(syncButton).toHaveAttribute("aria-busy", "true");
+  await expect(syncStatus).toHaveAttribute("role", "status");
+  await expect(syncStatus).toContainText("Syncing providers...");
+  await expect(syncStatus).toContainText("Providers synced: 6 environments across 4 providers refreshed.");
+  await expect(syncButton).toBeEnabled();
+  await expect(syncButton).toHaveAttribute("aria-busy", "false");
+
+  const statusBox = await syncStatus.boundingBox();
+  const topbarBox = await page.locator(".pf-dep-top").boundingBox();
+  expect(statusBox).not.toBeNull();
+  expect(topbarBox).not.toBeNull();
+  expect(statusBox!.height).toBeLessThanOrEqual(topbarBox!.height);
+});
+
 test("deployment detail tabs expose selected state", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

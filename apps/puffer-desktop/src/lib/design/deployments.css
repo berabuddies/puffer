@@ -72,6 +72,26 @@
 .pf-dep-search button:hover {
   color: var(--foreground);
 }
+.pf-dep-sync-status {
+  display: inline-flex;
+  align-items: center;
+  max-width: clamp(160px, 20vw, 280px);
+  height: 28px;
+  padding: 0 9px;
+  border: 1px solid color-mix(in oklab, var(--border) 72%, var(--puffer-accent));
+  border-radius: 6px;
+  background: color-mix(in oklab, var(--background) 90%, var(--puffer-accent) 10%);
+  color: var(--foreground);
+  font-size: 11.5px;
+  font-weight: 650;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pf-dep-sync-status[data-state="syncing"] {
+  color: var(--muted-foreground);
+}
 
 /* Body split: list (40%) + detail (60%) ------------------------------ */
 .pf-dep-body {
@@ -98,6 +118,7 @@
   .pf-dep-top { padding: 0 10px; gap: 8px; }
   .pf-dep-top-right { gap: 4px; }
   .pf-dep-top-right .sc-btn[data-size="sm"] { padding: 0 8px; height: 28px; font-size: 12px; }
+  .pf-dep-sync-status { max-width: 140px; height: 26px; padding: 0 7px; font-size: 11px; }
   .pf-dep-detail-head { padding: 10px 14px; min-height: auto; }
   .pf-dep-tabs { padding: 0 6px; }
   .pf-dep-tab { padding: 8px 8px; font-size: 12px; }

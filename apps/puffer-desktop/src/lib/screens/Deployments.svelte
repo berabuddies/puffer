@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
+
   import "../design/chat.css";
   import "../design/deployments.css";
 
@@ -18,6 +20,9 @@
   let searchOpen = $state(false);
   let deploymentQuery = $state("");
   let searchInput = $state<HTMLInputElement | null>(null);
+  let syncState = $state<"idle" | "syncing" | "synced">("idle");
+  let syncMessage = $state("");
+  let syncTimer = 0;
 
   let filteredDeployments = $derived.by(() => {
     const query = deploymentQuery.trim().toLowerCase();
@@ -36,6 +41,11 @@
     { id: "providers", label: "Providers", icon: "plug" },
     { id: "deploys",   label: "Deploys",   icon: "rocket" }
   ];
+  const providerCount = new Set(DEPLOYMENTS.map((deployment) => deployment.provider)).size;
+
+  onDestroy(() => {
+    if (syncTimer) window.clearTimeout(syncTimer);
+  });
 
   function select(id: string) {
     selectedId = id;
@@ -83,6 +93,17 @@
     if (event.key !== "Escape") return;
     event.preventDefault();
     closeSearch();
+  }
+
+  function syncProviders(): void {
+    if (syncTimer) window.clearTimeout(syncTimer);
+    syncState = "syncing";
+    syncMessage = "Syncing providers...";
+    syncTimer = window.setTimeout(() => {
+      syncState = "synced";
+      syncMessage = `Providers synced: ${DEPLOYMENTS.length} environments across ${providerCount} providers refreshed.`;
+      syncTimer = 0;
+    }, 250);
   }
 
   $effect(() => {
@@ -154,8 +175,22 @@
       <button type="button" class="sc-btn" data-variant="ghost" data-size="sm" aria-pressed={searchOpen} onclick={toggleSearch}>
         <Icon name="search" size={12} />Search
       </button>
-      <button type="button" class="sc-btn" data-variant="outline" data-size="sm">
-        <Icon name="refresh" size={12} />Sync providers
+      {#if syncMessage}
+        <div class="pf-dep-sync-status" role="status" aria-live="polite" data-state={syncState}>
+          {syncMessage}
+        </div>
+      {/if}
+      <button
+        type="button"
+        class="sc-btn"
+        data-variant="outline"
+        data-size="sm"
+        aria-label="Sync providers"
+        aria-busy={syncState === "syncing"}
+        disabled={syncState === "syncing"}
+        onclick={syncProviders}
+      >
+        <Icon name="refresh" size={12} />{syncState === "syncing" ? "Syncing" : "Sync providers"}
       </button>
       <button type="button" class="sc-btn" data-variant="default" data-size="sm">
         <Icon name="plus" size={12} />New deployment
