@@ -60,6 +60,13 @@ impl CallbackListener {
         while Instant::now() < deadline {
             match self.listener.accept() {
                 Ok((mut stream, _)) => {
+                    // The listener is nonblocking, which is inherited by the
+                    // accepted stream on some platforms (macOS). Switch the
+                    // stream back to blocking + impose a read timeout so we
+                    // don't hit EAGAIN on the first read just because the
+                    // browser's HTTP request hasn't fully flushed yet.
+                    stream.set_nonblocking(false)?;
+                    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
                     let mut buffer = [0_u8; 4096];
                     let bytes_read = stream.read(&mut buffer)?;
                     let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
