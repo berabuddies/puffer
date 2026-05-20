@@ -281,6 +281,11 @@ test("Files tab saves text edits through the daemon", async ({ page }) => {
 test("Files tab previews common document and data formats", async ({ page }) => {
   const daemon = new FakeDaemon();
   seedPreviewFiles(daemon);
+  const pdfRendererRequests: string[] = [];
+  page.on("request", (request) => {
+    const url = request.url();
+    if (url.includes("pdfjs-dist") || url.includes("pdf.worker")) pdfRendererRequests.push(url);
+  });
   await page.addInitScript(() => {
     Object.defineProperty(window, "DecompressionStream", { value: undefined, configurable: true });
   });
@@ -297,6 +302,7 @@ test("Files tab previews common document and data formats", async ({ page }) => 
   await page.getByRole("button", { name: "locations.csv" }).click();
   await expect(page.getByLabel("CSV preview")).toContainText("Library");
   await expect(page.getByLabel("CSV preview")).toContainText("Cafe");
+  expect(pdfRendererRequests).toHaveLength(0);
 
   await page.getByRole("button", { name: "sample.pdf" }).click();
   await expect(page.getByLabel("PDF preview")).toBeVisible();
@@ -305,6 +311,7 @@ test("Files tab previews common document and data formats", async ({ page }) => 
     (request) => request.params.path === "/tmp/puffer/sample.pdf" && request.params.maxBytes === 24 * 1024 * 1024
   );
   await expectCanvasHasInk(page, 'canvas[aria-label="PDF page 1"]');
+  expect(pdfRendererRequests.length).toBeGreaterThan(0);
 
   await page.getByRole("button", { name: "brief.docx" }).click();
   await expect(page.getByLabel("DOCX preview")).toContainText("Quarterly planning note");

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
-  import { getDocument, GlobalWorkerOptions, type PDFDocumentLoadingTask } from "pdfjs-dist";
+  import type { PDFDocumentLoadingTask } from "pdfjs-dist";
 
   type Props = {
     base64: string;
@@ -15,7 +15,20 @@
   let generation = 0;
   let loadingTask: PDFDocumentLoadingTask | null = null;
 
-  GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.mjs", import.meta.url).toString();
+  type PdfJsModule = typeof import("pdfjs-dist");
+
+  let pdfJsModulePromise: Promise<PdfJsModule> | null = null;
+
+  function loadPdfJs(): Promise<PdfJsModule> {
+    pdfJsModulePromise ??= import("pdfjs-dist").then((module) => {
+      module.GlobalWorkerOptions.workerSrc = new URL(
+        "pdfjs-dist/build/pdf.worker.mjs",
+        import.meta.url
+      ).toString();
+      return module;
+    });
+    return pdfJsModulePromise;
+  }
 
   $effect(() => {
     const target = host;
@@ -44,8 +57,12 @@
   async function renderPdf(target: HTMLDivElement, source: string, current: number): Promise<void> {
     target.replaceChildren();
     error = null;
-    status = "Loading PDF...";
+    status = "Loading PDF renderer...";
     void loadingTask?.destroy();
+
+    const { getDocument } = await loadPdfJs();
+    if (current !== generation) return;
+    status = "Loading PDF...";
 
     const task = getDocument({
       data: base64ToBytes(source),
