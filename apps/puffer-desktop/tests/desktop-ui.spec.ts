@@ -892,7 +892,7 @@ test("rapid Browser new-tab clicks allocate unique tab ids", async ({ page }) =>
   await expect(page.locator(".pf-browser-tab")).toHaveCount(3);
 });
 
-test("late Browser new-tab responses do not resurrect cleared tabs", async ({ page }) => {
+test("stale empty Browser tab lists do not cancel a pending new tab", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayResponse(
     "browser_agent",
@@ -913,11 +913,11 @@ test("late Browser new-tab responses do not resurrect cleared tabs", async ({ pa
     request.params.action === "open" && request.params.tabId === "tab-2"
   );
   daemon.emit("browser:session-browser:tabs", { activeTabId: null, tabs: [] });
-  await expect(page.locator(".pf-browser-status")).toHaveText("No pages");
+  await expect(page.locator(".pf-browser-tab")).toHaveCount(1);
 
   await page.waitForTimeout(170);
-  await expect(page.locator(".pf-browser-tab")).toHaveCount(0);
-  await expect(page.locator(".pf-browser-status")).toHaveText("No pages");
+  await expect(page.locator(".pf-browser-tab")).toHaveCount(2);
+  await expect(page.locator(".pf-browser-status")).toHaveText("Connected");
 });
 
 test("Browser tab close controls name the exact tab they target", async ({ page }) => {
@@ -2068,7 +2068,7 @@ test("Browser tab list event reopens disconnected active tab", async ({ page }) 
   });
 });
 
-test("Browser navigation controls are disabled while reconnecting", async ({ page }) => {
+test("Browser navigation controls are disabled while reconnecting but address stays editable", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
@@ -2107,7 +2107,7 @@ test("Browser navigation controls are disabled while reconnecting", async ({ pag
   await expect(toolbar.getByRole("button", { name: "Back" })).toBeDisabled({ timeout: 250 });
   await expect(toolbar.getByRole("button", { name: "Forward" })).toBeDisabled({ timeout: 250 });
   await expect(toolbar.getByRole("button", { name: "Reload" })).toBeDisabled({ timeout: 250 });
-  await expect(page.getByLabel("URL")).toBeDisabled({ timeout: 250 });
+  await expect(page.getByLabel("URL")).toBeEnabled({ timeout: 250 });
 });
 
 test("late Browser open responses do not overwrite the active tab", async ({ page }) => {

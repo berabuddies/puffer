@@ -188,6 +188,7 @@
   let liveErrorSeq = 0;
   let desktopPins = $state<DesktopPinState>({ pinnedAgentIds: [], pinnedWorkspacePaths: [] });
   let desktopPinInFlightKeys = $state<string[]>([]);
+  const submitMessageInFlightGuards = new Set<string>();
 
   let settingsSnapshot = $state<SettingsSnapshot | null>(null);
   let settingsLoading = $state(false);
@@ -831,10 +832,13 @@
         // When we reconnect after a drop, refresh groups + re-open the
         // selected session so the UI catches up.
         if (s === "open" && !onboarding) {
+          desktopPinInFlightKeys = [];
           void refreshPins();
           void refreshSettings();
           void refreshGroups();
-          if (selectedSession) void openSession(selectedSession);
+          if (selectedSession) {
+            void openSession(selectedSession, { showLoading: false, resetLiveState: true });
+          }
         }
       }),
       // Any time a session is created or a turn finishes, refresh the
@@ -1656,11 +1660,13 @@
 
   function setSubmitMessageInFlight(sessionId: string, inFlight: boolean) {
     if (inFlight) {
+      submitMessageInFlightGuards.add(sessionId);
       if (!submitMessageInFlightSessionIds.includes(sessionId)) {
         submitMessageInFlightSessionIds = [...submitMessageInFlightSessionIds, sessionId];
       }
       return;
     }
+    submitMessageInFlightGuards.delete(sessionId);
     submitMessageInFlightSessionIds = submitMessageInFlightSessionIds.filter(
       (id) => id !== sessionId
     );
@@ -1674,6 +1680,7 @@
     const sessionAtSubmit = selectedSession;
     const submitSessionId = sessionAtSubmit.id;
     if (
+      submitMessageInFlightGuards.has(submitSessionId) ||
       submitMessageInFlightFor(submitSessionId) ||
       turnStartedAtMs !== null ||
       currentTurnId !== null ||

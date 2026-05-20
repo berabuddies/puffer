@@ -126,6 +126,7 @@
   let selectedModelId = $state<string | null>(null);
   let selectedThinkingOptionId = $state("");
   let submitInFlightSessionIds = $state<string[]>([]);
+  const submitInFlightGuards = new Set<string>();
   let thinkingProviderId = $state<string | null>(null);
   let thinkingModels = $state<ModelDescriptorInfo[]>([]);
   let thinkingLoadError = $state<string | null>(null);
@@ -382,11 +383,13 @@
 
   function setSubmitInFlight(sessionId: string, inFlight: boolean) {
     if (inFlight) {
+      submitInFlightGuards.add(sessionId);
       if (!submitInFlightSessionIds.includes(sessionId)) {
         submitInFlightSessionIds = [...submitInFlightSessionIds, sessionId];
       }
       return;
     }
+    submitInFlightGuards.delete(sessionId);
     submitInFlightSessionIds = submitInFlightSessionIds.filter((id) => id !== sessionId);
   }
 
@@ -752,6 +755,7 @@
     if (!v || !canSubmitPrompt) return;
     const targetSessionId = session?.id;
     if (!targetSessionId) return;
+    if (submitInFlightGuards.has(targetSessionId)) return;
     const previousDraft = draft;
     setSubmitInFlight(targetSessionId, true);
     draft = "";

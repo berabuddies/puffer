@@ -222,3 +222,90 @@ test("Reload loading state recovers when no browser state event follows", async 
 
   await expect(statusBar).toContainText("Connected", { timeout: 2_000 });
 });
+
+test("Address bar re-enables and loading clears after failed navigation", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openBrowserAgent(page);
+  await openBrowserPane(page, daemon);
+
+  const addressBar = page.locator(".pf-browser-address");
+  await expect(addressBar).toBeEnabled();
+
+  daemon.failNext("browser_navigate", "navigation channel closed");
+  await addressBar.fill("https://fails.example.com");
+  await addressBar.press("Enter");
+
+  await daemon.waitForRequest("browser_navigate", (request) =>
+    request.params.url === "https://fails.example.com"
+  );
+  await expect(addressBar).toBeEnabled();
+  await expect(page.locator(".pf-browser-status")).toContainText("Chrome error");
+  await expect(page.locator(".pf-browser-status")).not.toHaveClass(/loading/);
+});
+
+test("Address bar can reopen a disconnected tab with the typed URL", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openBrowserAgent(page);
+  await openBrowserPane(page, daemon);
+
+  daemon.emit("browser:session-browser:tabs", {
+    activeTabId: "tab-1",
+    tabs: [
+      {
+        tabId: "tab-1",
+        label: "Recovered tab",
+        url: "https://old.example.com",
+        title: "Recovered tab",
+        loading: false,
+        connected: false,
+        active: true,
+        backendSessionId: "session-browser:browser:tab-1"
+      }
+    ]
+  });
+  await daemon.waitForRequest("browser_open", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1" &&
+    request.params.url === "https://old.example.com"
+  );
+
+  const addressBar = page.locator(".pf-browser-address");
+  await expect(addressBar).toBeEnabled();
+  await addressBar.fill("https://reopen.example.com");
+  await addressBar.press("Enter");
+
+  await daemon.waitForRequest("browser_navigate", (request) =>
+    request.params.sessionId === "session-browser:browser:tab-1" &&
+    request.params.url === "https://reopen.example.com"
+  );
+});
+
+test("Stale empty tab list is ignored while a new tab is opening", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.delayResponse(
+    "browser_agent",
+    (request) => request.params.action === "open" && request.params.tabId === "tab-2",
+    220
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openBrowserAgent(page);
+  await openBrowserPane(page, daemon);
+
+  await page.getByRole("button", { name: "New tab" }).click();
+  await daemon.waitForRequest("browser_agent", (request) =>
+    request.params.action === "open" && request.params.tabId === "tab-2"
+  );
+  daemon.emit("browser:session-browser:tabs", { activeTabId: null, tabs: [] });
+
+  await expect(page.locator(".pf-browser-tab")).toHaveCount(1);
+  await page.waitForTimeout(260);
+  await expect(page.locator(".pf-browser-tab")).toHaveCount(2);
+  await expect(page.getByLabel("URL")).toBeEnabled();
+});

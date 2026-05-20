@@ -134,6 +134,7 @@
     )
   );
   let browserControlsEnabled = $derived(Boolean(activeTab && connected && !browserCommandPending));
+  let browserAddressEnabled = $derived(Boolean(activeTab && !browserCommandPending));
   let activeDevtools = $derived(activeTab?.devtools ?? []);
   let consoleEvents = $derived(activeDevtools.filter((item) => item.kind === "console"));
   let networkEvents = $derived(activeDevtools.filter((item) => item.kind === "network"));
@@ -235,8 +236,11 @@
 
   function applyTabsState(state: BrowserTabsState, options: ApplyTabsOptions = {}) {
     if (!Array.isArray(state.tabs)) return;
+    const hasLocalTransition =
+      tabOpenPending || closingTabs.length > 0 || pendingBrowserCommands.length > 0;
     if (state.tabs.length === 0) {
       if (!options.allowEmpty) return;
+      if (hasLocalTransition && tabs.length > 0) return;
       tabStateVersion += 1;
       pendingNavigationSessions.clear();
       tabs = [];
@@ -264,6 +268,7 @@
     tabStateVersion += 1;
     const previousActiveTabId = activeTabId;
     const nextTabs = state.tabs.map(tabFromInfo);
+    if (hasLocalTransition && nextTabs.length < tabs.length) return;
     const connectedTabId = nextTabs.find((tab) => tab.connected)?.id;
     const validActiveTabId = state.activeTabId && nextTabs.some((tab) => tab.id === state.activeTabId)
       ? state.activeTabId
@@ -605,14 +610,33 @@
     }
   }
 
+  function clearCommandLoading(target: BrowserCommandTarget, message: string | null = null) {
+    clearNavigationPending(target.backendSessionId);
+    const tabId = tabIdForBackendSession(target.backendSessionId);
+    if (tabId) {
+      updateTab(tabId, {
+        loading: false,
+        status: message ? "Chrome error" : "Connected",
+        error: message
+      });
+    }
+    if (!targetStillActive(target)) return;
+    loading = false;
+    if (message) {
+      error = message;
+      status = "Chrome error";
+    } else {
+      status = connected ? "Connected" : status;
+    }
+  }
+
   function runHistory(direction: "back" | "forward") {
     const target = activeCommandTarget();
     if (!target || !beginBrowserCommand(target, "history")) return;
     markNavigationPending(target);
     void browserHistory(target.backendSessionId, direction)
       .catch((err) => {
-        clearNavigationPending(target.backendSessionId);
-        reportCommandError(target, err);
+        clearCommandLoading(target, String(err));
       })
       .finally(() => {
         finishBrowserCommand(target, "history");
@@ -625,8 +649,7 @@
     markNavigationPending(target);
     void browserReload(target.backendSessionId)
       .catch((err) => {
-        clearNavigationPending(target.backendSessionId);
-        reportCommandError(target, err);
+        clearCommandLoading(target, String(err));
       })
       .finally(() => {
         finishBrowserCommand(target, "reload");
@@ -724,9 +747,15 @@
     } catch (err) {
       if (generation !== sessionGeneration || activeEventSessionId !== eventSessionId) return;
       const message = String(err);
-      updateTab(tabId, { connected: false, status: "Chrome failed to start", error: message });
+      updateTab(tabId, {
+        connected: false,
+        loading: false,
+        status: "Chrome failed to start",
+        error: message
+      });
       if (activeTabId === tabId && activeEventSessionId === eventSessionId) {
         connected = false;
+        loading = false;
         error = message;
         status = "Chrome failed to start";
         resetPointer(activePointerId ?? undefined);
@@ -940,7 +969,7 @@
   async function submitUrl(event: SubmitEvent) {
     event.preventDefault();
     const requestedTab = activeTab;
-    if (!connected || !activeTabId || !requestedTab) return;
+    if (!activeTabId || !requestedTab) return;
     addressInput?.blur();
     const requestedGeneration = sessionGeneration;
     const requestedTabId = requestedTab.id;
@@ -960,18 +989,23 @@
         loading: true,
         favicon: faviconFor(requestedUrl)
       });
-      await browserNavigate(requestedBackendSessionId, requestedUrl);
+      if (connected) {
+        await browserNavigate(requestedBackendSessionId, requestedUrl);
+      } else {
+        const size = measureViewport() ?? lastResize;
+        const next = await browserOpen({
+          sessionId: requestedBackendSessionId,
+          url: requestedUrl,
+          ...size
+        });
+        if (disposed || requestedGeneration !== sessionGeneration) return;
+        applyState(next, requestedTabId);
+      }
     } catch (err) {
-      clearNavigationPending(requestedBackendSessionId);
       if (disposed || requestedGeneration !== sessionGeneration) return;
       if (!tabs.some((tab) => tab.id === requestedTabId)) return;
       const message = String(err);
-      updateTab(requestedTabId, { error: message, status: "Chrome error", loading: false });
-      if (activeTabId === requestedTabId) {
-        error = message;
-        status = "Chrome error";
-        loading = false;
-      }
+      clearCommandLoading(commandTarget, message);
     } finally {
       finishBrowserCommand(commandTarget, "navigate");
     }
@@ -1539,7 +1573,7 @@
       class="pf-browser-address"
       aria-label="URL"
       spellcheck="false"
-      disabled={!browserControlsEnabled}
+      disabled={!browserAddressEnabled}
       bind:this={addressInput}
       bind:value={urlDraft}
     />
