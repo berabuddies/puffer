@@ -13,6 +13,9 @@
   let status = $state("Loading PDF...");
   let error = $state<string | null>(null);
   let renderedPages = $state(0);
+  let zoom = $state(1);
+  let zoomPercent = $derived(Math.round(zoom * 100));
+  let renderScale = $derived(1.35 * zoom);
   let generation = 0;
   let loadingTask: PDFDocumentLoadingTask | null = null;
   let showTextFallback = $derived(textLines.some((line) => line.trim() && line.trim() !== "No text found."));
@@ -37,10 +40,19 @@
   $effect(() => {
     const target = host;
     const source = base64;
+    const scale = renderScale;
     if (!target || !source) return;
 
     const current = ++generation;
-    renderPdf(target, source, current);
+    renderPdf(target, source, current, scale);
+  });
+
+  let lastSource = $state("");
+  $effect(() => {
+    const source = base64;
+    if (source === lastSource) return;
+    lastSource = source;
+    zoom = 1;
   });
 
   onDestroy(() => {
@@ -58,7 +70,16 @@
     return bytes;
   }
 
-  async function renderPdf(target: HTMLDivElement, source: string, current: number): Promise<void> {
+  function setZoom(next: number): void {
+    zoom = Math.max(0.5, Math.min(2, Math.round(next * 10) / 10));
+  }
+
+  async function renderPdf(
+    target: HTMLDivElement,
+    source: string,
+    current: number,
+    scale: number
+  ): Promise<void> {
     target.replaceChildren();
     error = null;
     renderedPages = 0;
@@ -84,7 +105,7 @@
       for (let pageNumber = 1; pageNumber <= maxPages; pageNumber += 1) {
         if (current !== generation) return;
         const page = await pdf.getPage(pageNumber);
-        const viewport = page.getViewport({ scale: 1.35 });
+        const viewport = page.getViewport({ scale });
         const wrapper = document.createElement("section");
         wrapper.className = "pdf-canvas-page";
 
@@ -125,6 +146,17 @@
 </script>
 
 <div class="pdf-renderer">
+  <div class="pdf-toolbar" role="group" aria-label="PDF zoom controls">
+    <button type="button" aria-label="Zoom out" onclick={() => setZoom(zoom - 0.1)} disabled={zoom <= 0.5}>
+      -
+    </button>
+    <button type="button" aria-label="Reset zoom" onclick={() => setZoom(1)}>
+      {zoomPercent}%
+    </button>
+    <button type="button" aria-label="Zoom in" onclick={() => setZoom(zoom + 0.1)} disabled={zoom >= 2}>
+      +
+    </button>
+  </div>
   {#if status}
     <div class="pdf-status">{status}</div>
   {/if}
@@ -149,9 +181,49 @@
     width: 100%;
   }
 
+  .pdf-toolbar {
+    display: inline-flex;
+    align-items: center;
+    justify-self: center;
+    gap: 4px;
+    padding: 3px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--background);
+    box-shadow: 0 1px 2px rgb(15 23 42 / 0.06);
+  }
+
+  .pdf-toolbar button {
+    min-width: 34px;
+    height: 26px;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--foreground);
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+    line-height: 1;
+  }
+
+  .pdf-toolbar button:hover:not(:disabled) {
+    background: color-mix(in oklab, var(--background) 88%, var(--muted));
+  }
+
+  .pdf-toolbar button:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+
   .pdf-status,
   .pdf-error {
-    color: var(--muted);
+    justify-self: center;
+    width: fit-content;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--background);
+    color: var(--muted-foreground);
     font-size: 12px;
   }
 
@@ -173,7 +245,7 @@
   }
 
   :global(.pdf-page-label) {
-    color: var(--muted);
+    color: var(--muted-foreground);
     font-size: 11px;
     text-transform: uppercase;
   }

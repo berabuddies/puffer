@@ -119,7 +119,7 @@ function previewPdf(file: ReadFileResult): PdfPreview | null {
         ? bytesToBase64(utf8StringToBytes(file.content))
         : null;
   if (!base64) return null;
-  const nativeLines = normalizedProvidedPreviewLines(file.textPreview);
+  const nativeLines = normalizedPdfPreviewLines(file.textPreview ?? [], 200);
   const lines = extractPdfText(base64ToBytes(base64));
   const previewLines = nativeLines.length > 0 ? nativeLines : lines;
   return { kind: "pdf", base64, lines: previewLines.length > 0 ? previewLines : ["No text found."] };
@@ -300,7 +300,34 @@ function parseCsv(content: string): string[][] {
 function extractPdfText(bytes: Uint8Array): string[] {
   const streamTexts = decodePdfStreams(bytes.slice(0, PDF_TEXT_SCAN_BYTES));
   const values = streamTexts.flatMap((stream) => extractPdfStrings(stream));
-  return normalizePreviewLines(values, 200);
+  return normalizedPdfPreviewLines(values, 200);
+}
+
+function normalizedPdfPreviewLines(values: string[], limit: number): string[] {
+  return normalizePreviewLines(values, limit * 2)
+    .filter(isReadablePdfPreviewLine)
+    .slice(0, limit);
+}
+
+function isReadablePdfPreviewLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (trimmed.length < 3) return false;
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(trimmed)) return false;
+  if (isInternalPdfToken(trimmed)) return false;
+  const textChars = Array.from(trimmed.matchAll(/[\p{L}\p{N}]/gu)).length;
+  if (textChars < 3) return false;
+  const symbolChars = Array.from(
+    trimmed.matchAll(/[^\p{L}\p{N}\s.,:;!?()[\]\-_/&%+#'"$@]/gu)
+  ).length;
+  return symbolChars / Math.max(trimmed.length, 1) <= 0.35;
+}
+
+function isInternalPdfToken(line: string): boolean {
+  const lower = line.toLowerCase();
+  if (lower.includes("cidinit")) return true;
+  if (lower.includes("tex-t1") || /^tex(?:\b|-)/i.test(line)) return true;
+  return /^(?:begin|end)(?:cmap|bfchar|bfrange|codespacerange)$/i.test(line) ||
+    /^(?:cmapname|cmaptype|cidsysteminfo|identity-h|adobe-identity-ucs)$/i.test(line);
 }
 
 function decodePdfStreams(bytes: Uint8Array): string[] {

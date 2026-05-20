@@ -76,13 +76,23 @@ const groqAuth = [
   }
 ];
 
-function makePdfBase64(text: string): string {
-  const stream = `BT /F1 18 Tf 20 100 Td (${text.replace(/[()\\]/g, "\\$&")}) Tj ET`;
+function makePdfBase64(text: string, pageCount = 1): string {
+  const fontObjectId = 3 + pageCount * 2;
+  const pageObjectIds = Array.from({ length: pageCount }, (_, index) => 3 + index * 2);
+  const pageRefs = pageObjectIds.map((id) => `${id} 0 R`).join(" ");
   const objects = [
     "<< /Type /Catalog /Pages 2 0 R >>",
-    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 260 160] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
-    `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`,
+    `<< /Type /Pages /Kids [${pageRefs}] /Count ${pageCount} >>`,
+    ...Array.from({ length: pageCount }).flatMap((_, index) => {
+      const pageObjectId = 3 + index * 2;
+      const contentObjectId = pageObjectId + 1;
+      const pageText = pageCount === 1 ? text : `${text} ${index + 1}`;
+      const stream = `BT /F1 18 Tf 20 100 Td (${pageText.replace(/[()\\]/g, "\\$&")}) Tj ET`;
+      return [
+        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 260 160] /Resources << /Font << /F1 ${fontObjectId} 0 R >> >> /Contents ${contentObjectId} 0 R >>`,
+        `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`
+      ];
+    }),
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
   ];
   let pdf = "%PDF-1.4\n";
@@ -235,6 +245,13 @@ function seedPreviewFiles(daemon: FakeDaemon): void {
   });
   daemon.seedBinaryFile("/tmp/puffer/tasks.xlsx", xlsx);
   daemon.seedBinaryFile("/tmp/puffer/sample.pdf", makePdfBase64("Puffer PDF preview"));
+  daemon.seedBinaryFile("/tmp/puffer/long.pdf", makePdfBase64("Long PDF preview", 29));
+  daemon.seedBinaryFile(
+    "/tmp/puffer/tex-garbage.pdf",
+    makePdfBase64("Clean PDF preview"),
+    undefined,
+    ["CIDInit", "TeX-T1-0", "TeX-T1-0 TeX T1 0", "ÿ", "\u000e", "9", "\u0010", "a", "~"]
+  );
   daemon.seedFile(
     "/tmp/puffer/ascii-sniffed.pdf",
     Buffer.from(makePdfBase64("ASCII sniffed PDF preview"), "base64").toString("utf8")
@@ -424,6 +441,23 @@ test("Files tab previews common document and data formats", async ({ page }) => 
   await expect(page.getByLabel("PDF text fallback")).toContainText("Puffer PDF preview");
   expect(pdfRendererRequests.length).toBeGreaterThan(0);
 
+  const pdfPreview = page.getByLabel("PDF preview");
+  const zoomControls = pdfPreview.getByRole("group", { name: "PDF zoom controls" });
+  await expect(zoomControls).toBeVisible();
+  await expect(zoomControls.getByText("100%")).toBeVisible();
+  const initialWidth = await page.locator('canvas[aria-label="PDF page 1"]').evaluate((canvas) =>
+    Math.round(canvas.getBoundingClientRect().width)
+  );
+  await zoomControls.getByRole("button", { name: "Zoom in" }).click();
+  await expect(zoomControls.getByText("110%")).toBeVisible();
+  await expect.poll(async () =>
+    page.locator('canvas[aria-label="PDF page 1"]').evaluate((canvas) =>
+      Math.round(canvas.getBoundingClientRect().width)
+    )
+  ).toBeGreaterThan(initialWidth);
+  await zoomControls.getByRole("button", { name: "Reset zoom" }).click();
+  await expect(zoomControls.getByText("100%")).toBeVisible();
+
   await page.getByRole("button", { name: "ascii-sniffed.pdf" }).click();
   await expect(page.getByLabel("PDF preview")).toBeVisible();
   await daemon.waitForRequest(
@@ -434,6 +468,25 @@ test("Files tab previews common document and data formats", async ({ page }) => 
   );
   await expectCanvasHasInk(page, 'canvas[aria-label="PDF page 1"]');
   await expect(page.getByLabel("PDF text fallback")).toContainText("ASCII sniffed PDF preview");
+
+  await page.getByRole("button", { name: "tex-garbage.pdf" }).click();
+  await expect(page.getByLabel("PDF preview")).toBeVisible();
+  await expectCanvasHasInk(page, 'canvas[aria-label="PDF page 1"]');
+  const fallback = page.getByLabel("PDF text fallback");
+  await expect(fallback).toContainText("Clean PDF preview");
+  await expect(fallback).not.toContainText("CIDInit");
+  await expect(fallback).not.toContainText("TeX-T1-0");
+
+  await page.getByRole("button", { name: "long.pdf" }).click();
+  await expect(page.getByLabel("PDF preview")).toBeVisible();
+  const pageLimit = page.getByText("Showing first 20 of 29 pages.");
+  await expect(pageLimit).toBeVisible();
+  const pageLimitColors = await pageLimit.evaluate((node) => {
+    const style = getComputedStyle(node);
+    return { color: style.color, backgroundColor: style.backgroundColor };
+  });
+  expect(pageLimitColors.color).not.toBe(pageLimitColors.backgroundColor);
+  expect(pageLimitColors.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
 
   await page.getByRole("button", { name: "brief.docx" }).click();
   await expect(page.getByLabel("DOCX preview")).toContainText("Quarterly planning note");
