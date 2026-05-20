@@ -2230,6 +2230,70 @@ test("background permission request is available when returning to that session"
   });
 });
 
+test("daemon-running background sessions receive approval events", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-daemon-running-a",
+        displayName: "Daemon running A",
+        title: "Daemon running A",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        activityStatus: "running",
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      },
+      {
+        sessionId: "session-daemon-running-b",
+        displayName: "Daemon running B",
+        title: "Daemon running B",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 0,
+        activityStatus: "idle",
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const alphaRow = page
+    .locator(".pf-sidebar-agent-row")
+    .filter({ hasText: "Daemon running A" });
+  await expect(alphaRow.locator('.state[data-state="running"]')).toContainText("running");
+  await openSession(page, /Daemon running B/);
+
+  daemon.emit("session:session-daemon-running-a:event", {
+    type: "permission-request",
+    turnId: "turn-session-daemon-running-a",
+    requestId: "permission-daemon-running",
+    toolId: "bash",
+    summary: "Approve daemon-started command",
+    reason: "This approval started before the UI opened the session."
+  });
+  await expect(alphaRow.locator('.state[data-state="awaiting"]')).toContainText("awaiting");
+
+  await openSession(page, /Daemon running A/);
+  await expect(page.getByText("This approval started before the UI opened the session.")).toBeVisible();
+  await page.getByRole("button", { name: "Allow once" }).click();
+
+  const request = await daemon.waitForRequest("resolve_permission");
+  expect(request.params).toMatchObject({
+    turnId: "turn-session-daemon-running-a",
+    requestId: "permission-daemon-running",
+    action: "allow_once"
+  });
+});
+
 test("late permission response failures do not leak into a switched session", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

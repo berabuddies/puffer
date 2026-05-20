@@ -371,8 +371,15 @@
   }
 
   function liveSidebarSessionSubscriptionTargets(): string[] {
-    return Object.keys(liveSidebarAgentsById)
-      .sort();
+    const targets = new Set(Object.keys(liveSidebarAgentsById));
+    for (const group of groups) {
+      for (const session of group.sessions) {
+        if (isTopLevelSession(session) && activityStatusIsActive(session.activityStatus)) {
+          targets.add(session.id);
+        }
+      }
+    }
+    return Array.from(targets).sort();
   }
 
   async function ensureLiveSidebarSessionSubscriptions(targetIds: string[]) {
