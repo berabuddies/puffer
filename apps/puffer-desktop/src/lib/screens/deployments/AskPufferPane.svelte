@@ -1,15 +1,25 @@
 <script lang="ts">
   import Puffer from "../../design/Puffer.svelte";
   import Icon from "../../design/Icon.svelte";
-  import type { Deployment } from "../../data/mockDeployments";
+  import type { Deployment, MemoryItem } from "../../data/mockDeployments";
 
-  type Props = { d: Deployment };
-  let { d }: Props = $props();
+  type Props = {
+    d: Deployment;
+    memoryDrafts: MemoryItem[];
+    onAddMemory: (item: MemoryItem) => void;
+  };
+  let { d, memoryDrafts, onAddMemory }: Props = $props();
 
+  const diagnosticSourceRef = "f02ae81 diagnostic";
+  const diagnosticTitle = "Node 20 keep-alive regression";
   let draft = $state("");
   let localTurns = $state<{ id: number; prompt: string; response: string }[]>([]);
   let localTurnId = 0;
   let lastDeploymentId = $state<string | null>(null);
+  let memoryStatus = $state("");
+  let diagnosticSaved = $derived(
+    memoryDrafts.some((item) => item.source.kind === "ask" && item.source.ref === diagnosticSourceRef)
+  );
 
   type Line = { type?: "cmd" | "dim"; text: string };
   let terminalLines = $derived<Line[]>([
@@ -45,6 +55,7 @@
     lastDeploymentId = d.id;
     draft = "";
     localTurns = [];
+    memoryStatus = "";
   });
 
   function responseFor(prompt: string): string {
@@ -70,6 +81,25 @@
     if (event.key !== "Enter" || event.shiftKey) return;
     event.preventDefault();
     submitDraft();
+  }
+
+  function saveDiagnosticMemory(): void {
+    if (diagnosticSaved) return;
+    const item: MemoryItem = {
+      id: `ask-${d.id}-keepalive-${Date.now()}`,
+      kind: "pitfall",
+      title: diagnosticTitle,
+      body:
+        "POST /subscription/update p95 rose from 180ms to 480ms after f02ae81. Node 20 drops http.Agent keep-alive defaults; pin agent.keepAlive=true in lib/http.ts or roll back to 6f8c120 while patching.",
+      source: { kind: "ask", ref: diagnosticSourceRef },
+      confidence: "high",
+      savedBy: "Puffer",
+      time: "just now",
+      tags: ["node-20", "keepalive", "performance"],
+      uses: 0
+    };
+    onAddMemory(item);
+    memoryStatus = `Saved "${diagnosticTitle}" to Memory for ${d.name}.`;
   }
 </script>
 
@@ -143,9 +173,20 @@
             <button type="button" class="sc-btn" data-variant="outline" data-size="sm">
               <Icon name="chevL" size={12} />Roll back to 6f8c120
             </button>
-            <button type="button" class="sc-btn" data-variant="ghost" data-size="sm">
-              <Icon name="bolt" size={12} />Save to memory
+            <button
+              type="button"
+              class="sc-btn"
+              data-variant="ghost"
+              data-size="sm"
+              aria-pressed={diagnosticSaved}
+              disabled={diagnosticSaved}
+              onclick={saveDiagnosticMemory}
+            >
+              <Icon name="bolt" size={12} />{diagnosticSaved ? "Saved to memory" : "Save to memory"}
             </button>
+            {#if memoryStatus}
+              <span class="pf-dep-ask-status" role="status" aria-live="polite">{memoryStatus}</span>
+            {/if}
           </div>
         </div>
       </div>

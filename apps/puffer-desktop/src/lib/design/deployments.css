@@ -1022,6 +1022,20 @@
   display: flex; gap: 6px; flex-wrap: wrap;
   margin-top: 14px;
 }
+.pf-dep-ask-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  max-width: min(520px, 100%);
+  padding: 0 8px;
+  border: 1px solid color-mix(in oklab, var(--border) 72%, var(--puffer-accent));
+  border-radius: 6px;
+  background: color-mix(in oklab, var(--background) 90%, var(--puffer-accent) 10%);
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.25;
+}
 
 .pf-dep-ask-composer {
   display: flex; flex-direction: column; gap: 8px;

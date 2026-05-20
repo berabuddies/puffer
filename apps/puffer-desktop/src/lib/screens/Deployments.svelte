@@ -14,7 +14,7 @@
   import SecretsPane from "./deployments/SecretsPane.svelte";
   import ProvidersPane from "./deployments/ProvidersPane.svelte";
   import DeploysPane from "./deployments/DeploysPane.svelte";
-  import { DEPLOYMENTS, type DeployHistoryItem, type Deployment } from "../data/mockDeployments";
+  import { DEPLOYMENTS, type DeployHistoryItem, type Deployment, type MemoryItem } from "../data/mockDeployments";
 
   type Tab = "askpuffer" | "memory" | "secrets" | "providers" | "deploys";
   let selectedId = $state("d-prod-api");
@@ -37,6 +37,7 @@
   let redeployTimer = 0;
   let redeploySequence = $state(1429);
   let redeployHistory = $state<Record<string, DeployHistoryItem[]>>({});
+  let memoryDrafts = $state<Record<string, MemoryItem[]>>({});
 
   const providerOptions: { id: Deployment["provider"]; label: string; region: string }[] = [
     { id: "vercel", label: "Vercel", region: "iad1 - us-east" },
@@ -227,6 +228,13 @@
       redeployingId = null;
       redeployTimer = 0;
     }, 350);
+  }
+
+  function addMemoryDraft(deploymentId: string, item: MemoryItem): void {
+    memoryDrafts = {
+      ...memoryDrafts,
+      [deploymentId]: [item, ...(memoryDrafts[deploymentId] ?? [])]
+    };
   }
 
   $effect(() => {
@@ -566,9 +574,17 @@
         aria-labelledby={`dep-tab-${tab}`}
       >
         {#if tab === "askpuffer"}
-          <AskPufferPane d={selected} />
+          <AskPufferPane
+            d={selected}
+            memoryDrafts={memoryDrafts[selected.id] ?? []}
+            onAddMemory={(item) => addMemoryDraft(selected.id, item)}
+          />
         {:else if tab === "memory"}
-          <MemoryPane d={selected} />
+          <MemoryPane
+            d={selected}
+            drafts={memoryDrafts[selected.id] ?? []}
+            onAddMemory={(item) => addMemoryDraft(selected.id, item)}
+          />
         {:else if tab === "secrets"}
           <SecretsPane d={selected} />
         {:else if tab === "providers"}

@@ -3,14 +3,17 @@
   import Icon, { type IconName } from "../../design/Icon.svelte";
   import { KIND_META, MEMORY, type Deployment, type MemoryItem } from "../../data/mockDeployments";
 
-  type Props = { d: Deployment };
-  let { d }: Props = $props();
+  type Props = {
+    d: Deployment;
+    drafts: MemoryItem[];
+    onAddMemory: (item: MemoryItem) => void;
+  };
+  let { d, drafts, onAddMemory }: Props = $props();
 
   const kindOptions: MemoryItem["kind"][] = ["incident", "runbook", "fact", "pitfall", "convention"];
 
   let baseItems = $derived(MEMORY[d.id] ?? MEMORY["d-prod-api"]);
-  let draftItems = $state<Record<string, MemoryItem[]>>({});
-  let items = $derived([...(draftItems[d.id] ?? []), ...baseItems]);
+  let items = $derived([...drafts, ...baseItems]);
   let filter = $state<string>("all");
   let addNoteOpen = $state(false);
   let noteTitle = $state("");
@@ -86,10 +89,7 @@
       tags: tagList(noteTags),
       uses: 0
     };
-    draftItems = {
-      ...draftItems,
-      [d.id]: [next, ...(draftItems[d.id] ?? [])]
-    };
+    onAddMemory(next);
     if (filter !== "all" && filter !== next.kind) filter = next.kind;
     memoryStatus = `Added memory note "${title}" to ${d.name}.`;
     if (statusTimer) window.clearTimeout(statusTimer);

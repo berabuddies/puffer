@@ -407,6 +407,33 @@ test("deployment Ask Puffer composer sends prompts from button and Enter", async
   await expect(textbox).toHaveValue("");
 });
 
+test("deployment Ask Puffer saves diagnostic output into Memory", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Deployments" }).click();
+  const save = page.getByRole("button", { name: "Save to memory" });
+
+  await save.click();
+
+  await expect(page.getByRole("status")).toContainText(
+    'Saved "Node 20 keep-alive regression" to Memory for stripe-api · production.'
+  );
+  await expect(page.getByRole("button", { name: "Saved to memory" })).toBeDisabled();
+
+  await page.getByRole("tab", { name: "Memory" }).click();
+  await expect(page.locator(".pf-dep-pane-head .sub")).toContainText("7 notes");
+  const note = page.locator(".pf-dep-mem").filter({ hasText: "Node 20 keep-alive regression" });
+  await expect(note).toBeVisible();
+  await expect(note).toContainText("Pitfall");
+  await expect(note).toContainText("POST /subscription/update p95 rose from 180ms to 480ms after f02ae81.");
+  await expect(note).toContainText("ask:");
+  await expect(note).toContainText("f02ae81 diagnostic");
+  await expect(note).toContainText("#node-20");
+  await expect(note).toContainText("#keepalive");
+});
+
 test("deployment secrets sync button reports progress and completion", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
