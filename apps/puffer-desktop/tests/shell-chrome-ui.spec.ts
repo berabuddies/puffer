@@ -407,6 +407,28 @@ test("deployment Ask Puffer composer sends prompts from button and Enter", async
   await expect(textbox).toHaveValue("");
 });
 
+test("deployment secrets sync button reports progress and completion", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Deployments" }).click();
+  await page.getByRole("tab", { name: "Secrets" }).click();
+  const syncButton = page.getByRole("button", { name: "Sync secrets" });
+  const status = page.locator(".pf-dep-pane-status");
+
+  await expect(status).toHaveCount(0);
+  await syncButton.click();
+
+  await expect(syncButton).toBeDisabled();
+  await expect(syncButton).toHaveAttribute("aria-busy", "true");
+  await expect(status).toHaveAttribute("role", "status");
+  await expect(status).toContainText("Syncing stripe-api · production secrets with Vault...");
+  await expect(status).toContainText("Secrets synced: 8 keys refreshed for stripe-api · production.");
+  await expect(syncButton).toBeEnabled();
+  await expect(syncButton).toHaveAttribute("aria-busy", "false");
+});
+
 test("deployment secret reveal controls target one key and toggle their state", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

@@ -405,6 +405,29 @@
   padding: 1px 5px;
   border-radius: 4px;
 }
+.pf-dep-pane-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.pf-dep-pane-status {
+  max-width: clamp(150px, 20vw, 280px);
+  padding: 4px 7px;
+  border: 1px solid color-mix(in oklab, var(--border) 72%, var(--puffer-accent));
+  border-radius: 6px;
+  background: color-mix(in oklab, var(--background) 90%, var(--puffer-accent) 10%);
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pf-dep-pane-status[data-state="syncing"] {
+  color: var(--foreground);
+}
 
 /* Alert -------------------------------------------------------------- */
 .pf-dep-alert {

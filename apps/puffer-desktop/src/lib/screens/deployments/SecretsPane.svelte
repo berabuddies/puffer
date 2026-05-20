@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import Icon from "../../design/Icon.svelte";
   import { SECRETS, type Deployment } from "../../data/mockDeployments";
 
@@ -7,9 +8,43 @@
 
   let secrets = $derived(SECRETS[d.id] ?? SECRETS["d-prod-api"]);
   let revealed = $state<Record<string, boolean>>({});
+  let syncState = $state<"idle" | "syncing" | "synced">("idle");
+  let syncMessage = $state("");
+  let syncTimer = 0;
+  let statusDeploymentId = $state("");
+
+  onDestroy(() => {
+    if (syncTimer) window.clearTimeout(syncTimer);
+  });
+
+  $effect(() => {
+    const deploymentId = d.id;
+    if (deploymentId === statusDeploymentId) return;
+    statusDeploymentId = deploymentId;
+    if (syncTimer) window.clearTimeout(syncTimer);
+    syncTimer = 0;
+    syncState = "idle";
+    syncMessage = "";
+  });
 
   function toggle(key: string) {
     revealed = { ...revealed, [key]: !revealed[key] };
+  }
+
+  function syncSecrets(): void {
+    if (syncTimer) window.clearTimeout(syncTimer);
+    const deploymentId = d.id;
+    const deploymentName = d.name;
+    const keyCount = secrets.length;
+    statusDeploymentId = deploymentId;
+    syncState = "syncing";
+    syncMessage = `Syncing ${deploymentName} secrets with Vault...`;
+    syncTimer = window.setTimeout(() => {
+      if (statusDeploymentId !== deploymentId) return;
+      syncState = "synced";
+      syncMessage = `Secrets synced: ${keyCount} keys refreshed for ${deploymentName}.`;
+      syncTimer = 0;
+    }, 250);
   }
 </script>
 
@@ -19,9 +54,23 @@
       <h3>Secrets &amp; env</h3>
       <p class="sub">{secrets.length} keys · synced to Vault · masked for all roles except <code>owner</code></p>
     </div>
-    <div style="display: flex; gap: 6px;">
-      <button type="button" class="sc-btn" data-variant="ghost" data-size="sm">
-        <Icon name="refresh" size={12} />Sync
+    <div class="pf-dep-pane-actions">
+      {#if syncMessage}
+        <div class="pf-dep-pane-status" role="status" aria-live="polite" data-state={syncState}>
+          {syncMessage}
+        </div>
+      {/if}
+      <button
+        type="button"
+        class="sc-btn"
+        data-variant="ghost"
+        data-size="sm"
+        aria-label="Sync secrets"
+        aria-busy={syncState === "syncing"}
+        disabled={syncState === "syncing"}
+        onclick={syncSecrets}
+      >
+        <Icon name="refresh" size={12} />{syncState === "syncing" ? "Syncing" : "Sync"}
       </button>
       <button type="button" class="sc-btn" data-variant="default" data-size="sm">
         <Icon name="plus" size={12} />Add secret
