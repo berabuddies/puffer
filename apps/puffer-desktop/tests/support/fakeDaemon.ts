@@ -255,6 +255,7 @@ export class FakeDaemon {
   private readonly details = new Map<string, SessionDetailOverrides>();
   private groupedSessionFilter: ((metadata: JsonRecord) => boolean) | null = null;
   private readonly files = new Map<string, FakeFileValue>();
+  private readonly canonicalFilePaths = new Map<string, string>();
   private fileTabsState: JsonRecord | null = null;
   private readonly lspLocations = new Map<string, string>();
   private readonly providerModels: Record<string, JsonRecord[]>;
@@ -420,6 +421,11 @@ export class FakeDaemon {
 
   seedFile(path: string, content: string): void {
     this.files.set(path, content);
+  }
+
+  seedCanonicalFile(requestPath: string, resultPath: string, content: string): void {
+    this.files.set(requestPath, content);
+    this.canonicalFilePaths.set(requestPath, resultPath);
   }
 
   setFileTabs(tabs: FakeFileTab[], activePath: string | null = tabs[0]?.path ?? null): void {
@@ -1335,6 +1341,7 @@ export class FakeDaemon {
     const path = String(params.path ?? "");
     const content = this.files.get(path) ?? defaultFileContent(path);
     this.files.set(path, content);
+    const resultPath = this.canonicalFilePaths.get(path) ?? path;
     const maxBytesValue = Number(params.maxBytes ?? params.max_bytes ?? Number.POSITIVE_INFINITY);
     const maxBytes = Number.isFinite(maxBytesValue) && maxBytesValue >= 0
       ? Math.floor(maxBytesValue)
@@ -1343,7 +1350,7 @@ export class FakeDaemon {
       const bytes = Buffer.from(content.content, "base64");
       const visible = maxBytes === Number.POSITIVE_INFINITY ? bytes : bytes.subarray(0, maxBytes);
       return {
-        path,
+        path: resultPath,
         encoding: content.encoding,
         content: visible.toString("base64"),
         size: content.size,
@@ -1355,7 +1362,7 @@ export class FakeDaemon {
     const bytes = Buffer.from(content, "utf8");
     const visible = maxBytes === Number.POSITIVE_INFINITY ? bytes : bytes.subarray(0, maxBytes);
     return {
-      path,
+      path: resultPath,
       encoding: "utf8",
       content: visible.toString("utf8"),
       size: bytes.length,

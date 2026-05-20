@@ -337,7 +337,7 @@
         root === expectedRoot &&
         sessionId === expectedSessionId
       ) {
-        cacheFileResult(result, !wasDirty);
+        cacheFileResult(result, !wasDirty, target);
       }
     } catch (err) {
       if (
@@ -451,27 +451,32 @@
     openTabs = next;
   }
 
-  function cacheFileResult(result: ReadFileResult, resetDraft: boolean) {
+  function cacheFileResult(
+    result: ReadFileResult,
+    resetDraft: boolean,
+    logicalPath = result.path
+  ) {
+    const cachedResult = result.path === logicalPath ? result : { ...result, path: logicalPath };
     const nextFiles = new Map(fileCache);
-    nextFiles.set(result.path, result);
+    nextFiles.set(logicalPath, cachedResult);
     fileCache = nextFiles;
 
-    if (resetDraft || !draftCache.has(result.path)) {
+    if (resetDraft || !draftCache.has(logicalPath)) {
       const nextDrafts = new Map(draftCache);
-      nextDrafts.set(result.path, result.encoding === "utf8" ? result.content : "");
+      nextDrafts.set(logicalPath, cachedResult.encoding === "utf8" ? cachedResult.content : "");
       draftCache = nextDrafts;
     }
 
     openTabs = openTabs.map((tab) =>
-      tab.path === result.path ? { ...tab, size: result.size } : tab
+      tab.path === logicalPath ? { ...tab, size: cachedResult.size } : tab
     );
 
-    if (activePath === result.path) {
-      activeFile = result;
-      activeSize = result.size;
+    if (activePath === logicalPath) {
+      activeFile = cachedResult;
+      activeSize = cachedResult.size;
       activeError = null;
-      draftContent = draftCache.get(result.path) ?? (result.encoding === "utf8" ? result.content : "");
-      void loadActivePreview(result);
+      draftContent = draftCache.get(logicalPath) ?? (cachedResult.encoding === "utf8" ? cachedResult.content : "");
+      void loadActivePreview(cachedResult);
     }
   }
 
@@ -661,7 +666,7 @@
         root === expectedRoot &&
         sessionId === expectedSessionId
       ) {
-        cacheFileResult(result, false);
+        cacheFileResult(result, false, path);
         loaded = true;
       }
     } catch (err) {
@@ -792,7 +797,7 @@
       ) {
         return;
       }
-      cacheFileResult(result, true);
+      cacheFileResult(result, true, target);
       pinTab(target);
       if (activePath === target) {
         clearLspState();

@@ -618,6 +618,32 @@ test("Files tab previews common document and data formats", async ({ page }) => 
   await expect(page.getByLabel("Legacy Word preview")).toContainText("Owner: Otter");
 });
 
+test("Files tab previews files whose read path canonicalizes differently", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.seedCanonicalFile(
+    "/tmp/puffer/link-readme.md",
+    "/tmp/puffer/real-readme.md",
+    "# Canonical Notes\n\nOpened through a symlinked workspace entry.\n"
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openFilesPanel(page);
+
+  await page.getByRole("button", { name: "link-readme.md" }).click();
+  await daemon.waitForRequest(
+    "read_file",
+    (request) => request.params.path === "/tmp/puffer/link-readme.md"
+  );
+
+  await expect(page.getByLabel("Markdown preview")).toContainText("Canonical Notes");
+  await expect(page.getByRole("tab", { name: /link-readme\.md/ })).toHaveAttribute(
+    "aria-selected",
+    "true"
+  );
+});
+
 test("Files tab PDF zoom is immediate and page-limit status remains readable", async ({ page }) => {
   const daemon = new FakeDaemon();
   seedPreviewFiles(daemon);
