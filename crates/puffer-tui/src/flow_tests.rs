@@ -958,13 +958,13 @@ fn failed_shell_shortcut_persists_as_system_message() {
     assert!(record.events.iter().any(|event| {
         matches!(
             event,
-            TranscriptEvent::SystemMessage { text } if text.contains("shell-failed")
+            TranscriptEvent::SystemMessage { text, .. } if text.contains("shell-failed")
         )
     }));
     assert!(!record.events.iter().any(|event| {
         matches!(
             event,
-            TranscriptEvent::AssistantMessage { text } if text.contains("shell-failed")
+            TranscriptEvent::AssistantMessage { text, .. } if text.contains("shell-failed")
         )
     }));
 }
@@ -1041,7 +1041,7 @@ fn poll_pending_submit_skips_empty_assistant_message_after_tool_only_turn() {
     assert!(!record.events.iter().any(|event| {
         matches!(
             event,
-            TranscriptEvent::AssistantMessage { text } if text.is_empty()
+            TranscriptEvent::AssistantMessage { text, .. } if text.is_empty()
         )
     }));
 }

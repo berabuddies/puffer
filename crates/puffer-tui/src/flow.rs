@@ -870,6 +870,7 @@ fn resume_transient_picker_selection(
         TranscriptEvent::CommandInvoked {
             name: "resume".to_string(),
             args: summary.id.to_string(),
+            actor: Some(state.user_actor()),
         },
     )?;
     emit_system_message(
@@ -1053,6 +1054,7 @@ fn persist_pending_assistant_drafts(
                 state.session.id,
                 TranscriptEvent::AssistantMessage {
                     text: message.text.clone(),
+                    actor: Some(state.assistant_actor()),
                 },
             )?;
         }

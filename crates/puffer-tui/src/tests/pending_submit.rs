@@ -30,6 +30,7 @@ fn failed_pending_turn_discards_streamed_assistant_draft() {
             state.session.id,
             TranscriptEvent::UserMessage {
                 text: "fail after partial".to_string(),
+                actor: Some(state.user_actor()),
             },
         )
         .unwrap();
@@ -81,13 +82,13 @@ fn failed_pending_turn_discards_streamed_assistant_draft() {
     assert!(!record.events.iter().any(|event| {
         matches!(
             event,
-            TranscriptEvent::AssistantMessage { text } if text.contains("partial answer")
+            TranscriptEvent::AssistantMessage { text, .. } if text.contains("partial answer")
         )
     }));
     assert!(record.events.iter().any(|event| {
         matches!(
             event,
-            TranscriptEvent::SystemMessage { text } if text.contains("network down")
+            TranscriptEvent::SystemMessage { text, .. } if text.contains("network down")
         )
     }));
 }
@@ -116,6 +117,7 @@ fn successful_tool_turn_persists_pre_tool_assistant_draft() {
             state.session.id,
             TranscriptEvent::UserMessage {
                 text: "inspect the file".to_string(),
+                actor: Some(state.user_actor()),
             },
         )
         .unwrap();
@@ -189,7 +191,7 @@ fn successful_tool_turn_persists_pre_tool_assistant_draft() {
         .position(|event| {
             matches!(
                 event,
-                TranscriptEvent::AssistantMessage { text }
+                TranscriptEvent::AssistantMessage { text, .. }
                     if text.contains("I'll inspect that first.")
             )
         })
@@ -208,7 +210,7 @@ fn successful_tool_turn_persists_pre_tool_assistant_draft() {
         .position(|event| {
             matches!(
                 event,
-                TranscriptEvent::AssistantMessage { text } if text == "Done."
+                TranscriptEvent::AssistantMessage { text, .. } if text == "Done."
             )
         })
         .expect("final assistant text persisted");
