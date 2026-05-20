@@ -35,9 +35,6 @@ pub(crate) fn build_codex_openai_request_body(
         "model": model_id,
         "instructions": instructions,
         "input": codex_input_items(input),
-        "tools": tools,
-        "tool_choice": "auto",
-        "parallel_tool_calls": !tools.is_empty(),
         "store": store,
         "stream": stream,
         "include": include,
@@ -46,6 +43,11 @@ pub(crate) fn build_codex_openai_request_body(
             .clone()
             .unwrap_or_else(|| state.session.id.to_string()),
     });
+    if !tools.is_empty() {
+        body["tools"] = json!(tools);
+        body["tool_choice"] = json!("auto");
+        body["parallel_tool_calls"] = json!(true);
+    }
     if let Some(reasoning) = reasoning {
         body["reasoning"] = reasoning;
     }
@@ -590,6 +592,27 @@ mod tests {
         );
 
         assert_eq!(body["include"][0], json!("reasoning.encryptedcontent"));
+    }
+
+    #[test]
+    fn request_body_omits_tool_fields_without_tools() {
+        let state = state();
+
+        let body = build_codex_openai_request_body(
+            &state,
+            "https://api.openai.com",
+            "gpt-5",
+            "instructions",
+            Value::String("hello".to_string()),
+            &Vec::new(),
+            false,
+            None,
+            true,
+        );
+
+        assert!(body.get("tools").is_none(), "body: {body}");
+        assert!(body.get("tool_choice").is_none(), "body: {body}");
+        assert!(body.get("parallel_tool_calls").is_none(), "body: {body}");
     }
 
     #[test]
