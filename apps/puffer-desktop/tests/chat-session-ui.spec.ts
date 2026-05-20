@@ -1870,6 +1870,37 @@ test("unsent composer drafts are preserved per session while switching", async (
   ).toHaveLength(0);
 });
 
+test("unsent composer draft survives returning to the workspace board", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-workspace-draft",
+        displayName: "Workspace draft",
+        title: "Workspace draft",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Workspace draft/);
+  const composer = page.locator(".pf-composer textarea");
+  await composer.fill("Keep this draft while I check the project");
+  await page.getByRole("button", { name: "Back" }).click();
+  await expect(page.locator(".pf-pw-list")).toBeVisible();
+
+  await openSession(page, /Workspace draft/);
+  await expect(composer).toHaveValue("Keep this draft while I check the project");
+});
+
 test("resolved transcript permissions do not reappear as pending approvals", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

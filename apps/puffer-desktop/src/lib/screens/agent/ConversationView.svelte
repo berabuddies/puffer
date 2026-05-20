@@ -341,6 +341,19 @@
     return sessionPreferenceKey(sessionId, "routing");
   }
 
+  function draftPreferenceKey(sessionId: string): string {
+    return sessionPreferenceKey(sessionId, "draft");
+  }
+
+  function readDraftForSession(sessionId: string): string {
+    if (typeof window === "undefined") return "";
+    try {
+      return window.localStorage.getItem(draftPreferenceKey(sessionId)) ?? "";
+    } catch {
+      return "";
+    }
+  }
+
   function readRoutingPreference(sessionId: string): ComposerRoutingPreference | null {
     const cached = routingBySessionId[sessionId];
     if (cached) return cached;
@@ -589,10 +602,24 @@
     if (!sessionId) return;
     if (value.length > 0) {
       draftBySessionId = { ...draftBySessionId, [sessionId]: value };
+      if (typeof window !== "undefined") {
+        try {
+          window.localStorage.setItem(draftPreferenceKey(sessionId), value);
+        } catch {
+          /* Draft persistence is best-effort. */
+        }
+      }
       return;
     }
     const { [sessionId]: _removed, ...rest } = draftBySessionId;
     draftBySessionId = rest;
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.removeItem(draftPreferenceKey(sessionId));
+      } catch {
+        /* Draft persistence is best-effort. */
+      }
+    }
   }
 
   function updateDraft(value: string) {
@@ -604,7 +631,7 @@
     // Keep unsent composer text isolated per session while switching threads.
     const nextSessionId = session?.id ?? null;
     if (nextSessionId !== lastSessionId) {
-      draft = nextSessionId ? draftBySessionId[nextSessionId] ?? "" : "";
+      draft = nextSessionId ? draftBySessionId[nextSessionId] ?? readDraftForSession(nextSessionId) : "";
       expandedActivityIds = [];
       selectedActivityChildren = {};
       lastSessionId = nextSessionId;
