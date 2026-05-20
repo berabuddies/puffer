@@ -41,6 +41,7 @@
     status: string;
     connected: boolean;
     favicon: string;
+    updatedAtMs: number;
     frame: BrowserFrameEvent | null;
     devtools: BrowserDevtoolsEvent[];
   };
@@ -119,6 +120,7 @@
   let tabStateVersion = 0;
   const handledBrowserShortcutCodes = new Set<string>();
   const pendingNavigationSessions = new Set<string>();
+  let pendingNavigationUrls = new Map<string, string>();
   let pendingFrame: BrowserFrameEvent | null = null;
   let frameDecodeInFlight = false;
   const NAVIGATION_IDLE_FALLBACK_MS = 1_200;
@@ -212,6 +214,7 @@
       status: "Starting Chrome...",
       connected: false,
       favicon: "",
+      updatedAtMs: 0,
       frame: null,
       devtools: []
     };
@@ -219,6 +222,14 @@
 
   function tabFromInfo(info: BrowserTabInfo): BrowserTab {
     const existing = tabs.find((tab) => tab.id === info.tabId);
+    if (
+      existing &&
+      typeof info.updatedAtMs === "number" &&
+      info.updatedAtMs > 0 &&
+      existing.updatedAtMs > info.updatedAtMs
+    ) {
+      return existing;
+    }
     const backendId = info.backendSessionId || existing?.backendSessionId || backendSessionId(info.tabId);
     const pendingNavigation = pendingNavigationSessions.has(backendId);
     const loading = Boolean(info.loading || pendingNavigation);
@@ -233,6 +244,7 @@
       status: info.connected ? (loading ? "Loading" : "Connected") : "Disconnected",
       connected: info.connected,
       favicon: faviconFor(info.url || "about:blank"),
+      updatedAtMs: info.updatedAtMs || existing?.updatedAtMs || Date.now(),
       error: null
     };
   }
@@ -273,7 +285,17 @@
     const nextTabs = state.tabs.map(tabFromInfo);
     if (hasLocalTransition && nextTabs.length < tabs.length && !options.allowLocalTransitionShrink) return;
     const connectedTabId = nextTabs.find((tab) => tab.connected)?.id;
-    const validActiveTabId = state.activeTabId && nextTabs.some((tab) => tab.id === state.activeTabId)
+    const activeEvent = state.tabs.find((tab) => tab.tabId === state.activeTabId);
+    const existingActive = activeEvent
+      ? tabs.find((tab) => tab.id === activeEvent.tabId)
+      : null;
+    const activeEventFresh =
+      !activeEvent ||
+      !existingActive ||
+      typeof activeEvent.updatedAtMs !== "number" ||
+      activeEvent.updatedAtMs <= 0 ||
+      activeEvent.updatedAtMs >= existingActive.updatedAtMs;
+    const validActiveTabId = state.activeTabId && activeEventFresh && nextTabs.some((tab) => tab.id === state.activeTabId)
       ? state.activeTabId
       : null;
     tabs = nextTabs;
@@ -295,6 +317,7 @@
     pendingBrowserCommands = [];
     clearCursorTimer();
     pendingNavigationSessions.clear();
+    pendingNavigationUrls = new Map();
     clearNavigationFallbackTimers();
     resetPointer(activePointerId ?? undefined);
     const restored = loadSavedTabsFor(nextSessionId);
@@ -560,8 +583,9 @@
     return tabs.find((tab) => tab.backendSessionId === backendId)?.id ?? null;
   }
 
-  function markNavigationPending(target: BrowserCommandTarget) {
+  function markNavigationPending(target: BrowserCommandTarget, url?: string) {
     pendingNavigationSessions.add(target.backendSessionId);
+    if (url) pendingNavigationUrls.set(target.backendSessionId, url);
     scheduleNavigationFallback(target);
     const tabId = tabIdForBackendSession(target.backendSessionId);
     if (tabId) updateTab(tabId, { loading: true, status: "Loading", error: null }, false);
@@ -574,6 +598,7 @@
 
   function clearNavigationPending(backendId: string) {
     pendingNavigationSessions.delete(backendId);
+    pendingNavigationUrls.delete(backendId);
     const timer = navigationFallbackTimers.get(backendId);
     if (timer) clearTimeout(timer);
     navigationFallbackTimers.delete(backendId);
@@ -584,6 +609,11 @@
       clearTimeout(timer);
     }
     navigationFallbackTimers = new Map();
+    pendingNavigationUrls = new Map();
+  }
+
+  function isDuplicateNavigationIntent(target: BrowserCommandTarget, url: string): boolean {
+    return pendingNavigationUrls.get(target.backendSessionId) === url;
   }
 
   function scheduleNavigationFallback(target: BrowserCommandTarget) {
@@ -603,6 +633,7 @@
       !pendingNavigationSessions.has(target.backendSessionId)
     ) return;
     pendingNavigationSessions.delete(target.backendSessionId);
+    pendingNavigationUrls.delete(target.backendSessionId);
     const tabId = tabIdForBackendSession(target.backendSessionId);
     const tab = tabId ? tabs.find((candidate) => candidate.id === tabId) : null;
     const nextStatus = tab?.connected === false ? "Disconnected" : "Connected";
@@ -668,7 +699,11 @@
   }
 
   function updateTab(tabId: string, patch: Partial<BrowserTab>, persist = true) {
-    tabs = tabs.map((tab) => (tab.id === tabId ? { ...tab, ...patch } : tab));
+    tabs = tabs.map((tab) =>
+      tab.id === tabId
+        ? { ...tab, ...patch, updatedAtMs: patch.updatedAtMs ?? Date.now() }
+        : tab
+    );
     if (persist) saveTabs();
   }
 
@@ -982,14 +1017,16 @@
       backendSessionId: requestedBackendSessionId,
       generation: requestedGeneration
     };
+    if (isDuplicateNavigationIntent(commandTarget, requestedUrl)) return;
     if (!beginBrowserCommand(commandTarget, "navigate")) return;
     error = null;
-    markNavigationPending(commandTarget);
+    markNavigationPending(commandTarget, requestedUrl);
     try {
       updateTab(requestedTabId, {
         url: requestedUrl,
         status: "Loading",
         loading: true,
+        updatedAtMs: Date.now(),
         favicon: faviconFor(requestedUrl)
       });
       if (connected) {

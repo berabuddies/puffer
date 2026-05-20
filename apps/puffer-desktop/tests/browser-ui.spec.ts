@@ -244,6 +244,7 @@ test("Address bar re-enables and loading clears after failed navigation", async 
   await expect(addressBar).toBeEnabled();
   await expect(page.locator(".pf-browser-status")).toContainText("Chrome error");
   await expect(page.locator(".pf-browser-status")).not.toHaveClass(/loading/);
+  await expect(addressBar).toHaveValue("https://fails.example.com");
 });
 
 test("Address bar can reopen a disconnected tab with the typed URL", async ({ page }) => {
@@ -308,4 +309,73 @@ test("Stale empty tab list is ignored while a new tab is opening", async ({ page
   await page.waitForTimeout(260);
   await expect(page.locator(".pf-browser-tab")).toHaveCount(2);
   await expect(page.getByLabel("URL")).toBeEnabled();
+});
+
+test("Stale tab URL events do not overwrite the active address bar", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openBrowserAgent(page);
+  await openBrowserPane(page, daemon);
+
+  const addressBar = page.locator(".pf-browser-address");
+  await addressBar.fill("https://current.example.test");
+  await addressBar.press("Enter");
+  await daemon.waitForRequest("browser_navigate", (request) =>
+    request.params.url === "https://current.example.test"
+  );
+  await expect(addressBar).toHaveValue("https://current.example.test");
+
+  daemon.emit("browser:session-browser:tabs", {
+    activeTabId: "tab-1",
+    tabs: [
+      {
+        tabId: "tab-1",
+        label: "Old tab",
+        url: "https://old.example.test",
+        title: "Old tab",
+        loading: false,
+        connected: true,
+        active: true,
+        backendSessionId: "session-browser:browser:tab-1",
+        createdAtMs: 1,
+        updatedAtMs: 1
+      }
+    ]
+  });
+
+  await expect(addressBar).toHaveValue("https://current.example.test");
+});
+
+test("Duplicate browser navigate submits are ignored while the URL is pending", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.delayResponse(
+    "browser_navigate",
+    (request) => request.params.url === "https://dedupe.example.test",
+    300
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openBrowserAgent(page);
+  await openBrowserPane(page, daemon);
+
+  await page.locator(".pf-browser-address").fill("https://dedupe.example.test");
+  await page.locator(".pf-browser-toolbar").evaluate((form) => {
+    (form as HTMLFormElement).requestSubmit();
+    (form as HTMLFormElement).requestSubmit();
+  });
+
+  await daemon.waitForRequest("browser_navigate", (request) =>
+    request.params.url === "https://dedupe.example.test"
+  );
+  await page.waitForTimeout(50);
+  expect(
+    daemon.requests.filter(
+      (request) =>
+        request.method === "browser_navigate" &&
+        request.params.url === "https://dedupe.example.test"
+    )
+  ).toHaveLength(1);
 });
