@@ -328,6 +328,26 @@ test("Files tab close controls include paths for duplicate file names", async ({
   await expect(page.getByRole("button", { name: "Close src/main.rs", exact: true })).toHaveCount(1);
 });
 
+test("Files directory rows expose expand and collapse state", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openRegressionAgent(page);
+  await openFilesPanel(page);
+
+  const srcDir = page.locator(".tree-body").getByRole("button", { name: /^src$/ });
+  await expect(srcDir).toHaveAttribute("aria-expanded", "false");
+
+  await srcDir.click();
+  await expect(srcDir).toHaveAttribute("aria-expanded", "true");
+  await expect(page.locator(".tree-body").getByRole("button", { name: "main.rs" })).toBeVisible();
+
+  await srcDir.click();
+  await expect(srcDir).toHaveAttribute("aria-expanded", "false");
+  await expect(page.locator(".tree-body").getByRole("button", { name: "main.rs" })).toHaveCount(0);
+});
+
 test("Files tab saves text edits through the daemon", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

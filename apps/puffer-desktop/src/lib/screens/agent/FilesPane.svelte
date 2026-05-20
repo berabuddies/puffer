@@ -1202,6 +1202,7 @@
               event.preventDefault();
               void openFile(row.path, row.size, { pinned: true });
             }}
+            aria-expanded={row.kind === "directory" || row.kind === "symlink" ? expanded.has(row.path) : undefined}
             title={row.path}
           >
             {#if row.kind === "directory"}
