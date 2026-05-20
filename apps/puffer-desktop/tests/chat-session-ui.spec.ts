@@ -2592,6 +2592,41 @@ test("failed question responses keep the question prompt retryable", async ({ pa
   await expect(submit).toBeEnabled();
 });
 
+test("custom-only question requires a typed answer", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /^Browser regression\b/);
+  daemon.emit("session:session-browser:event", {
+    type: "user-question-request",
+    turnId: "turn-question-custom-only",
+    requestId: "question-custom-only",
+    questions: [
+      {
+        header: "Details",
+        question: "What exact command should I run?",
+        options: []
+      }
+    ]
+  });
+
+  await expect(page.getByText("What exact command should I run?")).toBeVisible();
+  const submit = page.getByRole("button", { name: "Send answer" });
+  await expect(submit).toBeDisabled();
+  await page.getByPlaceholder("Type another answer").fill("npm test");
+  await expect(submit).toBeEnabled();
+  await submit.click();
+
+  const request = await daemon.waitForRequest("resolve_user_question");
+  expect(request.params).toMatchObject({
+    turnId: "turn-question-custom-only",
+    requestId: "question-custom-only",
+    answers: { "What exact command should I run?": "npm test" },
+    annotations: {}
+  });
+});
+
 test("late question response failures do not leak into a switched session", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

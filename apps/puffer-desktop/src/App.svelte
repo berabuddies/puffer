@@ -2762,8 +2762,7 @@
                 preview: typeof option.preview === "string" ? option.preview : null
               }))
           : []
-      }))
-      .filter((item) => item.options.length > 0);
+      }));
   }
 
   async function ensureSessionSubscription() {
