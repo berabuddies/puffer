@@ -3613,6 +3613,97 @@ test("composer waits for stale OpenRouter model validation before submit", async
   });
 });
 
+test("composer skips OpenRouter models that do not support agent tools", async ({ page }) => {
+  const model = (
+    id: string,
+    displayName = id,
+    supportsTools = true,
+    isDefault = false
+  ) => ({
+    id,
+    displayName,
+    provider: "openrouter",
+    api: "openai-responses",
+    supportsTools,
+    contextWindow: null,
+    maxOutputTokens: null,
+    supportsReasoning: false,
+    thinkingOptions: [],
+    defaultThinkingOptionId: null,
+    isDefault
+  });
+  const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "openrouter",
+        kind: "api_key",
+        email: null,
+        expiresAtMs: null,
+        scopes: [],
+        planType: null,
+        organizationName: null
+      }
+    ],
+    providers: [
+      {
+        id: "openrouter",
+        displayName: "OpenRouter",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 2,
+        authModes: ["api_key"],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ],
+    sessions: [
+      {
+        sessionId: "session-openrouter-no-tool-default",
+        displayName: "OpenRouter tool model",
+        title: "OpenRouter tool model",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "openrouter",
+        modelId: "openrouter/owl-alpha",
+        timeline: []
+      }
+    ],
+    providerModels: {
+      openrouter: [
+        model("openrouter/owl-alpha", "OpenRouter: Owl Alpha", false, true),
+        model("google/gemini-3.5-flash", "Google: Gemini 3.5 Flash", true, false)
+      ]
+    }
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /OpenRouter tool model/);
+  await expect(page.locator(".pf-composer .picker .trigger")).toContainText(
+    "google/gemini-3.5-flash"
+  );
+
+  const picker = page.locator(".pf-composer .picker");
+  await picker.locator(".trigger").click();
+  const unsupportedRow = picker.locator(".row").filter({ hasText: "OpenRouter: Owl Alpha" });
+  await expect(unsupportedRow).toBeDisabled();
+  await expect(unsupportedRow).toContainText("No agent tools");
+
+  await page.locator(".pf-composer textarea").fill("Use an agent-capable OpenRouter model");
+  await page.getByRole("button", { name: "Send" }).click();
+  const request = await daemon.waitForRequest(
+    "run_agent_turn",
+    (item) => item.params.message === "Use an agent-capable OpenRouter model"
+  );
+  expect(request.params).toMatchObject({
+    providerId: "openrouter",
+    modelId: "google/gemini-3.5-flash"
+  });
+});
+
 test("model picker closes with Escape and can reopen", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

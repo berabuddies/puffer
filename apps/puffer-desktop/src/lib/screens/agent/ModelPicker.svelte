@@ -135,9 +135,15 @@
       }
     }
     if (generation !== providerSwitchGeneration) return;
-    const defaultModel = models.find((model) => model.isDefault) ?? models[0];
+    const defaultModel =
+      models.find((model) => model.isDefault && modelSupportsAgentTools(model)) ??
+      models.find(modelSupportsAgentTools);
     onChange(providerId, defaultModel?.id ?? "");
     pendingProviderId = null;
+  }
+
+  function modelSupportsAgentTools(model: ModelDescriptorInfo): boolean {
+    return model.supportsTools !== false;
   }
 
   function toggle() {
@@ -150,6 +156,9 @@
 
   function pick(providerId: string, modelId: string) {
     if (disabled) return;
+    const providerModels = modelsByProvider[providerId] ?? [];
+    const model = providerModels.find((entry) => entry.id === modelId);
+    if (model && !modelSupportsAgentTools(model)) return;
     pendingProviderId = null;
     open = false;
     query = "";
@@ -247,17 +256,23 @@
           {#each filteredEntries as entry (entry.provider + "::" + entry.model.id)}
             {@const isCurrent =
               providerIdsEquivalent(entry.provider, activeProvider) && entry.model.id === activeModel}
+            {@const supportsAgentTools = modelSupportsAgentTools(entry.model)}
             <button
               type="button"
               class="row"
               class:on={isCurrent}
+              class:unsupported={!supportsAgentTools}
+              disabled={!supportsAgentTools}
               onclick={() => pick(entry.provider, entry.model.id)}
               role="option"
               aria-selected={isCurrent}
+              title={supportsAgentTools ? entry.model.id : `${entry.model.id} does not support agent tools`}
             >
               <span class="row-main">
                 <span class="row-name">{entry.model.displayName || entry.model.id}</span>
-                <span class="row-provider">{entry.providerLabel}</span>
+                <span class="row-provider">
+                  {entry.providerLabel}{supportsAgentTools ? "" : " · No agent tools"}
+                </span>
               </span>
               <span class="row-id">{entry.model.id}</span>
               {#if isCurrent}
@@ -417,6 +432,13 @@
   }
   .row:hover {
     background: color-mix(in oklab, var(--background) 90%, var(--muted));
+  }
+  .row:disabled {
+    cursor: not-allowed;
+    opacity: 0.58;
+  }
+  .row.unsupported:hover {
+    background: transparent;
   }
   .row.on {
     background: color-mix(in oklab, var(--accent) 12%, var(--background));

@@ -271,6 +271,9 @@ fn parse_discovered_models(
             .and_then(Value::as_str)
             .or_else(|| default_display_name(item, &discovery.response))
             .unwrap_or(id);
+        if discovery_item_lacks_tool_support(item) {
+            continue;
+        }
         models.push(ModelDescriptor {
             id: id.to_string(),
             display_name: display_name.to_string(),
@@ -285,6 +288,17 @@ fn parse_discovered_models(
         });
     }
     Ok(models)
+}
+
+fn discovery_item_lacks_tool_support(item: &Value) -> bool {
+    let Some(parameters) = item.get("supported_parameters").and_then(Value::as_array) else {
+        return false;
+    };
+    !parameters.iter().any(|parameter| {
+        parameter
+            .as_str()
+            .is_some_and(|value| value.eq_ignore_ascii_case("tools"))
+    })
 }
 
 fn discovery_model_compat(
@@ -504,6 +518,47 @@ mod tests {
                 .expect("models");
         assert_eq!(models[0].id, "reasoner");
         assert_eq!(models[0].display_name, "Reasoner");
+    }
+
+    #[test]
+    fn discovery_filters_models_without_tool_support_parameter() {
+        let discovery = ModelDiscoveryConfig {
+            path: "/models".to_string(),
+            response: ModelDiscoveryFormat::OpenAiModels,
+            api: "openai-completions".to_string(),
+            context_window: 32_000,
+            max_output_tokens: 4_096,
+            supports_reasoning: false,
+            items_field: "data".to_string(),
+            id_field: "id".to_string(),
+            display_name_field: Some("name".to_string()),
+            headers: IndexMap::new(),
+        };
+        let payload = serde_json::json!({
+            "data": [
+                {
+                    "id": "plain-chat",
+                    "name": "Plain Chat",
+                    "supported_parameters": ["temperature", "top_p"]
+                },
+                {
+                    "id": "agent-chat",
+                    "name": "Agent Chat",
+                    "supported_parameters": ["temperature", "tools", "tool_choice"]
+                },
+                {
+                    "id": "legacy-chat",
+                    "name": "Legacy Chat"
+                }
+            ]
+        });
+        let provider = provider(discovery.clone());
+        let models =
+            parse_discovered_models(&provider, provider.discovery.as_ref().unwrap(), &payload)
+                .expect("models");
+
+        let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+        assert_eq!(ids, vec!["agent-chat", "legacy-chat"]);
     }
 
     #[test]
