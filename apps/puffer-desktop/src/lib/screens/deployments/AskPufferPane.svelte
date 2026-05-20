@@ -107,6 +107,7 @@
   }
 
   function handleComposerKeydown(event: KeyboardEvent): void {
+    if (event.isComposing || event.keyCode === 229) return;
     if (event.key !== "Enter" || event.shiftKey) return;
     event.preventDefault();
     submitDraft();

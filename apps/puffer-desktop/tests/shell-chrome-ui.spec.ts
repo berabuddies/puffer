@@ -418,6 +418,29 @@ test("deployment Ask Puffer composer sends prompts from button and Enter", async
   await expect(thread.locator('.pf-msg[data-role="user"] .pf-msg-text').filter({ hasText: "Summarize logs" })).toHaveCount(1);
   await expect(thread).toContainText("I queued an investigation for stripe-api · production: Summarize logs.");
 
+  await textbox.fill("zhong");
+  await textbox.evaluate((node) => {
+    node.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    node.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Enter",
+        bubbles: true,
+        cancelable: true,
+        isComposing: true
+      })
+    );
+    node.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Enter",
+        bubbles: true,
+        cancelable: true,
+        keyCode: 229
+      })
+    );
+  });
+  await expect(textbox).toHaveValue("zhong");
+  await expect(thread.locator('.pf-msg[data-role="user"] .pf-msg-text').filter({ hasText: "zhong" })).toHaveCount(0);
+
   await page.locator(".pf-dep-row").filter({ hasText: "puffer-web · production" }).click();
   await expect(thread).not.toContainText("Check failed deploys");
   await expect(thread).not.toContainText("Summarize logs");
