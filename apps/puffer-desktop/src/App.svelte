@@ -2006,6 +2006,13 @@
       statusMessage = `Agent turn ${turnId.slice(0, 8)} started.`;
       return true;
     } catch (error) {
+      const detail = errorText(error);
+      if (isRecoverableTurnStartDisconnect(detail)) {
+        turnThinking = false;
+        turnStatusHint = "Waiting for reconnect";
+        statusMessage = "Connection lost while starting the agent turn. Reconnect to sync the transcript.";
+        return true;
+      }
       clearLiveSidebarAgentState(submitSessionId, null);
       if (selectedSession?.id !== submitSessionId) {
         removeCachedSubmittedMessage(submitSessionId, localUserId);
@@ -2018,7 +2025,6 @@
       turnStartedAtMs = null;
       turnThinking = false;
       turnStatusHint = null;
-      const detail = errorText(error);
       statusMessage = `run_agent_turn failed: ${detail}`;
       appendAgentError("Agent start failed", detail, "turn-start-error");
       return false;
@@ -2169,6 +2175,14 @@
 
   function errorText(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
+  }
+
+  function isRecoverableTurnStartDisconnect(detail: string): boolean {
+    const normalized = detail.toLowerCase();
+    return (
+      normalized.includes("websocket closed") ||
+      normalized.includes("websocket is not open")
+    );
   }
 
   function appendAgentError(title: string, body: string, code: string) {

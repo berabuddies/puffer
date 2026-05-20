@@ -3195,6 +3195,80 @@ test("default routing refresh updates an open session without explicit routing",
   });
 });
 
+test("send in flight stays pending across backend reconnect until transcript reload", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-submit-reconnect",
+        displayName: "Submit reconnect",
+        title: "Submit reconnect",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  daemon.delayResponse(
+    "run_agent_turn",
+    (request) => request.params.sessionId === "session-submit-reconnect",
+    500
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Submit reconnect/);
+  await page.locator(".pf-composer textarea").fill("Keep turn through reconnect");
+  await page.getByRole("button", { name: "Send" }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.message === "Keep turn through reconnect"
+  );
+
+  await daemon.dropConnections();
+  await expect(page.locator(".connection-banner")).toContainText("Puffer backend disconnected.");
+  await expect(page.getByRole("button", { name: "Stop turn" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Stop turn" })).toBeDisabled();
+  await expect(page.getByText("Agent start failed")).toHaveCount(0);
+
+  const recoveredAt = Date.now();
+  daemon.setSessionTimeline("session-submit-reconnect", [
+    {
+      kind: "user_message",
+      id: "submit-reconnect-user",
+      text: "Keep turn through reconnect",
+      createdAtMs: recoveredAt
+    },
+    {
+      kind: "assistant_message",
+      id: "submit-reconnect-assistant",
+      text: "Recovered answer after reconnect.",
+      createdAtMs: recoveredAt + 1
+    }
+  ]);
+
+  daemon.allowConnections();
+  await page.getByRole("button", { name: "Reconnect backend" }).click();
+  await expect(page.locator(".connection-banner")).toHaveCount(0);
+  await expect(page.getByText("Recovered answer after reconnect.")).toBeVisible();
+  await expect(page.getByText("Agent start failed")).toHaveCount(0);
+  await page.locator(".pf-composer textarea").fill("Second turn after recovery");
+  await page.getByRole("button", { name: "Send" }).click();
+  const recoveredRequest = await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.message === "Second turn after recovery"
+  );
+  expect(recoveredRequest.params).toMatchObject({
+    sessionId: "session-submit-reconnect"
+  });
+});
+
 test("composer sends fast mode and permission mode with the turn request", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
