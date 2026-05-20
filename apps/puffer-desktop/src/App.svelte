@@ -923,7 +923,11 @@
           clearCachedTurnRuntimeState(event.sessionId);
         }
         void refreshGroups();
-        if (selectedSession && event?.sessionId === selectedSession.id) {
+        if (
+          selectedSession &&
+          openAgentSessionId === selectedSession.id &&
+          event?.sessionId === selectedSession.id
+        ) {
           if (settled) {
             void openSession(selectedSession, { showLoading: false, resetLiveState: true });
           } else if (event.reason === "generated_title" || event.reason === "rename_session") {

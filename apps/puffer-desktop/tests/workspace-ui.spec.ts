@@ -750,6 +750,78 @@ test("closed remembered session stays closed after backend reconnect", async ({ 
   await expect(history).toContainText("Reconnect closed session");
 });
 
+test("closed remembered session ignores stale workspace update events", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-close-stale-event",
+        displayName: "Stale closed session",
+        title: "Stale closed session",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "user_message",
+            id: "stale-close-user",
+            text: "This closed session should ignore stale updates.",
+            createdAtMs: baseTime - 50_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await page.addInitScript(() => {
+    window.localStorage.setItem(
+      "puffer-desktop:preferences",
+      JSON.stringify({ rememberSession: true })
+    );
+  });
+  await daemon.open(page);
+
+  const history = page.getByRole("region", { name: "Session history" });
+  await history.getByRole("button", { name: /Stale closed session/ }).click();
+  await expect(page.locator(".pf-agent-detail .primary-title")).toContainText(
+    "Stale closed session"
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(() => window.localStorage.getItem("puffer-desktop:remembered-session"))
+    )
+    .toContain("session-close-stale-event");
+
+  await page.getByRole("button", { name: "Close session" }).click();
+  await expect(page.locator(".pf-agent-detail")).toHaveCount(0);
+  await expect(
+    page.evaluate(() => window.localStorage.getItem("puffer-desktop:remembered-session"))
+  ).resolves.toBeNull();
+  const detailLoadsBefore = daemon.requests.filter(
+    (request) => request.method === "load_session_detail"
+  ).length;
+
+  daemon.emit("workspace:sessions:changed", {
+    sessionId: "session-close-stale-event",
+    reason: "generated_title"
+  });
+  await page.waitForTimeout(150);
+
+  await expect(page.locator(".pf-agent-detail")).toHaveCount(0);
+  expect(daemon.requests.filter((request) => request.method === "load_session_detail")).toHaveLength(
+    detailLoadsBefore
+  );
+  await expect(
+    page.evaluate(() => window.localStorage.getItem("puffer-desktop:remembered-session"))
+  ).resolves.toBeNull();
+
+  await page.reload();
+  await expect(page.locator(".pf-agent-detail")).toHaveCount(0);
+  await expect(page.locator(".pf-pw-list")).toBeVisible();
+  await expect(history).toContainText("Stale closed session");
+});
+
 test("legacy remembered session without workspace root is ignored", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [],
