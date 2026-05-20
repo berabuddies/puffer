@@ -381,6 +381,57 @@ fn allow_session_external_path_access_is_reused() {
 }
 
 #[test]
+fn agent_cwd_external_path_uses_manual_approval() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let outside = outside_workspace_tempdir(&cwd);
+    let resources = LoadedResources {
+        tools: vec![loaded_tool("Agent", "Delegate work", "runtime:agent")],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let prompt_log = prompts.clone();
+
+    let outcome = with_permission_prompt_handler(
+        move |request| {
+            prompt_log.lock().unwrap().push(format!(
+                "{}\n{}",
+                request.summary,
+                request.reason.unwrap_or_default()
+            ));
+            PermissionPromptAction::Deny
+        },
+        || {
+            resolve_tool_permission(
+                &mut state,
+                &resources,
+                &registry,
+                &cwd,
+                "Agent",
+                &json!({
+                    "description": "Inspect external project",
+                    "prompt": "List skills",
+                    "cwd": outside.path().display().to_string()
+                }),
+                None,
+            )
+        },
+    )
+    .unwrap();
+
+    let PermissionOutcome::Denied(result) = outcome else {
+        panic!("external Agent cwd should wait for manual approval");
+    };
+    assert!(!result.success);
+    assert!(result.output.stdout.contains("permission denied by user"));
+    let prompts = prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 1);
+    assert!(prompts[0].contains("Allow Agent to access"));
+    assert!(prompts[0].contains("outside the current working directories"));
+}
+
+#[test]
 fn execute_openai_tool_calls_block_tools_outside_request_scope() {
     let resources = LoadedResources {
         tools: vec![loaded_tool("Bash", "Run shell", "runtime:claude_bash")],

@@ -379,6 +379,7 @@ fn filesystem_path_request(
         "NotebookEdit" => "notebook_path",
         "Glob" | "Grep" => "path",
         "read_file" | "list_dir" | "search_text" => "path",
+        "Agent" => "cwd",
         _ => return None,
     };
     let raw = input.get(field)?.as_str()?.trim();
