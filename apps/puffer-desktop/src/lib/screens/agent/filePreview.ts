@@ -1,3 +1,4 @@
+import { inflateSync } from "fflate";
 import type { ReadFileResult } from "../../api/desktop";
 
 export type CsvPreview = {
@@ -387,20 +388,9 @@ async function readZipEntry(bytes: Uint8Array, entry: ZipEntry): Promise<Uint8Ar
 }
 
 async function inflateRaw(input: Uint8Array, expectedSize: number): Promise<Uint8Array> {
-  type DecompressionStreamConstructor = new (format: string) => TransformStream<Uint8Array, Uint8Array>;
-  const Decompression = (globalThis as { DecompressionStream?: DecompressionStreamConstructor })
-    .DecompressionStream;
-  if (!Decompression) {
-    throw new Error("This WebView cannot decompress Office previews");
-  }
-  const payload = input.buffer.slice(
-    input.byteOffset,
-    input.byteOffset + input.byteLength
-  ) as ArrayBuffer;
-  const stream = new Blob([payload]).stream().pipeThrough(new Decompression("deflate-raw"));
-  const output = new Uint8Array(await new Response(stream).arrayBuffer());
-  if (expectedSize > 0 && output.length === 0) {
-    throw new Error("Office preview decompressed to an empty document");
+  const output = inflateSync(input);
+  if (expectedSize > 0 && output.length !== expectedSize) {
+    throw new Error("Office preview decompressed to an unexpected size");
   }
   return output;
 }

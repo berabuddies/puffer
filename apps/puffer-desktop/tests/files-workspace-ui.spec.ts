@@ -238,6 +238,9 @@ test("Files tab saves text edits through the daemon", async ({ page }) => {
 test("Files tab previews common document and data formats", async ({ page }) => {
   const daemon = new FakeDaemon();
   seedPreviewFiles(daemon);
+  await page.addInitScript(() => {
+    Object.defineProperty(window, "DecompressionStream", { value: undefined, configurable: true });
+  });
   await daemon.install(page);
   await daemon.open(page);
 
