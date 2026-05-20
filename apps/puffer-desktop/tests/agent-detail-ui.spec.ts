@@ -2,6 +2,8 @@ import { expect, type Page, test } from "@playwright/test";
 import { FakeDaemon } from "./support/fakeDaemon";
 
 const baseTime = Date.now();
+const ONE_PIXEL_PNG =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lzTnGQAAAABJRU5ErkJggg==";
 
 async function openAgent(page: Page, name: RegExp): Promise<void> {
   await page.locator(".pf-sidebar-agents-list").getByRole("button", { name }).click();
@@ -522,4 +524,77 @@ test("Side panel does not duplicate effectful Browser or Terminal panes", async 
       ["pty_list", "pty_open", "pty_focus", "pty_replay"].includes(request.method)
     )
   ).toHaveLength(terminalAttachCount);
+});
+
+test("MCP browser actions render recorded browser frames in activity details", async ({ page }) => {
+  const browserInput = {
+    arguments: {
+      url: "https://example.com",
+      tabId: "tab-1"
+    }
+  };
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-mcp-browser-action",
+        displayName: "MCP browser action",
+        title: "MCP browser action",
+        cwd: "/tmp/puffer-browser-action",
+        folderPath: "/tmp/puffer-browser-action",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        timeline: [
+          {
+            kind: "user_message",
+            id: "mcp-browser-user",
+            text: "Open example.com.",
+            createdAtMs: baseTime - 50_000
+          },
+          {
+            kind: "tool_call",
+            id: "mcp-browser-tool",
+            toolId: "mcp__browser__open",
+            status: "success",
+            inputText: JSON.stringify(browserInput),
+            inputJson: browserInput,
+            outputText: "Done.",
+            createdAtMs: baseTime - 40_000
+          },
+          {
+            kind: "assistant_message",
+            id: "mcp-browser-assistant",
+            text: "Opened example.com.",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+  daemon.setBrowserRecording("session-mcp-browser-action", [
+    {
+      frameId: "mcp-browser-frame",
+      backendSessionId: "session-mcp-browser-action:browser:tab-1",
+      rootSessionId: "session-mcp-browser-action",
+      tabId: "tab-1",
+      url: "https://example.com",
+      title: "Example Domain",
+      mimeType: "image/png",
+      encoding: "base64",
+      data: ONE_PIXEL_PNG,
+      width: 960,
+      height: 720,
+      recordedAtMs: baseTime - 35_000
+    }
+  ]);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openAgent(page, /^MCP browser action\b/);
+  await page.getByRole("button", { name: /Agent activity/ }).click();
+  await page.getByRole("button", { name: /Browser · Open https:\/\/example\.com/ }).click();
+
+  const recording = page.locator(".pf-browser-recording-render");
+  await expect(recording.getByRole("img", { name: "Example Domain" })).toBeVisible();
+  await expect(recording).toContainText("Example Domain");
+  await expect(page.getByText("No browser frames recorded for this action yet.")).toHaveCount(0);
 });

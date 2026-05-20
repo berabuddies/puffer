@@ -290,6 +290,17 @@
     return entries.length ? entries.join(" · ") : smartTitle(mcp.tool);
   }
 
+  function isBrowserToolCall(name: string, input: Record<string, unknown> | null): boolean {
+    const lowerName = name.toLowerCase();
+    if (lowerName === "browser") return true;
+    const mcp = mcpParts(name, input);
+    return mcp?.server.toLowerCase() === "browser";
+  }
+
+  function browserArgs(input: Record<string, unknown> | null): Record<string, unknown> | null {
+    return recordField(input, "arguments") ?? input;
+  }
+
   function outputStatusMeta(output: Record<string, unknown> | null): string[] {
     return [
       stringField(output, ["status"]),
@@ -769,7 +780,7 @@
     toolStatus.toLowerCase().startsWith("run") || toolStatus === "pending"
   );
   let isTerminalTool = $derived(["bash", "shell", "powershell"].includes(toolName.toLowerCase()));
-  let isBrowserTool = $derived(toolName.toLowerCase() === "browser");
+  let isBrowserTool = $derived(isBrowserToolCall(toolName, inputJson));
   let recordingFrames = $state<RecordingFrame[]>([]);
   let selectedFrameId = $state<string | null>(null);
   let recordingDisposer: (() => void) | null = null;
@@ -781,13 +792,17 @@
     };
   }
 
-  function tabIdForBrowserAction(): string | null {
-    return stringField(inputJson, ["tabId"]);
+  function browserFrameMatchesAction(frame: BrowserRecordedFrame): boolean {
+    const args = browserArgs(inputJson);
+    const backendSessionId = stringField(args, ["backendSessionId", "backend_session_id"]);
+    const tabId = stringField(args, ["tabId", "tab_id"]);
+    if (backendSessionId && frame.backendSessionId !== backendSessionId) return false;
+    if (tabId && frame.tabId !== tabId) return false;
+    return true;
   }
 
   function mergeRecordingFrame(frame: BrowserRecordedFrame) {
-    const tabId = tabIdForBrowserAction();
-    if (tabId && frame.tabId !== tabId) return;
+    if (!browserFrameMatchesAction(frame)) return;
     const next = toRecordingFrame(frame);
     if (recordingFrames.some((item) => item.frameId === next.frameId)) return;
     recordingFrames = [...recordingFrames, next].slice(-80);
@@ -796,10 +811,9 @@
   async function loadBrowserRecording() {
     if (!sessionId || !isBrowserTool) return;
     try {
-      const tabId = tabIdForBrowserAction();
       const snapshot = await browserRecording(sessionId);
       recordingFrames = snapshot.frames
-        .filter((frame) => !tabId || frame.tabId === tabId)
+        .filter(browserFrameMatchesAction)
         .map(toRecordingFrame)
         .slice(-80);
     } catch {
