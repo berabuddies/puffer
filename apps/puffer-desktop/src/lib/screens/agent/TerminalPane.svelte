@@ -389,6 +389,7 @@
             class="terminal-tab-close"
             title="Close terminal"
             aria-label="Close {tab.title}"
+            disabled={closingPtyIds.includes(tab.ptyId)}
             onclick={(event) => void closeTerminalTab(event, tab.ptyId)}
           >
             <Icon name="x" size={11} />
@@ -491,7 +492,7 @@
     white-space: nowrap;
   }
   .terminal-tab-main:hover,
-  .terminal-tab-close:hover,
+  .terminal-tab-close:hover:not(:disabled),
   .terminal-new:hover:not(:disabled) {
     background: color-mix(in oklab, var(--accent) 55%, transparent);
     color: var(--foreground);
@@ -508,6 +509,10 @@
     background: transparent;
     color: var(--muted-foreground);
     cursor: pointer;
+  }
+  .terminal-tab-close:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
   }
   .terminal-new {
     border-right: 1px solid var(--border);

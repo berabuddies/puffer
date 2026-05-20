@@ -309,6 +309,7 @@ test("Terminal close ignores repeated clicks while close is in flight", async ({
 
   const request = await daemon.waitForRequest("pty_close");
   expect(request.params.ptyId).toBe("pty-1");
+  await expect(page.getByRole("button", { name: "Close Terminal 1" })).toBeDisabled();
   await page.waitForTimeout(50);
   expect(daemon.requests.filter((request) => request.method === "pty_close")).toHaveLength(1);
 });
