@@ -30,6 +30,42 @@
     selectedId = id;
     tab = "askpuffer";
   }
+
+  function selectTab(id: Tab) {
+    tab = id;
+  }
+
+  function focusTab(id: Tab) {
+    document.querySelector<HTMLButtonElement>(`[data-dep-tab="${id}"]`)?.focus();
+  }
+
+  function moveTab(id: Tab, offset: number) {
+    const idx = tabs.findIndex((item) => item.id === id);
+    if (idx < 0) return;
+    const next = tabs[(idx + offset + tabs.length) % tabs.length].id;
+    selectTab(next);
+    setTimeout(() => focusTab(next), 0);
+  }
+
+  function handleTabKeydown(event: KeyboardEvent, id: Tab) {
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+      event.preventDefault();
+      moveTab(id, 1);
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+      event.preventDefault();
+      moveTab(id, -1);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      const first = tabs[0].id;
+      selectTab(first);
+      setTimeout(() => focusTab(first), 0);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      const last = tabs[tabs.length - 1].id;
+      selectTab(last);
+      setTimeout(() => focusTab(last), 0);
+    }
+  }
 </script>
 
 <div class="pf-dep">
@@ -130,15 +166,32 @@
         </div>
       </div>
 
-      <div class="pf-dep-tabs">
+      <div class="pf-dep-tabs" role="tablist" aria-label="Deployment detail">
         {#each tabs as t (t.id)}
-          <button type="button" class="pf-dep-tab" data-active={tab === t.id} onclick={() => (tab = t.id)}>
+          <button
+            type="button"
+            class="pf-dep-tab"
+            role="tab"
+            id={`dep-tab-${t.id}`}
+            data-active={tab === t.id}
+            data-dep-tab={t.id}
+            aria-selected={tab === t.id}
+            aria-controls={`dep-panel-${t.id}`}
+            tabindex={tab === t.id ? 0 : -1}
+            onclick={() => selectTab(t.id)}
+            onkeydown={(event) => handleTabKeydown(event, t.id)}
+          >
             <Icon name={t.icon} size={12} />{t.label}
           </button>
         {/each}
       </div>
 
-      <div class="pf-dep-pane-wrap">
+      <div
+        class="pf-dep-pane-wrap"
+        role="tabpanel"
+        id={`dep-panel-${tab}`}
+        aria-labelledby={`dep-tab-${tab}`}
+      >
         {#if tab === "askpuffer"}
           <AskPufferPane d={selected} />
         {:else if tab === "memory"}

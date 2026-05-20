@@ -127,6 +127,35 @@ test("sidebar can open the deployments screen", async ({ page }) => {
   await expect(page.getByRole("button", { name: /New deployment/ })).toBeVisible();
 });
 
+test("deployment detail tabs expose selected state", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const sidebar = page.locator(".pf-sidebar");
+  await sidebar.getByRole("button", { name: "Deployments" }).click();
+
+  const tabs = page.locator(".pf-dep-tabs");
+  await expect(tabs).toHaveAttribute("role", "tablist");
+  const askTab = tabs.getByRole("tab", { name: "Ask Puffer" });
+  const secretsTab = tabs.getByRole("tab", { name: "Secrets" });
+  await expect(askTab).toHaveAttribute("aria-selected", "true");
+  await expect(secretsTab).toHaveAttribute("aria-selected", "false");
+
+  await secretsTab.click();
+  await expect(askTab).toHaveAttribute("aria-selected", "false");
+  await expect(secretsTab).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("heading", { name: "Secrets & env" })).toBeVisible();
+
+  await secretsTab.press("ArrowRight");
+  const providersTab = tabs.getByRole("tab", { name: "Providers" });
+  await expect(providersTab).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("heading", { name: "Providers & integrations" })).toBeVisible();
+
+  await providersTab.press("Home");
+  await expect(askTab).toHaveAttribute("aria-selected", "true");
+});
+
 test("deployment secret reveal controls target one key and toggle their state", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
@@ -134,7 +163,7 @@ test("deployment secret reveal controls target one key and toggle their state", 
 
   const sidebar = page.locator(".pf-sidebar");
   await sidebar.getByRole("button", { name: "Deployments" }).click();
-  await page.getByRole("button", { name: "Secrets" }).click();
+  await page.getByRole("tab", { name: "Secrets" }).click();
 
   const row = page.locator(".pf-dep-secrets-row").filter({ hasText: "DATABASE_URL" });
   await expect(row).toContainText("••••••••••••••");
