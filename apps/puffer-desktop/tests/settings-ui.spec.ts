@@ -239,6 +239,144 @@ test("default model picker replaces a cross-provider configured model after load
   });
 });
 
+test("default model picker skips models without agent tool support", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "openrouter",
+        kind: "api_key",
+        email: null,
+        expiresAtMs: null,
+        scopes: [],
+        planType: null,
+        organizationName: null
+      }
+    ],
+    providers: [
+      {
+        id: "openrouter",
+        displayName: "OpenRouter",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 2,
+        authModes: ["api_key"],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ],
+    providerModels: {
+      openrouter: [
+        {
+          id: "owl-alpha",
+          displayName: "Owl Alpha",
+          provider: "openrouter",
+          api: "openai-responses",
+          supportsTools: false,
+          supportsVision: false,
+          contextWindow: null,
+          maxOutputTokens: null,
+          thinkingOptions: [],
+          defaultThinkingOptionId: null,
+          isDefault: true
+        },
+        {
+          id: "toolsmith",
+          displayName: "Toolsmith",
+          provider: "openrouter",
+          api: "openai-responses",
+          supportsTools: true,
+          supportsVision: false,
+          contextWindow: null,
+          maxOutputTokens: null,
+          thinkingOptions: [],
+          defaultThinkingOptionId: null,
+          isDefault: false
+        }
+      ]
+    }
+  });
+  daemon.setSettingsConfig({
+    defaultProvider: "openrouter",
+    defaultModel: "owl-alpha"
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Providers" }).click();
+
+  const pane = page.locator(".pf-settings-pane");
+  const modelSelect = pane.getByLabel("Model");
+  await expect(modelSelect).toHaveValue("toolsmith");
+  await expect(modelSelect.locator('option[value="owl-alpha"]')).toHaveCount(0);
+
+  await pane.getByRole("button", { name: "Save default" }).click();
+  const update = await daemon.waitForRequest("update_config");
+  expect(update.params).toMatchObject({
+    defaultProvider: "openrouter",
+    defaultModel: "toolsmith"
+  });
+});
+
+test("default model save is disabled when no provider models support agent tools", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "openrouter",
+        kind: "api_key",
+        email: null,
+        expiresAtMs: null,
+        scopes: [],
+        planType: null,
+        organizationName: null
+      }
+    ],
+    providers: [
+      {
+        id: "openrouter",
+        displayName: "OpenRouter",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 1,
+        authModes: ["api_key"],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ],
+    providerModels: {
+      openrouter: [
+        {
+          id: "owl-alpha",
+          displayName: "Owl Alpha",
+          provider: "openrouter",
+          api: "openai-responses",
+          supportsTools: false,
+          supportsVision: false,
+          contextWindow: null,
+          maxOutputTokens: null,
+          thinkingOptions: [],
+          defaultThinkingOptionId: null,
+          isDefault: true
+        }
+      ]
+    }
+  });
+  daemon.setSettingsConfig({
+    defaultProvider: "openrouter",
+    defaultModel: "owl-alpha"
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Providers" }).click();
+
+  const pane = page.locator(".pf-settings-pane");
+  await expect(pane.getByLabel("Model")).toHaveValue("");
+  await expect(pane.getByRole("button", { name: "Save default" })).toBeDisabled();
+  await expect(pane.getByText("No OpenRouter models support agent tools.")).toBeVisible();
+});
+
 test("providers page marks connected and disconnected providers", async ({ page }) => {
   const daemon = new FakeDaemon({
     auth: [

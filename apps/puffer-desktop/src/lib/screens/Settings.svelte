@@ -259,12 +259,21 @@
     }
   }
 
+  function modelSupportsAgentTools(model: ModelDescriptorInfo): boolean {
+    return model.supportsTools !== false;
+  }
+
+  function agentToolModels(models: ModelDescriptorInfo[]): ModelDescriptorInfo[] {
+    return models.filter(modelSupportsAgentTools);
+  }
+
   function defaultModelId(models: ModelDescriptorInfo[]): string {
-    return (models.find((model) => model.isDefault) ?? models[0])?.id ?? "";
+    const availableModels = agentToolModels(models);
+    return (availableModels.find((model) => model.isDefault) ?? availableModels[0])?.id ?? "";
   }
 
   function modelIdInList(modelId: string, models: ModelDescriptorInfo[]): boolean {
-    return Boolean(modelId && models.some((model) => model.id === modelId));
+    return Boolean(modelId && agentToolModels(models).some((model) => model.id === modelId));
   }
 
   function addPermissionRow() {
@@ -418,12 +427,24 @@
   let modelPickerLoading = $derived(
     Boolean(modelPickerProvider && modelLoadingByProvider[modelPickerProvider])
   );
+  let modelPickerModels = $derived(agentToolModels(providerModels[modelPickerProvider] ?? []));
+  let modelPickerModelsLoaded = $derived(
+    Boolean(modelPickerProvider && providerModels[modelPickerProvider])
+  );
+  let modelPickerNoAgentModels = $derived(
+    modelPickerModelsLoaded && !modelPickerLoading && modelPickerModels.length === 0 && !modelError
+  );
+  let modelPickerProviderName = $derived(
+    defaultRouteProviders.find((p) => providerIdsEquivalent(p.id, modelPickerProvider))
+      ?.displayName ?? modelPickerProvider
+  );
   let modelPickerDisabled = $derived(!daemonReachable || modelSaving);
   let canSaveDefaultModel = $derived(
     Boolean(
       daemonReachable &&
         modelPickerProvider &&
         modelPickerModel &&
+        modelIdInList(modelPickerModel, providerModels[modelPickerProvider] ?? []) &&
         !modelPickerLoading &&
         !modelSaving
     )
@@ -617,15 +638,25 @@
               onchange={(e) => (modelPickerModel = (e.currentTarget as HTMLSelectElement).value)}
               disabled={modelPickerDisabled || !modelPickerProvider || modelPickerLoading}
             >
-              <option value="">{modelPickerLoading ? "Loading models..." : "— pick a model —"}</option>
-              {#each (providerModels[modelPickerProvider] ?? []) as m (m.id)}
+              <option value="">
+                {modelPickerLoading
+                  ? "Loading models..."
+                  : modelPickerNoAgentModels
+                    ? "No agent-capable models"
+                    : "— pick a model —"}
+              </option>
+              {#each modelPickerModels as m (m.id)}
                 <option value={m.id}>{m.displayName} ({m.id})</option>
               {/each}
             </select>
           </label>
           {#if modelPickerLoading}
             <div class="pf-model-loading-note">
-              Fetching {defaultRouteProviders.find((p) => providerIdsEquivalent(p.id, modelPickerProvider))?.displayName ?? modelPickerProvider} models...
+              Fetching {modelPickerProviderName} models...
+            </div>
+          {:else if modelPickerNoAgentModels}
+            <div class="pf-model-loading-note" data-error="true">
+              No {modelPickerProviderName} models support agent tools.
             </div>
           {/if}
           <div style="display: flex; justify-content: flex-end; gap: 8px;">
@@ -1148,6 +1179,11 @@
     font-size: 11.5px;
     line-height: 1.4;
     padding: 7px 9px;
+  }
+  .pf-model-loading-note[data-error="true"] {
+    border-color: color-mix(in oklab, var(--destructive, #c03232) 32%, var(--border));
+    background: color-mix(in oklab, var(--destructive, #c03232) 7%, var(--background));
+    color: var(--destructive, #c03232);
   }
   .pf-model-badge {
     display: inline-flex;
