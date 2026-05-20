@@ -341,6 +341,43 @@
     });
   }
 
+  function selectNodeProvider(provider: AgentProvider) {
+    if (!selectedNode) return;
+    changeProvider(selectedNode.id, provider);
+  }
+
+  function focusProviderButton(provider: AgentProvider) {
+    document.querySelector<HTMLButtonElement>(`[data-pipeline-provider="${provider}"]`)?.focus();
+  }
+
+  function moveProviderSelection(provider: AgentProvider, offset: number) {
+    const idx = providerOptions.findIndex((item) => item.id === provider);
+    if (idx < 0) return;
+    const next = providerOptions[(idx + offset + providerOptions.length) % providerOptions.length].id;
+    selectNodeProvider(next);
+    setTimeout(() => focusProviderButton(next), 0);
+  }
+
+  function handleProviderKeydown(event: KeyboardEvent, provider: AgentProvider) {
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+      event.preventDefault();
+      moveProviderSelection(provider, 1);
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+      event.preventDefault();
+      moveProviderSelection(provider, -1);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      const first = providerOptions[0].id;
+      selectNodeProvider(first);
+      setTimeout(() => focusProviderButton(first), 0);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      const last = providerOptions[providerOptions.length - 1].id;
+      selectNodeProvider(last);
+      setTimeout(() => focusProviderButton(last), 0);
+    }
+  }
+
   function addAgent(provider: AgentProvider) {
     if (!workflow) return;
     const meta = providerMeta(provider);
@@ -757,12 +794,17 @@
               {/if}
             </div>
             {#if selectedNode}
-              <div class="pf-provider-switcher" role="group" aria-label="Agent provider">
+              <div class="pf-provider-switcher" role="radiogroup" aria-label="Agent provider">
                 {#each providerOptions as provider (provider.id)}
                   <button
                     type="button"
+                    role="radio"
                     data-selected={selectedNode.type === provider.id}
-                    onclick={() => changeProvider(selectedNode.id, provider.id)}
+                    data-pipeline-provider={provider.id}
+                    aria-checked={selectedNode.type === provider.id}
+                    tabindex={selectedNode.type === provider.id ? 0 : -1}
+                    onclick={() => selectNodeProvider(provider.id)}
+                    onkeydown={(event) => handleProviderKeydown(event, provider.id)}
                   >
                     {provider.label}
                   </button>
