@@ -810,10 +810,16 @@ fn apply_session_routing_to_groups(
 ) -> Result<()> {
     for group in groups {
         for session in &mut group.sessions {
-            let routing =
-                load_session_routing_state(&state.paths.user_config_dir, &session.session_id)?;
-            session.provider_id = routing.provider_id;
-            session.model_id = routing.model_id;
+            match load_session_routing_state(&state.paths.user_config_dir, &session.session_id) {
+                Ok(routing) => {
+                    session.provider_id = routing.provider_id;
+                    session.model_id = routing.model_id;
+                }
+                Err(_) => {
+                    session.provider_id = None;
+                    session.model_id = None;
+                }
+            }
         }
     }
     Ok(())

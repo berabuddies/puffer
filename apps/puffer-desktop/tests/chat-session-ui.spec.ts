@@ -5050,3 +5050,41 @@ test("cancel turn for already-completed turn clears stuck cancel state", async (
   const composer = page.locator(".pf-composer textarea");
   await expect(composer).toBeEnabled();
 });
+
+test("session list renders when a session has null routing fields", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-good-routing",
+        displayName: "Good routing",
+        title: "Good routing",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [],
+        providerId: "codex",
+        modelId: "claude-sonnet-4-6"
+      },
+      {
+        sessionId: "session-null-routing",
+        displayName: "Null routing",
+        title: "Null routing",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 0,
+        timeline: [],
+        providerId: null,
+        modelId: null
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await expect(page.getByRole("button", { name: /Good routing/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Null routing/ })).toBeVisible();
+});
