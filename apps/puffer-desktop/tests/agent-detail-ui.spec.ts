@@ -772,3 +772,108 @@ test("browser activity details reload recordings when selecting another action",
   await expect(recording.getByRole("img", { name: "Beta Domain" })).toBeVisible();
   await expect(recording.getByRole("img", { name: "Alpha Domain" })).toHaveCount(0);
 });
+
+test("browser activity details match recordings by URL when tab ids are absent", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-browser-url-actions",
+        displayName: "Browser URL actions",
+        title: "Browser URL actions",
+        cwd: "/tmp/puffer-browser-url-actions",
+        folderPath: "/tmp/puffer-browser-url-actions",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        timeline: [
+          {
+            kind: "user_message",
+            id: "browser-url-user",
+            text: "Open two URL-only pages.",
+            createdAtMs: baseTime - 50_000
+          },
+          {
+            kind: "tool_call",
+            id: "browser-url-alpha-tool",
+            toolId: "Browser",
+            status: "success",
+            inputText: JSON.stringify({
+              action: "open",
+              url: "https://alpha-url.example"
+            }),
+            inputJson: {
+              action: "open",
+              url: "https://alpha-url.example"
+            },
+            outputText: "Done.",
+            createdAtMs: baseTime - 45_000
+          },
+          {
+            kind: "tool_call",
+            id: "browser-url-beta-tool",
+            toolId: "Browser",
+            status: "success",
+            inputText: JSON.stringify({
+              action: "open",
+              url: "https://beta-url.example"
+            }),
+            inputJson: {
+              action: "open",
+              url: "https://beta-url.example"
+            },
+            outputText: "Done.",
+            createdAtMs: baseTime - 40_000
+          },
+          {
+            kind: "assistant_message",
+            id: "browser-url-assistant",
+            text: "Opened both URL-only pages.",
+            createdAtMs: baseTime - 35_000
+          }
+        ]
+      }
+    ]
+  });
+  daemon.setBrowserRecording("session-browser-url-actions", [
+    {
+      frameId: "browser-url-alpha-frame",
+      backendSessionId: "session-browser-url-actions:browser:tab-1",
+      rootSessionId: "session-browser-url-actions",
+      tabId: "tab-1",
+      url: "https://alpha-url.example",
+      title: "Alpha URL Domain",
+      mimeType: "image/png",
+      encoding: "base64",
+      data: ONE_PIXEL_PNG,
+      width: 960,
+      height: 720,
+      recordedAtMs: baseTime - 44_000
+    },
+    {
+      frameId: "browser-url-beta-frame",
+      backendSessionId: "session-browser-url-actions:browser:tab-2",
+      rootSessionId: "session-browser-url-actions",
+      tabId: "tab-2",
+      url: "https://beta-url.example",
+      title: "Beta URL Domain",
+      mimeType: "image/png",
+      encoding: "base64",
+      data: ONE_PIXEL_PNG,
+      width: 960,
+      height: 720,
+      recordedAtMs: baseTime - 39_000
+    }
+  ]);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openAgent(page, /^Browser URL actions\b/);
+  await page.getByRole("button", { name: /Agent activity/ }).click();
+  await page.getByRole("button", { name: /Browser Open https:\/\/alpha-url\.example/ }).click();
+  const recording = page.locator(".pf-browser-recording-render");
+  await expect(recording.getByRole("img", { name: "Alpha URL Domain" })).toBeVisible();
+  await expect(recording.getByRole("img", { name: "Beta URL Domain" })).toHaveCount(0);
+
+  await page.getByRole("button", { name: /Browser Open https:\/\/beta-url\.example/ }).click();
+  await expect(recording.getByRole("img", { name: "Beta URL Domain" })).toBeVisible();
+  await expect(recording.getByRole("img", { name: "Alpha URL Domain" })).toHaveCount(0);
+});

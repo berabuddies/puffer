@@ -823,7 +823,7 @@
     };
   }
 
-  function browserFrameMatchesArgs(
+  function browserFrameStructurallyMatchesArgs(
     args: Record<string, unknown> | null,
     frame: BrowserRecordedFrame
   ): boolean {
@@ -832,6 +832,33 @@
     if (backendSessionId && frame.backendSessionId !== backendSessionId) return false;
     if (tabId && frame.tabId !== tabId) return false;
     return true;
+  }
+
+  function browserFrameUrlMatchesArgs(
+    args: Record<string, unknown> | null,
+    frame: BrowserRecordedFrame
+  ): boolean {
+    const url = stringField(args, ["url"]);
+    if (!url) return true;
+    return frame.url === url || frame.url.startsWith(`${url}#`);
+  }
+
+  function shouldPreferBrowserUrl(args: Record<string, unknown> | null): boolean {
+    return Boolean(
+      stringField(args, ["url"]) &&
+        !stringField(args, ["backendSessionId", "backend_session_id"]) &&
+        !stringField(args, ["tabId", "tab_id"])
+    );
+  }
+
+  function preferBrowserFramesForArgs(
+    args: Record<string, unknown> | null,
+    frames: BrowserRecordedFrame[]
+  ): BrowserRecordedFrame[] {
+    const structural = frames.filter((frame) => browserFrameStructurallyMatchesArgs(args, frame));
+    if (!shouldPreferBrowserUrl(args)) return structural;
+    const urlMatches = structural.filter((frame) => browserFrameUrlMatchesArgs(args, frame));
+    return urlMatches.length > 0 ? urlMatches : structural;
   }
 
   function browserRecordingKey(): string {
@@ -862,7 +889,8 @@
     generation: number
   ) {
     if (generation !== recordingGeneration || expectedKey !== recordingKey) return;
-    if (!browserFrameMatchesArgs(args, frame)) return;
+    if (!browserFrameStructurallyMatchesArgs(args, frame)) return;
+    if (shouldPreferBrowserUrl(args) && !browserFrameUrlMatchesArgs(args, frame)) return;
     const next = toRecordingFrame(frame);
     if (recordingFrames.some((item) => item.frameId === next.frameId)) return;
     recordingFrames = [...recordingFrames, next].slice(-80);
@@ -877,8 +905,7 @@
     try {
       const snapshot = await browserRecording(targetSessionId);
       if (generation !== recordingGeneration || expectedKey !== recordingKey) return;
-      recordingFrames = snapshot.frames
-        .filter((frame) => browserFrameMatchesArgs(args, frame))
+      recordingFrames = preferBrowserFramesForArgs(args, snapshot.frames)
         .map(toRecordingFrame)
         .slice(-80);
     } catch {

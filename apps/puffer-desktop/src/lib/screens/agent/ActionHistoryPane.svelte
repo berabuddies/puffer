@@ -311,16 +311,35 @@
 
   function framesForAction(action: ActionItem | null): RecordingFrame[] {
     if (!action || action.kind !== "browser") return [];
-    return recordingFrames.filter((frame) => browserFrameMatchesAction(action, frame));
+    const structural = recordingFrames.filter((frame) => browserFrameStructurallyMatchesAction(action, frame));
+    if (!shouldPreferBrowserActionUrl(action)) return structural;
+    const urlMatches = structural.filter((frame) => browserFrameUrlMatchesAction(action, frame));
+    return urlMatches.length > 0 ? urlMatches : structural;
   }
 
-  function browserFrameMatchesAction(action: ActionItem, frame: BrowserRecordedFrame): boolean {
+  function browserFrameStructurallyMatchesAction(action: ActionItem, frame: BrowserRecordedFrame): boolean {
     const args = browserArgs(action.input);
     const backendSessionId = stringField(args, ["backendSessionId", "backend_session_id"]);
     const tabId = stringField(args, ["tabId", "tab_id"]);
     if (backendSessionId && frame.backendSessionId !== backendSessionId) return false;
     if (tabId && frame.tabId !== tabId) return false;
     return true;
+  }
+
+  function browserFrameUrlMatchesAction(action: ActionItem, frame: BrowserRecordedFrame): boolean {
+    const args = browserArgs(action.input);
+    const url = stringField(args, ["url"]);
+    if (!url) return true;
+    return frame.url === url || frame.url.startsWith(`${url}#`);
+  }
+
+  function shouldPreferBrowserActionUrl(action: ActionItem): boolean {
+    const args = browserArgs(action.input);
+    return Boolean(
+      stringField(args, ["url"]) &&
+        !stringField(args, ["backendSessionId", "backend_session_id"]) &&
+        !stringField(args, ["tabId", "tab_id"])
+    );
   }
 
   let visibleFrames = $derived(framesForAction(selected));
