@@ -105,3 +105,41 @@ test("Address bar updates when switching tabs even if previously focused", async
   // After opening a new tab, the address bar should show the new tab's URL
   await expect(addressBar).toHaveValue("about:blank");
 });
+
+test("Status bar shows loading state on reload", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openBrowserAgent(page);
+  await openBrowserPane(page, daemon);
+
+  const statusBar = page.locator(".pf-browser-status");
+  await expect(statusBar).toContainText("Connected");
+
+  // Click the reload button
+  await page.locator("button[title='Reload']").click();
+  await daemon.waitForRequest("browser_reload");
+
+  // The status bar should show "Loading"
+  await expect(statusBar).toContainText("Loading");
+});
+
+test("Status bar shows loading state on back/forward navigation", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openBrowserAgent(page);
+  await openBrowserPane(page, daemon);
+
+  const statusBar = page.locator(".pf-browser-status");
+  await expect(statusBar).toContainText("Connected");
+
+  // Click the back button
+  await page.locator("button[title='Back']").click();
+  await daemon.waitForRequest("browser_history");
+
+  // The status bar should show "Loading"
+  await expect(statusBar).toContainText("Loading");
+});

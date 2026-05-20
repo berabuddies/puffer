@@ -484,6 +484,8 @@
   function runHistory(direction: "back" | "forward") {
     const target = activeCommandTarget();
     if (!target) return;
+    loading = true;
+    status = "Loading";
     void browserHistory(target.backendSessionId, direction).catch((err) => {
       reportCommandError(target, err);
     });
@@ -492,6 +494,8 @@
   function reloadActiveTab() {
     const target = activeCommandTarget();
     if (!target) return;
+    loading = true;
+    status = "Loading";
     void browserReload(target.backendSessionId).catch((err) => {
       reportCommandError(target, err);
     });
@@ -794,6 +798,8 @@
     const requestedBackendSessionId = requestedTab.backendSessionId || backendSessionId(requestedTabId);
     const requestedUrl = urlDraft;
     error = null;
+    loading = true;
+    status = "Loading";
     try {
       updateTab(requestedTabId, {
         url: requestedUrl,
