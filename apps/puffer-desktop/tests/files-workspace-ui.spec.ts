@@ -503,16 +503,39 @@ test("Files tab previews common document and data formats", async ({ page }) => 
   const pageLimitColors = await pageLimit.evaluate((node) => {
     const style = getComputedStyle(node);
     const shell = node.closest(".pdf-shell");
+    const controls = node.closest(".pdf-controls-row");
     const shellStyle = shell ? getComputedStyle(shell) : null;
+    const controlsStyle = controls ? getComputedStyle(controls) : null;
     return {
       color: style.color,
       backgroundColor: style.backgroundColor,
-      shellBackgroundColor: shellStyle?.backgroundColor ?? ""
+      borderTopColor: style.borderTopColor,
+      shellBackgroundColor: shellStyle?.backgroundColor ?? "",
+      controlsBackgroundColor: controlsStyle?.backgroundColor ?? "",
+      controlsBoxShadow: controlsStyle?.boxShadow ?? ""
     };
   });
   expect(pageLimitColors.color).not.toBe(pageLimitColors.backgroundColor);
   expect(pageLimitColors.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
   expect(pageLimitColors.backgroundColor).not.toBe(pageLimitColors.shellBackgroundColor);
+  expect(pageLimitColors.borderTopColor).not.toBe(pageLimitColors.shellBackgroundColor);
+  expect(pageLimitColors.controlsBackgroundColor).not.toBe(pageLimitColors.shellBackgroundColor);
+  expect(pageLimitColors.controlsBoxShadow).not.toBe("none");
+  const longInitialWidth = await page.locator('canvas[aria-label="PDF page 1"]').evaluate((canvas) =>
+    Math.round(canvas.getBoundingClientRect().width)
+  );
+  await pdfPreview.evaluate((node) => {
+    node.scrollTop = 480;
+    node.scrollLeft = 0;
+  });
+  await expect(zoomControls).toBeVisible();
+  await zoomControls.getByRole("button", { name: "Zoom in" }).click();
+  await expect(zoomControls.getByText("110%")).toBeVisible();
+  await expect.poll(async () =>
+    page.locator('canvas[aria-label="PDF page 1"]').evaluate((canvas) =>
+      Math.round(canvas.getBoundingClientRect().width)
+    )
+  ).toBeGreaterThan(longInitialWidth);
 
   await page.getByRole("button", { name: "brief.docx" }).click();
   await expect(page.getByLabel("DOCX preview")).toContainText("Quarterly planning note");

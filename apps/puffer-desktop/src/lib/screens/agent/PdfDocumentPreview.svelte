@@ -146,20 +146,22 @@
 </script>
 
 <div class="pdf-renderer">
-  <div class="pdf-toolbar" role="group" aria-label="PDF zoom controls">
-    <button type="button" aria-label="Zoom out" onclick={() => setZoom(zoom - 0.1)} disabled={zoom <= 0.5}>
-      -
-    </button>
-    <button type="button" aria-label="Reset zoom" onclick={() => setZoom(1)}>
-      {zoomPercent}%
-    </button>
-    <button type="button" aria-label="Zoom in" onclick={() => setZoom(zoom + 0.1)} disabled={zoom >= 2}>
-      +
-    </button>
+  <div class="pdf-controls-row">
+    <div class="pdf-toolbar" role="group" aria-label="PDF zoom controls">
+      <button type="button" aria-label="Zoom out" onclick={() => setZoom(zoom - 0.1)} disabled={zoom <= 0.5}>
+        -
+      </button>
+      <button type="button" aria-label="Reset zoom" onclick={() => setZoom(1)}>
+        {zoomPercent}%
+      </button>
+      <button type="button" aria-label="Zoom in" onclick={() => setZoom(zoom + 0.1)} disabled={zoom >= 2}>
+        +
+      </button>
+    </div>
+    {#if status}
+      <div class="pdf-status" role="status" aria-live="polite">{status}</div>
+    {/if}
   </div>
-  {#if status}
-    <div class="pdf-status">{status}</div>
-  {/if}
   {#if error}
     <div class="pdf-error">PDF renderer failed: {error}</div>
   {/if}
@@ -181,36 +183,52 @@
     width: 100%;
   }
 
-  .pdf-toolbar {
+  .pdf-controls-row {
     position: sticky;
     top: 0;
-    z-index: 2;
+    z-index: 3;
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    justify-self: center;
+    gap: 8px;
+    max-width: 100%;
+    padding: 6px;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    background: #fff;
+    box-shadow: 0 8px 24px rgb(15 23 42 / 0.18);
+    color: #111827;
+  }
+
+  .pdf-toolbar {
     display: inline-flex;
     align-items: center;
-    justify-self: center;
     gap: 4px;
-    padding: 3px;
-    border: 1px solid var(--border);
+    padding: 2px;
+    border: 1px solid #d1d5db;
     border-radius: 7px;
-    background: var(--background);
-    box-shadow: 0 1px 2px rgb(15 23 42 / 0.06);
+    background: #f3f4f6;
   }
 
   .pdf-toolbar button {
     min-width: 34px;
     height: 26px;
-    border: 0;
+    border: 1px solid transparent;
     border-radius: 5px;
-    background: transparent;
-    color: var(--foreground);
+    background: #fff;
+    color: #111827;
     cursor: pointer;
     font: inherit;
     font-size: 12px;
+    font-weight: 650;
     line-height: 1;
   }
 
   .pdf-toolbar button:hover:not(:disabled) {
-    background: color-mix(in oklab, var(--background) 88%, var(--muted));
+    background: #e5e7eb;
+    border-color: #cbd5e1;
   }
 
   .pdf-toolbar button:disabled {
@@ -218,22 +236,29 @@
     opacity: 0.45;
   }
 
-  .pdf-status,
+  .pdf-status {
+    width: fit-content;
+    max-width: 100%;
+    padding: 4px 10px;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    background: #f8fafc;
+    color: #111827;
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.35;
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.75);
+  }
+
   .pdf-error {
     justify-self: center;
     width: fit-content;
     padding: 4px 8px;
-    border: 1px solid color-mix(in oklab, var(--accent) 36%, var(--border));
+    border: 1px solid #d99a95;
     border-radius: 6px;
-    background: color-mix(in oklab, var(--accent) 10%, var(--background));
-    color: var(--foreground);
-    font-size: 12px;
-  }
-
-  .pdf-error {
-    border-color: color-mix(in oklab, #b3261e 35%, var(--border));
-    background: color-mix(in oklab, #b3261e 8%, var(--background));
+    background: #fff5f4;
     color: #b3261e;
+    font-size: 12px;
   }
 
   .pdf-canvas-stack {
