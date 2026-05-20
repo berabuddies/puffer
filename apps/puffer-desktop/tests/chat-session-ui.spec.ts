@@ -2299,6 +2299,93 @@ test("background streamed assistant text is restored when switching back before 
   await expect(page.getByText("Streamed while Alpha was hidden.")).toBeVisible();
 });
 
+test("background tool activity is restored when switching back before persistence", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-alpha-bg-tool",
+        displayName: "Alpha bg tool",
+        title: "Alpha bg tool",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      },
+      {
+        sessionId: "session-beta-bg-tool",
+        displayName: "Beta bg tool",
+        title: "Beta bg tool",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 1,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "beta-bg-tool-seed",
+            text: "Beta tool seed",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Alpha bg tool/);
+  await page.locator(".pf-composer textarea").fill("Alpha tool prompt");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.sessionId === "session-alpha-bg-tool"
+  );
+
+  await openSession(page, /Beta bg tool/);
+  await expect(page.getByText("Beta tool seed")).toBeVisible();
+
+  daemon.emit("session:session-alpha-bg-tool:event", {
+    type: "tool-calls-requested",
+    turnId: "turn-session-alpha-bg-tool",
+    requests: [
+      {
+        callId: "call-bg-tool",
+        toolId: "HiddenTool",
+        input: "{\"target\":\"background\"}"
+      }
+    ]
+  });
+  daemon.emit("session:session-alpha-bg-tool:event", {
+    type: "tool-invocations",
+    turnId: "turn-session-alpha-bg-tool",
+    invocations: [
+      {
+        callId: "call-bg-tool",
+        toolId: "HiddenTool",
+        input: "{\"target\":\"background\"}",
+        output: "hidden tool finished",
+        success: true
+      }
+    ]
+  });
+
+  await openSession(page, /Alpha bg tool/);
+  const tool = page.locator(".pf-tool").filter({ hasText: "HiddenTool" });
+  await expect(tool).toHaveCount(1);
+  await expect(tool).toContainText("done");
+  await tool.getByRole("button", { name: /Expand tool output/ }).click();
+  await expect(tool).toContainText("hidden tool finished");
+});
+
 test("daemon-running background sessions receive approval events", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

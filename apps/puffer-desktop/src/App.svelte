@@ -1472,6 +1472,82 @@
     );
   }
 
+  function cacheBackgroundToolCallsRequested(
+    sessionId: string,
+    ev: Extract<SessionStreamEvent, { type: "tool-calls-requested" }>
+  ) {
+    const cached = transientConversationStates[sessionId] ?? emptyTransientConversationState();
+    let liveItems = cached.liveStreamItems;
+    for (const req of ev.requests) {
+      const id = liveToolId(ev.turnId, req.callId);
+      if (liveItems.some((item) => item.id === id)) continue;
+      liveItems = appendCachedLiveItem(
+        { ...cached, liveStreamItems: liveItems },
+        {
+          id,
+          kind: "tool",
+          title: req.toolId,
+          summary: `${req.toolId} · running`,
+          body: "",
+          meta: [],
+          toolName: req.toolId,
+          status: "running",
+          input: req.input,
+          output: "",
+          inputJson: safeParseJson(req.input)
+        }
+      );
+    }
+    setTransientConversationState(
+      sessionId,
+      withCachedTurnState(cached, ev.turnId, {
+        liveStreamItems: liveItems,
+        turnThinking: false,
+        turnStatusHint: "Running tools"
+      })
+    );
+  }
+
+  function cacheBackgroundToolInvocations(
+    sessionId: string,
+    ev: Extract<SessionStreamEvent, { type: "tool-invocations" }>
+  ) {
+    const cached = transientConversationStates[sessionId] ?? emptyTransientConversationState();
+    let liveItems = cached.liveStreamItems;
+    for (const inv of ev.invocations) {
+      const id = liveToolId(ev.turnId, inv.callId);
+      const payload: TimelineItem = {
+        id,
+        kind: "tool",
+        title: inv.toolId,
+        summary: `${inv.toolId} · ${inv.success ? "success" : "error"}`,
+        body: inv.output,
+        meta: [],
+        toolName: inv.toolId,
+        status: inv.success ? "success" : "error",
+        input: inv.input,
+        output: inv.output,
+        inputJson: safeParseJson(inv.input)
+      };
+      const existingIdx = liveItems.findIndex((item) => item.id === id);
+      liveItems = existingIdx >= 0
+        ? [
+            ...liveItems.slice(0, existingIdx),
+            payload,
+            ...liveItems.slice(existingIdx + 1)
+          ]
+        : appendCachedLiveItem({ ...cached, liveStreamItems: liveItems }, payload);
+    }
+    setTransientConversationState(
+      sessionId,
+      withCachedTurnState(cached, ev.turnId, {
+        liveStreamItems: liveItems,
+        turnThinking: false,
+        turnStatusHint: null
+      })
+    );
+  }
+
   function cacheBackgroundPermissionRequest(
     sessionId: string,
     ev: Extract<SessionStreamEvent, { type: "permission-request" }>
@@ -1565,14 +1641,18 @@
       case "text-delta":
         cacheBackgroundTextDelta(sessionId, ev);
         break;
+      case "tool-calls-requested":
+        cacheBackgroundToolCallsRequested(sessionId, ev);
+        break;
+      case "tool-invocations":
+        cacheBackgroundToolInvocations(sessionId, ev);
+        break;
       case "permission-request":
         cacheBackgroundPermissionRequest(sessionId, ev);
         break;
       case "user-question-request":
         cacheBackgroundUserQuestionRequest(sessionId, ev);
         break;
-      case "tool-calls-requested":
-      case "tool-invocations":
       case "usage":
         break;
     }
