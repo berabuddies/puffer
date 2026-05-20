@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy } from "svelte";
   import { ensureLocalDaemonClient } from "../../api/daemonClient";
   import { browserRecording, type BrowserRecordedFrame } from "../../api/desktop";
   import Icon, { type IconName } from "../../design/Icon.svelte";
@@ -784,6 +784,8 @@
   let recordingFrames = $state<RecordingFrame[]>([]);
   let selectedFrameId = $state<string | null>(null);
   let recordingDisposer: (() => void) | null = null;
+  let recordingKey = "";
+  let recordingGeneration = 0;
 
   function toRecordingFrame(frame: BrowserRecordedFrame): RecordingFrame {
     return {
@@ -792,8 +794,10 @@
     };
   }
 
-  function browserFrameMatchesAction(frame: BrowserRecordedFrame): boolean {
-    const args = browserArgs(inputJson);
+  function browserFrameMatchesArgs(
+    args: Record<string, unknown> | null,
+    frame: BrowserRecordedFrame
+  ): boolean {
     const backendSessionId = stringField(args, ["backendSessionId", "backend_session_id"]);
     const tabId = stringField(args, ["tabId", "tab_id"]);
     if (backendSessionId && frame.backendSessionId !== backendSessionId) return false;
@@ -801,37 +805,85 @@
     return true;
   }
 
-  function mergeRecordingFrame(frame: BrowserRecordedFrame) {
-    if (!browserFrameMatchesAction(frame)) return;
+  function browserRecordingKey(): string {
+    if (!sessionId || !isBrowserTool) return "";
+    const args = browserArgs(inputJson);
+    return [
+      sessionId,
+      item.id,
+      toolName,
+      stringField(args, ["backendSessionId", "backend_session_id"]) ?? "",
+      stringField(args, ["tabId", "tab_id"]) ?? "",
+      stringField(args, ["action"]) ?? "",
+      stringField(args, ["url"]) ?? ""
+    ].join("\u0000");
+  }
+
+  function resetBrowserRecording(): void {
+    recordingDisposer?.();
+    recordingDisposer = null;
+    recordingFrames = [];
+    selectedFrameId = null;
+  }
+
+  function mergeRecordingFrameForArgs(
+    args: Record<string, unknown> | null,
+    frame: BrowserRecordedFrame,
+    expectedKey: string,
+    generation: number
+  ) {
+    if (generation !== recordingGeneration || expectedKey !== recordingKey) return;
+    if (!browserFrameMatchesArgs(args, frame)) return;
     const next = toRecordingFrame(frame);
     if (recordingFrames.some((item) => item.frameId === next.frameId)) return;
     recordingFrames = [...recordingFrames, next].slice(-80);
   }
 
-  async function loadBrowserRecording() {
-    if (!sessionId || !isBrowserTool) return;
+  async function loadBrowserRecordingForAction(
+    targetSessionId: string,
+    args: Record<string, unknown> | null,
+    expectedKey: string,
+    generation: number
+  ) {
     try {
-      const snapshot = await browserRecording(sessionId);
+      const snapshot = await browserRecording(targetSessionId);
+      if (generation !== recordingGeneration || expectedKey !== recordingKey) return;
       recordingFrames = snapshot.frames
-        .filter(browserFrameMatchesAction)
+        .filter((frame) => browserFrameMatchesArgs(args, frame))
         .map(toRecordingFrame)
         .slice(-80);
     } catch {
+      if (generation !== recordingGeneration || expectedKey !== recordingKey) return;
       recordingFrames = [];
     }
   }
 
-  async function subscribeBrowserRecording() {
-    if (!sessionId || !isBrowserTool) return;
+  async function subscribeBrowserRecordingForAction(
+    targetSessionId: string,
+    args: Record<string, unknown> | null,
+    expectedKey: string,
+    generation: number
+  ) {
     const client = await ensureLocalDaemonClient();
+    if (generation !== recordingGeneration || expectedKey !== recordingKey) return;
     recordingDisposer?.();
-    recordingDisposer = client.on<BrowserRecordedFrame>(`browser:${sessionId}:recording`, mergeRecordingFrame);
+    recordingDisposer = client.on<BrowserRecordedFrame>(
+      `browser:${targetSessionId}:recording`,
+      (frame) => mergeRecordingFrameForArgs(args, frame, expectedKey, generation)
+    );
   }
 
-  onMount(() => {
-    if (!isBrowserTool) return;
-    void loadBrowserRecording();
-    void subscribeBrowserRecording();
+  $effect(() => {
+    const nextKey = browserRecordingKey();
+    if (nextKey === recordingKey) return;
+    recordingKey = nextKey;
+    recordingGeneration += 1;
+    resetBrowserRecording();
+    if (!nextKey || !sessionId || !isBrowserTool) return;
+    const args = browserArgs(inputJson);
+    const generation = recordingGeneration;
+    void loadBrowserRecordingForAction(sessionId, args, nextKey, generation);
+    void subscribeBrowserRecordingForAction(sessionId, args, nextKey, generation);
   });
 
   onDestroy(() => {

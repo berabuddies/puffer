@@ -598,3 +598,112 @@ test("MCP browser actions render recorded browser frames in activity details", a
   await expect(recording).toContainText("Example Domain");
   await expect(page.getByText("No browser frames recorded for this action yet.")).toHaveCount(0);
 });
+
+test("browser activity details reload recordings when selecting another action", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-browser-multi-action",
+        displayName: "Browser multi action",
+        title: "Browser multi action",
+        cwd: "/tmp/puffer-browser-multi",
+        folderPath: "/tmp/puffer-browser-multi",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        timeline: [
+          {
+            kind: "user_message",
+            id: "browser-multi-user",
+            text: "Open two pages.",
+            createdAtMs: baseTime - 50_000
+          },
+          {
+            kind: "tool_call",
+            id: "browser-alpha-tool",
+            toolId: "Browser",
+            status: "success",
+            inputText: JSON.stringify({
+              action: "open",
+              url: "https://alpha.example",
+              tabId: "tab-alpha"
+            }),
+            inputJson: {
+              action: "open",
+              url: "https://alpha.example",
+              tabId: "tab-alpha"
+            },
+            outputText: "Done.",
+            createdAtMs: baseTime - 45_000
+          },
+          {
+            kind: "tool_call",
+            id: "browser-beta-tool",
+            toolId: "Browser",
+            status: "success",
+            inputText: JSON.stringify({
+              action: "open",
+              url: "https://beta.example",
+              tabId: "tab-beta"
+            }),
+            inputJson: {
+              action: "open",
+              url: "https://beta.example",
+              tabId: "tab-beta"
+            },
+            outputText: "Done.",
+            createdAtMs: baseTime - 40_000
+          },
+          {
+            kind: "assistant_message",
+            id: "browser-multi-assistant",
+            text: "Opened both pages.",
+            createdAtMs: baseTime - 35_000
+          }
+        ]
+      }
+    ]
+  });
+  daemon.setBrowserRecording("session-browser-multi-action", [
+    {
+      frameId: "browser-alpha-frame",
+      backendSessionId: "session-browser-multi-action:browser:tab-alpha",
+      rootSessionId: "session-browser-multi-action",
+      tabId: "tab-alpha",
+      url: "https://alpha.example",
+      title: "Alpha Domain",
+      mimeType: "image/png",
+      encoding: "base64",
+      data: ONE_PIXEL_PNG,
+      width: 960,
+      height: 720,
+      recordedAtMs: baseTime - 44_000
+    },
+    {
+      frameId: "browser-beta-frame",
+      backendSessionId: "session-browser-multi-action:browser:tab-beta",
+      rootSessionId: "session-browser-multi-action",
+      tabId: "tab-beta",
+      url: "https://beta.example",
+      title: "Beta Domain",
+      mimeType: "image/png",
+      encoding: "base64",
+      data: ONE_PIXEL_PNG,
+      width: 960,
+      height: 720,
+      recordedAtMs: baseTime - 39_000
+    }
+  ]);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openAgent(page, /^Browser multi action\b/);
+  await page.getByRole("button", { name: /Agent activity/ }).click();
+  await page.getByRole("button", { name: /Browser Open https:\/\/alpha\.example/ }).click();
+  const recording = page.locator(".pf-browser-recording-render");
+  await expect(recording.getByRole("img", { name: "Alpha Domain" })).toBeVisible();
+
+  await page.getByRole("button", { name: /Browser Open https:\/\/beta\.example/ }).click();
+
+  await expect(recording.getByRole("img", { name: "Beta Domain" })).toBeVisible();
+  await expect(recording.getByRole("img", { name: "Alpha Domain" })).toHaveCount(0);
+});
