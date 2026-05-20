@@ -796,7 +796,7 @@ test("late Browser new-tab responses do not resurrect cleared tabs", async ({ pa
   await expect(page.locator(".pf-browser-status")).toHaveText("No pages");
 });
 
-test("Browser tab close control is a native button", async ({ page }) => {
+test("Browser tab close controls name the exact tab they target", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
@@ -811,9 +811,10 @@ test("Browser tab close control is a native button", async ({ page }) => {
     candidate.params.action === "open" && candidate.params.tabId === "tab-2"
   );
 
-  const closeControls = page.getByRole("button", { name: "Close tab" });
+  await expect(page.getByRole("button", { name: "Close tab", exact: true })).toHaveCount(0);
+  const closeControls = page.getByRole("button", { name: /^Close tab \d+:/ });
   await expect(closeControls.first()).toHaveJSProperty("tagName", "BUTTON");
-  await closeControls.nth(1).click();
+  await page.getByRole("button", { name: "Close tab 2: blank page" }).click();
   await expect(page.locator(".pf-browser-tab")).toHaveCount(1);
 });
 

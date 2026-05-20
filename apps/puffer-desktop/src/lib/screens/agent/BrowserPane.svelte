@@ -1067,9 +1067,24 @@
     }
   }
 
-  function tabTitle(tab: BrowserTab): string {
+  function fullTabTitle(tab: BrowserTab): string {
     const value = tab.title || (tab.url === "about:blank" ? tab.label : tab.url);
+    return value || tab.id;
+  }
+
+  function tabTitle(tab: BrowserTab): string {
+    const value = fullTabTitle(tab);
     return value.length > 28 ? `${value.slice(0, 25)}...` : value;
+  }
+
+  function closeTabTarget(tab: BrowserTab): string {
+    if (tab.title) return tab.title;
+    if (tab.url && tab.url !== "about:blank") return tab.url;
+    return "blank page";
+  }
+
+  function closeTabLabel(tab: BrowserTab, index: number): string {
+    return `Close tab ${index + 1}: ${closeTabTarget(tab)}`;
   }
 
   function canvasPoint(event: MouseEvent | WheelEvent): { x: number; y: number } {
@@ -1369,14 +1384,15 @@
 
 <div class="pf-browser-pane">
   <div class="pf-browser-tabs" role="tablist" aria-label="Browser tabs">
-    {#each tabs as tab (tab.id)}
+    {#each tabs as tab, index (tab.id)}
+      {@const closeLabel = closeTabLabel(tab, index)}
       <div
         class="pf-browser-tab"
         class:active={tab.id === activeTabId}
         role="tab"
         tabindex="0"
         aria-selected={tab.id === activeTabId}
-        title={tab.title || tab.url}
+        title={fullTabTitle(tab)}
         onclick={() => selectTab(tab.id)}
         onkeydown={(event) => {
           if (event.key === "Enter" || event.key === " ") {
@@ -1394,8 +1410,8 @@
         <button
           class="close"
           type="button"
-          title="Close tab"
-          aria-label="Close tab"
+          title={closeLabel}
+          aria-label={closeLabel}
           disabled={isClosingTab(sessionId, tab.id)}
           onclick={(event) => closeTab(tab.id, event)}
         >
