@@ -647,3 +647,48 @@ test("deployment secret reveal controls target one key and toggle their state", 
     "false"
   );
 });
+
+test("deployment memory and secret row more menus expose actions", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const sidebar = page.locator(".pf-sidebar");
+  await sidebar.getByRole("button", { name: "Deployments" }).click();
+
+  await page.getByRole("tab", { name: "Memory" }).click();
+  const memoryNote = page.locator(".pf-dep-mem").filter({ hasText: "Node 20 drops http-keepalive by default" });
+  await memoryNote.getByRole("button", { name: "More actions for Node 20 drops http-keepalive by default" }).click();
+
+  const memoryMenu = page.getByRole("menu", { name: "Actions for Node 20 drops http-keepalive by default" });
+  await expect(memoryMenu).toBeVisible();
+  await memoryMenu.getByRole("menuitem", { name: "Pin note" }).click();
+  await expect(memoryNote).toContainText("pinned");
+  await expect(page.getByRole("status")).toContainText(
+    'Pinned "Node 20 drops http-keepalive by default" for stripe-api · production.'
+  );
+
+  await memoryNote.getByRole("button", { name: "More actions for Node 20 drops http-keepalive by default" }).click();
+  await page.getByRole("menu", { name: "Actions for Node 20 drops http-keepalive by default" })
+    .getByRole("menuitem", { name: "Use in Ask Puffer" })
+    .click();
+  await expect(page.getByRole("status")).toContainText(
+    'Queued "Node 20 drops http-keepalive by default" as Ask Puffer context for stripe-api · production.'
+  );
+
+  await page.getByRole("tab", { name: "Secrets" }).click();
+  const secretRow = page.locator(".pf-dep-secrets-row").filter({ hasText: "DATABASE_URL" });
+  await secretRow.getByRole("button", { name: "More actions for DATABASE_URL" }).click();
+
+  const secretMenu = page.getByRole("menu", { name: "Actions for DATABASE_URL" });
+  await expect(secretMenu).toBeVisible();
+  await secretMenu.getByRole("menuitem", { name: "Queue rotation" }).click();
+  await expect(secretRow).toContainText("needs rotation");
+  await expect(page.getByRole("status")).toContainText("Queued rotation for DATABASE_URL in stripe-api · production.");
+
+  await secretRow.getByRole("button", { name: "More actions for DATABASE_URL" }).click();
+  await page.getByRole("menu", { name: "Actions for DATABASE_URL" })
+    .getByRole("menuitem", { name: "Audit access" })
+    .click();
+  await expect(page.getByRole("status")).toContainText("Queued access audit for DATABASE_URL in stripe-api · production.");
+});

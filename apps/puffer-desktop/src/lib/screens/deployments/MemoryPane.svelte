@@ -25,6 +25,8 @@
   let memoryStatus = $state("");
   let statusDeploymentId = $state("");
   let statusTimer = 0;
+  let openActionId = $state<string | null>(null);
+  let pinnedIds = $state<Record<string, boolean>>({});
   const kinds = ["all", ...kindOptions];
   let filtered = $derived(filter === "all" ? items : items.filter((m) => m.kind === filter));
   let canAddNote = $derived(noteTitle.trim().length > 0 && noteBody.trim().length > 0);
@@ -39,6 +41,8 @@
     statusDeploymentId = deploymentId;
     resetAddNote();
     memoryStatus = "";
+    openActionId = null;
+    pinnedIds = {};
     if (statusTimer) window.clearTimeout(statusTimer);
     statusTimer = 0;
   });
@@ -62,7 +66,17 @@
   function openAddNote(): void {
     resetAddNote();
     addNoteOpen = true;
+    openActionId = null;
     window.setTimeout(() => noteTitleInput?.focus({ preventScroll: true }), 20);
+  }
+
+  function showMemoryStatus(message: string): void {
+    memoryStatus = message;
+    if (statusTimer) window.clearTimeout(statusTimer);
+    statusTimer = window.setTimeout(() => {
+      memoryStatus = "";
+      statusTimer = 0;
+    }, 4000);
   }
 
   function tagList(value: string): string[] {
@@ -91,13 +105,24 @@
     };
     onAddMemory(next);
     if (filter !== "all" && filter !== next.kind) filter = next.kind;
-    memoryStatus = `Added memory note "${title}" to ${d.name}.`;
-    if (statusTimer) window.clearTimeout(statusTimer);
-    statusTimer = window.setTimeout(() => {
-      memoryStatus = "";
-      statusTimer = 0;
-    }, 4000);
+    showMemoryStatus(`Added memory note "${title}" to ${d.name}.`);
     resetAddNote();
+  }
+
+  function toggleMemoryActions(id: string): void {
+    openActionId = openActionId === id ? null : id;
+  }
+
+  function togglePin(item: MemoryItem): void {
+    const pinned = pinnedIds[item.id] === true;
+    pinnedIds = { ...pinnedIds, [item.id]: !pinned };
+    openActionId = null;
+    showMemoryStatus(`${pinned ? "Unpinned" : "Pinned"} "${item.title}" for ${d.name}.`);
+  }
+
+  function queueAskContext(item: MemoryItem): void {
+    openActionId = null;
+    showMemoryStatus(`Queued "${item.title}" as Ask Puffer context for ${d.name}.`);
   }
 </script>
 
@@ -214,6 +239,11 @@
               <Icon name={meta.icon as IconName} size={10} />{meta.label}
             </span>
             <span class="pf-dep-mem-title">{m.title}</span>
+            {#if pinnedIds[m.id]}
+              <span class="pf-dep-pin-chip">
+                <Icon name="pin" size={10} />pinned
+              </span>
+            {/if}
             <span class="pf-dep-mem-conf" data-conf={m.confidence}>
               <span class="dot"></span>{m.confidence}
             </span>
@@ -234,9 +264,34 @@
             <span class="pf-dep-mem-uses" title={`Referenced ${m.uses} times`}>
               <Icon name="refresh" size={10} />×{m.uses}
             </span>
-            <button type="button" class="pf-dep-ico" title="More" aria-label="More">
-              <Icon name="moreH" size={11} />
-            </button>
+            <span class="pf-dep-row-menu-wrap">
+              <button
+                type="button"
+                class="pf-dep-ico"
+                title="More actions"
+                aria-label={`More actions for ${m.title}`}
+                aria-expanded={openActionId === m.id}
+                aria-controls={`memory-actions-${m.id}`}
+                onclick={() => toggleMemoryActions(m.id)}
+              >
+                <Icon name="moreH" size={11} />
+              </button>
+              {#if openActionId === m.id}
+                <span
+                  class="pf-dep-row-menu"
+                  id={`memory-actions-${m.id}`}
+                  role="menu"
+                  aria-label={`Actions for ${m.title}`}
+                >
+                  <button type="button" role="menuitem" onclick={() => togglePin(m)}>
+                    <Icon name="pin" size={11} />{pinnedIds[m.id] ? "Unpin note" : "Pin note"}
+                  </button>
+                  <button type="button" role="menuitem" onclick={() => queueAskContext(m)}>
+                    <Icon name="sparkles" size={11} />Use in Ask Puffer
+                  </button>
+                </span>
+              {/if}
+            </span>
           </div>
         </div>
       </div>

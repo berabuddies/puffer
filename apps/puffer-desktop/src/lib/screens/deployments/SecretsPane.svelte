@@ -19,6 +19,8 @@
   let newSecretPreview = $state("");
   let newSecretScope = $state<Secret["scope"]>("runtime");
   let newSecretKeyInput = $state<HTMLInputElement | null>(null);
+  let openActionKey = $state<string | null>(null);
+  let rotationOverrides = $state<Record<string, boolean>>({});
   let canAddSecret = $derived(
     newSecretKey.trim().length > 0 &&
       newSecretPreview.trim().length > 0 &&
@@ -42,6 +44,8 @@
     newSecretPreview = "";
     newSecretScope = "runtime";
     revealed = {};
+    openActionKey = null;
+    rotationOverrides = {};
   });
 
   function toggle(key: string) {
@@ -69,6 +73,7 @@
     newSecretKey = "";
     newSecretPreview = "";
     newSecretScope = "runtime";
+    openActionKey = null;
     window.setTimeout(() => newSecretKeyInput?.focus({ preventScroll: true }), 20);
   }
 
@@ -94,6 +99,30 @@
     syncMessage = `Added ${key} to ${d.name}.`;
     syncState = "synced";
     closeAddSecret();
+  }
+
+  function secretNeedsRotation(secret: Secret): boolean {
+    return rotationOverrides[secret.key] ?? (secret.rotate ?? false);
+  }
+
+  function toggleSecretActions(key: string): void {
+    openActionKey = openActionKey === key ? null : key;
+  }
+
+  function queueRotation(secret: Secret): void {
+    const next = !secretNeedsRotation(secret);
+    rotationOverrides = { ...rotationOverrides, [secret.key]: next };
+    openActionKey = null;
+    syncState = "synced";
+    syncMessage = next
+      ? `Queued rotation for ${secret.key} in ${d.name}.`
+      : `Cleared rotation request for ${secret.key} in ${d.name}.`;
+  }
+
+  function auditAccess(secret: Secret): void {
+    openActionKey = null;
+    syncState = "synced";
+    syncMessage = `Queued access audit for ${secret.key} in ${d.name}.`;
   }
 </script>
 
@@ -183,7 +212,8 @@
     </div>
     {#each secrets as s (s.key)}
       {@const secretRevealed = revealed[s.key] === true}
-      <div class="pf-dep-secrets-row" data-rotate={s.rotate ?? false}>
+      {@const needsRotation = secretNeedsRotation(s)}
+      <div class="pf-dep-secrets-row" data-rotate={needsRotation}>
         <span class="mono key">
           <Icon name="key" size={11} color="var(--muted-foreground)" />{s.key}
         </span>
@@ -203,12 +233,37 @@
         <span class="pf-dep-scope" data-scope={s.scope}>{s.scope}</span>
         <span class="sub">{s.updated} · {s.by}</span>
         <div class="pf-dep-secrets-actions">
-          {#if s.rotate}
+          {#if needsRotation}
             <span class="pf-dep-rotate-chip">needs rotation</span>
           {/if}
-          <button type="button" class="pf-dep-ico" title="More" aria-label="More">
-            <Icon name="moreH" size={11} />
-          </button>
+          <span class="pf-dep-row-menu-wrap">
+            <button
+              type="button"
+              class="pf-dep-ico"
+              title="More actions"
+              aria-label={`More actions for ${s.key}`}
+              aria-expanded={openActionKey === s.key}
+              aria-controls={`secret-actions-${s.key}`}
+              onclick={() => toggleSecretActions(s.key)}
+            >
+              <Icon name="moreH" size={11} />
+            </button>
+            {#if openActionKey === s.key}
+              <span
+                class="pf-dep-row-menu"
+                id={`secret-actions-${s.key}`}
+                role="menu"
+                aria-label={`Actions for ${s.key}`}
+              >
+                <button type="button" role="menuitem" onclick={() => queueRotation(s)}>
+                  <Icon name="refresh" size={11} />{needsRotation ? "Clear rotation" : "Queue rotation"}
+                </button>
+                <button type="button" role="menuitem" onclick={() => auditAccess(s)}>
+                  <Icon name="shield" size={11} />Audit access
+                </button>
+              </span>
+            {/if}
+          </span>
         </div>
       </div>
     {/each}

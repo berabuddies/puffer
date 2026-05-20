@@ -597,7 +597,7 @@
 .pf-dep-secrets-head,
 .pf-dep-secrets-row {
   display: grid;
-  grid-template-columns: 1.3fr 1.5fr 0.7fr 1fr 0.7fr;
+  grid-template-columns: 1.2fr 1.35fr 0.65fr 0.9fr minmax(150px, 0.9fr);
   gap: 10px;
   align-items: center;
   padding: 9px 14px;
@@ -639,7 +639,13 @@
 .pf-dep-scope[data-scope="runtime"] { color: oklch(0.5 0.15 240); border-color: color-mix(in oklab, oklch(0.5 0.15 240) 30%, var(--border)); }
 .pf-dep-scope[data-scope="build"]   { color: oklch(0.5 0.15 290); border-color: color-mix(in oklab, oklch(0.5 0.15 290) 30%, var(--border)); }
 .pf-dep-secrets-row .sub { font-size: 11px; color: var(--muted-foreground); }
-.pf-dep-secrets-actions { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
+.pf-dep-secrets-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
 .pf-dep-secret-form {
   display: grid;
   grid-template-columns: minmax(160px, 1fr) minmax(180px, 1.3fr) 120px auto;
@@ -699,6 +705,47 @@
   transition: background 120ms, color 120ms;
 }
 .pf-dep-ico:hover { background: var(--accent); color: var(--foreground); }
+.pf-dep-ico[aria-expanded="true"] {
+  background: color-mix(in oklab, var(--puffer-accent) 12%, var(--background));
+  color: var(--puffer-accent);
+}
+.pf-dep-row-menu-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.pf-dep-row-menu {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  box-shadow: var(--shadow-sm);
+}
+.pf-dep-row-menu button {
+  all: unset;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 4px;
+  color: var(--foreground);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.pf-dep-row-menu button:hover {
+  background: var(--accent);
+}
+.pf-dep-secrets-actions .pf-dep-row-menu {
+  flex-direction: column;
+  align-items: stretch;
+}
 
 /* Providers pane ----------------------------------------------------- */
 .pf-dep-provs {
@@ -1181,6 +1228,17 @@
   font-size: 13.5px; font-weight: 600; letter-spacing: -0.01em;
   flex: 1; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pf-dep-pin-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--puffer-accent);
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--puffer-accent) 10%, transparent);
 }
 .pf-dep-mem-conf {
   display: inline-flex; align-items: center; gap: 5px;
