@@ -274,6 +274,30 @@ test("deployment redeploy controls insert a live deploy history item", async ({ 
   await expect(page.locator(".pf-dep-history-row").first()).toContainText("manual-1431");
 });
 
+test("deployment history logs button opens deploy output", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Deployments" }).click();
+  await page.getByRole("tab", { name: "Deploys" }).click();
+
+  const firstRun = page.locator(".pf-dep-history-row").first();
+  await firstRun.getByRole("button", { name: "Logs for b-1428" }).click();
+
+  const logs = page.getByLabel("Deploy logs for b-1428");
+  await expect(logs).toBeVisible();
+  await expect(logs).toContainText("Starting b-1428 for stripe-api · production");
+  await expect(logs).toContainText("Injected 41 environment keys and 8 integrations");
+  await expect(firstRun.getByRole("button", { name: "Logs for b-1428" })).toHaveAttribute(
+    "aria-pressed",
+    "true"
+  );
+
+  await logs.getByRole("button", { name: "Close deploy logs" }).click();
+  await expect(page.getByLabel("Deploy logs for b-1428")).toHaveCount(0);
+});
+
 test("deployment open button opens public URLs and reports unavailable targets", async ({ page }) => {
   await page.addInitScript(() => {
     const target = window as typeof window & {

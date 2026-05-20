@@ -706,6 +706,26 @@
 .pf-dep-history-row .mono    { font-family: var(--font-mono); }
 
 /* Logs --------------------------------------------------------------- */
+.pf-dep-logs-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pf-dep-logs-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.pf-dep-logs-head h4 {
+  margin: 0;
+  font-size: 13px;
+}
+.pf-dep-logs-head p {
+  margin: 2px 0 0;
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+}
 .pf-dep-logs {
   background: oklch(0.16 0.005 270);
   color: oklch(0.9 0 0);
