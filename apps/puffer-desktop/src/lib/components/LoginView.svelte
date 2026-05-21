@@ -482,30 +482,6 @@
     align-items: center;
     gap: 0.7rem;
   }
-  .connected-summary {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.4rem;
-    font-size: 0.85rem;
-    color: var(--text);
-  }
-  .connected-detail {
-    color: var(--text-muted);
-    font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: 0.78rem;
-  }
-  .status-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 999px;
-    background: var(--text-muted);
-    flex: 0 0 auto;
-  }
-  .status-dot[data-connected="true"] {
-    background: #4caf50;
-    box-shadow: 0 0 0 3px rgba(76, 175, 80, 0.18);
-  }
   .logout-btn {
     border: 1px solid rgba(111, 101, 89, 0.22);
     border-radius: 10px;
