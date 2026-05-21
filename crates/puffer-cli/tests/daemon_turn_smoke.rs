@@ -483,6 +483,94 @@ fn daemon_cancel_turn_marks_session_idle_before_provider_returns() {
     daemon.stop();
 }
 
+#[test]
+fn daemon_rejects_concurrent_turn_for_same_session() {
+    let mock =
+        MockOpenAiServer::start_with_delay("First concurrent turn reply", Duration::from_secs(2));
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let workspace = tempdir.path().join("workspace");
+    let puffer_home = tempdir.path().join("home");
+    let puffer_config = puffer_home.join(".puffer");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::create_dir_all(&puffer_config).expect("puffer config");
+    std::fs::write(
+        puffer_config.join("auth.json"),
+        json!({
+            "format_version": 1,
+            "providers": {
+                "openai": { "kind": "api_key", "key": "sk-test" }
+            }
+        })
+        .to_string(),
+    )
+    .expect("auth store");
+    let discovery_cache = tempdir.path().join("discovery.json");
+    std::fs::write(&discovery_cache, discovery_cache_json()).expect("discovery cache");
+
+    let mut daemon = DaemonProcess::start(&workspace, &puffer_home, &discovery_cache);
+    let mut client = DaemonClient::connect(&daemon.handshake);
+
+    client.rpc(
+        "update_config",
+        json!({
+            "openaiBaseUrl": mock.base_url,
+            "defaultProvider": "openai",
+            "defaultModel": "openai/gpt-5",
+        }),
+    );
+    let session = client.rpc(
+        "create_session",
+        json!({
+            "cwd": workspace.display().to_string(),
+            "providerId": "codex",
+            "modelId": "codex/gpt-5",
+        }),
+    );
+    let session_id = session["sessionId"].as_str().expect("session id");
+
+    let first = client.rpc(
+        "run_agent_turn",
+        json!({
+            "sessionId": session_id,
+            "message": "First concurrent turn",
+            "providerId": "codex",
+            "modelId": "codex/gpt-5",
+            "permissionMode": "read-only",
+        }),
+    );
+    let first_turn_id = first["turnId"].as_str().expect("turn id");
+    wait_until(Duration::from_secs(5), || {
+        mock.responses_calls.load(Ordering::SeqCst) > 0
+    });
+
+    let error = client
+        .try_rpc(
+            "run_agent_turn",
+            json!({
+                "sessionId": session_id,
+                "message": "Second concurrent turn",
+                "providerId": "codex",
+                "modelId": "codex/gpt-5",
+                "permissionMode": "read-only",
+            }),
+        )
+        .expect_err("same-session concurrent turn should be rejected");
+    assert_eq!(error["code"], "turn-start-error");
+    let error_message = error["message"].as_str().expect("error message");
+    assert!(error_message.contains("already has an in-flight turn"));
+    assert!(error_message.contains(first_turn_id));
+    assert_eq!(mock.responses_calls.load(Ordering::SeqCst), 1);
+
+    let complete = client.wait_for_event(|message| {
+        message["event"] == format!("session:{session_id}:event")
+            && message["payload"]["type"] == "turn-complete"
+    });
+    assert_eq!(complete["payload"]["turnId"], first_turn_id);
+    assert_eq!(mock.responses_calls.load(Ordering::SeqCst), 1);
+
+    daemon.stop();
+}
+
 struct DaemonProcess {
     child: Child,
     handshake: Value,
@@ -573,6 +661,22 @@ impl DaemonClient {
     }
 
     fn rpc(&mut self, method: &str, params: Value) -> Value {
+        match self.try_rpc(method, params) {
+            Ok(result) => result,
+            Err(error) => panic!("{method} failed: {error}"),
+        }
+    }
+
+    fn try_rpc(&mut self, method: &str, params: Value) -> Result<Value, Value> {
+        let message = self.rpc_response(method, params);
+        if message["error"].is_null() {
+            Ok(message["result"].clone())
+        } else {
+            Err(message["error"].clone())
+        }
+    }
+
+    fn rpc_response(&mut self, method: &str, params: Value) -> Value {
         let id = self.next_id.to_string();
         self.next_id += 1;
         self.socket
@@ -587,10 +691,7 @@ impl DaemonClient {
             assert!(Instant::now() < deadline, "{method} timed out");
             let message = self.read_message_until(deadline);
             if message["id"].as_str() == Some(id.as_str()) {
-                if !message["error"].is_null() {
-                    panic!("{method} failed: {}", message["error"]);
-                }
-                return message["result"].clone();
+                return message;
             }
             self.backlog.push(message);
         }

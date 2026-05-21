@@ -2274,20 +2274,29 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     let cancel_reported = Arc::new(AtomicBool::new(false));
     let user_prompt_persisted = Arc::new(AtomicBool::new(false));
 
-    state.turns.lock().unwrap().insert(
-        turn_id.clone(),
-        TurnHandle {
-            session_id: session_id.clone(),
-            session_uuid,
-            channel: channel.clone(),
-            message: message.clone(),
-            cancel: cancel.clone(),
-            cancel_reported: cancel_reported.clone(),
-            user_prompt_persisted: user_prompt_persisted.clone(),
-            pending: pending.clone(),
-            pending_questions: pending_questions.clone(),
-        },
-    );
+    {
+        let mut turns = state.turns.lock().unwrap();
+        if let Some((existing_turn_id, _)) = turns
+            .iter()
+            .find(|(_, handle)| handle.session_uuid == session_uuid)
+        {
+            anyhow::bail!("session {session_id} already has an in-flight turn {existing_turn_id}");
+        }
+        turns.insert(
+            turn_id.clone(),
+            TurnHandle {
+                session_id: session_id.clone(),
+                session_uuid,
+                channel: channel.clone(),
+                message: message.clone(),
+                cancel: cancel.clone(),
+                cancel_reported: cancel_reported.clone(),
+                user_prompt_persisted: user_prompt_persisted.clone(),
+                pending: pending.clone(),
+                pending_questions: pending_questions.clone(),
+            },
+        );
+    }
 
     let state_for_thread = state.clone();
     let turn_id_thread = turn_id.clone();
