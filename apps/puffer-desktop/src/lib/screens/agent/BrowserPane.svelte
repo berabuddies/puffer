@@ -900,6 +900,16 @@
   function applyState(next: BrowserState, tabId = activeTabId) {
     if (disposed || !tabId) return;
     const existing = tabs.find((tab) => tab.id === tabId);
+    const stateUpdatedAtMs =
+      typeof next.updatedAtMs === "number" && next.updatedAtMs > 0
+        ? next.updatedAtMs
+        : Date.now();
+    if (
+      existing &&
+      existing.updatedAtMs - stateUpdatedAtMs > TAB_INFO_STALE_GRACE_MS
+    ) {
+      return;
+    }
     clearNavigationPending(existing?.backendSessionId || backendSessionId(tabId));
     const nextUrl = next.url || existing?.url || "about:blank";
     const nextTitle = next.title ?? "";
@@ -913,7 +923,8 @@
       error: nextError,
       status: nextStatus,
       connected: nextConnected,
-      favicon: faviconFor(nextUrl)
+      favicon: faviconFor(nextUrl),
+      updatedAtMs: stateUpdatedAtMs
     });
     if (tabId !== activeTabId) return;
     currentUrl = nextUrl;

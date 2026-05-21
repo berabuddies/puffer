@@ -348,6 +348,32 @@ test("Stale tab URL events do not overwrite the active address bar", async ({ pa
   await expect(addressBar).toHaveValue("https://current.example.test");
 });
 
+test("Stale browser state events do not overwrite the active address bar", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openBrowserAgent(page);
+  await openBrowserPane(page, daemon);
+
+  const addressBar = page.locator(".pf-browser-address");
+  await addressBar.fill("https://current-state.example.test");
+  await addressBar.press("Enter");
+  await daemon.waitForRequest("browser_navigate", (request) =>
+    request.params.url === "https://current-state.example.test"
+  );
+  await expect(addressBar).toHaveValue("https://current-state.example.test");
+
+  daemon.emit("browser:session-browser:browser:tab-1:state", {
+    url: "https://stale-state.example.test",
+    title: "Stale state",
+    loading: false,
+    updatedAtMs: 1
+  });
+
+  await expect(addressBar).toHaveValue("https://current-state.example.test");
+});
+
 test("Duplicate browser navigate submits are ignored while the URL is pending", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayResponse(

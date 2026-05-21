@@ -1455,6 +1455,7 @@ export type BrowserState = {
   url: string;
   title: string;
   loading: boolean;
+  updatedAtMs?: number;
   width?: number;
   height?: number;
   popOut?: boolean;
