@@ -945,7 +945,6 @@ fn is_read_only_pending_slash_command(submitted: &str) -> bool {
             | "config"
             | "context"
             | "debug"
-            | "diff"
             | "doctor"
             | "files"
             | "hooks"
