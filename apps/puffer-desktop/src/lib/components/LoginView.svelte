@@ -228,15 +228,75 @@
             </span>
           </header>
 
-          {#if auth}
-            <div class="actions">
-              <div class="connected-summary">
-                <span class="status-dot" data-connected="true" aria-hidden="true"></span>
-                <span>{connectedHint(auth)}</span>
-                {#if auth.planType}
-                  <span class="connected-detail">· {auth.planType}</span>
-                {/if}
+          {#if candidates.length}
+            <div class="imports">
+              {#each candidates as candidate (importKey(candidate.providerId, candidate.source))}
+                <button
+                  type="button"
+                  class="import"
+                  disabled={credentialBusy}
+                  on:click={() => submitImport(candidate.providerId, candidate.source)}
+                  title={candidate.sourcePath}
+                >
+                  {#if busyImportKey === importKey(candidate.providerId, candidate.source)}
+                    Importing…
+                  {:else}
+                    Use credentials from {sourceLabel(candidate.source)}
+                  {/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+
+          <div class="actions">
+            {#if supports(provider, "oauth")}
+              <button
+                class="oauth-btn"
+                disabled={credentialBusy || pendingKey.length > 0}
+                on:click={() => submitOauth(provider.id)}
+                title={pendingKey.length > 0
+                  ? "Clear the API key field to use OAuth"
+                  : undefined}
+              >
+                {isBusy
+                  ? provider.id === "worldrouter"
+                    ? "Waiting for browser login…"
+                    : "Opening browser…"
+                  : auth
+                    ? remoteEnabled
+                      ? "Reconnect with OAuth (remote)"
+                      : "Reconnect with OAuth"
+                    : remoteEnabled
+                      ? "Connect with OAuth (remote)"
+                      : "Connect with OAuth"}
+              </button>
+            {/if}
+
+            {#if supports(provider, "api_key")}
+              <div class="api-key-row">
+                <input
+                  type="password"
+                  aria-label={`API key for ${provider.displayName}`}
+                  value={apiKeys[provider.id] ?? ""}
+                  placeholder={auth ? "Replace API key" : "Paste API key"}
+                  disabled={credentialBusy}
+                  on:input={(event) =>
+                    updateApiKey(provider.id, (event.currentTarget as HTMLInputElement).value)}
+                  on:keydown={(event) => {
+                    if (event.key === "Enter") submitApiKey(provider.id);
+                  }}
+                />
+                <button
+                  class="apikey-btn"
+                  disabled={credentialBusy || pendingKey.length === 0}
+                  on:click={() => submitApiKey(provider.id)}
+                >
+                  {auth ? "Update key" : "Connect"}
+                </button>
               </div>
+            {/if}
+
+            {#if auth}
               <button
                 class="logout-btn"
                 disabled={isBusy}
@@ -244,73 +304,8 @@
               >
                 {isBusy ? "Disconnecting…" : "Disconnect"}
               </button>
-            </div>
-          {:else}
-            {#if candidates.length}
-              <div class="imports">
-                {#each candidates as candidate (importKey(candidate.providerId, candidate.source))}
-                  <button
-                    type="button"
-                    class="import"
-                    disabled={credentialBusy}
-                    on:click={() => submitImport(candidate.providerId, candidate.source)}
-                    title={candidate.sourcePath}
-                  >
-                    {#if busyImportKey === importKey(candidate.providerId, candidate.source)}
-                      Importing…
-                    {:else}
-                      Use credentials from {sourceLabel(candidate.source)}
-                    {/if}
-                  </button>
-                {/each}
-              </div>
             {/if}
-
-            <div class="actions">
-              {#if supports(provider, "oauth")}
-                <button
-                  class="oauth-btn"
-                  disabled={credentialBusy || pendingKey.length > 0}
-                  on:click={() => submitOauth(provider.id)}
-                  title={pendingKey.length > 0
-                    ? "Clear the API key field to use OAuth"
-                    : undefined}
-                >
-                  {isBusy
-                    ? provider.id === "worldrouter"
-                      ? "Waiting for browser login…"
-                      : "Opening browser…"
-                    : remoteEnabled
-                      ? "Connect with OAuth (remote)"
-                      : "Connect with OAuth"}
-                </button>
-              {/if}
-
-              {#if supports(provider, "api_key")}
-                <div class="api-key-row">
-                  <input
-                    type="password"
-                    aria-label={`API key for ${provider.displayName}`}
-                    value={apiKeys[provider.id] ?? ""}
-                    placeholder="Paste API key"
-                    disabled={credentialBusy}
-                    on:input={(event) =>
-                      updateApiKey(provider.id, (event.currentTarget as HTMLInputElement).value)}
-                    on:keydown={(event) => {
-                      if (event.key === "Enter") submitApiKey(provider.id);
-                    }}
-                  />
-                  <button
-                    class="apikey-btn"
-                    disabled={credentialBusy || pendingKey.length === 0}
-                    on:click={() => submitApiKey(provider.id)}
-                  >
-                    Connect
-                  </button>
-                </div>
-              {/if}
-            </div>
-          {/if}
+          </div>
 
           <p class="hint">
             {auth
