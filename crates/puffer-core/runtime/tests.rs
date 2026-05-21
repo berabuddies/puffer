@@ -261,7 +261,8 @@ fn bundled_resources() -> LoadedResources {
         builtin_resources_dir: root.join("resources"),
     };
     ensure_workspace_dirs(&paths).unwrap();
-    load_resources(&paths).unwrap()
+    let runner = crate::runner_adapter::LocalToolRunner::new();
+    load_resources(&paths, &runner).unwrap()
 }
 
 #[test]

@@ -228,6 +228,7 @@ mod tests {
             SessionMetadata {
                 id: Uuid::new_v4(),
                 display_name: None,
+                generated_title: None,
                 cwd: PathBuf::from("/tmp"),
                 created_at_ms: 0,
                 updated_at_ms: 0,

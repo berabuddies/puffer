@@ -376,6 +376,7 @@ fn execute_agent_tool_inherits_active_team_for_named_spawn() {
     let session = SessionMetadata {
         id: Uuid::new_v4(),
         display_name: None,
+        generated_title: None,
         cwd: temp.path().to_path_buf(),
         created_at_ms: 0,
         updated_at_ms: 0,
@@ -443,6 +444,7 @@ fn execute_agent_tool_rejects_teammate_spawning_teammate() {
     let session = SessionMetadata {
         id: Uuid::new_v4(),
         display_name: None,
+        generated_title: None,
         cwd: temp.path().to_path_buf(),
         created_at_ms: 0,
         updated_at_ms: 0,
@@ -486,6 +488,7 @@ fn execute_agent_tool_rejects_teammate_background_agents() {
     let session = SessionMetadata {
         id: Uuid::new_v4(),
         display_name: None,
+        generated_title: None,
         cwd: temp.path().to_path_buf(),
         created_at_ms: 0,
         updated_at_ms: 0,
