@@ -511,6 +511,39 @@ test("providers page marks connected and disconnected providers", async ({ page 
   await expect(anthropicCard.getByRole("button", { name: "Connect" })).toBeVisible();
 });
 
+test("providers page marks auth-free local providers as ready", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    auth: [],
+    providers: [
+      {
+        id: "ollama",
+        displayName: "Ollama",
+        baseUrl: "http://localhost:11434/v1",
+        defaultApi: "openai-completions",
+        modelCount: 1,
+        authModes: [],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page, { allowUnauthenticatedWorkspace: true });
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Providers" }).click();
+
+  const connectionSummary = page.getByRole("status", { name: "Credential connections" });
+  await expect(connectionSummary).toContainText("1 agent provider ready");
+  await expect(connectionSummary.getByText("Ollama")).toBeVisible();
+  await expect(connectionSummary.getByText("local")).toBeVisible();
+
+  const ollamaCard = page.locator(".provider-card").filter({ hasText: "Ollama" });
+  await expect(ollamaCard.locator(".status")).toHaveText("Ready");
+  await expect(ollamaCard.getByText("No credentials required")).toBeVisible();
+  await expect(ollamaCard.getByRole("button", { name: "Connect" })).toHaveCount(0);
+});
+
 test("provider model picker recovers when refreshed auth changes providers", async ({ page }) => {
   const daemon = new FakeDaemon({
     auth: [

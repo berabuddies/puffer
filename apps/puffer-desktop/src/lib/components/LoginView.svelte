@@ -1,6 +1,10 @@
 <script lang="ts">
   import { providerVisual } from "../providerVisuals";
-  import { providerIdsEquivalent } from "../providerIds";
+  import {
+    providerIsAvailableForAgent,
+    providerIdsEquivalent,
+    providerRunsWithoutAuth
+  } from "../providerIds";
   import type { ExternalCredential, ProviderSummary, SettingsSnapshot } from "../types";
 
   export let snapshot: SettingsSnapshot | null = null;
@@ -77,6 +81,12 @@
   })();
 
   $: connectedAuth = snapshot?.auth ?? [];
+  $: authenticatedProviderIds = connectedAuth.map((auth) => auth.providerId);
+  $: availableAgentProviders =
+    snapshot?.providers.filter((provider) =>
+      providerIsAvailableForAgent(provider, authenticatedProviderIds)
+    ) ?? [];
+  $: showAvailableProviders = availableAgentProviders.length > connectedAuth.length;
 
   $: importsByProvider = (() => {
     const map: Record<string, ExternalCredential[]> = {};
@@ -124,15 +134,29 @@
     <div class="connection-summary" role="status" aria-label="Credential connections">
       <div class="connection-copy">
         <strong>
-          {connectedAuth.length} provider{connectedAuth.length === 1 ? "" : "s"} connected
+          {#if showAvailableProviders}
+            {availableAgentProviders.length} agent provider{availableAgentProviders.length === 1 ? "" : "s"} ready
+          {:else}
+            {connectedAuth.length} provider{connectedAuth.length === 1 ? "" : "s"} connected
+          {/if}
         </strong>
         <span>
-          {connectedAuth.length
+          {availableAgentProviders.length
             ? "Ready for new sessions and provider switches."
             : "Connect a provider before starting an agent."}
         </span>
       </div>
-      {#if connectedAuth.length}
+      {#if showAvailableProviders}
+        <div class="connection-pills" aria-label="Ready agent list">
+          {#each availableAgentProviders as provider (provider.id)}
+            {@const auth = authForProvider(provider.id)}
+            <span class="connection-pill">
+              <span class="pill-name">{provider.displayName}</span>
+              <span class="pill-kind">{auth?.kind ?? "local"}</span>
+            </span>
+          {/each}
+        </div>
+      {:else if connectedAuth.length}
         <div class="connection-pills" aria-label="Credential list">
           {#each connectedAuth as auth (auth.providerId)}
             <span class="connection-pill">
@@ -171,6 +195,7 @@
         {@const visual = providerVisual(provider)}
         {@const candidates = importsByProvider[provider.id] ?? []}
         {@const auth = authForProvider(provider.id)}
+        {@const authFree = providerRunsWithoutAuth(provider)}
         <article class="provider-card" style="--provider-accent: {visual.accent};">
           <header class="card-head">
             <span class="logo" aria-hidden="true">
@@ -180,8 +205,8 @@
               <h2 class="name">{provider.displayName}</h2>
               <p class="meta">{provider.id} · {provider.modelCount} model{provider.modelCount === 1 ? "" : "s"}</p>
             </div>
-            <span class="status" data-connected={auth !== null}>
-              {auth ? "Connected" : "Not connected"}
+            <span class="status" data-connected={auth !== null || authFree}>
+              {auth ? "Connected" : authFree ? "Ready" : "Not connected"}
             </span>
           </header>
 
@@ -249,7 +274,13 @@
             {/if}
           </div>
 
-          <p class="hint">{auth ? connectedHint(auth) : `via ${provider.authModes.join(" · ")}`}</p>
+          <p class="hint">
+            {auth
+              ? connectedHint(auth)
+              : authFree
+                ? "No credentials required"
+                : `via ${provider.authModes.join(" · ")}`}
+          </p>
         </article>
       {/each}
     {/if}
