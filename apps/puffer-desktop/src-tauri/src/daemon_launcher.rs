@@ -6,14 +6,17 @@
 //! opens a local port-forward to the remote WebSocket so the frontend can
 //! continue to connect to `ws://127.0.0.1:<localport>/ws` transparently.
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::io::{BufRead, BufReader};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tungstenite::{connect, Message};
+use url::Url;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -81,6 +84,15 @@ impl Drop for RemoteSession {
 impl DaemonLauncher {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Returns the handshake for the currently-running local daemon, if any.
+    /// Unlike `ensure_started`, this never spawns a new daemon — callers that
+    /// just want to talk to the existing daemon (e.g. forwarding a one-off
+    /// RPC) shouldn't trigger a fresh spawn as a side effect.
+    pub(crate) fn current_handshake(&self) -> Option<DaemonHandshake> {
+        let guard = self.child.lock().unwrap();
+        guard.as_ref().map(|child| child.handshake.clone())
     }
 
     /// Returns the handshake for the local daemon, starting it if needed.
@@ -217,6 +229,97 @@ check that sshd allows TCP forwarding and that the remote daemon really bound"
         });
 
         Ok(local_handshake)
+    }
+}
+
+/// Synchronously runs a single JSON-RPC round trip against the puffer
+/// daemon's WebSocket endpoint described by `handshake`. The daemon's wire
+/// protocol is one JSON object per text frame; we send a `{ id, method,
+/// params }` request and wait for the matching `{ id, ok, result | error }`
+/// response (event frames in between are skipped).
+///
+/// This is intentionally narrow: it's used by corbina to forward specific
+/// catalog-style lookups (e.g. worldrouter's live `/v1/models` list) to the
+/// daemon that already holds the live registry, without us having to
+/// re-implement discovery here. Anything more chatty should use the
+/// frontend's persistent DaemonClient instead.
+pub(crate) fn query_daemon_rpc(
+    handshake: &DaemonHandshake,
+    method: &str,
+    params: Value,
+    timeout: Duration,
+) -> Result<Value> {
+    // Bolt the auth token onto the URL the way the frontend client does
+    // (`?token=…`). Without this the daemon returns 401 on upgrade.
+    let mut url = Url::parse(&handshake.url).context("parsing daemon handshake URL")?;
+    if !handshake.token.is_empty() {
+        let has_token = url
+            .query_pairs()
+            .any(|(name, _)| name == "token");
+        if !has_token {
+            url.query_pairs_mut().append_pair("token", &handshake.token);
+        }
+    }
+
+    let (mut socket, _response) =
+        connect(url.as_str()).with_context(|| format!("connecting to daemon at {}", handshake.url))?;
+
+    // Constrain the underlying TCP socket so a hung daemon can't lock the
+    // model picker forever. tungstenite::connect returns a MaybeTlsStream
+    // wrapping the raw stream — best-effort apply read/write timeouts.
+    if let tungstenite::stream::MaybeTlsStream::Plain(stream) = socket.get_ref() {
+        let _ = stream.set_read_timeout(Some(timeout));
+        let _ = stream.set_write_timeout(Some(timeout));
+    }
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let request = json!({
+        "id": id,
+        "method": method,
+        "params": params,
+    });
+    socket
+        .send(Message::Text(request.to_string()))
+        .with_context(|| format!("sending {method} to daemon"))?;
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        if Instant::now() >= deadline {
+            let _ = socket.close(None);
+            return Err(anyhow!("daemon {method} timed out after {:?}", timeout));
+        }
+        let message = socket
+            .read()
+            .with_context(|| format!("reading daemon response for {method}"))?;
+        let text = match message {
+            Message::Text(text) => text,
+            // Pings/Pongs/Binary aren't part of our request/response protocol —
+            // just keep reading until we see our text reply.
+            Message::Ping(payload) => {
+                let _ = socket.send(Message::Pong(payload));
+                continue;
+            }
+            Message::Pong(_) | Message::Binary(_) | Message::Frame(_) => continue,
+            Message::Close(_) => {
+                return Err(anyhow!("daemon closed the WebSocket before responding"))
+            }
+        };
+        let value: Value = serde_json::from_str(&text)
+            .with_context(|| format!("parsing daemon response: {text}"))?;
+        // Server-pushed events have an `event` field and no `id`; skip them.
+        let response_id = value.get("id").and_then(Value::as_str);
+        if response_id != Some(id.as_str()) {
+            continue;
+        }
+        let _ = socket.close(None);
+        if value.get("ok").and_then(Value::as_bool) == Some(false) {
+            let err = value
+                .get("error")
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "(no error message)".to_string());
+            return Err(anyhow!("daemon {method} failed: {err}"));
+        }
+        return Ok(value.get("result").cloned().unwrap_or(Value::Null));
     }
 }
 

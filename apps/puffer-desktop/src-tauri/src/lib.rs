@@ -382,8 +382,11 @@ fn cancel_turn(
 }
 
 pub fn run() {
-    let backend = Arc::new(BackendState::new());
     let launcher = Arc::new(DaemonLauncher::new());
+    // Give the backend a handle to the launcher so it can forward
+    // catalog-style RPCs (e.g. worldrouter's live `/v1/models` list) to
+    // the daemon that already holds the merged provider registry.
+    let backend = Arc::new(BackendState::new_with_launcher(Some(launcher.clone())));
     websocket::start_backend_ws(backend.clone());
 
     Builder::default()

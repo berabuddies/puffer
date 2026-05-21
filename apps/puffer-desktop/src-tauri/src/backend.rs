@@ -42,10 +42,22 @@ pub(crate) struct BackendState {
     fs_watches: Arc<fs_watch::FsWatchRegistry>,
     browsers: browser::BrowserRegistry,
     turns: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// Optional handle to the puffer daemon child so we can forward
+    /// catalog-style RPCs (live `/v1/models`, etc.) to the daemon that owns
+    /// the real ProviderRegistry. None during plain unit tests where no
+    /// daemon was spawned — those code paths fall back to the hardcoded
+    /// descriptors instead.
+    daemon_launcher: Option<Arc<crate::daemon_launcher::DaemonLauncher>>,
 }
 
 impl BackendState {
     pub(crate) fn new() -> Self {
+        Self::new_with_launcher(None)
+    }
+
+    pub(crate) fn new_with_launcher(
+        daemon_launcher: Option<Arc<crate::daemon_launcher::DaemonLauncher>>,
+    ) -> Self {
         let ptys = Arc::new(pty::PtyRegistry::new());
         ptys.spawn_idle_pruner();
         let browser_profile_root = app_home()
@@ -56,6 +68,7 @@ impl BackendState {
             fs_watches: Arc::new(fs_watch::FsWatchRegistry::new()),
             browsers: browser::BrowserRegistry::new(browser_profile_root),
             turns: Mutex::new(HashMap::new()),
+            daemon_launcher,
         }
     }
 
@@ -231,9 +244,10 @@ impl BackendState {
             "add_mcp_server" => serde_value(json!({"servers": self.list_mcp_servers()?})),
             "list_provider_models" => {
                 let provider_id = string_param(&params, &["providerId", "provider_id"])?;
+                let models = self.resolve_provider_models(&provider_id);
                 serde_value(json!({
                     "providerId": provider_id,
-                    "models": self.provider_models(&provider_id),
+                    "models": models,
                 }))
             }
             "list_permissions" => serde_value(json!({
@@ -549,8 +563,46 @@ impl BackendState {
         })
     }
 
-    fn provider_models(&self, provider_id: &str) -> Vec<Value> {
+    /// Returns the model catalog for `provider_id`. For most providers this
+    /// is just the hardcoded list in the free-function `provider_models`,
+    /// but providers whose catalog is too large to hardcode (currently
+    /// worldrouter — the relay exposes ~66 models discovered via live
+    /// `/v1/models`) are forwarded to the running puffer daemon's
+    /// `list_provider_models` RPC, which holds the merged ProviderRegistry.
+    /// Falls back to the hardcoded seed if the daemon isn't running or the
+    /// call fails — better to show the two seed models than a spinner that
+    /// never resolves.
+    fn resolve_provider_models(&self, provider_id: &str) -> Vec<Value> {
+        let canonical = canonical_backend_provider_id(provider_id);
+        if canonical == "worldrouter" {
+            if let Some(models) = self.fetch_daemon_provider_models(&canonical) {
+                return models;
+            }
+        }
         provider_models(provider_id)
+    }
+
+    fn fetch_daemon_provider_models(&self, provider_id: &str) -> Option<Vec<Value>> {
+        let launcher = self.daemon_launcher.as_ref()?;
+        let handshake = launcher.current_handshake()?;
+        match crate::daemon_launcher::query_daemon_rpc(
+            &handshake,
+            "list_provider_models",
+            json!({ "providerId": provider_id }),
+            std::time::Duration::from_secs(8),
+        ) {
+            Ok(result) => result
+                .get("models")
+                .and_then(Value::as_array)
+                .cloned(),
+            Err(error) => {
+                eprintln!(
+                    "corbina: daemon list_provider_models({provider_id}) failed: {error}; \
+                     falling back to descriptor seed"
+                );
+                None
+            }
+        }
     }
 
     fn provider_auth_statuses(&self) -> Result<Vec<AuthProviderStatusDto>> {
