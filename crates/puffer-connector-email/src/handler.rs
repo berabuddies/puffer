@@ -27,7 +27,10 @@ pub fn handle_command(
 
     // 2. Allowed-senders filter (case-insensitive on the raw sender
     //    address carried in `InboundMessage.user_id`).
-    if let Some(sender) = message.user_id.as_deref() {
+    if !config.allowed_senders.is_empty() {
+        let Some(sender) = message.user_id.as_deref() else {
+            return Ok(CommandOutcome::Ignored);
+        };
         if !config.is_sender_allowed(sender) {
             return Ok(CommandOutcome::Ignored);
         }
@@ -139,6 +142,17 @@ mod tests {
             &config,
         )
         .unwrap();
+        assert_eq!(outcome, CommandOutcome::Ignored);
+    }
+
+    #[test]
+    fn allowlist_rejects_missing_sender() {
+        let runtime = test_runtime(tempdir().unwrap().path().to_path_buf());
+        let mut config = open_config();
+        config.allowed_senders = vec!["allowed@example.com".to_string()];
+
+        let outcome = handle_command(&runtime, &email("thread-1", None, "/help"), &config).unwrap();
+
         assert_eq!(outcome, CommandOutcome::Ignored);
     }
 

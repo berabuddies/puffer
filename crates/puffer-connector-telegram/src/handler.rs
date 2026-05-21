@@ -22,11 +22,15 @@ pub fn handle_command(
     }
 
     // 2. Allowed-users filter.
-    if let Some(user) = message.user_id.as_deref() {
-        if let Ok(id) = user.parse::<i64>() {
-            if !config.is_user_allowed(id) {
-                return Ok(CommandOutcome::Ignored);
-            }
+    if !config.allowed_users.is_empty() {
+        let Some(user) = message.user_id.as_deref() else {
+            return Ok(CommandOutcome::Ignored);
+        };
+        let Ok(id) = user.parse::<i64>() else {
+            return Ok(CommandOutcome::Ignored);
+        };
+        if !config.is_user_allowed(id) {
+            return Ok(CommandOutcome::Ignored);
         }
     }
 
@@ -142,6 +146,20 @@ mod tests {
         config.allowed_users = vec![42];
         let outcome = handle_command(&runtime, &dm("hi", Some("7")), &config).unwrap();
         assert_eq!(outcome, CommandOutcome::Ignored);
+    }
+
+    #[test]
+    fn allowlist_rejects_missing_or_malformed_user_id() {
+        let runtime = test_runtime(tempdir().unwrap().path().to_path_buf());
+        let mut config = open_config();
+        config.allowed_users = vec![42];
+
+        let missing = handle_command(&runtime, &dm("/help", None), &config).unwrap();
+        let malformed =
+            handle_command(&runtime, &dm("/help", Some("not-a-number")), &config).unwrap();
+
+        assert_eq!(missing, CommandOutcome::Ignored);
+        assert_eq!(malformed, CommandOutcome::Ignored);
     }
 
     #[test]

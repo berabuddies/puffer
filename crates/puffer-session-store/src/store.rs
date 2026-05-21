@@ -408,6 +408,7 @@ mod tests {
                 source.id,
                 TranscriptEvent::UserMessage {
                     text: "hello".to_string(),
+                    actor: None,
                 },
             )
             .unwrap();
@@ -424,6 +425,46 @@ mod tests {
         let fork_record = store.load_session(fork.id).unwrap();
         assert_eq!(fork_record.metadata.parent_session_id, Some(source.id));
         assert_eq!(fork_record.events.len(), 1);
+    }
+
+    #[test]
+    fn load_session_accepts_old_jsonl_events_without_actor_fields() {
+        let tempdir = tempdir().unwrap();
+        let paths = test_paths(tempdir.path());
+        fs::create_dir_all(&paths.workspace_config_dir).unwrap();
+        let store = SessionStore::from_paths(&paths).unwrap();
+
+        let session = store.create_session(tempdir.path().join("src")).unwrap();
+        let events_path = store.session_path(session.id).with_extension("jsonl");
+        fs::write(
+            &events_path,
+            concat!(
+                "{\"type\":\"assistant_message\",\"text\":\"a\"}\n",
+                "{\"type\":\"system_message\",\"text\":\"s\"}\n",
+                "{\"type\":\"tool_invocation\",\"call_id\":\"call-1\",\"tool_id\":\"Read\",\"input\":\"{}\",\"output\":\"ok\",\"success\":true}\n",
+                "{\"type\":\"command_invoked\",\"name\":\"help\",\"args\":\"\"}\n",
+            ),
+        )
+        .unwrap();
+
+        let record = store.load_session(session.id).unwrap();
+        assert_eq!(record.events.len(), 4);
+        assert!(matches!(
+            record.events[0],
+            TranscriptEvent::AssistantMessage { actor: None, .. }
+        ));
+        assert!(matches!(
+            record.events[2],
+            TranscriptEvent::ToolInvocation {
+                actor: None,
+                subject: None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            record.events[3],
+            TranscriptEvent::CommandInvoked { actor: None, .. }
+        ));
     }
 
     #[test]
@@ -584,6 +625,7 @@ mod tests {
                 session.id,
                 TranscriptEvent::UserMessage {
                     text: "before".to_string(),
+                    actor: None,
                 },
             )
             .unwrap();

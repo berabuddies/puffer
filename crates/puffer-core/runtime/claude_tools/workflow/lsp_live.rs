@@ -117,7 +117,9 @@ pub(super) fn execute_lsp(resources: &LoadedResources, cwd: &Path, input: Value)
     let parsed: LspInput = serde_json::from_value(input).context("invalid LSP input")?;
     let operation = parsed.operation.clone();
     let file_path = resolve_path(cwd, &parsed.file_path);
-    let output = match execute_lsp_inner(resources, cwd, &parsed, &file_path) {
+    let output = match validate_lsp_input(cwd, &file_path)
+        .and_then(|file_path| execute_lsp_inner(resources, cwd, &parsed, &file_path))
+    {
         Ok(result) => LspToolOutput {
             operation,
             file_path: file_path.display().to_string(),
@@ -146,7 +148,6 @@ fn execute_lsp_inner(
     input: &LspInput,
     file_path: &Path,
 ) -> Result<LspExecutionResult> {
-    validate_lsp_input(file_path)?;
     let server = match resolve_lsp_server(resources, file_path) {
         LspServerResolution::Available(server) => server,
         LspServerResolution::Missing { extension, servers } => {
@@ -180,13 +181,23 @@ fn execute_lsp_inner(
     })
 }
 
-fn validate_lsp_input(file_path: &Path) -> Result<()> {
-    let metadata = fs::metadata(file_path)
+fn validate_lsp_input(cwd: &Path, file_path: &Path) -> Result<PathBuf> {
+    let canonical_cwd = fs::canonicalize(cwd)
+        .with_context(|| format!("failed to canonicalize {}", cwd.display()))?;
+    let canonical_file = fs::canonicalize(file_path)
         .with_context(|| format!("failed to stat {}", file_path.display()))?;
-    if !metadata.is_file() {
-        bail!("Path is not a file: {}", file_path.display());
+    if !canonical_file.starts_with(&canonical_cwd) {
+        bail!(
+            "LSP file path escapes workspace: {}",
+            canonical_file.display()
+        );
     }
-    Ok(())
+    let metadata = fs::metadata(&canonical_file)
+        .with_context(|| format!("failed to stat {}", canonical_file.display()))?;
+    if !metadata.is_file() {
+        bail!("Path is not a file: {}", canonical_file.display());
+    }
+    Ok(canonical_file)
 }
 
 fn run_lsp_operation(

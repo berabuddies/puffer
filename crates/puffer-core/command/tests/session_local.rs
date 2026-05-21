@@ -21,6 +21,7 @@ fn branch_forks_and_switches_current_session() {
             original_id,
             TranscriptEvent::UserMessage {
                 text: "Inspect the auth flow".to_string(),
+                actor: None,
             },
         )
         .unwrap();
@@ -66,6 +67,7 @@ fn branch_without_explicit_name_derives_branch_title_from_first_user_message() {
             original_id,
             TranscriptEvent::UserMessage {
                 text: "Inspect the auth flow".to_string(),
+                actor: None,
             },
         )
         .unwrap();

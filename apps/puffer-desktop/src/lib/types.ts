@@ -11,6 +11,26 @@ export type TimelineKind =
   | "diff"
   | "command";
 
+export type MessageActorKind =
+  | "user"
+  | "assistant"
+  | "agent"
+  | "subagent"
+  | "team_lead"
+  | "system"
+  | "runtime";
+
+export type MessageActor = {
+  kind: MessageActorKind;
+  id: string;
+  agentId?: string | null;
+  agentType?: string | null;
+  name?: string | null;
+  teamName?: string | null;
+  sessionId?: string | null;
+  parentSessionId?: string | null;
+};
+
 export type FolderGroup = {
   id: string;
   label: string;
@@ -110,6 +130,7 @@ type TimelineBase = {
   body: string;
   meta: string[];
   status?: string | null;
+  actor?: MessageActor | null;
 };
 
 export type MessageTimelineItem = TimelineBase & {
@@ -123,6 +144,7 @@ export type ToolTimelineItem = TimelineBase & {
   input: string;
   output: string;
   inputJson: Record<string, unknown> | null;
+  subject?: MessageActor | null;
 };
 
 export type PermissionTimelineItem = TimelineBase & {

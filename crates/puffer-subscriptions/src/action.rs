@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use puffer_subscriber_runtime::EventEnvelope;
 use rusqlite::{params, Connection};
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 static GLOBAL_OUTBOUND: OnceLock<Arc<dyn Outbound>> = OnceLock::new();
@@ -82,9 +82,9 @@ pub trait ActionDispatcher: Send + Sync {
 /// outbound has been installed (e.g. the binary is running without
 /// connector wiring) the action returns a clear error so the agent can
 /// surface it to the user.
-#[derive(Default)]
 pub struct BuiltinActionDispatcher {
     sqlite_pool: Mutex<Vec<(PathBuf, Connection)>>,
+    storage_root: PathBuf,
     /// Per-instance outbound override, used by tests. Production code
     /// installs the outbound process-globally via [`install_outbound`]
     /// so any dispatcher instance picks it up.
@@ -92,10 +92,29 @@ pub struct BuiltinActionDispatcher {
     workflow_runner: OnceLock<Arc<dyn WorkflowActionRunner>>,
 }
 
+impl Default for BuiltinActionDispatcher {
+    fn default() -> Self {
+        Self {
+            sqlite_pool: Mutex::new(Vec::new()),
+            storage_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            outbound: OnceLock::new(),
+            workflow_runner: OnceLock::new(),
+        }
+    }
+}
+
 impl BuiltinActionDispatcher {
     /// Constructs an empty dispatcher.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Constructs a dispatcher rooted at `storage_root` for relative file actions.
+    pub fn with_storage_root(storage_root: impl Into<PathBuf>) -> Self {
+        Self {
+            storage_root: storage_root.into(),
+            ..Self::default()
+        }
     }
 
     /// Installs an outbound implementation on this specific dispatcher
@@ -127,7 +146,7 @@ impl BuiltinActionDispatcher {
         table: &str,
         envelope: &EventEnvelope,
     ) -> Result<ActionResult> {
-        let absolute = expand_path(path)?;
+        let absolute = resolve_sqlite_path(&self.storage_root, path)?;
         let mut pool = self.sqlite_pool.lock().unwrap();
         if !pool.iter().any(|(p, _)| p == &absolute) {
             if let Some(parent) = absolute.parent() {
@@ -273,14 +292,25 @@ impl ActionDispatcher for BuiltinActionDispatcher {
     }
 }
 
-fn expand_path(path: &str) -> Result<PathBuf> {
-    if let Some(stripped) = path.strip_prefix("~/") {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .context("HOME is not set; cannot expand `~`")?;
-        return Ok(home.join(stripped));
+fn resolve_sqlite_path(storage_root: &Path, path: &str) -> Result<PathBuf> {
+    let raw = path.trim();
+    if raw.starts_with("~/") {
+        anyhow::bail!("sqlite_insert.path must be relative to subscription storage");
     }
-    Ok(PathBuf::from(path))
+    let candidate = Path::new(raw);
+    if candidate.is_absolute() || has_parent_component(candidate) {
+        anyhow::bail!("sqlite_insert.path must be a safe relative path");
+    }
+    Ok(storage_root.join(candidate))
+}
+
+fn has_parent_component(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    })
 }
 
 #[cfg(test)]
@@ -311,9 +341,9 @@ mod tests {
     fn sqlite_insert_creates_table_and_inserts_row() {
         let dir = tempdir().unwrap();
         let db = dir.path().join("x.db");
-        let dispatcher = BuiltinActionDispatcher::new();
+        let dispatcher = BuiltinActionDispatcher::with_storage_root(dir.path());
         let action = ActionSpec::SqliteInsert {
-            path: db.display().to_string(),
+            path: "x.db".to_string(),
             table: "ioc_messages".into(),
         };
         let result = dispatcher.dispatch(&action, &envelope("hello", json!({"chat":"@x"})));
@@ -323,6 +353,24 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM ioc_messages", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn sqlite_insert_rejects_absolute_and_traversal_paths() {
+        let dir = tempdir().unwrap();
+        let dispatcher = BuiltinActionDispatcher::with_storage_root(dir.path());
+        for path in [
+            "/tmp/puffer-subscriptions.db",
+            "~/puffer.db",
+            "../puffer.db",
+        ] {
+            let action = ActionSpec::SqliteInsert {
+                path: path.to_string(),
+                table: "ioc_messages".into(),
+            };
+            let result = dispatcher.dispatch(&action, &envelope("hello", json!({})));
+            assert!(!result.success, "{path} should be rejected");
+        }
     }
 
     struct RecordingOutbound {

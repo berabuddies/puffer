@@ -128,6 +128,33 @@ pub(crate) fn validate_path(allowed_roots: &[PathBuf], raw: &str) -> Result<Path
     Ok(canonical)
 }
 
+pub(crate) fn validate_write_path(allowed_roots: &[PathBuf], raw: &str) -> Result<PathBuf> {
+    let path = PathBuf::from(raw);
+    if !path.is_absolute() {
+        bail!("path must be absolute: {raw}");
+    }
+    if path.exists() {
+        let canonical = std::fs::canonicalize(&path)
+            .with_context(|| format!("path does not exist: {}", path.display()))?;
+        if !path_is_allowed(allowed_roots, &canonical) {
+            bail!("path escapes allowed roots: {}", canonical.display());
+        }
+        return Ok(canonical);
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("path has no parent: {}", path.display()))?;
+    let canonical_parent = std::fs::canonicalize(parent)
+        .with_context(|| format!("parent path does not exist: {}", parent.display()))?;
+    if !path_is_allowed(allowed_roots, &canonical_parent) {
+        bail!("path escapes allowed roots: {}", path.display());
+    }
+    let Some(name) = path.file_name() else {
+        bail!("path has no file name: {}", path.display());
+    };
+    Ok(canonical_parent.join(name))
+}
+
 pub(crate) fn path_is_allowed(allowed_roots: &[PathBuf], path: &Path) -> bool {
     allowed_roots
         .iter()

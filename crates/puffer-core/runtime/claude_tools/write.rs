@@ -396,10 +396,11 @@ mod tests {
     }
 
     #[test]
-    fn write_rejects_paths_outside_working_directories() {
+    fn write_rejects_paths_outside_default_writable_roots() {
+        // Path outside cwd, /tmp, $TMPDIR, and any /add-dir root.
+        // Codex-style default writable set: [cwd, /tmp, $TMPDIR, ...add-dir].
         let temp = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let path = outside.path().join("fresh.txt");
+        let path = std::path::PathBuf::from("/__puffer_test_outside_writable_set__/fresh.txt");
         let mut read_state = HashMap::new();
 
         let error = execute_claude_write_tool(
@@ -413,6 +414,40 @@ mod tests {
         .to_string();
 
         assert!(error.contains("outside the current working directories"));
+    }
+
+    #[test]
+    fn write_allows_paths_under_slash_tmp_under_workspace_write() {
+        // Codex-style default writable set includes /tmp on Unix, so the
+        // model writing to /tmp/<test>.txt should not bounce off the path
+        // gate the way it did pre-this-change.
+        if !cfg!(unix) || !std::path::Path::new("/tmp").is_dir() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let uniq = format!(
+            "puffer_test_{}_{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let path = std::path::PathBuf::from("/tmp").join(&uniq);
+        let mut read_state = HashMap::new();
+
+        let result = execute_claude_write_tool(
+            temp.path(),
+            &[],
+            &workspace_write_policy(),
+            write_input(&path, "hello"),
+            &mut read_state,
+        );
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            result.is_ok(),
+            "write to /tmp must succeed under workspace-write; got: {result:?}"
+        );
     }
 
     #[test]

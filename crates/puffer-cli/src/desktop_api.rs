@@ -5,7 +5,9 @@ use puffer_provider_registry::{
     ExternalImportSource, ProviderRegistry, StoredCredential,
 };
 use puffer_resources::LoadedResources;
-use puffer_session_store::{GitDiffSnapshot, SessionRecord, SessionStore, TranscriptEvent};
+use puffer_session_store::{
+    GitDiffSnapshot, MessageActor, SessionRecord, SessionStore, TranscriptEvent,
+};
 use puffer_workflow::WorkflowStore;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -958,33 +960,36 @@ fn timeline_items(record: &SessionRecord) -> Vec<TimelineItemDto> {
     let mut pending_assistant = None;
     for (index, event) in record.events.iter().enumerate() {
         match event {
-            TranscriptEvent::UserMessage { text } => {
+            TranscriptEvent::UserMessage { text, actor } => {
                 flush_pending_assistant(&mut items, &mut pending_assistant);
                 items.push(TimelineItemDto::UserMessage {
                     id: format!("timeline-{index}"),
                     text: text.clone(),
+                    actor: actor.clone(),
                 });
             }
-            TranscriptEvent::AssistantMessage { text } => {
+            TranscriptEvent::AssistantMessage { text, actor } => {
                 flush_pending_assistant(&mut items, &mut pending_assistant);
                 pending_assistant = Some(TimelineItemDto::AssistantMessage {
                     id: format!("timeline-{index}"),
                     text: text.clone(),
+                    actor: actor.clone(),
                 });
             }
-            TranscriptEvent::SystemMessage { text } => {
-                let parsed = parse_system_message(index, text);
+            TranscriptEvent::SystemMessage { text, actor } => {
+                let parsed = parse_system_message(index, text, actor.clone());
                 if parse_tool_message(text).is_none() {
                     flush_pending_assistant(&mut items, &mut pending_assistant);
                 }
                 items.extend(parsed);
             }
-            TranscriptEvent::CommandInvoked { name, args } => {
+            TranscriptEvent::CommandInvoked { name, args, actor } => {
                 flush_pending_assistant(&mut items, &mut pending_assistant);
                 items.push(TimelineItemDto::Command {
                     id: format!("timeline-{index}"),
                     command_name: name.clone(),
                     command_args: args.clone(),
+                    actor: actor.clone(),
                 })
             }
             TranscriptEvent::GitDiffSnapshot { snapshot } => {
@@ -999,18 +1004,42 @@ fn timeline_items(record: &SessionRecord) -> Vec<TimelineItemDto> {
                 items.push(TimelineItemDto::SystemMessage {
                     id: format!("timeline-{index}"),
                     text: format!("Session renamed to {name}."),
+                    actor: None,
                 })
             }
             TranscriptEvent::ToolInvocation {
-                call_id: _,
+                call_id,
                 tool_id,
                 input,
                 output,
                 success,
+                actor,
+                subject,
             } => {
                 let status = if *success { "ok" } else { "error" };
-                let text = format!("Tool {tool_id} [{status}]\ninput: {input}\n{output}");
-                items.extend(parse_system_message(index, &text))
+                let summary = summarize_tool_input(tool_id, input);
+                items.push(TimelineItemDto::ToolCall {
+                    id: format!("timeline-{index}-{call_id}"),
+                    tool_id: tool_id.clone(),
+                    status: status.to_string(),
+                    summary: summary.clone(),
+                    input_text: input.clone(),
+                    input_json: serde_json::from_str(input).ok(),
+                    output_text: output.clone(),
+                    actor: actor.clone(),
+                    subject: subject.clone(),
+                });
+                if let Some((state, reason)) = permission_state(output) {
+                    items.push(TimelineItemDto::PermissionDialog {
+                        id: format!("timeline-{index}-{call_id}-permission"),
+                        tool_id: tool_id.clone(),
+                        state: state.to_string(),
+                        summary,
+                        reason: reason.to_string(),
+                        input_text: Some(input.clone()),
+                        actor: actor.clone(),
+                    });
+                }
             }
             TranscriptEvent::TranscriptRewritten { .. } | TranscriptEvent::StateSnapshot { .. } => {
             }
@@ -1029,7 +1058,11 @@ fn flush_pending_assistant(
     }
 }
 
-fn parse_system_message(index: usize, text: &str) -> Vec<TimelineItemDto> {
+fn parse_system_message(
+    index: usize,
+    text: &str,
+    actor: Option<MessageActor>,
+) -> Vec<TimelineItemDto> {
     if let Some(parsed) = parse_tool_message(text) {
         let summary = summarize_tool_input(&parsed.tool_id, &parsed.input_text);
         let mut items = vec![TimelineItemDto::ToolCall {
@@ -1040,6 +1073,8 @@ fn parse_system_message(index: usize, text: &str) -> Vec<TimelineItemDto> {
             input_text: parsed.input_text.clone(),
             input_json: parsed.input_json,
             output_text: parsed.output_text.clone(),
+            actor: actor.clone(),
+            subject: None,
         }];
         if let Some((state, reason)) = permission_state(&parsed.output_text) {
             items.push(TimelineItemDto::PermissionDialog {
@@ -1049,6 +1084,7 @@ fn parse_system_message(index: usize, text: &str) -> Vec<TimelineItemDto> {
                 summary,
                 reason: reason.to_string(),
                 input_text: Some(parsed.input_text),
+                actor: actor.clone(),
             });
         }
         return items;
@@ -1056,6 +1092,7 @@ fn parse_system_message(index: usize, text: &str) -> Vec<TimelineItemDto> {
     vec![TimelineItemDto::SystemMessage {
         id: format!("timeline-{index}"),
         text: text.to_string(),
+        actor,
     }]
 }
 
@@ -1549,9 +1586,11 @@ mod tests {
         let items = timeline_items(&record(vec![
             TranscriptEvent::UserMessage {
                 text: "inspect this".to_string(),
+                actor: None,
             },
             TranscriptEvent::AssistantMessage {
                 text: "Here is what I found.".to_string(),
+                actor: None,
             },
             TranscriptEvent::ToolInvocation {
                 call_id: "call-1".to_string(),
@@ -1559,6 +1598,8 @@ mod tests {
                 input: r#"{"path":"Cargo.toml"}"#.to_string(),
                 output: "contents".to_string(),
                 success: true,
+                actor: None,
+                subject: None,
             },
         ]));
 
@@ -1571,6 +1612,7 @@ mod tests {
         let items = timeline_items(&record(vec![
             TranscriptEvent::UserMessage {
                 text: "inspect this".to_string(),
+                actor: None,
             },
             TranscriptEvent::ToolInvocation {
                 call_id: "call-1".to_string(),
@@ -1578,9 +1620,12 @@ mod tests {
                 input: r#"{"path":"Cargo.toml"}"#.to_string(),
                 output: "contents".to_string(),
                 success: true,
+                actor: None,
+                subject: None,
             },
             TranscriptEvent::AssistantMessage {
                 text: "Here is what I found.".to_string(),
+                actor: None,
             },
         ]));
 

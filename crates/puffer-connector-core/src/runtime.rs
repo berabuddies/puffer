@@ -179,6 +179,7 @@ impl ConnectorRuntimeInner {
             session_id,
             TranscriptEvent::UserMessage {
                 text: input.to_string(),
+                actor: Some(state.user_actor()),
             },
         )?;
 
@@ -195,6 +196,27 @@ impl ConnectorRuntimeInner {
             self.auth_store.save(&self.auth_path)?;
         }
 
+        for invocation in &turn.tool_invocations {
+            state.push_tool_invocation(
+                &invocation.call_id,
+                &invocation.tool_id,
+                &invocation.input,
+                &invocation.output,
+                invocation.success,
+            );
+            self.session_store.append_event(
+                session_id,
+                TranscriptEvent::ToolInvocation {
+                    call_id: invocation.call_id.clone(),
+                    tool_id: invocation.tool_id.clone(),
+                    input: invocation.input.clone(),
+                    output: invocation.output.clone(),
+                    success: invocation.success,
+                    actor: Some(state.assistant_actor()),
+                    subject: state.tool_subject_actor(&invocation.tool_id, &invocation.output),
+                },
+            )?;
+        }
         state.push_message(
             puffer_core::MessageRole::Assistant,
             turn.assistant_text.clone(),
@@ -203,6 +225,7 @@ impl ConnectorRuntimeInner {
             session_id,
             TranscriptEvent::AssistantMessage {
                 text: turn.assistant_text.clone(),
+                actor: Some(state.assistant_actor()),
             },
         )?;
         puffer_core::append_trace_events(&self.session_store, session_id, &turn.reflection_traces);

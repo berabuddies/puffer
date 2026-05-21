@@ -88,6 +88,13 @@ pub(crate) struct TuiState {
     /// Snapshot of the user's in-progress input at the moment they started
     /// navigating history, restored when they move past the newest entry.
     pub(crate) history_draft: Option<String>,
+    /// Timestamp of the most recent user keystroke. Auto-recap fires when
+    /// `now - last_user_input_at > config.recap.idle_secs` and the rest of
+    /// `puffer_core::recap::should_auto_trigger` passes.
+    pub(crate) last_user_input_at: std::time::Instant,
+    /// Count of user messages observed at the time the last recap (manual or
+    /// auto) was triggered. Feeds the cooldown check.
+    pub(crate) last_recap_user_msg_count: Option<usize>,
 }
 
 /// Carries one completed background provider turn back to the UI thread.
@@ -175,6 +182,8 @@ impl Default for TuiState {
             history: VecDeque::new(),
             history_cursor: None,
             history_draft: None,
+            last_user_input_at: std::time::Instant::now(),
+            last_recap_user_msg_count: None,
         }
     }
 }

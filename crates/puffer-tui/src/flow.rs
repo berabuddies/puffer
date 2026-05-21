@@ -276,6 +276,7 @@ pub(crate) fn handle_prompt_submit(
         state.session.id,
         TranscriptEvent::UserMessage {
             text: submitted.clone(),
+            actor: Some(state.user_actor()),
         },
     )?;
 
@@ -416,7 +417,10 @@ pub(crate) fn cancel_pending_submit(
     state.push_message(MessageRole::System, message.clone());
     session_store.append_event(
         state.session.id,
-        TranscriptEvent::SystemMessage { text: message },
+        TranscriptEvent::SystemMessage {
+            text: message,
+            actor: Some(state.system_actor()),
+        },
     )?;
     Ok(true)
 }
@@ -529,7 +533,10 @@ pub(crate) fn poll_pending_submit(
                         state.push_message(MessageRole::System, message.clone());
                         session_store.append_event(
                             state.session.id,
-                            TranscriptEvent::SystemMessage { text: message },
+                            TranscriptEvent::SystemMessage {
+                                text: message,
+                                actor: Some(state.system_actor()),
+                            },
                         )?;
                     }
                 }
@@ -574,7 +581,10 @@ pub(crate) fn poll_pending_submit(
                         state.push_message(MessageRole::System, message.clone());
                         session_store.append_event(
                             state.session.id,
-                            TranscriptEvent::SystemMessage { text: message },
+                            TranscriptEvent::SystemMessage {
+                                text: message,
+                                actor: Some(state.system_actor()),
+                            },
                         )?;
                     }
                 }
@@ -694,6 +704,7 @@ pub(crate) fn handle_submit(
         state.session.id,
         TranscriptEvent::UserMessage {
             text: submitted.clone(),
+            actor: Some(state.user_actor()),
         },
     )?;
 
@@ -706,6 +717,7 @@ pub(crate) fn handle_submit(
                 state.session.id,
                 TranscriptEvent::AssistantMessage {
                     text: turn.assistant_text,
+                    actor: Some(state.assistant_actor()),
                 },
             )?;
             if puffer_core::project_memory_turn_completed(state) {
@@ -717,7 +729,10 @@ pub(crate) fn handle_submit(
             state.push_message(MessageRole::System, message.clone());
             session_store.append_event(
                 state.session.id,
-                TranscriptEvent::SystemMessage { text: message },
+                TranscriptEvent::SystemMessage {
+                    text: message,
+                    actor: Some(state.system_actor()),
+                },
             )?;
         }
     }
@@ -783,6 +798,7 @@ fn finalize_assistant_text(
         state.session.id,
         TranscriptEvent::AssistantMessage {
             text: assistant_text.to_string(),
+            actor: Some(state.assistant_actor()),
         },
     )?;
     Ok(())
@@ -952,7 +968,13 @@ pub(crate) fn emit_system_message(
     text: String,
 ) -> Result<()> {
     state.push_message(MessageRole::System, text.clone());
-    session_store.append_event(state.session.id, TranscriptEvent::SystemMessage { text })?;
+    session_store.append_event(
+        state.session.id,
+        TranscriptEvent::SystemMessage {
+            text,
+            actor: Some(state.system_actor()),
+        },
+    )?;
     Ok(())
 }
 
@@ -1020,6 +1042,8 @@ pub(crate) fn append_tool_messages(
                 input: invocation.input.clone(),
                 output: invocation.output.clone(),
                 success: invocation.success,
+                actor: Some(state.assistant_actor()),
+                subject: state.tool_subject_actor(&invocation.tool_id, &invocation.output),
             },
         )?;
     }
@@ -1039,6 +1063,7 @@ pub(crate) fn execute_shell_shortcut(
         state.session.id,
         TranscriptEvent::UserMessage {
             text: rendered_command,
+            actor: Some(state.user_actor()),
         },
     )?;
 
@@ -1101,10 +1126,18 @@ pub(crate) fn execute_shell_shortcut(
         MessageRole::System
     };
     state.push_message(role, reply.clone());
-    session_store.append_event(
-        state.session.id,
-        TranscriptEvent::AssistantMessage { text: reply },
-    )?;
+    let event = if result.success {
+        TranscriptEvent::AssistantMessage {
+            text: reply,
+            actor: Some(state.assistant_actor()),
+        }
+    } else {
+        TranscriptEvent::SystemMessage {
+            text: reply,
+            actor: Some(state.system_actor()),
+        }
+    };
+    session_store.append_event(state.session.id, event)?;
     Ok(())
 }
 

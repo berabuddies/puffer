@@ -5,7 +5,8 @@ use crate::command_helpers::{
     handle_export_command, handle_fast_command, handle_goal_command, handle_hooks_command,
     handle_ide_command, handle_keybindings_command, handle_mcp_command, handle_memory_command,
     handle_model_command, handle_permissions_command, handle_plan_command, handle_plugin_command,
-    handle_reflect_command, handle_remote_control_command, handle_remote_env_command,
+    handle_recap_command, handle_reflect_command, handle_remote_control_command,
+    handle_remote_env_command,
     handle_resume_command, handle_sandbox_command, handle_session_command, handle_tag_command,
     handle_tasks_command, handle_terminal_setup_command, list_skills, persist_user_settings,
     record_command_checkpoint, reload_config_from_disk, remove_provider_credentials,
@@ -280,6 +281,13 @@ pub fn supported_commands() -> Vec<CommandSpec> {
         ),
         cmd("memory", &[], "Edit memory files", None, CommandKind::Ui),
         cmd(
+            "recap",
+            &[],
+            "Summarize the session in 1-2 sentences (transient, not persisted)",
+            None,
+            CommandKind::Local,
+        ),
+        cmd(
             "model",
             &[],
             "Select the active model",
@@ -517,6 +525,7 @@ pub fn dispatch_command(
             TranscriptEvent::CommandInvoked {
                 name: format!("skill:{skill_name}"),
                 args: args.to_string(),
+                actor: Some(state.user_actor()),
             },
         )?;
         execute_skill_command(
@@ -543,6 +552,7 @@ pub fn dispatch_command(
                 TranscriptEvent::CommandInvoked {
                     name: name.to_string(),
                     args: args.to_string(),
+                    actor: Some(state.user_actor()),
                 },
             )?;
             execute_skill_command(
@@ -564,6 +574,7 @@ pub fn dispatch_command(
         TranscriptEvent::CommandInvoked {
             name: command.name.to_string(),
             args: args.to_string(),
+            actor: Some(state.user_actor()),
         },
     )?;
 
@@ -630,6 +641,7 @@ fn execute_prompt_command(
                     state.session.id,
                     TranscriptEvent::AssistantMessage {
                         text: turn.assistant_text,
+                        actor: Some(state.assistant_actor()),
                     },
                 )?;
             }
@@ -736,6 +748,7 @@ fn execute_prompt_command(
         state.session.id,
         TranscriptEvent::UserMessage {
             text: rendered.clone(),
+            actor: Some(state.user_actor()),
         },
     )?;
 
@@ -755,6 +768,7 @@ fn execute_prompt_command(
                 state.session.id,
                 TranscriptEvent::AssistantMessage {
                     text: turn.assistant_text,
+                    actor: Some(state.assistant_actor()),
                 },
             )?;
             if command.name == "statusline" {
@@ -924,6 +938,7 @@ fn execute_local_command(
         "reflect" => handle_reflect_command(state, session_store, args),
         "agents" => handle_agents_command(state, session_store, args),
         "memory" => handle_memory_command(state, session_store, args),
+        "recap" => handle_recap_command(state, resources, providers, auth_store, session_store, args),
         "keybindings" => handle_keybindings_command(state, session_store),
         "remote-control" => handle_remote_control_command(state, session_store, args),
         "remote-env" => handle_remote_env_command(state, session_store, args),

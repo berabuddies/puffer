@@ -263,6 +263,26 @@ pub fn run_app(
                 tui.enqueue_prompt(notice);
             }
         }
+        // Auto-recap: when the user has stepped away (idle timer elapsed) and
+        // the skip checks pass, enqueue `/recap` so the existing slash-command
+        // dispatcher runs the side-turn and surfaces a 1-2 sentence summary.
+        if !tui.has_pending_submit() && tui.queued_prompts.is_empty() {
+            let idle_threshold = std::time::Duration::from_secs(state.config.recap.idle_secs);
+            let idle_elapsed = tui.last_user_input_at.elapsed();
+            if idle_elapsed >= idle_threshold
+                && puffer_core::recap::should_auto_trigger(
+                    state,
+                    tui.last_recap_user_msg_count,
+                    &tui.input,
+                )
+            {
+                tui.enqueue_prompt("/recap".to_string());
+                tui.last_recap_user_msg_count = Some(puffer_core::recap::count_user_messages(state));
+                // Reset idle timer so we don't fire again immediately when the
+                // user keeps the terminal unfocused after the recap shows up.
+                tui.last_user_input_at = std::time::Instant::now();
+            }
+        }
         if !tui.has_pending_submit() && !tui.queued_prompts.is_empty() {
             submit_next_queued_prompt(
                 state,
@@ -453,6 +473,9 @@ fn handle_key(
     tui: &mut TuiState,
     no_alt_screen: bool,
 ) -> Result<bool> {
+    // Reset the recap idle timer on any keystroke. Auto-recap fires only
+    // after `config.recap.idle_secs` have elapsed since the last keystroke.
+    tui.last_user_input_at = std::time::Instant::now();
     if tui.overlay.is_some() {
         return handle_overlay_key(
             key,

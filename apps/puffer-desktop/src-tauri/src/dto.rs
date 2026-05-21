@@ -1,3 +1,4 @@
+use puffer_session_store::MessageActor;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -44,14 +45,20 @@ pub enum TimelineItemDto {
     UserMessage {
         id: String,
         text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        actor: Option<MessageActor>,
     },
     AssistantMessage {
         id: String,
         text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        actor: Option<MessageActor>,
     },
     SystemMessage {
         id: String,
         text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        actor: Option<MessageActor>,
     },
     ToolCall {
         id: String,
@@ -61,11 +68,17 @@ pub enum TimelineItemDto {
         input_json: Option<Value>,
         output_text: String,
         permission_dialog: Option<PermissionDialogDto>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        actor: Option<MessageActor>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        subject: Option<MessageActor>,
     },
     CommandInvoked {
         id: String,
         name: String,
         args: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        actor: Option<MessageActor>,
     },
     SessionRenamed {
         id: String,

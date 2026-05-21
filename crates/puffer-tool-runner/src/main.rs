@@ -23,6 +23,10 @@ struct Args {
     #[arg(long)]
     token: Option<String>,
 
+    /// Allow unauthenticated RPCs. Intended only for local tests.
+    #[arg(long)]
+    allow_unauthenticated: bool,
+
     /// Working directory for tool execution. Also added to the sandbox roots.
     #[arg(long)]
     cwd: Option<PathBuf>,
@@ -31,9 +35,11 @@ struct Args {
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let token = args
-        .token
-        .or_else(|| std::env::var("PUFFER_RUNNER_TOKEN").ok());
+    let token = resolve_auth_token(
+        args.token.clone(),
+        std::env::var("PUFFER_RUNNER_TOKEN").ok(),
+        args.allow_unauthenticated,
+    )?;
 
     let cwd = resolve_cwd(args.cwd)?;
 
@@ -72,4 +78,42 @@ async fn main() -> Result<()> {
         .context("server")?;
 
     Ok(())
+}
+
+fn resolve_auth_token(
+    cli_token: Option<String>,
+    env_token: Option<String>,
+    allow_unauthenticated: bool,
+) -> Result<Option<String>> {
+    let token = cli_token
+        .or(env_token)
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty());
+    if token.is_none() && !allow_unauthenticated {
+        anyhow::bail!(
+            "puffer-tool-runner requires --token or PUFFER_RUNNER_TOKEN; pass --allow-unauthenticated only for local tests"
+        );
+    }
+    Ok(token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_auth_token;
+
+    #[test]
+    fn auth_token_is_required_by_default() {
+        let error = resolve_auth_token(None, None, false).unwrap_err();
+
+        assert!(error.to_string().contains("requires --token"));
+    }
+
+    #[test]
+    fn auth_token_can_come_from_env_or_explicit_test_override() {
+        assert_eq!(
+            resolve_auth_token(None, Some(" env-token ".to_string()), false).unwrap(),
+            Some("env-token".to_string())
+        );
+        assert_eq!(resolve_auth_token(None, None, true).unwrap(), None);
+    }
 }

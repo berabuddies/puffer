@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::{Component, Path};
 
 /// A single subscription installed by the agent.
 ///
@@ -132,6 +133,9 @@ pub fn validate_spec(spec: &SubscriptionSpec) -> Result<(), String> {
             if path.trim().is_empty() {
                 return Err("sqlite_insert.path must not be empty".into());
             }
+            if !is_safe_relative_path(path) {
+                return Err("sqlite_insert.path must be a safe relative path".into());
+            }
             if !is_valid_sqlite_identifier(table) {
                 return Err(format!(
                     "sqlite_insert.table `{table}` is not a valid SQL identifier"
@@ -169,6 +173,21 @@ pub(crate) fn is_valid_sqlite_identifier(s: &str) -> bool {
         _ => return false,
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn is_safe_relative_path(path: &str) -> bool {
+    let trimmed = path.trim();
+    if trimmed.starts_with("~/") {
+        return false;
+    }
+    let path = Path::new(trimmed);
+    !path.is_absolute()
+        && !path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
 }
 
 /// Render `template` against the matched event payload. Supported tokens:
@@ -226,7 +245,7 @@ mod tests {
             classify_prompt: None,
             classify_model: None,
             action: ActionSpec::SqliteInsert {
-                path: "/tmp/x.db".into(),
+                path: "x.db".into(),
                 table: "ioc_messages".into(),
             },
             created_at_ms: 0,
@@ -245,12 +264,33 @@ mod tests {
             classify_prompt: None,
             classify_model: None,
             action: ActionSpec::SqliteInsert {
-                path: "/tmp/x.db".into(),
+                path: "x.db".into(),
                 table: "drop table users--".into(),
             },
             created_at_ms: 0,
         };
         assert!(validate_spec(&spec).is_err());
+    }
+
+    #[test]
+    fn rejects_absolute_or_traversal_sqlite_path() {
+        for path in ["/tmp/x.db", "~/x.db", "../x.db"] {
+            let spec = SubscriptionSpec {
+                id: "x".into(),
+                description: String::new(),
+                source_topic: "t".into(),
+                status: SubscriptionStatus::Enabled,
+                prefilter: None,
+                classify_prompt: None,
+                classify_model: None,
+                action: ActionSpec::SqliteInsert {
+                    path: path.into(),
+                    table: "ioc_messages".into(),
+                },
+                created_at_ms: 0,
+            };
+            assert!(validate_spec(&spec).is_err(), "{path} should be rejected");
+        }
     }
 
     #[test]

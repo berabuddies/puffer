@@ -43,6 +43,31 @@ fn execute_lsp_uses_real_stdio_session_for_hover() {
 }
 
 #[test]
+fn execute_lsp_rejects_file_outside_workspace() {
+    let workspace = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    let source = outside.path().join("main.rs");
+    fs::write(&source, "fn main() {}\n").unwrap();
+
+    let output = execute_lsp(
+        &LoadedResources::default(),
+        workspace.path(),
+        json!({
+            "operation": "hover",
+            "filePath": source.display().to_string(),
+            "line": 1,
+            "character": 4,
+        }),
+    )
+    .unwrap();
+
+    let parsed: Value = serde_json::from_str(&output).unwrap();
+    assert!(parsed["result"]
+        .as_str()
+        .is_some_and(|value| value.contains("escapes workspace")));
+}
+
+#[test]
 fn execute_lsp_runs_call_hierarchy_and_workspace_symbol_requests() {
     let _guard = test_env_lock().lock().unwrap();
     let temp = tempdir().unwrap();

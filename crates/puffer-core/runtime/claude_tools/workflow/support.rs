@@ -1,11 +1,11 @@
 use super::store::{
     agents_path, append_agent_message, claude_task_dir, detect_powershell_binary,
-    find_team_for_session, git_ahead_count, git_dirty, git_head_commit, git_toplevel, is_git_repo,
-    load_store, messages_path, next_task_id, now_ms, register_team_member,
-    remove_claude_team_artifacts, resolve_recipients, save_store, shutdown_requests_path,
-    task_output_path, tasks_path, team_lead_agent_id, teams_path, todos_path,
-    validate_ask_user_questions, workflow_root, worktrees_path, write_claude_team_file, AgentInput,
-    AgentStore, AskUserQuestionInput, ClaudeTeamFile, ClaudeTeamMember, ConfigInput,
+    ensure_safe_identifier, find_team_for_session, git_ahead_count, git_dirty, git_head_commit,
+    git_toplevel, is_git_repo, load_store, messages_path, next_task_id, now_ms,
+    register_team_member, remove_claude_team_artifacts, resolve_recipients, save_store,
+    shutdown_requests_path, task_output_path, tasks_path, team_lead_agent_id, teams_path,
+    todos_path, validate_ask_user_questions, workflow_root, worktrees_path, write_claude_team_file,
+    AgentInput, AgentStore, AskUserQuestionInput, ClaudeTeamFile, ClaudeTeamMember, ConfigInput,
     EnterWorktreeInput, ExitWorktreeInput, MessageStore, PendingShutdownRequest, PowerShellInput,
     SendMessageInput, ShutdownRequestStore, StoredAgent, StoredMessage, StoredTask, StoredTeam,
     StoredTodo, StoredWorktree, TaskStore, TeamCreateInput, TeamStore, TodoStore, TodoWriteInput,
@@ -13,13 +13,14 @@ use super::store::{
 };
 use super::task_runtime::{terminal_task_status, validate_todos, wait_for_child_output};
 use crate::config_settings::{
-    config_setting_path, config_setting_scope, get_config_value, persist_config_setting,
-    scope_label, set_config_value,
+    config_setting_path, config_setting_scope, get_config_value, normalize_config_key,
+    persist_config_setting, scope_label, set_config_value,
 };
 use crate::runtime::permission_prompt::{prompt_for_user_question, UserQuestionPromptRequest};
 use crate::AppState;
 use anyhow::{anyhow, bail, Context, Result};
 use puffer_config::{ensure_workspace_dirs, ConfigPaths};
+use puffer_session_store::MessageActor;
 use serde_json::{json, Value};
 use std::fs;
 use std::fs::OpenOptions;
@@ -163,11 +164,8 @@ pub(super) fn execute_send_message(
     }
 
     // --- Sender identity ---
-    let from = if let Some(ref team_name) = state.active_team_name {
-        team_lead_agent_id(team_name)
-    } else {
-        "user".to_string()
-    };
+    let from = state.workflow_sender_id();
+    let actor = Some(state.assistant_actor());
 
     let store_cwd = state.session.cwd.as_path();
     let recipients = resolve_recipients(store_cwd, state.active_team_name.as_deref(), &to)?;
@@ -184,13 +182,13 @@ pub(super) fn execute_send_message(
 
     match message_type.as_deref() {
         Some("shutdown_request") => {
-            return handle_shutdown_request(store_cwd, &from, &recipients, &parsed);
+            return handle_shutdown_request(store_cwd, &from, &recipients, &parsed, actor);
         }
         Some("shutdown_response") => {
-            return handle_shutdown_response(store_cwd, &from, &parsed);
+            return handle_shutdown_response(store_cwd, &from, &parsed, actor);
         }
         Some("plan_approval_response") => {
-            return handle_plan_approval_response(store_cwd, &from, &recipients, &parsed);
+            return handle_plan_approval_response(store_cwd, &from, &recipients, &parsed, actor);
         }
         _ => {}
     }
@@ -210,6 +208,7 @@ pub(super) fn execute_send_message(
             read: false,
             summary: parsed.summary.clone(),
             message: parsed.message.clone(),
+            actor: actor.clone(),
             created_at_ms: now_ms(),
         };
         // Try in-process delivery via teammate registry.
@@ -262,6 +261,7 @@ fn handle_shutdown_request(
     from: &str,
     recipients: &[String],
     parsed: &SendMessageInput,
+    actor: Option<MessageActor>,
 ) -> Result<String> {
     let request_id = format!("shutdown-{}", Uuid::new_v4().simple());
     let reason = parsed
@@ -299,6 +299,7 @@ fn handle_shutdown_request(
             read: false,
             summary: Some("shutdown request".to_string()),
             message: enriched.clone(),
+            actor: actor.clone(),
             created_at_ms: now_ms(),
         });
         if let Some(agent) = agents
@@ -323,6 +324,7 @@ fn handle_shutdown_response(
     store_cwd: &Path,
     from: &str,
     parsed: &SendMessageInput,
+    actor: Option<MessageActor>,
 ) -> Result<String> {
     let request_id = parsed
         .message
@@ -383,6 +385,7 @@ fn handle_shutdown_response(
             "shutdown rejected".to_string()
         }),
         message: response_msg,
+        actor,
         created_at_ms: now_ms(),
     });
     save_store(&messages_path(store_cwd), &messages)?;
@@ -400,6 +403,7 @@ fn handle_plan_approval_response(
     from: &str,
     recipients: &[String],
     parsed: &SendMessageInput,
+    actor: Option<MessageActor>,
 ) -> Result<String> {
     let request_id = parsed
         .message
@@ -439,6 +443,7 @@ fn handle_plan_approval_response(
                 format!("plan rejected: {}", feedback.as_deref().unwrap_or(""))
             }),
             message: response_msg.clone(),
+            actor: actor.clone(),
             created_at_ms: now_ms(),
         });
         if let Some(agent) = agents
@@ -468,9 +473,7 @@ pub(super) fn execute_team_create(
     let parsed: TeamCreateInput =
         serde_json::from_value(input).context("invalid TeamCreate input")?;
     let requested_team_name = parsed.team_name.trim();
-    if requested_team_name.is_empty() {
-        bail!("team_name is required for TeamCreate");
-    }
+    ensure_safe_identifier(requested_team_name, "team_name")?;
     let store_cwd = state.session.cwd.as_path();
     if let Some(existing_team_name) = current_team_name(state).map(str::to_string).or_else(|| {
         find_team_for_session(store_cwd, &state.session.id.to_string())
@@ -808,8 +811,10 @@ pub(super) fn execute_enter_worktree(
     }
     let worktree_name = parsed
         .name
-        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
         .unwrap_or_else(|| format!("worktree-{}", Uuid::new_v4().simple()));
+    ensure_safe_identifier(&worktree_name, "worktree name")?;
     if store
         .worktrees
         .iter()
@@ -947,6 +952,10 @@ pub(super) fn execute_config(state: &mut AppState, cwd: &Path, input: Value) -> 
     let storage_path = config_setting_path(&paths, &parsed.setting)?;
     if has_value {
         let value = parsed.value.unwrap_or(Value::Null);
+        if normalize_config_key(&parsed.setting) == Some("status_line_command") && !value.is_null()
+        {
+            bail!("Config tool cannot set executable status_line_command");
+        }
         set_config_value(state, &parsed.setting, value)?;
         let _ = persist_config_setting(&paths, state, &parsed.setting)?;
     }

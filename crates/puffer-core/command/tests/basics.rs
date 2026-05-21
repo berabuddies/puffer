@@ -95,6 +95,7 @@ fn app_state_defaults_expose_command_state() {
             effort_level: None,
             copy_full_response: false,
             memory: puffer_config::MemoryConfig::default(),
+            recap: puffer_config::RecapConfig::default(),
             mascot: MascotConfig {
                 id: "clawd".to_string(),
                 display_name: "Clawd".to_string(),

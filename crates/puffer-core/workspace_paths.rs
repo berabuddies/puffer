@@ -217,14 +217,50 @@ pub(crate) fn sandbox_allows_all_paths(sandbox_mode: &str) -> bool {
     sandbox_mode.trim() == "danger-full-access"
 }
 
-/// Returns the normalized primary workspace root plus any distinct additional roots.
+/// Returns the normalized primary workspace root plus any distinct
+/// additional roots.
+///
+/// Default writable set mirrors codex's
+/// [`SandboxPolicy::WorkspaceWrite::get_writable_roots_with_cwd`]
+/// (`openai/codex` `codex-rs/protocol/src/protocol.rs::1156-1210`):
+///
+///   * the primary `cwd`
+///   * `/tmp` on Unix (the standard ephemeral scratch location every
+///     coding agent's training data assumes is writable)
+///   * `$TMPDIR` when set (per-user on macOS, opt-in elsewhere)
+///   * any explicit `/add-dir` roots the user added at runtime
+///
+/// Including `/tmp` and `$TMPDIR` here removes the need for the old
+/// puffer-only "scratchpad" advertisement (commit `5e7251c`), which
+/// asked the model to write to `~/.puffer/scratchpad/<sid>/` despite
+/// the path sandbox always rejecting that path. The result was 1800+
+/// empty scratchpad dirs accumulated on disk, plus broken nested
+/// subagent dispatch (see PR #119). With this change the model can
+/// follow standard Unix scratch conventions and `workspace-write`
+/// sandbox mode actually permits it.
 pub(crate) fn workspace_roots(cwd: &Path, additional_roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     let mut seen = BTreeSet::new();
-    for root in std::iter::once(cwd).chain(additional_roots.iter().map(PathBuf::as_path)) {
-        let normalized = normalize_user_path(cwd, root.to_string_lossy().as_ref());
+    let mut push_root = |raw: &Path| {
+        let normalized = normalize_user_path(cwd, raw.to_string_lossy().as_ref());
         if seen.insert(normalized.clone()) {
             roots.push(normalized);
+        }
+    };
+    push_root(cwd);
+    for root in additional_roots {
+        push_root(root.as_path());
+    }
+    // Default ephemeral scratch locations the model is trained to use.
+    if cfg!(unix) {
+        let slash_tmp = Path::new("/tmp");
+        if slash_tmp.is_dir() {
+            push_root(slash_tmp);
+        }
+    }
+    if let Some(tmpdir) = std::env::var_os("TMPDIR") {
+        if !tmpdir.is_empty() {
+            push_root(Path::new(&tmpdir));
         }
     }
     roots
@@ -352,5 +388,60 @@ mod tests {
             resolve_path_for_session(&cwd, &[], "danger-full-access", Path::new(&outside)).unwrap();
 
         assert_eq!(resolved, outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_roots_default_set_includes_slash_tmp() {
+        use super::workspace_roots;
+        use std::path::PathBuf;
+        let cwd = tempdir().unwrap();
+        let roots = workspace_roots(cwd.path(), &[]);
+        assert!(
+            roots.contains(&PathBuf::from("/tmp")) || !std::path::Path::new("/tmp").is_dir(),
+            "default writable set must include /tmp on Unix when it exists; got {roots:?}"
+        );
+    }
+
+    #[test]
+    fn workspace_roots_default_set_includes_tmpdir_env_when_set() {
+        use super::workspace_roots;
+        use std::path::PathBuf;
+        let _guard = crate::test_locks::env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let temp = tempdir().unwrap();
+        let original = std::env::var_os("TMPDIR");
+        std::env::set_var("TMPDIR", temp.path());
+
+        let cwd = tempdir().unwrap();
+        let roots = workspace_roots(cwd.path(), &[]);
+        let normalized = PathBuf::from(temp.path());
+
+        match original {
+            Some(value) => std::env::set_var("TMPDIR", value),
+            None => std::env::remove_var("TMPDIR"),
+        }
+
+        assert!(
+            roots.iter().any(|root| root == &normalized),
+            "default writable set must include $TMPDIR when set; got {roots:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_path_in_workspaces_rejects_path_clearly_outside_default_writable_set() {
+        let temp = tempdir().unwrap();
+        let err = resolve_path_in_workspaces(
+            temp.path(),
+            &[],
+            Path::new("/__puffer_test_outside_writable_set__/foo.txt"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("outside the current working directories"),
+            "expected reject error; got: {err}"
+        );
     }
 }

@@ -194,8 +194,10 @@ pub(crate) fn run_benchmark_command(
         session_id,
         TranscriptEvent::UserMessage {
             text: prompt.clone(),
+            actor: Some(state.user_actor()),
         },
     );
+    let benchmark_actor = state.assistant_actor();
 
     // Write streaming events to trajectory file incrementally so progress
     // is observable and partial results survive crashes.
@@ -239,7 +241,10 @@ pub(crate) fn run_benchmark_command(
                         };
                         let _ = session_store.append_event(
                             session_id,
-                            TranscriptEvent::SystemMessage { text: rendered },
+                            TranscriptEvent::SystemMessage {
+                                text: rendered,
+                                actor: Some(benchmark_actor.clone()),
+                            },
                         );
                     }
                     // Write to incremental trajectory
@@ -268,7 +273,10 @@ pub(crate) fn run_benchmark_command(
                     let rendered = format!("Reflection checkpoint\n{summary}");
                     let _ = session_store.append_event(
                         session_id,
-                        TranscriptEvent::SystemMessage { text: rendered },
+                        TranscriptEvent::SystemMessage {
+                            text: rendered,
+                            actor: Some(benchmark_actor.clone()),
+                        },
                     );
                     if let Some(lock) = incremental_ref {
                         if let Ok(mut f) = lock.lock() {
@@ -371,6 +379,7 @@ pub(crate) fn run_benchmark_command(
                 session_id,
                 TranscriptEvent::AssistantMessage {
                     text: turn.assistant_text.clone(),
+                    actor: Some(benchmark_actor.clone()),
                 },
             );
             write_benchmark_artifacts(

@@ -156,6 +156,7 @@ fn capture_tmux_turn(size: TerminalSize) -> String {
             session.id,
             TranscriptEvent::UserMessage {
                 text: "Review the current worktree and call out any risks.".to_string(),
+                actor: None,
             },
         )
         .unwrap();
@@ -165,6 +166,7 @@ fn capture_tmux_turn(size: TerminalSize) -> String {
             TranscriptEvent::AssistantMessage {
                 text: "The working tree is clean.\n\nNo pending changes are waiting for review."
                     .to_string(),
+                actor: None,
             },
         )
         .unwrap();

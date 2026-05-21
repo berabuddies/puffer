@@ -696,7 +696,11 @@ mod tests {
     }
 
     #[test]
-    fn grep_rejects_working_directory_escape() {
+    fn grep_rejects_paths_outside_default_writable_roots() {
+        // Absolute path outside cwd, /tmp, $TMPDIR, /add-dir. ("../" no
+        // longer works because tempdir lives in $TMPDIR and so does its
+        // parent. Codex-style default writable set now covers /tmp +
+        // $TMPDIR explicitly.)
         let temp = tempfile::tempdir().unwrap();
         let error = execute_claude_grep(
             temp.path(),
@@ -704,7 +708,7 @@ mod tests {
             &workspace_write_policy(),
             json!({
                 "pattern": "abc",
-                "path": "../"
+                "path": "/__puffer_test_outside_writable_set__/"
             }),
         )
         .unwrap_err()

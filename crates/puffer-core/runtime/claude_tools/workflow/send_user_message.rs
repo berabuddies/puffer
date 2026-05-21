@@ -6,7 +6,7 @@ use std::path::Path;
 use uuid::Uuid;
 
 use super::store::{
-    load_store, messages_path, now_ms, resolve_path, save_store, MessageStore,
+    load_store, messages_path, now_ms, resolve_path, save_store, team_lead_agent_id, MessageStore,
     SendUserMessageInput, StoredMessage,
 };
 
@@ -34,10 +34,17 @@ pub fn execute_send_user_message(state: &mut AppState, cwd: &Path, input: Value)
         }
     }
     let mut messages = load_store::<MessageStore>(&messages_path(state.session.cwd.as_path()))?;
+    let from = if let Some(actor) = state.current_actor.as_ref() {
+        actor.agent_id.clone().unwrap_or_else(|| actor.id.clone())
+    } else if let Some(team_name) = state.active_team_name.as_deref() {
+        team_lead_agent_id(team_name)
+    } else {
+        "assistant".to_string()
+    };
     messages.messages.push(StoredMessage {
         id: format!("user-msg-{}", Uuid::new_v4().simple()),
         to: "user".to_string(),
-        from: "assistant".to_string(),
+        from,
         read: false,
         summary: Some(parsed.status.clone()),
         message: json!({
@@ -48,6 +55,7 @@ pub fn execute_send_user_message(state: &mut AppState, cwd: &Path, input: Value)
                 .collect::<Vec<_>>(),
             "status": parsed.status,
         }),
+        actor: Some(state.assistant_actor()),
         created_at_ms: now_ms(),
     });
     save_store(&messages_path(state.session.cwd.as_path()), &messages)?;

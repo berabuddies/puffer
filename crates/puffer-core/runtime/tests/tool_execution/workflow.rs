@@ -110,10 +110,10 @@ fn config_tool_allows_null_to_clear_openai_map_settings() {
 }
 
 #[test]
-fn config_tool_supports_camel_case_aliases_and_status_line_settings() {
+fn config_tool_rejects_status_line_command_writes() {
     let mut state = temp_state();
     let cwd = state.cwd.clone();
-    let output = crate::runtime::claude_tools::workflow::config::execute_config(
+    let error = crate::runtime::claude_tools::workflow::config::execute_config(
         &mut state,
         &cwd,
         json!({
@@ -121,21 +121,33 @@ fn config_tool_supports_camel_case_aliases_and_status_line_settings() {
             "value": "echo status"
         }),
     )
+    .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("cannot set executable status_line_command"));
+    assert!(state.config.ui.status_line.is_none());
+}
+
+#[test]
+fn config_tool_can_read_status_line_command() {
+    let mut state = temp_state();
+    state.config.ui.status_line = Some(puffer_config::StatusLineConfig {
+        command: "echo status".to_string(),
+        padding: 0,
+    });
+    let cwd = state.cwd.clone();
+    let output = crate::runtime::claude_tools::workflow::config::execute_config(
+        &mut state,
+        &cwd,
+        json!({
+            "setting": "statusLineCommand"
+        }),
+    )
     .unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
-    assert_eq!(parsed["success"], true);
-    assert_eq!(parsed["scope"], "workspace");
-    assert_eq!(parsed["persisted"], true);
+    assert_eq!(parsed["operation"], "get");
     assert_eq!(parsed["value"], "echo status");
-    assert_eq!(
-        state
-            .config
-            .ui
-            .status_line
-            .as_ref()
-            .map(|status_line| status_line.command.as_str()),
-        Some("echo status")
-    );
 }
 
 #[test]
@@ -413,6 +425,38 @@ fn team_create_makes_dirs_and_team_delete_removes_them() {
 }
 
 #[test]
+fn team_create_rejects_path_components_in_team_name() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let error = crate::runtime::claude_tools::workflow::team_create::execute_team_create(
+        &mut state,
+        &cwd,
+        json!({ "team_name": "../outside" }),
+    )
+    .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("simple identifier without path components"));
+}
+
+#[test]
+fn enter_worktree_rejects_path_components_in_name() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let error = crate::runtime::claude_tools::workflow::enter_worktree::execute_enter_worktree(
+        &mut state,
+        &cwd,
+        json!({ "name": "../outside" }),
+    )
+    .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("simple identifier without path components"));
+}
+
+#[test]
 fn team_delete_only_removes_the_current_session_team() {
     let tempdir = tempfile::tempdir().unwrap();
     let _lock = puffer_home_lock().lock().unwrap();
@@ -590,6 +634,25 @@ fn task_output_waits_for_agent_completion() {
 }
 
 #[test]
+fn task_output_rejects_path_components_in_task_id() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let error = crate::runtime::claude_tools::workflow::task_output::execute_task_output(
+        &mut state,
+        &cwd,
+        json!({
+            "task_id": "../agent-output",
+            "block": false
+        }),
+    )
+    .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("simple identifier without path components"));
+}
+
+#[test]
 fn task_stop_rejects_non_background_tasks() {
     let mut state = temp_state();
     let cwd = state.cwd.clone();
@@ -617,4 +680,20 @@ fn task_stop_rejects_non_background_tasks() {
     assert!(error
         .to_string()
         .contains("is not a running background task"));
+}
+
+#[test]
+fn task_stop_rejects_unrecorded_shell_pid() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let error = crate::runtime::claude_tools::workflow::task_stop::execute_task_stop(
+        &mut state,
+        &cwd,
+        json!({
+            "task_id": "shell-1"
+        }),
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("unknown task `shell-1`"));
 }
