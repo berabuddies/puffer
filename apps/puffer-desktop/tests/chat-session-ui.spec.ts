@@ -7,6 +7,15 @@ async function openSession(page: Page, name: RegExp): Promise<void> {
   await page.getByRole("button", { name }).first().click();
 }
 
+async function reconnectBackend(page: Page, daemon: FakeDaemon): Promise<void> {
+  await daemon.dropConnections();
+  const banner = page.locator(".connection-banner");
+  await expect(banner).toContainText("Puffer backend disconnected.");
+  daemon.allowConnections();
+  await banner.getByRole("button", { name: "Reconnect backend" }).click();
+  await expect(page.locator(".connection-banner")).toHaveCount(0);
+}
+
 test("turn completion reload does not leak live chat into a newly selected session", async ({
   page
 }) => {
@@ -2532,7 +2541,7 @@ test("daemon-running background sessions receive approval events", async ({ page
         updatedAtMs: baseTime - 1_000,
         createdAtMs: baseTime - 120_000,
         eventCount: 0,
-        activityStatus: "idle",
+        activityStatus: "running",
         providerId: "codex",
         modelId: "test-model",
         timeline: []
@@ -4185,6 +4194,199 @@ test("lost turn-start response clears pending start after idle reconnect", async
   expect(retryRequest.params).toMatchObject({
     sessionId: "session-lost-start"
   });
+});
+
+test("permission prompt remains actionable after backend reconnect", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-permission-reconnect",
+        displayName: "Permission reconnect",
+        title: "Permission reconnect",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        activityStatus: "idle",
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Permission reconnect/);
+  await page.locator(".pf-composer textarea").fill("Need approval after reconnect");
+  await page.getByRole("button", { name: "Send" }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.sessionId === "session-permission-reconnect"
+  );
+
+  await reconnectBackend(page, daemon);
+  daemon.emit("session:session-permission-reconnect:event", {
+    type: "permission-request",
+    turnId: "turn-session-permission-reconnect",
+    requestId: "permission-after-reconnect",
+    toolId: "edit",
+    summary: "Approval needed after reconnect",
+    reason: "Reconnect approval probe"
+  });
+
+  await expect(page.getByText("Approval needed")).toBeVisible();
+  await page.getByRole("button", { name: "Allow once" }).click();
+  const request = await daemon.waitForRequest("resolve_permission");
+  expect(request.params).toMatchObject({
+    turnId: "turn-session-permission-reconnect",
+    requestId: "permission-after-reconnect",
+    action: "allow_once"
+  });
+});
+
+test("question prompt remains actionable after backend reconnect", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-question-reconnect",
+        displayName: "Question reconnect",
+        title: "Question reconnect",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        activityStatus: "idle",
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Question reconnect/);
+  await page.locator(".pf-composer textarea").fill("Ask after reconnect");
+  await page.getByRole("button", { name: "Send" }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.sessionId === "session-question-reconnect"
+  );
+
+  await reconnectBackend(page, daemon);
+  daemon.emit("session:session-question-reconnect:event", {
+    type: "user-question-request",
+    turnId: "turn-session-question-reconnect",
+    requestId: "question-after-reconnect",
+    questions: [
+      {
+        question: "Which path should I use?",
+        header: "Path",
+        options: [{ label: "src", description: "Source tree" }]
+      }
+    ]
+  });
+
+  await expect(page.getByText("Which path should I use?")).toBeVisible();
+  await page.locator(".pf-question-option").filter({ hasText: "src" }).click();
+  await page.getByRole("button", { name: "Send answer" }).click();
+  const request = await daemon.waitForRequest("resolve_user_question");
+  expect(request.params).toMatchObject({
+    turnId: "turn-session-question-reconnect",
+    requestId: "question-after-reconnect"
+  });
+});
+
+test("turn cancellation completion restores send after backend reconnect", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-cancel-reconnect",
+        displayName: "Cancel reconnect",
+        title: "Cancel reconnect",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        activityStatus: "idle",
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Cancel reconnect/);
+  await page.locator(".pf-composer textarea").fill("Cancel around reconnect");
+  await page.getByRole("button", { name: "Send" }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.sessionId === "session-cancel-reconnect"
+  );
+  await page.getByRole("button", { name: "Stop turn" }).click();
+  await daemon.waitForRequest(
+    "cancel_turn",
+    (request) => request.params.turnId === "turn-session-cancel-reconnect"
+  );
+
+  await reconnectBackend(page, daemon);
+  daemon.emit("session:session-cancel-reconnect:event", {
+    type: "turn-error",
+    turnId: "turn-session-cancel-reconnect",
+    error: "cancelled"
+  });
+
+  await expect(page.getByRole("button", { name: "Stop turn" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
+  await expect(page.locator(".pf-composer textarea")).toBeEnabled();
+});
+
+test("turn completion restores send after backend reconnect", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-complete-reconnect",
+        displayName: "Complete reconnect",
+        title: "Complete reconnect",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        activityStatus: "idle",
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Complete reconnect/);
+  await page.locator(".pf-composer textarea").fill("Complete around reconnect");
+  await page.getByRole("button", { name: "Send" }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.sessionId === "session-complete-reconnect"
+  );
+
+  await reconnectBackend(page, daemon);
+  daemon.emit("session:session-complete-reconnect:event", {
+    type: "turn-complete",
+    turnId: "turn-session-complete-reconnect",
+    assistantText: "Completed after reconnect."
+  });
+
+  await expect(page.getByText("Completed after reconnect.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Stop turn" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
 });
 
 test("composer sends fast mode and permission mode with the turn request", async ({ page }) => {

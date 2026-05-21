@@ -750,6 +750,45 @@ test("closed remembered session stays closed after backend reconnect", async ({ 
   await expect(history).toContainText("Reconnect closed session");
 });
 
+test("narrow workspace reconnect clears banner and preserves session navigation", async ({
+  page
+}) => {
+  await page.setViewportSize({ width: 420, height: 820 });
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-narrow-reconnect",
+        displayName: "Narrow reconnect",
+        title: "Narrow reconnect",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const history = page.getByRole("region", { name: "Session history" });
+  await history.getByRole("button", { name: /Narrow reconnect/ }).click();
+  await expect(page.locator(".pf-agent-detail .primary-title")).toContainText("Narrow reconnect");
+
+  await daemon.dropConnections();
+  const banner = page.locator(".connection-banner");
+  await expect(banner).toContainText("Puffer backend disconnected.");
+  daemon.allowConnections();
+  await banner.getByRole("button", { name: "Reconnect backend" }).click();
+  await expect(page.locator(".connection-banner")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Back" }).first().click();
+  await expect(history.getByRole("button", { name: /Narrow reconnect/ })).toBeVisible();
+  await history.getByRole("button", { name: /Narrow reconnect/ }).click();
+  await expect(page.locator(".pf-agent-detail .primary-title")).toContainText("Narrow reconnect");
+});
+
 test("closed remembered session ignores stale workspace update events", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
