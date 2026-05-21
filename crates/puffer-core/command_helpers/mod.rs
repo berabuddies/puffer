@@ -53,8 +53,8 @@ pub(crate) use model::{
     apply_model_preferences, handle_effort_command, handle_fast_command, handle_model_command,
 };
 pub use pentest::{
-    prepare_pentest_command, PentestCommand, PentestStart, DEFAULT_PENTEST_MAX_ITERATIONS,
-    PENTEST_USAGE,
+    prepare_pentest_command, PentestCommand, PentestStart, DEFAULT_PENTEST_MAX_DISPATCHES_PER_ITER,
+    DEFAULT_PENTEST_MAX_ITERATIONS, PENTEST_USAGE,
 };
 pub use plugins::PluginActionEntry;
 pub(crate) use plugins::{

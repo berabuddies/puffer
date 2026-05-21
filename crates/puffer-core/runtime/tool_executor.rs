@@ -190,7 +190,14 @@ fn successful_runtime_tool(tool_id: &str, stdout: String) -> ToolExecutionResult
 pub(super) fn is_parallel_safe_tool(tool_id: &str) -> bool {
     matches!(
         tool_id,
-        "Glob" | "Grep" | "WebFetch" | "WebSearch" | "ToolSearch" | "Skill" | "Bash"
+        "Glob"
+            | "Grep"
+            | "WebFetch"
+            | "WebSearch"
+            | "ToolSearch"
+            | "Skill"
+            | "Bash"
+            | "Agent"
     )
 }
 

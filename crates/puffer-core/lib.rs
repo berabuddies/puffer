@@ -33,8 +33,8 @@ pub use command_helpers::ResumeLaunchResolution;
 pub use command_helpers::SessionOverlayView;
 pub use command_helpers::TaskActionEntry;
 pub use command_helpers::{
-    prepare_pentest_command, PentestCommand, PentestStart, DEFAULT_PENTEST_MAX_ITERATIONS,
-    PENTEST_USAGE,
+    prepare_pentest_command, PentestCommand, PentestStart, DEFAULT_PENTEST_MAX_DISPATCHES_PER_ITER,
+    DEFAULT_PENTEST_MAX_ITERATIONS, PENTEST_USAGE,
 };
 pub use command_summary::render_cost_summary;
 pub(crate) use command_summary::{render_buddy_summary, render_usage_summary};

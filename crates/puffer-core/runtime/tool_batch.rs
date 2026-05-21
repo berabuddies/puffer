@@ -75,6 +75,9 @@ pub(super) fn execute_tool_batch(
     // touch `inputs.state` (no `&mut AppState` across spawn boundaries).
     // `Arc<dyn ToolRunner>` is `Send + Sync` and clones cheaply.
     let runner = inputs.state.tool_runner.clone();
+    let agent_state = std::sync::Arc::new(inputs.state.clone());
+    let agent_providers = std::sync::Arc::new(inputs.providers.clone());
+    let agent_auth_template = inputs.auth_store.clone();
 
     let mut results: Vec<Option<(String, bool, bool)>> = vec![None; tool_calls.len()];
 
@@ -113,6 +116,10 @@ pub(super) fn execute_tool_batch(
             let registry = inputs.registry;
             let provider_context_ref = &provider_context;
             let runner_clone = runner.clone();
+            let tool_id_for_thread = tc.tool_id.clone();
+            let agent_state_local = agent_state.clone();
+            let agent_providers_local = agent_providers.clone();
+            let agent_auth_local = agent_auth_template.clone();
             // Observability-only clones are gated on a live handle so
             // the disabled path does no per-tool string allocations
             // (review v4 BLOCK #1).
@@ -148,30 +155,51 @@ pub(super) fn execute_tool_batch(
                         }
                         None => puffer_observability::SpanGuard::Disabled,
                     };
-                    let result = match claude_tools::execute_parallel_tool(
-                        &definition,
-                        cwd,
-                        &filesystem_policy.workspace_roots,
-                        &filesystem_policy,
-                        &session_id,
-                        args,
-                        resources,
-                        registry,
-                        provider_context_ref,
-                        &runner_clone,
-                    ) {
-                        Ok(exec) => {
-                            let terminate = extract_terminate(&exec.output.metadata);
-                            let output = if exec.output.stderr.is_empty() {
-                                exec.output.stdout
-                            } else if exec.output.stdout.is_empty() {
-                                exec.output.stderr
-                            } else {
-                                format!("{}\n{}", exec.output.stdout, exec.output.stderr)
-                            };
-                            (output, exec.success, terminate)
+                    let result = if tool_id_for_thread == "Agent" {
+                        let mut local_auth = agent_auth_local;
+                        match super::agents::execute_agent_tool(
+                            agent_state_local.as_ref(),
+                            resources,
+                            agent_providers_local.as_ref(),
+                            &mut local_auth,
+                            cwd,
+                            args,
+                        ) {
+                            Ok(output) => (output, true, false),
+                            Err(error) => {
+                                (format!("Tool execution failed: {error}"), false, false)
+                            }
                         }
-                        Err(error) => (format!("Tool execution failed: {error}"), false, false),
+                    } else {
+                        match claude_tools::execute_parallel_tool(
+                            &definition,
+                            cwd,
+                            &filesystem_policy.workspace_roots,
+                            &filesystem_policy,
+                            &session_id,
+                            args,
+                            resources,
+                            registry,
+                            provider_context_ref,
+                            &runner_clone,
+                        ) {
+                            Ok(exec) => {
+                                let terminate = extract_terminate(&exec.output.metadata);
+                                let output = if exec.output.stderr.is_empty() {
+                                    exec.output.stdout
+                                } else if exec.output.stdout.is_empty() {
+                                    exec.output.stderr
+                                } else {
+                                    format!("{}\n{}", exec.output.stdout, exec.output.stderr)
+                                };
+                                (output, exec.success, terminate)
+                            }
+                            Err(error) => (
+                                format!("Tool execution failed: {error}"),
+                                false,
+                                false,
+                            ),
+                        }
                     };
                     if let Some((_, _, tool_id, _, _)) = span_meta.as_ref() {
                         tool_span.set_content(
