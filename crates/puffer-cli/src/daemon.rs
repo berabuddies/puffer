@@ -2187,6 +2187,7 @@ fn handle_cancel_turn(state: &DaemonState, params: &Value) -> Result<Value> {
             &handle.cancel_reported,
             &handle.user_prompt_persisted,
         )?;
+        state.turns.lock().unwrap().remove(turn_id);
         Ok(json!({"ok": true}))
     } else {
         Ok(json!({"ok": false, "error": "turn not found"}))
