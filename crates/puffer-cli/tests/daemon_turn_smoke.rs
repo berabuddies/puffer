@@ -387,6 +387,102 @@ fn daemon_turn_error_refreshes_workspace_and_marks_session_idle() {
     daemon.stop();
 }
 
+#[test]
+fn daemon_cancel_turn_marks_session_idle_before_provider_returns() {
+    let mock = MockOpenAiServer::start_with_delay(
+        "Reply that should arrive after cancellation",
+        Duration::from_secs(2),
+    );
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let workspace = tempdir.path().join("workspace");
+    let puffer_home = tempdir.path().join("home");
+    let puffer_config = puffer_home.join(".puffer");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::create_dir_all(&puffer_config).expect("puffer config");
+    std::fs::write(
+        puffer_config.join("auth.json"),
+        json!({
+            "format_version": 1,
+            "providers": {
+                "openai": { "kind": "api_key", "key": "sk-test" }
+            }
+        })
+        .to_string(),
+    )
+    .expect("auth store");
+    let discovery_cache = tempdir.path().join("discovery.json");
+    std::fs::write(&discovery_cache, discovery_cache_json()).expect("discovery cache");
+
+    let mut daemon = DaemonProcess::start(&workspace, &puffer_home, &discovery_cache);
+    let mut client = DaemonClient::connect(&daemon.handshake);
+
+    client.rpc(
+        "update_config",
+        json!({
+            "openaiBaseUrl": mock.base_url,
+            "defaultProvider": "openai",
+            "defaultModel": "openai/gpt-5",
+        }),
+    );
+    let session = client.rpc(
+        "create_session",
+        json!({
+            "cwd": workspace.display().to_string(),
+            "providerId": "codex",
+            "modelId": "codex/gpt-5",
+        }),
+    );
+    let session_id = session["sessionId"].as_str().expect("session id");
+
+    let turn = client.rpc(
+        "run_agent_turn",
+        json!({
+            "sessionId": session_id,
+            "message": "Cancel while provider is still responding",
+            "providerId": "codex",
+            "modelId": "codex/gpt-5",
+            "permissionMode": "read-only",
+        }),
+    );
+    let turn_id = turn["turnId"].as_str().expect("turn id");
+    wait_until(Duration::from_secs(5), || {
+        mock.responses_calls.load(Ordering::SeqCst) > 0
+    });
+
+    let cancelled = client.rpc("cancel_turn", json!({ "turnId": turn_id }));
+    assert_eq!(cancelled["ok"], true);
+    let error = client.wait_for_event(|message| {
+        message["event"] == format!("session:{session_id}:event")
+            && message["payload"]["type"] == "turn-error"
+    });
+    assert_eq!(error["payload"]["turnId"], turn_id);
+    assert_eq!(error["payload"]["category"], "cancelled");
+    assert_eq!(error["payload"]["error"], "Interrupted by user.");
+
+    let detail = client.rpc("load_session_detail", json!({ "sessionId": session_id }));
+    let timeline = detail["timeline"].as_array().expect("timeline array");
+    assert!(timeline.iter().any(|item| {
+        item["kind"] == "user_message"
+            && item["text"] == "Cancel while provider is still responding"
+    }));
+    assert!(timeline.iter().any(|item| {
+        item["kind"] == "system_message" && item["text"] == "Interrupted by user."
+    }));
+
+    let groups = client.rpc("list_grouped_sessions", json!({}));
+    let status = groups
+        .as_array()
+        .expect("groups")
+        .iter()
+        .flat_map(|group| group["sessions"].as_array().into_iter().flatten())
+        .find(|item| item["sessionId"] == session_id)
+        .and_then(|item| item["activityStatus"].as_str())
+        .expect("session activity status");
+    assert_eq!(status, "idle");
+
+    daemon.stop();
+}
+
 struct DaemonProcess {
     child: Child,
     handshake: Value,
@@ -531,6 +627,17 @@ impl DaemonClient {
     }
 }
 
+fn wait_until(timeout: Duration, predicate: impl Fn() -> bool) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if predicate() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(predicate(), "condition timed out");
+}
+
 struct MockOpenAiServer {
     base_url: String,
     responses_calls: Arc<AtomicUsize>,
@@ -541,6 +648,10 @@ struct MockOpenAiServer {
 
 impl MockOpenAiServer {
     fn start(reply: &'static str) -> Self {
+        Self::start_with_delay(reply, Duration::ZERO)
+    }
+
+    fn start_with_delay(reply: &'static str, response_delay: Duration) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock openai");
         listener.set_nonblocking(true).expect("nonblocking mock");
         let address = listener.local_addr().expect("mock address");
@@ -554,7 +665,13 @@ impl MockOpenAiServer {
             while !thread_stop.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((stream, _)) => {
-                        handle_mock_openai_stream(stream, reply, &thread_calls, &thread_body);
+                        handle_mock_openai_stream(
+                            stream,
+                            reply,
+                            response_delay,
+                            &thread_calls,
+                            &thread_body,
+                        );
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10));
@@ -678,6 +795,7 @@ fn read_handshake_line(
 fn handle_mock_openai_stream(
     mut stream: TcpStream,
     reply: &str,
+    response_delay: Duration,
     responses_calls: &AtomicUsize,
     last_body: &Mutex<String>,
 ) {
@@ -724,6 +842,7 @@ fn handle_mock_openai_stream(
             if let Some(body) = text.split("\r\n\r\n").nth(1) {
                 *last_body.lock().unwrap() = body.to_string();
             }
+            thread::sleep(response_delay);
             write_http_json(
                 &mut stream,
                 json!({

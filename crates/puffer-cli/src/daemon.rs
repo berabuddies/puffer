@@ -64,7 +64,7 @@ use std::io::{BufReader, Read};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{broadcast, Mutex as AsyncMutex};
@@ -289,8 +289,15 @@ impl DaemonState {
     }
 }
 
+#[derive(Clone)]
 struct TurnHandle {
+    session_id: String,
+    session_uuid: Uuid,
+    channel: String,
+    message: String,
     cancel: CancelToken,
+    cancel_reported: Arc<AtomicBool>,
+    user_prompt_persisted: Arc<AtomicBool>,
     pending: Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<PermissionPromptAction>>>>,
     pending_questions:
         Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<UserQuestionPromptResponse>>>>,
@@ -2153,8 +2160,11 @@ fn handle_cancel_turn(state: &DaemonState, params: &Value) -> Result<Value> {
         .or_else(|| params.get("turn_id"))
         .and_then(|v| v.as_str())
         .context("missing turnId")?;
-    let mut turns = state.turns.lock().unwrap();
-    if let Some(handle) = turns.get_mut(turn_id) {
+    let handle = {
+        let turns = state.turns.lock().unwrap();
+        turns.get(turn_id).cloned()
+    };
+    if let Some(handle) = handle {
         handle.cancel.cancel();
         let mut pending = handle.pending.lock().unwrap();
         for (_, tx) in pending.drain() {
@@ -2167,10 +2177,64 @@ fn handle_cancel_turn(state: &DaemonState, params: &Value) -> Result<Value> {
                 annotations: serde_json::Map::new(),
             });
         }
+        report_cancelled_turn(
+            state,
+            handle.session_uuid,
+            &handle.session_id,
+            &handle.channel,
+            turn_id,
+            &handle.message,
+            &handle.cancel_reported,
+            &handle.user_prompt_persisted,
+        )?;
         Ok(json!({"ok": true}))
     } else {
         Ok(json!({"ok": false, "error": "turn not found"}))
     }
+}
+
+const CANCELLED_TURN_MESSAGE: &str = "Interrupted by user.";
+
+fn report_cancelled_turn(
+    state: &DaemonState,
+    session_uuid: Uuid,
+    session_id: &str,
+    channel: &str,
+    turn_id: &str,
+    message: &str,
+    cancel_reported: &AtomicBool,
+    user_prompt_persisted: &AtomicBool,
+) -> Result<bool> {
+    if cancel_reported.swap(true, Ordering::SeqCst) {
+        return Ok(false);
+    }
+    let session_store = SessionStore::from_paths(&state.paths)?;
+    if !user_prompt_persisted.swap(true, Ordering::SeqCst) {
+        session_store.append_event(
+            session_uuid,
+            TranscriptEvent::UserMessage {
+                text: message.to_string(),
+                actor: None,
+            },
+        )?;
+    }
+    session_store.append_event(
+        session_uuid,
+        TranscriptEvent::SystemMessage {
+            text: CANCELLED_TURN_MESSAGE.to_string(),
+            actor: None,
+        },
+    )?;
+    publish_turn_error_event(
+        state,
+        channel,
+        session_id,
+        turn_id,
+        CANCELLED_TURN_MESSAGE.to_string(),
+        None,
+        Some("cancelled"),
+    );
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -2207,11 +2271,19 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         Mutex<HashMap<String, std::sync::mpsc::Sender<UserQuestionPromptResponse>>>,
     > = Arc::new(Mutex::new(HashMap::new()));
     let cancel = CancelToken::new();
+    let cancel_reported = Arc::new(AtomicBool::new(false));
+    let user_prompt_persisted = Arc::new(AtomicBool::new(false));
 
     state.turns.lock().unwrap().insert(
         turn_id.clone(),
         TurnHandle {
+            session_id: session_id.clone(),
+            session_uuid,
+            channel: channel.clone(),
+            message: message.clone(),
             cancel: cancel.clone(),
+            cancel_reported: cancel_reported.clone(),
+            user_prompt_persisted: user_prompt_persisted.clone(),
             pending: pending.clone(),
             pending_questions: pending_questions.clone(),
         },
@@ -2222,6 +2294,8 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     let turn_id_resp = turn_id.clone();
     let channel_thread = channel.clone();
     let next_req_id = state.next_request_id.clone();
+    let cancel_reported_thread = cancel_reported.clone();
+    let user_prompt_persisted_thread = user_prompt_persisted.clone();
 
     // Run the synchronous agent loop on a fresh OS thread, *completely
     // detached* from tokio. `ProviderRegistry::discover_and_merge_all` +
@@ -2379,6 +2453,20 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         if setup_state.yolo {
             apply_daemon_yolo_mode(&mut app_state);
         }
+        if cancel.is_cancelled() {
+            let _ = report_cancelled_turn(
+                &setup_state,
+                session_uuid,
+                &session_id_for_thread,
+                &channel_thread,
+                &turn_id_thread,
+                &message_for_thread,
+                &cancel_reported_thread,
+                &user_prompt_persisted_thread,
+            );
+            setup_state.turns.lock().unwrap().remove(&turn_id_thread);
+            return;
+        }
         let runner = crate::runner_selection::select_tool_runner(
             &cfg_for_turn,
             &inputs.resources,
@@ -2405,13 +2493,15 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         // Persist the user message before the turn starts so a crash
         // doesn't silently drop it.
         app_state.push_message(MessageRole::User, message_for_thread.clone());
-        let _ = inputs.session_store.append_event(
-            session_uuid,
-            TranscriptEvent::UserMessage {
-                text: message_for_thread.clone(),
-                actor: Some(app_state.user_actor()),
-            },
-        );
+        if !user_prompt_persisted_thread.swap(true, Ordering::SeqCst) {
+            let _ = inputs.session_store.append_event(
+                session_uuid,
+                TranscriptEvent::UserMessage {
+                    text: message_for_thread.clone(),
+                    actor: Some(app_state.user_actor()),
+                },
+            );
+        }
         let _ = &session_id_for_thread; // keep the String alive for logging
 
         let stream_actor = app_state.assistant_actor();
@@ -2614,6 +2704,14 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
             Err(err) => {
                 eprintln!("turn {turn_id_thread} failed: {err:#}");
                 let (friendly, category) = classify_turn_error(&err);
+                if category == "cancelled" && cancel_reported_thread.load(Ordering::SeqCst) {
+                    state_for_thread
+                        .turns
+                        .lock()
+                        .unwrap()
+                        .remove(&turn_id_thread);
+                    return;
+                }
                 let raw = format!("{err:#}");
                 let _ = inputs.session_store.append_event(
                     session_uuid,
