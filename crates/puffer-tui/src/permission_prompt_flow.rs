@@ -40,6 +40,9 @@ pub(crate) fn handle_permission_prompt_key(key: KeyEvent, tui: &mut TuiState) ->
             }
             None
         }
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(PermissionPromptAction::Deny)
+        }
         KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => tui
             .overlay
             .as_mut()

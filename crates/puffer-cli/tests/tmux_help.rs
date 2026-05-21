@@ -1,11 +1,11 @@
-use puffer_test_support::{start_tmux_command, tmux_available, wait_for_tmux_text};
+use puffer_test_support::{require_tmux_or_skip, start_tmux_command, wait_for_tmux_text};
 use std::path::PathBuf;
 use std::time::Duration;
 use tempfile::tempdir;
 
 #[test]
 fn puffer_help_renders_in_tmux_no_alt_screen() {
-    if !tmux_available() {
+    if !require_tmux_or_skip("puffer_help_renders_in_tmux_no_alt_screen") {
         return;
     }
 

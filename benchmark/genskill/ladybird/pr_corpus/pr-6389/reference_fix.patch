@@ -1,0 +1,128 @@
+From 037b6bd55c6b6937620fc293d81a07e6aa609943 Mon Sep 17 00:00:00 2001
+From: Ali Mohammad Pur <ali.mpfard@gmail.com>
+Date: Sat, 4 Oct 2025 01:14:00 +0200
+Subject: [PATCH 1/2] LibWasm: Remove confusing newline after a few TAILCALLs
+
+---
+ .../LibWasm/AbstractMachine/BytecodeInterpreter.cpp  | 12 ++++--------
+ 1 file changed, 4 insertions(+), 8 deletions(-)
+
+diff --git a/Libraries/LibWasm/AbstractMachine/BytecodeInterpreter.cpp b/Libraries/LibWasm/AbstractMachine/BytecodeInterpreter.cpp
+index 3a226f0991265..e8831c77f108b 100644
+--- a/Libraries/LibWasm/AbstractMachine/BytecodeInterpreter.cpp
++++ b/Libraries/LibWasm/AbstractMachine/BytecodeInterpreter.cpp
+@@ -1298,8 +1298,7 @@ HANDLE_INSTRUCTION(br_if)
+     // bounds checked by verifier.
+     auto cond = configuration.take_source(0, addresses.sources).to<i32>();
+     if (cond == 0)
+-        TAILCALL
+-    return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
++        TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+     current_ip_value = interpreter.branch_to_label(configuration, instruction->arguments().get<LabelIndex>()).value();
+     TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+ }
+@@ -1623,8 +1622,7 @@ HANDLE_INSTRUCTION(memory_copy)
+     TRAP_IN_LOOP_IF_NOT(destination_position <= destination_instance->data().size());
+ 
+     if (count == 0)
+-        TAILCALL
+-    return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
++        TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+ 
+     Instruction::MemoryArgument memarg { 0, 0, args.dst_index };
+     if (destination_offset <= source_offset) {
+@@ -1664,8 +1662,7 @@ HANDLE_INSTRUCTION(memory_init)
+     TRAP_IN_LOOP_IF_NOT(destination_position <= memory->data().size());
+ 
+     if (count == 0)
+-        TAILCALL
+-    return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
++        TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+ 
+     Instruction::MemoryArgument memarg { 0, 0, args.memory_index };
+     for (size_t i = 0; i < (size_t)count; ++i) {
+@@ -1738,8 +1735,7 @@ HANDLE_INSTRUCTION(table_copy)
+     TRAP_IN_LOOP_IF_NOT(destination_position <= destination_instance->elements().size());
+ 
+     if (count == 0)
+-        TAILCALL
+-    return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
++        TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+ 
+     if (destination_offset <= source_offset) {
+         for (u32 i = 0; i < count; ++i) {
+
+From e7b012ebe2e6480d5b43ca1fd8361fc8cd355af0 Mon Sep 17 00:00:00 2001
+From: Ali Mohammad Pur <ali.mpfard@gmail.com>
+Date: Sat, 4 Oct 2025 09:16:21 +0200
+Subject: [PATCH 2/2] LibWasm: Take memory_fill arguments in the right order
+
+This makes ruffle.rs work again :^)
+---
+ .../AbstractMachine/BytecodeInterpreter.cpp   |   2 +-
+ .../Tests/Executor/test-memory_fill-order.js  |  23 ++++++++++++++++++
+ .../Fixtures/Modules/memory_fill-order.wasm   | Bin 0 -> 91 bytes
+ 3 files changed, 24 insertions(+), 1 deletion(-)
+ create mode 100644 Libraries/LibWasm/Tests/Executor/test-memory_fill-order.js
+ create mode 100644 Libraries/LibWasm/Tests/Fixtures/Modules/memory_fill-order.wasm
+
+diff --git a/Libraries/LibWasm/AbstractMachine/BytecodeInterpreter.cpp b/Libraries/LibWasm/AbstractMachine/BytecodeInterpreter.cpp
+index e8831c77f108b..843d7cc794f69 100644
+--- a/Libraries/LibWasm/AbstractMachine/BytecodeInterpreter.cpp
++++ b/Libraries/LibWasm/AbstractMachine/BytecodeInterpreter.cpp
+@@ -1581,6 +1581,7 @@ HANDLE_INSTRUCTION(memory_fill)
+         auto instance = configuration.store().get(address);
+         // bounds checked by verifier.
+         auto count = configuration.take_source(0, addresses.sources).to<u32>();
++        u8 value = static_cast<u8>(configuration.take_source(1, addresses.sources).to<u32>());
+         auto destination_offset = configuration.take_source(2, addresses.sources).to<u32>();
+ 
+         Checked<u32> checked_end = destination_offset;
+@@ -1591,7 +1592,6 @@ HANDLE_INSTRUCTION(memory_fill)
+             TAILCALL return continue_(HANDLER_PARAMS(DECOMPOSE_PARAMS_NAME_ONLY));
+ 
+         Instruction::MemoryArgument memarg { 0, 0, args.memory_index };
+-        u8 value = static_cast<u8>(configuration.take_source(1, addresses.sources).to<u32>());
+         for (u32 i = 0; i < count; ++i) {
+             if (interpreter.store_to_memory(configuration, memarg, { &value, sizeof(value) }, destination_offset + i))
+                 return Outcome::Return;
+diff --git a/Libraries/LibWasm/Tests/Executor/test-memory_fill-order.js b/Libraries/LibWasm/Tests/Executor/test-memory_fill-order.js
+new file mode 100644
+index 0000000000000..3ef512554c932
+--- /dev/null
++++ b/Libraries/LibWasm/Tests/Executor/test-memory_fill-order.js
+@@ -0,0 +1,23 @@
++test("memfill executes and returns expected result", () => {
++    const bin = readBinaryWasmFile("Fixtures/Modules/memory_fill-order.wasm");
++    const module = parseWebAssemblyModule(bin);
++
++    const test_fill = module.getExport("test_fill");
++    // memory.fill off=10 value=42 size=5
++    module.invoke(test_fill);
++
++    const get_value = module.getExport("get_value");
++
++    // After memory.fill, bytes 10..14 should be filled with value 42
++    expect(module.invoke(get_value, 10)).toBe(42);
++    expect(module.invoke(get_value, 11)).toBe(42);
++    expect(module.invoke(get_value, 12)).toBe(42);
++    expect(module.invoke(get_value, 13)).toBe(42);
++    expect(module.invoke(get_value, 14)).toBe(42);
++
++    // Byte 9 (before the fill region) should still be 0
++    expect(module.invoke(get_value, 9)).toBe(0);
++
++    // Byte 15 (after the fill region) should still be 0
++    expect(module.invoke(get_value, 15)).toBe(0);
++});
+diff --git a/Libraries/LibWasm/Tests/Fixtures/Modules/memory_fill-order.wasm b/Libraries/LibWasm/Tests/Fixtures/Modules/memory_fill-order.wasm
+new file mode 100644
+index 0000000000000000000000000000000000000000..6b14d005b4c143ced79c84f0129bac0fd4822c02
+GIT binary patch
+literal 91
+zcmWN?F%E+;5CFkFUl14<p(PbHQXb)#U<xNfG8InR`#1$mGpxrhfIKy!W|km{iRnWT
+p*Qg-v=zPsbT|QeWi2vrg{MYi!xc;Rbv5#|XLd(DzxSx1KxB%}m4}<^!
+
+literal 0
+HcmV?d00001
+

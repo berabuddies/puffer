@@ -7,7 +7,9 @@ use puffer_provider_openai::{
     OpenAIResponsesTextFormat, OpenAIResponsesTool,
 };
 use puffer_provider_registry::{AuthMode, OAuthCredential, ProviderDescriptor, StoredCredential};
-use puffer_resources::{AgentSpec, LoadedItem, LoadedResources, SourceInfo, SourceKind, ToolSpec};
+use puffer_resources::{
+    load_resources, AgentSpec, LoadedItem, LoadedResources, SourceInfo, SourceKind, ToolSpec,
+};
 use puffer_session_store::SessionMetadata;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -245,12 +247,44 @@ pub(super) fn refresh_env_lock() -> &'static Mutex<()> {
     crate::test_locks::env_lock()
 }
 
+fn bundled_resources() -> LoadedResources {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("workspace root")
+        .to_path_buf();
+    let temp = tempfile::tempdir().unwrap();
+    let paths = ConfigPaths {
+        workspace_root: temp.path().join("workspace"),
+        workspace_config_dir: temp.path().join("workspace/.puffer"),
+        user_config_dir: temp.path().join("user"),
+        builtin_resources_dir: root.join("resources"),
+    };
+    ensure_workspace_dirs(&paths).unwrap();
+    let runner = crate::runner_adapter::LocalToolRunner::new();
+    load_resources(&paths, &runner).unwrap()
+}
+
 #[test]
 fn anthropic_tool_schema_lists_expected_fields() {
     let schema = anthropic_tool_schema("write_file");
     let required = schema.get("required").and_then(Value::as_array).unwrap();
     assert!(required.iter().any(|value| value == "path"));
     assert!(required.iter().any(|value| value == "contents"));
+}
+
+#[test]
+fn runtime_system_prompt_mentions_ignore_memory_policy() {
+    let prompt = super::system_prompt::render_runtime_system_prompt(
+        &state(),
+        &bundled_resources(),
+        "gpt-5",
+        &std::collections::BTreeSet::new(),
+    )
+    .unwrap();
+
+    assert!(prompt.contains("ignore or not use memory"));
+    assert!(prompt.contains("loaded memory files were empty"));
 }
 
 #[test]
@@ -658,6 +692,7 @@ fn build_codex_openai_request_body_matches_codex_shape() {
     let state = state();
     let body = build_codex_openai_request_body(
         &state,
+        OPENAI_CHATGPT_BASE_URL,
         "gpt-5",
         "system instructions",
         Value::String("hello".to_string()),
@@ -669,14 +704,14 @@ fn build_codex_openai_request_body_matches_codex_shape() {
 
     assert_eq!(body["model"], json!("gpt-5"));
     assert_eq!(body["stream"], json!(true));
-    assert_eq!(body["include"][0], json!("reasoning.encrypted_content"));
+    assert_eq!(body["include"], json!([]));
     assert_eq!(body["prompt_cache_key"], json!(Uuid::nil().to_string()));
     assert_eq!(body["instructions"], json!("system instructions"));
     assert_eq!(body["input"][0]["type"], json!("message"));
     assert_eq!(body["input"][0]["content"][0]["text"], json!("hello"));
     assert_eq!(body["reasoning"]["summary"], json!("auto"));
     assert_eq!(body["reasoning"]["effort"], json!("medium"));
-    assert_eq!(body["parallel_tool_calls"], json!(false));
+    assert!(body.get("parallel_tool_calls").is_none());
     assert!(body.get("previous_response_id").is_none());
     assert!(body.get("service_tier").is_none());
 }
@@ -687,6 +722,7 @@ fn build_codex_openai_request_body_supports_xhigh_effort() {
     state.effort_level = "xhigh".to_string();
     let body = build_codex_openai_request_body(
         &state,
+        OPENAI_CHATGPT_BASE_URL,
         "gpt-5",
         "",
         Value::String("hello".to_string()),
@@ -720,6 +756,7 @@ fn build_codex_openai_request_body_uses_priority_tier_for_fast_mode() {
     }];
     let body = build_codex_openai_request_body(
         &state,
+        OPENAI_CHATGPT_BASE_URL,
         "gpt-5",
         "",
         Value::String("hello".to_string()),
@@ -734,7 +771,7 @@ fn build_codex_openai_request_body_uses_priority_tier_for_fast_mode() {
     // Fast mode no longer disables reasoning — it only sets service_tier.
     // Reasoning is controlled solely by effort_level, matching Anthropic behavior.
     assert_eq!(body["reasoning"]["effort"], json!("medium"));
-    assert_eq!(body["include"][0], json!("reasoning.encrypted_content"));
+    assert_eq!(body["include"], json!([]));
 }
 
 #[test]
@@ -742,6 +779,7 @@ fn build_codex_openai_request_body_includes_native_structured_output_config() {
     let state = state();
     let body = build_codex_openai_request_body(
         &state,
+        OPENAI_CHATGPT_BASE_URL,
         "gpt-5",
         "",
         Value::String("hello".to_string()),
@@ -993,7 +1031,9 @@ fn parse_openai_sse_response_streaming_emits_text_deltas() {
 
 #[test]
 fn execute_user_prompt_refreshes_openai_oauth_after_401() {
-    let _guard = refresh_env_lock().lock().unwrap();
+    let _guard = refresh_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let requests = Arc::new(Mutex::new(Vec::new()));

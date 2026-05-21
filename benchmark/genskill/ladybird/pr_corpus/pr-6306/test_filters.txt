@@ -1,0 +1,2 @@
+Libraries/LibJS/Tests/builtins/Temporal/Duration/Duration.prototype.round.js
+Libraries/LibJS/Tests/builtins/Temporal/Duration/Duration.prototype.total.js

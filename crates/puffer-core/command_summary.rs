@@ -9,7 +9,7 @@ use puffer_transport_anthropic::{
 };
 
 /// Renders a lightweight local cost-style summary for the active session.
-pub(crate) fn render_cost_summary(state: &AppState) -> String {
+pub fn render_cost_summary(state: &AppState) -> String {
     let elapsed_ms = now_ms().saturating_sub(state.session.created_at_ms);
     let assistant_messages = state
         .transcript

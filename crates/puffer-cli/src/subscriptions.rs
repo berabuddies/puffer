@@ -24,7 +24,7 @@ use tokio::runtime::Runtime;
 /// subscription manager and its supervised subscribers. Dropping it
 /// after [`SubscriptionRuntime::shutdown`] joins all background tasks.
 pub(crate) struct SubscriptionRuntime {
-    runtime: Runtime,
+    runtime: Option<Runtime>,
     manager: Arc<SubscriptionManager>,
 }
 
@@ -36,10 +36,22 @@ impl SubscriptionRuntime {
 
     /// Best-effort shutdown: stops router + every subscriber, then drops
     /// the underlying runtime.
-    pub(crate) fn shutdown(self) {
-        self.manager.shutdown();
-        // Runtime drops at end of scope; tokio shuts down its workers.
-        drop(self.runtime);
+    pub(crate) fn shutdown(mut self) {
+        self.shutdown_inner();
+    }
+
+    fn shutdown_inner(&mut self) {
+        let Some(runtime) = self.runtime.take() else {
+            return;
+        };
+        shutdown_manager(&self.manager);
+        runtime.shutdown_background();
+    }
+}
+
+impl Drop for SubscriptionRuntime {
+    fn drop(&mut self) {
+        self.shutdown_inner();
     }
 }
 
@@ -84,7 +96,29 @@ pub(crate) fn install(
 
     autostart_subscribers(&manager, paths);
 
-    Ok(SubscriptionRuntime { runtime, manager })
+    Ok(SubscriptionRuntime {
+        runtime: Some(runtime),
+        manager,
+    })
+}
+
+fn shutdown_manager(manager: &Arc<SubscriptionManager>) {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        let manager = manager.clone();
+        let _ = std::thread::Builder::new()
+            .name("puffer-subscriptions-shutdown".to_string())
+            .spawn(move || manager.shutdown())
+            .and_then(|thread| {
+                thread.join().map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "subscription shutdown thread panicked",
+                    )
+                })
+            });
+        return;
+    }
+    manager.shutdown();
 }
 
 const DEFAULT_CLASSIFY_MODEL: &str = "claude-haiku-4-5";
@@ -217,6 +251,47 @@ fn subscriber_for_platform(platform: &str) -> Option<&'static str> {
 
 fn subscriptions_path(paths: &ConfigPaths) -> PathBuf {
     paths.user_config_dir.join("subscriptions.json")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic;
+
+    fn test_subscription_runtime() -> SubscriptionRuntime {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(1)
+            .thread_name("puffer-subscriptions-test")
+            .build()
+            .expect("subscription runtime");
+        let manager = Arc::new(
+            SubscriptionManagerBuilder::new(temp.path().join("subscriptions.json"))
+                .build(runtime.handle().clone())
+                .expect("subscription manager"),
+        );
+        SubscriptionRuntime {
+            runtime: Some(runtime),
+            manager,
+        }
+    }
+
+    #[test]
+    fn subscription_runtime_can_drop_inside_tokio_context() {
+        let outer = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("outer runtime");
+        let runtime = test_subscription_runtime();
+        let result = panic::catch_unwind(|| {
+            outer.block_on(async { drop(runtime) });
+        });
+        assert!(
+            result.is_ok(),
+            "dropping SubscriptionRuntime inside Tokio must not panic"
+        );
+    }
 }
 
 fn autostart_subscribers(manager: &SubscriptionManager, paths: &ConfigPaths) {

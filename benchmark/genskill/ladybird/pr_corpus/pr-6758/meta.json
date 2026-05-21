@@ -1,0 +1,13 @@
+{
+  "pr_number": 6758,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/6758",
+  "title": "LibWebView: Add a bit of explicit handling for \"localhost:port\" URLs",
+  "merged_at": "2025-11-08T16:14:44Z",
+  "base_commit": "a290034a8164dcfe83b3679ab848592a97e0e2b1",
+  "merge_commit": "0dd8e1e6f23ce15112e8ef5f4d540584d6baecbc",
+  "area": "libwebview",
+  "files_changed": [
+    "Libraries/LibWebView/URL.cpp"
+  ],
+  "task_prompt": "Fix the failing LibWebView URL tests in Tests/LibWebView/TestWebViewURL.cpp for localhost URLs with explicit ports. The WebView URL helper should handle localhost:port inputs correctly."
+}

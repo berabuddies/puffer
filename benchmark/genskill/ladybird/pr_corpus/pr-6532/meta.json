@@ -1,0 +1,13 @@
+{
+  "pr_number": 6532,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/6532",
+  "title": "LibWeb: Account for transforms in `isPointInPath()`",
+  "merged_at": "2025-10-21T15:42:28Z",
+  "base_commit": "e8a9d23f924e75d1a9230f7a68b4d205801a4dda",
+  "merge_commit": "494fcc40ac1277ebe01dd38fec0eee1abf22dc9c",
+  "area": "libweb-canvas",
+  "files_changed": [
+    "Libraries/LibWeb/HTML/CanvasRenderingContext2D.cpp"
+  ],
+  "task_prompt": "Fix the four failing tests: Tests/LibWeb/Text/input/wpt-import/html/canvas/element/path-objects/2d.path.isPointInPath.transform.1.html through .4.html. The Canvas 2D API isPointInPath() method does not account for the current transform matrix when checking whether a point lies inside a path. After calling ctx.translate(), ctx.rotate(), or ctx.scale(), isPointInPath() still tests the original untransformed coordinates instead of inverting the transform to get canvas space coordinates. Expected outputs are the corresponding .txt files."
+}

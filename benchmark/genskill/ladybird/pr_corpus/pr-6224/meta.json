@@ -1,0 +1,14 @@
+{
+  "pr_number": 6224,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/6224",
+  "title": "Fix bugs when inline cache of GetById is not invalidated",
+  "merged_at": "2025-09-18T13:56:21Z",
+  "base_commit": "1b8e81cd6f3b3aade74bcfa25ea05a38f2d32e33",
+  "merge_commit": "c3b0eabf1812d7982cd55e209ff94883ff2940cc",
+  "area": "libjs",
+  "files_changed": [
+    "Libraries/LibJS/Bytecode/Interpreter.cpp",
+    "Libraries/LibJS/Tests/regress/inline-caching.js"
+  ],
+  "task_prompt": "Fix the failing LibJS inline caching regression in Libraries/LibJS/Tests/regress/inline-caching.js. Ensure GetById inline caches are invalidated when object shapes change."
+}

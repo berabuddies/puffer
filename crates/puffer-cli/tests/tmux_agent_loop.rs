@@ -12,8 +12,8 @@
 //! images).
 
 use puffer_test_support::{
-    capture_tmux_visible_pane, send_tmux_keys, start_tmux_command_with_size, temp_workspace,
-    tmux_available, wait_for_tmux_text, TerminalSize,
+    capture_tmux_visible_pane, require_tmux_or_skip, send_tmux_keys, start_tmux_command_with_size,
+    temp_workspace, wait_for_tmux_text, TerminalSize,
 };
 use std::fs;
 use std::io::{Read, Write};
@@ -94,6 +94,19 @@ fn sse_text_response(text: &str) -> String {
     )
 }
 
+fn openai_sse_text_response(text: &str) -> String {
+    format!(
+        "event: response.created\n\
+         data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp_tui_codex\"}}}}\n\n\
+         event: response.output_text.delta\n\
+         data: {{\"type\":\"response.output_text.delta\",\"delta\":\"{text}\"}}\n\n\
+         event: response.output_item.done\n\
+         data: {{\"type\":\"response.output_item.done\",\"item\":{{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"{text}\"}}]}}}}\n\n\
+         event: response.completed\n\
+         data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"resp_tui_codex\",\"status\":\"completed\",\"usage\":{{\"input_tokens\":12,\"output_tokens\":8,\"input_tokens_details\":{{\"cached_tokens\":0}}}}}}}}\n\n"
+    )
+}
+
 fn sse_tool_use_response(tool_use_id: &str, tool_name: &str, input_json: &str) -> String {
     // The `input_json` is embedded into a content_block_delta as
     // partial_json. Backslash-escape per JSON rules so the SSE event
@@ -141,6 +154,30 @@ models:
     fs::write(dir.join("anthropic.yaml"), provider_yaml).unwrap();
 }
 
+fn write_openai_override(workspace: &Path, mock_url: &str) {
+    let provider_yaml = format!(
+        r#"id: openai
+display_name: Mock OpenAI
+base_url: {mock_url}
+default_api: openai-responses
+auth_modes:
+  - api_key
+discovery: null
+models:
+  - id: gpt-5
+    display_name: Mock GPT-5
+    provider: openai
+    api: openai-responses
+    context_window: 272000
+    max_output_tokens: 16384
+    supports_reasoning: true
+"#,
+    );
+    let dir = workspace.join(".puffer/resources/providers");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("openai.yaml"), provider_yaml).unwrap();
+}
+
 fn write_config(workspace: &Path) {
     fs::create_dir_all(workspace.join(".puffer")).unwrap();
     fs::write(
@@ -148,6 +185,7 @@ fn write_config(workspace: &Path) {
         r#"
 app_name = "Puffer Code"
 default_provider = "anthropic"
+default_model = "anthropic/claude-sonnet-4-5"
 theme = "puffer"
 
 [mascot]
@@ -175,6 +213,41 @@ tmux_golden_mode = true
     .unwrap();
 }
 
+fn write_codex_config(workspace: &Path) {
+    fs::create_dir_all(workspace.join(".puffer")).unwrap();
+    fs::write(
+        workspace.join(".puffer/config.toml"),
+        r#"
+app_name = "Puffer Code"
+default_provider = "codex"
+default_model = "codex/gpt-5"
+theme = "puffer"
+
+[mascot]
+id = "clawd"
+display_name = "Clawd"
+enabled = true
+
+[ui]
+no_alt_screen = true
+tmux_golden_mode = true
+"#,
+    )
+    .unwrap();
+    fs::write(
+        workspace.join(".puffer/auth.json"),
+        r#"{
+  "providers": {
+    "openai": {
+      "kind": "api_key",
+      "key": "tmux-openai-mock-key"
+    }
+  }
+}"#,
+    )
+    .unwrap();
+}
+
 fn link_repo_resources(workspace: &Path) {
     // Some tools and agents resolve relative to a repo `resources/`
     // dir; symlink the repo's resources into the workspace so the
@@ -191,7 +264,7 @@ fn link_repo_resources(workspace: &Path) {
 
 #[test]
 fn tmux_agent_loop_renders_assistant_reply_from_mock_anthropic() {
-    if !tmux_available() {
+    if !require_tmux_or_skip("tmux_agent_loop_renders_assistant_reply_from_mock_anthropic") {
         return;
     }
 
@@ -262,6 +335,79 @@ fn tmux_agent_loop_renders_assistant_reply_from_mock_anthropic() {
     );
 }
 
+#[test]
+fn tmux_agent_loop_accepts_codex_default_provider_alias() {
+    if !require_tmux_or_skip("tmux_agent_loop_accepts_codex_default_provider_alias") {
+        return;
+    }
+
+    let final_text = "puffer-tmux-codex-agent-loop-ok";
+    let final_text_owned = final_text.to_string();
+    let (mock_url, requests, server) =
+        spawn_mock_anthropic(1, move |_| openai_sse_text_response(&final_text_owned));
+
+    let (_tempdir, workspace) = temp_workspace().unwrap();
+    link_repo_resources(workspace.as_path());
+    write_openai_override(workspace.as_path(), &mock_url);
+    write_codex_config(workspace.as_path());
+
+    let binary = env!("CARGO_BIN_EXE_puffer");
+    let session = start_tmux_command_with_size(
+        "sh",
+        &[
+            "-lc",
+            &format!(
+                "HOME='{ws}' PUFFER_HTTP_TRACE_PATH='{ws}/wire.log' '{bin}'",
+                ws = workspace.display(),
+                bin = binary
+            ),
+        ],
+        Some(workspace.as_path()),
+        TerminalSize {
+            cols: 120,
+            rows: 30,
+        },
+    )
+    .unwrap();
+
+    wait_for_tmux_text(&session, "Puffer Code", Duration::from_secs(20)).unwrap();
+    send_tmux_keys(&session, &["say hi through codex", "Enter"]).unwrap();
+
+    let capture = match wait_for_tmux_text(&session, final_text, Duration::from_secs(30)) {
+        Ok(capture) => capture,
+        Err(error) => {
+            let pane = capture_tmux_visible_pane(&session)
+                .unwrap_or_else(|_| "<failed to capture pane>".to_string());
+            let wire = std::fs::read_to_string(workspace.join("wire.log"))
+                .unwrap_or_else(|_| "<no wire log>".to_string());
+            panic!(
+                "expected Codex alias turn to render text: {error}\n--- pane ---\n{pane}\n--- wire ---\n{wire}"
+            );
+        }
+    };
+    assert!(
+        capture.contains(final_text),
+        "tmux pane did not render mock Codex reply:\n{capture}"
+    );
+
+    server.join().unwrap();
+    let captured_requests = requests.lock().unwrap();
+    assert_eq!(
+        captured_requests.len(),
+        1,
+        "mock should have received exactly one OpenAI request"
+    );
+    let raw = &captured_requests[0];
+    assert!(
+        raw.contains("/v1/responses"),
+        "Codex alias should route to the OpenAI Responses endpoint: {raw}"
+    );
+    assert!(
+        raw.contains("say hi through codex"),
+        "mock did not see the user prompt in the request body: {raw}"
+    );
+}
+
 /// Multi-turn tool round-trip through the TUI. Mock first replies with
 /// a `tool_use` block, then (after agent_loop runs the tool locally and
 /// pushes the result) with the final text. Verifies the tmux pane
@@ -269,7 +415,7 @@ fn tmux_agent_loop_renders_assistant_reply_from_mock_anthropic() {
 /// full agent_loop survives through the real TUI.
 #[test]
 fn tmux_agent_loop_drives_tool_round_trip_in_tui() {
-    if !tmux_available() {
+    if !require_tmux_or_skip("tmux_agent_loop_drives_tool_round_trip_in_tui") {
         return;
     }
 
@@ -381,7 +527,7 @@ fn tmux_agent_loop_drives_tool_round_trip_in_tui() {
 
 #[test]
 fn tmux_agent_loop_answers_ask_user_question_with_keyboard_selection() {
-    if !tmux_available() {
+    if !require_tmux_or_skip("tmux_agent_loop_answers_ask_user_question_with_keyboard_selection") {
         return;
     }
 

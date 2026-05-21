@@ -204,14 +204,15 @@ fn timeline_items(record: &SessionRecord) -> Vec<TimelineItemDto> {
     let mut pending_assistant = None;
     for (index, event) in record.events.iter().enumerate() {
         match event {
-            TranscriptEvent::AssistantMessage { text } => {
+            TranscriptEvent::AssistantMessage { text, actor } => {
                 flush_pending_assistant(&mut items, &mut pending_assistant);
                 pending_assistant = Some(TimelineItemDto::AssistantMessage {
                     id: format!("event-{index}"),
                     text: text.clone(),
+                    actor: actor.clone(),
                 });
             }
-            TranscriptEvent::SystemMessage { text } if parse_tool_message(text).is_some() => {
+            TranscriptEvent::SystemMessage { text, .. } if parse_tool_message(text).is_some() => {
                 if let Some(item) = timeline_item(index, event) {
                     items.push(item);
                 }
@@ -245,15 +246,19 @@ fn flush_pending_assistant(
 fn timeline_item(index: usize, event: &TranscriptEvent) -> Option<TimelineItemDto> {
     let id = format!("event-{index}");
     match event {
-        TranscriptEvent::UserMessage { text } => Some(TimelineItemDto::UserMessage {
+        TranscriptEvent::UserMessage { text, actor } => Some(TimelineItemDto::UserMessage {
             id,
             text: text.clone(),
+            actor: actor.clone(),
         }),
-        TranscriptEvent::AssistantMessage { text } => Some(TimelineItemDto::AssistantMessage {
-            id,
-            text: text.clone(),
-        }),
-        TranscriptEvent::SystemMessage { text } => {
+        TranscriptEvent::AssistantMessage { text, actor } => {
+            Some(TimelineItemDto::AssistantMessage {
+                id,
+                text: text.clone(),
+                actor: actor.clone(),
+            })
+        }
+        TranscriptEvent::SystemMessage { text, actor } => {
             if let Some(tool) = parse_tool_message(text) {
                 Some(TimelineItemDto::ToolCall {
                     id,
@@ -263,11 +268,14 @@ fn timeline_item(index: usize, event: &TranscriptEvent) -> Option<TimelineItemDt
                     input_json: tool.input_json,
                     output_text: tool.output_text.clone(),
                     permission_dialog: permission_dialog(&tool.output_text),
+                    actor: actor.clone(),
+                    subject: None,
                 })
             } else {
                 Some(TimelineItemDto::SystemMessage {
                     id,
                     text: text.clone(),
+                    actor: actor.clone(),
                 })
             }
         }
@@ -277,6 +285,8 @@ fn timeline_item(index: usize, event: &TranscriptEvent) -> Option<TimelineItemDt
             input,
             output,
             success,
+            actor,
+            subject,
         } => Some(TimelineItemDto::ToolCall {
             id: format!("{id}-{call_id}"),
             tool_id: tool_id.clone(),
@@ -289,12 +299,17 @@ fn timeline_item(index: usize, event: &TranscriptEvent) -> Option<TimelineItemDt
             input_json: serde_json::from_str(input).ok(),
             output_text: output.clone(),
             permission_dialog: permission_dialog(output),
+            actor: actor.clone(),
+            subject: subject.clone(),
         }),
-        TranscriptEvent::CommandInvoked { name, args } => Some(TimelineItemDto::CommandInvoked {
-            id,
-            name: name.clone(),
-            args: args.clone(),
-        }),
+        TranscriptEvent::CommandInvoked { name, args, actor } => {
+            Some(TimelineItemDto::CommandInvoked {
+                id,
+                name: name.clone(),
+                args: args.clone(),
+                actor: actor.clone(),
+            })
+        }
         TranscriptEvent::SessionRenamed { name } => Some(TimelineItemDto::SessionRenamed {
             id,
             name: name.clone(),

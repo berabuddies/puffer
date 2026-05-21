@@ -1,0 +1,16 @@
+{
+  "pr_number": 6750,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/6750",
+  "title": "AK: Add a formatter for Duration",
+  "merged_at": "2025-11-12T20:41:46Z",
+  "base_commit": "d284b4c2b83c15ddceafecc35f2f0ead7c974fe7",
+  "merge_commit": "ae732801785e983af6b8cf673cd2d8cf29ca2bb6",
+  "area": "ak",
+  "files_changed": [
+    "AK/Format.cpp",
+    "AK/Time.cpp",
+    "AK/Time.h",
+    "Tests/AK/TestFormat.cpp"
+  ],
+  "task_prompt": "Fix the failing AK duration formatting regression in Tests/AK/TestFormat.cpp. Implement the minimal formatter behavior needed by the updated unit tests."
+}

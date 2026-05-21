@@ -22,6 +22,19 @@ fn read_repo_file(relative_path: &str) -> String {
     fs::read_to_string(workspace_root().join(relative_path)).unwrap()
 }
 
+fn claude_reference_available() -> bool {
+    workspace_root().join("references/claude-code").is_dir()
+}
+
+macro_rules! require_claude_reference {
+    () => {
+        if !claude_reference_available() {
+            eprintln!("skipping Claude reference parity test; references/claude-code is absent");
+            return;
+        }
+    };
+}
+
 fn extract_template_literal(contents: &str, marker: &str) -> String {
     let start = contents.find(marker).unwrap() + marker.len();
     let source = &contents[start..];

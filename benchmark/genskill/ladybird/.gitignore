@@ -1,0 +1,7 @@
+.bin/
+.cargo-linux/
+.cache/
+pr_corpus/pr-*/expert_run.jsonl
+pr_corpus/pr-*/expert_run.md
+pr_corpus/pr-*/expert_run_artifact.json
+pr_corpus/pr-*/skills/

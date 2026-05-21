@@ -1,7 +1,9 @@
 use super::onboarding_body_lines;
 use super::overlay_content::{overlay_rows, overlay_title};
 use super::overlay_list::{overlay_selection, visible_overlay_rows};
+use crate::markdown::render_markdown;
 use crate::popup::popup_rows;
+use crate::user_question_overlay::UserQuestionOverlay;
 use crate::OverlayState;
 use puffer_core::CommandSpec;
 use ratatui::layout::Rect;
@@ -9,8 +11,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const MAX_INLINE_DROPDOWN_ROWS: usize = 8;
+const MAX_USER_QUESTION_PREVIEW_LINES: usize = 8;
 /// Hard cap on how tall the input prompt is allowed to grow when the user
 /// inserts newlines or pastes are inserted verbatim. Beyond this the prompt
 /// is rendered with an internal scroll so the rest of the UI stays visible.
@@ -103,6 +107,7 @@ pub(super) fn overlay_prompt_input(input: &str, overlay: Option<&OverlayState>) 
     match overlay {
         Some(OverlayState::ApiKeyPrompt { value, .. }) => "*".repeat(value.chars().count()),
         Some(OverlayState::OnboardingApiKey { input, .. }) => "*".repeat(input.chars().count()),
+        Some(OverlayState::UserQuestionPrompt { overlay }) => overlay.custom_answer().to_string(),
         _ => input.to_string(),
     }
 }
@@ -113,7 +118,93 @@ pub(super) fn overlay_prompt_placeholder(overlay: Option<&OverlayState>) -> &'st
         Some(OverlayState::ApiKeyPrompt { .. } | OverlayState::OnboardingApiKey { .. }) => {
             "Paste API key"
         }
+        Some(OverlayState::UserQuestionPrompt { .. }) => "Type custom answer",
+        Some(overlay) if !overlay.accepts_filter_input() => "Overlay open",
         _ => "Type to jump",
+    }
+}
+
+/// Renders the composer input and returns the cursor row and column.
+pub(super) fn multiline_prompt_text(
+    input: &str,
+    cursor: usize,
+    prompt_width: u16,
+) -> (Text<'static>, u16, u16) {
+    if input.is_empty() {
+        let line = Line::from(vec![
+            Span::raw("❯ "),
+            Span::styled(
+                "Review changes, ask a question, or type /",
+                Style::default().add_modifier(Modifier::DIM),
+            ),
+        ]);
+        return (Text::from(line), 0, 2);
+    }
+
+    let cursor = clamp_char_boundary(input, cursor.min(input.len()));
+    let prefix = &input[..cursor];
+    let cursor_row = prefix.matches('\n').count() as u16;
+    let last_newline = prefix.rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+    let cursor_in_row = cursor.saturating_sub(last_newline);
+    let body_width = usize::from(prompt_width.saturating_sub(2));
+    let mut cursor_col = 2u16;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    for (idx, segment) in input.split('\n').enumerate() {
+        let cursor_in_segment = if idx == usize::from(cursor_row) {
+            Some(cursor_in_row)
+        } else {
+            None
+        };
+        let (body, body_cursor_col) =
+            visible_prompt_segment(segment, cursor_in_segment, body_width);
+        if cursor_in_segment.is_some() {
+            cursor_col = 2 + body_cursor_col;
+        }
+        if idx == 0 {
+            lines.push(Line::from(format!("❯ {body}")));
+        } else {
+            lines.push(Line::from(format!("  {body}")));
+        }
+    }
+    (Text::from(lines), cursor_row, cursor_col)
+}
+
+/// Returns the inline overlay prompt row.
+pub(super) fn overlay_prompt_line(input: &str, placeholder: &str) -> Line<'static> {
+    if input.is_empty() {
+        Line::from(vec![
+            Span::raw("❯ "),
+            Span::styled(
+                placeholder.to_string(),
+                Style::default().add_modifier(Modifier::DIM),
+            ),
+        ])
+    } else {
+        Line::from(format!("❯ {input}"))
+    }
+}
+
+/// Returns the hint row for inline overlay interactions.
+pub(super) fn overlay_hint_line(
+    input: &str,
+    onboarding_active: bool,
+    overlay: Option<&OverlayState>,
+) -> String {
+    if overlay
+        .is_some_and(|overlay| !overlay.accepts_text_input() && !overlay.accepts_filter_input())
+    {
+        return "Esc closes · / starts a command".to_string();
+    }
+    let prefix = if input.is_empty() {
+        "Type to jump"
+    } else {
+        "Typing jumps selection"
+    };
+    if onboarding_active {
+        format!("{prefix} · Enter to continue · Esc to go back")
+    } else {
+        format!("{prefix} · Enter to select · Esc to close")
     }
 }
 
@@ -122,8 +213,63 @@ pub(super) fn overlay_prompt_cursor(cursor: usize, overlay: Option<&OverlayState
     match overlay {
         Some(OverlayState::ApiKeyPrompt { cursor, .. }) => *cursor,
         Some(OverlayState::OnboardingApiKey { cursor, .. }) => *cursor,
+        Some(OverlayState::UserQuestionPrompt { overlay }) => overlay.custom_answer().len(),
         _ => cursor,
     }
+}
+
+fn visible_prompt_segment(segment: &str, cursor: Option<usize>, max_width: usize) -> (String, u16) {
+    if max_width == 0 {
+        return (String::new(), 0);
+    }
+    let Some(cursor) = cursor else {
+        return (take_display_prefix(segment, max_width), 0);
+    };
+    let cursor = clamp_char_boundary(segment, cursor.min(segment.len()));
+    let before_cursor = &segment[..cursor];
+    let start = scroll_start_for_cursor(before_cursor, max_width);
+    let visible_before_cursor = &segment[start..cursor];
+    let cursor_col = UnicodeWidthStr::width(visible_before_cursor).min(max_width) as u16;
+    (
+        take_display_prefix(&segment[start..], max_width),
+        cursor_col,
+    )
+}
+
+fn scroll_start_for_cursor(before_cursor: &str, max_width: usize) -> usize {
+    let mut start = before_cursor.len();
+    let mut width = 0usize;
+    for (index, ch) in before_cursor.char_indices().rev() {
+        let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width.saturating_add(char_width) > max_width {
+            break;
+        }
+        width = width.saturating_add(char_width);
+        start = index;
+    }
+    start
+}
+
+fn take_display_prefix(value: &str, max_width: usize) -> String {
+    let mut output = String::new();
+    let mut width = 0usize;
+    for ch in value.chars() {
+        let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width.saturating_add(char_width) > max_width {
+            break;
+        }
+        width = width.saturating_add(char_width);
+        output.push(ch);
+    }
+    output
+}
+
+fn clamp_char_boundary(value: &str, cursor: usize) -> usize {
+    let mut index = cursor.min(value.len());
+    while index > 0 && !value.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }
 
 fn inline_dropdown_text(
@@ -138,7 +284,7 @@ fn inline_dropdown_text(
         }
         return None;
     }
-    if input.starts_with('/') {
+    if input.starts_with('/') && !input.contains(' ') {
         return Some(Text::from(command_dropdown_lines(
             input,
             slash_selection,
@@ -160,10 +306,11 @@ fn command_dropdown_lines(
             Style::default().add_modifier(Modifier::DIM),
         ))];
     }
+    let selected_index = slash_selection.min(rows.len() - 1);
     rows.into_iter()
         .enumerate()
         .map(|(index, command)| {
-            let selected = index == slash_selection;
+            let selected = index == selected_index;
             let argument_hint = command
                 .argument_hint
                 .as_deref()
@@ -187,9 +334,40 @@ fn overlay_dropdown_lines(overlay: &OverlayState) -> Vec<Line<'static>> {
         OverlayState::OnboardingApiKey { provider_name, .. } => {
             api_key_dropdown_lines("Let's get started.", provider_name)
         }
+        OverlayState::UserQuestionPrompt { overlay } => user_question_dropdown_lines(overlay),
         _ if overlay.is_onboarding() => onboarding_body_lines(overlay, MAX_INLINE_DROPDOWN_ROWS),
         _ => generic_overlay_dropdown_lines(overlay),
     }
+}
+
+fn user_question_dropdown_lines(overlay: &UserQuestionOverlay) -> Vec<Line<'static>> {
+    let mut lines = generic_overlay_dropdown_lines(&OverlayState::UserQuestionPrompt {
+        overlay: overlay.clone(),
+    });
+    let Some(preview) = overlay.selected_preview() else {
+        return lines;
+    };
+    let footer = lines.pop();
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        "Preview",
+        Style::default().add_modifier(Modifier::DIM),
+    )));
+    let mut preview_lines = render_markdown(preview).lines;
+    let truncated = preview_lines.len() > MAX_USER_QUESTION_PREVIEW_LINES;
+    preview_lines.truncate(MAX_USER_QUESTION_PREVIEW_LINES);
+    lines.extend(preview_lines);
+    if truncated {
+        lines.push(Line::from(Span::styled(
+            "... preview truncated",
+            Style::default().add_modifier(Modifier::DIM),
+        )));
+    }
+    if let Some(footer) = footer {
+        lines.push(Line::default());
+        lines.push(footer);
+    }
+    lines
 }
 
 fn generic_overlay_dropdown_lines(overlay: &OverlayState) -> Vec<Line<'static>> {
@@ -213,8 +391,10 @@ fn generic_overlay_dropdown_lines(overlay: &OverlayState) -> Vec<Line<'static>> 
     lines.push(Line::from(Span::styled(
         if overlay.is_onboarding() {
             "Enter to continue · Esc to go back"
-        } else {
+        } else if overlay.accepts_filter_input() {
             "Typing jumps selection · Enter to select · Esc to close"
+        } else {
+            "Use arrows or shortcuts · Enter to select · Esc to close"
         },
         Style::default().add_modifier(Modifier::DIM),
     )));

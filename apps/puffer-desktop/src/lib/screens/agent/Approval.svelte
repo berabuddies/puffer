@@ -4,10 +4,11 @@
 
   type Props = {
     item: PermissionTimelineItem;
+    disabled?: boolean;
     onResolve: (permissionId: string, choice: string) => void;
   };
 
-  let { item, onResolve }: Props = $props();
+  let { item, disabled = false, onResolve }: Props = $props();
 
   function variantFor(choice: string): "default" | "outline" | "ghost" {
     const n = choice.toLowerCase();
@@ -39,6 +40,7 @@
         class="sc-btn"
         data-variant={variantFor(choice)}
         data-size="sm"
+        disabled={disabled}
         onclick={() => onResolve(item.id, choice)}
       >{choice}</button>
     {/each}

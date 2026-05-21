@@ -6,9 +6,9 @@ use crate::command_helpers::{
     handle_ide_command, handle_keybindings_command, handle_mcp_command, handle_memory_command,
     handle_model_command, handle_permissions_command, handle_plan_command, handle_plugin_command,
     handle_recap_command, handle_reflect_command, handle_remote_control_command,
-    handle_remote_env_command,
-    handle_resume_command, handle_sandbox_command, handle_session_command, handle_tag_command,
-    handle_tasks_command, handle_terminal_setup_command, list_skills, persist_user_settings,
+    handle_remote_env_command, handle_resume_command, handle_sandbox_command,
+    handle_session_command, handle_tag_command, handle_tasks_command,
+    handle_terminal_setup_command, handle_genskill_command, list_skills, persist_user_settings,
     record_command_checkpoint, reload_config_from_disk, remove_provider_credentials,
     render_login_guidance, rewind_transcript, run_doctor, run_provider_login_flow,
     should_hide_terminal_setup_command, supports_auth_mode, terminal_setup_command_description,
@@ -18,7 +18,7 @@ use crate::{
     workspace_paths, AppState, MessageRole,
 };
 use anyhow::Result;
-use puffer_provider_registry::{AuthMode, AuthStore, ProviderRegistry};
+use puffer_provider_registry::{canonical_provider_id, AuthMode, AuthStore, ProviderRegistry};
 use puffer_resources::{prompt_by_id, render_prompt_for, skill_by_name, LoadedResources};
 use puffer_session_store::{SessionStore, TranscriptEvent};
 use serde::Serialize;
@@ -192,6 +192,13 @@ pub fn supported_commands() -> Vec<CommandSpec> {
             &["objective"],
             "Set or view the goal for a long-running task",
             Some("[<text> | clear | budget <N> | status]"),
+            CommandKind::Local,
+        ),
+        cmd(
+            "genskill",
+            &[],
+            "Generate a reusable skill from the current conversation",
+            Some("[--candidates N] [--rounds K]"),
             CommandKind::Local,
         ),
         cmd(
@@ -524,6 +531,7 @@ pub fn dispatch_command(
             TranscriptEvent::CommandInvoked {
                 name: format!("skill:{skill_name}"),
                 args: args.to_string(),
+                actor: Some(state.user_actor()),
             },
         )?;
         execute_skill_command(
@@ -550,6 +558,7 @@ pub fn dispatch_command(
                 TranscriptEvent::CommandInvoked {
                     name: name.to_string(),
                     args: args.to_string(),
+                    actor: Some(state.user_actor()),
                 },
             )?;
             execute_skill_command(
@@ -571,6 +580,7 @@ pub fn dispatch_command(
         TranscriptEvent::CommandInvoked {
             name: command.name.to_string(),
             args: args.to_string(),
+            actor: Some(state.user_actor()),
         },
     )?;
 
@@ -637,6 +647,7 @@ fn execute_prompt_command(
                     state.session.id,
                     TranscriptEvent::AssistantMessage {
                         text: turn.assistant_text,
+                        actor: Some(state.assistant_actor()),
                     },
                 )?;
             }
@@ -743,6 +754,7 @@ fn execute_prompt_command(
         state.session.id,
         TranscriptEvent::UserMessage {
             text: rendered.clone(),
+            actor: Some(state.user_actor()),
         },
     )?;
 
@@ -762,6 +774,7 @@ fn execute_prompt_command(
                 state.session.id,
                 TranscriptEvent::AssistantMessage {
                     text: turn.assistant_text,
+                    actor: Some(state.assistant_actor()),
                 },
             )?;
             if command.name == "statusline" {
@@ -879,6 +892,10 @@ fn execute_local_command(
         }
         "effort" => handle_effort_command(state, providers, session_store, args),
         "fast" => handle_fast_command(state, session_store, args),
+        "genskill" => {
+            let message = handle_genskill_command(state, resources, providers, auth_store, args)?;
+            emit_system(state, session_store, message)
+        }
         "theme" => {
             if args.is_empty() {
                 emit_system(
@@ -927,7 +944,9 @@ fn execute_local_command(
         "reflect" => handle_reflect_command(state, session_store, args),
         "agents" => handle_agents_command(state, session_store, args),
         "memory" => handle_memory_command(state, session_store, args),
-        "recap" => handle_recap_command(state, resources, providers, auth_store, session_store, args),
+        "recap" => {
+            handle_recap_command(state, resources, providers, auth_store, session_store, args)
+        }
         "keybindings" => handle_keybindings_command(state, session_store),
         "remote-control" => handle_remote_control_command(state, session_store, args),
         "remote-env" => handle_remote_env_command(state, session_store, args),
@@ -961,12 +980,15 @@ fn execute_local_command(
         "mcp" => handle_mcp_command(state, resources, session_store, args),
         "ide" => handle_ide_command(state, resources, session_store, args),
         "login" => {
-            let provider = if args.is_empty() {
+            let provider_arg = if args.is_empty() {
                 state.current_provider.as_deref().unwrap_or("anthropic")
             } else {
                 args
             };
-            let descriptor = providers.provider(provider);
+            let descriptor = providers.provider(provider_arg);
+            let provider = descriptor
+                .map(|provider_descriptor| provider_descriptor.id.clone())
+                .unwrap_or_else(|| canonical_provider_id(provider_arg));
             if descriptor
                 .map(|provider_descriptor| provider_descriptor.auth_modes.is_empty())
                 .unwrap_or(false)
@@ -978,7 +1000,7 @@ fn execute_local_command(
                 );
             }
             if supports_auth_mode(descriptor, AuthMode::OAuth) {
-                return match run_provider_login_flow(state, auth_store, provider) {
+                return match run_provider_login_flow(state, auth_store, &provider) {
                     Ok(message) => emit_system(state, session_store, message),
                     Err(error) => emit_system(
                         state,
@@ -986,9 +1008,9 @@ fn execute_local_command(
                         format!(
                             "Login failed for {provider}: {error}\n\n{}",
                             render_login_guidance(
-                                provider,
+                                &provider,
                                 descriptor,
-                                auth_store.has_auth(provider)
+                                auth_store.has_auth(&provider)
                             )
                         ),
                     ),
@@ -997,20 +1019,20 @@ fn execute_local_command(
             emit_system(
                 state,
                 session_store,
-                render_login_guidance(provider, descriptor, auth_store.has_auth(provider)),
+                render_login_guidance(&provider, descriptor, auth_store.has_auth(&provider)),
             )
         }
         "logout" => {
-            let provider = if args.is_empty() {
-                state
-                    .current_provider
-                    .clone()
-                    .unwrap_or_else(|| "anthropic".to_string())
+            let provider_arg = if args.is_empty() {
+                state.current_provider.as_deref().unwrap_or("anthropic")
             } else {
-                args.to_string()
+                args
             };
-            if providers
-                .provider(provider.as_str())
+            let descriptor = providers.provider(provider_arg);
+            let provider = descriptor
+                .map(|provider_descriptor| provider_descriptor.id.clone())
+                .unwrap_or_else(|| canonical_provider_id(provider_arg));
+            if descriptor
                 .map(|descriptor| descriptor.auth_modes.is_empty())
                 .unwrap_or(false)
             {

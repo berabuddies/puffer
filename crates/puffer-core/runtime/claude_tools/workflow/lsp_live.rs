@@ -30,6 +30,7 @@ use self::manager::with_lsp_session;
 use super::lsp_live_diagnostics::{diagnostics_for_file, record_publish_diagnostics};
 
 const LSP_REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
+const LSP_SHUTDOWN_REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_LSP_FILE_SIZE_BYTES: u64 = 10_000_000;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -117,7 +118,9 @@ pub(super) fn execute_lsp(resources: &LoadedResources, cwd: &Path, input: Value)
     let parsed: LspInput = serde_json::from_value(input).context("invalid LSP input")?;
     let operation = parsed.operation.clone();
     let file_path = resolve_path(cwd, &parsed.file_path);
-    let output = match execute_lsp_inner(resources, cwd, &parsed, &file_path) {
+    let output = match validate_lsp_input(cwd, &file_path)
+        .and_then(|file_path| execute_lsp_inner(resources, cwd, &parsed, &file_path))
+    {
         Ok(result) => LspToolOutput {
             operation,
             file_path: file_path.display().to_string(),
@@ -146,7 +149,6 @@ fn execute_lsp_inner(
     input: &LspInput,
     file_path: &Path,
 ) -> Result<LspExecutionResult> {
-    validate_lsp_input(file_path)?;
     let server = match resolve_lsp_server(resources, file_path) {
         LspServerResolution::Available(server) => server,
         LspServerResolution::Missing { extension, servers } => {
@@ -180,13 +182,23 @@ fn execute_lsp_inner(
     })
 }
 
-fn validate_lsp_input(file_path: &Path) -> Result<()> {
-    let metadata = fs::metadata(file_path)
+fn validate_lsp_input(cwd: &Path, file_path: &Path) -> Result<PathBuf> {
+    let canonical_cwd = fs::canonicalize(cwd)
+        .with_context(|| format!("failed to canonicalize {}", cwd.display()))?;
+    let canonical_file = fs::canonicalize(file_path)
         .with_context(|| format!("failed to stat {}", file_path.display()))?;
-    if !metadata.is_file() {
-        bail!("Path is not a file: {}", file_path.display());
+    if !canonical_file.starts_with(&canonical_cwd) {
+        bail!(
+            "LSP file path escapes workspace: {}",
+            canonical_file.display()
+        );
     }
-    Ok(())
+    let metadata = fs::metadata(&canonical_file)
+        .with_context(|| format!("failed to stat {}", canonical_file.display()))?;
+    if !metadata.is_file() {
+        bail!("Path is not a file: {}", canonical_file.display());
+    }
+    Ok(canonical_file)
 }
 
 fn run_lsp_operation(
@@ -430,6 +442,15 @@ impl LspSession {
     }
 
     pub(super) fn request(&mut self, method: &str, params: Value) -> Result<Value> {
+        self.request_with_timeout(method, params, LSP_REQUEST_TIMEOUT)
+    }
+
+    fn request_with_timeout(
+        &mut self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value> {
         self.drain_pending_messages()?;
         let id = self.next_id;
         self.next_id += 1;
@@ -443,7 +464,7 @@ impl LspSession {
         loop {
             let message = self
                 .messages
-                .recv_timeout(LSP_REQUEST_TIMEOUT)
+                .recv_timeout(timeout)
                 .map_err(|error| match error {
                     RecvTimeoutError::Timeout => {
                         anyhow!("timed out waiting for LSP response to `{method}`")
@@ -490,6 +511,23 @@ impl LspSession {
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => return Ok(()),
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => return Ok(()),
+            }
+        }
+    }
+
+    fn drain_pending_messages_until_idle(&mut self, idle_timeout: Duration) -> Result<()> {
+        loop {
+            match self.messages.recv_timeout(idle_timeout) {
+                Ok(message) => {
+                    let message = message?;
+                    if is_server_request(&message) {
+                        self.respond_to_server_request(&message)?;
+                        continue;
+                    }
+                    let _ = self.handle_notification(&message)?;
+                }
+                Err(RecvTimeoutError::Timeout) => return Ok(()),
+                Err(RecvTimeoutError::Disconnected) => return Ok(()),
             }
         }
     }
@@ -554,7 +592,11 @@ impl LspSession {
     }
 
     pub(super) fn shutdown(&mut self) -> Result<()> {
-        let _ = self.request("shutdown", Value::Object(Default::default()));
+        let _ = self.request_with_timeout(
+            "shutdown",
+            Value::Object(Default::default()),
+            LSP_SHUTDOWN_REQUEST_TIMEOUT,
+        );
         let _ = self.notify("exit", Value::Object(Default::default()));
         if let Ok(Some(_)) = self.child.try_wait() {
             return Ok(());

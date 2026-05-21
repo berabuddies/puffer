@@ -1,0 +1,20 @@
+{
+  "pr_number": 6545,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/6545",
+  "title": "LibRegex: Add unicode string properties ",
+  "merged_at": "2025-10-24T17:24:56Z",
+  "base_commit": "ba78e3d4bee117ae51bf451a312e40faec0b0954",
+  "merge_commit": "cd4ac4f30f5f453376ed79373b7c3b3d20720921",
+  "area": "libregex",
+  "files_changed": [
+    "Libraries/LibJS/Runtime/RegExpObject.cpp",
+    "Libraries/LibJS/Tests/builtins/RegExp/RegExp.js",
+    "Libraries/LibJS/Tests/builtins/RegExp/RegExp.prototype.source.js",
+    "Libraries/LibRegex/RegexDefs.h",
+    "Libraries/LibRegex/RegexError.h",
+    "Libraries/LibRegex/RegexParser.cpp",
+    "Libraries/LibUnicode/CharacterTypes.cpp",
+    "Libraries/LibUnicode/CharacterTypes.h"
+  ],
+  "task_prompt": "Fix the failing LibRegex Unicode string property regression covered by the RegExp tests. Add support for Unicode string properties without regressing existing RegExp parsing."
+}

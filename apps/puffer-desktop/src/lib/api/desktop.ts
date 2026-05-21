@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AgentActivityStatus,
   AuthProviderStatus,
   AskUserQuestionItem,
   DesktopPinState,
@@ -15,6 +16,7 @@ import type {
   SessionDetail,
   SessionListItem,
   SettingsSnapshot,
+  MessageActor,
   TimelineItem,
   WorkflowRun,
   WorkflowSnapshot
@@ -58,6 +60,7 @@ type BackendSessionListItem = {
   parentSessionId: string | null;
   providerId?: string | null;
   modelId?: string | null;
+  activityStatus?: string | null;
 };
 
 type BackendDiff = {
@@ -108,11 +111,37 @@ type BackendRepoActionResult = {
   pullRequest: BackendPullRequest | null;
 };
 
+type BackendActorFields = {
+  actor?: MessageActor | null;
+  subject?: MessageActor | null;
+};
+
 type BackendTimelineItem =
-  | { kind: "user_message"; id: string; text: string; createdAtMs?: number | null }
-  | { kind: "assistant_message"; id: string; text: string; createdAtMs?: number | null }
-  | { kind: "system_message"; id: string; text: string; createdAtMs?: number | null }
-  | { kind: "command"; id: string; commandName: string; commandArgs: string; createdAtMs?: number | null }
+  | ({
+      kind: "user_message";
+      id: string;
+      text: string;
+      createdAtMs?: number | null;
+    } & BackendActorFields)
+  | ({
+      kind: "assistant_message";
+      id: string;
+      text: string;
+      createdAtMs?: number | null;
+    } & BackendActorFields)
+  | ({
+      kind: "system_message";
+      id: string;
+      text: string;
+      createdAtMs?: number | null;
+    } & BackendActorFields)
+  | ({
+      kind: "command";
+      id: string;
+      commandName: string;
+      commandArgs: string;
+      createdAtMs?: number | null;
+    } & BackendActorFields)
   | {
       kind: "tool_call";
       id: string;
@@ -127,8 +156,8 @@ type BackendTimelineItem =
       input_json?: Record<string, unknown> | null;
       outputText?: string;
       output_text?: string;
-    }
-  | {
+    } & BackendActorFields
+  | ({
       kind: "permission_dialog";
       id: string;
       createdAtMs?: number | null;
@@ -137,7 +166,7 @@ type BackendTimelineItem =
       summary: string | null;
       reason: string;
       inputText: string | null;
-    }
+    } & BackendActorFields)
   | { kind: "diff_snapshot"; id: string; snapshot: BackendDiff; createdAtMs?: number | null };
 
 type BackendAgentDiffFile = {
@@ -186,6 +215,10 @@ function remoteArgs(remote?: RemoteConnection): Record<string, unknown> {
     remoteCwd: remote.cwd || null,
     remotePassword: remote.password || null
   };
+}
+
+function shouldInvokeRemote(remote?: RemoteConnection): boolean {
+  return canInvokeTauri() && Boolean(remote?.enabled && remote.target.trim());
 }
 
 type BackendSettingsConfig = SettingsSnapshot["config"];
@@ -342,6 +375,7 @@ function normalizeAskUserQuestionTool(
     body: "",
     meta: [],
     status: pending ? "pending" : "answered",
+    actor: value.actor ?? null,
     questions,
     answers
   };
@@ -358,13 +392,25 @@ function normalizeSessionListItem(value: BackendSessionListItem): SessionListIte
     updatedAtMs: value.updatedAtMs,
     createdAtMs: value.createdAtMs,
     eventCount: value.eventCount,
+    activityStatus: normalizeActivityStatus(value.activityStatus),
     slug: value.slug,
     tags: value.tags,
     note: value.note,
     parentSessionId: value.parentSessionId,
-    providerId: value.providerId ?? "codex",
+    providerId: value.providerId ?? null,
     modelId: value.modelId ?? null
   };
+}
+
+function normalizeActivityStatus(value: string | null | undefined): AgentActivityStatus {
+  switch (value) {
+    case "running":
+    case "awaiting":
+    case "review":
+      return value;
+    default:
+      return "idle";
+  }
 }
 
 function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
@@ -377,7 +423,8 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         title: "User message",
         summary: preview(value.text),
         body: value.text,
-        meta: []
+        meta: [],
+        actor: value.actor ?? null
       };
     case "assistant_message":
       return {
@@ -387,7 +434,8 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         title: "Assistant response",
         summary: preview(value.text),
         body: value.text,
-        meta: []
+        meta: [],
+        actor: value.actor ?? null
       };
     case "system_message":
       return {
@@ -397,7 +445,8 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         title: "System message",
         summary: preview(value.text),
         body: value.text,
-        meta: []
+        meta: [],
+        actor: value.actor ?? null
       };
     case "command":
       return {
@@ -407,7 +456,8 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         title: `/${value.commandName}`,
         summary: preview(value.commandArgs || `/${value.commandName}`),
         body: [value.commandName, value.commandArgs].filter(Boolean).join(" "),
-        meta: ["slash command"]
+        meta: ["slash command"],
+        actor: value.actor ?? null
       };
     case "tool_call":
       const toolId = value.toolId ?? value.tool_id ?? "";
@@ -436,7 +486,9 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         status: value.status,
         input: inputText,
         output: outputText,
-        inputJson
+        inputJson,
+        actor: value.actor ?? null,
+        subject: value.subject ?? null
       };
     case "permission_dialog":
       return {
@@ -449,6 +501,7 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         meta: [value.state],
         toolName: value.toolId,
         status: value.state,
+        actor: value.actor ?? null,
         permissionDialog: {
           state: value.state,
           reason: value.reason,
@@ -599,11 +652,14 @@ export async function mergePullRequest(
 }
 
 export async function loadSettingsSnapshot(remote?: RemoteConnection): Promise<SettingsSnapshot> {
+  if (shouldInvokeRemote(remote)) {
+    return invoke<BackendSettingsSnapshot>("load_settings_snapshot", remoteArgs(remote));
+  }
+  if (canReachDaemon()) {
+    const client = await ensureLocalDaemonClient();
+    return client.request<BackendSettingsSnapshot>("load_settings_snapshot");
+  }
   if (!canInvokeTauri()) {
-    if (canReachDaemon()) {
-      const client = await ensureLocalDaemonClient();
-      return client.request<BackendSettingsSnapshot>("load_settings_snapshot");
-    }
     return mockSettingsSnapshot;
   }
   return invoke<BackendSettingsSnapshot>("load_settings_snapshot", remoteArgs(remote));
@@ -613,13 +669,19 @@ export async function loginWithOauth(
   providerId: string,
   remote?: RemoteConnection
 ): Promise<SettingsSnapshot> {
+  if (shouldInvokeRemote(remote)) {
+    return invoke<BackendSettingsSnapshot>("login_with_oauth", {
+      providerId,
+      ...remoteArgs(remote)
+    });
+  }
+  if (canReachDaemon()) {
+    const client = await ensureLocalDaemonClient();
+    return client.request<BackendSettingsSnapshot>("login_with_oauth", {
+      providerId
+    });
+  }
   if (!canInvokeTauri()) {
-    if (canReachDaemon()) {
-      const client = await ensureLocalDaemonClient();
-      return client.request<BackendSettingsSnapshot>("login_with_oauth", {
-        providerId
-      });
-    }
     return mockSettingsSnapshot;
   }
   return invoke<BackendSettingsSnapshot>("login_with_oauth", {
@@ -633,14 +695,21 @@ export async function loginWithApiKey(
   apiKey: string,
   remote?: RemoteConnection
 ): Promise<SettingsSnapshot> {
+  if (shouldInvokeRemote(remote)) {
+    return invoke<BackendSettingsSnapshot>("login_with_api_key", {
+      providerId,
+      apiKey,
+      ...remoteArgs(remote)
+    });
+  }
+  if (canReachDaemon()) {
+    const client = await ensureLocalDaemonClient();
+    return client.request<BackendSettingsSnapshot>("login_with_api_key", {
+      providerId,
+      apiKey
+    });
+  }
   if (!canInvokeTauri()) {
-    if (canReachDaemon()) {
-      const client = await ensureLocalDaemonClient();
-      return client.request<BackendSettingsSnapshot>("login_with_api_key", {
-        providerId,
-        apiKey
-      });
-    }
     return mockSettingsSnapshot;
   }
   return invoke<BackendSettingsSnapshot>("login_with_api_key", {
@@ -655,11 +724,11 @@ export async function loginWithApiKey(
  *  shell surfaces these so the user does not have to paste an API key they
  *  already have on disk. */
 export async function listExternalCredentials(): Promise<ExternalCredential[]> {
+  if (canReachDaemon()) {
+    const client = await ensureLocalDaemonClient();
+    return client.request<ExternalCredential[]>("list_external_credentials");
+  }
   if (!canInvokeTauri()) {
-    if (canReachDaemon()) {
-      const client = await ensureLocalDaemonClient();
-      return client.request<ExternalCredential[]>("list_external_credentials");
-    }
     return [];
   }
   return invoke<ExternalCredential[]>("list_external_credentials");
@@ -671,14 +740,14 @@ export async function importExternalCredential(
   providerId: string,
   source: "claude" | "codex"
 ): Promise<SettingsSnapshot> {
+  if (canReachDaemon()) {
+    const client = await ensureLocalDaemonClient();
+    return client.request<BackendSettingsSnapshot>("import_external_credential", {
+      providerId,
+      source
+    });
+  }
   if (!canInvokeTauri()) {
-    if (canReachDaemon()) {
-      const client = await ensureLocalDaemonClient();
-      return client.request<BackendSettingsSnapshot>("import_external_credential", {
-        providerId,
-        source
-      });
-    }
     return mockSettingsSnapshot;
   }
   return invoke<BackendSettingsSnapshot>("import_external_credential", {
@@ -691,13 +760,19 @@ export async function logoutProvider(
   providerId: string,
   remote?: RemoteConnection
 ): Promise<SettingsSnapshot> {
+  if (shouldInvokeRemote(remote)) {
+    return invoke<BackendSettingsSnapshot>("logout_provider", {
+      providerId,
+      ...remoteArgs(remote)
+    });
+  }
+  if (canReachDaemon()) {
+    const client = await ensureLocalDaemonClient();
+    return client.request<BackendSettingsSnapshot>("logout_provider", {
+      providerId
+    });
+  }
   if (!canInvokeTauri()) {
-    if (canReachDaemon()) {
-      const client = await ensureLocalDaemonClient();
-      return client.request<BackendSettingsSnapshot>("logout_provider", {
-        providerId
-      });
-    }
     return mockSettingsSnapshot;
   }
   return invoke<BackendSettingsSnapshot>("logout_provider", {
@@ -761,6 +836,7 @@ export async function writeRemoteFile(
 import {
   canInvokeTauri,
   canReachDaemon,
+  configuredBrowserRemoteDaemonHandshake,
   ensureLocalDaemonClient,
   switchDaemonClient
 } from "./daemonClient";
@@ -903,7 +979,12 @@ export async function connectSshDaemon(
   options: { remoteBinary?: string; remoteWorkspace?: string } = {}
 ): Promise<{ url: string; token: string; workspaceRoot: string; protocolVersion: string }> {
   if (!canInvokeTauri()) {
-    throw new Error("SSH remote daemon requires the Tauri desktop shell.");
+    const browserHandshake = configuredBrowserRemoteDaemonHandshake();
+    if (!browserHandshake) {
+      throw new Error("SSH remote daemon requires the Tauri desktop shell.");
+    }
+    await switchDaemonClient(browserHandshake);
+    return browserHandshake;
   }
   const handshake = await invoke<{
     url: string;
@@ -1088,14 +1169,15 @@ export async function resolveUserQuestion(
 
 /** Best-effort cancel: the current model/tool step completes then the turn
  *  exits. Any pending permission is treated as Deny. */
-export async function cancelTurn(turnId: string): Promise<void> {
+export async function cancelTurn(turnId: string): Promise<{ ok: boolean }> {
   try {
     const client = await ensureLocalDaemonClient();
-    await client.request("cancel_turn", { turnId });
-    return;
+    const result = await client.request<{ ok?: boolean }>("cancel_turn", { turnId });
+    return { ok: result?.ok !== false };
   } catch (daemonError) {
     if (!canInvokeTauri()) throw daemonError;
     await invoke("cancel_turn", { turnId });
+    return { ok: true };
   }
 }
 
@@ -1154,6 +1236,8 @@ export type ReadFileResult = {
   content: string;
   size: number;
   truncated: boolean;
+  textPreview?: string[];
+  htmlPreview?: string;
 };
 
 export type FileTabStateItem = {
@@ -1193,7 +1277,7 @@ export async function listDir(path: string): Promise<DirEntry[]> {
 
 /** Read a file. `maxBytes` caps the returned content (default 256 KiB);
  *  larger files are truncated and returned with `truncated: true`. Files
- *  larger than 5 MiB are refused outright with an error. Binary files
+ *  larger than the daemon hard limit are refused outright with an error. Binary files
  *  come back base64-encoded with `encoding: "base64"`. */
 export async function readFile(path: string, maxBytes?: number): Promise<ReadFileResult> {
   const client = await ensureLocalDaemonClient();
@@ -1243,10 +1327,15 @@ export async function lspInspect(
  *  `fsUnwatch(watchId)` on unmount to free the native watcher. */
 export async function fsWatch(
   paths: string[],
-  recursive: boolean = true
+  recursive: boolean = true,
+  watchId: string | null = null
 ): Promise<{ watchId: string }> {
   const client = await ensureLocalDaemonClient();
-  return client.request<{ watchId: string }>("fs_watch", { paths, recursive });
+  return client.request<{ watchId: string }>("fs_watch", {
+    paths,
+    recursive,
+    ...(watchId ? { watchId } : {})
+  });
 }
 
 /** Stop a filesystem watch. Idempotent — a stale id is a no-op. */
@@ -1630,6 +1719,7 @@ export type ModelDescriptorInfo = {
   contextWindow: number;
   maxOutputTokens: number;
   supportsReasoning: boolean;
+  supportsTools?: boolean;
   isDefault?: boolean;
   thinkingOptions?: {
     id: string;

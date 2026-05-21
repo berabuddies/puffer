@@ -1,0 +1,13 @@
+{
+  "pr_number": 6486,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/6486",
+  "title": "LibGfx: Correctly determine when to invert CMYK",
+  "merged_at": "2025-10-15T19:50:16Z",
+  "base_commit": "e55060ef6e869bf3deb4c3387bba5b88fbd37c58",
+  "merge_commit": "5df216218b29b9d5c78a0ad5c21de71fbb6e7595",
+  "area": "libgfx",
+  "files_changed": [
+    "Libraries/LibGfx/ImageFormats/JPEGLoader.cpp"
+  ],
+  "task_prompt": "Fix the failing LibGfx image decoder tests in Tests/LibGfx/TestImageDecoder.cpp for CMYK/YCCK JPEG color inversion handling. The JPEG loader should correctly determine when to invert decoded CMYK-style data for the added fixtures."
+}

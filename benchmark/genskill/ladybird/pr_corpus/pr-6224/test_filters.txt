@@ -1,0 +1,1 @@
+Libraries/LibJS/Tests/regress/inline-caching.js

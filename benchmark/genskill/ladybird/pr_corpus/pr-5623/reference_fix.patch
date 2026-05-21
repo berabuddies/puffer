@@ -1,0 +1,107 @@
+From 4aa945ba1f4fe8efed906154ab08235b3c0e2ad4 Mon Sep 17 00:00:00 2001
+From: Callum Law <callumlaw1709@outlook.com>
+Date: Tue, 29 Jul 2025 01:25:28 +1200
+Subject: [PATCH] LibRegex: Account for opcode size when calculating incoming
+ jump edges
+
+Not accounting for opcode size when calculating incoming jump edges
+meant that we were merging nodes where we otherwise shouldn't have been,
+for example /.*a|.*b/.
+---
+ Libraries/LibRegex/RegexOptimizer.cpp | 54 +++++++++++++++++----------
+ Tests/LibRegex/TestRegex.cpp          | 12 ++++++
+ 2 files changed, 46 insertions(+), 20 deletions(-)
+
+diff --git a/Libraries/LibRegex/RegexOptimizer.cpp b/Libraries/LibRegex/RegexOptimizer.cpp
+index fdb95e73bd23c..4a4738cad7c77 100644
+--- a/Libraries/LibRegex/RegexOptimizer.cpp
++++ b/Libraries/LibRegex/RegexOptimizer.cpp
+@@ -1372,34 +1372,48 @@ void Optimizer::append_alternation(ByteCode& target, Span<ByteCode> alternatives
+             auto opcode_bytes = alternative_bytes.slice(state.instruction_position, opcode.size());
+ 
+             switch (opcode.opcode_id()) {
+-            case OpCodeId::Jump:
+-                incoming_jump_edges.ensure(static_cast<OpCode_Jump const&>(opcode).offset() + state.instruction_position).append({ opcode_bytes });
+-                has_any_backwards_jump |= static_cast<OpCode_Jump const&>(opcode).offset() < 0;
++            case OpCodeId::Jump: {
++                auto const& cast_opcode = static_cast<OpCode_Jump const&>(opcode);
++                incoming_jump_edges.ensure(cast_opcode.offset() + cast_opcode.size() + state.instruction_position).append({ opcode_bytes });
++                has_any_backwards_jump |= cast_opcode.offset() < 0;
+                 break;
+-            case OpCodeId::JumpNonEmpty:
+-                incoming_jump_edges.ensure(static_cast<OpCode_JumpNonEmpty const&>(opcode).offset() + state.instruction_position).append({ opcode_bytes });
+-                has_any_backwards_jump |= static_cast<OpCode_JumpNonEmpty const&>(opcode).offset() < 0;
++            }
++            case OpCodeId::JumpNonEmpty: {
++                auto const& cast_opcode = static_cast<OpCode_JumpNonEmpty const&>(opcode);
++                incoming_jump_edges.ensure(cast_opcode.offset() + cast_opcode.size() + state.instruction_position).append({ opcode_bytes });
++                has_any_backwards_jump |= cast_opcode.offset() < 0;
+                 break;
+-            case OpCodeId::ForkJump:
+-                incoming_jump_edges.ensure(static_cast<OpCode_ForkJump const&>(opcode).offset() + state.instruction_position).append({ opcode_bytes });
+-                has_any_backwards_jump |= static_cast<OpCode_ForkJump const&>(opcode).offset() < 0;
++            }
++            case OpCodeId::ForkJump: {
++                auto const& cast_opcode = static_cast<OpCode_ForkJump const&>(opcode);
++                incoming_jump_edges.ensure(cast_opcode.offset() + cast_opcode.size() + state.instruction_position).append({ opcode_bytes });
++                has_any_backwards_jump |= cast_opcode.offset() < 0;
+                 break;
+-            case OpCodeId::ForkStay:
+-                incoming_jump_edges.ensure(static_cast<OpCode_ForkStay const&>(opcode).offset() + state.instruction_position).append({ opcode_bytes });
+-                has_any_backwards_jump |= static_cast<OpCode_ForkStay const&>(opcode).offset() < 0;
++            }
++            case OpCodeId::ForkStay: {
++                auto const& cast_opcode = static_cast<OpCode_ForkStay const&>(opcode);
++                incoming_jump_edges.ensure(cast_opcode.offset() + cast_opcode.size() + state.instruction_position).append({ opcode_bytes });
++                has_any_backwards_jump |= cast_opcode.offset() < 0;
+                 break;
+-            case OpCodeId::ForkReplaceJump:
+-                incoming_jump_edges.ensure(static_cast<OpCode_ForkReplaceJump const&>(opcode).offset() + state.instruction_position).append({ opcode_bytes });
+-                has_any_backwards_jump |= static_cast<OpCode_ForkReplaceJump const&>(opcode).offset() < 0;
++            }
++            case OpCodeId::ForkReplaceJump: {
++                auto const& cast_opcode = static_cast<OpCode_ForkReplaceJump const&>(opcode);
++                incoming_jump_edges.ensure(cast_opcode.offset() + cast_opcode.size() + state.instruction_position).append({ opcode_bytes });
++                has_any_backwards_jump |= cast_opcode.offset() < 0;
+                 break;
+-            case OpCodeId::ForkReplaceStay:
+-                incoming_jump_edges.ensure(static_cast<OpCode_ForkReplaceStay const&>(opcode).offset() + state.instruction_position).append({ opcode_bytes });
+-                has_any_backwards_jump |= static_cast<OpCode_ForkReplaceStay const&>(opcode).offset() < 0;
++            }
++            case OpCodeId::ForkReplaceStay: {
++                auto const& cast_opcode = static_cast<OpCode_ForkReplaceStay const&>(opcode);
++                incoming_jump_edges.ensure(cast_opcode.offset() + cast_opcode.size() + state.instruction_position).append({ opcode_bytes });
++                has_any_backwards_jump |= cast_opcode.offset() < 0;
+                 break;
+-            case OpCodeId::Repeat:
+-                incoming_jump_edges.ensure(state.instruction_position - static_cast<OpCode_Repeat const&>(opcode).offset()).append({ opcode_bytes });
++            }
++            case OpCodeId::Repeat: {
++                auto const& cast_opcode = static_cast<OpCode_Repeat const&>(opcode);
++                incoming_jump_edges.ensure(state.instruction_position - cast_opcode.offset()).append({ opcode_bytes });
+                 has_any_backwards_jump = true;
+                 break;
++            }
+             default:
+                 break;
+             }
+diff --git a/Tests/LibRegex/TestRegex.cpp b/Tests/LibRegex/TestRegex.cpp
+index bf8b19a39f3ed..50bd974f349f7 100644
+--- a/Tests/LibRegex/TestRegex.cpp
++++ b/Tests/LibRegex/TestRegex.cpp
+@@ -1367,3 +1367,15 @@ TEST_CASE(zero_width_backreference)
+         EXPECT_EQ(result.capture_group_matches.first()[0].view.to_byte_string(), ""sv);
+     }
+ }
++
++TEST_CASE(account_for_opcode_size_calculating_incoming_jump_edges)
++{
++    {
++        // The optimizer should not optimize the initial ForkStay for these alternatives as they are jumped to from different locations.
++        Regex<ECMA262> re(".*a|.*b", ECMAScriptFlags::Global);
++        auto result = re.match("aa"sv);
++        EXPECT_EQ(result.success, true);
++        EXPECT_EQ(result.matches.size(), 1u);
++        EXPECT_EQ(result.matches.first().view.to_byte_string(), "aa"sv);
++    }
++}

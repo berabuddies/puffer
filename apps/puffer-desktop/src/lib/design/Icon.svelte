@@ -31,6 +31,7 @@
     | "cpu"
     | "moreH"
     | "eye"
+    | "eyeOff"
     | "panel"
     | "panelOpen"
     | "panelClose"
@@ -49,13 +50,15 @@
     | "coin"
     | "token"
     | "wrench"
-    | "pin";
+    | "pin"
+    | "bot";
 </script>
 
 <script lang="ts">
   import ArrowRightIcon from "lucide-svelte/icons/arrow-right";
   import ArrowUpIcon from "lucide-svelte/icons/arrow-up";
   import BadgeCentIcon from "lucide-svelte/icons/badge-cent";
+  import BotIcon from "lucide-svelte/icons/bot";
   import BugIcon from "lucide-svelte/icons/bug";
   import CheckIcon from "lucide-svelte/icons/check";
   import ChevronDownIcon from "lucide-svelte/icons/chevron-down";
@@ -67,6 +70,7 @@
   import CopyIcon from "lucide-svelte/icons/copy";
   import CpuIcon from "lucide-svelte/icons/cpu";
   import EyeIcon from "lucide-svelte/icons/eye";
+  import EyeOffIcon from "lucide-svelte/icons/eye-off";
   import ExternalLinkIcon from "lucide-svelte/icons/external-link";
   import FileIcon from "lucide-svelte/icons/file";
   import FlameIcon from "lucide-svelte/icons/flame";
@@ -144,6 +148,7 @@
     cpu: CpuIcon,
     moreH: MoreHorizontalIcon,
     eye: EyeIcon,
+    eyeOff: EyeOffIcon,
     panel: LayoutPanelLeftIcon,
     panelOpen: PanelLeftOpenIcon,
     panelClose: PanelLeftCloseIcon,
@@ -162,7 +167,8 @@
     coin: CoinsIcon,
     token: BadgeCentIcon,
     wrench: WrenchIcon,
-    pin: PinIcon
+    pin: PinIcon,
+    bot: BotIcon
   };
 
   let { name, size = 14, color, strokeWidth = 1.8 }: Props = $props();

@@ -16,4 +16,4 @@ pub use model::{
     ProviderDescriptor, ProviderSource, ProviderSourceKind, RegisteredProvider, ResponsesPath,
     ThinkingFormat,
 };
-pub use registry::ProviderRegistry;
+pub use registry::{canonical_provider_id, ProviderRegistry};

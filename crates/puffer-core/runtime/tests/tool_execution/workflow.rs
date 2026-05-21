@@ -3,10 +3,6 @@ use puffer_config::ConfigPaths;
 use std::fs;
 use std::time::Duration;
 
-fn puffer_home_lock() -> &'static std::sync::Mutex<()> {
-    crate::test_locks::env_lock()
-}
-
 #[test]
 fn todo_write_rejects_multiple_in_progress_items() {
     let mut state = temp_state();
@@ -110,10 +106,10 @@ fn config_tool_allows_null_to_clear_openai_map_settings() {
 }
 
 #[test]
-fn config_tool_supports_camel_case_aliases_and_status_line_settings() {
+fn config_tool_rejects_status_line_command_writes() {
     let mut state = temp_state();
     let cwd = state.cwd.clone();
-    let output = crate::runtime::claude_tools::workflow::config::execute_config(
+    let error = crate::runtime::claude_tools::workflow::config::execute_config(
         &mut state,
         &cwd,
         json!({
@@ -121,21 +117,33 @@ fn config_tool_supports_camel_case_aliases_and_status_line_settings() {
             "value": "echo status"
         }),
     )
+    .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("cannot set executable status_line_command"));
+    assert!(state.config.ui.status_line.is_none());
+}
+
+#[test]
+fn config_tool_can_read_status_line_command() {
+    let mut state = temp_state();
+    state.config.ui.status_line = Some(puffer_config::StatusLineConfig {
+        command: "echo status".to_string(),
+        padding: 0,
+    });
+    let cwd = state.cwd.clone();
+    let output = crate::runtime::claude_tools::workflow::config::execute_config(
+        &mut state,
+        &cwd,
+        json!({
+            "setting": "statusLineCommand"
+        }),
+    )
     .unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
-    assert_eq!(parsed["success"], true);
-    assert_eq!(parsed["scope"], "workspace");
-    assert_eq!(parsed["persisted"], true);
+    assert_eq!(parsed["operation"], "get");
     assert_eq!(parsed["value"], "echo status");
-    assert_eq!(
-        state
-            .config
-            .ui
-            .status_line
-            .as_ref()
-            .map(|status_line| status_line.command.as_str()),
-        Some("echo status")
-    );
 }
 
 #[test]
@@ -162,11 +170,9 @@ fn config_tool_supports_copy_full_response_alias() {
 #[test]
 fn config_tool_persists_user_settings_to_user_config() {
     let tempdir = tempfile::tempdir().unwrap();
-    let _lock = puffer_home_lock().lock().unwrap();
-    let old_home = std::env::var_os("PUFFER_HOME");
     let home = tempdir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
-    std::env::set_var("PUFFER_HOME", &home);
+    let _home = puffer_config::set_puffer_home_override(&home);
     let mut state = temp_state();
     let cwd = state.cwd.clone();
     let output = crate::runtime::claude_tools::workflow::config::execute_config(
@@ -195,11 +201,6 @@ fn config_tool_persists_user_settings_to_user_config() {
             .unwrap()
             .contains("fast_mode = true")
     );
-    if let Some(value) = old_home {
-        std::env::set_var("PUFFER_HOME", value);
-    } else {
-        std::env::remove_var("PUFFER_HOME");
-    }
 }
 
 #[test]
@@ -262,11 +263,9 @@ fn config_tool_supports_integer_status_line_padding() {
 #[test]
 fn config_tool_allows_null_to_clear_model_override() {
     let tempdir = tempfile::tempdir().unwrap();
-    let _lock = puffer_home_lock().lock().unwrap();
-    let old_home = std::env::var_os("PUFFER_HOME");
     let home = tempdir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
-    std::env::set_var("PUFFER_HOME", &home);
+    let _home = puffer_config::set_puffer_home_override(&home);
     let mut state = temp_state();
     state.current_model = Some("openai/gpt-5".to_string());
     state.current_provider = Some("openai".to_string());
@@ -284,11 +283,6 @@ fn config_tool_allows_null_to_clear_model_override() {
     assert_eq!(parsed["success"], true);
     assert_eq!(parsed["value"], Value::Null);
     assert_eq!(state.current_model, None);
-    if let Some(value) = old_home {
-        std::env::set_var("PUFFER_HOME", value);
-    } else {
-        std::env::remove_var("PUFFER_HOME");
-    }
 }
 
 #[test]
@@ -364,11 +358,9 @@ fn ask_user_question_uses_prompt_handler_answers() {
 #[test]
 fn team_create_makes_dirs_and_team_delete_removes_them() {
     let tempdir = tempfile::tempdir().unwrap();
-    let _lock = puffer_home_lock().lock().unwrap();
-    let old_home = std::env::var_os("PUFFER_HOME");
     let home = tempdir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
-    std::env::set_var("PUFFER_HOME", &home);
+    let _home = puffer_config::set_puffer_home_override(&home);
     let mut state = temp_state();
     let cwd = state.cwd.clone();
     let created = crate::runtime::claude_tools::workflow::team_create::execute_team_create(
@@ -405,21 +397,46 @@ fn team_create_makes_dirs_and_team_delete_removes_them() {
     assert!(!std::path::Path::new(team_file_path).exists());
     assert!(!task_dir.exists());
     assert!(state.active_team_name.is_none());
-    if let Some(value) = old_home {
-        std::env::set_var("PUFFER_HOME", value);
-    } else {
-        std::env::remove_var("PUFFER_HOME");
-    }
+}
+
+#[test]
+fn team_create_rejects_path_components_in_team_name() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let error = crate::runtime::claude_tools::workflow::team_create::execute_team_create(
+        &mut state,
+        &cwd,
+        json!({ "team_name": "../outside" }),
+    )
+    .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("simple identifier without path components"));
+}
+
+#[test]
+fn enter_worktree_rejects_path_components_in_name() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let error = crate::runtime::claude_tools::workflow::enter_worktree::execute_enter_worktree(
+        &mut state,
+        &cwd,
+        json!({ "name": "../outside" }),
+    )
+    .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("simple identifier without path components"));
 }
 
 #[test]
 fn team_delete_only_removes_the_current_session_team() {
     let tempdir = tempfile::tempdir().unwrap();
-    let _lock = puffer_home_lock().lock().unwrap();
-    let old_home = std::env::var_os("PUFFER_HOME");
     let home = tempdir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
-    std::env::set_var("PUFFER_HOME", &home);
+    let _home = puffer_config::set_puffer_home_override(&home);
     let mut first = temp_state();
     let mut second = temp_state();
     second.cwd = first.cwd.clone();
@@ -450,12 +467,6 @@ fn team_delete_only_removes_the_current_session_team() {
     assert_eq!(deleted["team_name"], "alpha");
     assert!(!home.join(".claude/teams/alpha").exists());
     assert!(home.join(".claude/teams/beta").exists());
-
-    if let Some(value) = old_home {
-        std::env::set_var("PUFFER_HOME", value);
-    } else {
-        std::env::remove_var("PUFFER_HOME");
-    }
 }
 
 #[test]
@@ -590,6 +601,25 @@ fn task_output_waits_for_agent_completion() {
 }
 
 #[test]
+fn task_output_rejects_path_components_in_task_id() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let error = crate::runtime::claude_tools::workflow::task_output::execute_task_output(
+        &mut state,
+        &cwd,
+        json!({
+            "task_id": "../agent-output",
+            "block": false
+        }),
+    )
+    .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("simple identifier without path components"));
+}
+
+#[test]
 fn task_stop_rejects_non_background_tasks() {
     let mut state = temp_state();
     let cwd = state.cwd.clone();
@@ -617,4 +647,20 @@ fn task_stop_rejects_non_background_tasks() {
     assert!(error
         .to_string()
         .contains("is not a running background task"));
+}
+
+#[test]
+fn task_stop_rejects_unrecorded_shell_pid() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let error = crate::runtime::claude_tools::workflow::task_stop::execute_task_stop(
+        &mut state,
+        &cwd,
+        json!({
+            "task_id": "shell-1"
+        }),
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("unknown task `shell-1`"));
 }

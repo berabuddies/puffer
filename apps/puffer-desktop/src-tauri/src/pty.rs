@@ -32,6 +32,7 @@ use crate::events::EventEmitter;
 
 const PTY_IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const PTY_REPLAY_MAX_BYTES: usize = 1024 * 1024;
+const PTY_WRITE_MAX_BYTES: usize = 64 * 1024;
 
 /// Owns a single live PTY. Dropping this kills the child and joins the
 /// reader thread implicitly via the Child/master drops.
@@ -358,9 +359,7 @@ impl PtyRegistry {
 
     /// Writes raw base64-encoded bytes to a live PTY.
     pub fn write(&self, pty_id: &str, data_b64: &str) -> Result<()> {
-        let bytes = BASE64
-            .decode(data_b64.as_bytes())
-            .context("decode pty data")?;
+        let bytes = decode_pty_write_payload(data_b64)?;
         let mut guard = self.inner.lock().unwrap();
         let handle = guard
             .handles
@@ -470,6 +469,20 @@ impl PtyHandle {
     }
 }
 
+fn decode_pty_write_payload(data_b64: &str) -> Result<Vec<u8>> {
+    let bytes = BASE64
+        .decode(data_b64.as_bytes())
+        .context("decode pty data")?;
+    if bytes.len() > PTY_WRITE_MAX_BYTES {
+        anyhow::bail!(
+            "pty write payload is too large ({} bytes, hard limit {} bytes)",
+            bytes.len(),
+            PTY_WRITE_MAX_BYTES
+        );
+    }
+    Ok(bytes)
+}
+
 impl PtyReplay {
     fn push(&mut self, seq: u64, data: String, bytes: usize) {
         self.bytes += bytes;
@@ -481,6 +494,20 @@ impl PtyReplay {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_pty_write_payload_rejects_large_input() {
+        let encoded = BASE64.encode(vec![b'x'; PTY_WRITE_MAX_BYTES + 1]);
+
+        let error = decode_pty_write_payload(&encoded).unwrap_err();
+
+        assert!(error.to_string().contains("too large"));
     }
 }
 

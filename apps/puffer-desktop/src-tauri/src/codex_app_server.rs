@@ -404,6 +404,35 @@ pub(crate) fn run_turn(
     ui_turn_id: &str,
     options: CodexTurnOptions<'_>,
 ) -> Result<CodexTurnOutcome> {
+    let result = run_turn_once(command, events, channel, ui_turn_id, &options, false);
+    match result {
+        Ok(outcome) => Ok(outcome),
+        Err(error)
+            if options_has_reasoning_effort(&options)
+                && is_openai_include_validation_error(&error.to_string()) =>
+        {
+            events.emit(
+                channel.to_string(),
+                json!({
+                    "type": "thinking-delta",
+                    "turnId": ui_turn_id,
+                    "delta": "OpenAI rejected the Codex reasoning include selector; retrying without reasoning effort.\n",
+                }),
+            );
+            run_turn_once(command, events, channel, ui_turn_id, &options, true)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn run_turn_once(
+    command: &str,
+    events: &EventEmitter,
+    channel: &str,
+    ui_turn_id: &str,
+    options: &CodexTurnOptions<'_>,
+    omit_reasoning_effort: bool,
+) -> Result<CodexTurnOutcome> {
     let mut client = AppServerClient::spawn(
         command,
         options.permission_mode,
@@ -413,7 +442,11 @@ pub(crate) fn run_turn(
     client.initialize()?;
     let (models, default_model) = fetch_models_and_default(&mut client)?;
     let model = resolve_model(options.model, &models, default_model.as_deref());
-    let thinking_option = normalize_model_id(options.thinking_option_id.unwrap_or_default());
+    let thinking_option = if omit_reasoning_effort {
+        None
+    } else {
+        options.thinking_option_id.and_then(normalize_model_id)
+    };
     let service_tier = if options.fast_mode && model_supports_fast(&model, &models) {
         Some("fast")
     } else {
@@ -447,15 +480,14 @@ pub(crate) fn run_turn(
 
     client.request(
         "turn/start",
-        json!({
-            "threadId": thread_id,
-            "input": [{"type": "text", "text": options.message}],
-            "approvalPolicy": permission.approval_policy,
-            "sandboxPolicy": permission.sandbox_policy,
-            "model": model,
-            "effort": thinking_option,
-            "serviceTier": service_tier,
-        }),
+        turn_start_params(
+            &thread_id,
+            options.message,
+            &permission,
+            model.as_deref(),
+            thinking_option.as_deref(),
+            service_tier,
+        ),
         REQUEST_TIMEOUT,
         |method, params| emit_notification(events, channel, ui_turn_id, method, params),
     )?;
@@ -613,6 +645,56 @@ pub(crate) fn run_turn(
         tools,
         events: ordered_events,
     })
+}
+
+fn turn_start_params(
+    thread_id: &str,
+    message: &str,
+    permission: &PermissionPreset,
+    model: Option<&str>,
+    thinking_option: Option<&str>,
+    service_tier: Option<&str>,
+) -> Value {
+    let mut params = serde_json::Map::new();
+    params.insert("threadId".to_string(), json!(thread_id));
+    params.insert(
+        "input".to_string(),
+        json!([{"type": "text", "text": message}]),
+    );
+    params.insert(
+        "approvalPolicy".to_string(),
+        json!(permission.approval_policy),
+    );
+    params.insert(
+        "sandboxPolicy".to_string(),
+        permission.sandbox_policy.clone(),
+    );
+    if let Some(model) = model.filter(|value| !value.trim().is_empty()) {
+        params.insert("model".to_string(), json!(model));
+    }
+    if let Some(effort) = thinking_option.filter(|value| !value.trim().is_empty()) {
+        params.insert("effort".to_string(), json!(effort));
+    }
+    if let Some(service_tier) = service_tier.filter(|value| !value.trim().is_empty()) {
+        params.insert("serviceTier".to_string(), json!(service_tier));
+    }
+    Value::Object(params)
+}
+
+fn options_has_reasoning_effort(options: &CodexTurnOptions<'_>) -> bool {
+    options
+        .thinking_option_id
+        .is_some_and(|value| !value.trim().is_empty() && value != "default")
+}
+
+fn is_openai_include_validation_error(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    normalized.contains("include[0]")
+        && normalized.contains("invalid")
+        && (normalized.contains("reasoning.encrypted_content")
+            || normalized.contains("reasoning.encryptedcontent")
+            || normalized.contains("rea...ent")
+            || normalized.contains("supported values"))
 }
 
 fn upsert_ordered_tool_event(events: &mut Vec<CapturedTurnEvent>, tool: CapturedToolEvent) {
@@ -1184,8 +1266,59 @@ fn turn_error_message(params: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{permission_preset, playwright_mcp_args_config, server_request_response};
+    use super::{
+        is_openai_include_validation_error, permission_preset, playwright_mcp_args_config,
+        server_request_response, turn_start_params,
+    };
     use serde_json::json;
+
+    #[test]
+    fn turn_start_params_omit_null_effort_and_service_tier() {
+        let preset = permission_preset(None);
+        let params = turn_start_params("thread-1", "hello", &preset, Some("gpt-5.4"), None, None);
+
+        assert_eq!(params.get("threadId"), Some(&json!("thread-1")));
+        assert_eq!(
+            params.get("input"),
+            Some(&json!([{"type": "text", "text": "hello"}]))
+        );
+        assert_eq!(params.get("model"), Some(&json!("gpt-5.4")));
+        assert!(params.get("effort").is_none());
+        assert!(params.get("serviceTier").is_none());
+    }
+
+    #[test]
+    fn turn_start_params_include_selected_effort_and_fast_tier() {
+        let preset = permission_preset(Some("full-access"));
+        let params = turn_start_params(
+            "thread-1",
+            "hello",
+            &preset,
+            Some("gpt-5.4"),
+            Some("low"),
+            Some("fast"),
+        );
+
+        assert_eq!(params.get("effort"), Some(&json!("low")));
+        assert_eq!(params.get("serviceTier"), Some(&json!("fast")));
+        assert_eq!(
+            params.get("sandboxPolicy"),
+            Some(&json!({"type": "dangerFullAccess"}))
+        );
+    }
+
+    #[test]
+    fn openai_include_validation_errors_are_retryable_without_effort() {
+        assert!(is_openai_include_validation_error(
+            "request failed with status 400 Bad Request: {\"error\":{\"message\":\"Invalid value: 'rea...ent'. Supported values are: 'filesearchcall.results', 'reasoning.encryptedcontent'\"},\"param\":\"include[0]\"}"
+        ));
+        assert!(is_openai_include_validation_error(
+            "Invalid value: 'reasoning.encrypted_content'. Supported values are: 'reasoning.encryptedcontent'. param include[0]"
+        ));
+        assert!(!is_openai_include_validation_error(
+            "request failed with status 400 Bad Request: unrelated model error"
+        ));
+    }
 
     #[test]
     fn playwright_mcp_args_use_headless_without_cdp() {

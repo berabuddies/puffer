@@ -1,0 +1,77 @@
+diff --git a/AK/Checked.h b/AK/Checked.h
+index 84aea2c3df6a3..06debd0daeda2 100644
+--- a/AK/Checked.h
++++ b/AK/Checked.h
+@@ -348,14 +348,9 @@ class Checked {
+     {
+ #if __has_builtin(__builtin_add_overflow_p)
+         return __builtin_add_overflow_p(u, v, (T)0);
+-#elif __has_builtin(__builtin_add_overflow)
++#else
+         T result;
+         return __builtin_add_overflow(u, v, &result);
+-#else
+-        Checked checked;
+-        checked = u;
+-        checked += v;
+-        return checked.has_overflow();
+ #endif
+     }
+ 
+@@ -364,14 +359,9 @@ class Checked {
+     {
+ #if __has_builtin(__builtin_sub_overflow_p)
+         return __builtin_sub_overflow_p(u, v, (T)0);
+-#elif __has_builtin(__builtin_sub_overflow)
++#else
+         T result;
+         return __builtin_sub_overflow(u, v, &result);
+-#else
+-        Checked checked;
+-        checked = u;
+-        checked -= v;
+-        return checked.has_overflow();
+ #endif
+     }
+ 
+@@ -404,27 +394,12 @@ class Checked {
+     {
+ #if __has_builtin(__builtin_mul_overflow_p)
+         return __builtin_mul_overflow_p(u, v, (T)0);
+-#elif __has_builtin(__builtin_mul_overflow)
++#else
+         T result;
+         return __builtin_mul_overflow(u, v, &result);
+-#else
+-        Checked checked;
+-        checked = u;
+-        checked *= v;
+-        return checked.has_overflow();
+ #endif
+     }
+ 
+-    template<typename U, typename V, typename X>
+-    [[nodiscard]] static constexpr bool multiplication_would_overflow(U u, V v, X x)
+-    {
+-        Checked checked;
+-        checked = u;
+-        checked *= v;
+-        checked *= x;
+-        return checked.has_overflow();
+-    }
+-
+ private:
+     T m_value {};
+     bool m_overflow { false };
+diff --git a/Tests/AK/TestChecked.cpp b/Tests/AK/TestChecked.cpp
+index 34562a2ac2df1..51821c3b40054 100644
+--- a/Tests/AK/TestChecked.cpp
++++ b/Tests/AK/TestChecked.cpp
+@@ -374,7 +374,6 @@ TEST_CASE(should_constexpr_check_for_overflow_addition)
+ TEST_CASE(should_constexpr_check_for_overflow_multiplication)
+ {
+     static_assert(Checked<int>::multiplication_would_overflow(NumericLimits<int>::max(), 2));
+-    static_assert(Checked<int>::multiplication_would_overflow(NumericLimits<int>::max(), 1, 2));
+ }
+ 
+ TEST_CASE(should_constexpr_add_checked_values)

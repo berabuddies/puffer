@@ -111,7 +111,7 @@ export function agentPufferState(status: AgentStatus): AgentState {
   switch (status) {
     case "running": return "running";
     case "awaiting": return "awaiting";
-    case "review": return "idle";
+    case "review": return "review";
     default: return "idle";
   }
 }

@@ -1,0 +1,13 @@
+{
+  "pr_number": 6358,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/6358",
+  "title": "LibGfx: Allow decoding of GIFs with empty LZW data",
+  "merged_at": "2025-10-02T09:04:35Z",
+  "base_commit": "a5697b4796e17a63996dbfdc1427faa67ea8a524",
+  "merge_commit": "b3bdb202f846320e00b8eb892b947a2c7b12105b",
+  "area": "libgfx",
+  "files_changed": [
+    "Libraries/LibGfx/ImageFormats/GIFLoader.cpp"
+  ],
+  "task_prompt": "Fix the failing LibGfx image decoder test in Tests/LibGfx/TestImageDecoder.cpp for GIFs with empty LZW data. The GIF loader should accept the minimal fixture without failing decoding."
+}

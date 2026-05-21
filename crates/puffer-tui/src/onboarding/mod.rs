@@ -24,10 +24,13 @@ pub(crate) fn needs_initial_provider_setup(state: &AppState, providers: &Provide
         return true;
     }
     let Some(model_selector) = state.current_model.as_deref() else {
-        return false;
+        return true;
     };
     let Some((selected_provider, selected_model)) = model_selector.split_once('/') else {
-        return false;
+        return !provider
+            .models
+            .iter()
+            .any(|model| model.id == model_selector);
     };
     selected_provider != provider_id
         || !provider
@@ -52,9 +55,30 @@ pub(crate) fn initial_overlay(
         return Ok(Some(theme_picker()));
     }
     if let Some(provider_id) = state.current_provider.as_deref() {
+        if providers.provider(provider_id).is_none() {
+            return Ok(provider_picker(providers, true));
+        }
         return provider_setup_overlay(providers, auth_store, provider_id);
     }
     Ok(provider_picker(providers, true))
+}
+
+/// Builds the setup overlay needed before an interactive provider prompt can run.
+pub(crate) fn prompt_submission_overlay(
+    state: &AppState,
+    providers: &mut ProviderRegistry,
+    auth_store: &AuthStore,
+) -> Result<Option<OverlayState>> {
+    if let Some(provider_id) = state.current_provider.as_deref() {
+        if providers.provider(provider_id).is_none() {
+            return Ok(provider_picker(providers, true));
+        }
+        let selected_provider_needs_setup = needs_initial_provider_setup(state, providers);
+        if selected_provider_needs_setup || missing_required_auth(state, providers, auth_store) {
+            return provider_setup_overlay(providers, auth_store, provider_id);
+        }
+    }
+    initial_overlay(state, providers, auth_store)
 }
 
 /// Builds a command-driven picker overlay, including provider-scoped model selection.
@@ -126,7 +150,7 @@ pub(crate) fn overlay_from_command(
             }
         }
         "login" if args.is_empty() => login_provider_picker(providers),
-        "login" if !args.is_empty() => auth_picker(providers, auth_store, args, false)?,
+        "login" if !args.is_empty() => login_auth_overlay(providers, auth_store, args)?,
         "logout" if args.is_empty() => logout_picker(providers, auth_store),
         "fast" if args.is_empty() => fast_mode_picker_for_current_selection(state, providers),
         "theme" if args.is_empty() => Some(theme_picker()),
@@ -152,6 +176,29 @@ pub(crate) fn provider_setup_overlay(
     Ok(model_picker(providers, provider_id, true))
 }
 
+/// Builds the auth-only overlay used by explicit `/login` commands.
+pub(crate) fn login_auth_overlay(
+    providers: &ProviderRegistry,
+    auth_store: &AuthStore,
+    provider_id: &str,
+) -> Result<Option<OverlayState>> {
+    auth_picker(providers, auth_store, provider_id, false)
+}
+
+/// Builds the next overlay after credentials are updated.
+pub(crate) fn post_auth_overlay(
+    providers: &mut ProviderRegistry,
+    auth_store: &AuthStore,
+    provider_id: &str,
+    onboarding: bool,
+) -> Result<Option<OverlayState>> {
+    if onboarding {
+        provider_setup_overlay(providers, auth_store, provider_id)
+    } else {
+        Ok(None)
+    }
+}
+
 /// Returns the first provider step used after the initial theme selection.
 pub(crate) fn initial_provider_overlay(providers: &ProviderRegistry) -> Option<OverlayState> {
     provider_picker(providers, true)
@@ -169,7 +216,13 @@ pub(crate) fn back_overlay(
             onboarding,
             ..
         } => auth_picker(providers, auth_store, provider_id, *onboarding)?,
-        OverlayState::AuthPicker { onboarding, .. } => provider_picker(providers, *onboarding),
+        OverlayState::AuthPicker { onboarding, .. } => {
+            if *onboarding {
+                provider_picker(providers, true)
+            } else {
+                login_provider_picker(providers)
+            }
+        }
         OverlayState::ProviderPicker { onboarding, .. } if *onboarding => Some(theme_picker()),
         OverlayState::ModelPicker { onboarding, .. } if *onboarding => {
             provider_picker(providers, true)
@@ -238,11 +291,15 @@ fn needs_auth_choice(provider: &ProviderDescriptor, auth_store: &AuthStore) -> b
     supports_local_auth && !auth_store.has_auth(&provider.id)
 }
 
+fn provider_can_offer_models(provider: &ProviderDescriptor) -> bool {
+    !provider.models.is_empty() || provider.discovery.is_some()
+}
+
 fn provider_picker(providers: &ProviderRegistry, onboarding: bool) -> Option<OverlayState> {
     let mut providers = providers
         .providers()
         .filter(|provider| {
-            !provider.models.is_empty() && (onboarding || !provider.auth_modes.is_empty())
+            provider_can_offer_models(provider) && (onboarding || !provider.auth_modes.is_empty())
         })
         .collect::<Vec<_>>();
     providers.sort_by_key(|provider| provider_rank(provider.id.as_str()));
@@ -270,7 +327,7 @@ fn provider_picker(providers: &ProviderRegistry, onboarding: bool) -> Option<Ove
 fn login_provider_picker(providers: &ProviderRegistry) -> Option<OverlayState> {
     let mut providers = providers
         .providers()
-        .filter(|provider| !provider.models.is_empty())
+        .filter(|provider| provider_can_offer_models(provider))
         .filter(|provider| !provider.auth_modes.is_empty())
         .collect::<Vec<_>>();
     providers.sort_by_key(|provider| provider_rank(provider.id.as_str()));
@@ -512,7 +569,21 @@ pub(crate) fn fast_mode_picker_for_current_selection(
     providers: &ProviderRegistry,
 ) -> Option<OverlayState> {
     let model_selector = state.current_model.as_deref()?;
-    let (provider_id, model_id) = model_selector.split_once('/')?;
+    let (provider_id, model_id) = match model_selector.split_once('/') {
+        Some((provider_id, model_id)) => (provider_id, model_id),
+        None => {
+            let provider_id = state.current_provider.as_deref()?;
+            let provider = providers.provider(provider_id)?;
+            if !provider
+                .models
+                .iter()
+                .any(|model| model.id == model_selector)
+            {
+                return None;
+            }
+            (provider_id, model_selector)
+        }
+    };
     let effort = normalized_effort_level(
         provider_preference_family(providers, provider_id),
         &state.effort_level,
@@ -661,6 +732,20 @@ mod tests {
         }
     }
 
+    fn discovery_only_provider(
+        id: &str,
+        display_name: &str,
+        auth_modes: Vec<AuthMode>,
+    ) -> ProviderDescriptor {
+        let address = "127.0.0.1:9".parse().expect("socket address");
+        let mut provider = openai_provider(address);
+        provider.id = id.to_string();
+        provider.display_name = display_name.to_string();
+        provider.auth_modes = auth_modes;
+        provider.models.clear();
+        provider
+    }
+
     fn spawn_model_server() -> std::net::SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
         let address = listener.local_addr().expect("address");
@@ -738,6 +823,123 @@ mod tests {
                 assert!(entries.iter().any(|entry| entry.selector == "gpt-4.1-mini"));
             }
             other => panic!("expected model picker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn initial_provider_setup_required_when_model_is_unset() {
+        let address = "127.0.0.1:9".parse().expect("socket address");
+        let mut providers = ProviderRegistry::new();
+        providers.register(openai_provider(address));
+        let mut state = AppState::new(
+            puffer_config::PufferConfig::default(),
+            std::path::PathBuf::from("/workspace/puffer"),
+            puffer_session_store::SessionMetadata {
+                id: uuid::Uuid::nil(),
+                display_name: None,
+                generated_title: None,
+                cwd: std::path::PathBuf::from("/workspace/puffer"),
+                created_at_ms: 0,
+                updated_at_ms: 0,
+                parent_session_id: None,
+                slug: None,
+                tags: Vec::new(),
+                note: None,
+            },
+        );
+        state.current_provider = Some("openai".to_string());
+        state.current_model = None;
+
+        assert!(needs_initial_provider_setup(&state, &providers));
+    }
+
+    #[test]
+    fn initial_provider_setup_accepts_unscoped_current_provider_model() {
+        let address = "127.0.0.1:9".parse().expect("socket address");
+        let mut providers = ProviderRegistry::new();
+        providers.register(openai_provider(address));
+        let mut state = AppState::new(
+            puffer_config::PufferConfig::default(),
+            std::path::PathBuf::from("/workspace/puffer"),
+            puffer_session_store::SessionMetadata {
+                id: uuid::Uuid::nil(),
+                display_name: None,
+                generated_title: None,
+                cwd: std::path::PathBuf::from("/workspace/puffer"),
+                created_at_ms: 0,
+                updated_at_ms: 0,
+                parent_session_id: None,
+                slug: None,
+                tags: Vec::new(),
+                note: None,
+            },
+        );
+        state.current_provider = Some("openai".to_string());
+        state.current_model = Some("gpt-5".to_string());
+
+        assert!(!needs_initial_provider_setup(&state, &providers));
+    }
+
+    #[test]
+    fn initial_provider_setup_rejects_unknown_unscoped_model() {
+        let address = "127.0.0.1:9".parse().expect("socket address");
+        let mut providers = ProviderRegistry::new();
+        providers.register(openai_provider(address));
+        let mut state = AppState::new(
+            puffer_config::PufferConfig::default(),
+            std::path::PathBuf::from("/workspace/puffer"),
+            puffer_session_store::SessionMetadata {
+                id: uuid::Uuid::nil(),
+                display_name: None,
+                generated_title: None,
+                cwd: std::path::PathBuf::from("/workspace/puffer"),
+                created_at_ms: 0,
+                updated_at_ms: 0,
+                parent_session_id: None,
+                slug: None,
+                tags: Vec::new(),
+                note: None,
+            },
+        );
+        state.current_provider = Some("openai".to_string());
+        state.current_model = Some("gpt-unknown".to_string());
+
+        assert!(needs_initial_provider_setup(&state, &providers));
+    }
+
+    #[test]
+    fn provider_picker_includes_discovery_provider_without_bundled_models() {
+        let mut providers = ProviderRegistry::new();
+        providers.register(discovery_only_provider("lmstudio", "LM Studio", Vec::new()));
+
+        let overlay = provider_picker(&providers, true);
+
+        match overlay {
+            Some(OverlayState::ProviderPicker { entries, .. }) => {
+                assert!(entries.iter().any(|entry| entry.selector == "lmstudio"));
+            }
+            other => panic!("expected provider picker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn login_picker_includes_auth_discovery_provider_without_bundled_models() {
+        let mut providers = ProviderRegistry::new();
+        providers.register(discovery_only_provider(
+            "custom-openai",
+            "Custom OpenAI",
+            vec![AuthMode::ApiKey],
+        ));
+
+        let overlay = login_provider_picker(&providers);
+
+        match overlay {
+            Some(OverlayState::LoginPicker { entries, .. }) => {
+                assert!(entries
+                    .iter()
+                    .any(|entry| entry.selector == "custom-openai"));
+            }
+            other => panic!("expected login picker, got {other:?}"),
         }
     }
 

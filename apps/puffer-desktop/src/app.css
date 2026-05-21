@@ -124,10 +124,15 @@ h1, h2, h3, h4, h5, h6 {
   margin: 0;
 }
 
-:where(button, a, input, select, textarea, [tabindex]):focus-visible {
+:where(button, a, [tabindex]):focus-visible {
   outline: none;
   border-color: var(--ring);
   box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 50%, transparent);
+}
+
+:where(input, select, textarea):focus,
+:where(input, select, textarea):focus-visible {
+  outline: none;
 }
 
 code, pre, kbd, samp { font-family: var(--font-mono); }
@@ -171,7 +176,6 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   outline: none;
 }
 .sc-input::placeholder { color: var(--muted-foreground); }
-.sc-input:focus-visible { border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 50%, transparent); }
 
 .sc-switch {
   appearance: none; -webkit-appearance: none;
@@ -211,17 +215,18 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   border-bottom: 1px solid var(--border);
   background: var(--background);
   gap: 10px;
+  user-select: none;
 }
-.pf-titlebar-brand {
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 0 2px;
-  flex-shrink: 0;
+.pf-titlebar-drag-fill { align-self: stretch; flex: 1; }
+html.is-tauri .pf-titlebar {
+  height: 44px;
+  display: flex;
 }
 
 /* macOS (Tauri) with titleBarStyle: "Overlay" — the native traffic lights
    sit ~12px from the left within a ~28px span. Reserve 84px so tabs don't
    collide with them. No effect outside Tauri macOS. */
-html.is-tauri-mac .pf-titlebar { padding-left: 84px; }
+html.is-tauri-mac .pf-titlebar { padding-left: 88px; }
 .pf-traffic { display: flex; gap: 8px; align-items: center; }
 .pf-traffic .dot {
   width: 12px; height: 12px; border-radius: 50%;
@@ -272,11 +277,42 @@ html.is-tauri-mac .pf-titlebar { padding-left: 84px; }
    Sidebar
    ========================================================================== */
 .pf-sidebar {
-  width: 248px; flex-shrink: 0;
+  width: var(--pf-sidebar-width, 248px); flex-shrink: 0;
+  min-width: 220px;
+  max-width: 420px;
   background: color-mix(in oklab, var(--background) 80%, var(--muted));
   border-right: 1px solid var(--border);
   display: flex; flex-direction: column;
   font-size: 13px;
+  position: relative;
+}
+.pf-sidebar-resizer {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  bottom: 0;
+  width: 8px;
+  border: 0;
+  padding: 0;
+  appearance: none;
+  background: transparent;
+  cursor: col-resize;
+  z-index: 8;
+}
+.pf-sidebar-resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 1px;
+  background: transparent;
+  transition: background 120ms;
+}
+.pf-sidebar-resizer:hover::after,
+.pf-sidebar-resizer:focus-visible::after,
+.pf-sidebar[data-resizing="true"] .pf-sidebar-resizer::after {
+  background: var(--puffer-accent);
 }
 .pf-sidebar-section { padding: 8px 8px 4px; }
 .pf-sidebar-section:first-child {
@@ -329,7 +365,7 @@ html.is-tauri-mac .pf-titlebar { padding-left: 84px; }
   border-radius: 6px;
   color: var(--muted-foreground);
   cursor: pointer;
-  transition: background 120ms, color 120ms, border-color 120ms, box-shadow 120ms;
+  transition: color 120ms, border-color 120ms, box-shadow 120ms;
   min-height: 30px; white-space: nowrap; overflow: hidden;
   background: transparent; border: 1px solid transparent; width: 100%;
   text-align: left; font-size: inherit;
@@ -361,10 +397,17 @@ html.is-tauri-mac .pf-titlebar { padding-left: 84px; }
   color: var(--muted-foreground);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+.pf-sidebar-user {
+  margin: 0;
+}
+.pf-sidebar-user svg {
+  margin-left: auto;
+  flex-shrink: 0;
+}
 
 .pf-sidebar-agents { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .pf-sidebar-filters {
-  display: grid; grid-template-columns: 1fr 1fr; gap: 4px;
+  display: grid; grid-template-columns: 1fr; gap: 4px;
   padding: 2px 8px 6px; flex-shrink: 0;
 }
 .pf-sidebar-filters select {
@@ -382,25 +425,65 @@ html.is-tauri-mac .pf-titlebar { padding-left: 84px; }
 }
 .pf-sidebar-filters select:hover { color: var(--foreground); }
 .pf-sidebar-agents-list { flex: 1; overflow: auto; padding: 0 0 4px; }
+
+.pf-sidebar-project-group {
+  display: flex;
+  flex-direction: column;
+  margin: 2px 4px;
+}
+.pf-sidebar-project-header {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: transparent;
+  border: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  transition: color 120ms;
+}
+.pf-sidebar-project-header:hover { color: var(--foreground); }
+.pf-sidebar-project-header .name {
+  flex: 1; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.pf-sidebar-project-header .count {
+  font-size: 11px;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+.pf-sidebar-project-children {
+  display: flex;
+  flex-direction: column;
+  padding-left: 14px;
+}
+
 .pf-sidebar-agent-row {
-  display: flex; align-items: center; gap: 10px;
-  padding: 0;
-  margin: 0 4px;
+  display: flex; align-items: stretch;
   border-radius: 6px;
   overflow: hidden;
   border: 1px solid transparent;
-  transition: background 120ms, border-color 120ms, box-shadow 120ms;
+  transition: border-color 120ms, box-shadow 120ms;
 }
 .pf-sidebar-agent {
-  display: flex; align-items: center; gap: 10px;
-  padding: 6px 6px 6px 10px;
-  border-radius: 6px 0 0 6px;
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
   cursor: pointer;
   color: var(--foreground);
   font-size: 13px;
   overflow: hidden;
   background: transparent; border: 0; flex: 1; min-width: 0;
   text-align: left;
+}
+.pf-sidebar-agent .pf-row-stack {
+  display: flex; flex-direction: column; gap: 1px; flex: 1; min-width: 0;
+}
+.pf-sidebar-agent .line-1 {
+  display: flex; align-items: baseline; gap: 8px; min-width: 0;
 }
 .pf-sidebar-agent-row:hover {
   background: var(--pf-selected-bg-hover);
@@ -412,39 +495,52 @@ html.is-tauri-mac .pf-titlebar { padding-left: 84px; }
   border-color: transparent;
   font-weight: 700;
 }
-.pf-sidebar-agent-row[data-pinned="true"] .pf-pin-button {
-  color: var(--puffer-accent);
-  opacity: 1;
-}
-.pf-sidebar-agent .pf-row-stack {
-  display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0;
-}
-.pf-sidebar-agent .pf-row-stack .title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.pf-sidebar-agent .pf-task-status {
-  font-size: 10.5px; font-family: var(--font-mono);
+.pf-sidebar-agent-row .pf-pin-button {
+  width: 28px;
+  border: 0;
+  background: transparent;
   color: var(--muted-foreground);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.pf-pin-button {
-  width: 26px;
-  align-self: stretch;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 0;
-  border-radius: 0 6px 6px 0;
-  background: transparent;
-  color: var(--muted-foreground);
-  opacity: 0.55;
   cursor: pointer;
   flex-shrink: 0;
 }
-.pf-pin-button:hover {
+.pf-sidebar-agent-row .pf-pin-button:hover:not(:disabled),
+.pf-sidebar-agent-row .pf-pin-button[data-pinned="true"] {
   color: var(--foreground);
-  opacity: 1;
+}
+.pf-sidebar-agent-row .pf-pin-button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+.pf-sidebar-agent .title {
+  flex: 1; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.pf-sidebar-agent .state {
+  font-size: 10.5px; font-family: var(--font-mono);
+  color: var(--muted-foreground);
+  text-transform: lowercase;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.pf-sidebar-agent .state[data-state="running"]  { color: oklch(0.55 0.17 70); }
+.pf-sidebar-agent .state[data-state="awaiting"] { color: oklch(0.55 0.2 30); }
+.pf-sidebar-agent .state[data-state="review"]   { color: oklch(0.55 0.17 40); }
+.pf-sidebar-agent .age {
+  font-size: 11px;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
 }
 .pf-sidebar[data-collapsed="true"] {
   width: 56px;
+  min-width: 56px;
+  max-width: 56px;
+}
+.pf-sidebar[data-collapsed="true"] .pf-sidebar-resizer {
+  display: none;
 }
 .pf-sidebar[data-collapsed="true"] .pf-sidebar-brand {
   flex-direction: column;
@@ -493,7 +589,7 @@ html.is-tauri-mac .pf-titlebar { padding-left: 84px; }
 }
 
 /* Narrow: hide the entire sidebar; keep only tabs + main */
-@media (max-width: 720px) {
+@media (max-width: 719px) {
   .pf-sidebar { display: none; }
   .pf-titlebar-tabs { display: none; }
 }
@@ -619,6 +715,8 @@ html.is-tauri-mac .pf-titlebar { padding-left: 84px; }
 .pf-puffer[data-state="running"]  .body  { animation: pf-breathe 0.8s ease-in-out infinite; }
 .pf-puffer[data-state="running"]  .spike { animation: pf-spike-out 0.8s ease-in-out infinite; }
 .pf-puffer[data-state="awaiting"] .body  { animation: pf-breathe 1.6s ease-in-out infinite; }
+.pf-puffer[data-state="review"]   .body  { animation: pf-breathe 2.4s ease-in-out infinite; }
+.pf-puffer[data-state="review"]   .spike { animation: pf-spike-out 2.4s ease-in-out infinite; }
 
 .pf-puffer .pulse-ring {
   position: absolute; inset: -25%;

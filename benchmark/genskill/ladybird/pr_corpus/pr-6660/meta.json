@@ -1,0 +1,13 @@
+{
+  "pr_number": 6660,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/6660",
+  "title": "LibRegex: Track local compares in nested classes",
+  "merged_at": "2025-11-01T13:38:09Z",
+  "base_commit": "4bcb34d7a0e67a41d8eea69049eb4f0c423806ec",
+  "merge_commit": "8c9c2ee289ab1b8cc07353ea93cc3aff10426a66",
+  "area": "libregex",
+  "files_changed": [
+    "Libraries/LibRegex/RegexParser.cpp"
+  ],
+  "task_prompt": "Fix the failing LibRegex test cases in Tests/LibRegex/TestRegex.cpp related to tracking local compares in nested character classes. The parser/optimizer should preserve the correct compare scope for nested class operations so the added regex cases match as expected."
+}

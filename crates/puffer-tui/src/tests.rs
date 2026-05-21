@@ -2,7 +2,7 @@ use super::*;
 use crate::flow::{handle_auth_command, parse_shell_shortcut};
 use crate::state::AuthPickerEntry;
 use puffer_config::{ensure_workspace_dirs, save_user_config, ConfigPaths, PufferConfig};
-use puffer_core::{supported_commands, MessageRole};
+use puffer_core::{supported_commands, CommandKind, CommandSpec, MessageRole};
 use puffer_provider_registry::{
     AuthMode, ExternalImportCandidate, ExternalImportFamily, ExternalImportSource, ModelDescriptor,
     OAuthCredential, ProviderDescriptor, StoredCredential,
@@ -17,24 +17,20 @@ use ratatui::buffer::Buffer;
 use ratatui::style::Color;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
 use tempfile::tempdir;
 use uuid::Uuid;
 mod help;
+mod login;
 mod model_selection;
 mod overlays;
 mod panels;
+mod pending_submit;
 mod permission_prompt;
 mod status;
 mod support;
 mod tag;
 mod user_question;
 use support::*;
-
-fn puffer_home_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
 
 #[test]
 fn render_shows_command_popup_for_slash_input() {
@@ -85,6 +81,50 @@ fn slash_completion_appends_argument_space_for_commands_with_args() {
 }
 
 #[test]
+fn clear_exits_history_navigation() {
+    let mut tui = TuiState::default();
+    tui.push_history("alpha");
+    assert!(tui.history_recall_prev(&[]));
+    assert_eq!(tui.input, "alpha");
+    assert!(tui.is_navigating_history());
+
+    tui.clear(&[]);
+
+    assert!(tui.input.is_empty());
+    assert!(!tui.is_navigating_history());
+    assert!(!tui.history_recall_next(&[]));
+}
+
+#[test]
+fn render_hides_slash_popup_after_argument_command_completion() {
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let state = sample_state();
+    let resources = sample_resources();
+    let providers = sample_providers();
+    let auth_store = sample_auth_store();
+    terminal
+        .draw(|frame| {
+            render::render(
+                frame,
+                &state,
+                &resources,
+                &providers,
+                &auth_store,
+                "/model ",
+                7,
+                0,
+                0,
+                &supported_commands(),
+            )
+        })
+        .unwrap();
+    let rendered = buffer_to_string(terminal.backend().buffer());
+    assert!(!rendered.contains("no matches"));
+    assert!(!rendered.contains("Select the model"));
+}
+
+#[test]
 fn enter_completion_prefers_selected_slash_command() {
     let commands = supported_commands();
     let mut tui = TuiState::default();
@@ -97,6 +137,48 @@ fn enter_completion_prefers_selected_slash_command() {
 }
 
 #[test]
+fn slash_completion_clamps_stale_selection_after_command_reload() {
+    let commands = vec![visible_test_command("model")];
+    let mut tui = TuiState::default();
+    tui.input = "/mo".to_string();
+    tui.cursor = tui.input.len();
+    tui.slash_selection = 99;
+
+    assert!(tui.complete_on_enter(&commands));
+    assert_eq!(tui.input, "/model");
+    assert_eq!(tui.slash_selection, 0);
+}
+
+#[test]
+fn render_clamps_stale_slash_selection() {
+    let commands = vec![visible_test_command("model")];
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let state = sample_state();
+    let resources = sample_resources();
+    let providers = sample_providers();
+    let auth_store = sample_auth_store();
+    terminal
+        .draw(|frame| {
+            render::render(
+                frame,
+                &state,
+                &resources,
+                &providers,
+                &auth_store,
+                "/mo",
+                3,
+                99,
+                0,
+                &commands,
+            )
+        })
+        .unwrap();
+    let rendered = buffer_to_string(terminal.backend().buffer());
+    assert!(rendered.contains("› /model"));
+}
+
+#[test]
 fn transcript_scroll_clamps_to_available_lines() {
     let mut tui = TuiState::default();
     tui.follow_output = false;
@@ -104,6 +186,17 @@ fn transcript_scroll_clamps_to_available_lines() {
     assert_eq!(tui.scroll_offset, 2);
     tui.scroll_up(1, 3, 1);
     assert_eq!(tui.scroll_offset, 1);
+}
+
+fn visible_test_command(name: &str) -> CommandSpec {
+    CommandSpec {
+        name: name.to_string(),
+        aliases: Vec::new(),
+        description: "Visible command".to_string(),
+        argument_hint: None,
+        kind: CommandKind::Local,
+        hidden: false,
+    }
 }
 
 #[test]
@@ -333,13 +426,9 @@ fn try_open_overlay_builds_logout_picker() {
 #[test]
 fn logout_clears_active_provider_selection() {
     let tempdir = tempdir().unwrap();
-    let _lock = puffer_home_lock().lock().unwrap();
-    let old_home = std::env::var_os("PUFFER_HOME");
-    let home = tempdir.path().join("home");
+    let _home = crate::test_env::ScopedPufferHome::new("logout-active-provider");
     let workspace = tempdir.path().join("workspace");
-    std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&workspace).unwrap();
-    std::env::set_var("PUFFER_HOME", &home);
 
     let paths = ConfigPaths::discover(&workspace);
     ensure_workspace_dirs(&paths).unwrap();
@@ -371,24 +460,14 @@ fn logout_clears_active_provider_selection() {
     assert_eq!(state.config.default_provider, None);
     assert_eq!(state.config.default_model, None);
     assert!(!auth_store.has_auth("anthropic"));
-
-    if let Some(value) = old_home {
-        std::env::set_var("PUFFER_HOME", value);
-    } else {
-        std::env::remove_var("PUFFER_HOME");
-    }
 }
 
 #[test]
 fn logout_clears_selection_when_model_provider_matches_logged_out_provider() {
     let tempdir = tempdir().unwrap();
-    let _lock = puffer_home_lock().lock().unwrap();
-    let old_home = std::env::var_os("PUFFER_HOME");
-    let home = tempdir.path().join("home");
+    let _home = crate::test_env::ScopedPufferHome::new("logout-model-provider");
     let workspace = tempdir.path().join("workspace");
-    std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&workspace).unwrap();
-    std::env::set_var("PUFFER_HOME", &home);
 
     let paths = ConfigPaths::discover(&workspace);
     ensure_workspace_dirs(&paths).unwrap();
@@ -443,24 +522,14 @@ fn logout_clears_selection_when_model_provider_matches_logged_out_provider() {
             ..
         })
     ));
-
-    if let Some(value) = old_home {
-        std::env::set_var("PUFFER_HOME", value);
-    } else {
-        std::env::remove_var("PUFFER_HOME");
-    }
 }
 
 #[test]
 fn missing_auth_for_selected_provider_reopens_auth_picker() {
     let tempdir = tempdir().unwrap();
-    let _lock = puffer_home_lock().lock().unwrap();
-    let old_home = std::env::var_os("PUFFER_HOME");
-    let home = tempdir.path().join("home");
+    let _home = crate::test_env::ScopedPufferHome::new("missing-auth-provider");
     let workspace = tempdir.path().join("workspace");
-    std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&workspace).unwrap();
-    std::env::set_var("PUFFER_HOME", &home);
 
     let paths = ConfigPaths::discover(&workspace);
     ensure_workspace_dirs(&paths).unwrap();
@@ -493,12 +562,6 @@ fn missing_auth_for_selected_provider_reopens_auth_picker() {
         tui.overlay,
         Some(OverlayState::AuthPicker { ref provider_id, .. }) if provider_id == "openai"
     ));
-
-    if let Some(value) = old_home {
-        std::env::set_var("PUFFER_HOME", value);
-    } else {
-        std::env::remove_var("PUFFER_HOME");
-    }
 }
 
 #[test]
@@ -560,15 +623,46 @@ fn try_open_overlay_builds_fast_mode_picker_for_current_model() {
 }
 
 #[test]
+fn try_open_overlay_builds_fast_mode_picker_for_unscoped_current_model() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+
+    let mut state = sample_state();
+    state.current_provider = Some("openai".to_string());
+    state.current_model = Some("gpt-5".to_string());
+    let resources = sample_resources();
+    let mut providers = sample_providers();
+    let auth_store = sample_auth_store();
+    let mut tui = TuiState::default();
+    let opened = try_open_overlay(
+        &state,
+        &resources,
+        &mut providers,
+        &auth_store,
+        &session_store,
+        &mut tui,
+        "/fast",
+    )
+    .unwrap();
+    assert!(opened);
+    assert!(matches!(
+        tui.overlay,
+        Some(OverlayState::FastModePicker {
+            ref provider_id,
+            ref model_id,
+            ..
+        }) if provider_id == "openai" && model_id == "gpt-5"
+    ));
+}
+
+#[test]
 fn codex_import_without_base_url_clears_previous_openai_override() {
     let tempdir = tempdir().unwrap();
-    let _lock = puffer_home_lock().lock().unwrap();
-    let old_home = std::env::var_os("PUFFER_HOME");
-    let home = tempdir.path().join("home");
+    let _home = crate::test_env::ScopedPufferHome::new("codex-import-openai");
     let workspace = tempdir.path().join("workspace");
-    std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&workspace).unwrap();
-    std::env::set_var("PUFFER_HOME", &home);
 
     let paths = ConfigPaths::discover(&workspace);
     ensure_workspace_dirs(&paths).unwrap();
@@ -650,12 +744,6 @@ fn codex_import_without_base_url_clears_previous_openai_override() {
         .provider("openai")
         .map(|provider| provider.query_params.is_empty())
         .unwrap_or(false));
-
-    if let Some(value) = old_home {
-        std::env::set_var("PUFFER_HOME", value);
-    } else {
-        std::env::remove_var("PUFFER_HOME");
-    }
 }
 
 #[test]
@@ -703,6 +791,42 @@ fn render_shows_status_line_when_enabled() {
     let rendered = buffer_to_string(terminal.backend().buffer());
     assert!(rendered.contains("anthropic"));
     assert!(rendered.contains("sandbox workspace-write"));
+}
+
+#[test]
+fn render_hides_status_line_when_disabled() {
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut state = sample_state();
+    let resources = sample_resources();
+    let providers = sample_providers();
+    let auth_store = sample_auth_store();
+    state.statusline_enabled = false;
+    state.status_line_text = Some("custom tui status".to_string());
+    state.config.ui.status_line = Some(puffer_config::StatusLineConfig {
+        command: "printf custom".to_string(),
+        padding: 0,
+    });
+
+    terminal
+        .draw(|frame| {
+            render::render(
+                frame,
+                &state,
+                &resources,
+                &providers,
+                &auth_store,
+                "",
+                0,
+                0,
+                0,
+                &supported_commands(),
+            )
+        })
+        .unwrap();
+    let rendered = buffer_to_string(terminal.backend().buffer());
+    assert!(!rendered.contains("custom tui status"));
+    assert!(!rendered.contains("sandbox workspace-write"));
 }
 
 #[test]

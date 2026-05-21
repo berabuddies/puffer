@@ -11,6 +11,7 @@
   import Icon from "../design/Icon.svelte";
   import { connectSshDaemon, restartLocalDaemon } from "../api/desktop";
   import { canInvokeTauri, currentDaemonClient } from "../api/daemonClient";
+  import { focusTrap } from "../focusTrap";
 
   type Props = {
     onClose: () => void;
@@ -40,6 +41,13 @@
   // in the "Current" panel so users know where they are before switching.
   const current = currentDaemonClient()?.handshake ?? null;
 
+  function selectMode(nextMode: Mode) {
+    if (busy || mode === nextMode) return;
+    error = null;
+    status = null;
+    mode = nextMode;
+  }
+
   async function pickDirectory(): Promise<string | null> {
     if (!canInvokeTauri()) {
       return null;
@@ -64,7 +72,7 @@
   });
 
   async function submitLocal() {
-    if (!localCwd.trim()) return;
+    if (busy || !localCwd.trim()) return;
     busy = true;
     error = null;
     status = `Restarting daemon in ${localCwd}…`;
@@ -81,7 +89,7 @@
   }
 
   async function submitRemote() {
-    if (!sshTarget.trim()) return;
+    if (busy || !sshTarget.trim()) return;
     busy = true;
     error = null;
     status = `Connecting to ${sshTarget}…`;
@@ -114,6 +122,7 @@
     aria-label="Switch workspace"
     aria-modal="true"
     tabindex="-1"
+    use:focusTrap
     onkeydown={() => {}}
   >
     <div class="pf-modal-head">
@@ -133,7 +142,7 @@
         aria-selected={mode === "current"}
         class="pf-modal-seg-btn"
         data-active={mode === "current"}
-        onclick={() => (mode = "current")}
+        onclick={() => selectMode("current")}
         disabled={busy}
       >
         <Icon name="check" size={13} />
@@ -148,7 +157,7 @@
         aria-selected={mode === "local"}
         class="pf-modal-seg-btn"
         data-active={mode === "local"}
-        onclick={() => (mode = "local")}
+        onclick={() => selectMode("local")}
         disabled={busy}
       >
         <Icon name="folder" size={13} />
@@ -163,7 +172,7 @@
         aria-selected={mode === "remote"}
         class="pf-modal-seg-btn"
         data-active={mode === "remote"}
-        onclick={() => (mode = "remote")}
+        onclick={() => selectMode("remote")}
         disabled={busy}
       >
         <Icon name="globe" size={13} />

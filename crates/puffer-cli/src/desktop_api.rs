@@ -5,7 +5,9 @@ use puffer_provider_registry::{
     ExternalImportSource, ProviderRegistry, StoredCredential,
 };
 use puffer_resources::LoadedResources;
-use puffer_session_store::{GitDiffSnapshot, SessionRecord, SessionStore, TranscriptEvent};
+use puffer_session_store::{
+    GitDiffSnapshot, MessageActor, SessionRecord, SessionStore, TranscriptEvent, TranscriptRewrite,
+};
 use puffer_workflow::WorkflowStore;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,6 +15,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::cli_args::DesktopApiCommand;
+use crate::desktop_activity::session_activity_status;
 use crate::desktop_api_types::{
     AgentDiffDto, AgentDiffEntryDto, AgentDiffFileDto, AuthProviderStatusDto, DiffSummaryDto,
     DivergenceReportDto, ExternalCredentialDto, FolderGroupDto, ProviderSummaryDto,
@@ -174,6 +177,7 @@ pub(crate) fn list_grouped_sessions(session_store: &SessionStore) -> Result<Vec<
     let sessions = session_store.list_sessions()?;
     let mut groups = BTreeMap::<String, Vec<SessionListItemDto>>::new();
     for session in sessions {
+        let record = session_store.load_session(session.id)?;
         let folder_path = session_group_root(&session.cwd).display().to_string();
         groups
             .entry(folder_path.clone())
@@ -194,10 +198,13 @@ pub(crate) fn list_grouped_sessions(session_store: &SessionStore) -> Result<Vec<
                 updated_at_ms: session.updated_at_ms,
                 created_at_ms: session.created_at_ms,
                 event_count: session.event_count,
+                activity_status: session_activity_status(&record.events).to_string(),
                 slug: session.slug.clone(),
                 tags: session.tags.clone(),
                 note: session.note.clone(),
                 parent_session_id: session.parent_session_id.map(|value| value.to_string()),
+                provider_id: None,
+                model_id: None,
             });
     }
     let mut folders = groups
@@ -262,6 +269,8 @@ pub(crate) fn load_session_detail(
         folder_path,
         updated_at_ms: record.metadata.updated_at_ms,
         created_at_ms: record.metadata.created_at_ms,
+        event_count: record.events.len(),
+        activity_status: session_activity_status(&record.events).to_string(),
         slug: record.metadata.slug.clone(),
         tags: record.metadata.tags.clone(),
         note: record.metadata.note.clone(),
@@ -269,6 +278,8 @@ pub(crate) fn load_session_detail(
             .metadata
             .parent_session_id
             .map(|value| value.to_string()),
+        provider_id: None,
+        model_id: None,
         timeline: timeline_items(&record),
         latest_diff,
         diff_history,
@@ -958,33 +969,36 @@ fn timeline_items(record: &SessionRecord) -> Vec<TimelineItemDto> {
     let mut pending_assistant = None;
     for (index, event) in record.events.iter().enumerate() {
         match event {
-            TranscriptEvent::UserMessage { text } => {
+            TranscriptEvent::UserMessage { text, actor } => {
                 flush_pending_assistant(&mut items, &mut pending_assistant);
                 items.push(TimelineItemDto::UserMessage {
                     id: format!("timeline-{index}"),
                     text: text.clone(),
+                    actor: actor.clone(),
                 });
             }
-            TranscriptEvent::AssistantMessage { text } => {
+            TranscriptEvent::AssistantMessage { text, actor } => {
                 flush_pending_assistant(&mut items, &mut pending_assistant);
                 pending_assistant = Some(TimelineItemDto::AssistantMessage {
                     id: format!("timeline-{index}"),
                     text: text.clone(),
+                    actor: actor.clone(),
                 });
             }
-            TranscriptEvent::SystemMessage { text } => {
-                let parsed = parse_system_message(index, text);
+            TranscriptEvent::SystemMessage { text, actor } => {
+                let parsed = parse_system_message(index, text, actor.clone());
                 if parse_tool_message(text).is_none() {
                     flush_pending_assistant(&mut items, &mut pending_assistant);
                 }
                 items.extend(parsed);
             }
-            TranscriptEvent::CommandInvoked { name, args } => {
+            TranscriptEvent::CommandInvoked { name, args, actor } => {
                 flush_pending_assistant(&mut items, &mut pending_assistant);
                 items.push(TimelineItemDto::Command {
                     id: format!("timeline-{index}"),
                     command_name: name.clone(),
                     command_args: args.clone(),
+                    actor: actor.clone(),
                 })
             }
             TranscriptEvent::GitDiffSnapshot { snapshot } => {
@@ -999,25 +1013,74 @@ fn timeline_items(record: &SessionRecord) -> Vec<TimelineItemDto> {
                 items.push(TimelineItemDto::SystemMessage {
                     id: format!("timeline-{index}"),
                     text: format!("Session renamed to {name}."),
+                    actor: None,
                 })
             }
             TranscriptEvent::ToolInvocation {
-                call_id: _,
+                call_id,
                 tool_id,
                 input,
                 output,
                 success,
+                actor,
+                subject,
             } => {
                 let status = if *success { "ok" } else { "error" };
-                let text = format!("Tool {tool_id} [{status}]\ninput: {input}\n{output}");
-                items.extend(parse_system_message(index, &text))
+                let summary = summarize_tool_input(tool_id, input);
+                items.push(TimelineItemDto::ToolCall {
+                    id: format!("timeline-{index}-{call_id}"),
+                    tool_id: tool_id.clone(),
+                    status: status.to_string(),
+                    summary: summary.clone(),
+                    input_text: input.clone(),
+                    input_json: serde_json::from_str(input).ok(),
+                    output_text: output.clone(),
+                    actor: actor.clone(),
+                    subject: subject.clone(),
+                });
+                if let Some((state, reason)) = permission_state(output) {
+                    items.push(TimelineItemDto::PermissionDialog {
+                        id: format!("timeline-{index}-{call_id}-permission"),
+                        tool_id: tool_id.clone(),
+                        state: state.to_string(),
+                        summary,
+                        reason: reason.to_string(),
+                        input_text: Some(input.clone()),
+                        actor: actor.clone(),
+                    });
+                }
             }
-            TranscriptEvent::TranscriptRewritten { .. } | TranscriptEvent::StateSnapshot { .. } => {
+            TranscriptEvent::TranscriptRewritten { rewrite } => {
+                apply_timeline_rewrite(&mut items, &mut pending_assistant, rewrite);
             }
+            TranscriptEvent::StateSnapshot { .. } => {}
         }
     }
     flush_pending_assistant(&mut items, &mut pending_assistant);
     items
+}
+
+fn apply_timeline_rewrite(
+    items: &mut Vec<TimelineItemDto>,
+    pending_assistant: &mut Option<TimelineItemDto>,
+    rewrite: &TranscriptRewrite,
+) {
+    match rewrite {
+        TranscriptRewrite::Clear => {
+            pending_assistant.take();
+            items.clear();
+        }
+        TranscriptRewrite::PopLast { count } => {
+            for _ in 0..*count {
+                if pending_assistant.take().is_some() {
+                    continue;
+                }
+                if items.pop().is_none() {
+                    break;
+                }
+            }
+        }
+    }
 }
 
 fn flush_pending_assistant(
@@ -1029,7 +1092,11 @@ fn flush_pending_assistant(
     }
 }
 
-fn parse_system_message(index: usize, text: &str) -> Vec<TimelineItemDto> {
+fn parse_system_message(
+    index: usize,
+    text: &str,
+    actor: Option<MessageActor>,
+) -> Vec<TimelineItemDto> {
     if let Some(parsed) = parse_tool_message(text) {
         let summary = summarize_tool_input(&parsed.tool_id, &parsed.input_text);
         let mut items = vec![TimelineItemDto::ToolCall {
@@ -1040,6 +1107,8 @@ fn parse_system_message(index: usize, text: &str) -> Vec<TimelineItemDto> {
             input_text: parsed.input_text.clone(),
             input_json: parsed.input_json,
             output_text: parsed.output_text.clone(),
+            actor: actor.clone(),
+            subject: None,
         }];
         if let Some((state, reason)) = permission_state(&parsed.output_text) {
             items.push(TimelineItemDto::PermissionDialog {
@@ -1049,6 +1118,7 @@ fn parse_system_message(index: usize, text: &str) -> Vec<TimelineItemDto> {
                 summary,
                 reason: reason.to_string(),
                 input_text: Some(parsed.input_text),
+                actor: actor.clone(),
             });
         }
         return items;
@@ -1056,6 +1126,7 @@ fn parse_system_message(index: usize, text: &str) -> Vec<TimelineItemDto> {
     vec![TimelineItemDto::SystemMessage {
         id: format!("timeline-{index}"),
         text: text.to_string(),
+        actor,
     }]
 }
 
@@ -1510,7 +1581,9 @@ fn command_exists(command: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{timeline_items, TimelineItemDto};
-    use puffer_session_store::{SessionMetadata, SessionRecord, TranscriptEvent};
+    use puffer_session_store::{
+        SessionMetadata, SessionRecord, TranscriptEvent, TranscriptRewrite,
+    };
     use std::path::PathBuf;
     use uuid::Uuid;
 
@@ -1549,9 +1622,11 @@ mod tests {
         let items = timeline_items(&record(vec![
             TranscriptEvent::UserMessage {
                 text: "inspect this".to_string(),
+                actor: None,
             },
             TranscriptEvent::AssistantMessage {
                 text: "Here is what I found.".to_string(),
+                actor: None,
             },
             TranscriptEvent::ToolInvocation {
                 call_id: "call-1".to_string(),
@@ -1559,6 +1634,8 @@ mod tests {
                 input: r#"{"path":"Cargo.toml"}"#.to_string(),
                 output: "contents".to_string(),
                 success: true,
+                actor: None,
+                subject: None,
             },
         ]));
 
@@ -1571,6 +1648,7 @@ mod tests {
         let items = timeline_items(&record(vec![
             TranscriptEvent::UserMessage {
                 text: "inspect this".to_string(),
+                actor: None,
             },
             TranscriptEvent::ToolInvocation {
                 call_id: "call-1".to_string(),
@@ -1578,13 +1656,72 @@ mod tests {
                 input: r#"{"path":"Cargo.toml"}"#.to_string(),
                 output: "contents".to_string(),
                 success: true,
+                actor: None,
+                subject: None,
             },
             TranscriptEvent::AssistantMessage {
                 text: "Here is what I found.".to_string(),
+                actor: None,
             },
         ]));
 
         let kinds = items.iter().map(item_kind).collect::<Vec<_>>();
         assert_eq!(kinds, vec!["user", "tool", "assistant"]);
+    }
+
+    #[test]
+    fn timeline_clear_discards_prior_messages() {
+        let items = timeline_items(&record(vec![
+            TranscriptEvent::UserMessage {
+                text: "old prompt".to_string(),
+                actor: None,
+            },
+            TranscriptEvent::AssistantMessage {
+                text: "old answer".to_string(),
+                actor: None,
+            },
+            TranscriptEvent::TranscriptRewritten {
+                rewrite: TranscriptRewrite::Clear,
+            },
+            TranscriptEvent::SystemMessage {
+                text: "Transcript cleared.".to_string(),
+                actor: None,
+            },
+        ]));
+
+        let kinds = items.iter().map(item_kind).collect::<Vec<_>>();
+        assert_eq!(kinds, vec!["system"]);
+        assert!(matches!(
+            &items[0],
+            TimelineItemDto::SystemMessage { text, .. } if text == "Transcript cleared."
+        ));
+    }
+
+    #[test]
+    fn timeline_pop_discards_latest_visible_message() {
+        let items = timeline_items(&record(vec![
+            TranscriptEvent::UserMessage {
+                text: "keep prompt".to_string(),
+                actor: None,
+            },
+            TranscriptEvent::AssistantMessage {
+                text: "remove answer".to_string(),
+                actor: None,
+            },
+            TranscriptEvent::TranscriptRewritten {
+                rewrite: TranscriptRewrite::PopLast { count: 1 },
+            },
+            TranscriptEvent::SystemMessage {
+                text: "Removed the latest rendered transcript item.".to_string(),
+                actor: None,
+            },
+        ]));
+
+        let kinds = items.iter().map(item_kind).collect::<Vec<_>>();
+        assert_eq!(kinds, vec!["user", "system"]);
+        assert!(matches!(
+            &items[0],
+            TimelineItemDto::UserMessage { text, .. } if text == "keep prompt"
+        ));
     }
 }

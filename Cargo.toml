@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "benchmark/genskill/ladybird",
     "crates/puffer-cli",
     "crates/puffer-config",
     "crates/puffer-connector-core",
@@ -20,6 +21,7 @@ members = [
     "crates/puffer-runner-grpc",
     "crates/puffer-tool-runner",
     "crates/puffer-session-store",
+    "crates/puffer-skill-evolution",
     "crates/puffer-subscriber-email",
     "crates/puffer-subscriber-runtime",
     "crates/puffer-subscriber-telegram-user",
@@ -81,6 +83,7 @@ tokio = { version = "1.51", features = [
     "process",
     "time",
 ] }
+tracing = "0.1"
 reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.145", features = ["preserve_order"] }

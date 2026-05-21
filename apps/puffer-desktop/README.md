@@ -100,7 +100,7 @@ sudo apt-get install -y \
 The Playwright regression test requires a browser binary:
 
 ```bash
-npx playwright install chromium
+npx playwright install chromium webkit
 ```
 
 ## Verification
@@ -111,6 +111,8 @@ Run the production verification set before shipping:
 npm run check
 npm run build
 cargo check --manifest-path src-tauri/Cargo.toml
+npm run test:desktop-ui
+npm run test:desktop-ui:webkit
 npm run test:codex-playwright
 npm audit --audit-level=moderate
 npm run tauri build

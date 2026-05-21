@@ -1,5 +1,6 @@
 use super::*;
 use crate::runtime::tests::refresh_env_lock;
+use crate::MessageRole;
 use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
 use puffer_provider_registry::{AuthMode, AuthStore, ProviderDescriptor, ProviderRegistry};
 use puffer_resources::{AgentSpec, LoadedItem, LoadedResources, SourceInfo, SourceKind};
@@ -57,6 +58,17 @@ fn loaded_agent(
             kind: SourceKind::Builtin,
         },
     }
+}
+
+fn loaded_background_agent(
+    id: &str,
+    description: &str,
+    prompt: &str,
+    tools: &[&str],
+) -> LoadedItem<AgentSpec> {
+    let mut agent = loaded_agent(id, description, prompt, tools);
+    agent.value.background = true;
+    agent
 }
 
 fn init_git_repo(root: &Path) {
@@ -211,10 +223,9 @@ fn execute_agent_tool_background_returns_async_payload_and_output_file() {
 fn execute_agent_tool_sync_reports_worktree_isolation_metadata() {
     let temp = tempfile::tempdir().unwrap();
     let _guard = refresh_env_lock().lock().unwrap();
-    let old_home = std::env::var_os("PUFFER_HOME");
     let home = temp.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
-    std::env::set_var("PUFFER_HOME", &home);
+    let _home = puffer_config::set_puffer_home_override(&home);
     init_git_repo(temp.path());
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -312,12 +323,210 @@ fn execute_agent_tool_sync_reports_worktree_isolation_metadata() {
     assert!(team_file["members"]
         .as_array()
         .is_some_and(|members| members.iter().any(|member| member["name"] == "researcher")));
+    server.join().unwrap();
+}
+
+#[test]
+fn execute_agent_tool_inherits_active_team_for_named_spawn() {
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = refresh_env_lock().lock().unwrap();
+    let old_home = std::env::var_os("PUFFER_HOME");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::env::set_var("PUFFER_HOME", &home);
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buffer = [0_u8; 4096];
+            let _ = stream.read(&mut buffer);
+            let body = json!({
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "team ok"
+                    }
+                ]
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+    });
+
+    let mut provider = provider();
+    provider.id = "local-anthropic".to_string();
+    provider.base_url = format!("http://{address}");
+    provider.auth_modes.clear();
+    provider.models[0].provider = "local-anthropic".to_string();
+
+    let mut providers = ProviderRegistry::new();
+    providers.register(provider);
+    let session = SessionMetadata {
+        id: Uuid::new_v4(),
+        display_name: None,
+        generated_title: None,
+        cwd: temp.path().to_path_buf(),
+        created_at_ms: 0,
+        updated_at_ms: 0,
+        parent_session_id: None,
+        slug: None,
+        tags: Vec::new(),
+        note: None,
+    };
+    let mut state = AppState::new(PufferConfig::default(), temp.path().to_path_buf(), session);
+    state.current_provider = Some("local-anthropic".to_string());
+    state.current_model = Some("local-anthropic/claude-sonnet-4-5".to_string());
+    super::claude_tools::workflow::team_create::execute_team_create(
+        &mut state,
+        temp.path(),
+        json!({
+            "team_name": "alpha",
+            "description": "Coordination team"
+        }),
+    )
+    .unwrap();
+
+    let resources = LoadedResources {
+        agents: vec![loaded_agent(
+            "general-purpose",
+            "Default agent",
+            "You are a coding subagent.",
+            &["read_file"],
+        )],
+        ..LoadedResources::default()
+    };
+    let output = super::agents::execute_agent_tool(
+        &state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        temp.path(),
+        json!({
+            "description": "Sync request",
+            "prompt": "Do the thing",
+            "name": "researcher"
+        }),
+    )
+    .unwrap();
+    let payload: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(payload["teamName"], "alpha");
+    let team_file: Value = serde_json::from_str(
+        &std::fs::read_to_string(home.join(".claude/teams/alpha/config.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(team_file["members"]
+        .as_array()
+        .is_some_and(|members| members.iter().any(|member| member["name"] == "researcher")));
+
     if let Some(value) = old_home {
         std::env::set_var("PUFFER_HOME", value);
     } else {
         std::env::remove_var("PUFFER_HOME");
     }
     server.join().unwrap();
+}
+
+#[test]
+fn execute_agent_tool_rejects_teammate_spawning_teammate() {
+    let temp = tempfile::tempdir().unwrap();
+    let session = SessionMetadata {
+        id: Uuid::new_v4(),
+        display_name: None,
+        generated_title: None,
+        cwd: temp.path().to_path_buf(),
+        created_at_ms: 0,
+        updated_at_ms: 0,
+        parent_session_id: None,
+        slug: None,
+        tags: Vec::new(),
+        note: None,
+    };
+    let mut state = AppState::new(PufferConfig::default(), temp.path().to_path_buf(), session);
+    state.active_team_name = Some("alpha".to_string());
+    state.push_message(MessageRole::System, "You are a coding subagent.");
+
+    let error = super::agents::execute_agent_tool(
+        &state,
+        &LoadedResources {
+            agents: vec![loaded_agent(
+                "general-purpose",
+                "Default agent",
+                "You are a coding subagent.",
+                &["read_file"],
+            )],
+            ..LoadedResources::default()
+        },
+        &ProviderRegistry::new(),
+        &mut AuthStore::default(),
+        temp.path(),
+        json!({
+            "description": "Nested teammate",
+            "prompt": "Do the thing",
+            "name": "researcher"
+        }),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("Teammates cannot spawn other teammates"));
+}
+
+#[test]
+fn execute_agent_tool_rejects_teammate_background_agents() {
+    let temp = tempfile::tempdir().unwrap();
+    let session = SessionMetadata {
+        id: Uuid::new_v4(),
+        display_name: None,
+        generated_title: None,
+        cwd: temp.path().to_path_buf(),
+        created_at_ms: 0,
+        updated_at_ms: 0,
+        parent_session_id: None,
+        slug: None,
+        tags: Vec::new(),
+        note: None,
+    };
+    let mut state = AppState::new(PufferConfig::default(), temp.path().to_path_buf(), session);
+    state.active_team_name = Some("alpha".to_string());
+    state.push_message(MessageRole::System, "You are a coding subagent.");
+
+    let mut provider = provider();
+    provider.id = "local-anthropic".to_string();
+    provider.base_url = "http://127.0.0.1:9".to_string();
+    provider.auth_modes.clear();
+    provider.models[0].provider = "local-anthropic".to_string();
+    let mut providers = ProviderRegistry::new();
+    providers.register(provider);
+
+    let resources = LoadedResources {
+        agents: vec![loaded_background_agent(
+            "verification",
+            "Background verifier",
+            "You are a verification specialist.",
+            &["read_file"],
+        )],
+        ..LoadedResources::default()
+    };
+    let error = super::agents::execute_agent_tool(
+        &state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        temp.path(),
+        json!({
+            "description": "Background nested agent",
+            "prompt": "Verify the thing",
+            "subagent_type": "verification"
+        }),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("In-process teammates cannot spawn background agents"));
 }
 
 #[test]

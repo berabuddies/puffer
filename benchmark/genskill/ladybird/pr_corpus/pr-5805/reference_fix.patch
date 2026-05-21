@@ -1,0 +1,71 @@
+From 88f9a8796a319b8365ee18edc5025421f07be5c2 Mon Sep 17 00:00:00 2001
+From: Timothy Flynn <trflynn89@pm.me>
+Date: Sun, 10 Aug 2025 06:41:15 -0400
+Subject: [PATCH] LibJS: Handle out-of-range prefixed numbers in
+ Token::double_value
+
+This regressed in cd15b1a2c96f6e4e8b628f176899ab4107b71bde.
+
+If a prefixed number is out-of-range of a u64, stroul would previously
+fall back to ULONG_MAX. This patch restores that behavior.
+---
+ Libraries/LibJS/Tests/numeric-literals-basic.js | 15 +++++++++++++++
+ Libraries/LibJS/Token.cpp                       |  9 +++++----
+ 2 files changed, 20 insertions(+), 4 deletions(-)
+
+diff --git a/Libraries/LibJS/Tests/numeric-literals-basic.js b/Libraries/LibJS/Tests/numeric-literals-basic.js
+index b4b9f75181d1e..ca07ad0cccaf7 100644
+--- a/Libraries/LibJS/Tests/numeric-literals-basic.js
++++ b/Libraries/LibJS/Tests/numeric-literals-basic.js
+@@ -50,3 +50,18 @@ test("invalid numeric literals", () => {
+     expect("1in[]").not.toEval();
+     expect("2instanceof foo").not.toEval();
+ });
++
++test("out-of-range literals", () => {
++    expect(0x10000000000000000).toBe(18446744073709552000);
++    expect(-0x10000000000000000).toBe(-18446744073709552000);
++
++    expect(0o2000000000000000000000).toBe(18446744073709552000);
++    expect(-0o2000000000000000000000).toBe(-18446744073709552000);
++
++    expect(0b10000000000000000000000000000000000000000000000000000000000000000).toBe(
++        18446744073709552000
++    );
++    expect(-0b10000000000000000000000000000000000000000000000000000000000000000).toBe(
++        -18446744073709552000
++    );
++});
+diff --git a/Libraries/LibJS/Token.cpp b/Libraries/LibJS/Token.cpp
+index 9b809e68c206b..8b5763946c961 100644
+--- a/Libraries/LibJS/Token.cpp
++++ b/Libraries/LibJS/Token.cpp
+@@ -63,23 +63,24 @@ double Token::double_value() const
+     }
+ 
+     if (value.length() >= 2 && value.starts_with('0')) {
++        static constexpr auto fallback = NumericLimits<u64>::max();
+         auto next = value[1];
+ 
+         // hexadecimal
+         if (next == 'x' || next == 'X')
+-            return static_cast<double>(value.substring_view(2).to_number<u64>(TrimWhitespace::No, 16).value());
++            return static_cast<double>(value.substring_view(2).to_number<u64>(TrimWhitespace::No, 16).value_or(fallback));
+ 
+         // octal
+         if (next == 'o' || next == 'O')
+-            return static_cast<double>(value.substring_view(2).to_number<u64>(TrimWhitespace::No, 8).value());
++            return static_cast<double>(value.substring_view(2).to_number<u64>(TrimWhitespace::No, 8).value_or(fallback));
+ 
+         // binary
+         if (next == 'b' || next == 'B')
+-            return static_cast<double>(value.substring_view(2).to_number<u64>(TrimWhitespace::No, 2).value());
++            return static_cast<double>(value.substring_view(2).to_number<u64>(TrimWhitespace::No, 2).value_or(fallback));
+ 
+         // also octal, but syntax error in strict mode
+         if (is_ascii_digit(next) && (!value.contains('8') && !value.contains('9')))
+-            return static_cast<double>(value.substring_view(1).to_number<u64>(TrimWhitespace::No, 8).value());
++            return static_cast<double>(value.substring_view(1).to_number<u64>(TrimWhitespace::No, 8).value_or(fallback));
+     }
+ 
+     // This should always be a valid double

@@ -35,6 +35,7 @@ path = "tests/hot_reload.rs"
 [dependencies]
 anyhow.workspace = true
 arboard.workspace = true
+async-trait = "0.1"
 dirs.workspace = true
 glob.workspace = true
 fslock.workspace = true
@@ -65,6 +66,7 @@ puffer-provider-registry = { path = "../puffer-provider-registry" }
 puffer-resources = { path = "../puffer-resources" }
 puffer-runner-api = { path = "../puffer-runner-api" }
 puffer-session-store = { path = "../puffer-session-store" }
+puffer-skill-evolution = { path = "../puffer-skill-evolution" }
 puffer-subscriber-runtime = { path = "../puffer-subscriber-runtime" }
 puffer-subscriptions = { path = "../puffer-subscriptions" }
 puffer-tools = { path = "../puffer-tools" }

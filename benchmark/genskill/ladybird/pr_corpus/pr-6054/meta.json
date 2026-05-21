@@ -1,0 +1,14 @@
+{
+  "pr_number": 6054,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/6054",
+  "title": "LibCore: Fix ThreadedPromise issues found with ThreadSanitizer",
+  "merged_at": "2025-09-25T02:05:55Z",
+  "base_commit": "ec73299398e361c3e50c84581f8dfe8fa231bff1",
+  "merge_commit": "892e75ddfbdf9d1398536ea0f462729ff4bbf4c9",
+  "area": "libcore",
+  "files_changed": [
+    "Libraries/LibCore/ThreadedPromise.h",
+    "Tests/LibCore/TestLibCorePromise.cpp"
+  ],
+  "task_prompt": "Fix the failing LibCore ThreadedPromise regression in Tests/LibCore/TestLibCorePromise.cpp. Ensure promise completion and threading behavior remains safe under the test synchronization pattern."
+}

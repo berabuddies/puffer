@@ -1,0 +1,14 @@
+{
+  "pr_number": 5612,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/5612",
+  "title": "LibWasm: Return canonical NaN for min/max/floor/ceil/truncate operations",
+  "merged_at": "2025-07-27T13:35:28Z",
+  "base_commit": "a6857a6ce16b4c610ac099c2d43991fe4350daae",
+  "merge_commit": "ed943812095f5f63121a85a7167b16169f8039ad",
+  "area": "libwasm",
+  "files_changed": [
+    "Libraries/LibWasm/AbstractMachine/Operators.h",
+    "Tests/LibWasm/test-wasm.cpp"
+  ],
+  "task_prompt": "Fix the failing LibWasm numeric regression in Tests/LibWasm/test-wasm.cpp. Return canonical NaN for min, max, floor, ceil, and truncate operations where required."
+}

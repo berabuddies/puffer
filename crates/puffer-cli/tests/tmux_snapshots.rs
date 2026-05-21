@@ -2,7 +2,7 @@ use puffer_config::{ensure_workspace_dirs, ConfigPaths};
 use puffer_session_store::{SessionStore, TranscriptEvent};
 use puffer_test_support::{
     assert_normalized_snapshot, capture_tmux_pane, capture_tmux_visible_pane,
-    read_normalized_snapshot, start_tmux_command_with_size, temp_workspace, tmux_available,
+    read_normalized_snapshot, require_tmux_or_skip, start_tmux_command_with_size, temp_workspace,
     wait_for_tmux_text, TerminalSize,
 };
 use std::fs;
@@ -81,7 +81,7 @@ fn tmux_post_send_medium_compared_with_claude_reference_matches_snapshot() {
 }
 
 fn assert_tmux_home_snapshot(size: TerminalSize, snapshot_name: &str) {
-    if !tmux_available() {
+    if !require_tmux_or_skip(snapshot_name) {
         return;
     }
 
@@ -97,7 +97,7 @@ fn assert_tmux_home_snapshot(size: TerminalSize, snapshot_name: &str) {
 }
 
 fn assert_tmux_help_snapshot(size: TerminalSize, snapshot_name: &str) {
-    if !tmux_available() {
+    if !require_tmux_or_skip(snapshot_name) {
         return;
     }
 
@@ -113,7 +113,7 @@ fn assert_tmux_help_snapshot(size: TerminalSize, snapshot_name: &str) {
 }
 
 fn assert_tmux_turn_snapshot(size: TerminalSize, snapshot_name: &str) {
-    if !tmux_available() {
+    if !require_tmux_or_skip(snapshot_name) {
         return;
     }
 
@@ -126,7 +126,7 @@ fn assert_tmux_turn_comparison_snapshot(
     reference_name: &str,
     snapshot_name: &str,
 ) {
-    if !tmux_available() {
+    if !require_tmux_or_skip(snapshot_name) {
         return;
     }
 
@@ -156,6 +156,7 @@ fn capture_tmux_turn(size: TerminalSize) -> String {
             session.id,
             TranscriptEvent::UserMessage {
                 text: "Review the current worktree and call out any risks.".to_string(),
+                actor: None,
             },
         )
         .unwrap();
@@ -165,6 +166,7 @@ fn capture_tmux_turn(size: TerminalSize) -> String {
             TranscriptEvent::AssistantMessage {
                 text: "The working tree is clean.\n\nNo pending changes are waiting for review."
                     .to_string(),
+                actor: None,
             },
         )
         .unwrap();

@@ -1,5 +1,5 @@
 export type ScreenId = "workspace" | "pipelines" | "deployments" | "settings";
-export type AgentState = "idle" | "thinking" | "running" | "awaiting";
+export type AgentState = "idle" | "thinking" | "running" | "awaiting" | "review";
 export type AccentKey = "violet" | "cyan" | "amber" | "rose" | "lime" | "mono";
 export type DensityKey = "compact" | "comfortable" | "airy";
 export type ThemeKey = "light" | "dark";
@@ -14,8 +14,13 @@ export type Tweaks = {
   userName: string;
   showSidebar: boolean;
   collapsedSidebar: boolean;
+  sidebarWidth: number;
   agentState: AgentState;
 };
+
+export const SIDEBAR_MIN_WIDTH = 220;
+export const SIDEBAR_DEFAULT_WIDTH = 248;
+export const SIDEBAR_MAX_WIDTH = 420;
 
 export const defaultTweaks: Tweaks = {
   screen: "workspace",
@@ -26,6 +31,7 @@ export const defaultTweaks: Tweaks = {
   userName: "Otter",
   showSidebar: true,
   collapsedSidebar: false,
+  sidebarWidth: SIDEBAR_DEFAULT_WIDTH,
   agentState: "running"
 };
 
@@ -36,10 +42,16 @@ export function loadTweaks(): Tweaks {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return { ...defaultTweaks };
-    return { ...defaultTweaks, ...JSON.parse(raw) };
+    const loaded = { ...defaultTweaks, ...JSON.parse(raw) };
+    return { ...loaded, sidebarWidth: clampSidebarWidth(loaded.sidebarWidth) };
   } catch {
     return { ...defaultTweaks };
   }
+}
+
+export function clampSidebarWidth(value: unknown): number {
+  const numeric = typeof value === "number" && Number.isFinite(value) ? value : SIDEBAR_DEFAULT_WIDTH;
+  return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(numeric)));
 }
 
 export function persistTweaks(tweaks: Tweaks) {

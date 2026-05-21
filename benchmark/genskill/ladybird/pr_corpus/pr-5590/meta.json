@@ -1,0 +1,20 @@
+{
+  "pr_number": 5590,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/5590",
+  "title": "LibRegex: Improve capture group and backreference support",
+  "merged_at": "2025-10-16T14:37:54Z",
+  "base_commit": "49817a1c6a64158e024bb179b011f67719a7ef85",
+  "merge_commit": "4b989b8efd7007f62e94f25830804e9cd001d9b5",
+  "area": "libregex",
+  "files_changed": [
+    "Libraries/LibJS/Runtime/RegExpPrototype.cpp",
+    "Libraries/LibJS/Tests/builtins/RegExp/RegExp.prototype.exec.js",
+    "Libraries/LibRegex/RegexByteCode.cpp",
+    "Libraries/LibRegex/RegexByteCode.h",
+    "Libraries/LibRegex/RegexOptimizer.cpp",
+    "Libraries/LibRegex/RegexParser.cpp",
+    "Libraries/LibRegex/RegexParser.h",
+    "Tests/LibRegex/TestRegex.cpp"
+  ],
+  "task_prompt": "Fix the failing LibRegex capture and backreference regression covered by Tests/LibRegex/TestRegex.cpp and RegExp.prototype.exec.js. Improve capture group and backreference support without regressing existing regex behavior."
+}

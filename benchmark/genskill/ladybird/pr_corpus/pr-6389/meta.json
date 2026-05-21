@@ -1,0 +1,15 @@
+{
+  "pr_number": 6389,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/6389",
+  "title": "LibWasm: Fix dumb bug",
+  "merged_at": "2025-10-04T09:17:08Z",
+  "base_commit": "86505a7de40b0a84f76a76a1dba4fcb4f7f5fc78",
+  "merge_commit": "31da9ab4e82be3a732cf2b9b1303dc500357cb06",
+  "area": "libwasm",
+  "files_changed": [
+    "Libraries/LibWasm/AbstractMachine/BytecodeInterpreter.cpp",
+    "Libraries/LibWasm/Tests/Executor/test-memory_fill-order.js",
+    "Libraries/LibWasm/Tests/Fixtures/Modules/memory_fill-order.wasm"
+  ],
+  "task_prompt": "Fix the failing LibWasm memory.fill regression covered by Libraries/LibWasm/Tests/Executor/test-memory_fill-order.js. Preserve existing wasm execution semantics."
+}

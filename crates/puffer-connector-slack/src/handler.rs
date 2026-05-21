@@ -22,7 +22,10 @@ pub fn handle_command(
     }
 
     // 2. Allowed-users filter.
-    if let Some(user) = message.user_id.as_deref() {
+    if !config.allowed_users.is_empty() {
+        let Some(user) = message.user_id.as_deref() else {
+            return Ok(CommandOutcome::Ignored);
+        };
         if !config.is_user_allowed(user) {
             return Ok(CommandOutcome::Ignored);
         }
@@ -146,6 +149,17 @@ mod tests {
         let mut config = open_config();
         config.allowed_users = vec!["U42".to_string()];
         let outcome = handle_command(&runtime, &dm("hi", Some("U7")), &config).unwrap();
+        assert_eq!(outcome, CommandOutcome::Ignored);
+    }
+
+    #[test]
+    fn allowlist_rejects_missing_user_id() {
+        let runtime = test_runtime(tempdir().unwrap().path().to_path_buf());
+        let mut config = open_config();
+        config.allowed_users = vec!["U42".to_string()];
+
+        let outcome = handle_command(&runtime, &dm("/help", None), &config).unwrap();
+
         assert_eq!(outcome, CommandOutcome::Ignored);
     }
 

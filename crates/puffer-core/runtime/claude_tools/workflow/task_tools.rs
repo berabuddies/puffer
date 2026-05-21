@@ -1,8 +1,8 @@
 use super::store::{
-    agents_path, append_agent_message, load_store, next_task_id, now_ms, process_is_running,
-    save_store, shell_output_path, tasks_path, team_lead_agent_id, terminate_process,
-    wait_for_process_exit, AgentStore, StoredTask, TaskCreateInput, TaskIdInput, TaskOutputInput,
-    TaskStopInput, TaskStore, TaskUpdateInput,
+    agents_path, append_agent_message, ensure_safe_identifier, load_store, next_task_id, now_ms,
+    save_store, tasks_path, team_lead_agent_id, terminate_process, wait_for_process_exit,
+    AgentStore, StoredTask, TaskCreateInput, TaskIdInput, TaskOutputInput, TaskStopInput,
+    TaskStore, TaskUpdateInput,
 };
 use super::task_runtime::{
     read_runtime_agent_output, read_task_output, refresh_stored_task, runtime_agent_output_path,
@@ -276,6 +276,7 @@ pub(super) fn execute_task_stop(state: &mut AppState, _cwd: &Path, input: Value)
         .task_id
         .or(parsed.shell_id)
         .ok_or_else(|| anyhow!("TaskStop requires task_id or shell_id"))?;
+    ensure_safe_identifier(&target, "task_id")?;
 
     let store_cwd = state.session.cwd.as_path();
     let tp = tasks_path(store_cwd, &state.session.id);
@@ -337,22 +338,6 @@ pub(super) fn execute_task_stop(state: &mut AppState, _cwd: &Path, input: Value)
         return Ok(serde_json::to_string_pretty(&output)?);
     }
 
-    if let Some(process_id) = super::store::parse_shell_task_pid(&target) {
-        if !process_is_running(process_id) {
-            bail!("task `{target}` is not running");
-        }
-        terminate_process(process_id)?;
-        let _ = wait_for_process_exit(process_id, 1_000);
-        let output_file = shell_output_path(store_cwd, &target)?;
-        return Ok(serde_json::to_string_pretty(&json!({
-            "message": format!("Successfully stopped task: {target}"),
-            "task_id": target,
-            "task_type": "shell",
-            "command": Value::Null,
-            "outputFile": output_file.display().to_string()
-        }))?);
-    }
-
     bail!("unknown task `{}`", target)
 }
 
@@ -364,6 +349,7 @@ pub(super) fn execute_task_output(
 ) -> Result<String> {
     let parsed: TaskOutputInput =
         serde_json::from_value(input).context("invalid TaskOutput input")?;
+    ensure_safe_identifier(&parsed.task_id, "task_id")?;
     let store_cwd = state.session.cwd.as_path();
     let sid = &state.session.id;
     let block = parsed.block.unwrap_or(true);
@@ -509,42 +495,6 @@ pub(super) fn execute_task_output(
                     .display()
                     .to_string(),
             ),
-            block,
-            timeout,
-        );
-    }
-
-    if let Some(process_id) = super::store::parse_shell_task_pid(&parsed.task_id) {
-        let exited = if block {
-            wait_for_process_exit(process_id, timeout)
-        } else {
-            !process_is_running(process_id)
-        };
-        let output_file = shell_output_path(store_cwd, &parsed.task_id)?;
-        let output = fs::read_to_string(&output_file).unwrap_or_default();
-        let status = if process_is_running(process_id) {
-            "running"
-        } else {
-            "completed"
-        };
-        let task_payload = json!({
-            "task_id": parsed.task_id,
-            "task_type": "shell",
-            "status": status,
-            "description": parsed.task_id,
-            "output": output,
-            "outputFile": output_file.display().to_string(),
-        });
-        return task_output_response(
-            if exited {
-                "success"
-            } else if block {
-                "timeout"
-            } else {
-                "not_ready"
-            },
-            task_payload,
-            None,
             block,
             timeout,
         );

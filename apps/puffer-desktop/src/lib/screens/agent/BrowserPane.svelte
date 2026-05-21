@@ -10,6 +10,7 @@
     browserInput,
     browserNavigate,
     browserOpen,
+    browserRecording,
     browserReload,
     browserResize,
     browserTabClose,
@@ -19,6 +20,7 @@
     isDaemonReachable,
     type BrowserDevtoolsEvent,
     type BrowserFrameEvent,
+    type BrowserRecordedFrame,
     type BrowserState,
     type BrowserTabInfo,
     type BrowserTabsState
@@ -30,6 +32,7 @@
 
   type BrowserTab = {
     id: string;
+    backendSessionId: string;
     label: string;
     url: string;
     title: string;
@@ -38,18 +41,40 @@
     status: string;
     connected: boolean;
     favicon: string;
+    updatedAtMs: number;
     frame: BrowserFrameEvent | null;
     devtools: BrowserDevtoolsEvent[];
   };
 
+  type ApplyTabsOptions = {
+    allowEmpty?: boolean;
+    allowLocalTransitionShrink?: boolean;
+  };
+
+  type BrowserCommandTarget = {
+    backendSessionId: string;
+    generation: number;
+  };
+
+  type BrowserCommandKind = "navigate" | "history" | "reload";
+
+  type PendingBrowserCommand = BrowserCommandTarget & {
+    kind: BrowserCommandKind;
+  };
+
+  type ClosingTabTarget = {
+    sessionId: string;
+    tabId: string;
+  };
+
   let { sessionId }: Props = $props();
 
-  const initialTabs = loadSavedTabs();
   let viewport: HTMLDivElement | null = $state(null);
   let canvas: HTMLCanvasElement | null = $state(null);
-  let tabs = $state<BrowserTab[]>(initialTabs);
-  let activeTabId = $state(initialTabs[0]?.id ?? "");
-  let nextTabNumber = nextTabIndex(initialTabs);
+  let addressInput: HTMLInputElement | null = $state(null);
+  let tabs = $state<BrowserTab[]>([]);
+  let activeTabId = $state("");
+  let nextTabNumber = 2;
   let urlDraft = $state("about:blank");
   let currentUrl = $state("about:blank");
   let title = $state("");
@@ -62,13 +87,19 @@
   let browserCursorStyle = $state("default");
   let showDevtools = $state(false);
   let devtoolsView = $state<"console" | "network">("console");
+  let closingTabs = $state<ClosingTabTarget[]>([]);
+  let tabOpenPending = $state(false);
+  let pendingBrowserCommands = $state<PendingBrowserCommand[]>([]);
+  let navigationFallbackTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   let disposers: Array<() => void> = [];
   let activeDisposers: Array<() => void> = [];
   let resizeObserver: ResizeObserver | null = null;
   let disposed = false;
   let mounted = false;
+  let activeRootSessionId = "";
   let activeEventSessionId = "";
+  let sessionGeneration = 0;
   let lastResize = { width: 960, height: 720 };
   let activePointerId: number | null = null;
   let activeButton: "left" | "middle" | "right" | "none" = "none";
@@ -85,8 +116,31 @@
   let cursorTimer: ReturnType<typeof setTimeout> | null = null;
   let cursorRequest = 0;
   let pendingCursorPoint: { x: number; y: number } | null = null;
+  let pendingCursorSessionId: string | null = null;
+  let tabStateVersion = 0;
+  const handledBrowserShortcutCodes = new Set<string>();
+  const pendingNavigationSessions = new Set<string>();
+  let pendingNavigationUrls = new Map<string, string>();
+  let pendingFrame: BrowserFrameEvent | null = null;
+  let frameDecodeInFlight = false;
+  const NAVIGATION_IDLE_FALLBACK_MS = 1_200;
+  const TAB_INFO_STALE_GRACE_MS = 250;
 
   let activeTab = $derived(tabs.find((tab) => tab.id === activeTabId) ?? tabs[0]);
+  let browserCommandPending = $derived(
+    Boolean(
+      activeTab &&
+        pendingBrowserCommands.some(
+          (target) =>
+            target.generation === sessionGeneration &&
+            target.backendSessionId === activeBackendSessionId()
+        )
+    )
+  );
+  let browserControlsEnabled = $derived(Boolean(activeTab && connected && !browserCommandPending));
+  let browserAddressEnabled = $derived(
+    Boolean(activeTab && (activeTab.connected || !activeTab.error) && !browserCommandPending)
+  );
   let activeDevtools = $derived(activeTab?.devtools ?? []);
   let consoleEvents = $derived(activeDevtools.filter((item) => item.kind === "console"));
   let networkEvents = $derived(activeDevtools.filter((item) => item.kind === "network"));
@@ -95,7 +149,7 @@
     if (!viewport || !canvas) return;
     mounted = true;
     if (!isDaemonReachable()) {
-      status = "Browser is available when connected to the Corbina backend.";
+      status = "Browser is available when connected to the Puffer backend.";
       error = "No backend connection is configured for this preview.";
       return;
     }
@@ -105,8 +159,10 @@
       if (!size) return;
       lastResize = size;
       if (connected && activeTabId) {
-        void browserResize(activeBackendSessionId(), size.width, size.height).catch((err) => {
-          error = String(err);
+        const target = activeCommandTarget();
+        if (!target) return;
+        void browserResize(target.backendSessionId, size.width, size.height).catch((err) => {
+          reportCommandError(target, err);
         });
       }
     });
@@ -115,15 +171,7 @@
     window.addEventListener("pointerup", globalPointerUp);
     window.addEventListener("pointercancel", globalPointerCancel);
 
-    await syncDaemonTabs();
-    const client = await ensureLocalDaemonClient();
-    disposers.push(
-      client.on<BrowserTabsState>(`browser:${sessionId}:tabs`, (next) => {
-        applyTabsState(next);
-      })
-    );
-
-    if (activeTabId) await connectActiveTab();
+    void activateSession(sessionId);
   });
 
   onDestroy(() => {
@@ -134,6 +182,7 @@
     window.removeEventListener("pointerup", globalPointerUp);
     window.removeEventListener("pointercancel", globalPointerCancel);
     clearCursorTimer();
+    clearNavigationFallbackTimers();
     disposeActiveSubscriptions();
     for (const dispose of disposers) {
       try {
@@ -145,9 +194,19 @@
     disposers = [];
   });
 
-  function newBrowserTab(id: string, label: string): BrowserTab {
+  $effect(() => {
+    if (!mounted || disposed || activeRootSessionId === sessionId) return;
+    void activateSession(sessionId);
+  });
+
+  function newBrowserTab(
+    id: string,
+    label: string,
+    rootSessionId = activeRootSessionId || sessionId
+  ): BrowserTab {
     return {
       id,
+      backendSessionId: backendSessionId(id, rootSessionId),
       label,
       url: "about:blank",
       title: "",
@@ -156,60 +215,189 @@
       status: "Starting Chrome...",
       connected: false,
       favicon: "",
+      updatedAtMs: 0,
       frame: null,
       devtools: []
     };
   }
 
+  function isStaleTabInfo(info: BrowserTabInfo, existing: BrowserTab | null): boolean {
+    if (!existing || typeof info.updatedAtMs !== "number" || info.updatedAtMs <= 0) {
+      return false;
+    }
+    return existing.updatedAtMs - info.updatedAtMs > TAB_INFO_STALE_GRACE_MS;
+  }
+
   function tabFromInfo(info: BrowserTabInfo): BrowserTab {
     const existing = tabs.find((tab) => tab.id === info.tabId);
+    if (existing && isStaleTabInfo(info, existing)) {
+      return existing;
+    }
+    const backendId = info.backendSessionId || existing?.backendSessionId || backendSessionId(info.tabId);
+    const pendingNavigation = pendingNavigationSessions.has(backendId);
+    const loading = Boolean(info.loading || pendingNavigation);
     return {
       ...(existing ?? newBrowserTab(info.tabId, info.label || "New tab")),
       id: info.tabId,
+      backendSessionId: backendId,
       label: info.label || existing?.label || "New tab",
       url: info.url || "about:blank",
       title: info.title || "",
-      loading: info.loading,
-      status: info.connected ? (info.loading ? "Loading" : "Connected") : "Disconnected",
+      loading,
+      status: info.connected ? (loading ? "Loading" : "Connected") : "Disconnected",
       connected: info.connected,
       favicon: faviconFor(info.url || "about:blank"),
+      updatedAtMs: info.updatedAtMs || existing?.updatedAtMs || Date.now(),
       error: null
     };
   }
 
-  function applyTabsState(state: BrowserTabsState) {
-    if (!Array.isArray(state.tabs) || state.tabs.length === 0) return;
+  function applyTabsState(state: BrowserTabsState, options: ApplyTabsOptions = {}) {
+    if (!Array.isArray(state.tabs)) return;
+    const hasLocalTransition =
+      tabOpenPending || closingTabs.length > 0 || pendingBrowserCommands.length > 0;
+    if (state.tabs.length === 0) {
+      if (!options.allowEmpty) return;
+      if (hasLocalTransition && tabs.length > 0 && !options.allowLocalTransitionShrink) return;
+      tabStateVersion += 1;
+      pendingNavigationSessions.clear();
+      tabs = [];
+      activeTabId = "";
+      nextTabNumber = 2;
+      saveTabs([]);
+      connected = false;
+      loading = false;
+      error = null;
+      status = "No pages";
+      title = "";
+      currentUrl = "about:blank";
+      urlDraft = "about:blank";
+      showDevtools = false;
+      devtoolsView = "console";
+      tabOpenPending = false;
+      pendingBrowserCommands = [];
+      pendingNavigationSessions.clear();
+      clearNavigationFallbackTimers();
+      resetPointer(activePointerId ?? undefined);
+      disposeActiveSubscriptions();
+      clearCanvas();
+      return;
+    }
+    tabStateVersion += 1;
+    const previousActiveTabId = activeTabId;
     const nextTabs = state.tabs.map(tabFromInfo);
+    if (hasLocalTransition && nextTabs.length < tabs.length && !options.allowLocalTransitionShrink) return;
+    const connectedTabId = nextTabs.find((tab) => tab.connected)?.id;
+    const activeEvent = state.tabs.find((tab) => tab.tabId === state.activeTabId);
+    const existingActive = activeEvent
+      ? tabs.find((tab) => tab.id === activeEvent.tabId) ?? null
+      : null;
+    const activeEventFresh = !activeEvent || !isStaleTabInfo(activeEvent, existingActive);
+    const validActiveTabId = state.activeTabId && activeEventFresh && nextTabs.some((tab) => tab.id === state.activeTabId)
+      ? state.activeTabId
+      : null;
     tabs = nextTabs;
-    activeTabId = state.activeTabId || nextTabs.find((tab) => tab.connected)?.id || nextTabs[0].id;
+    activeTabId = validActiveTabId || connectedTabId || nextTabs[0].id;
     nextTabNumber = nextTabIndex(nextTabs);
     saveTabs(nextTabs);
     syncFromActiveTab();
+    if (!connected || activeTabId !== previousActiveTabId) {
+      resetPointer(activePointerId ?? undefined);
+    }
   }
 
-  async function syncDaemonTabs() {
+  async function activateSession(nextSessionId: string) {
+    const generation = ++sessionGeneration;
+    activeRootSessionId = nextSessionId;
+    activeEventSessionId = "";
+    disposeSessionSubscriptions();
+    tabOpenPending = false;
+    pendingBrowserCommands = [];
+    clearCursorTimer();
+    pendingNavigationSessions.clear();
+    pendingNavigationUrls = new Map();
+    clearNavigationFallbackTimers();
+    resetPointer(activePointerId ?? undefined);
+    const restored = loadSavedTabsFor(nextSessionId);
+    tabs = restored;
+    activeTabId = restored[0]?.id ?? "";
+    nextTabNumber = nextTabIndex(restored);
+    tabStateVersion += 1;
+    syncFromActiveTab();
+    if (activeTab?.frame) {
+      renderFrame(activeTab.frame);
+    } else {
+      clearCanvas();
+    }
+    await syncDaemonTabs(generation, nextSessionId);
+    if (generation !== sessionGeneration || disposed) return;
+    if (shouldHydrateFallbackFromRecording()) {
+      await hydrateTabsFromRecording(generation, nextSessionId);
+      if (generation !== sessionGeneration || disposed) return;
+    }
+    const client = await ensureLocalDaemonClient();
+    if (generation !== sessionGeneration || disposed) return;
+    disposers.push(
+      client.on<BrowserTabsState>(`browser:${nextSessionId}:tabs`, (next) => {
+        if (generation !== sessionGeneration || activeRootSessionId !== nextSessionId) return;
+        const previousActiveTabId = activeTabId;
+        applyTabsState(next, { allowEmpty: true });
+        if (
+          activeTabId &&
+          (activeTabId !== previousActiveTabId || !connected || !activeTab?.frame)
+        ) {
+          void connectActiveTab(generation);
+        }
+      }),
+      client.on<BrowserRecordedFrame>(`browser:${nextSessionId}:recording`, (frame) => {
+        if (generation !== sessionGeneration || activeRootSessionId !== nextSessionId) return;
+        applyRecordingFrame(nextSessionId, frame);
+      })
+    );
+
+    if (activeTabId) await connectActiveTab(generation);
+  }
+
+  function disposeSessionSubscriptions() {
+    disposeActiveSubscriptions();
+    for (const dispose of disposers) {
+      try {
+        dispose();
+      } catch {
+        /* ignore */
+      }
+    }
+    disposers = [];
+  }
+
+  async function syncDaemonTabs(generation = sessionGeneration, targetSessionId = sessionId) {
     try {
-      const state = await browserTabsList(sessionId);
+      const state = await browserTabsList(targetSessionId);
+      if (generation !== sessionGeneration || activeRootSessionId !== targetSessionId) return;
       applyTabsState(state);
     } catch {
       /* Local saved tabs remain the migration fallback. */
     }
   }
 
-  function storageKey(): string {
-    return `puffer-browser-tabs:${sessionId}`;
+  function storageKeyFor(value: string): string {
+    return `puffer-browser-tabs:${value}`;
   }
 
-  function loadSavedTabs(): BrowserTab[] {
+  function storageKey(): string {
+    return storageKeyFor(sessionId);
+  }
+
+  function loadSavedTabsFor(value: string): BrowserTab[] {
     if (typeof window === "undefined") return [newBrowserTab("tab-1", "New tab")];
     try {
-      const raw = window.localStorage.getItem(storageKey());
+      const raw = window.localStorage.getItem(storageKeyFor(value));
       const saved = raw ? JSON.parse(raw) : null;
       if (!Array.isArray(saved?.tabs)) return [newBrowserTab("tab-1", "New tab")];
       const restored = saved.tabs
         .filter((tab: Partial<BrowserTab>) => typeof tab.id === "string")
         .map((tab: Partial<BrowserTab>) => ({
-          ...newBrowserTab(tab.id!, tab.label || "New tab"),
+          ...newBrowserTab(tab.id!, tab.label || "New tab", value),
           url: tab.url || "about:blank",
           title: tab.title || "",
           status: "Disconnected",
@@ -220,6 +408,72 @@
     } catch {
       return [newBrowserTab("tab-1", "New tab")];
     }
+  }
+
+  function shouldHydrateFallbackFromRecording(): boolean {
+    if (tabs.length === 0) return true;
+    return tabs.every((tab) => !tab.connected && !tab.frame);
+  }
+
+  async function hydrateTabsFromRecording(
+    generation: number,
+    rootSessionId: string
+  ): Promise<void> {
+    try {
+      const snapshot = await browserRecording(rootSessionId);
+      if (
+        generation !== sessionGeneration ||
+        activeRootSessionId !== rootSessionId ||
+        disposed
+      ) return;
+      const recordedTabs = latestRecordedTabs(rootSessionId, snapshot.frames);
+      if (recordedTabs.length === 0) return;
+      const activeRecordedTab = recordedTabs.at(-1)!;
+      tabs = recordedTabs.map(recordedTabFromFrame);
+      activeTabId = activeRecordedTab.tabId;
+      nextTabNumber = nextTabIndex(tabs);
+      tabStateVersion += 1;
+      saveTabs(tabs);
+      syncFromActiveTab();
+      if (activeTab?.frame) renderFrame(activeTab.frame);
+    } catch {
+      /* A live daemon tab list may still arrive after the first paint. */
+    }
+  }
+
+  function latestRecordedTabs(
+    rootSessionId: string,
+    frames: BrowserRecordedFrame[]
+  ): BrowserRecordedFrame[] {
+    const latestByTab = new Map<string, BrowserRecordedFrame>();
+    for (const frame of frames) {
+      if (frame.rootSessionId !== rootSessionId || !frame.tabId) continue;
+      const existing = latestByTab.get(frame.tabId);
+      if (!existing || frame.recordedAtMs >= existing.recordedAtMs) {
+        latestByTab.set(frame.tabId, frame);
+      }
+    }
+    return [...latestByTab.values()].sort(
+      (left, right) => left.recordedAtMs - right.recordedAtMs
+    );
+  }
+
+  function recordedTabFromFrame(frame: BrowserRecordedFrame): BrowserTab {
+    const url = frame.url || "about:blank";
+    const title = frame.title || "";
+    return {
+      ...newBrowserTab(frame.tabId, title || url || "Recorded tab", frame.rootSessionId),
+      backendSessionId:
+        frame.backendSessionId || backendSessionId(frame.tabId, frame.rootSessionId),
+      url,
+      title,
+      loading: false,
+      error: null,
+      status: "Connected",
+      connected: true,
+      favicon: faviconFor(url),
+      frame: frameFromRecording(frame)
+    };
   }
 
   function saveTabs(nextTabs = tabs) {
@@ -256,22 +510,194 @@
   }
 
   function activeBackendSessionId(): string {
-    return `${sessionId}:browser:${activeTabId}`;
+    if (!activeTabId) return "";
+    return activeTab?.backendSessionId || backendSessionId(activeTabId);
   }
 
-  function backendSessionId(tabId: string): string {
-    return `${sessionId}:browser:${tabId}`;
+  function backendSessionId(tabId: string, rootSessionId = activeRootSessionId || sessionId): string {
+    return `${rootSessionId}:browser:${tabId}`;
+  }
+
+  function activeCommandTarget(): BrowserCommandTarget | null {
+    if (!activeTabId) return null;
+    return {
+      backendSessionId: activeBackendSessionId(),
+      generation: sessionGeneration
+    };
+  }
+
+  function reportCommandError(target: BrowserCommandTarget, err: unknown) {
+    if (!targetStillActive(target)) return;
+    error = String(err);
+  }
+
+  function targetStillActive(target: BrowserCommandTarget): boolean {
+    return (
+      !disposed &&
+      target.generation === sessionGeneration &&
+      activeBackendSessionId() === target.backendSessionId
+    );
+  }
+
+  function isBrowserCommandPending(target: BrowserCommandTarget): boolean {
+    return pendingBrowserCommands.some(
+      (item) =>
+        item.generation === target.generation &&
+        item.backendSessionId === target.backendSessionId
+    );
+  }
+
+  function beginBrowserCommand(target: BrowserCommandTarget, kind: BrowserCommandKind): boolean {
+    if (isBrowserCommandPending(target)) return false;
+    pendingBrowserCommands = [...pendingBrowserCommands, { ...target, kind }];
+    return true;
+  }
+
+  function finishBrowserCommand(target: BrowserCommandTarget, kind: BrowserCommandKind) {
+    pendingBrowserCommands = pendingBrowserCommands.filter(
+      (item) =>
+        item.kind !== kind ||
+        item.generation !== target.generation ||
+        item.backendSessionId !== target.backendSessionId
+    );
+  }
+
+  function tabIdForBackendSession(backendId: string): string | null {
+    return tabs.find((tab) => tab.backendSessionId === backendId)?.id ?? null;
+  }
+
+  function markNavigationPending(target: BrowserCommandTarget, url?: string) {
+    pendingNavigationSessions.add(target.backendSessionId);
+    if (url) pendingNavigationUrls.set(target.backendSessionId, url);
+    scheduleNavigationFallback(target);
+    const tabId = tabIdForBackendSession(target.backendSessionId);
+    if (tabId) updateTab(tabId, { loading: true, status: "Loading", error: null }, false);
+    if (targetStillActive(target)) {
+      loading = true;
+      status = "Loading";
+      error = null;
+    }
+  }
+
+  function clearNavigationPending(backendId: string) {
+    pendingNavigationSessions.delete(backendId);
+    pendingNavigationUrls.delete(backendId);
+    const timer = navigationFallbackTimers.get(backendId);
+    if (timer) clearTimeout(timer);
+    navigationFallbackTimers.delete(backendId);
+  }
+
+  function clearNavigationFallbackTimers() {
+    for (const timer of navigationFallbackTimers.values()) {
+      clearTimeout(timer);
+    }
+    navigationFallbackTimers = new Map();
+    pendingNavigationUrls = new Map();
+  }
+
+  function isDuplicateNavigationIntent(target: BrowserCommandTarget, url: string): boolean {
+    return pendingNavigationUrls.get(target.backendSessionId) === url;
+  }
+
+  function scheduleNavigationFallback(target: BrowserCommandTarget) {
+    const existing = navigationFallbackTimers.get(target.backendSessionId);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      navigationFallbackTimers.delete(target.backendSessionId);
+      settleStaleNavigation(target);
+    }, NAVIGATION_IDLE_FALLBACK_MS);
+    navigationFallbackTimers.set(target.backendSessionId, timer);
+  }
+
+  function settleStaleNavigation(target: BrowserCommandTarget) {
+    if (
+      disposed ||
+      target.generation !== sessionGeneration ||
+      !pendingNavigationSessions.has(target.backendSessionId)
+    ) return;
+    pendingNavigationSessions.delete(target.backendSessionId);
+    pendingNavigationUrls.delete(target.backendSessionId);
+    const tabId = tabIdForBackendSession(target.backendSessionId);
+    const tab = tabId ? tabs.find((candidate) => candidate.id === tabId) : null;
+    const nextStatus = tab?.connected === false ? "Disconnected" : "Connected";
+    if (tabId) updateTab(tabId, { loading: false, status: nextStatus }, false);
+    if (targetStillActive(target)) {
+      loading = false;
+      status = nextStatus;
+    }
+  }
+
+  function clearCommandLoading(target: BrowserCommandTarget, message: string | null = null) {
+    clearNavigationPending(target.backendSessionId);
+    const tabId = tabIdForBackendSession(target.backendSessionId);
+    if (tabId) {
+      updateTab(tabId, {
+        loading: false,
+        status: message ? "Chrome error" : "Connected",
+        error: message
+      });
+    }
+    if (!targetStillActive(target)) return;
+    loading = false;
+    if (message) {
+      error = message;
+      status = "Chrome error";
+    } else {
+      status = connected ? "Connected" : status;
+    }
+  }
+
+  function runHistory(direction: "back" | "forward") {
+    const target = activeCommandTarget();
+    if (!target || !beginBrowserCommand(target, "history")) return;
+    markNavigationPending(target);
+    void browserHistory(target.backendSessionId, direction)
+      .catch((err) => {
+        clearCommandLoading(target, String(err));
+      })
+      .finally(() => {
+        finishBrowserCommand(target, "history");
+      });
+  }
+
+  function reloadActiveTab() {
+    const target = activeCommandTarget();
+    if (!target || !beginBrowserCommand(target, "reload")) return;
+    markNavigationPending(target);
+    void browserReload(target.backendSessionId)
+      .catch((err) => {
+        clearCommandLoading(target, String(err));
+      })
+      .finally(() => {
+        finishBrowserCommand(target, "reload");
+      });
+  }
+
+  function sendBrowserInput(event: Parameters<typeof browserInput>[1]) {
+    const target = activeCommandTarget();
+    if (!target) return;
+    void browserInput(target.backendSessionId, event).catch((err) => {
+      reportCommandError(target, err);
+    });
   }
 
   function updateTab(tabId: string, patch: Partial<BrowserTab>, persist = true) {
-    tabs = tabs.map((tab) => (tab.id === tabId ? { ...tab, ...patch } : tab));
+    tabs = tabs.map((tab) =>
+      tab.id === tabId
+        ? { ...tab, ...patch, updatedAtMs: patch.updatedAtMs ?? Date.now() }
+        : tab
+    );
     if (persist) saveTabs();
+  }
+
+  function isAddressEditing(): boolean {
+    return addressInput !== null && document.activeElement === addressInput;
   }
 
   function syncFromActiveTab() {
     const tab = activeTab;
     if (!tab) return;
-    urlDraft = tab.url;
+    if (!isAddressEditing()) urlDraft = tab.url;
     currentUrl = tab.url;
     title = tab.title;
     status = tab.status;
@@ -280,52 +706,173 @@
     connected = tab.connected;
   }
 
-  async function connectActiveTab() {
-    if (!mounted || !viewport || !canvas || disposed || !activeTabId || !activeTab) return;
+  async function connectActiveTab(generation = sessionGeneration) {
+    const tab = activeTab;
+    if (!mounted || !viewport || !canvas || disposed || !activeTabId || !tab) return;
     disposeActiveSubscriptions();
     syncFromActiveTab();
-    if (activeTab.frame) {
-      renderFrame(activeTab.frame);
+    if (tab.frame) {
+      renderFrame(tab.frame);
     } else {
       clearCanvas();
     }
     clearCursorTimer();
     browserCursorStyle = "default";
-    const tabId = activeTabId;
-    const eventSessionId = backendSessionId(tabId);
-    const shouldOpen = !activeTab.connected;
+    const tabId = tab.id;
+    const eventSessionId = tab.backendSessionId || backendSessionId(tabId);
+    const shouldOpen = !tab.connected;
     activeEventSessionId = eventSessionId;
     try {
       const client = await ensureLocalDaemonClient();
+      if (generation !== sessionGeneration || activeEventSessionId !== eventSessionId) return;
       activeDisposers = [
         client.on<BrowserFrameEvent>(`browser:${eventSessionId}:frame`, (frame) => {
           if (activeEventSessionId === eventSessionId) drawFrame(frame);
         }),
         client.on<BrowserState>(`browser:${eventSessionId}:state`, (next) => {
-          if (activeEventSessionId === eventSessionId) applyState(next);
+          if (activeEventSessionId === eventSessionId) applyState(next, tabId);
         }),
         client.on<BrowserDevtoolsEvent>(`browser:${eventSessionId}:devtools`, (item) => {
-          addDevtoolsEvent(tabId, item);
+          if (activeEventSessionId === eventSessionId) addDevtoolsEvent(tabId, item);
         })
       ];
       const size = measureViewport() ?? lastResize;
       lastResize = size;
       if (shouldOpen) {
-        applyState(await browserOpen({ sessionId: eventSessionId, url: activeTab.url, ...size }));
+        const next = await browserOpen({ sessionId: eventSessionId, url: tab.url, ...size });
+        if (generation !== sessionGeneration || activeEventSessionId !== eventSessionId) return;
+        applyState(next, tabId);
       } else {
+        if (!tab.frame) {
+          void restoreRecordedFrame(generation, activeRootSessionId, tabId, eventSessionId);
+        }
         try {
           await browserResize(eventSessionId, size.width, size.height);
         } catch {
-          applyState(await browserOpen({ sessionId: eventSessionId, url: activeTab.url, ...size }));
+          const next = await browserOpen({
+            sessionId: eventSessionId,
+            url: tab.url,
+            ...size
+          });
+          if (generation !== sessionGeneration || activeEventSessionId !== eventSessionId) return;
+          applyState(next, tabId);
         }
       }
-      connected = true;
-      status = "Connected";
+      if (generation !== sessionGeneration || activeEventSessionId !== eventSessionId) return;
       updateTab(tabId, { connected: true, status: "Connected", error: null });
+      if (activeTabId === tabId && activeEventSessionId === eventSessionId) {
+        connected = true;
+        status = "Connected";
+        error = null;
+      }
     } catch (err) {
-      error = String(err);
-      status = "Chrome failed to start";
-      updateTab(tabId, { connected: false, status, error });
+      if (generation !== sessionGeneration || activeEventSessionId !== eventSessionId) return;
+      const message = String(err);
+      updateTab(tabId, {
+        connected: false,
+        loading: false,
+        status: "Chrome failed to start",
+        error: message
+      });
+      if (activeTabId === tabId && activeEventSessionId === eventSessionId) {
+        connected = false;
+        loading = false;
+        error = message;
+        status = "Chrome failed to start";
+        resetPointer(activePointerId ?? undefined);
+      }
+    }
+  }
+
+  async function restoreRecordedFrame(
+    generation: number,
+    rootSessionId: string,
+    tabId: string,
+    backendSessionId: string
+  ) {
+    try {
+      const snapshot = await browserRecording(rootSessionId);
+      if (
+        disposed ||
+        generation !== sessionGeneration ||
+        activeRootSessionId !== rootSessionId ||
+        activeEventSessionId !== backendSessionId ||
+        activeTabId !== tabId ||
+        activeTab?.frame
+      ) return;
+      const recorded = [...snapshot.frames]
+        .reverse()
+        .find((frame) =>
+          frame.backendSessionId === backendSessionId ||
+          (frame.rootSessionId === rootSessionId && frame.tabId === tabId)
+        );
+      if (!recorded) return;
+      const frame = frameFromRecording(recorded);
+      renderFrame(frame);
+      updateTab(tabId, { frame }, false);
+    } catch {
+      /* A live screencast frame or resize may still arrive shortly after attach. */
+    }
+  }
+
+  function frameFromRecording(frame: BrowserRecordedFrame): BrowserFrameEvent {
+    return {
+      frameId: frame.frameId,
+      mimeType: frame.mimeType || "image/jpeg",
+      encoding: "base64",
+      data: frame.data,
+      width: frame.width,
+      height: frame.height
+    };
+  }
+
+  function recordingBackendSessionId(frame: BrowserRecordedFrame): string {
+    const tab = tabs.find((candidate) => candidate.id === frame.tabId);
+    return frame.backendSessionId || tab?.backendSessionId || backendSessionId(frame.tabId);
+  }
+
+  function applyRecordingFrame(rootSessionId: string, frame: BrowserRecordedFrame) {
+    if (disposed || activeRootSessionId !== rootSessionId || frame.rootSessionId !== rootSessionId) return;
+    if (!frame.tabId) return;
+    const existing = tabs.find((tab) => tab.id === frame.tabId);
+    const frameBackendSessionId = recordingBackendSessionId(frame);
+    const nextFrame = frameFromRecording(frame);
+    const nextUrl = frame.url || existing?.url || currentUrl || "about:blank";
+    const nextTitle = frame.title || existing?.title || title || "";
+    const nextTab = {
+      ...(existing ?? newBrowserTab(frame.tabId, nextTitle || nextUrl || "Recorded tab", rootSessionId)),
+      backendSessionId: frameBackendSessionId,
+      frame: nextFrame,
+      url: nextUrl,
+      title: nextTitle,
+      loading: false,
+      error: null,
+      status: "Connected",
+      connected: true,
+      favicon: faviconFor(nextUrl)
+    };
+    const shouldActivate = frame.tabId === activeTabId || !existing;
+    tabs = existing
+      ? tabs.map((tab) => (tab.id === frame.tabId ? nextTab : tab))
+      : [...tabs, nextTab];
+    nextTabNumber = nextTabIndex(tabs);
+    if (!existing) tabStateVersion += 1;
+    saveTabs(tabs);
+    if (!shouldActivate) return;
+    const switchedTabs = activeTabId !== frame.tabId;
+    activeTabId = frame.tabId;
+    activeEventSessionId = frameBackendSessionId;
+    renderFrame(nextFrame);
+    currentUrl = nextUrl;
+    if (!isAddressEditing()) urlDraft = nextUrl;
+    title = nextTitle;
+    loading = false;
+    error = null;
+    status = "Connected";
+    connected = true;
+    if (switchedTabs) {
+      resetPointer(activePointerId ?? undefined);
+      void connectActiveTab();
     }
   }
 
@@ -350,25 +897,36 @@
     };
   }
 
-  function applyState(next: BrowserState) {
-    if (disposed) return;
-    if (next.url) {
-      currentUrl = next.url;
-      urlDraft = next.url;
-    }
-    title = next.title ?? "";
-    loading = next.loading;
-    error = next.error ?? null;
-    status = next.error ? "Chrome error" : next.loading ? "Loading" : "Connected";
-    updateTab(activeTabId, {
-      url: currentUrl,
-      title,
-      loading,
-      error,
-      status,
-      connected: !next.error,
-      favicon: faviconFor(currentUrl)
+  function applyState(next: BrowserState, tabId = activeTabId) {
+    if (disposed || !tabId) return;
+    const existing = tabs.find((tab) => tab.id === tabId);
+    clearNavigationPending(existing?.backendSessionId || backendSessionId(tabId));
+    const nextUrl = next.url || existing?.url || "about:blank";
+    const nextTitle = next.title ?? "";
+    const nextError = next.error ?? null;
+    const nextConnected = !nextError;
+    const nextStatus = nextError ? "Chrome error" : next.loading ? "Loading" : "Connected";
+    updateTab(tabId, {
+      url: nextUrl,
+      title: nextTitle,
+      loading: next.loading,
+      error: nextError,
+      status: nextStatus,
+      connected: nextConnected,
+      favicon: faviconFor(nextUrl)
     });
+    if (tabId !== activeTabId) return;
+    currentUrl = nextUrl;
+    if (!isAddressEditing()) urlDraft = nextUrl;
+    title = nextTitle;
+    loading = next.loading;
+    error = nextError;
+    status = nextStatus;
+    connected = nextConnected;
+    if (!nextConnected) {
+      clearCursorTimer();
+      resetPointer(activePointerId ?? undefined);
+    }
   }
 
   function drawFrame(frame: BrowserFrameEvent) {
@@ -380,6 +938,24 @@
     if (!canvas || disposed) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    pendingFrame = frame;
+    if (frameDecodeInFlight) return;
+    frameDecodeInFlight = true;
+    requestAnimationFrame(() => renderPendingFrame());
+  }
+
+  function renderPendingFrame() {
+    const frame = pendingFrame;
+    pendingFrame = null;
+    if (!frame || !canvas || disposed) {
+      frameDecodeInFlight = false;
+      return;
+    }
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      frameDecodeInFlight = false;
+      return;
+    }
     frameWidth = Math.max(1, frame.width);
     frameHeight = Math.max(1, frame.height);
     if (canvas.width !== frameWidth) canvas.width = frameWidth;
@@ -387,13 +963,24 @@
     const serial = ++drawSerial;
     const image = new Image();
     image.onload = () => {
-      if (disposed || serial !== drawSerial) return;
-      ctx.drawImage(image, 0, 0, frameWidth, frameHeight);
+      if (!disposed && serial === drawSerial) {
+        ctx.drawImage(image, 0, 0, frameWidth, frameHeight);
+      }
+      frameDecodeInFlight = false;
+      if (pendingFrame && !disposed) requestAnimationFrame(() => renderPendingFrame());
+    };
+    image.onerror = () => {
+      if (serial === drawSerial) {
+        frameDecodeInFlight = false;
+        if (pendingFrame && !disposed) requestAnimationFrame(() => renderPendingFrame());
+      }
     };
     image.src = `data:${frame.mimeType};base64,${frame.data}`;
   }
 
   function clearCanvas() {
+    drawSerial += 1;
+    pendingFrame = null;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
@@ -402,18 +989,48 @@
 
   async function submitUrl(event: SubmitEvent) {
     event.preventDefault();
+    const requestedTab = activeTab;
+    if (!activeTabId || !requestedTab) return;
+    addressInput?.blur();
+    const requestedGeneration = sessionGeneration;
+    const requestedTabId = requestedTab.id;
+    const requestedBackendSessionId = requestedTab.backendSessionId || backendSessionId(requestedTabId);
+    const requestedUrl = urlDraft;
+    const commandTarget = {
+      backendSessionId: requestedBackendSessionId,
+      generation: requestedGeneration
+    };
+    if (isDuplicateNavigationIntent(commandTarget, requestedUrl)) return;
+    if (!beginBrowserCommand(commandTarget, "navigate")) return;
     error = null;
+    markNavigationPending(commandTarget, requestedUrl);
     try {
-      updateTab(activeTabId, {
-        url: urlDraft,
+      updateTab(requestedTabId, {
+        url: requestedUrl,
         status: "Loading",
         loading: true,
-        favicon: faviconFor(urlDraft)
+        updatedAtMs: Date.now(),
+        favicon: faviconFor(requestedUrl)
       });
-      await browserNavigate(activeBackendSessionId(), urlDraft);
+      if (connected) {
+        await browserNavigate(requestedBackendSessionId, requestedUrl);
+      } else {
+        const size = measureViewport() ?? lastResize;
+        const next = await browserOpen({
+          sessionId: requestedBackendSessionId,
+          url: requestedUrl,
+          ...size
+        });
+        if (disposed || requestedGeneration !== sessionGeneration) return;
+        applyState(next, requestedTabId);
+      }
     } catch (err) {
-      error = String(err);
-      updateTab(activeTabId, { error, status: "Chrome error" });
+      if (disposed || requestedGeneration !== sessionGeneration) return;
+      if (!tabs.some((tab) => tab.id === requestedTabId)) return;
+      const message = String(err);
+      clearCommandLoading(commandTarget, message);
+    } finally {
+      finishBrowserCommand(commandTarget, "navigate");
     }
   }
 
@@ -425,47 +1042,92 @@
   }
 
   async function addTab() {
+    if (tabOpenPending) return;
     const size = measureViewport() ?? lastResize;
+    const tabId = `tab-${nextTabNumber}`;
+    nextTabNumber += 1;
+    const requestedAtVersion = tabStateVersion;
+    const requestedAtGeneration = sessionGeneration;
+    const requestedSessionId = sessionId;
+    tabOpenPending = true;
     try {
       const info = await browserTabOpen({
-        sessionId,
+        sessionId: requestedSessionId,
+        tabId,
         url: "about:blank",
         width: size.width,
         height: size.height,
         activate: true
       });
+      if (
+        disposed ||
+        requestedAtVersion !== tabStateVersion ||
+        requestedAtGeneration !== sessionGeneration
+      ) return;
       const tab = tabFromInfo(info);
       tabs = [...tabs.filter((item) => item.id !== tab.id), tab];
       activeTabId = tab.id;
       nextTabNumber = nextTabIndex(tabs);
       saveTabs();
       syncFromActiveTab();
-      void connectActiveTab();
+      void connectActiveTab(requestedAtGeneration);
     } catch (err) {
+      if (
+        disposed ||
+        requestedAtVersion !== tabStateVersion ||
+        requestedAtGeneration !== sessionGeneration ||
+        activeRootSessionId !== requestedSessionId
+      ) return;
       error = String(err);
+    } finally {
+      if (
+        !disposed &&
+        requestedAtGeneration === sessionGeneration &&
+        activeRootSessionId === requestedSessionId
+      ) {
+        tabOpenPending = false;
+      }
     }
   }
 
   function selectTab(tabId: string) {
     if (tabId === activeTabId) return;
+    const requestedSessionId = sessionId;
+    const requestedGeneration = sessionGeneration;
     activeTabId = tabId;
     syncFromActiveTab();
     if (activeTab?.frame) renderFrame(activeTab.frame);
     void browserTabFocus(sessionId, tabId).catch((err) => {
+      if (
+        disposed ||
+        requestedGeneration !== sessionGeneration ||
+        activeRootSessionId !== requestedSessionId ||
+        activeTabId !== tabId
+      ) return;
       error = String(err);
     });
     void connectActiveTab();
   }
 
-  function closeTab(tabId: string, event: Event) {
-    event.stopPropagation();
-    void browserTabClose(sessionId, tabId)
-      .then((state) => {
-        if (state.tabs.length) applyTabsState(state);
-      })
-      .catch(() => browserClose(backendSessionId(tabId)).catch(() => {}));
-    const index = tabs.findIndex((tab) => tab.id === tabId);
+  function browserActionErrorText(err: unknown): string {
+    return err instanceof Error ? err.message : String(err);
+  }
+
+  function shouldUseLegacyTabClose(err: unknown): boolean {
+    return /unhandled browser_agent action|unknown browser_agent action|unsupported.*tab close/i.test(
+      browserActionErrorText(err).toLowerCase()
+    );
+  }
+
+  function isClosingTab(targetSessionId: string, tabId: string): boolean {
+    return closingTabs.some(
+      (target) => target.sessionId === targetSessionId && target.tabId === tabId
+    );
+  }
+
+  function removeClosedTabLocally(tabId: string, index: number) {
     const nextTabs = tabs.filter((tab) => tab.id !== tabId);
+    tabStateVersion += 1;
     tabs = nextTabs;
     saveTabs(nextTabs);
     if (nextTabs.length === 0) {
@@ -488,9 +1150,82 @@
     }
   }
 
-  function tabTitle(tab: BrowserTab): string {
+  async function closeTab(tabId: string, event?: Event) {
+    event?.stopPropagation();
+    const requestedSessionId = sessionId;
+    if (isClosingTab(requestedSessionId, tabId)) return;
+    const requestedGeneration = sessionGeneration;
+    const requestedTab = tabs.find((tab) => tab.id === tabId);
+    const requestedBackendSessionId = requestedTab?.backendSessionId || backendSessionId(tabId, requestedSessionId);
+    const index = tabs.findIndex((tab) => tab.id === tabId);
+    if (index === -1) return;
+    const requestedVersion = tabStateVersion;
+    closingTabs = [...closingTabs, { sessionId: requestedSessionId, tabId }];
+    try {
+      const state = await browserTabClose(requestedSessionId, tabId);
+      if (
+        disposed ||
+        requestedGeneration !== sessionGeneration ||
+        activeRootSessionId !== requestedSessionId ||
+        requestedVersion !== tabStateVersion
+      ) return;
+      error = null;
+      applyTabsState(state, { allowEmpty: true, allowLocalTransitionShrink: true });
+    } catch (err) {
+      if (shouldUseLegacyTabClose(err)) {
+        try {
+          await browserClose(requestedBackendSessionId);
+        } catch (legacyErr) {
+          if (
+            !disposed &&
+            requestedGeneration === sessionGeneration &&
+            activeRootSessionId === requestedSessionId
+          ) {
+            error = browserActionErrorText(legacyErr);
+          }
+          return;
+        }
+        if (
+          disposed ||
+          requestedGeneration !== sessionGeneration ||
+          activeRootSessionId !== requestedSessionId ||
+          requestedVersion !== tabStateVersion
+        ) return;
+        error = null;
+        removeClosedTabLocally(tabId, index);
+        return;
+      }
+      if (
+        disposed ||
+        requestedGeneration !== sessionGeneration ||
+        activeRootSessionId !== requestedSessionId
+      ) return;
+      error = browserActionErrorText(err);
+    } finally {
+      closingTabs = closingTabs.filter(
+        (target) => target.sessionId !== requestedSessionId || target.tabId !== tabId
+      );
+    }
+  }
+
+  function fullTabTitle(tab: BrowserTab): string {
     const value = tab.title || (tab.url === "about:blank" ? tab.label : tab.url);
+    return value || tab.id;
+  }
+
+  function tabTitle(tab: BrowserTab): string {
+    const value = fullTabTitle(tab);
     return value.length > 28 ? `${value.slice(0, 25)}...` : value;
+  }
+
+  function closeTabTarget(tab: BrowserTab): string {
+    if (tab.title) return tab.title;
+    if (tab.url && tab.url !== "about:blank") return tab.url;
+    return "blank page";
+  }
+
+  function closeTabLabel(tab: BrowserTab, index: number): string {
+    return `Close tab ${index + 1}: ${closeTabTarget(tab)}`;
   }
 
   function canvasPoint(event: MouseEvent | WheelEvent): { x: number; y: number } {
@@ -531,7 +1266,10 @@
   }
 
   function sendMouse(event: PointerEvent, eventType: "mousePressed" | "mouseReleased" | "mouseMoved") {
-    if (!connected) return;
+    if (!connected || !activeTabId) {
+      if (eventType === "mouseReleased") resetPointer(event.pointerId);
+      return;
+    }
     event.preventDefault();
     canvas?.focus();
     const point = canvasPoint(event);
@@ -561,7 +1299,7 @@
       buttons = 0;
       click_count = activeClickCount || 1;
     }
-    void browserInput(activeBackendSessionId(), {
+    sendBrowserInput({
       kind: "mouse",
       eventType,
       x: point.x,
@@ -569,8 +1307,6 @@
       button,
       buttons,
       clickCount: click_count
-    }).catch((err) => {
-      error = String(err);
     });
     if (eventType === "mouseReleased") {
       resetPointer(event.pointerId);
@@ -617,21 +1353,32 @@
 
   function scheduleCursorProbe(point: { x: number; y: number }) {
     pendingCursorPoint = point;
+    pendingCursorSessionId = connected && activeTabId ? activeBackendSessionId() : null;
     if (cursorTimer) return;
     cursorTimer = setTimeout(() => {
       cursorTimer = null;
       const next = pendingCursorPoint;
+      const sessionId = pendingCursorSessionId;
       pendingCursorPoint = null;
-      if (!next || disposed || activeButtons > 0) return;
-      void probeCursor(next);
+      pendingCursorSessionId = null;
+      if (!next || !sessionId || disposed || activeButtons > 0) return;
+      if (!connected || !activeTabId || activeBackendSessionId() !== sessionId) return;
+      void probeCursor(sessionId, next);
     }, 60);
   }
 
-  async function probeCursor(point: { x: number; y: number }) {
+  async function probeCursor(sessionId: string, point: { x: number; y: number }) {
     const request = ++cursorRequest;
     try {
-      const result = await browserCursor(activeBackendSessionId(), point.x, point.y);
-      if (disposed || request !== cursorRequest || activeButtons > 0) return;
+      const result = await browserCursor(sessionId, point.x, point.y);
+      if (
+        disposed ||
+        request !== cursorRequest ||
+        activeButtons > 0 ||
+        !connected ||
+        !activeTabId ||
+        activeBackendSessionId() !== sessionId
+      ) return;
       browserCursorStyle = result.cursor || "default";
     } catch {
       if (request === cursorRequest) browserCursorStyle = "default";
@@ -644,20 +1391,19 @@
       cursorTimer = null;
     }
     pendingCursorPoint = null;
+    pendingCursorSessionId = null;
   }
 
   function sendWheel(event: WheelEvent) {
     if (!connected) return;
     event.preventDefault();
     const point = canvasPoint(event);
-    void browserInput(activeBackendSessionId(), {
+    sendBrowserInput({
       kind: "wheel",
       x: point.x,
       y: point.y,
       deltaX: event.deltaX,
       deltaY: event.deltaY
-    }).catch((err) => {
-      error = String(err);
     });
   }
 
@@ -676,6 +1422,23 @@
     return (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "c";
   }
 
+  function handleBrowserShortcut(event: KeyboardEvent): boolean {
+    if (!event.metaKey && !event.ctrlKey) return false;
+    const key = event.key.toLowerCase();
+    if (!["r", "l", "w"].includes(key)) return false;
+    event.preventDefault();
+    handledBrowserShortcutCodes.add(event.code);
+    if (key === "r") {
+      reloadActiveTab();
+    } else if (key === "l") {
+      addressInput?.focus();
+      addressInput?.select();
+    } else if (activeTabId) {
+      closeTab(activeTabId);
+    }
+    return true;
+  }
+
   function keyDown(event: KeyboardEvent) {
     if (!connected) return;
     if (isCopyShortcut(event)) {
@@ -683,66 +1446,65 @@
       void copySelection();
       return;
     }
-    if ((event.metaKey || event.ctrlKey) && ["r", "l", "w"].includes(event.key.toLowerCase())) {
+    if (handleBrowserShortcut(event)) {
       return;
     }
     event.preventDefault();
-    if (event.key.length === 1 && !event.metaKey && !event.ctrlKey) {
-      void browserInput(activeBackendSessionId(), { kind: "text", text: event.key }).catch((err) => {
-        error = String(err);
-      });
-      return;
-    }
-    void browserInput(activeBackendSessionId(), {
+    const text = event.key.length === 1 && !event.metaKey && !event.ctrlKey ? event.key : undefined;
+    sendBrowserInput({
       kind: "key",
       eventType: keyType(event),
       key: event.key,
       code: event.code,
+      ...(text ? { text } : {}),
       modifiers: modifiers(event)
-    }).catch((err) => {
-      error = String(err);
     });
   }
 
   function keyUp(event: KeyboardEvent) {
     if (!connected) return;
+    if (handledBrowserShortcutCodes.delete(event.code)) {
+      event.preventDefault();
+      return;
+    }
     if (isCopyShortcut(event)) {
       event.preventDefault();
       return;
     }
     event.preventDefault();
-    void browserInput(activeBackendSessionId(), {
+    sendBrowserInput({
       kind: "key",
       eventType: "keyUp",
       key: event.key,
       code: event.code,
       modifiers: modifiers(event)
-    }).catch((err) => {
-      error = String(err);
     });
   }
 
   function paste(event: ClipboardEvent) {
+    if (!connected || !activeTabId) return;
     const text = event.clipboardData?.getData("text/plain") ?? "";
     if (!text) return;
     event.preventDefault();
-    void browserInput(activeBackendSessionId(), { kind: "text", text }).catch((err) => {
-      error = String(err);
-    });
+    sendBrowserInput({ kind: "text", text });
   }
 
   async function copySelection() {
+    const target = activeCommandTarget();
+    if (!target) return;
     try {
-      const result = await browserCopySelection(activeBackendSessionId());
+      const result = await browserCopySelection(target.backendSessionId);
+      if (!targetStillActive(target)) return;
       if (!result.text) {
         status = "No selection";
         return;
       }
       await navigator.clipboard.writeText(result.text);
+      if (!targetStillActive(target)) return;
       error = null;
       status = "Copied selected text";
     } catch (err) {
-      error = String(err);
+      reportCommandError(target, err);
     }
   }
 
@@ -762,14 +1524,23 @@
 </script>
 
 <div class="pf-browser-pane">
-  <div class="pf-browser-tabs">
-    {#each tabs as tab (tab.id)}
-      <button
+  <div class="pf-browser-tabs" role="tablist" aria-label="Browser tabs">
+    {#each tabs as tab, index (tab.id)}
+      {@const closeLabel = closeTabLabel(tab, index)}
+      <div
         class="pf-browser-tab"
         class:active={tab.id === activeTabId}
-        type="button"
-        title={tab.title || tab.url}
+        role="tab"
+        tabindex="0"
+        aria-selected={tab.id === activeTabId}
+        title={fullTabTitle(tab)}
         onclick={() => selectTab(tab.id)}
+        onkeydown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            selectTab(tab.id);
+          }
+        }}
       >
         {#if tab.favicon}
           <img class="favicon" src={tab.favicon} alt="" onerror={(event) => ((event.currentTarget as HTMLImageElement).style.display = "none")} />
@@ -777,21 +1548,19 @@
           <span class="dot" class:loading={tab.loading}></span>
         {/if}
         <span class="label">{tabTitle(tab)}</span>
-        <span
+        <button
           class="close"
-          role="button"
-          tabindex="0"
-          title="Close tab"
+          type="button"
+          title={closeLabel}
+          aria-label={closeLabel}
+          disabled={isClosingTab(sessionId, tab.id)}
           onclick={(event) => closeTab(tab.id, event)}
-          onkeydown={(event) => {
-            if (event.key === "Enter" || event.key === " ") closeTab(tab.id, event);
-          }}
         >
           <Icon name="x" size={11} />
-        </span>
-      </button>
+        </button>
+      </div>
     {/each}
-    <button class="pf-browser-tab-add" type="button" title="New tab" onclick={() => void addTab()}>
+    <button class="pf-browser-tab-add" type="button" title="New tab" disabled={tabOpenPending} onclick={() => void addTab()}>
       <Icon name="plus" size={13} />
     </button>
   </div>
@@ -800,8 +1569,8 @@
       class="pf-browser-icon"
       type="button"
       title="Back"
-      disabled={!activeTab}
-      onclick={() => browserHistory(activeBackendSessionId(), "back").catch((err) => (error = String(err)))}
+      disabled={!browserControlsEnabled}
+      onclick={() => runHistory("back")}
     >
       <Icon name="chevL" size={14} />
     </button>
@@ -809,8 +1578,8 @@
       class="pf-browser-icon"
       type="button"
       title="Forward"
-      disabled={!activeTab}
-      onclick={() => browserHistory(activeBackendSessionId(), "forward").catch((err) => (error = String(err)))}
+      disabled={!browserControlsEnabled}
+      onclick={() => runHistory("forward")}
     >
       <Icon name="chevR" size={14} />
     </button>
@@ -818,8 +1587,8 @@
       class="pf-browser-icon"
       type="button"
       title="Reload"
-      disabled={!activeTab}
-      onclick={() => browserReload(activeBackendSessionId()).catch((err) => (error = String(err)))}
+      disabled={!browserControlsEnabled}
+      onclick={reloadActiveTab}
     >
       <Icon name="refresh" size={14} />
     </button>
@@ -827,7 +1596,8 @@
       class="pf-browser-address"
       aria-label="URL"
       spellcheck="false"
-      disabled={!activeTab}
+      disabled={!browserAddressEnabled}
+      bind:this={addressInput}
       bind:value={urlDraft}
     />
     <button
@@ -835,6 +1605,7 @@
       class:active={showDevtools}
       type="button"
       title="DevTools"
+      aria-pressed={showDevtools}
       disabled={!activeTab}
       onclick={() => (showDevtools = !showDevtools)}
     >
@@ -868,7 +1639,7 @@
       ></canvas>
       {#if !activeTab}
         <div class="pf-browser-empty">
-          <button class="pf-browser-empty-action" type="button" onclick={() => void addTab()}>New tab</button>
+          <button class="pf-browser-empty-action" type="button" disabled={tabOpenPending} onclick={() => void addTab()}>New tab</button>
         </div>
       {:else if !connected && !error}
         <div class="pf-browser-empty">Starting Chrome...</div>
@@ -881,11 +1652,13 @@
             <button
               type="button"
               class:active={devtoolsView === "console"}
+              aria-pressed={devtoolsView === "console"}
               onclick={() => (devtoolsView = "console")}
             >Console</button>
             <button
               type="button"
               class:active={devtoolsView === "network"}
+              aria-pressed={devtoolsView === "network"}
               onclick={() => (devtoolsView = "network")}
             >Network</button>
           </div>
@@ -1008,12 +1781,16 @@
   .pf-browser-tab .close {
     width: 18px;
     height: 18px;
+    padding: 0;
+    border: 0;
     border-radius: 4px;
+    background: transparent;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     margin-left: auto;
     color: var(--muted-foreground);
+    cursor: pointer;
   }
 
   .pf-browser-tab .close:hover,

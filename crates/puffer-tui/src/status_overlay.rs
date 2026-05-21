@@ -113,23 +113,74 @@ pub(crate) fn render_status_overlay(
         height: viewport.height.saturating_sub(2).max(6),
     };
     frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(format!(
-            "{}\n\n↑/↓ scroll · PgUp/PgDn page · Esc closes",
-            snapshot.body
-        ))
-        .scroll((snapshot.scroll, 0))
+    let body = format!(
+        "{}\n\n↑/↓ scroll · PgUp/PgDn page · Esc closes",
+        snapshot.body
+    );
+    let content_width = area.width.saturating_sub(2).max(1);
+    let visible_rows = usize::from(area.height.saturating_sub(2));
+    let max_scroll = Paragraph::new(body.as_str())
         .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .title("Status")
-                .borders(Borders::ALL)
-                .border_style(
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-        ),
+        .line_count(content_width)
+        .saturating_sub(visible_rows)
+        .min(u16::MAX as usize) as u16;
+    let scroll = snapshot.scroll.min(max_scroll);
+    frame.render_widget(
+        Paragraph::new(body)
+            .scroll((scroll, 0))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .title("Status")
+                    .borders(Borders::ALL)
+                    .border_style(
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+            ),
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    #[test]
+    fn render_status_overlay_clamps_overscroll() {
+        let backend = TestBackend::new(72, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let overlay = StatusOverlay {
+            shared: Arc::new(Mutex::new(StatusOverlayState {
+                body: (0..20)
+                    .map(|index| format!("status-line-{index:02}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                scroll: 0,
+            })),
+        };
+
+        for _ in 0..100 {
+            overlay.page_down();
+        }
+
+        terminal
+            .draw(|frame| {
+                render_status_overlay(frame, frame.area(), &overlay);
+            })
+            .unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Status"));
+        assert!(rendered.contains("status-line-19"));
+    }
 }

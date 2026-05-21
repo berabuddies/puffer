@@ -625,12 +625,13 @@ pub(crate) fn load_runtime_permission_context_with_inputs(
         PermissionsSettings::default()
     };
     let sandbox = load_runtime_sandbox_settings(cwd, state)?;
+    let browser_root_session_id = state.browser_root_session_id();
     let profile = EffectivePermissionProfile::from_legacy_sources(
         cwd,
         &state.working_dirs,
         &permissions,
         &sandbox,
-        &state.session.id,
+        &browser_root_session_id,
         state.session_allow_all,
         state.session_permission_state.grants(),
         state.plan_mode,

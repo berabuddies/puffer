@@ -14,3 +14,16 @@ benchmark/*.pyc
 # Claude Code + OMX tool metadata
 .claude/
 .omx/
+
+# Local audit and bug-triage artifacts.
+audit_scope.txt
+import_scope.json
+droid.resume.txt
+env.txt
+audits/
+bugs/
+apps/puffer-desktop/tests/fuzz/.runs/
+apps/puffer-desktop/tests/fuzz/__pycache__/
+apps/puffer-desktop/tests/fuzz/**/*.pyc
+apps/puffer-desktop/tests/*.tmp.spec.ts
+test-results/

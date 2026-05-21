@@ -1,0 +1,876 @@
+From 41cab5517d2a5c6b7a664578a03795a590fa611f Mon Sep 17 00:00:00 2001
+From: aplefull <aplefull@gmail.com>
+Date: Wed, 23 Jul 2025 20:48:34 +0200
+Subject: [PATCH 1/3] LibRegex: Fix backreferences to undefined capture groups
+
+Fixes handling of backreferences when the referenced capture group is
+undefined or hasn't participated in the match.
+CharacterCompareType::NamedReference is added to distinguish numbered
+(\1) from named (\k<name>) backreferences. Numbered backreferences use
+exact group lookup. Named backreferences search for participating
+groups among duplicates.
+---
+ Libraries/LibRegex/RegexByteCode.cpp  | 91 +++++++++++++++++++++++++--
+ Libraries/LibRegex/RegexByteCode.h    | 16 ++++-
+ Libraries/LibRegex/RegexOptimizer.cpp |  5 +-
+ Libraries/LibRegex/RegexParser.cpp    |  4 +-
+ Tests/LibRegex/TestRegex.cpp          | 90 ++++++++++++++++++++++++++
+ 5 files changed, 197 insertions(+), 9 deletions(-)
+
+diff --git a/Libraries/LibRegex/RegexByteCode.cpp b/Libraries/LibRegex/RegexByteCode.cpp
+index 74604826cd994..4a2d1cacbfcb8 100644
+--- a/Libraries/LibRegex/RegexByteCode.cpp
++++ b/Libraries/LibRegex/RegexByteCode.cpp
+@@ -609,12 +609,21 @@ ALWAYS_INLINE ExecutionResult OpCode_Compare::execute(MatchInput const& input, M
+         }
+         case CharacterCompareType::Reference: {
+             auto reference_number = ((size_t)m_bytecode->at(offset++)) - 1;
+-            if (input.match_index >= state.capture_group_matches_size())
+-                return ExecutionResult::Failed_ExecuteLowPrioForks;
++            if (input.match_index >= state.capture_group_matches_size()) {
++                had_zero_length_match = true;
++                if (current_inversion_state())
++                    inverse_matched = true;
++                break;
++            }
+ 
+             auto groups = state.capture_group_matches(input.match_index);
+-            if (groups.size() <= reference_number)
+-                return ExecutionResult::Failed_ExecuteLowPrioForks;
++
++            if (groups.size() <= reference_number) {
++                had_zero_length_match = true;
++                if (current_inversion_state())
++                    inverse_matched = true;
++                break;
++            }
+ 
+             auto str = groups.at(reference_number).view;
+ 
+@@ -628,6 +637,59 @@ ALWAYS_INLINE ExecutionResult OpCode_Compare::execute(MatchInput const& input, M
+             }
+             break;
+         }
++        case CharacterCompareType::NamedReference: {
++            auto reference_number = ((size_t)m_bytecode->at(offset++)) - 1;
++
++            if (input.match_index >= state.capture_group_matches_size()) {
++                had_zero_length_match = true;
++                if (current_inversion_state())
++                    inverse_matched = true;
++                break;
++            }
++
++            auto groups = state.capture_group_matches(input.match_index);
++
++            if (groups.size() <= reference_number) {
++                had_zero_length_match = true;
++                if (current_inversion_state())
++                    inverse_matched = true;
++                break;
++            }
++
++            RegexStringView str {};
++
++            auto reference_name_index = m_bytecode->get_group_name_index(reference_number);
++
++            if (reference_name_index.has_value()) {
++                auto target_name_string = m_bytecode->get_string(reference_name_index.value());
++
++                for (size_t i = 0; i < groups.size(); ++i) {
++                    if (groups[i].view.is_null())
++                        continue;
++
++                    auto group_name_index = m_bytecode->get_group_name_index(i);
++
++                    if (group_name_index.has_value()) {
++                        auto group_name_string = m_bytecode->get_string(group_name_index.value());
++
++                        if (group_name_string == target_name_string) {
++                            str = groups[i].view;
++                            break;
++                        }
++                    }
++                }
++            }
++
++            if (input.view.length() < state.string_position + str.length()) {
++                return ExecutionResult::Failed_ExecuteLowPrioForks;
++            }
++
++            if (compare_string(input, state, str, had_zero_length_match)) {
++                if (current_inversion_state())
++                    inverse_matched = true;
++            }
++            break;
++        }
+         case CharacterCompareType::Property: {
+             auto property = static_cast<Unicode::Property>(m_bytecode->at(offset++));
+             compare_property(input, state, property, current_inversion_state(), inverse_matched);
+@@ -946,6 +1008,9 @@ Vector<CompareTypeAndValuePair> OpCode_Compare::flat_compares() const
+         } else if (compare_type == CharacterCompareType::Reference) {
+             auto ref = m_bytecode->at(offset++);
+             result.append({ compare_type, ref });
++        } else if (compare_type == CharacterCompareType::NamedReference) {
++            auto ref = m_bytecode->at(offset++);
++            result.append({ compare_type, ref });
+         } else if (compare_type == CharacterCompareType::String) {
+             auto& length = m_bytecode->at(offset++);
+             for (size_t k = 0; k < length; ++k)
+@@ -1028,6 +1093,24 @@ Vector<ByteString> OpCode_Compare::variable_arguments_to_byte_string(Optional<Ma
+                     result.empend(ByteString::formatted(" (invalid index {}, max={})", input->match_index, state().capture_group_matches_size() - 1));
+                 }
+             }
++        } else if (compare_type == CharacterCompareType::NamedReference) {
++            auto ref = m_bytecode->at(offset++);
++            result.empend(ByteString::formatted(" named_number={}", ref));
++            if (input.has_value()) {
++                if (state().capture_group_matches_size() > input->match_index) {
++                    auto match = state().capture_group_matches(input->match_index);
++                    if (match.size() > ref) {
++                        auto& group = match[ref];
++                        result.empend(ByteString::formatted(" left={}", group.left_column));
++                        result.empend(ByteString::formatted(" right={}", group.left_column + group.view.length_in_code_units()));
++                        result.empend(ByteString::formatted(" contents='{}'", group.view));
++                    } else {
++                        result.empend(ByteString::formatted(" (invalid ref {}, max={})", ref, match.size() - 1));
++                    }
++                } else {
++                    result.empend(ByteString::formatted(" (invalid index {}, max={})", input->match_index, state().capture_group_matches_size() - 1));
++                }
++            }
+         } else if (compare_type == CharacterCompareType::String) {
+             auto& length = m_bytecode->at(offset++);
+             StringBuilder str_builder;
+diff --git a/Libraries/LibRegex/RegexByteCode.h b/Libraries/LibRegex/RegexByteCode.h
+index 87a5ed7c399bf..4c36f02761c25 100644
+--- a/Libraries/LibRegex/RegexByteCode.h
++++ b/Libraries/LibRegex/RegexByteCode.h
+@@ -69,6 +69,7 @@ enum class OpCodeId : ByteCodeValueType {
+     __ENUMERATE_CHARACTER_COMPARE_TYPE(CharClass)            \
+     __ENUMERATE_CHARACTER_COMPARE_TYPE(CharRange)            \
+     __ENUMERATE_CHARACTER_COMPARE_TYPE(Reference)            \
++    __ENUMERATE_CHARACTER_COMPARE_TYPE(NamedReference)       \
+     __ENUMERATE_CHARACTER_COMPARE_TYPE(Property)             \
+     __ENUMERATE_CHARACTER_COMPARE_TYPE(GeneralCategory)      \
+     __ENUMERATE_CHARACTER_COMPARE_TYPE(Script)               \
+@@ -261,6 +262,11 @@ class REGEX_API ByteCode : public DisjointChunks<ByteCodeValueType> {
+     FlyString get_string(size_t index) const { return m_string_table.get(index); }
+     auto const& string_table() const { return m_string_table; }
+ 
++    Optional<size_t> get_group_name_index(size_t group_index) const
++    {
++        return m_group_name_mappings.get(group_index);
++    }
++
+     void last_chunk() const = delete;
+     void first_chunk() const = delete;
+ 
+@@ -279,6 +285,10 @@ class REGEX_API ByteCode : public DisjointChunks<ByteCodeValueType> {
+                 m_string_table.m_table.set(entry.key, entry.value);
+             }
+             m_string_table.m_inverse_table.update(other.m_string_table.m_inverse_table);
++
++            for (auto const& mapping : other.m_group_name_mappings) {
++                m_group_name_mappings.set(mapping.key, mapping.value);
++            }
+         }
+     }
+ 
+@@ -326,8 +336,11 @@ class REGEX_API ByteCode : public DisjointChunks<ByteCodeValueType> {
+     void insert_bytecode_group_capture_right(size_t capture_groups_count, FlyString name)
+     {
+         empend(static_cast<ByteCodeValueType>(OpCodeId::SaveRightNamedCaptureGroup));
+-        empend(m_string_table.set(move(name)));
++        auto name_string_index = m_string_table.set(move(name));
++        empend(name_string_index);
+         empend(capture_groups_count);
++
++        m_group_name_mappings.set(capture_groups_count - 1, name_string_index);
+     }
+ 
+     enum class LookAroundType {
+@@ -618,6 +631,7 @@ class REGEX_API ByteCode : public DisjointChunks<ByteCodeValueType> {
+     static bool s_opcodes_initialized;
+     static size_t s_next_checkpoint_serial_id;
+     StringTable m_string_table;
++    HashMap<size_t, size_t> m_group_name_mappings;
+ };
+ 
+ #define ENUMERATE_EXECUTION_RESULTS                          \
+diff --git a/Libraries/LibRegex/RegexOptimizer.cpp b/Libraries/LibRegex/RegexOptimizer.cpp
+index 4a4738cad7c77..00651711c8c4c 100644
+--- a/Libraries/LibRegex/RegexOptimizer.cpp
++++ b/Libraries/LibRegex/RegexOptimizer.cpp
+@@ -131,6 +131,7 @@ static bool interpret_compares(Vector<CompareTypeAndValuePair> const& lhs, Stati
+             // We've transformed this into a series of ranges in flat_compares(), so bail out if we see it.
+             return false;
+         case CharacterCompareType::Reference:
++        case CharacterCompareType::NamedReference:
+             // We've handled this before coming here.
+             break;
+         case CharacterCompareType::Property:
+@@ -512,6 +513,7 @@ static bool has_overlap(Vector<CompareTypeAndValuePair> const& lhs, Vector<Compa
+             // We've transformed this into a series of ranges in flat_compares(), so bail out if we see it.
+             return true;
+         case CharacterCompareType::Reference:
++        case CharacterCompareType::NamedReference:
+             // We've handled this before coming here.
+             break;
+         case CharacterCompareType::Property:
+@@ -755,7 +757,7 @@ static AtomicRewritePreconditionResult block_satisfies_atomic_rewrite_preconditi
+                 break;
+ 
+             if (any_of(compares, [&](auto& compare) {
+-                    return compare.type == CharacterCompareType::AnyChar || compare.type == CharacterCompareType::Reference;
++                    return compare.type == CharacterCompareType::AnyChar || compare.type == CharacterCompareType::Reference || compare.type == CharacterCompareType::NamedReference;
+                 }))
+                 return AtomicRewritePreconditionResult::NotSatisfied;
+ 
+@@ -1835,6 +1837,7 @@ static LookupTableInsertionOutcome insert_into_lookup_table(RedBlackTree<ByteCod
+     case CharacterCompareType::And:
+         return LookupTableInsertionOutcome::FlushOnInsertion;
+     case CharacterCompareType::Reference:
++    case CharacterCompareType::NamedReference:
+     case CharacterCompareType::Property:
+     case CharacterCompareType::GeneralCategory:
+     case CharacterCompareType::Script:
+diff --git a/Libraries/LibRegex/RegexParser.cpp b/Libraries/LibRegex/RegexParser.cpp
+index f648c180f3bb8..3f8b6240fc05b 100644
+--- a/Libraries/LibRegex/RegexParser.cpp
++++ b/Libraries/LibRegex/RegexParser.cpp
+@@ -496,7 +496,6 @@ bool PosixBasicParser::parse_nonduplicating_re(ByteCode& bytecode, size_t& match
+         if (try_skip({ backref_name, 2 })) {
+             if (!m_capture_group_seen[i - 1])
+                 return set_error(Error::InvalidNumber);
+-            match_length_minimum += m_capture_group_minimum_lengths[i - 1];
+             bytecode.insert_bytecode_compare_values({ { CharacterCompareType::Reference, (ByteCodeValueType)i } });
+             return true;
+         }
+@@ -1656,8 +1655,7 @@ bool ECMA262Parser::parse_atom_escape(ByteCode& stack, size_t& match_length_mini
+             return false;
+         }
+ 
+-        match_length_minimum += maybe_length.value();
+-        stack.insert_bytecode_compare_values({ { CharacterCompareType::Reference, (ByteCodeValueType)group_index } });
++        stack.insert_bytecode_compare_values({ { CharacterCompareType::NamedReference, (ByteCodeValueType)group_index } });
+         return true;
+     }
+ 
+diff --git a/Tests/LibRegex/TestRegex.cpp b/Tests/LibRegex/TestRegex.cpp
+index 50bd974f349f7..0bbe5f10861cc 100644
+--- a/Tests/LibRegex/TestRegex.cpp
++++ b/Tests/LibRegex/TestRegex.cpp
+@@ -1379,3 +1379,93 @@ TEST_CASE(account_for_opcode_size_calculating_incoming_jump_edges)
+         EXPECT_EQ(result.matches.first().view.to_byte_string(), "aa"sv);
+     }
+ }
++
++TEST_CASE(backreference_to_undefined_capture_groups)
++{
++    {
++        // Test duplicate named groups in alternatives where backreference refers to participating group
++        Regex<ECMA262> re("(?:(?<x>a)|(?<x>b))\\k<x>"sv);
++        auto result = re.match("bb"sv);
++
++        EXPECT_EQ(result.success, true);
++        EXPECT_EQ(result.matches.size(), 1u);
++        EXPECT_EQ(result.matches.first().view.to_byte_string(), "bb"sv);
++        EXPECT_EQ(result.capture_group_matches.first().size(), 2u);
++        EXPECT(result.capture_group_matches.first()[0].view.is_null());
++        EXPECT_EQ(result.capture_group_matches.first()[1].view.to_byte_string(), "b"sv);
++    }
++
++    {
++        // Test duplicate named groups with quantifier
++        Regex<ECMA262> re("(?:(?:(?<x>a)|(?<x>b))\\k<x>){2}"sv);
++        auto result = re.match("aabb"sv);
++
++        EXPECT_EQ(result.success, true);
++        EXPECT_EQ(result.matches.size(), 1u);
++        EXPECT_EQ(result.matches.first().view.to_byte_string(), "aabb"sv);
++        EXPECT_EQ(result.capture_group_matches.first().size(), 2u);
++        EXPECT(result.capture_group_matches.first()[0].view.is_null());
++        EXPECT_EQ(result.capture_group_matches.first()[1].view.to_byte_string(), "b"sv);
++    }
++
++    {
++        // Test that first alternative works too
++        Regex<ECMA262> re("(?:(?<x>a)|(?<x>b))\\k<x>"sv);
++        auto result = re.match("aa"sv);
++
++        EXPECT_EQ(result.success, true);
++        EXPECT_EQ(result.matches.size(), 1u);
++        EXPECT_EQ(result.matches.first().view.to_byte_string(), "aa"sv);
++        EXPECT_EQ(result.capture_group_matches.first().size(), 2u);
++        EXPECT_EQ(result.capture_group_matches.first()[0].view.to_byte_string(), "a"sv);
++        EXPECT(result.capture_group_matches.first()[1].view.is_null());
++    }
++
++    {
++        // Test numbered backreference to undefined group
++        Regex<ECMA262> re("(.*?)a(?!(a+)b\\2c)\\2(.*)"sv);
++        auto result = re.match("baaabaac"sv);
++
++        EXPECT_EQ(result.success, true);
++        EXPECT_EQ(result.matches.size(), 1u);
++        EXPECT_EQ(result.matches.first().view.to_byte_string(), "baaabaac"sv);
++        EXPECT_EQ(result.capture_group_matches.first().size(), 3u);
++        EXPECT_EQ(result.capture_group_matches.first()[0].view.to_byte_string(), "ba"sv);
++        EXPECT(result.capture_group_matches.first()[1].view.is_null());
++        EXPECT_EQ(result.capture_group_matches.first()[2].view.to_byte_string(), "abaac"sv);
++    }
++
++    {
++        Regex<ECMA262> re("^(?:(?<a>x)|(?<a>y)|z)\\k<a>$"sv);
++
++        // Third alternative matches and backreference is undefined
++        auto result1 = re.match("z"sv);
++        EXPECT_EQ(result1.success, true);
++        EXPECT_EQ(result1.matches.size(), 1u);
++        EXPECT_EQ(result1.matches.first().view.to_byte_string(), "z"sv);
++        EXPECT_EQ(result1.capture_group_matches.first().size(), 2u);
++        EXPECT(result1.capture_group_matches.first()[0].view.is_null());
++        EXPECT(result1.capture_group_matches.first()[1].view.is_null());
++    }
++
++    {
++        // Quantified version of the above pattern
++        Regex<ECMA262> re("^(?:(?<a>x)|(?<a>y)|z){2}\\k<a>$"sv);
++
++        auto result1 = re.match("xz"sv);
++        EXPECT_EQ(result1.success, true);
++        EXPECT_EQ(result1.matches.size(), 1u);
++        EXPECT_EQ(result1.matches.first().view.to_byte_string(), "xz"sv);
++        EXPECT_EQ(result1.capture_group_matches.first().size(), 2u);
++        EXPECT(result1.capture_group_matches.first()[0].view.is_null());
++        EXPECT(result1.capture_group_matches.first()[1].view.is_null());
++
++        auto result2 = re.match("yz"sv);
++        EXPECT_EQ(result2.success, true);
++        EXPECT_EQ(result2.matches.size(), 1u);
++        EXPECT_EQ(result2.matches.first().view.to_byte_string(), "yz"sv);
++        EXPECT_EQ(result2.capture_group_matches.first().size(), 2u);
++        EXPECT(result2.capture_group_matches.first()[0].view.is_null());
++        EXPECT(result2.capture_group_matches.first()[1].view.is_null());
++    }
++}
+
+From 8ffde23c6dc2576260a0501baf31b8e9c9162f24 Mon Sep 17 00:00:00 2001
+From: aplefull <aplefull@gmail.com>
+Date: Thu, 24 Jul 2025 12:24:56 +0200
+Subject: [PATCH 2/3] LibRegex+LibJS: Include all named capture groups in
+ source order
+
+Previously, named capture groups in RegExp results did not always follow
+their source order, and unmatched groups were omitted. According to the
+spec, all named capture groups must appear in the result object in the
+order they are defined, even if they did not participate in the match.
+This commit makes sure we follow this requirement.
+---
+ Libraries/LibJS/Runtime/RegExpPrototype.cpp   | 128 ++++++++++++------
+ .../builtins/RegExp/RegExp.prototype.exec.js  |  58 ++++++++
+ Libraries/LibRegex/RegexParser.cpp            |   7 +-
+ Libraries/LibRegex/RegexParser.h              |   2 +-
+ 4 files changed, 154 insertions(+), 41 deletions(-)
+
+diff --git a/Libraries/LibJS/Runtime/RegExpPrototype.cpp b/Libraries/LibJS/Runtime/RegExpPrototype.cpp
+index 64c1ffd8af996..1f76e91e4a8a6 100644
+--- a/Libraries/LibJS/Runtime/RegExpPrototype.cpp
++++ b/Libraries/LibJS/Runtime/RegExpPrototype.cpp
+@@ -269,21 +269,23 @@ static ThrowCompletionOr<Value> regexp_builtin_exec(VM& vm, RegExpObject& regexp
+     // 22. Perform ! CreateDataPropertyOrThrow(A, "index", 𝔽(lastIndex)).
+     MUST(array->create_data_property_or_throw(vm.names.index, Value(match_index)));
+ 
+-    // 24. Let match be the Match { [[StartIndex]]: lastIndex, [[EndIndex]]: e }.
++    // 23. Perform ! CreateDataPropertyOrThrow(A, "input", S).
++    MUST(array->create_data_property_or_throw(vm.names.input, string));
++
++    // 24. Let match be the Match Record { [[StartIndex]]: lastIndex, [[EndIndex]]: e }.
+     auto match_indices = Match::create(match);
+ 
+     // 25. Let indices be a new empty List.
+     Vector<Optional<Match>> indices;
+-    Vector<Utf16String> captured_values;
+ 
+     // 26. Let groupNames be a new empty List.
+-    HashMap<Utf16FlyString, Match> group_names;
++    Vector<Utf16String> group_names;
+ 
+-    // 27. Add match as the last element of indices.
++    // 27. Append match to indices.
+     indices.append(move(match_indices));
+ 
+-    // 28. Let matchedValue be ! GetMatchString(S, match).
+-    // 29. Perform ! CreateDataPropertyOrThrow(A, "0", matchedValue).
++    // 28. Let matchedSubstr be GetMatchString(S, match).
++    // 29. Perform ! CreateDataPropertyOrThrow(A, "0", matchedSubstr).
+     MUST(array->create_data_property_or_throw(0, PrimitiveString::create(vm, match.view.u16_view())));
+ 
+     // 30. If R contains any GroupName, then
+@@ -293,11 +295,19 @@ static ThrowCompletionOr<Value> regexp_builtin_exec(VM& vm, RegExpObject& regexp
+     //     a. Let groups be undefined.
+     //     b. Let hasGroups be false.
+     bool has_groups = result.n_named_capture_groups != 0;
+-    auto groups_object = has_groups ? Object::create(realm, nullptr) : GC::Ptr<Object> {};
++    auto groups = has_groups ? Object::create(realm, nullptr) : js_undefined();
+ 
+-    // 33. For each integer i such that i ≥ 1 and i ≤ n, in ascending order, do
++    // 32. Perform ! CreateDataPropertyOrThrow(A, "groups", groups).
++    MUST(array->create_data_property_or_throw(vm.names.groups, groups));
++
++    // 33. Let matchedGroupNames be a new empty List.
++    Vector<Utf16FlyString> matched_group_names;
++    Vector<Utf16String> captured_values;
++
++    // 34. For each integer i such that 1 ≤ i ≤ n, in ascending order, do
+     for (size_t i = 1; i <= result.n_capture_groups; ++i) {
+-        // a. Let captureI be ith element of r's captures List.
++
++        // a. Let captureI be ith element of r.[[Captures]].
+         auto& capture = result.capture_group_matches[0][i - 1];
+ 
+         Value captured_value;
+@@ -308,23 +318,21 @@ static ThrowCompletionOr<Value> regexp_builtin_exec(VM& vm, RegExpObject& regexp
+             captured_value = js_undefined();
+             // ii. Append undefined to indices.
+             indices.append({});
+-            // iii. Append capture to indices.
+             captured_values.append({});
+         }
+         // c. Else,
+         else {
+-            // i. Let captureStart be captureI's startIndex.
+-            // ii. Let captureEnd be captureI's endIndex.
++            // i. Let captureStart be captureI.[[StartIndex]].
++            // ii. Let captureEnd be captureI.[[EndIndex]].
+             // iii. If fullUnicode is true, then
+-            //     1. Set captureStart to ! GetStringIndex(S, Input, captureStart).
+-            //     2. Set captureEnd to ! GetStringIndex(S, Input, captureEnd).
+-            // iv. Let capture be the Match { [[StartIndex]]: captureStart, [[EndIndex]: captureEnd }.
+-            // v. Let capturedValue be ! GetMatchString(S, capture).
++            //     1. Set captureStart to GetStringIndex(S, captureStart).
++            //     2. Set captureEnd to GetStringIndex(S, captureEnd).
++            // iv. Let capture be the Match Record { [[StartIndex]]: captureStart, [[EndIndex]]: captureEnd }.
++            // v. Let capturedValue be GetMatchString(S, capture).
+             auto capture_as_utf16_string = Utf16String::from_utf16(capture.view.u16_view());
+             captured_value = PrimitiveString::create(vm, capture_as_utf16_string);
+             // vi. Append capture to indices.
+             indices.append(Match::create(capture));
+-            // vii. Append capturedValue to the end of capturedValues.
+             captured_values.append(capture_as_utf16_string);
+         }
+ 
+@@ -333,22 +341,51 @@ static ThrowCompletionOr<Value> regexp_builtin_exec(VM& vm, RegExpObject& regexp
+ 
+         // e. If the ith capture of R was defined with a GroupName, then
+         if (capture.capture_group_name >= 0) {
+-            // i. Let s be the CapturingGroupName of the corresponding RegExpIdentifierName.
++            // i. Let s be the CapturingGroupName of that GroupName.
+             auto group_name = Utf16FlyString::from_utf8(regex.parser_result.bytecode.get_string(capture.capture_group_name));
+ 
+-            // ii. Perform ! CreateDataPropertyOrThrow(groups, s, capturedValue).
+-            MUST(groups_object->create_data_property_or_throw(group_name, captured_value));
+-
+-            // iii. Append s to groupNames.
+-            group_names.set(move(group_name), Match::create(capture));
++            // ii. If matchedGroupNames contains s, then
++            if (matched_group_names.contains_slow(group_name)) {
++                // 1. Assert: capturedValue is undefined.
++                VERIFY(captured_value.is_undefined());
++                // 2. Append undefined to groupNames.
++                group_names.append({});
++            }
++            // iii. Else,
++            else {
++                // 1. If capturedValue is not undefined, append s to matchedGroupNames.
++                if (!captured_value.is_undefined())
++                    matched_group_names.append(group_name);
++                // 2. NOTE: If there are multiple groups named s, groups may already have an s property at this point.
++                //        However, because groups is an ordinary object whose properties are all writable data properties,
++                //        the call to CreateDataPropertyOrThrow is nevertheless guaranteed to succeed.
++                // 3. Perform ! CreateDataPropertyOrThrow(groups, s, capturedValue).
++                MUST(groups.as_object().create_data_property_or_throw(group_name, captured_value));
++                // 4. Append s to groupNames.
++                group_names.append(group_name.to_utf16_string());
++            }
+         }
+         // f. Else,
+         else {
+             // i. Append undefined to groupNames.
+-            // See the note in MakeIndicesArray for why this step is skipped.
++            group_names.append({});
+         }
+     }
+ 
++    // Ensure named groups are enumerated in source order
++    if (has_groups) {
++        auto original_groups = groups;
++        groups = Object::create(realm, nullptr);
++
++        for (auto const& group_name_str : regex.parser_result.capture_groups) {
++            auto group_name = Utf16FlyString::from_utf8(group_name_str);
++            auto value = original_groups.as_object().get_without_side_effects(group_name);
++            MUST(groups.as_object().create_data_property_or_throw(group_name, value));
++        }
++
++        MUST(array->set(vm.names.groups, groups, Object::ShouldThrowExceptions::Yes));
++    }
++
+     // https://github.com/tc39/proposal-regexp-legacy-features#regexpbuiltinexec--r-s-
+     // 5. Let thisRealm be the current Realm Record.
+     auto* this_realm = &realm;
+@@ -368,24 +405,39 @@ static ThrowCompletionOr<Value> regexp_builtin_exec(VM& vm, RegExpObject& regexp
+         }
+     }
+ 
+-    // 32. Perform ! CreateDataPropertyOrThrow(A, "groups", groups).
+-    // NOTE: This step must be performed after the above loop in order for groups to be populated.
+-    Value groups = has_groups ? groups_object : js_undefined();
+-    MUST(array->create_data_property_or_throw(vm.names.groups, groups));
+-
+-    // 34. If hasIndices is true, then
++    // 35. If hasIndices is true, then
+     if (has_indices) {
+         // a. Let indicesArray be MakeMatchIndicesIndexPairArray(S, indices, groupNames, hasGroups).
+-        auto indices_array = make_match_indices_index_pair_array(vm, string->utf16_string_view(), indices, group_names, has_groups);
+-        // b. Perform ! CreateDataProperty(A, "indices", indicesArray).
+-        MUST(array->create_data_property(vm.names.indices, indices_array));
+-    }
++        HashMap<Utf16FlyString, Match> indices_group_names;
++        for (size_t i = 0; i < group_names.size(); ++i) {
++            if (!group_names[i].is_empty()) {
++                auto& capture = result.capture_group_matches[0][i];
++                if (!capture.view.is_null()) {
++                    indices_group_names.set(Utf16FlyString { group_names[i] }, Match::create(capture));
++                }
++            }
++        }
++        auto indices_array = make_match_indices_index_pair_array(vm, string->utf16_string_view(), indices, indices_group_names, has_groups);
+ 
+-    // 23. Perform ! CreateDataPropertyOrThrow(A, "input", S).
+-    // NOTE: This step is performed last to allow the string to be moved into the PrimitiveString::create() invocation.
+-    MUST(array->create_data_property_or_throw(vm.names.input, string));
++        // Make sure indices.groups includes all named groups in source order
++        if (has_groups) {
++            auto& indices_groups_object = indices_array.as_object().get_without_side_effects(vm.names.groups).as_object();
++            auto ordered_indices_groups_object = Object::create(realm, nullptr);
++
++            for (auto const& group_name_str : regex.parser_result.capture_groups) {
++                auto group_name = Utf16FlyString::from_utf8(group_name_str);
++                auto value = indices_groups_object.get_without_side_effects(group_name);
++                MUST(ordered_indices_groups_object->create_data_property_or_throw(group_name, value));
++            }
++
++            MUST(indices_array.as_object().set(vm.names.groups, ordered_indices_groups_object, Object::ShouldThrowExceptions::Yes));
++        }
++
++        // b. Perform ! CreateDataPropertyOrThrow(A, "indices", indicesArray).
++        MUST(array->create_data_property_or_throw(vm.names.indices, indices_array));
++    }
+ 
+-    // 35. Return A.
++    // 36. Return A.
+     return array;
+ }
+ 
+diff --git a/Libraries/LibJS/Tests/builtins/RegExp/RegExp.prototype.exec.js b/Libraries/LibJS/Tests/builtins/RegExp/RegExp.prototype.exec.js
+index e861ace858d4b..929c45f2d86f0 100644
+--- a/Libraries/LibJS/Tests/builtins/RegExp/RegExp.prototype.exec.js
++++ b/Libraries/LibJS/Tests/builtins/RegExp/RegExp.prototype.exec.js
+@@ -226,3 +226,61 @@ test("cached UTF-16 code point length", () => {
+ 
+     expect(match.codePointAt(0)).toBe(0x1f600);
+ });
++
++test("named groups source order", () => {
++    // Test that named groups appear in source order, not match order
++    let re = /(?<y>a)(?<x>a)|(?<x>b)(?<y>b)/;
++
++    let result1 = re.exec("aa");
++    expect(Object.keys(result1.groups)).toEqual(["y", "x"]);
++    expect(result1.groups.y).toBe("a");
++    expect(result1.groups.x).toBe("a");
++
++    let result2 = re.exec("bb");
++    expect(Object.keys(result2.groups)).toEqual(["y", "x"]);
++    expect(result2.groups.y).toBe("b");
++    expect(result2.groups.x).toBe("b");
++});
++
++test("named groups all present in groups object", () => {
++    // Test that all named groups appear in groups object, even unmatched ones
++    let re = /(?<fst>.)|(?<snd>.)/u;
++
++    let result = re.exec("abcd");
++    expect(Object.getOwnPropertyNames(result.groups)).toEqual(["fst", "snd"]);
++    expect(result.groups.fst).toBe("a");
++    expect(result.groups.snd).toBe(undefined);
++});
++
++test("named groups with hasIndices flag", () => {
++    // Test that indices.groups also contains all named groups in source order
++    let re = /(?<fst>.)|(?<snd>.)/du;
++
++    let result = re.exec("abcd");
++    expect(Object.getOwnPropertyNames(result.indices.groups)).toEqual(["fst", "snd"]);
++    expect(result.indices.groups.fst).toEqual([0, 1]);
++    expect(result.indices.groups.snd).toBe(undefined);
++});
++
++test("complex named groups ordering", () => {
++    // Test multiple groups in different order
++    let re = /(?<third>c)|(?<first>a)|(?<second>b)/;
++
++    let result1 = re.exec("a");
++    expect(Object.keys(result1.groups)).toEqual(["third", "first", "second"]);
++    expect(result1.groups.third).toBe(undefined);
++    expect(result1.groups.first).toBe("a");
++    expect(result1.groups.second).toBe(undefined);
++
++    let result2 = re.exec("b");
++    expect(Object.keys(result2.groups)).toEqual(["third", "first", "second"]);
++    expect(result2.groups.third).toBe(undefined);
++    expect(result2.groups.first).toBe(undefined);
++    expect(result2.groups.second).toBe("b");
++
++    let result3 = re.exec("c");
++    expect(Object.keys(result3.groups)).toEqual(["third", "first", "second"]);
++    expect(result3.groups.third).toBe("c");
++    expect(result3.groups.first).toBe(undefined);
++    expect(result3.groups.second).toBe(undefined);
++});
+diff --git a/Libraries/LibRegex/RegexParser.cpp b/Libraries/LibRegex/RegexParser.cpp
+index 3f8b6240fc05b..0eb04ec21592e 100644
+--- a/Libraries/LibRegex/RegexParser.cpp
++++ b/Libraries/LibRegex/RegexParser.cpp
+@@ -187,6 +187,8 @@ Parser::Result Parser::parse(Optional<AllOptions> regex_options)
+     else
+         set_error(Error::InvalidPattern);
+ 
++    auto capture_groups = m_parser_state.named_capture_groups.keys();
++
+     dbgln_if(REGEX_DEBUG, "[PARSER] Produced bytecode with {} entries (opcodes + arguments)", m_parser_state.bytecode.size());
+     return {
+         move(m_parser_state.bytecode),
+@@ -195,7 +197,7 @@ Parser::Result Parser::parse(Optional<AllOptions> regex_options)
+         move(m_parser_state.match_length_minimum),
+         move(m_parser_state.error),
+         move(m_parser_state.error_token),
+-        m_parser_state.named_capture_groups.keys(),
++        move(capture_groups),
+         m_parser_state.regex_options,
+     };
+ }
+@@ -2704,7 +2706,8 @@ bool ECMA262Parser::parse_capture_group(ByteCode& stack, size_t& match_length_mi
+                 return false;
+             }
+ 
+-            m_parser_state.named_capture_groups.ensure(name).append({ group_index, m_current_alternative_id });
++            auto& group_vector = m_parser_state.named_capture_groups.ensure(name);
++            group_vector.append({ group_index, m_current_alternative_id });
+ 
+             ByteCode capture_group_bytecode;
+             size_t length = 0;
+diff --git a/Libraries/LibRegex/RegexParser.h b/Libraries/LibRegex/RegexParser.h
+index f9d80081a39da..d58e6250348b4 100644
+--- a/Libraries/LibRegex/RegexParser.h
++++ b/Libraries/LibRegex/RegexParser.h
+@@ -120,7 +120,7 @@ class REGEX_API Parser {
+         size_t repetition_mark_count { 0 };
+         AllOptions regex_options;
+         HashMap<size_t, size_t> capture_group_minimum_lengths;
+-        HashMap<FlyString, Vector<NamedCaptureGroup>> named_capture_groups;
++        OrderedHashMap<FlyString, Vector<NamedCaptureGroup>> named_capture_groups;
+ 
+         explicit ParserState(Lexer& lexer)
+             : lexer(lexer)
+
+From 746aa4508b6d5acb3795f5ca63dff52665f4eb9d Mon Sep 17 00:00:00 2001
+From: aplefull <aplefull@gmail.com>
+Date: Thu, 24 Jul 2025 14:04:04 +0200
+Subject: [PATCH 3/3] LibRegex: Add support for forward references to named
+ capture groups
+
+This commit implements support for forward references to named capture
+groups. We now allow patterns like \k<name>(?<name>x) and
+self-references like (?<name>\k<name>x).
+---
+ .../builtins/RegExp/RegExp.prototype.exec.js  | 44 +++++++++++++
+ Libraries/LibRegex/RegexParser.cpp            | 61 ++++++++++++++-----
+ Libraries/LibRegex/RegexParser.h              |  7 +++
+ 3 files changed, 96 insertions(+), 16 deletions(-)
+
+diff --git a/Libraries/LibJS/Tests/builtins/RegExp/RegExp.prototype.exec.js b/Libraries/LibJS/Tests/builtins/RegExp/RegExp.prototype.exec.js
+index 929c45f2d86f0..982062fe855b3 100644
+--- a/Libraries/LibJS/Tests/builtins/RegExp/RegExp.prototype.exec.js
++++ b/Libraries/LibJS/Tests/builtins/RegExp/RegExp.prototype.exec.js
+@@ -284,3 +284,47 @@ test("complex named groups ordering", () => {
+     expect(result3.groups.first).toBe(undefined);
+     expect(result3.groups.second).toBe(undefined);
+ });
++
++test("forward references to named groups", () => {
++    // Self-reference inside group
++    let result1 = /(?<a>\k<a>\w)../.exec("bab");
++    expect(result1).not.toBe(null);
++    expect(result1[0]).toBe("bab");
++    expect(result1[1]).toBe("b");
++    expect(result1.groups.a).toBe("b");
++
++    // Reference before group definition
++    let result2 = /\k<a>(?<a>b)\w\k<a>/.exec("bab");
++    expect(result2).not.toBe(null);
++    expect(result2[0]).toBe("bab");
++    expect(result2[1]).toBe("b");
++    expect(result2.groups.a).toBe("b");
++
++    let result3 = /(?<b>b)\k<a>(?<a>a)\k<b>/.exec("bab");
++    expect(result3).not.toBe(null);
++    expect(result3[0]).toBe("bab");
++    expect(result3[1]).toBe("b");
++    expect(result3[2]).toBe("a");
++    expect(result3.groups.a).toBe("a");
++    expect(result3.groups.b).toBe("b");
++
++    // Backward reference
++    let result4 = /(?<a>a)(?<b>b)\k<a>/.exec("aba");
++    expect(result4).not.toBe(null);
++    expect(result4[0]).toBe("aba");
++    expect(result4.groups.a).toBe("a");
++    expect(result4.groups.b).toBe("b");
++
++    // Mixed forward/backward with alternation
++    let result5 = /(?<a>a)(?<b>b)\k<a>|(?<c>c)/.exec("aba");
++    expect(result5).not.toBe(null);
++    expect(result5.groups.a).toBe("a");
++    expect(result5.groups.b).toBe("b");
++    expect(result5.groups.c).toBe(undefined);
++});
++
++test("invalid named group references", () => {
++    expect(() => {
++        new RegExp("(?<a>x)\\k<nonexistent>");
++    }).toThrow();
++});
+diff --git a/Libraries/LibRegex/RegexParser.cpp b/Libraries/LibRegex/RegexParser.cpp
+index 0eb04ec21592e..4ddb6e6fe8183 100644
+--- a/Libraries/LibRegex/RegexParser.cpp
++++ b/Libraries/LibRegex/RegexParser.cpp
+@@ -173,6 +173,7 @@ ALWAYS_INLINE void Parser::reset()
+     m_parser_state.capture_groups_count = 0;
+     m_parser_state.named_capture_groups_count = 0;
+     m_parser_state.named_capture_groups.clear();
++    m_parser_state.unresolved_named_references.clear();
+ }
+ 
+ Parser::Result Parser::parse(Optional<AllOptions> regex_options)
+@@ -182,10 +183,13 @@ Parser::Result Parser::parse(Optional<AllOptions> regex_options)
+     reset();
+     if (regex_options.has_value())
+         m_parser_state.regex_options = regex_options.value();
+-    if (parse_internal(m_parser_state.bytecode, m_parser_state.match_length_minimum))
++    if (parse_internal(m_parser_state.bytecode, m_parser_state.match_length_minimum)) {
+         consume(TokenType::Eof, Error::InvalidPattern);
+-    else
++        if (!resolve_forward_named_references())
++            set_error(Error::InvalidNameForCaptureGroup);
++    } else {
+         set_error(Error::InvalidPattern);
++    }
+ 
+     auto capture_groups = m_parser_state.named_capture_groups.keys();
+ 
+@@ -1641,23 +1645,32 @@ bool ECMA262Parser::parse_atom_escape(ByteCode& stack, size_t& match_length_mini
+         }
+ 
+         auto it = m_parser_state.named_capture_groups.find(name);
+-        if (it == m_parser_state.named_capture_groups.end()) {
+-            set_error(Error::InvalidNameForCaptureGroup);
+-            return false;
+-        }
++        if (it != m_parser_state.named_capture_groups.end()) {
+ 
+-        // Use the first occurrence of the named group for the backreference
+-        // This follows ECMAScript behavior where \k<name> refers to the first
+-        // group with that name in left-to-right order, regardless of alternative
+-        auto group_index = it->value.first().group_index;
++            // Use the first occurrence of the named group for the backreference
++            // This follows ECMAScript behavior where \k<name> refers to the first
++            // group with that name in left-to-right order, regardless of alternative
++            auto group_index = it->value.first().group_index;
++            auto maybe_length = m_parser_state.capture_group_minimum_lengths.get(group_index);
++            if (maybe_length.has_value()) {
++                // Backward reference
++                stack.insert_bytecode_compare_values({ { CharacterCompareType::NamedReference, static_cast<ByteCodeValueType>(group_index) } });
++            } else {
++                // Self-reference or forward reference
++                auto placeholder_index = 0;
++                auto bytecode_offset = stack.size();
++                stack.insert_bytecode_compare_values({ { CharacterCompareType::NamedReference, static_cast<ByteCodeValueType>(placeholder_index) } });
+ 
+-        auto maybe_length = m_parser_state.capture_group_minimum_lengths.get(group_index);
+-        if (!maybe_length.has_value()) {
+-            set_error(Error::InvalidNameForCaptureGroup);
+-            return false;
+-        }
++                m_parser_state.unresolved_named_references.append({ name, bytecode_offset + 1 });
++            }
++        } else {
++            // Forward reference
++            auto placeholder_index = 0;
++            auto bytecode_offset = stack.size();
++            stack.insert_bytecode_compare_values({ { CharacterCompareType::NamedReference, static_cast<ByteCodeValueType>(placeholder_index) } });
+ 
+-        stack.insert_bytecode_compare_values({ { CharacterCompareType::NamedReference, (ByteCodeValueType)group_index } });
++            m_parser_state.unresolved_named_references.append({ name, bytecode_offset + 1 });
++        }
+         return true;
+     }
+ 
+@@ -2817,4 +2830,20 @@ size_t ECMA262Parser::ensure_total_number_of_capturing_parenthesis()
+     return count;
+ }
+ 
++bool Parser::resolve_forward_named_references()
++{
++    for (auto const& unresolved_ref : m_parser_state.unresolved_named_references) {
++        auto it = m_parser_state.named_capture_groups.find(unresolved_ref.name);
++        if (it == m_parser_state.named_capture_groups.end()) {
++            return false;
++        }
++
++        auto group_index = it->value.first().group_index;
++
++        m_parser_state.bytecode.at(unresolved_ref.bytecode_offset) = (ByteCodeValueType)group_index;
++    }
++
++    return true;
++}
++
+ }
+diff --git a/Libraries/LibRegex/RegexParser.h b/Libraries/LibRegex/RegexParser.h
+index d58e6250348b4..9b2210a9bc55e 100644
+--- a/Libraries/LibRegex/RegexParser.h
++++ b/Libraries/LibRegex/RegexParser.h
+@@ -90,6 +90,7 @@ class REGEX_API Parser {
+ 
+ protected:
+     virtual bool parse_internal(ByteCode&, size_t& match_length_minimum) = 0;
++    bool resolve_forward_named_references();
+ 
+     ALWAYS_INLINE bool match(TokenType type) const;
+     ALWAYS_INLINE bool match(char ch) const;
+@@ -122,6 +123,12 @@ class REGEX_API Parser {
+         HashMap<size_t, size_t> capture_group_minimum_lengths;
+         OrderedHashMap<FlyString, Vector<NamedCaptureGroup>> named_capture_groups;
+ 
++        struct UnresolvedNamedReference {
++            FlyString name;
++            size_t bytecode_offset;
++        };
++        Vector<UnresolvedNamedReference> unresolved_named_references;
++
+         explicit ParserState(Lexer& lexer)
+             : lexer(lexer)
+             , current_token(lexer.next())

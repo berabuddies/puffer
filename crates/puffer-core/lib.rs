@@ -36,7 +36,8 @@ pub use command_helpers::{
     prepare_pentest_command, PentestCommand, PentestStart, DEFAULT_PENTEST_MAX_ITERATIONS,
     PENTEST_USAGE,
 };
-pub(crate) use command_summary::{render_buddy_summary, render_cost_summary, render_usage_summary};
+pub use command_summary::render_cost_summary;
+pub(crate) use command_summary::{render_buddy_summary, render_usage_summary};
 pub use hooks::run_resource_hooks;
 pub use memory::{
     flush_project_memory, project_memory_turn_completed, spawn_project_memory_review,

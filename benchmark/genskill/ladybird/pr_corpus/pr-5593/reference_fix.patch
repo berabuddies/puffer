@@ -1,0 +1,58 @@
+From 569df03280cb79cd7dce0c8934a3b2e0df2ba779 Mon Sep 17 00:00:00 2001
+From: Ali Mohammad Pur <ali.mpfard@gmail.com>
+Date: Thu, 24 Jul 2025 20:24:55 +0200
+Subject: [PATCH] LibRegex: Use code unit length in more places that apply
+
+Finishes what 7f6b70fafb1dc6276638eb00704851f809d97d74 started.
+Having one part use length and another code unit length lead to crashes,
+the added test ensures we don't mess that up again.
+---
+ Libraries/LibRegex/RegexByteCode.cpp | 6 +++---
+ Tests/LibRegex/TestRegex.cpp         | 3 ++-
+ 2 files changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/Libraries/LibRegex/RegexByteCode.cpp b/Libraries/LibRegex/RegexByteCode.cpp
+index 709ee332f7416..74604826cd994 100644
+--- a/Libraries/LibRegex/RegexByteCode.cpp
++++ b/Libraries/LibRegex/RegexByteCode.cpp
+@@ -387,7 +387,7 @@ ALWAYS_INLINE ExecutionResult OpCode_SaveRightCaptureGroup::execute(MatchInput c
+     if (start_position < match.column)
+         return ExecutionResult::Continue;
+ 
+-    VERIFY(start_position + length <= input.view.length());
++    VERIFY(start_position + length <= input.view.length_in_code_units());
+ 
+     auto captured_text = input.view.substring_view(start_position, length);
+ 
+@@ -420,7 +420,7 @@ ALWAYS_INLINE ExecutionResult OpCode_SaveRightNamedCaptureGroup::execute(MatchIn
+     if (start_position < match.column)
+         return ExecutionResult::Continue;
+ 
+-    VERIFY(start_position + length <= input.view.length());
++    VERIFY(start_position + length <= input.view.length_in_code_units());
+ 
+     auto view = input.view.substring_view(start_position, length);
+ 
+@@ -551,7 +551,7 @@ ALWAYS_INLINE ExecutionResult OpCode_Compare::execute(MatchInput const& input, M
+             break;
+         }
+         case CharacterCompareType::CharClass: {
+-            if (input.view.length() <= state.string_position_in_code_units)
++            if (input.view.length_in_code_units() <= state.string_position_in_code_units)
+                 return ExecutionResult::Failed_ExecuteLowPrioForks;
+ 
+             auto character_class = (CharClass)m_bytecode->at(offset++);
+diff --git a/Tests/LibRegex/TestRegex.cpp b/Tests/LibRegex/TestRegex.cpp
+index ccbb8a2bcc33f..bf8b19a39f3ed 100644
+--- a/Tests/LibRegex/TestRegex.cpp
++++ b/Tests/LibRegex/TestRegex.cpp
+@@ -828,7 +828,8 @@ TEST_CASE(ECMA262_unicode_match)
+             "\\ud83c[\\udffb-\\udfff](?=\\ud83c[\\udffb-\\udfff])|(?:[^\\ud800-\\udfff][\\u0300-\\u036f\\ufe20-\\ufe2f\\u20d0-\\u20ff]?|[\\u0300-\\u036f\\ufe20-\\ufe2f\\u20d0-\\u20ff]|(?:\\ud83c[\\udde6-\\uddff]){2}|[\\ud800-\\udbff][\\udc00-\\udfff]|[\\ud800-\\udfff])[\\ufe0e\\ufe0f]?(?:[\\u0300-\\u036f\\ufe20-\\ufe2f\\u20d0-\\u20ff]|\\ud83c[\\udffb-\\udfff])?(?:\\u200d(?:[^\\ud800-\\udfff]|(?:\\ud83c[\\udde6-\\uddff]){2}|[\\ud800-\\udbff][\\udc00-\\udfff])[\\ufe0e\\ufe0f]?(?:[\\u0300-\\u036f\\ufe20-\\ufe2f\\u20d0-\\u20ff]|\\ud83c[\\udffb-\\udfff])?)*"sv,
+             "😀"sv,
+             true,
+-        }
++        },
++        { "(?<before>\\w*)\\s*(?<emoji>\\p{Emoji}+)\\s*(?<after>\\w*)"sv, "Hey 🎉 there! I love 🍕 pizza"sv, true, ECMAScriptFlags::Unicode },
+     };
+ 
+     for (auto& test : tests) {

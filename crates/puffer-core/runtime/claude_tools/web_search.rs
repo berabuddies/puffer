@@ -73,7 +73,7 @@ pub fn execute_claude_openai_web_search(
                 user_location: None,
                 external_web_access: None,
             }],
-            include: vec!["web_search_call.action.sources".to_string()],
+            include: Vec::new(),
             tool_choice: Some(OpenAIResponsesToolChoice::Mode(
                 OpenAIResponsesToolChoiceMode::Auto,
             )),

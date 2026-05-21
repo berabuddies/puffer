@@ -20,7 +20,24 @@
 }
 .pf-pw-top-left { display: flex; align-items: baseline; gap: 10px; min-width: 0; flex: 1; }
 .pf-pw-top-left h1 { font-size: 14px; font-weight: 600; letter-spacing: -0.01em; margin: 0; white-space: nowrap; }
-.pf-pw-sub { font-size: 12px; color: var(--muted-foreground); white-space: nowrap; }
+.pf-pw-sub {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  white-space: nowrap;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pf-pw-sub-btn {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+.pf-pw-sub-btn:hover {
+  color: var(--foreground);
+}
 .pf-pw-top-right { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-shrink: 0; }
 .pf-pw-search {
   display: flex; align-items: center; gap: 6px;
@@ -39,6 +56,111 @@
 }
 .pf-pw-search input::placeholder { color: var(--muted-foreground); }
 
+.pf-pw-history {
+  flex-shrink: 0;
+  padding: 12px 20px 0;
+  border-bottom: 1px solid var(--border);
+}
+.pf-pw-history-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 8px;
+}
+.pf-pw-history-head .copy {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  min-width: 0;
+}
+.pf-pw-history-head h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: 0;
+}
+.pf-pw-history-head .count {
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+.pf-pw-history-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+  padding-bottom: 12px;
+}
+.pf-pw-history-row {
+  min-width: 0;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: inherit;
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+.pf-pw-history-row:hover {
+  border-color: color-mix(in oklab, var(--puffer-accent) 38%, var(--border));
+  background: color-mix(in oklab, var(--puffer-accent) 5%, var(--card));
+}
+.pf-pw-history-row .main,
+.pf-pw-history-row .meta {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.pf-pw-history-row .title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.pf-pw-history-row .meta {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+.pf-pw-history-row .meta span:not(.sep) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pf-pw-history-row .meta .sep {
+  opacity: 0.45;
+}
+.pf-pw-history-row .status-pill {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: var(--font-sans);
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  text-transform: lowercase;
+}
+.pf-pw-history-row .status-pill[data-status="running"] {
+  background: color-mix(in oklab, oklch(0.7 0.17 70) 15%, var(--background));
+  color: oklch(0.55 0.17 70);
+}
+.pf-pw-history-row .status-pill[data-status="awaiting"] {
+  background: color-mix(in oklab, oklch(0.72 0.18 30) 16%, var(--background));
+  color: oklch(0.55 0.2 30);
+}
+.pf-pw-history-row .status-pill[data-status="review"] {
+  background: color-mix(in oklab, oklch(0.7 0.16 40) 15%, var(--background));
+  color: oklch(0.55 0.17 40);
+}
+
 .pf-pw-list {
   flex: 1;
   overflow: auto;
@@ -50,14 +172,22 @@
 .pf-pw-project {
   display: flex;
   flex-direction: column;
-  gap: 10px;
   min-width: 0;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
 }
 
 .pf-pw-project-head {
   display: flex; align-items: center; gap: 10px;
-  padding: 0 2px 4px;
+  padding: 14px 16px 12px;
   min-width: 0;
+}
+.pf-pw-project-toggle {
+  width: 28px;
+  min-width: 28px;
+  padding: 0;
 }
 .pf-pw-project-title {
   display: flex;
@@ -113,6 +243,9 @@
   align-items: flex-start;
   gap: 10px;
   min-width: 0;
+  padding: 12px 16px 14px;
+  background: color-mix(in oklab, var(--muted) 55%, var(--background));
+  border-top: 1px solid var(--border);
 }
 
 .pf-pw-agent {
@@ -125,7 +258,7 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  transition: transform 120ms, box-shadow 160ms, border-color 160ms;
+  transition: box-shadow 160ms, border-color 160ms, background 160ms;
   min-width: 0;
   width: max-content;
   max-width: 100%;
@@ -133,7 +266,6 @@
   color: inherit;
 }
 .pf-pw-agent:hover {
-  transform: translateY(-1px);
   border-color: color-mix(in oklab, var(--puffer-accent) 40%, var(--border));
   box-shadow: 0 8px 18px -12px color-mix(in oklab, var(--puffer-accent) 50%, transparent);
 }
@@ -152,7 +284,7 @@
 
 .pf-pw-agent .title {
   font-size: 12.5px; font-weight: 600; color: var(--foreground);
-  line-height: 1;
+  line-height: 1.2;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -187,10 +319,9 @@
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  transition: transform 120ms, border-color 160ms, color 160ms, background 160ms;
+  transition: border-color 160ms, color 160ms, background 160ms;
 }
 .pf-pw-agent-add:hover:not(:disabled) {
-  transform: translateY(-1px);
   color: var(--foreground);
   border-color: color-mix(in oklab, var(--puffer-accent) 45%, var(--border));
   background: color-mix(in oklab, var(--puffer-accent) 8%, var(--background));
@@ -228,6 +359,19 @@
   .pf-pw-project-title { flex-basis: 100%; }
   .pf-pw-project-counts { order: 2; }
   .pf-pw-project-head .sc-btn[data-size="sm"] { margin-left: auto; }
+  .pf-pw-history {
+    padding: 10px 10px 0;
+  }
+  .pf-pw-history-head {
+    align-items: flex-start;
+  }
+  .pf-pw-history-head .copy {
+    flex-direction: column;
+    gap: 2px;
+  }
+  .pf-pw-history-list {
+    grid-template-columns: 1fr;
+  }
   .pf-pw-agents-strip {
     flex-direction: column;
     align-items: stretch;
@@ -470,11 +614,10 @@
   font: inherit;
   font-size: 12px;
   color: var(--foreground);
-  transition: transform 100ms, border-color 120ms, background 120ms;
+  transition: border-color 120ms, background 120ms;
 }
 .pf-pw-chip:hover {
   border-color: color-mix(in oklab, var(--puffer-accent) 40%, var(--border));
-  transform: translateX(1px);
 }
 .pf-pw-chip .row {
   display: flex;
@@ -630,8 +773,11 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.pf-pmem-detail-head .sc-btn {
+.pf-pmem-actions {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 .pf-pmem-kind {
   display: inline-flex;
@@ -687,6 +833,44 @@
 .pf-pmem-body p {
   margin: 0 0 14px;
   white-space: pre-wrap;
+}
+.pf-pmem-body p.muted {
+  color: var(--muted-foreground);
+  font-style: italic;
+}
+.pf-pmem-status {
+  margin-bottom: 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: color-mix(in oklab, var(--muted) 55%, var(--background));
+  color: var(--muted-foreground);
+  padding: 9px 11px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.pf-pmem-status[data-kind="error"] {
+  border-color: color-mix(in oklab, var(--destructive) 35%, var(--border));
+  background: color-mix(in oklab, var(--destructive) 8%, var(--background));
+  color: color-mix(in oklab, var(--destructive) 75%, var(--foreground));
+}
+.pf-pmem-editor {
+  width: 100%;
+  min-height: 360px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  padding: 12px 13px;
+  font: 12.5px/1.55 var(--font-mono);
+  outline: none;
+}
+.pf-pmem-editor:focus {
+  border-color: color-mix(in oklab, var(--puffer-accent) 55%, var(--border));
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--puffer-accent) 12%, transparent);
+}
+.pf-pmem-editor:disabled {
+  opacity: 0.7;
 }
 .pf-pmem-tags {
   display: flex;
@@ -757,8 +941,6 @@
 .pf-modal-scrim {
   position: fixed; inset: 0; z-index: 100;
   background: color-mix(in oklch, var(--background) 30%, transparent 70%);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
   display: flex; align-items: center; justify-content: center;
   padding: 48px 24px;
   animation: pf-modal-scrim-in 140ms ease-out;
@@ -778,10 +960,19 @@
   animation: pf-modal-in 160ms cubic-bezier(0.2, 0.9, 0.3, 1);
 }
 @keyframes pf-modal-in {
-  from { opacity: 0; transform: translateY(6px) scale(0.98); }
-  to   { opacity: 1; transform: translateY(0) scale(1); }
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
-.pf-connect-modal { width: 520px; }
+.pf-connect-modal {
+  width: 520px;
+  /* Lock the overall modal height so head/foot stay pinned and only the
+     body scrolls when content (e.g. the directory picker) expands — see
+     PLUS-117. min-height equals height so flex children cannot shrink the
+     modal below the locked size. Bumped to 720 in v2 so the directory
+     picker fits without overflowing when the user clicks Browse. */
+  height: min(720px, calc(100vh - 80px));
+  min-height: min(720px, calc(100vh - 80px));
+}
 
 .pf-modal-head {
   display: flex; align-items: flex-start; gap: 12px;
@@ -823,6 +1014,12 @@
 .pf-modal-seg-btn {
   display: flex; align-items: center; gap: 10px;
   padding: 12px 14px;
+  /* PLUS-117 v2: lock seg-btn height so Local (short sub) and Remote
+     (multi-line sub) buttons render at the same height — earlier fix used
+     ellipsis to collapse the sub-line, but that dropped Remote's full
+     descriptive text. 84px fits a 3-row button (icon + title + 2-line
+     sub). */
+  min-height: 84px;
   background: var(--background);
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -835,22 +1032,41 @@
 .pf-modal-seg-btn:hover {
   border-color: transparent;
   background: var(--pf-selected-bg-hover);
-  font-weight: 700;
 }
 .pf-modal-seg-btn[data-active="true"] {
   border-color: transparent;
   background: var(--pf-selected-bg);
-  font-weight: 700;
 }
 .pf-modal-seg-btn[data-active="true"] svg { color: var(--foreground); }
 .pf-modal-seg-body { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; }
 .pf-modal-seg-title { font-size: 13px; font-weight: 600; }
-.pf-modal-seg-sub { font-size: 11px; color: var(--muted-foreground); font-family: var(--font-sans); }
+.pf-modal-seg-sub {
+  font-size: 11px;
+  color: var(--muted-foreground);
+  font-family: var(--font-sans);
+  /* PLUS-117 v2: cap sub width so longer descriptions (Remote's "SSH —
+     run agent on another host") wrap to two lines for a 3-row button,
+     restoring the original visual rhythm. Short subs (Local) stay one
+     line and the locked min-height on the button equalizes both. */
+  max-width: 140px;
+}
 
 .pf-modal-body {
   padding: 16px 20px 4px;
   overflow: auto;
   display: flex; flex-direction: column; gap: 14px;
+  /* Fill remaining modal space between fixed head/foot so the footer stays
+     pinned to the bottom regardless of body content height — PLUS-117. */
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* On the connect-project modal the overall modal height is locked, so the
+   body must claim *all* remaining space (flex-basis: 0) — that way swapping
+   Local/Remote (different field counts) does not change the body height and
+   any overflow scrolls internally instead of repositioning content. */
+.pf-connect-modal .pf-modal-body {
+  flex: 1 1 0;
 }
 
 .pf-field { display: flex; flex-direction: column; gap: 6px; }

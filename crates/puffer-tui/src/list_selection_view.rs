@@ -37,6 +37,11 @@ impl ListSelectionView {
         self.selection = (self.selection + 1).min(self.items.len().saturating_sub(1));
     }
 
+    /// Moves the selection to the final item.
+    pub(crate) fn select_last(&mut self) {
+        self.selection = self.items.len().saturating_sub(1);
+    }
+
     /// Moves the selection upward by a page-sized jump.
     pub(crate) fn page_up(&mut self) {
         for _ in 0..10 {

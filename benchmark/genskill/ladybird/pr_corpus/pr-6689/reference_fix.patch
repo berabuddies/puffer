@@ -1,0 +1,76 @@
+diff --git a/Libraries/LibJS/Runtime/VM.cpp b/Libraries/LibJS/Runtime/VM.cpp
+index 81dd09e4d9218..1ea5fd9546651 100644
+--- a/Libraries/LibJS/Runtime/VM.cpp
++++ b/Libraries/LibJS/Runtime/VM.cpp
+@@ -246,8 +246,12 @@ void VM::gather_roots(HashMap<GC::Cell*, GC::HeapRoot>& roots)
+     for (auto string : m_single_ascii_character_strings)
+         roots.set(string, GC::HeapRoot { .type = GC::HeapRoot::Type::VM });
+ 
+-    for (auto string : m_numeric_string_cache)
++    for (auto string : m_numeric_string_cache) {
++        // The numeric string cache is populated lazily, so skip null entries.
++        if (!string)
++            continue;
+         roots.set(string, GC::HeapRoot { .type = GC::HeapRoot::Type::VM });
++    }
+ 
+     roots.set(cached_strings.number, GC::HeapRoot { .type = GC::HeapRoot::Type::VM });
+     roots.set(cached_strings.undefined, GC::HeapRoot { .type = GC::HeapRoot::Type::VM });
+diff --git a/Libraries/LibWeb/Internals/Internals.cpp b/Libraries/LibWeb/Internals/Internals.cpp
+index 06a84d6f0f1cb..f51853df96416 100644
+--- a/Libraries/LibWeb/Internals/Internals.cpp
++++ b/Libraries/LibWeb/Internals/Internals.cpp
+@@ -13,6 +13,7 @@
+ #include <LibWeb/ARIA/StateAndProperties.h>
+ #include <LibWeb/Bindings/InternalsPrototype.h>
+ #include <LibWeb/Bindings/Intrinsics.h>
++#include <LibWeb/Bindings/MainThreadVM.h>
+ #include <LibWeb/DOM/Document.h>
+ #include <LibWeb/DOM/Event.h>
+ #include <LibWeb/DOM/EventTarget.h>
+@@ -342,6 +343,11 @@ String Internals::dump_display_list()
+     return window().associated_document().dump_display_list();
+ }
+ 
++String Internals::dump_gc_graph()
++{
++    return Bindings::main_thread_vm().heap().dump_graph().serialized();
++}
++
+ GC::Ptr<DOM::ShadowRoot> Internals::get_shadow_root(GC::Ref<DOM::Element> element)
+ {
+     return element->shadow_root();
+diff --git a/Libraries/LibWeb/Internals/Internals.h b/Libraries/LibWeb/Internals/Internals.h
+index 264c66f4f06a4..ea00854dc56c2 100644
+--- a/Libraries/LibWeb/Internals/Internals.h
++++ b/Libraries/LibWeb/Internals/Internals.h
+@@ -68,6 +68,7 @@ class WEB_API Internals final : public InternalsBase {
+     bool headless();
+ 
+     String dump_display_list();
++    String dump_gc_graph();
+ 
+     GC::Ptr<DOM::ShadowRoot> get_shadow_root(GC::Ref<DOM::Element>);
+ 
+diff --git a/Libraries/LibWeb/Internals/Internals.idl b/Libraries/LibWeb/Internals/Internals.idl
+index 2921939f4eef0..1ca4692a7a796 100644
+--- a/Libraries/LibWeb/Internals/Internals.idl
++++ b/Libraries/LibWeb/Internals/Internals.idl
+@@ -57,6 +57,7 @@ interface Internals {
+     readonly attribute boolean headless;
+ 
+     DOMString dumpDisplayList();
++    DOMString dumpGCGraph();
+ 
+     // Returns the shadow root of the element, if it has one, even if it's not normally accessible to JS.
+     ShadowRoot? getShadowRoot(Element element);
+diff --git a/Tests/LibWeb/Crash/Internals/dump-gc-graph.html b/Tests/LibWeb/Crash/Internals/dump-gc-graph.html
+new file mode 100644
+index 0000000000000..a2df016ed702b
+--- /dev/null
++++ b/Tests/LibWeb/Crash/Internals/dump-gc-graph.html
+@@ -0,0 +1,4 @@
++<!DOCTYPE html>
++<script>
++    internals.dumpGCGraph();
++</script>

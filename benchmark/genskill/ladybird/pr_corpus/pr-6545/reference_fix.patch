@@ -1,0 +1,375 @@
+From 16548b343352c68799c7544936ec01ec6371d5f5 Mon Sep 17 00:00:00 2001
+From: aplefull <aplefull@gmail.com>
+Date: Thu, 24 Jul 2025 00:16:08 +0200
+Subject: [PATCH 1/2] LibRegex+LibUnicode: Add unicode string properties
+
+---
+ .../LibJS/Tests/builtins/RegExp/RegExp.js     | 59 +++++++++++++++++++
+ Libraries/LibRegex/RegexDefs.h                | 39 ++++++------
+ Libraries/LibRegex/RegexError.h               | 41 +++++++------
+ Libraries/LibRegex/RegexParser.cpp            | 22 ++++++-
+ Libraries/LibUnicode/CharacterTypes.cpp       | 17 ++++++
+ Libraries/LibUnicode/CharacterTypes.h         |  1 +
+ 6 files changed, 139 insertions(+), 40 deletions(-)
+
+diff --git a/Libraries/LibJS/Tests/builtins/RegExp/RegExp.js b/Libraries/LibJS/Tests/builtins/RegExp/RegExp.js
+index 5223b1db4eb2f..38d6e5c58b318 100644
+--- a/Libraries/LibJS/Tests/builtins/RegExp/RegExp.js
++++ b/Libraries/LibJS/Tests/builtins/RegExp/RegExp.js
+@@ -97,3 +97,62 @@ test("Unicode non-ASCII matching", () => {
+         expect(result).toEqual(test.expected);
+     }
+ });
++
++// Test from https://github.com/tc39/test262/blob/main/test/built-ins/RegExp/unicodeSets/generated/character-property-escape-difference-property-of-strings-escape.js
++test("Unicode properties of strings", () => {
++    const regexes = [
++        /\p{Basic_Emoji}/v,
++        /\p{Emoji_Keycap_Sequence}/v,
++        /\p{RGI_Emoji_Modifier_Sequence}/v,
++        /\p{RGI_Emoji_Flag_Sequence}/v,
++        /\p{RGI_Emoji_Tag_Sequence}/v,
++        /\p{RGI_Emoji_ZWJ_Sequence}/v,
++        /\p{RGI_Emoji}/v,
++    ];
++
++    for (const re of regexes) {
++        expect(() => {
++            re.test("test");
++        }).not.toThrow();
++    }
++
++    const matchStrings = [
++        "0",
++        "1",
++        "2",
++        "3",
++        "4",
++        "5",
++        "8",
++        "A",
++        "B",
++        "D",
++        "E",
++        "F",
++        "a",
++        "b",
++        "c",
++        "d",
++        "e",
++        "f",
++    ];
++
++    const nonMatchStrings = [
++        "6\uFE0F\u20E3",
++        "7\uFE0F\u20E3",
++        "9\uFE0F\u20E3",
++        "\u2603",
++        "\u{1D306}",
++        "\u{1F1E7}\u{1F1EA}",
++    ];
++
++    const re = /^[\p{ASCII_Hex_Digit}--\p{Emoji_Keycap_Sequence}]+$/v;
++
++    for (const str of matchStrings) {
++        expect(re.test(str)).toBeTrue();
++    }
++
++    for (const str of nonMatchStrings) {
++        expect(re.test(str)).toBeFalse();
++    }
++});
+diff --git a/Libraries/LibRegex/RegexDefs.h b/Libraries/LibRegex/RegexDefs.h
+index 6a9f60fa97fc9..3ba3e790f8842 100644
+--- a/Libraries/LibRegex/RegexDefs.h
++++ b/Libraries/LibRegex/RegexDefs.h
+@@ -9,25 +9,26 @@
+ 
+ enum __Regex_Error {
+     __Regex_NoError,
+-    __Regex_InvalidPattern,              // Invalid regular expression.
+-    __Regex_InvalidCollationElement,     // Invalid collating element referenced.
+-    __Regex_InvalidCharacterClass,       // Invalid character class type referenced.
+-    __Regex_InvalidTrailingEscape,       // Trailing \ in pattern.
+-    __Regex_InvalidNumber,               // Number in \digit invalid or in error.
+-    __Regex_MismatchingBracket,          // [ ] imbalance.
+-    __Regex_MismatchingParen,            // ( ) imbalance.
+-    __Regex_MismatchingBrace,            // { } imbalance.
+-    __Regex_InvalidBraceContent,         // Content of {} invalid: not a number, number too large, more than two numbers, first larger than second.
+-    __Regex_InvalidBracketContent,       // Content of [] invalid.
+-    __Regex_InvalidRange,                // Invalid endpoint in range expression.
+-    __Regex_InvalidRepetitionMarker,     // ?, * or + not preceded by valid regular expression.
+-    __Regex_ReachedMaxRecursion,         // MaximumRecursion has been reached.
+-    __Regex_EmptySubExpression,          // Sub expression has empty content.
+-    __Regex_InvalidCaptureGroup,         // Content of capture group is invalid.
+-    __Regex_InvalidNameForCaptureGroup,  // Name of capture group is invalid.
+-    __Regex_InvalidNameForProperty,      // Name of property is invalid.
+-    __Regex_DuplicateNamedCapture,       // Duplicate named capture group
+-    __Regex_InvalidCharacterClassEscape, // Invalid escaped entity in character class.
++    __Regex_InvalidPattern,               // Invalid regular expression.
++    __Regex_InvalidCollationElement,      // Invalid collating element referenced.
++    __Regex_InvalidCharacterClass,        // Invalid character class type referenced.
++    __Regex_InvalidTrailingEscape,        // Trailing \ in pattern.
++    __Regex_InvalidNumber,                // Number in \digit invalid or in error.
++    __Regex_MismatchingBracket,           // [ ] imbalance.
++    __Regex_MismatchingParen,             // ( ) imbalance.
++    __Regex_MismatchingBrace,             // { } imbalance.
++    __Regex_InvalidBraceContent,          // Content of {} invalid: not a number, number too large, more than two numbers, first larger than second.
++    __Regex_InvalidBracketContent,        // Content of [] invalid.
++    __Regex_InvalidRange,                 // Invalid endpoint in range expression.
++    __Regex_InvalidRepetitionMarker,      // ?, * or + not preceded by valid regular expression.
++    __Regex_ReachedMaxRecursion,          // MaximumRecursion has been reached.
++    __Regex_EmptySubExpression,           // Sub expression has empty content.
++    __Regex_InvalidCaptureGroup,          // Content of capture group is invalid.
++    __Regex_InvalidNameForCaptureGroup,   // Name of capture group is invalid.
++    __Regex_InvalidNameForProperty,       // Name of property is invalid.
++    __Regex_DuplicateNamedCapture,        // Duplicate named capture group
++    __Regex_InvalidCharacterClassEscape,  // Invalid escaped entity in character class.
++    __Regex_NegatedCharacterClassStrings, // Negated character class cannot contain strings.
+ };
+ 
+ enum __RegexAllFlags {
+diff --git a/Libraries/LibRegex/RegexError.h b/Libraries/LibRegex/RegexError.h
+index 2e6975a25f513..f4182bbefe472 100644
+--- a/Libraries/LibRegex/RegexError.h
++++ b/Libraries/LibRegex/RegexError.h
+@@ -14,25 +14,26 @@ namespace regex {
+ 
+ enum class Error : u8 {
+     NoError = __Regex_NoError,
+-    InvalidPattern = __Regex_InvalidPattern,                           // Invalid regular expression.
+-    InvalidCollationElement = __Regex_InvalidCollationElement,         // Invalid collating element referenced.
+-    InvalidCharacterClass = __Regex_InvalidCharacterClass,             // Invalid character class type referenced.
+-    InvalidTrailingEscape = __Regex_InvalidTrailingEscape,             // Trailing \ in pattern.
+-    InvalidNumber = __Regex_InvalidNumber,                             // Number in \digit invalid or in error.
+-    MismatchingBracket = __Regex_MismatchingBracket,                   // [ ] imbalance.
+-    MismatchingParen = __Regex_MismatchingParen,                       // ( ) imbalance.
+-    MismatchingBrace = __Regex_MismatchingBrace,                       // { } imbalance.
+-    InvalidBraceContent = __Regex_InvalidBraceContent,                 // Content of {} invalid: not a number, number too large, more than two numbers, first larger than second.
+-    InvalidBracketContent = __Regex_InvalidBracketContent,             // Content of [] invalid.
+-    InvalidRange = __Regex_InvalidRange,                               // Invalid endpoint in range expression.
+-    InvalidRepetitionMarker = __Regex_InvalidRepetitionMarker,         // ?, * or + not preceded by valid regular expression.
+-    ReachedMaxRecursion = __Regex_ReachedMaxRecursion,                 // MaximumRecursion has been reached.
+-    EmptySubExpression = __Regex_EmptySubExpression,                   // Sub expression has empty content.
+-    InvalidCaptureGroup = __Regex_InvalidCaptureGroup,                 // Content of capture group is invalid.
+-    InvalidNameForCaptureGroup = __Regex_InvalidNameForCaptureGroup,   // Name of capture group is invalid.
+-    InvalidNameForProperty = __Regex_InvalidNameForProperty,           // Name of property is invalid.
+-    DuplicateNamedCapture = __Regex_DuplicateNamedCapture,             // Name of property is invalid.
+-    InvalidCharacterClassEscape = __Regex_InvalidCharacterClassEscape, // Invalid escaped entity in character class.
++    InvalidPattern = __Regex_InvalidPattern,                             // Invalid regular expression.
++    InvalidCollationElement = __Regex_InvalidCollationElement,           // Invalid collating element referenced.
++    InvalidCharacterClass = __Regex_InvalidCharacterClass,               // Invalid character class type referenced.
++    InvalidTrailingEscape = __Regex_InvalidTrailingEscape,               // Trailing \ in pattern.
++    InvalidNumber = __Regex_InvalidNumber,                               // Number in \digit invalid or in error.
++    MismatchingBracket = __Regex_MismatchingBracket,                     // [ ] imbalance.
++    MismatchingParen = __Regex_MismatchingParen,                         // ( ) imbalance.
++    MismatchingBrace = __Regex_MismatchingBrace,                         // { } imbalance.
++    InvalidBraceContent = __Regex_InvalidBraceContent,                   // Content of {} invalid: not a number, number too large, more than two numbers, first larger than second.
++    InvalidBracketContent = __Regex_InvalidBracketContent,               // Content of [] invalid.
++    InvalidRange = __Regex_InvalidRange,                                 // Invalid endpoint in range expression.
++    InvalidRepetitionMarker = __Regex_InvalidRepetitionMarker,           // ?, * or + not preceded by valid regular expression.
++    ReachedMaxRecursion = __Regex_ReachedMaxRecursion,                   // MaximumRecursion has been reached.
++    EmptySubExpression = __Regex_EmptySubExpression,                     // Sub expression has empty content.
++    InvalidCaptureGroup = __Regex_InvalidCaptureGroup,                   // Content of capture group is invalid.
++    InvalidNameForCaptureGroup = __Regex_InvalidNameForCaptureGroup,     // Name of capture group is invalid.
++    InvalidNameForProperty = __Regex_InvalidNameForProperty,             // Name of property is invalid.
++    DuplicateNamedCapture = __Regex_DuplicateNamedCapture,               // Name of property is invalid.
++    InvalidCharacterClassEscape = __Regex_InvalidCharacterClassEscape,   // Invalid escaped entity in character class.
++    NegatedCharacterClassStrings = __Regex_NegatedCharacterClassStrings, // Negated character class may contain strings.
+ };
+ 
+ inline StringView get_error_string(Error error)
+@@ -78,6 +79,8 @@ inline StringView get_error_string(Error error)
+         return "Duplicate capture group name"sv;
+     case Error::InvalidCharacterClassEscape:
+         return "Invalid escaped entity in character class."sv;
++    case Error::NegatedCharacterClassStrings:
++        return "Negated character class cannot contain strings"sv;
+     }
+     return "Undefined error."sv;
+ }
+diff --git a/Libraries/LibRegex/RegexParser.cpp b/Libraries/LibRegex/RegexParser.cpp
+index 4ddb6e6fe8183..cc8c8d4b0ac23 100644
+--- a/Libraries/LibRegex/RegexParser.cpp
++++ b/Libraries/LibRegex/RegexParser.cpp
+@@ -2463,6 +2463,19 @@ bool ECMA262Parser::parse_nested_class(Vector<regex::CompareTypeAndValuePair>& c
+                 compares.empend(CompareTypeAndValuePair { CharacterCompareType::Inverse, 0 });
+             property.visit(
+                 [&](Unicode::Property property) {
++                    if (Unicode::is_ecma262_string_property(property)) {
++                        if (negated) {
++                            set_error(Error::InvalidNameForProperty);
++                            return;
++                        }
++
++                        for (auto const& compare : compares) {
++                            if (compare.type == CharacterCompareType::Inverse) {
++                                set_error(Error::NegatedCharacterClassStrings);
++                                return;
++                            }
++                        }
++                    }
+                     compares.empend(CompareTypeAndValuePair { CharacterCompareType::Property, (ByteCodeValueType)property.value() });
+                 },
+                 [&](Unicode::GeneralCategory general_category) {
+@@ -2506,8 +2519,13 @@ bool ECMA262Parser::parse_unicode_property_escape(PropertyEscape& property, bool
+     property = move(*parsed_property);
+ 
+     return property.visit(
+-        [this](Unicode::Property property) {
+-            if (!Unicode::is_ecma262_property(property)) {
++        [this, negated](Unicode::Property property) {
++            if (Unicode::is_ecma262_string_property(property)) {
++                if (!m_parser_state.regex_options.has_flag_set(AllFlags::UnicodeSets) || negated) {
++                    set_error(Error::InvalidNameForProperty);
++                    return false;
++                }
++            } else if (!Unicode::is_ecma262_property(property)) {
+                 set_error(Error::InvalidNameForProperty);
+                 return false;
+             }
+diff --git a/Libraries/LibUnicode/CharacterTypes.cpp b/Libraries/LibUnicode/CharacterTypes.cpp
+index fd874cdb075dd..c364cb3d95c47 100644
+--- a/Libraries/LibUnicode/CharacterTypes.cpp
++++ b/Libraries/LibUnicode/CharacterTypes.cpp
+@@ -304,6 +304,23 @@ bool is_ecma262_property(Property property)
+     }
+ }
+ 
++// https://tc39.es/ecma262/#table-binary-unicode-properties-of-strings
++bool is_ecma262_string_property(Property property)
++{
++    switch (property.value()) {
++    case UCHAR_BASIC_EMOJI:
++    case UCHAR_EMOJI_KEYCAP_SEQUENCE:
++    case UCHAR_RGI_EMOJI:
++    case UCHAR_RGI_EMOJI_FLAG_SEQUENCE:
++    case UCHAR_RGI_EMOJI_TAG_SEQUENCE:
++    case UCHAR_RGI_EMOJI_MODIFIER_SEQUENCE:
++    case UCHAR_RGI_EMOJI_ZWJ_SEQUENCE:
++        return true;
++    default:
++        return false;
++    }
++}
++
+ Optional<Script> script_from_string(StringView script)
+ {
+     static auto script_names = []() {
+diff --git a/Libraries/LibUnicode/CharacterTypes.h b/Libraries/LibUnicode/CharacterTypes.h
+index a49a56a007b87..503eeaaa6cde0 100644
+--- a/Libraries/LibUnicode/CharacterTypes.h
++++ b/Libraries/LibUnicode/CharacterTypes.h
+@@ -39,6 +39,7 @@ bool code_point_has_variation_selector_property(u32 code_point);
+ bool code_point_has_white_space_property(u32 code_point);
+ 
+ bool is_ecma262_property(Property);
++bool is_ecma262_string_property(Property);
+ 
+ Optional<Script> script_from_string(StringView);
+ bool code_point_has_script(u32 code_point, Script script);
+
+From 06e3c72e3e4f39bf4d6adcf46a42fc7748f36069 Mon Sep 17 00:00:00 2001
+From: aplefull <aplefull@gmail.com>
+Date: Fri, 17 Oct 2025 14:57:07 +0200
+Subject: [PATCH 2/2] LibJS: Escape line terminators in regex source
+
+---
+ Libraries/LibJS/Runtime/RegExpObject.cpp      | 31 +++++++++++++++++--
+ .../RegExp/RegExp.prototype.source.js         | 30 ++++++++++++++++++
+ 2 files changed, 59 insertions(+), 2 deletions(-)
+
+diff --git a/Libraries/LibJS/Runtime/RegExpObject.cpp b/Libraries/LibJS/Runtime/RegExpObject.cpp
+index 0351ff4e2cf0c..2dfa73119345e 100644
+--- a/Libraries/LibJS/Runtime/RegExpObject.cpp
++++ b/Libraries/LibJS/Runtime/RegExpObject.cpp
+@@ -275,12 +275,30 @@ String RegExpObject::escape_regexp_pattern() const
+     // FIXME: Check the 'u' and 'v' flags and escape accordingly
+     StringBuilder builder;
+     auto escaped = false;
++    auto in_character_class = false;
+ 
+     for (auto code_point : m_pattern) {
+         if (escaped) {
+             escaped = false;
+             builder.append_code_point('\\');
+-            builder.append_code_point(code_point);
++
++            switch (code_point) {
++            case '\n':
++                builder.append_code_point('n');
++                break;
++            case '\r':
++                builder.append_code_point('r');
++                break;
++            case LINE_SEPARATOR:
++                builder.append("u2028"sv);
++                break;
++            case PARAGRAPH_SEPARATOR:
++                builder.append("u2029"sv);
++                break;
++            default:
++                builder.append_code_point(code_point);
++                break;
++            }
+             continue;
+         }
+ 
+@@ -289,9 +307,18 @@ String RegExpObject::escape_regexp_pattern() const
+             continue;
+         }
+ 
++        if (code_point == '[') {
++            in_character_class = true;
++        } else if (code_point == ']') {
++            in_character_class = false;
++        }
++
+         switch (code_point) {
+         case '/':
+-            builder.append("\\/"sv);
++            if (in_character_class)
++                builder.append_code_point('/');
++            else
++                builder.append("\\/"sv);
+             break;
+         case '\n':
+             builder.append("\\n"sv);
+diff --git a/Libraries/LibJS/Tests/builtins/RegExp/RegExp.prototype.source.js b/Libraries/LibJS/Tests/builtins/RegExp/RegExp.prototype.source.js
+index 3992c7c1db60f..7102df2949e80 100644
+--- a/Libraries/LibJS/Tests/builtins/RegExp/RegExp.prototype.source.js
++++ b/Libraries/LibJS/Tests/builtins/RegExp/RegExp.prototype.source.js
+@@ -5,3 +5,33 @@ test("basic functionality", () => {
+     expect(/\n/.source).toBe("\\n");
+     expect(/foo\/bar/.source).toBe("foo\\/bar");
+ });
++
++test("escaped characters", () => {
++    const tests = [
++        { regex: /\\n/, source: "\\\\n" },
++        { regex: /\\\n/, source: "\\\\\\n" },
++        { regex: /\\\\n/, source: "\\\\\\\\n" },
++        { regex: /\\r/, source: "\\\\r" },
++        { regex: /\\\r/, source: "\\\\\\r" },
++        { regex: /\\\\r/, source: "\\\\\\\\r" },
++        { regex: /\\u2028/, source: "\\\\u2028" },
++        { regex: /\\\u2028/, source: "\\\\\\u2028" },
++        { regex: /\\\\u2028/, source: "\\\\\\\\u2028" },
++        { regex: /\\u2029/, source: "\\\\u2029" },
++        { regex: /\\\u2029/, source: "\\\\\\u2029" },
++        { regex: /\\\\u2029/, source: "\\\\\\\\u2029" },
++        { regex: /\//, source: "\\/" },
++        { regex: /\\\//, source: "\\\\\\/" },
++        { regex: /[/]/, source: "[/]" },
++        { regex: /[\/]/, source: "[\\/]" },
++        { regex: /[\\/]/, source: "[\\\\/]" },
++        { regex: /[\\\/]/, source: "[\\\\\\/]" },
++        { regex: /\[\/\]/, source: "\\[\\/\\]" },
++        { regex: /\[\/\]/, source: "\\[\\/\\]" },
++        { regex: /\[\\\/\]/, source: "\\[\\\\\\/\\]" },
++    ];
++
++    for (const test of tests) {
++        expect(test.regex.source).toBe(test.source);
++    }
++});

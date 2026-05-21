@@ -27,6 +27,15 @@ use uuid::Uuid;
 const DEFAULT_PROVIDER: &str = "codex";
 const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-4-6";
 const DEFAULT_PUFFER_MODEL: &str = "default";
+const REMOTE_FILE_WRITE_MAX_BYTES: usize = 5 * 1024 * 1024;
+const MAX_GIT_CLONE_DEPTH: u64 = 10_000;
+const MAX_UNTRACKED_DIFF_FILES: usize = 128;
+const MAX_UNTRACKED_DIFF_FILE_BYTES: u64 = 256 * 1024;
+const MAX_UNTRACKED_DIFF_PATCH_BYTES: usize = 512 * 1024;
+const DEFAULT_PTY_COLS: u16 = 100;
+const DEFAULT_PTY_ROWS: u16 = 30;
+const MAX_PTY_COLS: u16 = 500;
+const MAX_PTY_ROWS: u16 = 200;
 
 pub(crate) struct BackendState {
     ptys: Arc<pty::PtyRegistry>,
@@ -254,6 +263,7 @@ impl BackendState {
         model_override: Option<String>,
     ) -> Result<Value> {
         let cwd = normalize_path(&cwd);
+        ensure_session_cwd(&cwd)?;
         let mut config = self.load_config()?;
         if config.default_provider.is_none() {
             config.default_provider = Some(DEFAULT_PROVIDER.to_string());
@@ -276,12 +286,17 @@ impl BackendState {
                     .clone()
                     .unwrap_or_else(|| DEFAULT_PROVIDER.to_string())
             });
+        let provider = canonical_backend_provider_id(&provider);
         validate_provider_id(&provider)?;
         let model = model_override
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .or_else(|| {
-                if provider == config.default_provider.clone().unwrap_or_default() {
+                if config
+                    .default_provider
+                    .as_deref()
+                    .is_some_and(|default| backend_provider_ids_match(default, &provider))
+                {
                     config.default_model.clone()
                 } else {
                     None
@@ -334,6 +349,8 @@ impl BackendState {
             folder_path: record.cwd.clone(),
             updated_at_ms: record.updated_at_ms,
             created_at_ms: record.created_at_ms,
+            event_count: record.events.len(),
+            activity_status: stored_session_activity_status(&record.events).to_string(),
             slug: record.slug.clone(),
             tags: record.tags.clone(),
             note: record.note.clone(),
@@ -366,16 +383,19 @@ impl BackendState {
                 StoredEvent::User { text, .. } => items.push(TimelineItemDto::UserMessage {
                     id,
                     text: text.clone(),
+                    actor: None,
                 }),
                 StoredEvent::Assistant { text, .. } => {
                     items.push(TimelineItemDto::AssistantMessage {
                         id,
                         text: text.clone(),
+                        actor: None,
                     })
                 }
                 StoredEvent::System { text, .. } => items.push(TimelineItemDto::SystemMessage {
                     id,
                     text: text.clone(),
+                    actor: None,
                 }),
                 StoredEvent::Tool {
                     tool_id,
@@ -391,6 +411,8 @@ impl BackendState {
                     input_text: input.clone(),
                     input_json: serde_json::from_str(input).ok(),
                     output_text: output.clone(),
+                    actor: None,
+                    subject: None,
                 }),
             }
         }
@@ -436,6 +458,7 @@ impl BackendState {
             updated_at_ms: record.updated_at_ms,
             created_at_ms: record.created_at_ms,
             event_count: record.events.len(),
+            activity_status: stored_session_activity_status(&record.events).to_string(),
             slug: record.slug.clone(),
             tags: record.tags.clone(),
             note: record.note.clone(),
@@ -568,16 +591,17 @@ impl BackendState {
     }
 
     fn store_api_key(&self, provider_id: &str, api_key: &str) -> Result<()> {
+        let (provider_id, api_key) = validate_api_key_login(provider_id, api_key)?;
         let mut credentials = self.load_credentials()?;
-        credentials
-            .api_keys
-            .insert(provider_id.to_string(), api_key.to_string());
+        credentials.api_keys.insert(provider_id, api_key);
         self.save_credentials(&credentials)
     }
 
     fn remove_api_key(&self, provider_id: &str) -> Result<()> {
+        let provider_id = canonical_backend_provider_id(provider_id);
+        validate_provider_id(&provider_id)?;
         let mut credentials = self.load_credentials()?;
-        credentials.api_keys.remove(provider_id);
+        credentials.api_keys.remove(&provider_id);
         self.save_credentials(&credentials)
     }
 
@@ -598,7 +622,8 @@ impl BackendState {
 
     fn read_remote_file(&self, params: Value) -> Result<Value> {
         let path = string_param(&params, &["path"])?;
-        let content = fs::read_to_string(path).context("failed to read file")?;
+        let path = files::validate_path(&self.allowed_roots()?, &path)?;
+        let content = fs::read_to_string(&path).context("failed to read file")?;
         serde_value(json!({"success": true, "stdout": content, "stderr": ""}))
     }
 
@@ -606,16 +631,24 @@ impl BackendState {
         let path = string_param(&params, &["path"])?;
         let encoded = string_param(&params, &["contentsBase64", "contents_base64"])?;
         let bytes = BASE64_STANDARD.decode(encoded).context("invalid base64")?;
-        fs::write(path, bytes).context("failed to write file")?;
+        if bytes.len() > REMOTE_FILE_WRITE_MAX_BYTES {
+            bail!(
+                "file is too large to write ({} bytes, hard limit {} bytes)",
+                bytes.len(),
+                REMOTE_FILE_WRITE_MAX_BYTES
+            );
+        }
+        let path = files::validate_write_path(&self.allowed_roots()?, &path)?;
+        fs::write(&path, bytes).context("failed to write file")?;
         serde_value(json!({"success": true, "stdout": "", "stderr": ""}))
     }
 
     fn git_clone(&self, events: EventEmitter, params: Value) -> Result<Value> {
         let url = string_param(&params, &["url"])?;
         let dest_raw = string_param(&params, &["dest"])?;
-        let depth = params.get("depth").and_then(Value::as_u64);
+        let depth = parse_git_clone_depth(&params)?;
         let base = self.default_workspace()?;
-        let dest = absolutize(&base, Path::new(&dest_raw));
+        let dest = validate_git_clone_dest(&self.allowed_roots()?, &base, &dest_raw)?;
         let clone_id = Uuid::new_v4().to_string();
         let clone_id_thread = clone_id.clone();
         let dest_thread = dest.clone();
@@ -751,9 +784,9 @@ impl BackendState {
         let cwd = optional_string_param(&params, &["cwd"])
             .map(PathBuf::from)
             .unwrap_or(self.default_workspace()?);
-        let cwd = normalize_path(&cwd);
-        let cols = params.get("cols").and_then(Value::as_u64).unwrap_or(100) as u16;
-        let rows = params.get("rows").and_then(Value::as_u64).unwrap_or(30) as u16;
+        let cwd = validate_pty_cwd(&self.allowed_roots()?, &cwd)?;
+        let cols = bounded_u16_param(&params, "cols", DEFAULT_PTY_COLS, MAX_PTY_COLS)?;
+        let rows = bounded_u16_param(&params, "rows", DEFAULT_PTY_ROWS, MAX_PTY_ROWS)?;
         let title = optional_string_param(&params, &["title"]);
         let pty_id = self
             .ptys
@@ -788,8 +821,8 @@ impl BackendState {
 
     fn pty_resize(&self, params: Value) -> Result<Value> {
         let pty_id = string_param(&params, &["ptyId", "pty_id"])?;
-        let cols = params.get("cols").and_then(Value::as_u64).unwrap_or(100) as u16;
-        let rows = params.get("rows").and_then(Value::as_u64).unwrap_or(30) as u16;
+        let cols = bounded_u16_param(&params, "cols", DEFAULT_PTY_COLS, MAX_PTY_COLS)?;
+        let rows = bounded_u16_param(&params, "rows", DEFAULT_PTY_ROWS, MAX_PTY_ROWS)?;
         self.ptys.resize(&pty_id, cols, rows)?;
         Ok(json!({}))
     }
@@ -925,7 +958,7 @@ impl BackendState {
             config.default_provider = if provider.trim().is_empty() {
                 None
             } else {
-                Some(provider.to_string())
+                Some(canonical_backend_provider_id(provider))
             };
             if params.get("defaultModel").is_none() {
                 config.default_model = default_model_for(provider);
@@ -987,6 +1020,20 @@ impl BackendState {
     fn save_sessions(&self, sessions: &[SessionRecord]) -> Result<()> {
         write_json(&sessions_file()?, sessions)
     }
+}
+
+fn ensure_session_cwd(cwd: &Path) -> Result<()> {
+    if cwd.exists() {
+        if cwd.is_dir() {
+            return Ok(());
+        }
+        bail!(
+            "session cwd exists but is not a directory: {}",
+            cwd.display()
+        );
+    }
+    fs::create_dir_all(cwd)
+        .with_context(|| format!("failed to create session cwd {}", cwd.display()))
 }
 
 fn run_agent_turn_thread(
@@ -1113,23 +1160,9 @@ fn run_agent_turn_inner(
     )?;
 
     let config = read_config()?;
-    let provider = if provider_locked && !record.provider.trim().is_empty() {
-        record.provider.clone()
-    } else if let Some(provider) = options.provider_id.as_deref() {
-        provider.to_string()
-    } else if record.provider.trim().is_empty() {
-        config
-            .default_provider
-            .clone()
-            .unwrap_or_else(|| DEFAULT_PROVIDER.to_string())
-    } else {
-        record.provider.clone()
-    };
-    let model = options
-        .model_id
-        .clone()
-        .or(record.model.clone())
-        .or(config.default_model);
+    let routing = resolve_turn_routing(&record, &config, options, provider_locked);
+    let provider = routing.provider;
+    let model = routing.model;
     update_session_routing(session_id, &provider, model.as_deref())?;
     let credentials: StoredCredentials = read_json_or_default(&credentials_file()?)?;
     if provider == "codex" {
@@ -1777,8 +1810,26 @@ fn current_diff_snapshot(session_id: &str, cwd: &str) -> Option<DiffSummaryDto> 
 fn untracked_diff(root: &Path, files: &str) -> (String, String) {
     let mut stat = String::new();
     let mut patch = String::new();
-    for rel in files.lines().map(str::trim).filter(|line| !line.is_empty()) {
+    let mut skipped = 0usize;
+    let mut processed = 0usize;
+    for rel in files
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(MAX_UNTRACKED_DIFF_FILES)
+    {
+        processed += 1;
         let path = root.join(rel);
+        let Ok(meta) = fs::metadata(&path) else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        if meta.len() > MAX_UNTRACKED_DIFF_FILE_BYTES {
+            skipped += 1;
+            continue;
+        }
         let Ok(content) = fs::read_to_string(&path) else {
             continue;
         };
@@ -1793,12 +1844,324 @@ fn untracked_diff(root: &Path, files: &str) -> (String, String) {
             "diff --git a/{display_path} b/{display_path}\nnew file mode 100644\nindex 0000000..0000000\n--- /dev/null\n+++ b/{display_path}\n@@ -0,0 +1,{line_count} @@\n"
         ));
         for line in content.lines() {
+            if patch.len() >= MAX_UNTRACKED_DIFF_PATCH_BYTES {
+                skipped += 1;
+                break;
+            }
             patch.push('+');
             patch.push_str(line);
             patch.push('\n');
         }
+        if patch.len() >= MAX_UNTRACKED_DIFF_PATCH_BYTES {
+            break;
+        }
+    }
+    let total = files.lines().filter(|line| !line.trim().is_empty()).count();
+    if processed < total.min(MAX_UNTRACKED_DIFF_FILES) {
+        skipped += total.min(MAX_UNTRACKED_DIFF_FILES) - processed;
+    }
+    if total > MAX_UNTRACKED_DIFF_FILES {
+        skipped += total - MAX_UNTRACKED_DIFF_FILES;
+    }
+    if skipped > 0 {
+        stat.push_str(&format!(
+            " ... {skipped} untracked file(s) omitted by desktop diff limits\n"
+        ));
+        patch.push_str(&format!(
+            "\n# {skipped} untracked file(s) omitted by desktop diff limits\n"
+        ));
     }
     (stat, patch)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+
+    fn test_session_record(
+        provider: &str,
+        model: Option<&str>,
+        events: Vec<StoredEvent>,
+    ) -> SessionRecord {
+        SessionRecord {
+            id: "test-session".to_string(),
+            display_name: None,
+            generated_title: None,
+            title: "Test session".to_string(),
+            cwd: "/tmp/puffer-test".to_string(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+            parent_session_id: None,
+            provider: provider.to_string(),
+            model: model.map(ToOwned::to_owned),
+            events,
+        }
+    }
+
+    #[test]
+    fn untracked_diff_omits_large_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small.txt");
+        let large = dir.path().join("large.txt");
+        fs::write(&small, "hello\n").unwrap();
+        fs::write(
+            &large,
+            vec![b'x'; (MAX_UNTRACKED_DIFF_FILE_BYTES as usize) + 1],
+        )
+        .unwrap();
+
+        let (stat, patch) = untracked_diff(dir.path(), "small.txt\nlarge.txt\n");
+
+        assert!(stat.contains("small.txt"));
+        assert!(patch.contains("+hello"));
+        assert!(stat.contains("omitted by desktop diff limits"));
+        assert!(!patch.contains("large.txt"));
+    }
+
+    #[test]
+    fn validate_api_key_login_rejects_empty_values() {
+        let empty_provider = validate_api_key_login("  ", "sk-test").unwrap_err();
+        assert!(empty_provider
+            .to_string()
+            .contains("provider id cannot be empty"));
+
+        let empty_key = validate_api_key_login("anthropic", "  ").unwrap_err();
+        assert!(empty_key.to_string().contains("api key cannot be empty"));
+    }
+
+    #[test]
+    fn validate_api_key_login_trims_values() {
+        let (provider, api_key) = validate_api_key_login("  anthropic  ", "  sk-test  ").unwrap();
+
+        assert_eq!(provider, "claude");
+        assert_eq!(api_key, "sk-test");
+    }
+
+    #[test]
+    fn validate_api_key_login_canonicalizes_desktop_provider_aliases() {
+        let (provider, _) = validate_api_key_login("openai", "sk-test").unwrap();
+        assert_eq!(provider, "codex");
+
+        let (provider, _) = validate_api_key_login("Claude", "sk-test").unwrap();
+        assert_eq!(provider, "claude");
+
+        let err = validate_api_key_login("unknown-provider", "sk-test").unwrap_err();
+        assert!(err.to_string().contains("unknown provider"));
+    }
+
+    #[test]
+    fn desktop_provider_aliases_map_to_tauri_cli_backends() {
+        assert_eq!(canonical_backend_provider_id("openai"), "codex");
+        assert_eq!(canonical_backend_provider_id("codex"), "codex");
+        assert_eq!(canonical_backend_provider_id("anthropic"), "claude");
+        assert_eq!(canonical_backend_provider_id("claude"), "claude");
+        assert_eq!(canonical_backend_provider_id("puffer"), "puffer");
+    }
+
+    #[test]
+    fn desktop_provider_aliases_match_for_default_routing() {
+        assert!(backend_provider_ids_match("openai", "codex"));
+        assert!(backend_provider_ids_match("anthropic", "claude"));
+        assert!(backend_provider_ids_match("Codex", "OPENAI"));
+        assert!(!backend_provider_ids_match("codex", "claude"));
+    }
+
+    #[test]
+    fn desktop_provider_validation_accepts_frontend_canonical_ids() {
+        validate_provider_id("openai").unwrap();
+        validate_provider_id("anthropic").unwrap();
+
+        let err = validate_provider_id("unknown-provider").unwrap_err();
+        assert!(err.to_string().contains("unknown provider"));
+    }
+
+    #[test]
+    fn desktop_default_models_accept_frontend_canonical_ids() {
+        assert_eq!(
+            default_model_for("anthropic"),
+            Some(DEFAULT_CLAUDE_MODEL.to_string())
+        );
+        assert_eq!(
+            default_model_for("puffer"),
+            Some(DEFAULT_PUFFER_MODEL.to_string())
+        );
+    }
+
+    #[test]
+    fn first_turn_provider_override_does_not_reuse_previous_provider_model() {
+        let record = test_session_record("claude", Some(DEFAULT_CLAUDE_MODEL), Vec::new());
+        let config = StoredConfig {
+            default_provider: Some("openai".to_string()),
+            default_model: Some("openai/gpt-5.4".to_string()),
+            ..StoredConfig::default()
+        };
+        let options = TurnLaunchOptions {
+            provider_id: Some("openai".to_string()),
+            ..TurnLaunchOptions::default()
+        };
+
+        let routing = resolve_turn_routing(&record, &config, &options, false);
+
+        assert_eq!(routing.provider, "codex");
+        assert_eq!(routing.model.as_deref(), Some("gpt-5.4"));
+    }
+
+    #[test]
+    fn turn_routing_keeps_locked_session_provider_despite_provider_override() {
+        let record = test_session_record(
+            "claude",
+            Some(DEFAULT_CLAUDE_MODEL),
+            vec![StoredEvent::User {
+                at_ms: 1,
+                text: "hello".to_string(),
+            }],
+        );
+        let config = StoredConfig {
+            default_provider: Some("openai".to_string()),
+            default_model: Some("openai/gpt-5.4".to_string()),
+            ..StoredConfig::default()
+        };
+        let options = TurnLaunchOptions {
+            provider_id: Some("openai".to_string()),
+            ..TurnLaunchOptions::default()
+        };
+
+        let routing = resolve_turn_routing(&record, &config, &options, true);
+
+        assert_eq!(routing.provider, "claude");
+        assert_eq!(routing.model.as_deref(), Some(DEFAULT_CLAUDE_MODEL));
+    }
+
+    #[test]
+    fn turn_routing_normalizes_explicit_matching_model_prefix() {
+        let record = test_session_record("codex", Some("gpt-5.4"), Vec::new());
+        let config = StoredConfig::default();
+        let options = TurnLaunchOptions {
+            provider_id: Some("anthropic".to_string()),
+            model_id: Some("anthropic/claude-sonnet-4-5".to_string()),
+            ..TurnLaunchOptions::default()
+        };
+
+        let routing = resolve_turn_routing(&record, &config, &options, false);
+
+        assert_eq!(routing.provider, "claude");
+        assert_eq!(routing.model.as_deref(), Some("claude-sonnet-4-5"));
+    }
+
+    #[test]
+    fn session_cwd_initializer_creates_missing_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("new-project").join("nested");
+
+        ensure_session_cwd(&missing).unwrap();
+
+        assert!(missing.is_dir());
+    }
+
+    #[test]
+    fn session_cwd_initializer_rejects_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("not-a-directory");
+        fs::write(&file, "not a directory").unwrap();
+
+        let err = ensure_session_cwd(&file).unwrap_err();
+
+        assert!(err.to_string().contains("not a directory"));
+    }
+
+    #[test]
+    fn validate_remote_write_rejects_paths_outside_allowed_roots() {
+        let allowed = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("secret.txt");
+        let roots = vec![allowed.path().canonicalize().unwrap()];
+
+        let err = files::validate_write_path(&roots, target.to_str().unwrap()).unwrap_err();
+
+        assert!(err.to_string().contains("path escapes allowed roots"));
+    }
+
+    #[test]
+    fn validate_remote_write_accepts_new_file_inside_allowed_root() {
+        let allowed = tempfile::tempdir().unwrap();
+        let target = allowed.path().join("created.txt");
+        let roots = vec![allowed.path().canonicalize().unwrap()];
+
+        let validated = files::validate_write_path(&roots, target.to_str().unwrap()).unwrap();
+        fs::write(&validated, BASE64_STANDARD.decode("b2s=").unwrap()).unwrap();
+
+        assert_eq!(fs::read_to_string(target).unwrap(), "ok");
+    }
+
+    #[test]
+    fn validate_git_clone_dest_rejects_paths_outside_allowed_roots() {
+        let allowed = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let roots = vec![allowed.path().canonicalize().unwrap()];
+
+        let err = validate_git_clone_dest(
+            &roots,
+            allowed.path(),
+            outside.path().join("repo").to_str().unwrap(),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("path escapes allowed roots"));
+    }
+
+    #[test]
+    fn validate_git_clone_dest_rejects_relative_traversal() {
+        let allowed = tempfile::tempdir().unwrap();
+        let roots = vec![allowed.path().canonicalize().unwrap()];
+
+        let err = validate_git_clone_dest(&roots, allowed.path(), "../repo").unwrap_err();
+
+        assert!(err.to_string().contains("path escapes allowed roots"));
+    }
+
+    #[test]
+    fn validate_pty_cwd_rejects_paths_outside_allowed_roots() {
+        let allowed = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let roots = vec![allowed.path().canonicalize().unwrap()];
+
+        let err = validate_pty_cwd(&roots, outside.path()).unwrap_err();
+
+        assert!(err.to_string().contains("path escapes allowed roots"));
+    }
+
+    #[test]
+    fn parse_git_clone_depth_rejects_zero_and_extreme_values() {
+        assert!(parse_git_clone_depth(&json!({"depth": 0})).is_err());
+        assert!(parse_git_clone_depth(&json!({"depth": MAX_GIT_CLONE_DEPTH + 1})).is_err());
+        assert!(parse_git_clone_depth(&json!({"depth": "1"})).is_err());
+        assert_eq!(
+            parse_git_clone_depth(&json!({"depth": 1})).unwrap(),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn bounded_u16_param_rejects_zero_and_overflow_values() {
+        assert!(bounded_u16_param(&json!({"cols": 0}), "cols", 100, 500).is_err());
+        assert!(bounded_u16_param(&json!({"cols": 65_536}), "cols", 100, 500).is_err());
+        assert!(bounded_u16_param(&json!({"cols": "120"}), "cols", 100, 500).is_err());
+        assert_eq!(
+            bounded_u16_param(&json!({"cols": 120}), "cols", 100, 500).unwrap(),
+            120
+        );
+    }
+
+    #[test]
+    fn file_tabs_file_rejects_path_components_in_session_id() {
+        let err = file_tabs_file("../outside").unwrap_err();
+
+        assert!(err.to_string().contains("simple identifier"));
+    }
 }
 
 fn emit_backend_event(events: &EventEmitter, event: &str, payload: Value) {
@@ -1841,7 +2204,7 @@ fn provider_summaries() -> Vec<ProviderSummaryDto> {
 }
 
 fn provider_models(provider_id: &str) -> Vec<Value> {
-    match provider_id {
+    match canonical_backend_provider_id(provider_id).as_str() {
         "puffer" => vec![model("default", "Default", "puffer", false)],
         "claude" => claude_models(),
         _ => codex_app_server_models().unwrap_or_default(),
@@ -1989,7 +2352,7 @@ fn claude_model(
 }
 
 fn default_model_for(provider: &str) -> Option<String> {
-    match provider {
+    match canonical_backend_provider_id(provider).as_str() {
         "claude" => Some(DEFAULT_CLAUDE_MODEL.to_string()),
         "puffer" => Some(DEFAULT_PUFFER_MODEL.to_string()),
         _ => codex_app_server_catalog()
@@ -1999,10 +2362,102 @@ fn default_model_for(provider: &str) -> Option<String> {
 }
 
 fn validate_provider_id(provider: &str) -> Result<()> {
-    match provider {
+    match canonical_backend_provider_id(provider).as_str() {
         "puffer" | "codex" | "claude" => Ok(()),
         other => bail!("unknown provider `{other}`"),
     }
+}
+
+fn canonical_backend_provider_id(provider: &str) -> String {
+    let trimmed = provider.trim();
+    match trimmed.to_ascii_lowercase().as_str() {
+        "openai" | "codex" => "codex".to_string(),
+        "anthropic" | "claude" => "claude".to_string(),
+        "puffer" => "puffer".to_string(),
+        _ => trimmed.to_string(),
+    }
+}
+
+fn backend_provider_ids_match(left: &str, right: &str) -> bool {
+    canonical_backend_provider_id(left) == canonical_backend_provider_id(right)
+}
+
+fn resolve_turn_routing(
+    record: &SessionRecord,
+    config: &StoredConfig,
+    options: &TurnLaunchOptions,
+    provider_locked: bool,
+) -> TurnRouting {
+    let provider = if provider_locked && !record.provider.trim().is_empty() {
+        record.provider.clone()
+    } else if let Some(provider) = options.provider_id.as_deref() {
+        provider.to_string()
+    } else if record.provider.trim().is_empty() {
+        config
+            .default_provider
+            .clone()
+            .unwrap_or_else(|| DEFAULT_PROVIDER.to_string())
+    } else {
+        record.provider.clone()
+    };
+    let provider = canonical_backend_provider_id(&provider);
+    let model =
+        options
+            .model_id
+            .as_deref()
+            .and_then(|model| normalize_backend_model_id_for_provider(&provider, model))
+            .or_else(|| {
+                backend_provider_ids_match(&record.provider, &provider)
+                    .then(|| {
+                        record.model.as_deref().and_then(|model| {
+                            normalize_backend_model_id_for_provider(&provider, model)
+                        })
+                    })
+                    .flatten()
+            })
+            .or_else(|| {
+                config
+                    .default_provider
+                    .as_deref()
+                    .filter(|default| backend_provider_ids_match(default, &provider))
+                    .and_then(|_| {
+                        config.default_model.as_deref().and_then(|model| {
+                            normalize_backend_model_id_for_provider(&provider, model)
+                        })
+                    })
+            })
+            .or_else(|| default_model_for(&provider));
+    TurnRouting { provider, model }
+}
+
+fn normalize_backend_model_id_for_provider(provider_id: &str, model_id: &str) -> Option<String> {
+    let trimmed = model_id.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some((prefix, model)) = trimmed.split_once('/') {
+        let prefix = canonical_backend_provider_id(prefix);
+        let model = model.trim();
+        if prefix == canonical_backend_provider_id(provider_id) && !model.is_empty() {
+            return Some(model.to_string());
+        }
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+fn validate_api_key_login(provider_id: &str, api_key: &str) -> Result<(String, String)> {
+    let provider_id = provider_id.trim();
+    if provider_id.is_empty() {
+        bail!("provider id cannot be empty");
+    }
+    let provider_id = canonical_backend_provider_id(provider_id);
+    validate_provider_id(&provider_id)?;
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        bail!("api key cannot be empty");
+    }
+    Ok((provider_id, api_key.to_string()))
 }
 
 fn provider_command(provider: &str) -> String {
@@ -2058,12 +2513,44 @@ fn git_output(cwd: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-fn absolutize(base: &Path, raw: &Path) -> PathBuf {
-    if raw.is_absolute() {
-        normalize_path(raw)
+fn validate_git_clone_dest(allowed_roots: &[PathBuf], base: &Path, raw: &str) -> Result<PathBuf> {
+    let raw_path = Path::new(raw);
+    let candidate = if raw_path.is_absolute() {
+        raw_path.to_path_buf()
     } else {
-        normalize_path(&base.join(raw))
+        base.join(raw_path)
+    };
+    files::validate_write_path(allowed_roots, &candidate.display().to_string())
+}
+
+fn validate_pty_cwd(allowed_roots: &[PathBuf], cwd: &Path) -> Result<PathBuf> {
+    files::validate_path(allowed_roots, &cwd.display().to_string())
+}
+
+fn parse_git_clone_depth(params: &Value) -> Result<Option<u64>> {
+    let Some(value) = params.get("depth") else {
+        return Ok(None);
+    };
+    let Some(depth) = value.as_u64() else {
+        bail!("clone depth must be an unsigned integer");
+    };
+    if depth == 0 || depth > MAX_GIT_CLONE_DEPTH {
+        bail!("clone depth must be between 1 and {MAX_GIT_CLONE_DEPTH}");
     }
+    Ok(Some(depth))
+}
+
+fn bounded_u16_param(params: &Value, key: &str, default: u16, max: u16) -> Result<u16> {
+    let Some(raw) = params.get(key) else {
+        return Ok(default);
+    };
+    let Some(value) = raw.as_u64() else {
+        bail!("{key} must be an unsigned integer");
+    };
+    if value == 0 || value > max as u64 {
+        bail!("{key} must be between 1 and {max}");
+    }
+    Ok(value as u16)
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -2142,6 +2629,58 @@ fn serde_value<T: Serialize>(value: T) -> Result<Value> {
     Ok(serde_json::to_value(value)?)
 }
 
+fn stored_session_activity_status(events: &[StoredEvent]) -> &'static str {
+    if latest_stored_action_requires_permission(events) {
+        return "awaiting";
+    }
+    if latest_stored_action_is_unanswered(events) {
+        return "running";
+    }
+    "idle"
+}
+
+fn latest_stored_action_requires_permission(events: &[StoredEvent]) -> bool {
+    for event in events.iter().rev() {
+        match event {
+            StoredEvent::System { text, .. } => return text_requires_permission(text),
+            StoredEvent::Tool { output, .. } => return output_requires_permission(output),
+            StoredEvent::User { .. } | StoredEvent::Assistant { .. } => return false,
+        }
+    }
+    false
+}
+
+fn latest_stored_action_is_unanswered(events: &[StoredEvent]) -> bool {
+    for event in events.iter().rev() {
+        match event {
+            StoredEvent::User { .. } => return true,
+            StoredEvent::Assistant { .. }
+            | StoredEvent::System { .. }
+            | StoredEvent::Tool { .. } => {
+                return false;
+            }
+        }
+    }
+    false
+}
+
+fn text_requires_permission(text: &str) -> bool {
+    output_requires_permission(text)
+        || text
+            .split_once('\n')
+            .and_then(|(_, rest)| rest.strip_prefix("input: "))
+            .and_then(|input| {
+                input
+                    .split_once('\n')
+                    .map(|(_, output)| output_requires_permission(output))
+            })
+            .unwrap_or(false)
+}
+
+fn output_requires_permission(output: &str) -> bool {
+    output.trim().strip_prefix("Permission required:").is_some()
+}
+
 fn read_json_or_default<T>(path: &Path) -> Result<T>
 where
     T: for<'de> Deserialize<'de> + Default,
@@ -2210,9 +2749,21 @@ fn permissions_file() -> Result<PathBuf> {
 }
 
 fn file_tabs_file(session_id: &str) -> Result<PathBuf> {
+    validate_state_file_id(session_id, "session_id")?;
     Ok(app_home()?
         .join("file-tabs")
         .join(format!("{session_id}.json")))
+}
+
+fn validate_state_file_id(value: &str, field: &str) -> Result<()> {
+    if value.trim().is_empty()
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        bail!("{field} must be a simple identifier");
+    }
+    Ok(())
 }
 
 fn now_ms() -> u64 {
@@ -2297,6 +2848,12 @@ struct ProviderLaunch {
     command: String,
     args: Vec<String>,
     json_stream: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TurnRouting {
+    provider: String,
+    model: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]

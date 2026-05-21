@@ -1,12 +1,15 @@
 use super::retry_http_send;
 use anyhow::{bail, Context, Result};
 use html2text::from_read;
-use reqwest::blocking::Client;
+use reqwest::blocking::{Client, Response};
+use reqwest::redirect::Policy;
 use reqwest::{StatusCode, Url};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -29,7 +32,9 @@ Usage notes:
   - For GitHub URLs, prefer using `gh` via Bash (for example `gh pr view`, `gh issue view`, `gh api`)."#;
 
 const MAX_RESULT_CHARS: usize = 100_000;
+const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const CACHE_TTL: Duration = Duration::from_secs(15 * 60);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone)]
 struct CachedFetch {
@@ -80,7 +85,16 @@ pub fn claude_web_fetch_input_schema() -> Value {
 pub fn execute_claude_web_fetch(raw_input: Value) -> Result<Value> {
     let input: ClaudeWebFetchInput =
         serde_json::from_value(raw_input).context("invalid WebFetch input")?;
-    execute_claude_web_fetch_internal(Client::new(), input)
+    let client = web_fetch_http_client()?;
+    execute_claude_web_fetch_internal(client, input)
+}
+
+fn web_fetch_http_client() -> Result<Client> {
+    Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .redirect(Policy::none())
+        .build()
+        .context("failed to build WebFetch HTTP client")
 }
 
 fn execute_claude_web_fetch_internal(client: Client, input: ClaudeWebFetchInput) -> Result<Value> {
@@ -109,16 +123,16 @@ fn execute_claude_web_fetch_internal(client: Client, input: ClaudeWebFetchInput)
     let final_url = response.url().clone();
     let status_text = status_text(status).to_string();
 
-    if host_changed(&request_url, &final_url) {
+    if let Some(redirect_url) = redirect_target(&request_url, &response)? {
         let redirect_message =
-            build_redirect_message(&request_url, &final_url, status, &input.prompt);
+            build_redirect_message(&request_url, &redirect_url, status, &input.prompt);
         return Ok(json!({
             "bytes": redirect_message.len(),
             "code": status.as_u16(),
             "codeText": status_text,
             "result": redirect_message,
             "durationMs": start.elapsed().as_millis(),
-            "url": final_url.to_string(),
+            "url": redirect_url.to_string(),
         }));
     }
 
@@ -127,9 +141,7 @@ fn execute_claude_web_fetch_internal(client: Client, input: ClaudeWebFetchInput)
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
-    let bytes = response
-        .bytes()
-        .context("failed to read web fetch response body")?;
+    let bytes = read_limited_response_body(response)?;
     let content = normalize_web_content(&bytes, content_type.as_deref())?;
     store_cached_fetch(
         &request_url,
@@ -159,14 +171,89 @@ fn normalize_url(raw_url: &str) -> Result<Url> {
         url.set_scheme("https")
             .map_err(|_| anyhow::anyhow!("failed to upgrade URL scheme to https"))?;
     }
+    validate_fetch_target(&url)?;
     Ok(url)
 }
 
-fn host_changed(request_url: &Url, final_url: &Url) -> bool {
-    request_url
+fn validate_fetch_target(url: &Url) -> Result<()> {
+    let host = url
         .host_str()
-        .zip(final_url.host_str())
-        .is_some_and(|(requested, actual)| !requested.eq_ignore_ascii_case(actual))
+        .ok_or_else(|| anyhow::anyhow!("WebFetch URL must include a host"))?;
+    let lower = host.to_ascii_lowercase();
+    if lower == "localhost" || lower.ends_with(".localhost") {
+        bail!("WebFetch cannot access localhost targets");
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if ip_is_private_or_local(ip) {
+            bail!("WebFetch cannot access private or local network targets");
+        }
+    }
+    Ok(())
+}
+
+fn ip_is_private_or_local(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_documentation()
+                || ip == Ipv4Addr::UNSPECIFIED
+        }
+        IpAddr::V6(ip) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+                || is_ipv6_documentation(ip)
+        }
+    }
+}
+
+fn is_ipv6_documentation(ip: Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xfff0) == 0x2001 && ip.segments()[1] == 0x0db8
+}
+
+fn read_limited_response_body(response: reqwest::blocking::Response) -> Result<Vec<u8>> {
+    if content_length_exceeds_limit(response.content_length()) {
+        bail!(
+            "WebFetch response body is too large (limit {} bytes)",
+            MAX_RESPONSE_BYTES
+        );
+    }
+    let mut limited = response.take((MAX_RESPONSE_BYTES + 1) as u64);
+    let mut bytes = Vec::new();
+    limited
+        .read_to_end(&mut bytes)
+        .context("failed to read web fetch response body")?;
+    if bytes.len() > MAX_RESPONSE_BYTES {
+        bail!(
+            "WebFetch response body is too large (limit {} bytes)",
+            MAX_RESPONSE_BYTES
+        );
+    }
+    Ok(bytes)
+}
+
+fn content_length_exceeds_limit(length: Option<u64>) -> bool {
+    length.is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+}
+
+fn redirect_target(request_url: &Url, response: &Response) -> Result<Option<Url>> {
+    if !response.status().is_redirection() {
+        return Ok(None);
+    }
+    let Some(location) = response.headers().get(reqwest::header::LOCATION) else {
+        return Ok(None);
+    };
+    let location = location
+        .to_str()
+        .context("redirect location header is not valid UTF-8")?;
+    let redirect_url = request_url
+        .join(location)
+        .with_context(|| format!("invalid redirect location `{location}`"))?;
+    Ok(Some(redirect_url))
 }
 
 fn status_text(status: StatusCode) -> &'static str {
@@ -363,6 +450,29 @@ mod tests {
     }
 
     #[test]
+    fn normalize_url_rejects_localhost_targets() {
+        let error = normalize_url("https://localhost/path").unwrap_err();
+        assert!(error.to_string().contains("localhost"));
+    }
+
+    #[test]
+    fn normalize_url_rejects_private_ip_targets() {
+        let error = normalize_url("https://192.168.1.10/path").unwrap_err();
+        assert!(error.to_string().contains("private or local"));
+    }
+
+    #[test]
+    fn content_length_limit_rejects_large_responses() {
+        assert!(content_length_exceeds_limit(Some(
+            (MAX_RESPONSE_BYTES + 1) as u64
+        )));
+        assert!(!content_length_exceeds_limit(Some(
+            MAX_RESPONSE_BYTES as u64
+        )));
+        assert!(!content_length_exceeds_limit(None));
+    }
+
+    #[test]
     fn redirect_message_contains_follow_up_instruction() {
         let original = Url::parse("https://old.example").unwrap();
         let redirect = Url::parse("https://new.example/page").unwrap();
@@ -371,6 +481,34 @@ mod tests {
         assert!(message.contains("REDIRECT DETECTED"));
         assert!(message.contains("use WebFetch again"));
         assert!(message.contains("https://new.example/page"));
+    }
+
+    #[test]
+    fn web_fetch_client_does_not_follow_redirects() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 1024];
+            let _ = stream.read(&mut buffer).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:9/metadata\r\nContent-Length: 0\r\n\r\n",
+                )
+                .unwrap();
+        });
+
+        let client = web_fetch_http_client().unwrap();
+        let request_url = Url::parse(&format!("http://{addr}/start")).unwrap();
+        let response = client.get(request_url.clone()).send().unwrap();
+
+        handle.join().unwrap();
+        assert_eq!(response.status(), StatusCode::FOUND);
+        let redirect = redirect_target(&request_url, &response).unwrap().unwrap();
+        assert_eq!(redirect.as_str(), "http://127.0.0.1:9/metadata");
     }
 
     #[test]

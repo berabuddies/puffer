@@ -52,9 +52,8 @@ pub(crate) fn handle_browser_agent(
     match action.as_str() {
         "list" => Ok(serde_json::to_value(browsers.list_tabs(&root_session_id))?),
         "open" => {
-            if let Some(tab_id) = optional_string(params, "tabId") {
-                arm_agent_recording(browsers, &root_session_id, &tab_id);
-            }
+            let tab_id = resolve_open_target_tab_id(browsers, &root_session_id, params);
+            arm_agent_recording(browsers, &root_session_id, &tab_id);
             let tab = open_agent_tab(
                 browsers,
                 events.clone(),
@@ -62,6 +61,7 @@ pub(crate) fn handle_browser_agent(
                 params,
                 width,
                 height,
+                Some(tab_id),
             )?;
             browsers.arm_agent_recording(&tab.backend_session_id);
             publish_tabs(browsers, &events, &root_session_id);
@@ -228,8 +228,9 @@ fn open_agent_tab(
     params: &Value,
     width: u32,
     height: u32,
+    resolved_tab_id: Option<String>,
 ) -> Result<BrowserTabInfo> {
-    if let Some(tab_id) = optional_string(params, "tabId") {
+    if let Some(tab_id) = resolved_tab_id.or_else(|| optional_string(params, "tabId")) {
         return browsers.open_tab(
             events.clone(),
             root_session_id.to_string(),
@@ -269,6 +270,24 @@ fn open_agent_tab(
         height,
         true,
     )
+}
+
+fn resolve_open_target_tab_id(
+    browsers: &BrowserRegistry,
+    root_session_id: &str,
+    params: &Value,
+) -> String {
+    if let Some(tab_id) = optional_string(params, "tabId") {
+        return tab_id;
+    }
+    if let Some(tab) = active_or_first(&browsers.list_tabs(root_session_id)) {
+        return tab.tab_id;
+    }
+    browsers
+        .tabs
+        .lock()
+        .unwrap()
+        .next_tab_id(root_session_id)
 }
 
 impl BrowserRegistry {

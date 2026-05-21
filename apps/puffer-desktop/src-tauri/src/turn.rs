@@ -23,7 +23,7 @@ use puffer_core::{
 };
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use puffer_resources::load_resources;
-use puffer_session_store::{SessionStore, TranscriptEvent};
+use puffer_session_store::{MessageActor, SessionStore, TranscriptEvent};
 use serde::Serialize;
 use serde_json::json;
 use std::collections::HashMap;
@@ -82,32 +82,48 @@ enum EmittedEvent {
     #[serde(rename_all = "camelCase")]
     TurnStart { turn_id: String },
     #[serde(rename_all = "camelCase")]
-    TextDelta { turn_id: String, delta: String },
+    TextDelta {
+        turn_id: String,
+        delta: String,
+        actor: MessageActor,
+    },
     #[serde(rename_all = "camelCase")]
-    ThinkingDelta { turn_id: String, delta: String },
+    ThinkingDelta {
+        turn_id: String,
+        delta: String,
+        actor: MessageActor,
+    },
     #[serde(rename_all = "camelCase")]
     ToolCallsRequested {
         turn_id: String,
         requests: serde_json::Value,
+        actor: MessageActor,
     },
     #[serde(rename_all = "camelCase")]
     ToolInvocations {
         turn_id: String,
         invocations: serde_json::Value,
+        actor: MessageActor,
     },
     #[serde(rename_all = "camelCase")]
     Usage {
         turn_id: String,
         report: serde_json::Value,
+        actor: MessageActor,
     },
     #[serde(rename_all = "camelCase")]
-    ReflectionCheckpoint { turn_id: String, summary: String },
+    ReflectionCheckpoint {
+        turn_id: String,
+        summary: String,
+        actor: MessageActor,
+    },
     #[serde(rename_all = "camelCase")]
     RetryAttempt {
         turn_id: String,
         attempt: usize,
         max_attempts: usize,
         error: String,
+        actor: MessageActor,
     },
     #[serde(rename_all = "camelCase")]
     PermissionRequest {
@@ -116,17 +132,20 @@ enum EmittedEvent {
         tool_id: String,
         summary: String,
         reason: Option<String>,
+        actor: MessageActor,
     },
     #[serde(rename_all = "camelCase")]
     UserQuestionRequest {
         turn_id: String,
         request_id: String,
         questions: serde_json::Value,
+        actor: MessageActor,
     },
     #[serde(rename_all = "camelCase")]
     TurnComplete {
         turn_id: String,
         assistant_text: String,
+        actor: MessageActor,
     },
     #[serde(rename_all = "camelCase")]
     TurnError { turn_id: String, error: String },
@@ -179,6 +198,7 @@ pub(crate) fn run_agent_turn(
 
     let spawn_turn_id = turn_id.clone();
     let spawn_session_id = session_id.clone();
+    let spawn_actor = state.assistant_actor();
     thread::spawn(move || {
         let result = drive_turn(
             app.clone(),
@@ -205,6 +225,7 @@ pub(crate) fn run_agent_turn(
                     EmittedEvent::TurnComplete {
                         turn_id: spawn_turn_id.clone(),
                         assistant_text,
+                        actor: spawn_actor.clone(),
                     },
                 );
             }
@@ -329,23 +350,28 @@ fn drive_turn(
         session_uuid,
         TranscriptEvent::UserMessage {
             text: message.clone(),
+            actor: Some(state.user_actor()),
         },
     )?;
 
     let mut auth_store = auth_store;
+    let stream_actor = state.assistant_actor();
 
     let on_event_app = app.clone();
     let on_event_channel = event_channel.clone();
     let on_event_turn_id = turn_id.clone();
+    let on_event_actor = stream_actor.clone();
     let on_event = move |event: TurnStreamEvent| {
         let payload = match event {
             TurnStreamEvent::ThinkingDelta(delta) => EmittedEvent::ThinkingDelta {
                 turn_id: on_event_turn_id.clone(),
                 delta,
+                actor: on_event_actor.clone(),
             },
             TurnStreamEvent::TextDelta(delta) => EmittedEvent::TextDelta {
                 turn_id: on_event_turn_id.clone(),
                 delta,
+                actor: on_event_actor.clone(),
             },
             TurnStreamEvent::ToolCallsRequested(requests) => EmittedEvent::ToolCallsRequested {
                 turn_id: on_event_turn_id.clone(),
@@ -361,6 +387,7 @@ fn drive_turn(
                         })
                         .collect(),
                 ),
+                actor: on_event_actor.clone(),
             },
             TurnStreamEvent::ToolInvocations(invocations) => EmittedEvent::ToolInvocations {
                 turn_id: on_event_turn_id.clone(),
@@ -378,6 +405,7 @@ fn drive_turn(
                         })
                         .collect(),
                 ),
+                actor: on_event_actor.clone(),
             },
             TurnStreamEvent::Usage(report) => EmittedEvent::Usage {
                 turn_id: on_event_turn_id.clone(),
@@ -387,10 +415,12 @@ fn drive_turn(
                     "cacheReadTokens": report.cache_read_tokens,
                     "cacheCreationTokens": report.cache_creation_tokens,
                 }),
+                actor: on_event_actor.clone(),
             },
             TurnStreamEvent::ReflectionCheckpoint(summary) => EmittedEvent::ReflectionCheckpoint {
                 turn_id: on_event_turn_id.clone(),
                 summary,
+                actor: on_event_actor.clone(),
             },
             TurnStreamEvent::ReflectionTrace(_) => return,
             TurnStreamEvent::RetryAttempt {
@@ -402,6 +432,7 @@ fn drive_turn(
                 attempt,
                 max_attempts,
                 error,
+                actor: on_event_actor.clone(),
             },
         };
         let _ = on_event_app.emit(&on_event_channel, payload);
@@ -412,6 +443,7 @@ fn drive_turn(
     let on_perm_turn_id = turn_id.clone();
     let on_perm_pending = pending.clone();
     let on_perm_next_id = next_request_id.clone();
+    let on_perm_actor = stream_actor.clone();
     let on_permission = move |request: PermissionPromptRequest| -> PermissionPromptAction {
         let request_id = on_perm_next_id.fetch_add(1, Ordering::SeqCst).to_string();
         let (tx, rx) = mpsc::channel::<PermissionPromptAction>();
@@ -428,6 +460,7 @@ fn drive_turn(
                 tool_id: request.tool_id,
                 summary: request.summary,
                 reason: request.reason,
+                actor: on_perm_actor.clone(),
             },
         );
 
@@ -440,6 +473,7 @@ fn drive_turn(
     let on_question_turn_id = turn_id.clone();
     let on_question_pending = pending_questions.clone();
     let on_question_next_id = next_request_id.clone();
+    let on_question_actor = stream_actor.clone();
     let on_user_question = move |request: UserQuestionPromptRequest| -> UserQuestionPromptResponse {
         let request_id = on_question_next_id
             .fetch_add(1, Ordering::SeqCst)
@@ -456,6 +490,7 @@ fn drive_turn(
                 turn_id: on_question_turn_id.clone(),
                 request_id,
                 questions: request.questions,
+                actor: on_question_actor.clone(),
             },
         );
 
@@ -490,6 +525,8 @@ fn drive_turn(
                 input: invocation.input.clone(),
                 output: invocation.output.clone(),
                 success: invocation.success,
+                actor: Some(stream_actor.clone()),
+                subject: state.tool_subject_actor(&invocation.tool_id, &invocation.output),
             },
         )?;
     }
@@ -499,6 +536,7 @@ fn drive_turn(
             session_uuid,
             TranscriptEvent::AssistantMessage {
                 text: outcome.assistant_text.clone(),
+                actor: Some(stream_actor.clone()),
             },
         )?;
     }

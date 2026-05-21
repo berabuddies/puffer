@@ -503,6 +503,7 @@ fn run_openai_responses_judge(
     let wire_input = items_to_responses_input(&[ConversationItem::user_message(prompt)]);
     let body = build_codex_openai_request_body(
         state,
+        &execution.request_config.base_url,
         model_id,
         &instructions,
         wire_input,

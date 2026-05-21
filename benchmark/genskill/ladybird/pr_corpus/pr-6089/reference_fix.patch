@@ -1,0 +1,103 @@
+From 70aa700555ae377cda7a5ed019b519b416df6a61 Mon Sep 17 00:00:00 2001
+From: Pavel Shliak <shlyakpavel@gmail.com>
+Date: Sat, 6 Sep 2025 01:54:05 +0400
+Subject: [PATCH] LibWasm: Fix memory.fill ignoring memory index and unsafe
+ bounds check
+
+Previously, the memory.fill instruction always wrote to memory 0,
+ignoring the selected memory index. This caused incorrect behavior
+in multi-memory modules (e.g. filling mem0 instead of mem1).
+Additionally, the bounds check used `destination_offset + count`
+without overflow checking, which could wrap and bypass validation.
+
+This patch:
+- Passes `args.memory_index` into store_to_memory, so the correct
+  memory is filled.
+- Uses Checked<u32> for destination_offset + count, consistent
+  with memory.copy and memory.init, to prevent overflow.
+
+Minimal repro:
+
+    (module
+      (memory $m0 1)
+      (memory $m1 1)
+
+      (func (export "go") (result i32)
+        ;; Fill mem1[0] with 0xAA
+        i32.const 0
+        i32.const 170
+        i32.const 1
+        memory.fill (memory 1)
+
+        ;; Return (mem1[0] << 8) | mem0[0]
+        i32.const 0
+        i32.load8_u (memory 1)
+        i32.const 8
+        i32.shl
+        i32.const 0
+        i32.load8_u (memory 0)
+        i32.or
+      )
+    )
+
+Before fix: returns 170 (0x00AA).
+After fix:  returns 43520 (0xAA00).
+---
+ .../AbstractMachine/BytecodeInterpreter.cpp        |   7 +++++--
+ .../LibWasm/Tests/Executor/test-memfill-memidx.js  |  11 +++++++++++
+ .../Tests/Fixtures/Modules/memfill-memidx.wasm     | Bin 0 -> 65 bytes
+ 3 files changed, 16 insertions(+), 2 deletions(-)
+ create mode 100644 Libraries/LibWasm/Tests/Executor/test-memfill-memidx.js
+ create mode 100644 Libraries/LibWasm/Tests/Fixtures/Modules/memfill-memidx.wasm
+
+diff --git a/Libraries/LibWasm/AbstractMachine/BytecodeInterpreter.cpp b/Libraries/LibWasm/AbstractMachine/BytecodeInterpreter.cpp
+index a1de59e51a8f1..6d2bc0d86053f 100644
+--- a/Libraries/LibWasm/AbstractMachine/BytecodeInterpreter.cpp
++++ b/Libraries/LibWasm/AbstractMachine/BytecodeInterpreter.cpp
+@@ -469,13 +469,16 @@ void BytecodeInterpreter::interpret_impl(Configuration& configuration, Expressio
+             u8 value = static_cast<u8>(configuration.take_source(1, addresses.sources).to<u32>());
+             auto destination_offset = configuration.take_source(2, addresses.sources).to<u32>();
+ 
+-            TRAP_IN_LOOP_IF_NOT(static_cast<size_t>(destination_offset + count) <= instance->data().size());
++            Checked<u32> checked_end = destination_offset;
++            checked_end += count;
++            TRAP_IN_LOOP_IF_NOT(!checked_end.has_overflow() && static_cast<size_t>(checked_end.value()) <= instance->data().size());
+ 
+             if (count == 0)
+                 RUN_NEXT_INSTRUCTION();
+ 
++            Instruction::MemoryArgument memarg { 0, 0, args.memory_index };
+             for (u32 i = 0; i < count; ++i) {
+-                if (store_to_memory(configuration, Instruction::MemoryArgument { 0, 0 }, { &value, sizeof(value) }, destination_offset + i))
++                if (store_to_memory(configuration, memarg, { &value, sizeof(value) }, destination_offset + i))
+                     return;
+             }
+ 
+diff --git a/Libraries/LibWasm/Tests/Executor/test-memfill-memidx.js b/Libraries/LibWasm/Tests/Executor/test-memfill-memidx.js
+new file mode 100644
+index 0000000000000..c33a14b458c58
+--- /dev/null
++++ b/Libraries/LibWasm/Tests/Executor/test-memfill-memidx.js
+@@ -0,0 +1,11 @@
++test("memfill executes and returns expected result", () => {
++    const bin = readBinaryWasmFile("Fixtures/Modules/memfill-memidx.wasm");
++
++    const module = parseWebAssemblyModule(bin);
++
++    const go = module.getExport("go");
++    const result = module.invoke(go);
++
++    // mem1[0]=0xAA, mem0[0]=0x00 → 0xAA00 = 43520
++    expect(result).toBe(43520);
++});
+diff --git a/Libraries/LibWasm/Tests/Fixtures/Modules/memfill-memidx.wasm b/Libraries/LibWasm/Tests/Fixtures/Modules/memfill-memidx.wasm
+new file mode 100644
+index 0000000000000000000000000000000000000000..faed7b14b865f720d2c2a49d44ce1d34cbf595b4
+GIT binary patch
+literal 65
+zcmWN@!3{t_6hOiERu-`(h!XVRcf!d@B)IEGjSkFdSk6tr?2LDnB<F<K)TVWZZm=ha
+P$M7u%<0R2uf8Zz|@)8I&
+
+literal 0
+HcmV?d00001
+

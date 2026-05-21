@@ -377,10 +377,16 @@ mod tests {
     /// vars; without it, parallel test runs race on the env table.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    fn bash_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Save+restore both BASH timeout env vars across a closure so
     /// tests don't leak overrides into siblings.
     fn with_bash_timeout_env<F: FnOnce()>(default_ms: Option<&str>, max_ms: Option<&str>, f: F) {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = bash_env_lock();
         let prior_default = std::env::var(ENV_DEFAULT_TIMEOUT_MS).ok();
         let prior_max = std::env::var(ENV_MAX_TIMEOUT_MS).ok();
         match default_ms {
@@ -476,131 +482,141 @@ mod tests {
 
     #[test]
     fn execute_foreground_returns_stdout() {
-        let temp = tempfile::tempdir().unwrap();
-        let result = execute(
-            temp.path(),
-            &test_session_id(),
-            ClaudeBashInput {
-                command: "printf 'hello'".to_string(),
-                timeout: Some(1_000),
-                description: None,
-                run_in_background: false,
-                dangerously_disable_sandbox: false,
-            },
-        )
-        .unwrap();
-        assert!(result.success);
-        assert_eq!(result.output.stdout, "hello");
-        assert!(!result.output.interrupted);
-        assert_eq!(result.output.dangerously_disable_sandbox, Some(false));
+        with_bash_timeout_env(None, None, || {
+            let temp = tempfile::tempdir().unwrap();
+            let result = execute(
+                temp.path(),
+                &test_session_id(),
+                ClaudeBashInput {
+                    command: "printf 'hello'".to_string(),
+                    timeout: Some(5_000),
+                    description: None,
+                    run_in_background: false,
+                    dangerously_disable_sandbox: false,
+                },
+            )
+            .unwrap();
+            assert!(result.success, "command failed: {}", result.output.stderr);
+            assert_eq!(result.output.stdout, "hello");
+            assert!(!result.output.interrupted);
+            assert_eq!(result.output.dangerously_disable_sandbox, Some(false));
+        });
     }
 
     #[test]
     fn execute_timeout_marks_interrupted() {
-        let temp = tempfile::tempdir().unwrap();
-        let result = execute(
-            temp.path(),
-            &test_session_id(),
-            ClaudeBashInput {
-                command: "sleep 0.2".to_string(),
-                timeout: Some(20),
-                description: None,
-                run_in_background: false,
-                dangerously_disable_sandbox: true,
-            },
-        )
-        .unwrap();
-        assert!(!result.success);
-        assert!(result.output.interrupted);
-        assert!(result.output.stderr.contains("timed out after"));
-        assert_eq!(result.output.dangerously_disable_sandbox, Some(true));
+        with_bash_timeout_env(None, None, || {
+            let temp = tempfile::tempdir().unwrap();
+            let result = execute(
+                temp.path(),
+                &test_session_id(),
+                ClaudeBashInput {
+                    command: "sleep 0.2".to_string(),
+                    timeout: Some(20),
+                    description: None,
+                    run_in_background: false,
+                    dangerously_disable_sandbox: true,
+                },
+            )
+            .unwrap();
+            assert!(!result.success);
+            assert!(result.output.interrupted);
+            assert!(result.output.stderr.contains("timed out after"));
+            assert_eq!(result.output.dangerously_disable_sandbox, Some(true));
+        });
     }
 
     #[test]
     fn execute_background_returns_task_id() {
-        let temp = tempfile::tempdir().unwrap();
-        let result = execute(
-            temp.path(),
-            &test_session_id(),
-            ClaudeBashInput {
-                command: "sleep 0.1".to_string(),
-                timeout: Some(1_000),
-                description: None,
-                run_in_background: true,
-                dangerously_disable_sandbox: false,
-            },
-        )
-        .unwrap();
-        assert!(result.success);
-        assert!(result.output.background_task_id.is_some());
-        assert_eq!(result.output.backgrounded_by_user, Some(false));
-        assert_eq!(result.output.assistant_auto_backgrounded, Some(false));
+        with_bash_timeout_env(None, None, || {
+            let temp = tempfile::tempdir().unwrap();
+            let result = execute(
+                temp.path(),
+                &test_session_id(),
+                ClaudeBashInput {
+                    command: "sleep 0.1".to_string(),
+                    timeout: Some(5_000),
+                    description: None,
+                    run_in_background: true,
+                    dangerously_disable_sandbox: false,
+                },
+            )
+            .unwrap();
+            assert!(result.success);
+            assert!(result.output.background_task_id.is_some());
+            assert_eq!(result.output.backgrounded_by_user, Some(false));
+            assert_eq!(result.output.assistant_auto_backgrounded, Some(false));
+        });
     }
 
     #[test]
     fn execute_background_persists_shell_task() {
-        let temp = tempfile::tempdir().unwrap();
-        let result = execute(
-            temp.path(),
-            &test_session_id(),
-            ClaudeBashInput {
-                command: "sleep 0.1".to_string(),
-                timeout: Some(1_000),
-                description: Some("Sleep briefly".to_string()),
-                run_in_background: true,
-                dangerously_disable_sandbox: false,
-            },
-        )
-        .unwrap();
-
-        let task_id = result.output.background_task_id.as_deref().unwrap();
-        let tasks_path = temp
-            .path()
-            .join(".puffer")
-            .join("runtime")
-            .join("claude_workflow")
-            .join("sessions")
-            .join(test_session_id().to_string())
-            .join("tasks.json");
-        let payload: Value =
-            serde_json::from_str(&fs::read_to_string(tasks_path).unwrap()).unwrap();
-        let tasks = payload.get("tasks").and_then(Value::as_array).unwrap();
-        let stored = tasks
-            .iter()
-            .find(|task| task.get("task_id").and_then(Value::as_str) == Some(task_id))
+        with_bash_timeout_env(None, None, || {
+            let temp = tempfile::tempdir().unwrap();
+            let result = execute(
+                temp.path(),
+                &test_session_id(),
+                ClaudeBashInput {
+                    command: "sleep 0.1".to_string(),
+                    timeout: Some(5_000),
+                    description: Some("Sleep briefly".to_string()),
+                    run_in_background: true,
+                    dangerously_disable_sandbox: false,
+                },
+            )
             .unwrap();
-        assert_eq!(
-            stored.get("task_type").and_then(Value::as_str),
-            Some("shell")
-        );
-        assert_eq!(
-            stored.get("status").and_then(Value::as_str),
-            Some("running")
-        );
-        assert_eq!(
-            stored.get("command").and_then(Value::as_str),
-            Some("sleep 0.1")
-        );
-        assert_eq!(
-            stored.get("subject").and_then(Value::as_str),
-            Some("Sleep briefly")
-        );
+
+            let task_id = result.output.background_task_id.as_deref().unwrap();
+            let tasks_path = temp
+                .path()
+                .join(".puffer")
+                .join("runtime")
+                .join("claude_workflow")
+                .join("sessions")
+                .join(test_session_id().to_string())
+                .join("tasks.json");
+            let payload: Value =
+                serde_json::from_str(&fs::read_to_string(tasks_path).unwrap()).unwrap();
+            let tasks = payload.get("tasks").and_then(Value::as_array).unwrap();
+            let stored = tasks
+                .iter()
+                .find(|task| task.get("task_id").and_then(Value::as_str) == Some(task_id))
+                .unwrap();
+            assert_eq!(
+                stored.get("task_type").and_then(Value::as_str),
+                Some("shell")
+            );
+            assert_eq!(
+                stored.get("status").and_then(Value::as_str),
+                Some("running")
+            );
+            assert_eq!(
+                stored.get("command").and_then(Value::as_str),
+                Some("sleep 0.1")
+            );
+            assert_eq!(
+                stored.get("subject").and_then(Value::as_str),
+                Some("Sleep briefly")
+            );
+        });
     }
 
     #[test]
     fn execute_from_value_parses_claude_field_names() {
-        let temp = tempfile::tempdir().unwrap();
-        let input = json!({
-            "command": "printf ok",
-            "timeout": 1000,
-            "description": "Print test token",
-            "run_in_background": false,
-            "dangerouslyDisableSandbox": true
+        with_bash_timeout_env(None, None, || {
+            let temp = tempfile::tempdir().unwrap();
+            let input = json!({
+                "command": "printf ok",
+            "timeout": 5000,
+                "description": "Print test token",
+                "run_in_background": false,
+                "dangerouslyDisableSandbox": true
+            });
+            let result = execute_from_value(temp.path(), &test_session_id(), input).unwrap();
+            assert!(result.success, "command failed: {}", result.output.stderr);
+            assert_eq!(result.output.stdout, "ok");
+            assert_eq!(result.output.dangerously_disable_sandbox, Some(true));
         });
-        let result = execute_from_value(temp.path(), &test_session_id(), input).unwrap();
-        assert!(result.success);
-        assert_eq!(result.output.stdout, "ok");
-        assert_eq!(result.output.dangerously_disable_sandbox, Some(true));
     }
 
     #[test]
@@ -665,31 +681,34 @@ mod tests {
 
     #[test]
     fn truncate_output_middle_truncation_real_bash() {
-        // Simulate large output: head=AAAAAA..., tail=ZZZZZZ...
-        let temp = tempfile::tempdir().unwrap();
-        // printf A × 20000 chars, then B × 20000 chars — total 40000 > 30000 limit
-        let result = execute(
-            temp.path(),
-            &test_session_id(),
-            ClaudeBashInput {
-                command: "printf '%0.sA' $(jot 20000); printf '%0.sZ' $(jot 20000)".to_string(),
-                timeout: Some(5_000),
-                description: None,
-                run_in_background: false,
-                dangerously_disable_sandbox: false,
-            },
-        )
-        .unwrap();
-        assert!(result.success, "command failed: {}", result.output.stderr);
-        let stdout = &result.output.stdout;
-        // 40000 chars > 30000 limit, must be truncated
-        assert!(
-            stdout.contains("[…"),
-            "large output must be middle-truncated"
-        );
-        // Head preserved (starts with A's)
-        assert!(stdout.starts_with('A'), "head must start with A");
-        // Tail preserved (ends with Z's)
-        assert!(stdout.ends_with('Z'), "tail must end with Z");
+        with_bash_timeout_env(None, None, || {
+            // Simulate large output: head=AAAAAA..., tail=ZZZZZZ...
+            let temp = tempfile::tempdir().unwrap();
+            // printf A × 20000 chars, then B × 20000 chars — total 40000 > 30000 limit
+            let result = execute(
+                temp.path(),
+                &test_session_id(),
+                ClaudeBashInput {
+                    command: "printf '%0.sA' $(jot 20000); printf '%0.sZ' $(jot 20000)"
+                        .to_string(),
+                    timeout: Some(5_000),
+                    description: None,
+                    run_in_background: false,
+                    dangerously_disable_sandbox: false,
+                },
+            )
+            .unwrap();
+            assert!(result.success, "command failed: {}", result.output.stderr);
+            let stdout = &result.output.stdout;
+            // 40000 chars > 30000 limit, must be truncated
+            assert!(
+                stdout.contains("[…"),
+                "large output must be middle-truncated"
+            );
+            // Head preserved (starts with A's)
+            assert!(stdout.starts_with('A'), "head must start with A");
+            // Tail preserved (ends with Z's)
+            assert!(stdout.ends_with('Z'), "tail must end with Z");
+        });
     }
 }

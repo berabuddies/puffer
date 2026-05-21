@@ -1,0 +1,32 @@
+# Sandbox image for puffer-genskill-eval replays.
+#
+# Each replay container does:
+#   git -C /work/ladybird reset --hard <base_sha>
+#   cp <test files from corpus> /work/ladybird/
+#   exec puffer non-interactive ...
+
+FROM ubuntu:24.04
+
+ARG LADYBIRD_REPO=https://github.com/LadybirdBrowser/ladybird.git
+ARG LADYBIRD_REF=master
+
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y     build-essential cmake ninja-build git pkg-config ccache     autoconf autoconf-archive automake libtool libtool-bin     libgl1-mesa-dev libssl-dev libavcodec-dev libavformat-dev     libavutil-dev libavfilter-dev libopenal-dev libxkbcommon-dev     libpulse-dev libwayland-dev libwebp-dev     qt6-base-dev qt6-tools-dev qt6-multimedia-dev qt6-wayland     ca-certificates curl jq python3 zip unzip tar  && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y     gcc-14 g++-14  && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y     mesa-common-dev python3-venv  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work
+RUN git clone --branch "${LADYBIRD_REF}" "${LADYBIRD_REPO}" ladybird
+RUN useradd -m -s /bin/bash ladybird && chown -R ladybird:ladybird /work
+RUN mkdir -p /opt/puffer && echo "Mount /usr/local/bin/puffer at runtime" > /opt/puffer/README
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y     generate-ninja  && rm -rf /var/lib/apt/lists/*
+
+# Warm build cache -- tolerate failure because individual replays rebuild from
+# their corpus base commit before running the target test.
+USER ladybird
+RUN cd ladybird && ( \
+    if [ -f Meta/ladybird.py ]; then python3 Meta/ladybird.py build; \
+    elif [ -x Meta/ladybird.sh ]; then ./Meta/ladybird.sh build; \
+    fi \
+  || true)
+
+CMD ["/bin/bash"]

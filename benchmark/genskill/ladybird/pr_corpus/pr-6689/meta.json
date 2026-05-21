@@ -1,0 +1,16 @@
+{
+  "pr_number": 6689,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/6689",
+  "title": "LibJS: Skip null entries in numeric string cache when gathering roots",
+  "merged_at": "2025-11-04T09:34:43Z",
+  "base_commit": "9ff75f442b52f55a55d16231c2657a4d822babe5",
+  "merge_commit": "74940726d0b517a2ceb8ea23d47fa1705d6ec090",
+  "area": "libjs",
+  "files_changed": [
+    "Libraries/LibJS/Runtime/VM.cpp",
+    "Libraries/LibWeb/Internals/Internals.cpp",
+    "Libraries/LibWeb/Internals/Internals.h",
+    "Libraries/LibWeb/Internals/Internals.idl"
+  ],
+  "task_prompt": "Fix the crash triggered by Tests/LibWeb/Crash/Internals/dump-gc-graph.html. The GC root-gathering pass iterates the numeric string cache in VM.cpp but does not skip null entries, causing a null pointer dereference. The test page calls internals.dumpGCGraph() which triggers root gathering; it should complete without crashing."
+}

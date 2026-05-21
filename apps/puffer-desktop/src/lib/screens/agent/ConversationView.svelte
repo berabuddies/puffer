@@ -1,8 +1,8 @@
 <script lang="ts">
   import "../../design/chat.css";
 
-  import { tick } from "svelte";
-  import Puffer from "../../design/Puffer.svelte";
+  import { onDestroy, tick } from "svelte";
+  import BrandLogo from "../../design/BrandLogo.svelte";
   import Icon, { type IconName } from "../../design/Icon.svelte";
   import MessageBody from "../../components/MessageBody.svelte";
   import ToolCard from "./ToolCard.svelte";
@@ -27,8 +27,20 @@
     type AgentTurnOptions,
     type ModelDescriptorInfo
   } from "../../api/desktop";
+  import {
+    canonicalDaemonProviderId,
+    providerIdCanRunAgent,
+    providerIdInSet,
+    providerIsAvailableForAgent,
+    providerIdsEquivalent
+  } from "../../providerIds";
 
   const ENGINEER_NAME = "Engineer";
+  type SubmitMessageResult = boolean | void | Promise<boolean | void>;
+  type ComposerRoutingPreference = {
+    providerId: string | null;
+    modelId: string | null;
+  };
 
   type Props = {
     session: SessionListItem | null;
@@ -37,16 +49,21 @@
     timeline: TimelineItem[];
     pendingPermissions: PermissionTimelineItem[];
     pendingQuestions: UserQuestionTimelineItem[];
+    resolvingPermissionIds?: string[];
+    resolvingQuestionIds?: string[];
     loading: boolean;
     /** True while an agent turn is running on the current session. Flips
      *  the composer's send button into a red "Stop" so the user can
      *  interrupt a runaway loop. */
     turnRunning?: boolean;
+    /** True once the daemon has returned the turn id required for cancel. */
+    turnCancelable?: boolean;
     turnStartedAtMs?: number | null;
     turnThinking?: boolean;
     turnStatusHint?: string | null;
     settingsSnapshot?: SettingsSnapshot | null;
-    onSubmitMessage: (message: string, options?: AgentTurnOptions) => void;
+    backendConnected?: boolean;
+    onSubmitMessage: (message: string, options?: AgentTurnOptions) => SubmitMessageResult;
     onResolvePermission: (permissionId: string, choice: string) => void;
     onResolveUserQuestion: (
       questionId: string,
@@ -55,6 +72,7 @@
     ) => void;
     onCancelTurn?: () => void;
     onOpenFileLink?: (path: string, line?: number | null) => void;
+    onDraftChange?: (hasDraft: boolean) => void;
   };
 
   let {
@@ -64,24 +82,41 @@
     timeline,
     pendingPermissions,
     pendingQuestions,
+    resolvingPermissionIds = [],
+    resolvingQuestionIds = [],
     loading,
     turnRunning = false,
+    turnCancelable = true,
     turnStartedAtMs = null,
     turnThinking = false,
     turnStatusHint = null,
     settingsSnapshot = null,
+    backendConnected = true,
     onSubmitMessage,
     onResolvePermission,
     onResolveUserQuestion,
     onCancelTurn,
-    onOpenFileLink
+    onOpenFileLink,
+    onDraftChange
   }: Props = $props();
 
   let displayUserName = $derived(userDisplayName.trim() || "Otter");
   let userInitial = $derived(displayUserName.trim().charAt(0).toUpperCase() || "O");
-  let engineerName = $derived(`${ENGINEER_NAME} (${providerDisplayName(session?.providerId)})`);
+
+  function scopedSessionItemId(itemId: string): string {
+    return session?.id ? `${session.id}::${itemId}` : itemId;
+  }
+
+  function isPermissionResolving(item: PermissionTimelineItem): boolean {
+    return resolvingPermissionIds.includes(scopedSessionItemId(item.id));
+  }
+
+  function isQuestionResolving(item: UserQuestionTimelineItem): boolean {
+    return resolvingQuestionIds.includes(scopedSessionItemId(item.id));
+  }
 
   let draft = $state("");
+  let draftBySessionId = $state<Record<string, string>>({});
   let threadEl: HTMLDivElement | undefined;
   let lastSessionId: string | null = null;
   let nowMs = $state(Date.now());
@@ -89,29 +124,145 @@
   let selectedActivityChildren = $state<Record<string, string>>({});
   let fastMode = $state(false);
   let permissionMode = $state<AgentPermissionMode>("workspace-write");
-  let routingSessionId = $state<string | null>(null);
+  let routingSelectionKey = $state<string | null>(null);
   let selectedProviderId = $state<string | null>(null);
   let selectedModelId = $state<string | null>(null);
   let selectedThinkingOptionId = $state("");
+  let submitInFlightSessionIds = $state<string[]>([]);
+  const submitInFlightGuards = new Set<string>();
   let thinkingProviderId = $state<string | null>(null);
   let thinkingModels = $state<ModelDescriptorInfo[]>([]);
   let thinkingLoadError = $state<string | null>(null);
+  let composerPreferencesSessionId = $state<string | null>(null);
+  let loadedThinkingPreferenceKey = $state<string | null>(null);
+  let routingBySessionId = $state<Record<string, ComposerRoutingPreference>>({});
+  let submitInFlight = $derived(
+    Boolean(session?.id && submitInFlightSessionIds.includes(session.id))
+  );
+  let displayedProviderId = $derived(
+    selectedProviderId ?? session?.providerId ?? settingsSnapshot?.config.defaultProvider ?? null
+  );
+  let engineerName = $derived(`${ENGINEER_NAME} (${providerDisplayName(displayedProviderId)})`);
 
   let fastModeAvailable = $derived(modelSupportsFastMode(selectedModelId));
+  let selectedProviderModelSourceId = $derived.by(() => {
+    return providerModelSourceId(selectedProviderId);
+  });
   let selectedModelInfo = $derived(
-    thinkingProviderId === selectedProviderId
+    selectedProviderModelSourceId &&
+      providerIdsEquivalent(thinkingProviderId, selectedProviderModelSourceId)
       ? thinkingModels.find((model) => model.id === selectedModelId) ?? null
       : null
   );
+  let selectedProviderModelsLoaded = $derived(
+    !selectedProviderModelSourceId ||
+      providerIdsEquivalent(thinkingProviderId, selectedProviderModelSourceId)
+  );
+  let selectedProviderModelsLoadFailed = $derived(
+    Boolean(
+      thinkingLoadError &&
+        selectedProviderModelSourceId &&
+        providerIdsEquivalent(thinkingProviderId, selectedProviderModelSourceId)
+    )
+  );
+  let selectedModelReady = $derived.by(() => {
+    const modelId = selectedModelId?.trim();
+    if (!modelId) return false;
+    if (!selectedProviderModelSourceId) return true;
+    if (selectedProviderModelsLoadFailed) return true;
+    if (!selectedProviderModelsLoaded) return false;
+    const current = thinkingModels.find((model) => model.id === modelId);
+    if (current) return modelSupportsAgentTools(current);
+    if (isCustomModelId(modelId, selectedProviderModelSourceId)) return true;
+    return false;
+  });
+  let selectedModelBlockedReason = $derived.by(() => {
+    const label = providerDisplayName(selectedProviderId);
+    const modelId = selectedModelId?.trim();
+    if (!modelId) {
+      if (selectedProviderModelsLoaded && thinkingModels.length > 0) {
+        return `No ${label} models support agent tools.`;
+      }
+      return selectedProviderModelsLoaded
+        ? `Pick a ${label} model before sending.`
+        : `Loading ${label} models before sending.`;
+    }
+    if (!selectedProviderModelSourceId) return null;
+    if (selectedProviderModelsLoadFailed) return null;
+    if (!selectedProviderModelsLoaded) return `Loading ${label} models before sending.`;
+    const current = thinkingModels.find((model) => model.id === modelId);
+    if (current && !modelSupportsAgentTools(current)) {
+      return `${current.displayName || current.id} does not support agent tools.`;
+    }
+    if (isCustomModelId(modelId, selectedProviderModelSourceId)) return null;
+    if (thinkingModels.length === 0) return `No ${label} models available.`;
+    return `Updating ${label} model before sending.`;
+  });
   let thinkingOptions = $derived(selectedModelInfo?.thinkingOptions ?? []);
   let thinkingAvailable = $derived(thinkingOptions.length > 0);
   let conversationStarted = $derived(
     (session?.eventCount ?? 0) > 0 ||
       timeline.some((item) =>
-        ["user", "assistant", "system", "tool", "command"].includes(item.kind)
+        ["user", "assistant", "system", "tool", "command", "diff"].includes(item.kind)
       )
   );
   let allowProviderSwitch = $derived(Boolean(session) && !conversationStarted && !turnRunning);
+  let authenticatedProviderIds = $derived((settingsSnapshot?.auth ?? []).map((entry) => entry.providerId));
+  let availableAgentProviderIds = $derived(
+    (settingsSnapshot?.providers ?? [])
+      .filter((provider) => providerIsAvailableForAgent(provider, authenticatedProviderIds))
+      .map((provider) => provider.id)
+  );
+  let selectedProviderAuthenticated = $derived(
+    settingsSnapshot === null ||
+      !selectedProviderId ||
+      (providerIdCanRunAgent(selectedProviderId, settingsSnapshot?.providers ?? []) &&
+        providerIdInSet(selectedProviderId, availableAgentProviderIds))
+  );
+  let providerSwitchCanRecover = $derived(
+    allowProviderSwitch && availableAgentProviderIds.length > 0
+  );
+  let agentBusy = $derived(
+    !turnRunning &&
+      (agentState === "running" || agentState === "thinking" || agentState === "awaiting")
+  );
+  let composerDisabled = $derived(
+    !session ||
+      !backendConnected ||
+      agentBusy ||
+      (!selectedProviderAuthenticated && !providerSwitchCanRecover)
+  );
+  let modelPickerDisabled = $derived(
+    turnRunning || (!selectedProviderAuthenticated && !providerSwitchCanRecover)
+  );
+  let composerBlockedReason = $derived(
+    agentBusy
+      ? agentState === "awaiting"
+        ? "Respond to the pending request before starting another turn."
+        : "Wait for the running agent turn to finish."
+      : !backendConnected
+        ? "Reconnect the Puffer backend before sending another message."
+      : selectedProviderAuthenticated
+      ? selectedModelReady
+        ? null
+        : selectedModelBlockedReason
+      : providerSwitchCanRecover
+        ? `Switch to a connected provider to continue this empty session.`
+        : `Reconnect ${providerDisplayName(selectedProviderId)} to continue this session.`
+  );
+  let canSubmitPrompt = $derived(
+    Boolean(
+      draft.trim() &&
+        session &&
+        backendConnected &&
+        !turnRunning &&
+        !agentBusy &&
+        !submitInFlight &&
+        selectedProviderAuthenticated &&
+        selectedModelReady
+    )
+  );
+  let canCancelTurn = $derived(Boolean(turnRunning && turnCancelable && onCancelTurn));
 
   function modelSupportsFastMode(modelId: string | null | undefined): boolean {
     const normalized = modelId?.trim().toLowerCase();
@@ -121,11 +272,78 @@
     );
   }
 
+  function normalizeModelIdForProvider(
+    providerId: string | null | undefined,
+    modelId: string | null | undefined
+  ): string | null {
+    const trimmed = modelId?.trim();
+    if (!trimmed) return null;
+    const slashIndex = trimmed.indexOf("/");
+    if (slashIndex <= 0 || slashIndex === trimmed.length - 1) return trimmed;
+    const prefix = trimmed.slice(0, slashIndex);
+    const model = trimmed.slice(slashIndex + 1).trim();
+    const provider = providerId?.trim();
+    const canonicalPrefix = canonicalDaemonProviderId(prefix).toLowerCase();
+    const canonicalProvider = provider ? canonicalDaemonProviderId(provider).toLowerCase() : "";
+    if (
+      provider &&
+      model &&
+      canonicalPrefix === canonicalProvider &&
+      shouldStripModelPrefix(canonicalProvider)
+    ) {
+      return model;
+    }
+    return trimmed;
+  }
+
+  function shouldStripModelPrefix(canonicalProviderId: string): boolean {
+    return canonicalProviderId === "openai" || canonicalProviderId === "anthropic";
+  }
+
+  function isCustomModelId(
+    modelId: string | null | undefined,
+    providerId: string | null | undefined = null
+  ): boolean {
+    const trimmed = modelId?.trim();
+    if (!trimmed) return false;
+    if (providerIdsEquivalent(providerId, "openrouter") && trimmed === "openrouter/auto") {
+      return true;
+    }
+    return trimmed.includes(":") || trimmed.startsWith("ft-");
+  }
+
+  function modelSupportsAgentTools(model: ModelDescriptorInfo): boolean {
+    return model.supportsTools !== false;
+  }
+
+  function configuredProviderDisplayName(providerId: string): string | null {
+    const providers = settingsSnapshot?.providers ?? [];
+    const exact = providers.find((provider) => provider.id.trim().toLowerCase() === providerId);
+    if (exact?.displayName.trim()) return exact.displayName.trim();
+    const equivalent = providers.find((provider) => providerIdsEquivalent(provider.id, providerId));
+    if (equivalent?.displayName.trim()) return equivalent.displayName.trim();
+    return null;
+  }
+
+  function providerModelSourceId(providerId: string | null | undefined): string | null {
+    const normalized = providerId?.trim().toLowerCase();
+    if (!normalized) return null;
+    const providers = settingsSnapshot?.providers ?? [];
+    const exact = providers.find((provider) => provider.id.trim().toLowerCase() === normalized);
+    if (exact) return exact.id;
+    const equivalent = providers.find((provider) => providerIdsEquivalent(provider.id, normalized));
+    return equivalent?.id ?? providerId ?? null;
+  }
+
   function providerDisplayName(providerId: string | null | undefined): string {
     const normalized = providerId?.trim().toLowerCase();
     if (!normalized) return "Codex";
-    if (normalized === "codex" || normalized === "openai") return "Codex";
     if (normalized === "claude" || normalized === "anthropic") return "Claude";
+    const configured = configuredProviderDisplayName(normalized);
+    if (configured) return configured;
+    if (normalized === "codex") return "Codex";
+    if (normalized === "openai") return "OpenAI";
+    if (normalized === "openrouter") return "OpenRouter";
     if (normalized === "puffer") return "Puffer";
     return normalized
       .split(/[-_\s]+/)
@@ -141,6 +359,68 @@
     return "workspace-write";
   }
 
+  function sessionPreferenceKey(sessionId: string, name: string): string {
+    return `puffer-agent:session:${sessionId}:${name}`;
+  }
+
+  function routingPreferenceKey(sessionId: string): string {
+    return sessionPreferenceKey(sessionId, "routing");
+  }
+
+  function draftPreferenceKey(sessionId: string): string {
+    return sessionPreferenceKey(sessionId, "draft");
+  }
+
+  function readDraftForSession(sessionId: string): string {
+    if (typeof window === "undefined") return "";
+    try {
+      return window.localStorage.getItem(draftPreferenceKey(sessionId)) ?? "";
+    } catch {
+      return "";
+    }
+  }
+
+  function readRoutingPreference(sessionId: string): ComposerRoutingPreference | null {
+    const cached = routingBySessionId[sessionId];
+    if (cached) return cached;
+    if (typeof window === "undefined") return null;
+    try {
+      const raw = window.localStorage.getItem(routingPreferenceKey(sessionId));
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as Partial<ComposerRoutingPreference> | null;
+      if (!parsed || typeof parsed.providerId !== "string") return null;
+      return {
+        providerId: parsed.providerId,
+        modelId: typeof parsed.modelId === "string" ? parsed.modelId : ""
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  function rememberRoutingPreference(
+    sessionId: string,
+    providerId: string | null,
+    modelId: string | null
+  ) {
+    const preference = {
+      providerId,
+      modelId: normalizeModelIdForProvider(providerId, modelId) ?? ""
+    };
+    routingBySessionId = { ...routingBySessionId, [sessionId]: preference };
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(routingPreferenceKey(sessionId), JSON.stringify(preference));
+    }
+  }
+
+  function thinkingPreferenceKey(): string | null {
+    const sessionId = session?.id;
+    const providerId = selectedProviderModelSourceId ?? selectedProviderId;
+    const modelId = selectedModelId?.trim();
+    if (!sessionId || !providerId || !modelId) return null;
+    return sessionPreferenceKey(sessionId, `thinking:${providerId}:${modelId}`);
+  }
+
   function composerOptions(): AgentTurnOptions {
     return {
       providerId: selectedProviderId,
@@ -152,9 +432,25 @@
   }
 
   function pickModel(providerId: string, modelId: string) {
+    const normalizedModelId = normalizeModelIdForProvider(providerId, modelId) ?? "";
     selectedProviderId = providerId;
-    selectedModelId = modelId;
+    selectedModelId = normalizedModelId;
     selectedThinkingOptionId = "";
+    if (session?.id) {
+      rememberRoutingPreference(session.id, providerId, normalizedModelId);
+    }
+  }
+
+  function setSubmitInFlight(sessionId: string, inFlight: boolean) {
+    if (inFlight) {
+      submitInFlightGuards.add(sessionId);
+      if (!submitInFlightSessionIds.includes(sessionId)) {
+        submitInFlightSessionIds = [...submitInFlightSessionIds, sessionId];
+      }
+      return;
+    }
+    submitInFlightGuards.delete(sessionId);
+    submitInFlightSessionIds = submitInFlightSessionIds.filter((id) => id !== sessionId);
   }
 
   function thinkingLabel(optionId: string | null | undefined): string {
@@ -165,9 +461,10 @@
   // Rolled-up thread: agent activity stays attached to the final response,
   // while intermediate prose remains in chronological order with tool work.
   type RowKind =
-    | { kind: "user"; item: MessageTimelineItem }
-    | { kind: "system"; item: MessageTimelineItem }
+    | { key: string; kind: "user"; item: MessageTimelineItem }
+    | { key: string; kind: "system"; item: MessageTimelineItem }
     | {
+        key: string;
         kind: "agent";
         item: MessageTimelineItem | null;
         children: ActivityChild[];
@@ -211,11 +508,52 @@
     return reordered;
   }
 
+  function agentRowHasVisibleText(row: Extract<RowKind, { kind: "agent" }>): boolean {
+    if (row.item?.body.trim()) return true;
+    return row.children.some((child) => isActivityMessage(child) && child.body.trim());
+  }
+
+  function stableTextHash(text: string): string {
+    let hash = 2166136261;
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36);
+  }
+
+  function timelineItemKeyBase(item: TimelineItem): string {
+    if (item.id) return `${item.kind}:${item.id}`;
+    return `${item.kind}:${stableTextHash(
+      [item.title, item.summary, item.body].filter(Boolean).join("\n")
+    )}`;
+  }
+
+  function nextRowKey(base: string, counts: Map<string, number>): string {
+    const count = counts.get(base) ?? 0;
+    counts.set(base, count + 1);
+    return `${base}:${count}`;
+  }
+
   function buildRows(items: TimelineItem[]): RowKind[] {
     const rows: RowKind[] = [];
+    const keyCounts = new Map<string, number>();
+    let lastUserKey: string | null = null;
     let current:
       | Extract<RowKind, { kind: "agent" }>
       | null = null;
+
+    const startAgentRow = (seed: TimelineItem): Extract<RowKind, { kind: "agent" }> => ({
+      key: nextRowKey(
+        lastUserKey ? `agent-after:${lastUserKey}` : `agent:${timelineItemKeyBase(seed)}`,
+        keyCounts
+      ),
+      kind: "agent",
+      item: null,
+      children: [],
+      approvals: [],
+      questions: []
+    });
 
     const flushCurrent = () => {
       if (!current) return;
@@ -239,21 +577,26 @@
     for (const item of items) {
       if (item.kind === "user") {
         flushCurrent();
-        rows.push({ kind: "user", item: item as MessageTimelineItem });
+        lastUserKey = nextRowKey(timelineItemKeyBase(item), keyCounts);
+        rows.push({ key: lastUserKey, kind: "user", item: item as MessageTimelineItem });
       } else if (item.kind === "system") {
         flushCurrent();
-        rows.push({ kind: "system", item: item as MessageTimelineItem });
+        rows.push({
+          key: nextRowKey(timelineItemKeyBase(item), keyCounts),
+          kind: "system",
+          item: item as MessageTimelineItem
+        });
       } else if (item.kind === "assistant" || item.kind === "command") {
-        if (!current) current = { kind: "agent", item: null, children: [], approvals: [], questions: [] };
+        if (!current) current = startAgentRow(item);
         current.children.push(item as MessageTimelineItem);
       } else if (item.kind === "tool") {
-        if (!current) current = { kind: "agent", item: null, children: [], approvals: [], questions: [] };
+        if (!current) current = startAgentRow(item);
         current.children.push(item as ToolTimelineItem);
       } else if (item.kind === "diff") {
-        if (!current) current = { kind: "agent", item: null, children: [], approvals: [], questions: [] };
+        if (!current) current = startAgentRow(item);
         current.children.push(item as DiffTimelineItem);
       } else if (item.kind === "question") {
-        if (!current) current = { kind: "agent", item: null, children: [], approvals: [], questions: [] };
+        if (!current) current = startAgentRow(item);
         current.questions.push(item as UserQuestionTimelineItem);
       }
     }
@@ -266,7 +609,6 @@
       timeline.filter(
         (i) =>
           i.kind !== "permission" &&
-          i.kind !== "diff" &&
           !(i.kind === "question" && i.status === "pending")
       )
     )
@@ -287,26 +629,87 @@
     return elapsed < 10 ? `${elapsed.toFixed(1)}s` : `${Math.floor(elapsed)}s`;
   }
 
+  function setDraftForSession(sessionId: string | null | undefined, value: string) {
+    if (!sessionId) return;
+    if (value.length > 0) {
+      draftBySessionId = { ...draftBySessionId, [sessionId]: value };
+      if (typeof window !== "undefined") {
+        try {
+          window.localStorage.setItem(draftPreferenceKey(sessionId), value);
+        } catch {
+          /* Draft persistence is best-effort. */
+        }
+      }
+      return;
+    }
+    const { [sessionId]: _removed, ...rest } = draftBySessionId;
+    draftBySessionId = rest;
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.removeItem(draftPreferenceKey(sessionId));
+      } catch {
+        /* Draft persistence is best-effort. */
+      }
+    }
+  }
+
+  function updateDraft(value: string) {
+    draft = value;
+    setDraftForSession(session?.id, value);
+  }
+
   $effect(() => {
-    // On session change, reset scroll to top so users see the start.
-    if (session?.id !== lastSessionId) {
-      lastSessionId = session?.id ?? null;
+    // Keep unsent composer text isolated per session while switching threads.
+    const nextSessionId = session?.id ?? null;
+    if (nextSessionId !== lastSessionId) {
+      draft = nextSessionId ? draftBySessionId[nextSessionId] ?? readDraftForSession(nextSessionId) : "";
+      expandedActivityIds = [];
+      selectedActivityChildren = {};
+      lastSessionId = nextSessionId;
       void tick().then(() => threadEl?.scrollTo({ top: 0, behavior: "auto" }));
     }
   });
 
   $effect(() => {
+    onDraftChange?.(draft.trim().length > 0);
+  });
+
+  onDestroy(() => {
+    onDraftChange?.(false);
+  });
+
+  $effect(() => {
     const sessionId = session?.id ?? null;
-    if (sessionId === routingSessionId) return;
-    routingSessionId = sessionId;
-    selectedProviderId =
-      session?.providerId ?? settingsSnapshot?.config.defaultProvider ?? null;
-    selectedModelId = session?.modelId ?? settingsSnapshot?.config.defaultModel ?? null;
+    const saved =
+      sessionId && (session?.eventCount ?? 0) === 0
+        ? readRoutingPreference(sessionId)
+        : null;
+    const sessionHasRoute = Boolean(session?.providerId || session?.modelId);
+    const source = saved ? "saved" : sessionHasRoute ? "session" : "default";
+    const providerId = saved
+      ? saved.providerId
+      : session?.providerId ?? settingsSnapshot?.config.defaultProvider ?? null;
+    const modelId = saved
+      ? saved.modelId
+      : session?.modelId ?? settingsSnapshot?.config.defaultModel ?? null;
+    const nextSelectionKey = [
+      sessionId ?? "",
+      source,
+      providerId ?? "",
+      modelId ?? ""
+    ].join("\0");
+    if (nextSelectionKey === routingSelectionKey) return;
+    routingSelectionKey = nextSelectionKey;
+    selectedProviderId = providerId;
+    selectedModelId = normalizeModelIdForProvider(
+      providerId,
+      modelId
+    );
     selectedThinkingOptionId = "";
   });
 
   $effect(() => {
-    const providerId = selectedProviderId;
+    const providerId = selectedProviderModelSourceId;
     if (!providerId) {
       thinkingProviderId = null;
       thinkingModels = [];
@@ -332,7 +735,65 @@
   });
 
   $effect(() => {
+    if (
+      !selectedProviderId ||
+      !selectedProviderModelSourceId ||
+      !providerIdsEquivalent(thinkingProviderId, selectedProviderModelSourceId) ||
+      thinkingModels.length === 0
+    ) {
+      return;
+    }
+    if (
+      selectedModelId &&
+      thinkingModels.some((model) => model.id === selectedModelId && modelSupportsAgentTools(model))
+    ) {
+      return;
+    }
+    const selectedCatalogModel = selectedModelId
+      ? thinkingModels.find((model) => model.id === selectedModelId)
+      : null;
+    const defaultModel = settingsSnapshot?.config.defaultModel ?? null;
+    const defaultProvider = settingsSnapshot?.config.defaultProvider ?? null;
+    const selectedCanonical = canonicalDaemonProviderId(selectedProviderId);
+    const defaultCanonical = defaultProvider ? canonicalDaemonProviderId(defaultProvider) : null;
+    const isDefaultFromOtherProvider =
+      defaultModel &&
+      defaultCanonical &&
+      selectedModelId === normalizeModelIdForProvider(selectedProviderId, defaultModel) &&
+      selectedCanonical !== defaultCanonical;
+    if (
+      !selectedCatalogModel &&
+      !isDefaultFromOtherProvider &&
+      isCustomModelId(selectedModelId, selectedProviderModelSourceId)
+    ) {
+      return;
+    }
+    const fallback =
+      thinkingModels.find((model) => model.isDefault && modelSupportsAgentTools(model)) ??
+      thinkingModels.find(modelSupportsAgentTools) ??
+      null;
+    const nextModelId = fallback?.id ?? "";
+    selectedModelId = nextModelId;
+    selectedThinkingOptionId = "";
+    if (session?.id && selectedProviderId) {
+      rememberRoutingPreference(session.id, selectedProviderId, nextModelId);
+    }
+  });
+
+  $effect(() => {
     if (!thinkingAvailable) {
+      selectedThinkingOptionId = "";
+      loadedThinkingPreferenceKey = null;
+      return;
+    }
+    const preferenceKey = thinkingPreferenceKey();
+    if (typeof window !== "undefined" && preferenceKey && preferenceKey !== loadedThinkingPreferenceKey) {
+      loadedThinkingPreferenceKey = preferenceKey;
+      const saved = window.localStorage.getItem(preferenceKey);
+      if (saved && thinkingOptions.some((option) => option.id === saved)) {
+        selectedThinkingOptionId = saved;
+        return;
+      }
       selectedThinkingOptionId = "";
       return;
     }
@@ -342,10 +803,7 @@
     ) {
       return;
     }
-    selectedThinkingOptionId =
-      selectedModelInfo?.defaultThinkingOptionId ??
-      thinkingOptions.find((option) => option.isDefault)?.id ??
-      "";
+    selectedThinkingOptionId = "";
   });
 
   $effect(() => {
@@ -359,28 +817,72 @@
 
   $effect(() => {
     if (typeof window === "undefined") return;
-    fastMode = window.localStorage.getItem("puffer-agent:fast-mode") === "1";
+    const sessionId = session?.id ?? null;
+    if (sessionId === composerPreferencesSessionId) return;
+    composerPreferencesSessionId = sessionId;
+    if (!sessionId) {
+      fastMode = false;
+      permissionMode = "workspace-write";
+      return;
+    }
+    fastMode = window.localStorage.getItem(sessionPreferenceKey(sessionId, "fast-mode")) === "1";
     permissionMode = normalizePermissionMode(
-      window.localStorage.getItem("puffer-agent:permission-mode")
+      window.localStorage.getItem(sessionPreferenceKey(sessionId, "permission-mode"))
     );
   });
 
   $effect(() => {
     if (typeof window === "undefined") return;
-    window.localStorage.setItem("puffer-agent:fast-mode", fastMode ? "1" : "0");
-    window.localStorage.setItem("puffer-agent:permission-mode", permissionMode);
+    const sessionId = session?.id ?? null;
+    if (!sessionId || composerPreferencesSessionId !== sessionId) return;
+    window.localStorage.setItem(sessionPreferenceKey(sessionId, "fast-mode"), fastMode ? "1" : "0");
+    window.localStorage.setItem(sessionPreferenceKey(sessionId, "permission-mode"), permissionMode);
+  });
+
+  $effect(() => {
+    if (typeof window === "undefined") return;
+    if (!thinkingAvailable) return;
+    const preferenceKey = thinkingPreferenceKey();
+    if (!preferenceKey) return;
+    if (!selectedThinkingOptionId) {
+      window.localStorage.removeItem(preferenceKey);
+      return;
+    }
+    if (!thinkingOptions.some((option) => option.id === selectedThinkingOptionId)) return;
+    window.localStorage.setItem(preferenceKey, selectedThinkingOptionId);
   });
 
   async function submit() {
     const v = draft.trim();
-    if (!v) return;
-    onSubmitMessage(v, composerOptions());
+    if (!v || !canSubmitPrompt) return;
+    const targetSessionId = session?.id;
+    if (!targetSessionId) return;
+    if (submitInFlightGuards.has(targetSessionId)) return;
+    const previousDraft = draft;
+    setSubmitInFlight(targetSessionId, true);
     draft = "";
-    await tick();
-    threadEl?.scrollTo({ top: threadEl.scrollHeight, behavior: "smooth" });
+    setDraftForSession(targetSessionId, "");
+    try {
+      const accepted = await onSubmitMessage(v, composerOptions());
+      if (accepted === false) {
+        setDraftForSession(targetSessionId, previousDraft);
+        if ((session?.id ?? null) === targetSessionId && !draft.trim()) draft = previousDraft;
+        return;
+      }
+      await tick();
+      if ((session?.id ?? null) === targetSessionId) {
+        threadEl?.scrollTo({ top: threadEl.scrollHeight, behavior: "smooth" });
+      }
+    } catch {
+      setDraftForSession(targetSessionId, previousDraft);
+      if ((session?.id ?? null) === targetSessionId && !draft.trim()) draft = previousDraft;
+    } finally {
+      setSubmitInFlight(targetSessionId, false);
+    }
   }
 
   function onKeydown(e: KeyboardEvent) {
+    if (e.isComposing || e.keyCode === 229) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       submit();
@@ -406,6 +908,7 @@
       };
     } else {
       out.push({
+        key: "agent-pending-prompts",
         kind: "agent",
         item: null,
         children: [],
@@ -414,18 +917,6 @@
       });
     }
     return out;
-  });
-
-  let typingLabel = $derived.by(() => {
-    const elapsed = formatElapsed(turnStartedAtMs);
-    const suffix = elapsed ? ` (${elapsed})` : "";
-    if (turnRunning) {
-      if (turnStatusHint) return `${turnStatusHint}${suffix}`;
-      if (turnThinking) return `Thinking${suffix}`;
-      return `Running${suffix}`;
-    }
-    if (agentState === "awaiting") return `${engineerName} paused - waiting for your response`;
-    return null;
   });
 
   type ActivityCategory = "thought" | "message" | "agent" | "write" | "read" | "browser" | "terminal" | "search" | "diff" | "other";
@@ -454,13 +945,39 @@
     return -1;
   });
 
+  let activeTurnHasVisibleText = $derived.by(() => {
+    if (!turnRunning) return false;
+    if (activeTurnAgentRowIndex >= 0) {
+      const row = distributedRows[activeTurnAgentRowIndex];
+      return row?.kind === "agent" && agentRowHasVisibleText(row);
+    }
+    for (let index = distributedRows.length - 1; index >= 0; index -= 1) {
+      const row = distributedRows[index];
+      if (row.kind === "agent") return agentRowHasVisibleText(row);
+    }
+    return false;
+  });
+
+  let typingLabel = $derived.by(() => {
+    const elapsed = formatElapsed(turnStartedAtMs);
+    const suffix = elapsed ? ` (${elapsed})` : "";
+    if (turnRunning) {
+      if (turnStatusHint) return `${turnStatusHint}${suffix}`;
+      if (turnThinking) return `Thinking${suffix}`;
+      if (activeTurnHasVisibleText) return null;
+      return `Running${suffix}`;
+    }
+    if (agentState === "awaiting") return `${engineerName} paused - waiting for your response`;
+    return null;
+  });
+
   function shouldCollapseActivity(row: Extract<RowKind, { kind: "agent" }>, idx: number): boolean {
     const isActiveTurn = idx === activeTurnAgentRowIndex;
     return !isActiveTurn && row.children.length > 0 && Boolean(row.item?.body.trim());
   }
 
   function activityGroupId(row: Extract<RowKind, { kind: "agent" }>, idx: number): string {
-    return row.item?.id ?? row.children[0]?.id ?? `activity-${idx}`;
+    return row.key || row.item?.id || row.children[0]?.id || `activity-${idx}`;
   }
 
   function activityExpanded(id: string): boolean {
@@ -515,12 +1032,39 @@
     return "bolt";
   }
 
+  function compactToolName(name: string | null | undefined): string {
+    return (name ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  }
+
+  function isSubagentToolName(name: string | null | undefined): boolean {
+    const compact = compactToolName(name);
+    return (
+      compact === "subagent" ||
+      compact === "spawnagent" ||
+      compact === "waitagent" ||
+      compact === "sendinput" ||
+      compact === "closeagent" ||
+      compact === "resumeagent" ||
+      compact.includes("collab")
+    );
+  }
+
+  function subagentActivityName(name: string): string {
+    const compact = compactToolName(name);
+    if (compact === "spawnagent" || compact === "subagent") return "Spawn sub-agent";
+    if (compact === "waitagent") return "Wait for sub-agent";
+    if (compact === "sendinput") return "Message sub-agent";
+    if (compact === "closeagent") return "Close sub-agent";
+    if (compact === "resumeagent") return "Resume sub-agent";
+    return "Sub-agent";
+  }
+
   function childActivityCategory(child: ActivityChild): ActivityCategory {
     if (child.kind === "diff") return "diff";
     if (child.kind !== "tool") return "message";
     const name = child.toolName.toLowerCase();
     if (name === "thinking") return "thought";
-    if (name.includes("sub_agent") || name.includes("collab") || name.includes("spawnagent")) return "agent";
+    if (isSubagentToolName(child.toolName)) return "agent";
     if (name.includes("browser") || name.includes("web") || name.includes("fetch")) return "browser";
     if (name.includes("mcp__") && (name.includes("__list") || name.includes("__read"))) return "read";
     if (name.includes("edit") || name.includes("write") || name.includes("replace") || name.includes("patch")) return "write";
@@ -919,8 +1463,43 @@
     if (generic) return generic.name;
     const mcpName = mcpActivityName(child.toolName, input);
     if (mcpName) return mcpName;
-    if (child.toolName.toLowerCase() === "sub_agent") return "Sub-agent";
+    if (isSubagentToolName(child.toolName)) return subagentActivityName(child.toolName);
     return child.toolName && child.toolName !== "undefined" ? child.toolName : "Tool";
+  }
+
+  function arrayInputString(input: Record<string, unknown> | null, name: string): string | null {
+    const value = input?.[name];
+    if (!Array.isArray(value)) return null;
+    const strings = value
+      .map((item) => (typeof item === "string" ? item.trim() : ""))
+      .filter(Boolean);
+    if (strings.length === 0) return null;
+    return strings.length === 1 ? strings[0] : `${strings.length} targets`;
+  }
+
+  function subagentActivityArg(name: string, input: Record<string, unknown> | null): string {
+    const compact = compactToolName(name);
+    if (compact === "waitagent") {
+      return [
+        arrayInputString(input, "targets"),
+        inputString(input, ["timeoutMs", "timeout_ms"])
+      ].filter(Boolean).join(" · ");
+    }
+    if (compact === "sendinput") {
+      return [
+        inputString(input, ["target", "agentId", "agent_id"]),
+        valuePreview(inputString(input, ["message"]), 80)
+      ].filter(Boolean).join(" · ");
+    }
+    if (compact === "closeagent" || compact === "resumeagent") {
+      return inputString(input, ["target", "id", "agentId", "agent_id"]) ?? "";
+    }
+    return [
+      inputString(input, ["agent_type", "agentType", "tool", "role"]),
+      inputString(input, ["model"]),
+      inputString(input, ["reasoningEffort", "reasoning_effort"]),
+      valuePreview(inputString(input, ["message", "prompt"]), 80)
+    ].filter(Boolean).join(" · ");
   }
 
   function activityActionArg(child: ActivityChild): string {
@@ -936,12 +1515,7 @@
     if (generic) return generic.arg;
     const mcpArg = mcpActivityArg(child.toolName, input);
     if (mcpArg) return mcpArg;
-    if (child.toolName.toLowerCase() === "sub_agent") {
-      const tool = inputString(input, ["tool"]) ?? "spawn";
-      const model = inputString(input, ["model"]);
-      const effort = inputString(input, ["reasoningEffort", "reasoning_effort"]);
-      return [tool, model, effort].filter(Boolean).join(" · ");
-    }
+    if (isSubagentToolName(child.toolName)) return subagentActivityArg(child.toolName, input);
     if (child.toolName.toLowerCase() === "browser") return browserActionArg(input) ?? "Action";
     const value = inputString(input, ["path", "file_path", "url", "command", "pattern", "query", "cwd"]);
     const fallback = value ?? child.summary ?? child.title ?? "";
@@ -1006,7 +1580,7 @@
       {:else if rows.length === 0 && !typingLabel}
         <div class="state">No messages in this session yet. Send a prompt to get started.</div>
       {:else}
-        {#each distributedRows as row, idx (idx)}
+        {#each distributedRows as row, idx (row.key)}
           {#if row.kind === "user"}
             <div class="pf-msg" data-role="user">
               <div class="pf-msg-avatar">{userInitial}</div>
@@ -1038,7 +1612,7 @@
             </div>
           {:else}
             <div class="pf-msg" data-role="agent">
-              <div class="pf-msg-avatar"><Puffer size={26} state="idle" /></div>
+              <div class="pf-msg-avatar"><BrandLogo size={26} /></div>
               <div class="pf-msg-body">
                 <div class="pf-msg-meta">
                   <span class="name">{engineerName}</span>
@@ -1162,10 +1736,10 @@
                       {/if}
                     {/if}
                     {#each row.approvals as p (p.id)}
-                      <Approval item={p} onResolve={onResolvePermission} />
+                      <Approval item={p} disabled={isPermissionResolving(p)} onResolve={onResolvePermission} />
                     {/each}
                     {#each row.questions as q (q.id)}
-                      <QuestionPrompt item={q} onResolve={onResolveUserQuestion} />
+                      <QuestionPrompt item={q} disabled={isQuestionResolving(q)} onResolve={onResolveUserQuestion} />
                     {/each}
                   </div>
                 {/if}
@@ -1181,7 +1755,7 @@
 
         {#if typingLabel}
           <div class="pf-msg" data-role="agent" style="opacity: 0.85;">
-            <div class="pf-msg-avatar"><Puffer size={26} state={agentState} /></div>
+            <div class="pf-msg-avatar"><BrandLogo size={26} /></div>
             <div class="pf-msg-body">
               <div class="typing">{typingLabel}</div>
             </div>
@@ -1194,18 +1768,20 @@
   <div class="pf-composer-wrap">
     <div class="pf-composer">
       <textarea
-        bind:value={draft}
+        value={draft}
         placeholder={session ? `Reply to ${engineerName}…` : "Select a session to continue"}
+        oninput={(event) => updateDraft(event.currentTarget.value)}
         onkeydown={onKeydown}
-        disabled={!session}
+        disabled={composerDisabled}
       ></textarea>
       <div class="pf-composer-foot">
         <ModelPicker
           snapshot={settingsSnapshot}
           currentProvider={selectedProviderId}
           currentModel={selectedModelId}
+          contextKey={session?.id ?? null}
           allowProviderSwitch={allowProviderSwitch}
-          disabled={turnRunning}
+          disabled={modelPickerDisabled}
           onChange={pickModel}
         />
         <label class="pf-toggle-chip" class:disabled={!fastModeAvailable} title={fastModeAvailable ? "Fast mode" : "Fast mode is not available for this model"}>
@@ -1240,20 +1816,21 @@
         </label>
         <span class="spacer"></span>
         <span class="pf-composer-hint">
-          ⏎ to send · ⇧⏎ for newline
+          {composerBlockedReason ?? "⏎ to send · ⇧⏎ for newline"}
         </span>
         {#if turnRunning}
           <button
             type="button"
             class="pf-send-btn pf-stop-btn"
-            onclick={onCancelTurn}
+            disabled={!canCancelTurn}
+            onclick={() => { if (canCancelTurn) onCancelTurn?.(); }}
             aria-label="Stop turn"
-            title="Stop the running agent turn"
+            title={canCancelTurn ? "Stop the running agent turn" : "Waiting for turn id"}
           >
             <Icon name="pause2" size={14} />
           </button>
         {:else}
-          <button type="button" class="pf-send-btn" disabled={!draft.trim() || !session} onclick={submit} aria-label="Send">
+          <button type="button" class="pf-send-btn" disabled={!canSubmitPrompt} onclick={submit} aria-label="Send">
             <Icon name="arrowUp" size={15} />
           </button>
         {/if}

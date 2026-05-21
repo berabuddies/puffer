@@ -253,7 +253,11 @@ mod tests {
     }
 
     #[test]
-    fn glob_rejects_paths_outside_working_directories() {
+    fn glob_rejects_paths_outside_default_writable_roots() {
+        // Absolute path outside cwd, /tmp, $TMPDIR, /add-dir. ("../" no
+        // longer works as the "outside" probe because tempdir's cwd is
+        // already inside $TMPDIR — its parent is too. Codex-style default
+        // writable set covers /tmp + $TMPDIR.)
         let temp = tempfile::tempdir().unwrap();
         let error = execute_claude_glob(
             temp.path(),
@@ -261,7 +265,7 @@ mod tests {
             &workspace_write_policy(),
             json!({
                 "pattern": "*.rs",
-                "path": "../"
+                "path": "/__puffer_test_outside_writable_set__/"
             }),
         )
         .unwrap_err()

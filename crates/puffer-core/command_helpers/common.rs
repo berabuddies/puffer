@@ -205,6 +205,7 @@ pub(crate) fn execute_skill_command(
         state.session.id,
         TranscriptEvent::UserMessage {
             text: rendered.clone(),
+            actor: Some(state.user_actor()),
         },
     )?;
 
@@ -230,6 +231,7 @@ pub(crate) fn execute_skill_command(
                 state.session.id,
                 TranscriptEvent::AssistantMessage {
                     text: turn.assistant_text,
+                    actor: Some(state.assistant_actor()),
                 },
             )?;
             Ok(())
@@ -271,7 +273,13 @@ pub(crate) fn emit_system(
     text: String,
 ) -> Result<()> {
     state.push_message(MessageRole::System, text.clone());
-    session_store.append_event(state.session.id, TranscriptEvent::SystemMessage { text })?;
+    session_store.append_event(
+        state.session.id,
+        TranscriptEvent::SystemMessage {
+            text,
+            actor: Some(state.system_actor()),
+        },
+    )?;
     Ok(())
 }
 

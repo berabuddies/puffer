@@ -14,10 +14,13 @@ mod daemon_fs_watch;
 mod daemon_lsp;
 mod daemon_pty;
 mod daemon_title;
+mod daemon_turn_routing;
 mod daemon_ui_state;
+mod desktop_activity;
 mod desktop_api;
 mod desktop_api_types;
 mod heartbeat;
+mod non_interactive;
 mod resource_fs;
 mod runner_selection;
 mod subscriptions;
@@ -33,6 +36,7 @@ use command_surface::{
     run_install_command, run_mcp_command, run_plugin_command, run_setup_token_command,
     run_update_command,
 };
+use non_interactive::run_non_interactive_command;
 use puffer_config::{ensure_workspace_dirs, load_config, ConfigPaths};
 use puffer_core::{resolve_resume_launch, supported_commands, AppState, ResumeLaunchResolution};
 use puffer_provider_openai::{
@@ -40,9 +44,11 @@ use puffer_provider_openai::{
     parse_authorization_input as parse_openai_authorization_input,
     refresh_oauth_token as refresh_openai_oauth_token,
 };
-use puffer_provider_registry::{AuthMode, AuthStore, ProviderRegistry, StoredCredential};
+use puffer_provider_registry::{
+    canonical_provider_id, AuthMode, AuthStore, ProviderRegistry, StoredCredential,
+};
 use puffer_resources::load_resources;
-use puffer_session_store::SessionStore;
+use puffer_session_store::{SessionMetadata, SessionStore};
 use puffer_tools::ToolRegistry;
 use puffer_transport_anthropic::{
     build_messages_request, exchange_authorization_code as exchange_anthropic_code,
@@ -54,7 +60,7 @@ use puffer_transport_anthropic::{
 use puffer_tui::StartupAction;
 use std::io::Read as _;
 use std::io::Write as _;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::auth_credentials::{
@@ -204,7 +210,8 @@ fn main() -> Result<()> {
             token,
             stdin,
         }) => {
-            let provider = resolve_provider_arg(provider, config.default_provider.as_deref());
+            let provider =
+                resolve_provider_arg(&providers, provider, config.default_provider.as_deref());
             let token = if stdin {
                 read_secret_from_stdin()?
             } else if let Some(token) = token {
@@ -324,6 +331,15 @@ fn main() -> Result<()> {
                 deny_tools,
             },
         ),
+        Some(Command::NonInteractive(args)) => run_non_interactive_command(
+            &cwd,
+            &config,
+            &resources,
+            &mut providers,
+            &mut auth_store,
+            &paths,
+            args,
+        ),
         Some(Command::AnthropicRequestFixture) => {
             let request = build_messages_request(
                 &AnthropicRequestConfig {
@@ -440,14 +456,17 @@ fn main() -> Result<()> {
                     cli.no_alt_screen || config.ui.no_alt_screen,
                 ),
                 ResumeLaunchResolution::Picker { query, .. } if cli.resume.is_some() => {
-                    let session = session_store.create_session(cwd.clone())?;
                     let runner = crate::runner_selection::select_tool_runner(
                         &config,
                         &resources,
                         cwd.clone(),
                     );
-                    let mut state =
-                        AppState::new(config.clone(), cwd, session).with_tool_runner(runner);
+                    let mut state = AppState::new(
+                        config.clone(),
+                        cwd.clone(),
+                        transient_resume_picker_session(cwd),
+                    )
+                    .with_tool_runner(runner);
                     if let Some(prompt) = cli.prompt {
                         state.queue_pending_query_prompt(prompt);
                     }
@@ -546,6 +565,25 @@ fn run_existing_session_tui(
         initial_prompt,
         no_alt_screen,
     )
+}
+
+fn transient_resume_picker_session(cwd: std::path::PathBuf) -> SessionMetadata {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    SessionMetadata {
+        id: Uuid::nil(),
+        display_name: Some("Resume picker".to_string()),
+        generated_title: None,
+        cwd,
+        created_at_ms: now,
+        updated_at_ms: now,
+        parent_session_id: None,
+        slug: None,
+        tags: Vec::new(),
+        note: None,
+    }
 }
 
 fn run_tool_command(
@@ -803,7 +841,7 @@ fn run_auth_command(
             value,
             stdin,
         } => {
-            let provider = resolve_provider_arg(provider, default_provider);
+            let provider = resolve_provider_arg(providers, provider, default_provider);
             if !provider_supports_auth_mode(&provider, providers, &AuthMode::OAuth) {
                 anyhow::bail!(
                     "provider `{provider}` does not support OAuth; use `puffer setup-token {provider}` or `puffer auth set-api-key {provider}`"
@@ -812,7 +850,7 @@ fn run_auth_command(
             run_login_flow(&provider, value, stdin, auth_store, auth_path, providers)?;
         }
         AuthCommand::Logout { provider } => {
-            let provider = resolve_provider_arg(provider, default_provider);
+            let provider = resolve_provider_arg(providers, provider, default_provider);
             let removed = auth_store.remove(&provider);
             auth_store.save(auth_path)?;
             if removed.is_some() {
@@ -826,6 +864,7 @@ fn run_auth_command(
             api_key,
             stdin,
         } => {
+            let provider = resolve_provider_id(providers, &provider);
             let key = if stdin {
                 read_secret_from_stdin()?
             } else {
@@ -838,6 +877,7 @@ fn run_auth_command(
             println!("stored api key for {provider}");
         }
         AuthCommand::Clear { provider } => {
+            let provider = resolve_provider_id(providers, &provider);
             let removed = auth_store.remove(&provider);
             auth_store.save(auth_path)?;
             if removed.is_some() {
@@ -847,10 +887,12 @@ fn run_auth_command(
             }
         }
         AuthCommand::OauthUrl { provider } => {
+            let provider = resolve_provider_id(providers, &provider);
             let bundle = oauth_start_bundle_for_provider(providers, &provider)?;
             println!("{}", bundle.authorization_url);
         }
         AuthCommand::OauthStart { provider } => {
+            let provider = resolve_provider_id(providers, &provider);
             let bundle = oauth_start_bundle_for_provider(providers, &provider)?;
             println!(
                 "{}",
@@ -872,6 +914,7 @@ fn run_auth_command(
             state,
             stdin,
         } => {
+            let provider = resolve_provider_id(providers, &provider);
             let input = if stdin {
                 read_secret_from_stdin()?
             } else {
@@ -926,6 +969,7 @@ fn run_auth_command(
             println!("stored oauth credentials for {provider}");
         }
         AuthCommand::OauthRefresh { provider } => {
+            let provider = resolve_provider_id(providers, &provider);
             let credential = auth_store
                 .get(&provider)
                 .ok_or_else(|| anyhow::anyhow!("no credentials stored for {provider}"))?;
@@ -956,10 +1000,22 @@ fn run_auth_command(
     Ok(())
 }
 
-fn resolve_provider_arg(provider: Option<String>, default_provider: Option<&str>) -> String {
-    provider
+fn resolve_provider_arg(
+    providers: &ProviderRegistry,
+    provider: Option<String>,
+    default_provider: Option<&str>,
+) -> String {
+    let provider = provider
         .or_else(|| default_provider.map(ToOwned::to_owned))
-        .unwrap_or_else(|| "anthropic".to_string())
+        .unwrap_or_else(|| "anthropic".to_string());
+    resolve_provider_id(providers, &provider)
+}
+
+fn resolve_provider_id(providers: &ProviderRegistry, provider: &str) -> String {
+    providers
+        .provider(provider)
+        .map(|descriptor| descriptor.id.clone())
+        .unwrap_or_else(|| canonical_provider_id(provider))
 }
 
 fn run_login_flow(

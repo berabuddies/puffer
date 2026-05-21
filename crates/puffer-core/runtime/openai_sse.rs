@@ -19,7 +19,7 @@ pub(super) struct OpenAISseResult {
     pub(super) tool_calls: Vec<OpenAIResponseToolCall>,
     pub(super) emitted_tool_call_ids: HashSet<String>,
     /// Reasoning items captured from `response.output_item.done` events when
-    /// the request enabled `include: ["reasoning.encrypted_content"]`. These
+    /// the request enabled `include: ["reasoning.encryptedcontent"]`. These
     /// need to be re-emitted in the next turn's `input` so the model can
     /// resume its prior thought process — aligned with Codex behavior.
     pub(super) reasoning_items: Vec<Value>,

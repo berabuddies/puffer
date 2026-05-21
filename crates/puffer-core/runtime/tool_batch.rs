@@ -68,7 +68,6 @@ pub(super) fn execute_tool_batch(
         )?);
     }
 
-    let working_dirs = inputs.state.working_dirs.clone();
     let session_id = inputs.state.session.id;
     let provider_context =
         backend_to_provider_context(session.tool_execution_backend(), inputs.model_id);
@@ -112,7 +111,6 @@ pub(super) fn execute_tool_batch(
             let args: Value = serde_json::from_str(&tc.input).unwrap_or(Value::Null);
             let resources = inputs.resources;
             let registry = inputs.registry;
-            let working_dirs_ref = &working_dirs;
             let provider_context_ref = &provider_context;
             let runner_clone = runner.clone();
             // Observability-only clones are gated on a live handle so
@@ -153,7 +151,7 @@ pub(super) fn execute_tool_batch(
                     let result = match claude_tools::execute_parallel_tool(
                         &definition,
                         cwd,
-                        working_dirs_ref,
+                        &filesystem_policy.workspace_roots,
                         &filesystem_policy,
                         &session_id,
                         args,
@@ -347,11 +345,32 @@ fn execute_tool_batch_serial(
         ) {
             Ok(exec) => exec,
             Err(error) => {
+                let output_text = process_tool_result(
+                    &format!("Tool execution failed: {error}"),
+                    MAX_TOOL_RESULT_CHARS,
+                    &inputs.state.session.id,
+                );
                 if inputs.observability.is_some() {
-                    tool_span.mark_error(error.to_string());
+                    tool_span.set_content(
+                        puffer_observability::LANGFUSE_OBSERVATION_OUTPUT,
+                        puffer_observability::ContentKind::ToolOutput {
+                            tool_id: call.tool_id.clone(),
+                        },
+                        &output_text,
+                    );
+                    tool_span.set_str("puffer.tool.success", "false".to_string());
+                    tool_span.mark_error("tool_failed".to_string());
                     tool_span.end();
                 }
-                return Err(error);
+                invocations.push(ToolInvocation {
+                    call_id: call.call_id.clone(),
+                    tool_id: call.tool_id.clone(),
+                    input: call.input.clone(),
+                    output: output_text,
+                    success: false,
+                    terminate: false,
+                });
+                continue;
             }
         };
         let terminate = extract_terminate(&execution.output.metadata);

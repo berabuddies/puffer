@@ -4,7 +4,6 @@ use anyhow::{anyhow, bail, Context, Result};
 use puffer_config::ConfigPaths;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::io::ErrorKind;
 use std::path::Path;
 use tungstenite::{connect, Message};
 use url::Url;
@@ -19,9 +18,19 @@ pub(super) fn execute_browser_tool(
     let mut params: BrowserToolInput =
         serde_json::from_value(input).context("invalid Browser tool input")?;
     normalize_session_id(&mut params, current_session_id);
-    let handshake = read_handshake(cwd)?;
-    let response = send_daemon_request(&handshake, "browser_agent", serde_json::to_value(params)?)?;
-    Ok(serde_json::to_string_pretty(&response)?)
+    let payload = serde_json::to_value(params)?;
+    let handshakes = read_handshake_candidates(cwd)?;
+    let mut last_error = None;
+    for handshake in &handshakes {
+        match send_daemon_request(handshake, "browser_agent", payload.clone()) {
+            Ok(response) => return Ok(serde_json::to_string_pretty(&response)?),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    if let Some(error) = last_error {
+        return Err(error);
+    }
+    bail!("Browser tool found no daemon handshakes")
 }
 
 fn normalize_session_id(params: &mut BrowserToolInput, current_session_id: &Uuid) {
@@ -69,7 +78,7 @@ struct BrowserToolInput {
     activate: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DaemonHandshake {
     url: String,
@@ -93,43 +102,86 @@ struct DaemonError {
     message: String,
 }
 
-fn read_handshake(cwd: &Path) -> Result<DaemonHandshake> {
+fn read_handshake_candidates(cwd: &Path) -> Result<Vec<DaemonHandshake>> {
     let paths = ConfigPaths::discover(cwd);
     let workspace_root = canonical_workspace_root(&paths.workspace_root);
     let workspace_path = paths.workspace_config_dir.join("daemon.handshake");
     let user_path = paths.user_config_dir.join("daemon.handshake");
+
     let mut last_error = None;
-    for path in [&workspace_path, &user_path] {
-        match std::fs::read_to_string(path) {
-            Ok(text) => match serde_json::from_str(&text) {
-                Ok(handshake) => {
-                    if handshake_matches_workspace(&handshake, &workspace_root) {
-                        return Ok(handshake);
-                    }
-                }
-                Err(error) => {
-                    last_error = Some(
-                        anyhow!(error)
-                            .context(format!("decode daemon handshake {}", path.display())),
-                    );
-                }
-            },
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => {
-                last_error = Some(
-                    anyhow!(error).context(format!("read daemon handshake {}", path.display())),
-                );
-            }
+    let workspace_handshake = match read_handshake_file(&workspace_path) {
+        Ok(handshake) => handshake,
+        Err(error) => {
+            last_error = Some(error);
+            None
         }
+    };
+    let user_handshake = match read_handshake_file(&user_path) {
+        Ok(handshake) => handshake,
+        Err(error) => {
+            last_error = Some(error);
+            None
+        }
+    };
+    let handshakes = select_handshake_candidates_for_browser(
+        workspace_handshake,
+        user_handshake,
+        &workspace_root,
+    );
+    if !handshakes.is_empty() {
+        return Ok(handshakes);
     }
+
     if let Some(error) = last_error {
         return Err(error);
     }
+
     bail!(
         "Browser tool requires a running Puffer daemon at {} or {}",
         workspace_path.display(),
         user_path.display()
     );
+}
+
+fn read_handshake_file(path: &Path) -> Result<Option<DaemonHandshake>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(anyhow!(error).context(format!("read daemon handshake {}", path.display())));
+        }
+    };
+    serde_json::from_str(&text)
+        .map(Some)
+        .context(format!("decode daemon handshake {}", path.display()))
+}
+
+#[cfg(test)]
+fn select_handshake_for_browser(
+    workspace_handshake: Option<DaemonHandshake>,
+    user_handshake: Option<DaemonHandshake>,
+    workspace_root: &Path,
+) -> Option<DaemonHandshake> {
+    select_handshake_candidates_for_browser(workspace_handshake, user_handshake, workspace_root)
+        .into_iter()
+        .next()
+}
+
+fn select_handshake_candidates_for_browser(
+    workspace_handshake: Option<DaemonHandshake>,
+    user_handshake: Option<DaemonHandshake>,
+    workspace_root: &Path,
+) -> Vec<DaemonHandshake> {
+    let mut candidates = Vec::new();
+    if let Some(handshake) = workspace_handshake
+        .filter(|handshake| handshake_matches_workspace(handshake, workspace_root))
+    {
+        candidates.push(handshake);
+    }
+    if let Some(handshake) = user_handshake {
+        candidates.push(handshake);
+    }
+    candidates
 }
 
 fn handshake_matches_workspace(handshake: &DaemonHandshake, workspace_root: &Path) -> bool {
@@ -285,5 +337,81 @@ mod tests {
             workspace_root: Some(other.path().display().to_string()),
         };
         assert!(!handshake_matches_workspace(&handshake, workspace.path()));
+    }
+
+    #[test]
+    fn browser_handshake_prefers_matching_workspace_handshake() {
+        let workspace = tempfile::tempdir().unwrap();
+        let matching = DaemonHandshake {
+            url: "ws://127.0.0.1:1/ws".to_string(),
+            token: "workspace".to_string(),
+            workspace_root: Some(workspace.path().display().to_string()),
+        };
+        let user = DaemonHandshake {
+            url: "ws://127.0.0.1:2/ws".to_string(),
+            token: "user".to_string(),
+            workspace_root: Some("/other/workspace".to_string()),
+        };
+
+        let selected =
+            select_handshake_for_browser(Some(matching), Some(user), workspace.path()).unwrap();
+        assert_eq!(selected.token, "workspace");
+    }
+
+    #[test]
+    fn browser_handshake_keeps_user_fallback_after_matching_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let matching = DaemonHandshake {
+            url: "ws://127.0.0.1:1/ws".to_string(),
+            token: "workspace".to_string(),
+            workspace_root: Some(workspace.path().display().to_string()),
+        };
+        let user = DaemonHandshake {
+            url: "ws://127.0.0.1:2/ws".to_string(),
+            token: "user".to_string(),
+            workspace_root: Some("/desktop/global".to_string()),
+        };
+
+        let selected =
+            select_handshake_candidates_for_browser(Some(matching), Some(user), workspace.path());
+        let tokens = selected
+            .iter()
+            .map(|handshake| handshake.token.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(tokens, vec!["workspace", "user"]);
+    }
+
+    #[test]
+    fn browser_handshake_uses_user_handshake_as_global_fallback() {
+        let workspace = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let mismatched = DaemonHandshake {
+            url: "ws://127.0.0.1:1/ws".to_string(),
+            token: "workspace".to_string(),
+            workspace_root: Some(other.path().display().to_string()),
+        };
+        let user = DaemonHandshake {
+            url: "ws://127.0.0.1:2/ws".to_string(),
+            token: "user".to_string(),
+            workspace_root: Some("/desktop/global".to_string()),
+        };
+
+        let selected =
+            select_handshake_for_browser(Some(mismatched), Some(user), workspace.path()).unwrap();
+        assert_eq!(selected.token, "user");
+    }
+
+    #[test]
+    fn browser_handshake_ignores_mismatched_workspace_without_user_fallback() {
+        let workspace = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let mismatched = DaemonHandshake {
+            url: "ws://127.0.0.1:1/ws".to_string(),
+            token: "workspace".to_string(),
+            workspace_root: Some(other.path().display().to_string()),
+        };
+
+        let selected = select_handshake_for_browser(Some(mismatched), None, workspace.path());
+        assert!(selected.is_none());
     }
 }

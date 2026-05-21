@@ -1,0 +1,13 @@
+{
+  "pr_number": 6539,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/6539",
+  "title": "AK: Remove unused Checked<T> code",
+  "merged_at": "2025-10-21T22:26:23Z",
+  "base_commit": "7db73118e996dc07efec7c9b9f446d8025f808a3",
+  "merge_commit": "2c78fd5b8930ea4969d34629e11314ce0719a814",
+  "area": "ak",
+  "files_changed": [
+    "AK/Checked.h"
+  ],
+  "task_prompt": "Fix the failing AK Checked<T> tests in Tests/AK/TestChecked.cpp. Remove the obsolete Checked<T> behavior while preserving the checked arithmetic semantics expected by the updated unit tests."
+}

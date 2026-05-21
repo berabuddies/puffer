@@ -114,7 +114,7 @@ impl TextOverlay {
     /// Jumps to the bottom (G).
     pub(crate) fn scroll_to_bottom(&self) {
         if let Ok(mut state) = self.shared.lock() {
-            // Use a large sentinel; the renderer will clamp naturally.
+            // The renderer clamps this sentinel once it knows the viewport height.
             state.scroll = u16::MAX / 2;
         }
     }
@@ -161,9 +161,17 @@ pub(crate) fn render_text_overlay(frame: &mut Frame<'_>, viewport: Rect, overlay
         height: viewport.height.saturating_sub(2).max(6),
     };
     frame.render_widget(Clear, area);
+    let body_height = area.height.saturating_sub(2);
+    let max_scroll = snapshot
+        .body
+        .lines
+        .len()
+        .saturating_sub(body_height as usize)
+        .min(u16::MAX as usize) as u16;
+    let scroll = snapshot.scroll.min(max_scroll);
     frame.render_widget(
         Paragraph::new(snapshot.body)
-            .scroll((snapshot.scroll, 0))
+            .scroll((scroll, 0))
             .wrap(Wrap { trim: false })
             .block(
                 Block::default()

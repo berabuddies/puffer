@@ -1,0 +1,14 @@
+{
+  "pr_number": 6567,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/6567",
+  "title": "LibRegex: Properly track code units in unicode mode",
+  "merged_at": "2025-10-24T19:23:06Z",
+  "base_commit": "cd4ac4f30f5f453376ed79373b7c3b3d20720921",
+  "merge_commit": "5632a52531cb48ccbaccc17dfc2f6ecddbb2a196",
+  "area": "libregex",
+  "files_changed": [
+    "Libraries/LibJS/Tests/builtins/RegExp/RegExp.js",
+    "Libraries/LibRegex/RegexMatcher.cpp"
+  ],
+  "task_prompt": "Fix the failing LibRegex Unicode-mode regression covered by Libraries/LibJS/Tests/builtins/RegExp/RegExp.js. Track code units correctly while preserving RegExp behavior."
+}

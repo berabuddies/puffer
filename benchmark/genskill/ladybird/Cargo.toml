@@ -1,0 +1,21 @@
+[package]
+name = "puffer-genskill-eval"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "puffer-genskill-eval"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+clap = { version = "4", features = ["derive"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process", "fs", "time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

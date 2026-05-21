@@ -1,8 +1,10 @@
 use puffer_config::{ensure_workspace_dirs, ConfigPaths};
 use puffer_provider_registry::{OAuthCredential, StoredCredential};
+use puffer_session_store::SessionMetadata;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use uuid::Uuid;
 
 #[test]
 fn top_level_help_shows_claude_style_public_surface() {
@@ -90,6 +92,36 @@ fn resume_help_mentions_the_tui() {
 }
 
 #[test]
+fn startup_resume_picker_does_not_create_blank_session() {
+    let (_tempdir, workspace, puffer_home) = configured_workspace();
+    write_session_fixture(
+        &puffer_home,
+        Uuid::parse_str("00000000-0000-0000-0000-000000000101").unwrap(),
+        "dockyard alpha",
+        &workspace,
+        10,
+    );
+    write_session_fixture(
+        &puffer_home,
+        Uuid::parse_str("00000000-0000-0000-0000-000000000102").unwrap(),
+        "dockyard beta",
+        &workspace,
+        20,
+    );
+    let before = session_fixture_count(&puffer_home);
+
+    let output = run_puffer(&workspace, &puffer_home, &["--resume", "dockyard"]);
+
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("interactive TUI requires stdin and stdout to be terminals"),
+        "{stderr}"
+    );
+    assert_eq!(session_fixture_count(&puffer_home), before);
+}
+
+#[test]
 fn remote_help_mentions_ssh_launch() {
     let (_tempdir, workspace, puffer_home) = configured_workspace();
     let output = run_puffer(&workspace, &puffer_home, &["remote", "--help"]);
@@ -98,6 +130,16 @@ fn remote_help_mentions_ssh_launch() {
     assert!(stdout.contains("Launch Puffer on a remote host over SSH"));
     assert!(stdout.contains("<TARGET>"));
     assert!(stdout.contains("--cwd"));
+}
+
+#[test]
+fn non_interactive_startup_prompt_prints_command_output() {
+    let (_tempdir, workspace, puffer_home) = configured_workspace();
+    let output = run_puffer(&workspace, &puffer_home, &["--no-alt-screen", "/status"]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Status"), "{stdout}");
+    assert!(stdout.contains("Provider:"), "{stdout}");
 }
 
 #[test]
@@ -417,6 +459,51 @@ fn configured_workspace() -> (tempfile::TempDir, PathBuf, PathBuf) {
     std::os::unix::fs::symlink(repo_root.join("resources"), workspace.join("resources"))
         .expect("resource symlink");
     (tempdir, workspace, puffer_home)
+}
+
+fn write_session_fixture(
+    puffer_home: &Path,
+    id: Uuid,
+    display_name: &str,
+    cwd: &Path,
+    updated_at_ms: u64,
+) {
+    let root = puffer_home.join(".puffer").join("sessions");
+    fs::create_dir_all(&root).expect("sessions dir");
+    let metadata = SessionMetadata {
+        id,
+        display_name: Some(display_name.to_string()),
+        generated_title: None,
+        cwd: cwd.to_path_buf(),
+        created_at_ms: 1,
+        updated_at_ms,
+        parent_session_id: None,
+        slug: Some(display_name.replace(' ', "-")),
+        tags: Vec::new(),
+        note: None,
+    };
+    let body = serde_json::json!({ "metadata": metadata });
+    fs::write(
+        root.join(format!("{id}.session.json")),
+        serde_json::to_vec(&body).expect("session json"),
+    )
+    .expect("write session");
+    fs::write(root.join(format!("{id}.jsonl")), b"").expect("write jsonl");
+}
+
+fn session_fixture_count(puffer_home: &Path) -> usize {
+    let root = puffer_home.join(".puffer").join("sessions");
+    fs::read_dir(root)
+        .expect("session dir")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| name.ends_with(".session.json"))
+        })
+        .count()
 }
 
 fn run_puffer(workspace: &Path, puffer_home: &Path, args: &[&str]) -> Output {

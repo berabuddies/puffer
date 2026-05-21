@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy } from "svelte";
   import { ensureLocalDaemonClient } from "../../api/daemonClient";
   import { browserRecording, type BrowserRecordedFrame } from "../../api/desktop";
   import Icon, { type IconName } from "../../design/Icon.svelte";
@@ -37,7 +37,7 @@
     if (t.includes("browser") || t.includes("fetch") || t.includes("web")) return "globe";
     if (t.includes("git") || t.includes("diff")) return "git";
     if (t.includes("plan") || t.includes("thinking")) return "cpu";
-    if (t.includes("sub_agent") || t.includes("mcp__")) return "plug";
+    if (isSubagentToolName(name) || t.includes("mcp__")) return "plug";
     if (t.includes("list") || t.includes("ls")) return "folder";
     return "bolt";
   }
@@ -143,10 +143,11 @@
   }
 
   function subAgentArgLine(input: Record<string, unknown> | null): string {
-    const tool = stringField(input, ["tool"]) ?? "spawnAgent";
+    const tool = stringField(input, ["agent_type", "agentType", "tool", "role"]) ?? "spawn";
     const model = stringField(input, ["model"]);
     const effort = stringField(input, ["reasoningEffort", "reasoning_effort"]);
-    return [tool, model, effort].filter(Boolean).join(" · ");
+    const prompt = shortValue(stringField(input, ["message", "prompt"]), 72);
+    return [tool, model, effort, prompt].filter(Boolean).join(" · ");
   }
 
   function statusLabel(s: string): string {
@@ -251,10 +252,37 @@
     return { server: match[1] || "mcp", tool: match[2] || "tool" };
   }
 
+  function compactToolName(name: string | null | undefined): string {
+    return (name ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  }
+
+  function isSubagentToolName(name: string | null | undefined): boolean {
+    const compact = compactToolName(name);
+    return (
+      compact === "subagent" ||
+      compact === "spawnagent" ||
+      compact === "waitagent" ||
+      compact === "sendinput" ||
+      compact === "closeagent" ||
+      compact === "resumeagent" ||
+      compact.includes("collab")
+    );
+  }
+
+  function subagentDisplayToolName(name: string): string {
+    const compact = compactToolName(name);
+    if (compact === "spawnagent" || compact === "subagent") return "Spawn sub-agent";
+    if (compact === "waitagent") return "Wait for sub-agent";
+    if (compact === "sendinput") return "Message sub-agent";
+    if (compact === "closeagent") return "Close sub-agent";
+    if (compact === "resumeagent") return "Resume sub-agent";
+    return "Sub-agent";
+  }
+
   function displayToolName(name: string, input: Record<string, unknown> | null): string {
     const mcp = mcpParts(name, input);
     if (mcp) return `${smartTitle(mcp.server)} · ${smartTitle(mcp.tool)}`;
-    if (name.toLowerCase() === "sub_agent") return "Sub-agent";
+    if (isSubagentToolName(name)) return subagentDisplayToolName(name);
     return name && name !== "undefined" ? name : "Tool";
   }
 
@@ -288,6 +316,17 @@
         return rendered ? `${key}: ${rendered}` : key;
       });
     return entries.length ? entries.join(" · ") : smartTitle(mcp.tool);
+  }
+
+  function isBrowserToolCall(name: string, input: Record<string, unknown> | null): boolean {
+    const lowerName = name.toLowerCase();
+    if (lowerName === "browser") return true;
+    const mcp = mcpParts(name, input);
+    return mcp?.server.toLowerCase() === "browser";
+  }
+
+  function browserArgs(input: Record<string, unknown> | null): Record<string, unknown> | null {
+    return recordField(input, "arguments") ?? input;
   }
 
   function outputStatusMeta(output: Record<string, unknown> | null): string[] {
@@ -681,7 +720,7 @@
         body: summary.length || content.length ? null : toolOutput
       };
     }
-    if (normalized === "sub_agent") {
+    if (isSubagentToolName(name)) {
       const states = asRecord(output?.agentsStates);
       const rows = states
         ? Object.entries(states).map(([id, state]) => {
@@ -693,14 +732,15 @@
         : stringArrayField(output, ["receiverThreadIds"]);
       return {
         mode: "list",
-        title: `Sub-agent ${stringField(input, ["tool"]) ?? "task"}`,
+        title: subagentDisplayToolName(name),
         meta: [
+          stringField(input, ["agent_type", "agentType", "tool", "role"]) ?? "",
           stringField(input, ["model"]) ?? "",
           stringField(input, ["reasoningEffort", "reasoning_effort"]) ?? "",
           stringField(output, ["status"]) ?? ""
         ].filter(Boolean),
         rows,
-        body: stringField(input, ["prompt"])
+        body: stringField(input, ["message", "prompt"])
       };
     }
     if (normalized === "view_image" || normalized === "image_generation") {
@@ -769,10 +809,12 @@
     toolStatus.toLowerCase().startsWith("run") || toolStatus === "pending"
   );
   let isTerminalTool = $derived(["bash", "shell", "powershell"].includes(toolName.toLowerCase()));
-  let isBrowserTool = $derived(toolName.toLowerCase() === "browser");
+  let isBrowserTool = $derived(isBrowserToolCall(toolName, inputJson));
   let recordingFrames = $state<RecordingFrame[]>([]);
   let selectedFrameId = $state<string | null>(null);
   let recordingDisposer: (() => void) | null = null;
+  let recordingKey = "";
+  let recordingGeneration = 0;
 
   function toRecordingFrame(frame: BrowserRecordedFrame): RecordingFrame {
     return {
@@ -781,43 +823,179 @@
     };
   }
 
-  function tabIdForBrowserAction(): string | null {
-    return stringField(inputJson, ["tabId"]);
+  function browserFrameStructurallyMatchesArgs(
+    args: Record<string, unknown> | null,
+    frame: BrowserRecordedFrame
+  ): boolean {
+    const backendSessionId = stringField(args, ["backendSessionId", "backend_session_id"]);
+    const tabId = stringField(args, ["tabId", "tab_id"]);
+    if (backendSessionId && frame.backendSessionId !== backendSessionId) return false;
+    if (tabId && frame.tabId !== tabId) return false;
+    return true;
   }
 
-  function mergeRecordingFrame(frame: BrowserRecordedFrame) {
-    const tabId = tabIdForBrowserAction();
-    if (tabId && frame.tabId !== tabId) return;
+  function parseBrowserUrl(value: string): URL | null {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    try {
+      return new URL(trimmed);
+    } catch {
+      try {
+        return new URL(`https://${trimmed}`);
+      } catch {
+        return null;
+      }
+    }
+  }
+
+  function comparableBrowserHost(url: URL): string {
+    return url.hostname.toLowerCase().replace(/^www\./, "");
+  }
+
+  function browserHostsCompatible(actionUrl: URL, frameUrl: URL): boolean {
+    const actionHost = comparableBrowserHost(actionUrl);
+    const frameHost = comparableBrowserHost(frameUrl);
+    return (
+      actionHost === frameHost ||
+      frameHost.endsWith(`.${actionHost}`) ||
+      actionHost.endsWith(`.${frameHost}`)
+    );
+  }
+
+  function browserPathsCompatible(actionUrl: URL, frameUrl: URL): boolean {
+    const actionPath = actionUrl.pathname.replace(/\/+$/, "") || "/";
+    const framePath = frameUrl.pathname.replace(/\/+$/, "") || "/";
+    if (actionPath === "/") return true;
+    return framePath === actionPath || framePath.startsWith(`${actionPath}/`);
+  }
+
+  function browserSearchAndHashCompatible(actionUrl: URL, frameUrl: URL): boolean {
+    if (actionUrl.search && frameUrl.search !== actionUrl.search) return false;
+    if (actionUrl.hash && frameUrl.hash !== actionUrl.hash) return false;
+    return true;
+  }
+
+  function browserUrlsCompatible(actionUrlValue: string, frameUrlValue: string): boolean {
+    if (frameUrlValue === actionUrlValue || frameUrlValue.startsWith(`${actionUrlValue}#`)) {
+      return true;
+    }
+    const actionUrl = parseBrowserUrl(actionUrlValue);
+    const frameUrl = parseBrowserUrl(frameUrlValue);
+    if (!actionUrl || !frameUrl) return false;
+    return (
+      browserHostsCompatible(actionUrl, frameUrl) &&
+      browserPathsCompatible(actionUrl, frameUrl) &&
+      browserSearchAndHashCompatible(actionUrl, frameUrl)
+    );
+  }
+
+  function browserFrameUrlMatchesArgs(
+    args: Record<string, unknown> | null,
+    frame: BrowserRecordedFrame
+  ): boolean {
+    const url = stringField(args, ["url"]);
+    if (!url) return true;
+    return browserUrlsCompatible(url, frame.url);
+  }
+
+  function shouldPreferBrowserUrl(args: Record<string, unknown> | null): boolean {
+    return Boolean(
+      stringField(args, ["url"]) &&
+        !stringField(args, ["backendSessionId", "backend_session_id"]) &&
+        !stringField(args, ["tabId", "tab_id"])
+    );
+  }
+
+  function preferBrowserFramesForArgs(
+    args: Record<string, unknown> | null,
+    frames: BrowserRecordedFrame[]
+  ): BrowserRecordedFrame[] {
+    const structural = frames.filter((frame) => browserFrameStructurallyMatchesArgs(args, frame));
+    if (!shouldPreferBrowserUrl(args)) return structural;
+    const urlMatches = structural.filter((frame) => browserFrameUrlMatchesArgs(args, frame));
+    if (urlMatches.length > 0) return urlMatches;
+    return structural.length <= 1 ? structural : [];
+  }
+
+  function browserRecordingKey(): string {
+    if (!sessionId || !isBrowserTool) return "";
+    const args = browserArgs(inputJson);
+    return [
+      sessionId,
+      item.id,
+      toolName,
+      stringField(args, ["backendSessionId", "backend_session_id"]) ?? "",
+      stringField(args, ["tabId", "tab_id"]) ?? "",
+      stringField(args, ["action"]) ?? "",
+      stringField(args, ["url"]) ?? ""
+    ].join("\u0000");
+  }
+
+  function resetBrowserRecording(): void {
+    recordingDisposer?.();
+    recordingDisposer = null;
+    recordingFrames = [];
+    selectedFrameId = null;
+  }
+
+  function mergeRecordingFrameForArgs(
+    args: Record<string, unknown> | null,
+    frame: BrowserRecordedFrame,
+    expectedKey: string,
+    generation: number
+  ) {
+    if (generation !== recordingGeneration || expectedKey !== recordingKey) return;
+    if (!browserFrameStructurallyMatchesArgs(args, frame)) return;
+    if (shouldPreferBrowserUrl(args) && !browserFrameUrlMatchesArgs(args, frame)) return;
     const next = toRecordingFrame(frame);
     if (recordingFrames.some((item) => item.frameId === next.frameId)) return;
     recordingFrames = [...recordingFrames, next].slice(-80);
   }
 
-  async function loadBrowserRecording() {
-    if (!sessionId || !isBrowserTool) return;
+  async function loadBrowserRecordingForAction(
+    targetSessionId: string,
+    args: Record<string, unknown> | null,
+    expectedKey: string,
+    generation: number
+  ) {
     try {
-      const tabId = tabIdForBrowserAction();
-      const snapshot = await browserRecording(sessionId);
-      recordingFrames = snapshot.frames
-        .filter((frame) => !tabId || frame.tabId === tabId)
+      const snapshot = await browserRecording(targetSessionId);
+      if (generation !== recordingGeneration || expectedKey !== recordingKey) return;
+      recordingFrames = preferBrowserFramesForArgs(args, snapshot.frames)
         .map(toRecordingFrame)
         .slice(-80);
     } catch {
+      if (generation !== recordingGeneration || expectedKey !== recordingKey) return;
       recordingFrames = [];
     }
   }
 
-  async function subscribeBrowserRecording() {
-    if (!sessionId || !isBrowserTool) return;
+  async function subscribeBrowserRecordingForAction(
+    targetSessionId: string,
+    args: Record<string, unknown> | null,
+    expectedKey: string,
+    generation: number
+  ) {
     const client = await ensureLocalDaemonClient();
+    if (generation !== recordingGeneration || expectedKey !== recordingKey) return;
     recordingDisposer?.();
-    recordingDisposer = client.on<BrowserRecordedFrame>(`browser:${sessionId}:recording`, mergeRecordingFrame);
+    recordingDisposer = client.on<BrowserRecordedFrame>(
+      `browser:${targetSessionId}:recording`,
+      (frame) => mergeRecordingFrameForArgs(args, frame, expectedKey, generation)
+    );
   }
 
-  onMount(() => {
-    if (!isBrowserTool) return;
-    void loadBrowserRecording();
-    void subscribeBrowserRecording();
+  $effect(() => {
+    const nextKey = browserRecordingKey();
+    if (nextKey === recordingKey) return;
+    recordingKey = nextKey;
+    recordingGeneration += 1;
+    resetBrowserRecording();
+    if (!nextKey || !sessionId || !isBrowserTool) return;
+    const args = browserArgs(inputJson);
+    const generation = recordingGeneration;
+    void loadBrowserRecordingForAction(sessionId, args, nextKey, generation);
+    void subscribeBrowserRecordingForAction(sessionId, args, nextKey, generation);
   });
 
   onDestroy(() => {
@@ -850,7 +1028,7 @@
   let toggleable = $derived(hasOutput || isPending || isBrowserTool);
 
   let arg = $derived(
-    toolName.toLowerCase() === "sub_agent"
+    isSubagentToolName(toolName)
       ? subAgentArgLine(inputJson)
       : mcpArgLine(toolName, inputJson)
         ?? (isBrowserTool

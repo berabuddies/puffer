@@ -19,6 +19,7 @@
   } from "../../types";
   import type { AgentState } from "../../shell/tweaks";
   import type { AgentTurnOptions } from "../../api/desktop";
+  type SubmitMessageResult = boolean | void | Promise<boolean | void>;
 
   type Props = {
     // Live session data from the backend.
@@ -27,15 +28,19 @@
     timeline: TimelineItem[];
     pendingPermissions: PermissionTimelineItem[];
     pendingQuestions: UserQuestionTimelineItem[];
+    resolvingPermissionIds?: string[];
+    resolvingQuestionIds?: string[];
     loading: boolean;
     turnRunning?: boolean;
+    turnCancelable?: boolean;
     turnStartedAtMs?: number | null;
     turnThinking?: boolean;
     turnStatusHint?: string | null;
     settingsSnapshot?: SettingsSnapshot | null;
+    backendConnected?: boolean;
     userDisplayName?: string;
     onBack: () => void;
-    onSubmitMessage: (message: string, options?: AgentTurnOptions) => void;
+    onSubmitMessage: (message: string, options?: AgentTurnOptions) => SubmitMessageResult;
     onResolvePermission: (permissionId: string, choice: string) => void;
     onResolveUserQuestion: (
       questionId: string,
@@ -43,6 +48,7 @@
       annotations?: Record<string, Record<string, string>>
     ) => void;
     onCancelTurn?: () => void;
+    onDraftChange?: (hasDraft: boolean) => void;
     onRenameTitle?: (title: string) => void | Promise<void>;
   };
 
@@ -52,27 +58,35 @@
     timeline,
     pendingPermissions,
     pendingQuestions,
+    resolvingPermissionIds = [],
+    resolvingQuestionIds = [],
     loading,
     turnRunning = false,
+    turnCancelable = true,
     turnStartedAtMs = null,
     turnThinking = false,
     turnStatusHint = null,
     settingsSnapshot = null,
+    backendConnected = true,
     userDisplayName = "Otter",
     onBack,
     onSubmitMessage,
     onResolvePermission,
     onResolveUserQuestion,
     onCancelTurn,
+    onDraftChange,
     onRenameTitle
   }: Props = $props();
 
   type Tab = "chat" | "diff" | "terminal" | "files" | "browser";
+  type FileOpenTarget = { path: string; line: number | null; requestId: number };
   let tab = $state<Tab>("chat");
   let sideTab = $state<Tab | null>(null);
   let sideWidth = $state(420);
   let sideDragStart: { pointerId: number; startX: number; startWidth: number } | null = null;
-  let fileToOpen = $state<string | null>(null);
+  let fileToOpen = $state<FileOpenTarget | null>(null);
+  let fileOpenRequestId = 0;
+  let fileToOpenSessionId: string | null = null;
   let rootEl = $state<HTMLElement | undefined>(undefined);
   let searchInputEl = $state<HTMLInputElement | undefined>(undefined);
   let searchOpen = $state(false);
@@ -89,21 +103,57 @@
   let displayProject = $derived(session?.folderPath?.split("/").pop() ?? "");
   let projectCwd = $derived(sessionDetail?.repoStatus?.cwd ?? session?.cwd ?? "");
   let displayWorktree = $derived("");
-  let status = $derived<AgentStatus>(inferStatusFromSession(sessionDetail));
+  let status = $derived<AgentStatus>(
+    pendingPermissions.length > 0 || pendingQuestions.length > 0
+      ? "awaiting"
+      : inferStatusFromSession(sessionDetail)
+  );
   let editingTitle = $state(false);
   let titleDraft = $state("");
   let titleSaving = $state(false);
+  let titleEditSessionId: string | null = null;
+  let titleEditGeneration = 0;
+  let titleEditing = $derived(Boolean(editingTitle && titleEditSessionId === (session?.id ?? null)));
+  let detailSessionId: string | null = null;
 
   $effect(() => {
-    if (!editingTitle) titleDraft = displayName;
+    if (!titleEditing) titleDraft = displayName;
+  });
+
+  $effect(() => {
+    const nextSessionId = session?.id ?? null;
+    if (nextSessionId === titleEditSessionId) return;
+    titleEditGeneration += 1;
+    titleEditSessionId = nextSessionId;
+    editingTitle = false;
+    titleSaving = false;
+    titleDraft = displayName;
+  });
+
+  $effect(() => {
+    const nextSessionId = session?.id ?? null;
+    if (nextSessionId === fileToOpenSessionId) return;
+    fileToOpenSessionId = nextSessionId;
+    fileToOpen = null;
+  });
+
+  $effect(() => {
+    const nextSessionId = session?.id ?? null;
+    if (nextSessionId === detailSessionId) return;
+    detailSessionId = nextSessionId;
+    closeSearch();
   });
 
   function inferStatusFromSession(d: SessionDetail | null): AgentStatus {
+    if (
+      session?.activityStatus === "running" ||
+      session?.activityStatus === "awaiting" ||
+      session?.activityStatus === "review"
+    ) {
+      return session.activityStatus;
+    }
     if (!d) return "idle";
-    const hasPending = d.timeline.some((t) => t.kind === "permission");
-    if (hasPending) return "awaiting";
     if (d.repoStatus?.pullRequest) return "review";
-    if (d.repoStatus?.hasUncommittedChanges) return "running";
     return "idle";
   }
 
@@ -126,23 +176,36 @@
   let diffCount = $derived(timeline.filter((t) => t.kind === "diff").length);
   function startTitleEdit() {
     if (!session || !onRenameTitle) return;
+    titleEditGeneration += 1;
+    titleEditSessionId = session.id;
     titleDraft = displayName;
     editingTitle = true;
   }
 
   function cancelTitleEdit() {
+    titleEditGeneration += 1;
     titleDraft = displayName;
     editingTitle = false;
+    titleEditSessionId = null;
   }
 
   async function saveTitleEdit() {
-    if (!session || !onRenameTitle || titleSaving) return;
+    if (!session || !onRenameTitle || titleSaving || !titleEditing) return;
+    const saveGeneration = titleEditGeneration;
+    const saveSessionId = session.id;
     titleSaving = true;
+    let saved = false;
     try {
       await onRenameTitle(titleDraft);
-      editingTitle = false;
+      saved = true;
     } finally {
-      titleSaving = false;
+      if (titleEditGeneration === saveGeneration && titleEditSessionId === saveSessionId) {
+        titleSaving = false;
+        if (saved) {
+          editingTitle = false;
+          titleEditSessionId = null;
+        }
+      }
     }
   }
 
@@ -184,17 +247,23 @@
 
   function handleTabClick(event: MouseEvent, nextTab: Tab) {
     if (event.metaKey || event.ctrlKey) {
-      sideTab = nextTab;
       event.preventDefault();
+      if (!sidePanelTabAllowed(nextTab) || nextTab === tab) return;
+      sideTab = nextTab;
       if (searchOpen) void refreshSearch(false);
       return;
     }
     tab = nextTab;
+    if (sideTab === nextTab) sideTab = null;
     if (searchOpen) void refreshSearch(false);
   }
 
-  function openLinkedFile(path: string) {
-    fileToOpen = path;
+  function sidePanelTabAllowed(value: Tab): boolean {
+    return value === "diff";
+  }
+
+  function openLinkedFile(path: string, line: number | null = null) {
+    fileToOpen = { path, line, requestId: ++fileOpenRequestId };
     tab = "files";
   }
 
@@ -232,18 +301,20 @@
     const element = target instanceof HTMLElement ? target : null;
     if (!element) return false;
     if (element.closest(".pf-agent-find")) return false;
-    return Boolean(element.closest("input, textarea, select, [contenteditable='true']"));
+    return Boolean(
+      element.closest("input, textarea, select, [contenteditable='true'], .pf-browser-canvas")
+    );
   }
 
   function handleGlobalKeydown(event: KeyboardEvent) {
     const key = event.key.toLowerCase();
+    if (isEditableTarget(event.target)) return;
     if ((event.metaKey || event.ctrlKey) && key === "f") {
       event.preventDefault();
       openSearch();
       return;
     }
     if (!searchOpen) return;
-    if (isEditableTarget(event.target)) return;
     if (event.key === "Escape") {
       event.preventDefault();
       closeSearch();
@@ -396,8 +467,8 @@
     </button>
     <Puffer size={20} state={pufferState} />
     <div class="pf-agent-identity">
-      <div class="name" class:editing={editingTitle}>
-        {#if editingTitle}
+      <div class="name" class:editing={titleEditing}>
+        {#if titleEditing}
           <input
             class="title-input"
             bind:value={titleDraft}
@@ -426,10 +497,10 @@
             <Icon name="x" size={12} />
           </button>
         {:else}
-          <span class="primary-title">{displayName}</span>
+          <span class="primary-title" title={displayName}>{displayName}</span>
           {#if displayTitle}
             <span class="sep">·</span>
-            <span class="title">{displayTitle}</span>
+            <span class="title" title={displayTitle}>{displayTitle}</span>
           {/if}
           {#if onRenameTitle}
             <button
@@ -466,34 +537,59 @@
       {/if}
       {statusLabel}
     </span>
-    <div class="pf-agent-tabs">
-      <button class="pf-agent-tab" class:on={tab === "chat"} onclick={(event) => handleTabClick(event, "chat")}>
+    <div class="pf-agent-tabs" role="group" aria-label="Agent detail panes">
+      <button
+        type="button"
+        class="pf-agent-tab"
+        class:on={tab === "chat"}
+        aria-pressed={tab === "chat"}
+        onclick={(event) => handleTabClick(event, "chat")}
+      >
         <Icon name="sparkles" size={12} />Chat
       </button>
-      <button class="pf-agent-tab" class:on={tab === "diff"} onclick={(event) => handleTabClick(event, "diff")}>
+      <button
+        type="button"
+        class="pf-agent-tab"
+        class:on={tab === "diff"}
+        aria-pressed={tab === "diff"}
+        onclick={(event) => handleTabClick(event, "diff")}
+      >
         <Icon name="git" size={12} />Diff
         {#if diffCount > 0}
           <span class="pf-agent-tab-badge">{diffCount}</span>
         {/if}
       </button>
       <button
+        type="button"
         class="pf-agent-tab"
         class:on={tab === "terminal"}
+        aria-pressed={tab === "terminal"}
         onclick={(event) => handleTabClick(event, "terminal")}
       >
         <Icon name="terminal" size={12} />Terminal
       </button>
-      <button class="pf-agent-tab" class:on={tab === "files"} onclick={(event) => handleTabClick(event, "files")}>
+      <button
+        type="button"
+        class="pf-agent-tab"
+        class:on={tab === "files"}
+        aria-pressed={tab === "files"}
+        onclick={(event) => handleTabClick(event, "files")}
+      >
         <Icon name="folder" size={12} />Files
       </button>
       <button
+        type="button"
         class="pf-agent-tab"
         class:on={tab === "browser"}
+        aria-pressed={tab === "browser"}
         onclick={(event) => handleTabClick(event, "browser")}
       >
         <Icon name="globe" size={12} />Browser
       </button>
     </div>
+    <button type="button" class="pf-agent-close" onclick={onBack} title="Close session" aria-label="Close session">
+      <Icon name="x" size={13} />
+    </button>
   </div>
 
   <div class="pf-agent-detail-shell" class:withSubpage={sideTab !== null}>
@@ -505,20 +601,25 @@
         {timeline}
         {pendingPermissions}
         {pendingQuestions}
+        {resolvingPermissionIds}
+        {resolvingQuestionIds}
         {loading}
         {displayName}
         {pufferState}
         {projectCwd}
         {turnRunning}
+        {turnCancelable}
         {turnStartedAtMs}
         {turnThinking}
         {turnStatusHint}
         {settingsSnapshot}
+        {backendConnected}
         {userDisplayName}
         {onSubmitMessage}
         {onResolvePermission}
         {onResolveUserQuestion}
         {onCancelTurn}
+        {onDraftChange}
         onOpenFileLink={openLinkedFile}
         {fileToOpen}
       />
@@ -552,20 +653,25 @@
           {timeline}
           {pendingPermissions}
           {pendingQuestions}
+          {resolvingPermissionIds}
+          {resolvingQuestionIds}
           {loading}
           {displayName}
           {pufferState}
           {projectCwd}
           {turnRunning}
+          {turnCancelable}
           {turnStartedAtMs}
           {turnThinking}
           {turnStatusHint}
           {settingsSnapshot}
+          {backendConnected}
           {userDisplayName}
           {onSubmitMessage}
           {onResolvePermission}
           {onResolveUserQuestion}
           {onCancelTurn}
+          {onDraftChange}
           onOpenFileLink={openLinkedFile}
           {fileToOpen}
         />
@@ -638,13 +744,31 @@
     transition: background 120ms, color 120ms;
   }
   .pf-agent-back:hover { background: var(--accent); color: var(--foreground); }
+  .pf-agent-close {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--muted-foreground);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background 120ms, color 120ms, border-color 120ms;
+  }
+  .pf-agent-close:hover {
+    background: var(--accent);
+    color: var(--foreground);
+    border-color: var(--border);
+  }
   .pf-agent-identity {
     display: flex;
     flex-direction: column;
     gap: 1px;
     min-width: 0;
-    flex: 0 1 auto;
-    max-width: 420px;
+    flex: 1 1 auto;
   }
   .pf-agent-identity .name {
     font-size: 14px;

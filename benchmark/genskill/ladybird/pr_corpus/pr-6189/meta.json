@@ -1,0 +1,14 @@
+{
+  "pr_number": 6189,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/6189",
+  "title": "AK: Fix is_within_range when converting from float",
+  "merged_at": "2025-09-24T09:40:24Z",
+  "base_commit": "23380a563a97d8002356845d28de1efe13ea9f2d",
+  "merge_commit": "b76f1fb011131d044e00239ff86638dad72b083b",
+  "area": "ak",
+  "files_changed": [
+    "AK/Checked.h",
+    "Tests/AK/TestChecked.cpp"
+  ],
+  "task_prompt": "Fix the failing AK Checked range regression in Tests/AK/TestChecked.cpp. Correct is_within_range behavior for float conversions without weakening checked arithmetic semantics."
+}

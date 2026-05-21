@@ -1,0 +1,21 @@
+{
+  "pr_number": 6306,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/6306",
+  "title": "LibJS: Handle relativeTo ZDTs that fall within second DST wallclock time",
+  "merged_at": "2025-09-28T15:33:43Z",
+  "base_commit": "321809320b93645a94f3563a8b9756377be8332f",
+  "merge_commit": "cb6ca85564abb57517b82754b4ac1ba78785707a",
+  "area": "libjs",
+  "files_changed": [
+    "Libraries/LibJS/Runtime/Temporal/Duration.cpp",
+    "Libraries/LibJS/Runtime/Temporal/Duration.h",
+    "Libraries/LibJS/Runtime/Temporal/DurationPrototype.cpp",
+    "Libraries/LibJS/Runtime/Temporal/PlainDate.cpp",
+    "Libraries/LibJS/Runtime/Temporal/PlainDateTime.cpp",
+    "Libraries/LibJS/Runtime/Temporal/PlainYearMonth.cpp",
+    "Libraries/LibJS/Runtime/Temporal/ZonedDateTime.cpp",
+    "Libraries/LibJS/Tests/builtins/Temporal/Duration/Duration.prototype.round.js",
+    "Libraries/LibJS/Tests/builtins/Temporal/Duration/Duration.prototype.total.js"
+  ],
+  "task_prompt": "Fix the failing LibJS Temporal Duration regression under Libraries/LibJS/Tests/builtins/Temporal/Duration. Correct relativeTo ZonedDateTime handling during the second DST wall-clock time."
+}

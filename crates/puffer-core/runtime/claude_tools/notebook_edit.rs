@@ -532,11 +532,12 @@ mod tests {
     }
 
     #[test]
-    fn notebook_edit_rejects_paths_outside_working_directories() {
+    fn notebook_edit_rejects_paths_outside_default_writable_roots() {
+        // Path outside cwd, /tmp, $TMPDIR, /add-dir. Codex-style default
+        // writable set; this exercises the gate's reject branch.
         let temp = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let notebook_path = outside.path().join("demo.ipynb");
-        write_notebook(&notebook_path, &sample_notebook());
+        let notebook_path =
+            std::path::PathBuf::from("/__puffer_test_outside_writable_set__/demo.ipynb");
 
         let error = execute_notebook_edit_tool(
             temp.path(),

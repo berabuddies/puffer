@@ -1,0 +1,14 @@
+{
+  "pr_number": 6250,
+  "url": "https://github.com/LadybirdBrowser/ladybird/pull/6250",
+  "title": "AK: Destroy non-trivial types by ref in HashTable::clear_with_capacity",
+  "merged_at": "2025-09-22T22:28:01Z",
+  "base_commit": "2a288f6d5318890a82a2c5c2f6664ca03339ac67",
+  "merge_commit": "84241ea7616410982ffa52246d58b950fc75b05d",
+  "area": "ak",
+  "files_changed": [
+    "AK/HashTable.h",
+    "Tests/AK/TestHashTable.cpp"
+  ],
+  "task_prompt": "Fix the failing AK HashTable clear_with_capacity regression in Tests/AK/TestHashTable.cpp. Ensure non-trivial stored values are destroyed correctly while preserving existing hash table behavior."
+}

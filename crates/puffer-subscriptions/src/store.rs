@@ -151,7 +151,7 @@ mod tests {
             classify_prompt: None,
             classify_model: None,
             action: ActionSpec::SqliteInsert {
-                path: "/tmp/x.db".into(),
+                path: "x.db".into(),
                 table: "msgs".into(),
             },
             created_at_ms: 0,

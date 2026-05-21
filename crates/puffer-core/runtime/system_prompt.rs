@@ -70,6 +70,7 @@ $SESSION_GUIDANCE
 
 # Important context behavior
 When working with tool results, write down any important information you might need later in your response, as the original tool result may be cleared later to free context space.
+If the user explicitly says to ignore or not use memory, proceed as if any loaded memory files were empty. Do not apply remembered facts, cite memory content, compare against memory, or mention memory unless the user later re-enables it.
 
 $ENVIRONMENT"#;
 
@@ -297,25 +298,6 @@ fn build_environment_section(state: &AppState, model_id: &str) -> Result<String>
     ];
     lines.extend(prepend_bullets(items));
 
-    // Scratchpad directory: session-isolated temp space for intermediate files.
-    if let Some(scratchpad) = scratchpad_dir(state) {
-        lines.push(String::new());
-        lines.push("# Scratchpad Directory".to_string());
-        lines.push(format!(
-            "IMPORTANT: Always use this scratchpad directory for temporary files instead of `/tmp` or other system temp directories:\n\
-             `{}`\n\n\
-             Use this directory for ALL temporary file needs:\n\
-             - Storing intermediate results or data during multi-step tasks\n\
-             - Writing temporary scripts or configuration files\n\
-             - Saving outputs that don't belong in the user's project\n\
-             - Creating working files during analysis or processing\n\
-             - Any file that would otherwise go to `/tmp`\n\n\
-             Only use `/tmp` if the user explicitly requests it.\n\
-             The scratchpad directory is session-specific, isolated from the user's project, and can be used freely without permission prompts.",
-            scratchpad.display()
-        ));
-    }
-
     Ok(lines.join("\n"))
 }
 
@@ -397,19 +379,6 @@ fn load_memory_prompt_for_filename(cwd: &Path, filename: &str) -> Option<String>
             blocks.join("\n\n")
         ))
     }
-}
-
-/// Returns the session-specific scratchpad directory, creating it if needed.
-/// Returns the session-specific scratchpad directory under $HOME/.puffer/
-/// (not in the project directory, to avoid polluting workspace listings).
-fn scratchpad_dir(state: &AppState) -> Option<PathBuf> {
-    let home = env::var_os("HOME")?;
-    let dir = Path::new(&home)
-        .join(".puffer")
-        .join("scratchpad")
-        .join(state.session.id.to_string());
-    std::fs::create_dir_all(&dir).ok()?;
-    Some(dir)
 }
 
 fn is_git_repository(cwd: &Path) -> bool {
@@ -538,6 +507,7 @@ mod tests {
         assert!(prompt.contains("AskUserQuestion"));
         assert!(prompt.contains("# Environment"));
         assert!(prompt.contains("Primary working directory:"));
+        assert!(prompt.contains("ignore or not use memory"));
     }
 
     #[test]

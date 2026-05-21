@@ -1,0 +1,94 @@
+From 24e493c6275a4b037ddd0c1e7cbe3e528109b090 Mon Sep 17 00:00:00 2001
+From: vedant-pandey <vedantpandey46@gmail.com>
+Date: Sun, 28 Sep 2025 12:59:05 +0530
+Subject: [PATCH] LibJS: Move Typed Array copyWithin optimization before index
+ update
+
+The optimization for non-shared ArrayBuffers operates on incorrect
+values of from_byte_index and to_byte_index because they will have been
+modified in the preceding steps. This causes the incorrect range to be
+copied within the buffer.
+---
+ .../LibJS/Runtime/TypedArrayPrototype.cpp     | 38 +++++++++----------
+ .../TypedArray.prototype.copyWithin.js        | 14 +++++++
+ 2 files changed, 33 insertions(+), 19 deletions(-)
+
+diff --git a/Libraries/LibJS/Runtime/TypedArrayPrototype.cpp b/Libraries/LibJS/Runtime/TypedArrayPrototype.cpp
+index 471c2b98085d2..60492470596ec 100644
+--- a/Libraries/LibJS/Runtime/TypedArrayPrototype.cpp
++++ b/Libraries/LibJS/Runtime/TypedArrayPrototype.cpp
+@@ -358,6 +358,25 @@ JS_DEFINE_NATIVE_FUNCTION(TypedArrayPrototype::copy_within)
+             return typed_array;
+         }
+ 
++        // OPTIMIZATION: Fast path for non-shared ArrayBuffers that are not detached and have enough space to perform the copy with memmove.
++        if (!buffer->is_shared_array_buffer()) {
++            Checked<size_t> from_end = from_byte_index;
++            from_end += count_bytes;
++            Checked<size_t> to_end = to_byte_index;
++            to_end += count_bytes;
++
++            if (!from_end.has_overflow()
++                && !to_end.has_overflow()
++                && from_end.value() <= buffer_byte_limit
++                && to_end.value() <= buffer_byte_limit) {
++                auto* base = buffer->buffer().data();
++                void const* src = base + from_byte_index;
++                void* dst = base + to_byte_index;
++                memmove(dst, src, count_bytes);
++                return typed_array;
++            }
++        }
++
+         i8 direction;
+ 
+         // l. If fromByteIndex < toByteIndex and toByteIndex < fromByteIndex + countBytes, then
+@@ -383,25 +402,6 @@ JS_DEFINE_NATIVE_FUNCTION(TypedArrayPrototype::copy_within)
+             direction = 1;
+         }
+ 
+-        // OPTIMIZATION: Fast path for non-shared ArrayBuffers that are not detached and have enough space to perform the copy with memmove.
+-        if (!buffer->is_shared_array_buffer()) {
+-            Checked<size_t> from_end = from_byte_index;
+-            from_end += count_bytes;
+-            Checked<size_t> to_end = to_byte_index;
+-            to_end += count_bytes;
+-
+-            if (!from_end.has_overflow()
+-                && !to_end.has_overflow()
+-                && from_end.value() <= buffer_byte_limit
+-                && to_end.value() <= buffer_byte_limit) {
+-                auto* base = buffer->buffer().data();
+-                void const* src = base + from_byte_index;
+-                void* dst = base + to_byte_index;
+-                memmove(dst, src, count_bytes);
+-                return typed_array;
+-            }
+-        }
+-
+         // n. Repeat, while countBytes > 0,
+         while (count_bytes > 0) {
+             // i. If fromByteIndex < bufferByteLimit and toByteIndex < bufferByteLimit, then
+diff --git a/Libraries/LibJS/Tests/builtins/TypedArray/TypedArray.prototype.copyWithin.js b/Libraries/LibJS/Tests/builtins/TypedArray/TypedArray.prototype.copyWithin.js
+index 7d2ad7e847473..feef899fe556f 100644
+--- a/Libraries/LibJS/Tests/builtins/TypedArray/TypedArray.prototype.copyWithin.js
++++ b/Libraries/LibJS/Tests/builtins/TypedArray/TypedArray.prototype.copyWithin.js
+@@ -119,4 +119,18 @@ describe("normal behavior", () => {
+             expect(array).toEqual(new T([1n, 2n, 1n]));
+         });
+     });
++
++    test("overwriting in middle with end", () => {
++        TYPED_ARRAYS.forEach(T => {
++            const array = new T([0, 54, 999, 1000, 0, 0]);
++            expect(array.copyWithin(3, 2, 4)).toEqual(array);
++            expect(array).toEqual(new T([0, 54, 999, 999, 1000, 0]));
++        });
++
++        BIGINT_TYPED_ARRAYS.forEach(T => {
++            const array = new T([0n, 54n, 999n, 1000n, 0n, 0n]);
++            expect(array.copyWithin(3, 2, 4)).toEqual(array);
++            expect(array).toEqual(new T([0n, 54n, 999n, 999n, 1000n, 0n]));
++        });
++    });
+ });
