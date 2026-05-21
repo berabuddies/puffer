@@ -4447,6 +4447,7 @@ dependencies = [
  "html2text",
  "indexmap 2.14.0",
  "jsonschema",
+ "libc",
  "notify",
  "psl",
  "puffer-config",

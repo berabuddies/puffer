@@ -41,6 +41,7 @@ mod openai_ws;
 pub(crate) mod overflow;
 mod permission_prompt;
 mod plan_events;
+pub(crate) mod process_store;
 mod provider_adapter;
 pub mod quota;
 mod reflection;

@@ -31,6 +31,7 @@ pub(crate) mod skill;
 pub(crate) mod tool_search;
 pub mod web_fetch;
 pub mod web_search;
+pub mod write_stdin;
 
 /// Retries a blocking HTTP send operation up to `max_attempts` times with 1s delay
 /// on transient connection/timeout errors.
@@ -108,6 +109,10 @@ pub(crate) fn execute_tool(
             let output = serde_json::to_string_pretty(&execution.output)
                 .context("failed to serialize Bash output")?;
             Ok(tool_result(definition, execution.success, output))
+        }
+        "WriteStdin" => {
+            let (success, output) = write_stdin::execute(&state.process_store, input)?;
+            Ok(tool_result(definition, success, output))
         }
         "Read" => {
             if is_full_read_request(&input) {

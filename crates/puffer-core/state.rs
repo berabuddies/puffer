@@ -14,7 +14,7 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Describes the role of a rendered transcript message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -250,6 +250,8 @@ pub struct AppState {
     /// Defaults to a `LocalToolRunner`; tests and remote backends override
     /// it via [`AppState::with_tool_runner`].
     pub tool_runner: Arc<dyn ToolRunner>,
+    /// In-memory store for interactive/background processes with PTY or pipe I/O.
+    pub process_store: Arc<Mutex<crate::runtime::process_store::ProcessStore>>,
 }
 
 impl AppState {
@@ -334,6 +336,9 @@ impl AppState {
             tasks: Vec::new(),
             next_task_id: 1,
             tool_runner: Arc::new(LocalToolRunner::new()),
+            process_store: Arc::new(Mutex::new(
+                crate::runtime::process_store::ProcessStore::default(),
+            )),
         }
     }
 
