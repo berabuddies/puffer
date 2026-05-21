@@ -3,6 +3,7 @@
 
   import TitleBar from "./lib/shell/TitleBar.svelte";
   import Sidebar, { type ActiveAgent, type UserChip } from "./lib/shell/Sidebar.svelte";
+  import { isTauri } from "./lib/shell/platform";
   import {
     applyTweaksToDocument,
     defaultTweaks,
@@ -1188,13 +1189,10 @@
     authBusyProviderId = providerId;
     authError = null;
     try {
-      if (providerId === "worldrouter") {
-        // The Tauri handler returns immediately after spawning the
-        // detached `puffer auth login worldrouter` subprocess (it
-        // blocks up to 120 s on the localhost callback). The reaper
-        // thread emits `worldrouter:oauth-completed` when the child
-        // exits; that listener clears `authBusyProviderId`, refreshes
-        // the snapshot, and decides whether to navigate.
+      if (providerId === "worldrouter" && isTauri()) {
+        // Tauri: the host returns immediately after spawning the
+        // detached `puffer auth login worldrouter` subprocess and emits
+        // `worldrouter:oauth-completed` when the child exits.
         statusMessage = "Opening browser — finish the login to continue.";
         await loginWithOauth(providerId, remoteConnection);
         // Intentionally leave `authBusyProviderId` set; the event
@@ -1212,11 +1210,11 @@
     } catch (error) {
       authError = String(error);
       statusMessage = authError;
-      if (providerId === "worldrouter") {
+      if (providerId === "worldrouter" && isTauri()) {
         authBusyProviderId = null;
       }
     } finally {
-      if (providerId !== "worldrouter") {
+      if (!(providerId === "worldrouter" && isTauri())) {
         authBusyProviderId = null;
       }
     }
