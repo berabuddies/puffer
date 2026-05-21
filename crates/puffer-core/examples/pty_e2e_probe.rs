@@ -60,22 +60,41 @@ fn main() -> Result<()> {
     let model = resolve_model(&providers, &provider_id)?;
     eprintln!("[pty-probe] provider={provider_id} model={model}");
 
-    let prompt = r#"You have two tools available: Bash (with a "tty" boolean parameter) and WriteStdin (with "process_id" and "input" parameters).
+    let prompt = std::env::var("PROBE_PROMPT").unwrap_or_else(|_| {
+        r#"You have two tools available: Bash (with a "tty" boolean parameter) and WriteStdin (with "process_id" and "input" parameters).
 
-Your task: demonstrate interactive PTY by doing the following steps IN ORDER:
+Your task: use lldb to debug a pre-compiled C program. Follow these steps IN ORDER:
 
-1. Use the Bash tool with tty: true and command: "python3" to start a Python REPL.
-   This will return a process_id and initial output (the Python prompt).
+1. Use the Bash tool with tty: true and command: "lldb /tmp/puffer_lldb_target" to start lldb.
+   This returns a process_id and initial lldb output (the (lldb) prompt).
 
-2. Use the WriteStdin tool with the process_id from step 1 and input: "2 + 2\n"
-   to send "2 + 2" to the Python REPL. Report the output (should show 4).
+2. Use WriteStdin to set a breakpoint at the sum_points function:
+   input: "breakpoint set --name sum_points\n"
 
-3. Use WriteStdin again with input: "import sys; print(sys.version)\n"
-   to get the Python version.
+3. Use WriteStdin to run the program:
+   input: "run\n"
+   The program should hit the breakpoint inside sum_points.
 
-4. Use WriteStdin with input: "exit()\n" to cleanly exit the REPL.
+4. Use WriteStdin to print the local variables:
+   input: "frame variable\n"
+   Report the values of pts, n, and total.
 
-After each step, report what output you received. At the end, summarize whether the PTY interaction worked correctly."#;
+5. Use WriteStdin to print the first element of the pts array:
+   input: "expression pts[0]\n"
+   Report the struct fields (x, y, label).
+
+6. Use WriteStdin to step over one loop iteration and inspect total again:
+   input: "next\n"
+   then: "frame variable total\n"
+
+7. Use WriteStdin to continue execution to completion:
+   input: "continue\n"
+
+8. Use WriteStdin to quit lldb:
+   input: "quit\n"
+
+After each step, report what output you received. At the end, summarize whether the lldb debugging session worked correctly and what values you observed."#.to_string()
+    });
 
     eprintln!("[pty-probe] prompt:\n{prompt}\n");
 
@@ -104,7 +123,7 @@ After each step, report what output you received. At the end, summarize whether 
     );
     eprintln!();
 
-    let turn = execute_user_turn(&mut state, &resources, &mut providers, &mut auth_store, prompt)?;
+    let turn = execute_user_turn(&mut state, &resources, &mut providers, &mut auth_store, &prompt)?;
     eprintln!();
     eprintln!(
         "[pty-probe] turn completed: {} tool invocations",

@@ -601,3 +601,114 @@ fn tmux_agent_loop_answers_ask_user_question_with_keyboard_selection() {
         "second request should carry the selected answer: {body2}"
     );
 }
+
+/// PTY round-trip through the TUI. Mock first replies with a Bash tool_use
+/// containing tty:true to start python3, then a WriteStdin tool_use to send
+/// "2+2\n", then final text. Verifies the TUI renders the PTY output
+/// (Python prompt, "4") and the final text.
+#[test]
+fn tmux_agent_loop_drives_pty_round_trip_in_tui() {
+    if !require_tmux_or_skip("tmux_agent_loop_drives_pty_round_trip_in_tui") {
+        return;
+    }
+
+    let final_text = "puffer-tmux-pty-round-trip-ok";
+    let (_tempdir, workspace) = temp_workspace().unwrap();
+    link_repo_resources(workspace.as_path());
+
+    let final_text_owned = final_text.to_string();
+    let (mock_url, requests, server) = spawn_mock_anthropic(3, move |index| match index {
+        0 => sse_tool_use_response(
+            "toolu_pty_bash",
+            "Bash",
+            r#"{"command":"python3","tty":true,"timeout":10000}"#,
+        ),
+        1 => sse_tool_use_response(
+            "toolu_pty_stdin",
+            "WriteStdin",
+            r#"{"process_id":1000,"input":"2+2\n"}"#,
+        ),
+        _ => sse_text_response(&final_text_owned),
+    });
+
+    write_anthropic_override(workspace.as_path(), &mock_url);
+    write_config(workspace.as_path());
+
+    let binary = env!("CARGO_BIN_EXE_puffer");
+    let session = start_tmux_command_with_size(
+        "sh",
+        &[
+            "-lc",
+            &format!(
+                "HOME='{ws}' PUFFER_HTTP_TRACE_PATH='{ws}/wire.log' '{bin}'",
+                ws = workspace.display(),
+                bin = binary
+            ),
+        ],
+        Some(workspace.as_path()),
+        TerminalSize {
+            cols: 120,
+            rows: 40,
+        },
+    )
+    .unwrap();
+
+    wait_for_tmux_text(&session, "Puffer Code", Duration::from_secs(20)).unwrap();
+    send_tmux_keys(&session, &["start a python pty", "Enter"]).unwrap();
+
+    let capture = match wait_for_tmux_text(&session, final_text, Duration::from_secs(60)) {
+        Ok(capture) => capture,
+        Err(error) => {
+            let pane = capture_tmux_visible_pane(&session)
+                .unwrap_or_else(|_| "<failed to capture pane>".to_string());
+            let wire = std::fs::read_to_string(workspace.join("wire.log"))
+                .unwrap_or_else(|_| "<no wire log>".to_string());
+            panic!(
+                "expected final text after PTY round trip: {error}\n--- pane ---\n{pane}\n--- wire ---\n{wire}"
+            );
+        }
+    };
+
+    assert!(
+        capture.contains(final_text),
+        "tmux pane missing final text:\n{capture}"
+    );
+
+    server.join().unwrap();
+    let captured = requests.lock().unwrap();
+    assert_eq!(
+        captured.len(),
+        3,
+        "mock should have received exactly three requests (Bash + WriteStdin + final)"
+    );
+
+    // Request 2 (after Bash tty) must carry tool_result with Python prompt
+    let body2 = &captured[1];
+    assert!(
+        body2.contains("tool_result"),
+        "second request missing tool_result: {body2}"
+    );
+    assert!(
+        body2.contains("toolu_pty_bash"),
+        "second request must reference Bash tool_use_id: {body2}"
+    );
+    assert!(
+        body2.contains("Python") || body2.contains(">>>"),
+        "second request should carry Python REPL output: {body2}"
+    );
+    assert!(
+        body2.contains("processId") || body2.contains("process_id"),
+        "second request should carry processId in Bash output: {body2}"
+    );
+
+    // Request 3 (after WriteStdin) must carry tool_result with "4"
+    let body3 = &captured[2];
+    assert!(
+        body3.contains("tool_result"),
+        "third request missing tool_result: {body3}"
+    );
+    assert!(
+        body3.contains("toolu_pty_stdin"),
+        "third request must reference WriteStdin tool_use_id: {body3}"
+    );
+}
