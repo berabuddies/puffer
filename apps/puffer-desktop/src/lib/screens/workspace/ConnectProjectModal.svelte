@@ -13,7 +13,7 @@
   import {
     canonicalDaemonProviderId,
     providerCanRunAgent,
-    providerIdInSet,
+    providerIsAvailableForAgent,
     providerIdsEquivalent
   } from "../../providerIds";
   import type { ProviderSummary, SettingsSnapshot } from "../../types";
@@ -111,8 +111,9 @@
   function providerOptionsFor(source: SettingsSnapshot | null): ProviderSummary[] {
     const authenticatedProviderIds = (source?.auth ?? []).map((entry) => entry.providerId);
     return (source?.providers?.length ? source.providers : fallbackProviders).filter((provider) =>
-      providerCanRunAgent(provider) &&
-      (source === null || providerIdInSet(provider.id, authenticatedProviderIds))
+      source === null
+        ? providerCanRunAgent(provider)
+        : providerIsAvailableForAgent(provider, authenticatedProviderIds)
     );
   }
 

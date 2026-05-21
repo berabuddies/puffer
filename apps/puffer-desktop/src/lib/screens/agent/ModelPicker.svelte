@@ -2,7 +2,7 @@
   import { listProviderModels, type ModelDescriptorInfo } from "../../api/desktop";
   import type { SettingsSnapshot } from "../../types";
   import Icon from "../../design/Icon.svelte";
-  import { providerCanRunAgent, providerIdInSet, providerIdsEquivalent } from "../../providerIds";
+  import { providerIsAvailableForAgent, providerIdsEquivalent } from "../../providerIds";
 
   type Props = {
     snapshot: SettingsSnapshot | null;
@@ -48,12 +48,11 @@
   );
   let activeProvider = $derived(pendingProviderId ?? currentProvider);
   let activeModel = $derived(pendingProviderId ? "" : currentModel);
-  let authedProviderIds = $derived((snapshot?.auth ?? []).map((entry) => entry.providerId));
-  let authedProviders = $derived(
+  let authenticatedProviderIds = $derived((snapshot?.auth ?? []).map((entry) => entry.providerId));
+  let availableProviders = $derived(
     (snapshot?.providers ?? []).filter(
       (provider) =>
-        providerCanRunAgent(provider) &&
-        providerIdInSet(provider.id, authedProviderIds)
+        providerIsAvailableForAgent(provider, authenticatedProviderIds)
     )
   );
   let providerLabel = $derived(
@@ -62,7 +61,7 @@
   );
 
   let currentProviderEntry = $derived(
-    authedProviders.find((provider) => providerIdsEquivalent(provider.id, activeProvider)) ?? null
+    availableProviders.find((provider) => providerIdsEquivalent(provider.id, activeProvider)) ?? null
   );
   let currentProviderModels = $derived(
     modelsByProvider[activeProvider] ?? modelsByProvider[currentProviderEntry?.id ?? ""] ?? []
@@ -73,7 +72,7 @@
   let filteredEntries = $derived.by(() => {
     const needle = query.trim().toLowerCase();
     const out: { provider: string; providerLabel: string; model: ModelDescriptorInfo }[] = [];
-    const provider = authedProviders.find((entry) => providerIdsEquivalent(entry.id, activeProvider));
+    const provider = availableProviders.find((entry) => providerIdsEquivalent(entry.id, activeProvider));
     if (!provider) return out;
     for (const model of currentProviderModels) {
       if (
@@ -94,7 +93,7 @@
     try {
       const next: Record<string, ModelDescriptorInfo[]> = { ...modelsByProvider };
       const provider = currentProviderEntry ??
-        authedProviders.find((entry) => providerIdsEquivalent(entry.id, currentProvider));
+        availableProviders.find((entry) => providerIdsEquivalent(entry.id, currentProvider));
       const providers = provider ? [provider] : [];
       for (const provider of providers) {
         try {
@@ -248,7 +247,7 @@
     <div bind:this={menuEl} class="menu" role="listbox">
       {#if allowProviderSwitch}
         <div class="providers" role="group" aria-label="Model provider">
-          {#each authedProviders as provider (provider.id)}
+          {#each availableProviders as provider (provider.id)}
             <button
               type="button"
               class:on={providerIdsEquivalent(provider.id, activeProvider)}
@@ -272,7 +271,7 @@
         {#if busy && filteredEntries.length === 0}
           <div class="hint">Loading {providerLabel || "provider"} models…</div>
         {:else if filteredEntries.length === 0}
-          {#if authedProviders.length === 0}
+          {#if availableProviders.length === 0}
             <div class="hint">Connect a provider first.</div>
           {:else if !currentProvider}
             <div class="hint">Pick a provider.</div>

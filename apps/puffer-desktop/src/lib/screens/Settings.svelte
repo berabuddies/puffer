@@ -4,9 +4,8 @@
   import Icon, { type IconName } from "../design/Icon.svelte";
   import LoginView from "../components/LoginView.svelte";
   import {
-    providerCanRunAgent,
     providerIdCanRunAgent,
-    providerIdInSet,
+    providerIsAvailableForAgent,
     providerIdsEquivalent
   } from "../providerIds";
   import type { AccentKey, DensityKey, FontMixKey, ThemeKey, Tweaks } from "../shell/tweaks";
@@ -340,7 +339,7 @@
   let defaultRouteProviders = $derived.by(() => {
     const authIds = (props.snapshot?.auth ?? []).map((auth) => auth.providerId);
     return (props.snapshot?.providers ?? []).filter(
-      (provider) => providerCanRunAgent(provider) && providerIdInSet(provider.id, authIds)
+      (provider) => providerIsAvailableForAgent(provider, authIds)
     );
   });
 

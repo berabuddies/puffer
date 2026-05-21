@@ -31,6 +31,7 @@
     canonicalDaemonProviderId,
     providerIdCanRunAgent,
     providerIdInSet,
+    providerIsAvailableForAgent,
     providerIdsEquivalent
   } from "../../providerIds";
 
@@ -210,19 +211,19 @@
   );
   let allowProviderSwitch = $derived(Boolean(session) && !conversationStarted && !turnRunning);
   let authenticatedProviderIds = $derived((settingsSnapshot?.auth ?? []).map((entry) => entry.providerId));
-  let authenticatedAgentProviderIds = $derived(
-    authenticatedProviderIds.filter((providerId) =>
-      providerIdCanRunAgent(providerId, settingsSnapshot?.providers ?? [])
-    )
+  let availableAgentProviderIds = $derived(
+    (settingsSnapshot?.providers ?? [])
+      .filter((provider) => providerIsAvailableForAgent(provider, authenticatedProviderIds))
+      .map((provider) => provider.id)
   );
   let selectedProviderAuthenticated = $derived(
     settingsSnapshot === null ||
       !selectedProviderId ||
       (providerIdCanRunAgent(selectedProviderId, settingsSnapshot?.providers ?? []) &&
-        providerIdInSet(selectedProviderId, authenticatedAgentProviderIds))
+        providerIdInSet(selectedProviderId, availableAgentProviderIds))
   );
   let providerSwitchCanRecover = $derived(
-    allowProviderSwitch && authenticatedAgentProviderIds.length > 0
+    allowProviderSwitch && availableAgentProviderIds.length > 0
   );
   let agentBusy = $derived(
     !turnRunning &&

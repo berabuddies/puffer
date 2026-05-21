@@ -16,6 +16,10 @@ type ProviderCapability = {
   modelCount?: number | null;
 };
 
+type ProviderAuthCapability = ProviderCapability & {
+  authModes?: readonly string[] | null;
+};
+
 /** True when a provider id can run an agent session. */
 export function isAgentProviderId(providerId: string | null | undefined): boolean {
   const trimmed = providerId?.trim();
@@ -35,6 +39,26 @@ export function providerCanRunAgent(provider: ProviderCapability | null | undefi
   const api = provider.defaultApi?.trim().toLowerCase() ?? "";
   if (!NON_AGENT_APIS.has(api)) return true;
   return (provider.modelCount ?? 0) > 0;
+}
+
+/** True when a provider can run agent sessions without credentials. */
+export function providerRunsWithoutAuth(provider: ProviderAuthCapability | null | undefined): boolean {
+  return (
+    providerCanRunAgent(provider) &&
+    Array.isArray(provider?.authModes) &&
+    provider.authModes.length === 0
+  );
+}
+
+/** True when a provider is usable for an agent in the current auth snapshot. */
+export function providerIsAvailableForAgent(
+  provider: ProviderAuthCapability | null | undefined,
+  authenticatedProviderIds: Iterable<string | null | undefined>
+): boolean {
+  return (
+    providerCanRunAgent(provider) &&
+    (providerRunsWithoutAuth(provider) || providerIdInSet(provider?.id, authenticatedProviderIds))
+  );
 }
 
 /** True when an id is backed by a known agent-capable provider descriptor. */

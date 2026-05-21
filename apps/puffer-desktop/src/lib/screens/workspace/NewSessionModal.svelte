@@ -4,7 +4,7 @@
   import {
     canonicalDaemonProviderId,
     providerCanRunAgent,
-    providerIdInSet,
+    providerIsAvailableForAgent,
     providerIdsEquivalent
   } from "../../providerIds";
   import type { ProviderSummary, SettingsSnapshot } from "../../types";
@@ -57,8 +57,9 @@
 
   let providerOptions = $derived(
     (snapshot?.providers?.length ? snapshot.providers : fallbackProviders).filter((provider) =>
-      providerCanRunAgent(provider) &&
-      (snapshot === null || providerIdInSet(provider.id, authenticatedProviderIds))
+      snapshot === null
+        ? providerCanRunAgent(provider)
+        : providerIsAvailableForAgent(provider, authenticatedProviderIds)
     )
   );
 

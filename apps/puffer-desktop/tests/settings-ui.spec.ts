@@ -174,6 +174,62 @@ test("default routing only offers authenticated agent providers", async ({ page 
   });
 });
 
+test("default routing offers auth-free local agent providers", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    auth: [],
+    providers: [
+      {
+        id: "ollama",
+        displayName: "Ollama",
+        baseUrl: "http://localhost:11434/v1",
+        defaultApi: "openai-completions",
+        modelCount: 1,
+        authModes: [],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ],
+    providerModels: {
+      ollama: [
+        {
+          id: "llama3.2",
+          displayName: "Llama 3.2",
+          provider: "ollama",
+          api: "openai-completions",
+          supportsTools: true,
+          supportsVision: false,
+          contextWindow: null,
+          maxOutputTokens: null,
+          thinkingOptions: [],
+          defaultThinkingOptionId: null,
+          isDefault: true
+        }
+      ]
+    }
+  });
+  daemon.setSettingsConfig({
+    defaultProvider: "ollama",
+    defaultModel: "llama3.2"
+  });
+  await daemon.install(page);
+  await daemon.open(page, { allowUnauthenticatedWorkspace: true });
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Providers" }).click();
+
+  const pane = page.locator(".pf-settings-pane");
+  const providerSelect = pane.getByLabel("Provider");
+  await expect(providerSelect).toHaveValue("ollama");
+  await expect(providerSelect.locator('option[value="ollama"]')).toHaveCount(1);
+  await expect(pane.getByLabel("Model")).toHaveValue("llama3.2");
+  await pane.getByRole("button", { name: "Save default" }).click();
+  const update = await daemon.waitForRequest("update_config");
+  expect(update.params).toMatchObject({
+    defaultProvider: "ollama",
+    defaultModel: "llama3.2"
+  });
+});
+
 test("default model picker replaces a cross-provider configured model after load", async ({ page }) => {
   const daemon = new FakeDaemon({
     auth: [

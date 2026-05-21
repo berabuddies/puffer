@@ -6013,6 +6013,76 @@ test("empty agent can recover by switching away from a disconnected provider", a
   });
 });
 
+test("auth-free local provider session can submit", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-local-ollama",
+        displayName: "Local Ollama agent",
+        title: "Local Ollama agent",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "ollama",
+        modelId: "llama3.2",
+        timeline: []
+      }
+    ],
+    auth: [],
+    providers: [
+      {
+        id: "ollama",
+        displayName: "Ollama",
+        baseUrl: "http://localhost:11434/v1",
+        defaultApi: "openai-completions",
+        modelCount: 1,
+        authModes: [],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ],
+    providerModels: {
+      ollama: [
+        {
+          id: "llama3.2",
+          displayName: "Llama 3.2",
+          provider: "ollama",
+          api: "openai-completions",
+          supportsTools: true,
+          supportsVision: false,
+          contextWindow: null,
+          maxOutputTokens: null,
+          thinkingOptions: [],
+          defaultThinkingOptionId: null,
+          isDefault: true
+        }
+      ]
+    }
+  });
+  await daemon.install(page);
+  await daemon.open(page, { allowUnauthenticatedWorkspace: true });
+
+  await openSession(page, /Local Ollama agent/);
+  const composer = page.locator(".pf-composer textarea");
+  await expect(page.getByText("No messages in this session yet. Send a prompt to get started.")).toBeVisible();
+  await expect(composer).toBeEnabled();
+  await composer.fill("Ask local model");
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+  await page.getByRole("button", { name: "Send" }).click();
+
+  const turnRequest = await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.message === "Ask local model"
+  );
+  expect(turnRequest.params).toMatchObject({
+    sessionId: "session-local-ollama",
+    providerId: "ollama",
+    modelId: "llama3.2"
+  });
+});
+
 test("empty agent does not recover through non-agent provider credentials", async ({
   page
 }) => {
