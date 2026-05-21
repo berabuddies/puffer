@@ -1649,6 +1649,20 @@ fn build_provider_command(
                 json_stream: false,
             })
         }
+        "worldrouter" => {
+            let command = ensure_provider_command("puffer")?;
+            Ok(ProviderLaunch {
+                label: "WorldRouter".to_string(),
+                command,
+                args: vec![
+                    "--no-alt-screen".to_string(),
+                    "--provider".to_string(),
+                    "worldrouter".to_string(),
+                    message.to_string(),
+                ],
+                json_stream: false,
+            })
+        }
         other => bail!("unknown provider `{other}`"),
     }
 }
@@ -2560,6 +2574,7 @@ fn default_model_for(provider: &str) -> Option<String> {
     match canonical_backend_provider_id(provider).as_str() {
         "claude" => Some(DEFAULT_CLAUDE_MODEL.to_string()),
         "puffer" => Some(DEFAULT_PUFFER_MODEL.to_string()),
+        "worldrouter" => Some("kimi-k2.6".to_string()),
         _ => codex_app_server_catalog()
             .ok()
             .and_then(|catalog| catalog.default_model),
@@ -2568,7 +2583,7 @@ fn default_model_for(provider: &str) -> Option<String> {
 
 fn validate_provider_id(provider: &str) -> Result<()> {
     match canonical_backend_provider_id(provider).as_str() {
-        "puffer" | "codex" | "claude" => Ok(()),
+        "puffer" | "codex" | "claude" | "worldrouter" => Ok(()),
         other => bail!("unknown provider `{other}`"),
     }
 }
@@ -2579,6 +2594,7 @@ fn canonical_backend_provider_id(provider: &str) -> String {
         "openai" | "codex" => "codex".to_string(),
         "anthropic" | "claude" => "claude".to_string(),
         "puffer" => "puffer".to_string(),
+        "worldrouter" => "worldrouter".to_string(),
         _ => trimmed.to_string(),
     }
 }

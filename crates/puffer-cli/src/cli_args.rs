@@ -28,6 +28,10 @@ pub(crate) struct Cli {
     /// Disable alternate-screen mode for the TUI.
     #[arg(long = "no-alt-screen", default_value_t = false)]
     pub(crate) no_alt_screen: bool,
+
+    /// Override the active provider for the TUI launch path (also applied to `--resume`/fork).
+    #[arg(long = "provider")]
+    pub(crate) provider: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]

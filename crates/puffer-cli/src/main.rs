@@ -95,7 +95,7 @@ fn main() -> Result<()> {
     let cwd = std::env::current_dir()?;
     let paths = ConfigPaths::discover(&cwd);
     ensure_workspace_dirs(&paths)?;
-    let config = load_config(&paths)?;
+    let mut config = load_config(&paths)?;
     let auth_path = paths.user_config_dir.join("auth.json");
     let mut auth_store = AuthStore::load(&auth_path)?;
     let mut resources = load_resources(&paths, &puffer_runner_local::LocalToolRunner::new())?;
@@ -184,6 +184,20 @@ fn main() -> Result<()> {
     } else {
         None
     };
+
+    // When the user passes `--provider <id>` on the top-level CLI, override
+    // the configured default for the TUI launch paths (`None`, `Resume`,
+    // `Fork`). This lets the desktop GUI pick which provider to start a chat
+    // session with without persisting a config change.
+    if let Some(provider_override) = cli.provider.as_deref() {
+        if matches!(
+            cli.subcommand,
+            None | Some(Command::Resume { .. }) | Some(Command::Fork { .. })
+        ) {
+            let resolved = resolve_provider_id(&providers, provider_override);
+            config.default_provider = Some(resolved);
+        }
+    }
 
     let result = match cli.subcommand {
         Some(Command::Subscriber { .. }) => {

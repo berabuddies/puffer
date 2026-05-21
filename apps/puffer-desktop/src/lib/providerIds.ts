@@ -6,7 +6,7 @@ export function canonicalDaemonProviderId(providerId: string): string {
   return providerId;
 }
 
-const BUILTIN_AGENT_PROVIDER_IDS = new Set(["openai", "anthropic", "puffer"]);
+const BUILTIN_AGENT_PROVIDER_IDS = new Set(["openai", "anthropic", "puffer", "worldrouter"]);
 const NON_AGENT_PROVIDER_IDS = new Set(["github"]);
 const NON_AGENT_APIS = new Set(["", "oauth", "none", "disabled"]);
 

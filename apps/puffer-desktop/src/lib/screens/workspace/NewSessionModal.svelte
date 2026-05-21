@@ -52,6 +52,7 @@
     if (provider.id === "codex" || provider.id === "openai") return "OpenAI Codex CLI";
     if (provider.id === "claude" || provider.id === "anthropic") return "Claude Code CLI";
     if (provider.id === "puffer") return "Puffer CLI";
+    if (provider.id === "worldrouter") return "WorldRouter inference";
     return provider.defaultApi ? `${provider.defaultApi} provider` : "Model provider";
   }
 
