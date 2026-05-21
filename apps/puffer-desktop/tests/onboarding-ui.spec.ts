@@ -71,6 +71,30 @@ test("force onboarding does not bypass provider login when auth is empty", async
   await expect(page.getByRole("button", { name: /Continue/ })).toHaveCount(0);
 });
 
+test("auth-free local provider satisfies onboarding provider requirement", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    auth: [],
+    providers: [
+      {
+        id: "ollama",
+        displayName: "Ollama",
+        baseUrl: "http://localhost:11434/v1",
+        defaultApi: "openai-completions",
+        modelCount: 1,
+        authModes: [],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page, { forceOnboarding: true, skipOnboarding: false });
+
+  await expect(page.getByRole("heading", { name: "Workspace is ready" })).toBeVisible();
+  await expect(page.getByText("1 agent provider ready")).toBeVisible();
+  await expect(page.getByLabel("API key for Anthropic")).toHaveCount(0);
+});
+
 test("skip flag does not bypass provider login with only non-agent auth", async ({ page }) => {
   const daemon = new FakeDaemon({
     auth: [

@@ -3,7 +3,7 @@
   import BrandLogo from "../design/BrandLogo.svelte";
   import Puffer from "../design/Puffer.svelte";
   import Icon from "../design/Icon.svelte";
-  import { providerIdCanRunAgent } from "../providerIds";
+  import { providerIsAvailableForAgent } from "../providerIds";
   import type { ExternalCredential, SettingsSnapshot } from "../types";
 
   type Props = {
@@ -23,12 +23,13 @@
 
   let props: Props = $props();
 
-  let agentAuthCount = $derived(
-    (props.snapshot?.auth ?? []).filter((auth) =>
-      providerIdCanRunAgent(auth.providerId, props.snapshot?.providers ?? [])
+  let authenticatedProviderIds = $derived((props.snapshot?.auth ?? []).map((auth) => auth.providerId));
+  let agentProviderCount = $derived(
+    (props.snapshot?.providers ?? []).filter((provider) =>
+      providerIsAvailableForAgent(provider, authenticatedProviderIds)
     ).length
   );
-  let signedIn = $derived(agentAuthCount > 0);
+  let signedIn = $derived(agentProviderCount > 0);
 
   let steps = $derived(
     signedIn
@@ -72,14 +73,14 @@
   <div class="pf-onboard-main">
     {#if signedIn}
       <h2>Workspace is ready</h2>
-      <p class="lead">Provider auth is connected. Open the workspace to start or connect a project.</p>
+      <p class="lead">An agent provider is ready. Open the workspace to start or connect a project.</p>
       <div class="pf-onboard-ready">
         <div class="pf-onboard-ready-icon">
           <Icon name="check" size={18} color="var(--puffer-accent)" />
         </div>
         <div>
           <div class="pf-onboard-ready-title">
-            {agentAuthCount} agent provider{agentAuthCount === 1 ? "" : "s"} connected
+            {agentProviderCount} agent provider{agentProviderCount === 1 ? "" : "s"} ready
           </div>
           <div class="pf-onboard-ready-sub">
             Repository access is managed from the workspace and provider settings.

@@ -855,14 +855,15 @@
     return true;
   }
 
-  function hasAgentProviderAuth(snapshot: SettingsSnapshot | null): boolean {
-    return (snapshot?.auth ?? []).some((auth) =>
-      providerIdCanRunAgent(auth.providerId, snapshot?.providers ?? [])
+  function hasAvailableAgentProvider(snapshot: SettingsSnapshot | null): boolean {
+    const authenticatedProviderIds = (snapshot?.auth ?? []).map((auth) => auth.providerId);
+    return (snapshot?.providers ?? []).some((provider) =>
+      providerIsAvailableForAgent(provider, authenticatedProviderIds)
     );
   }
 
   function shouldShowOnboarding(snapshot: SettingsSnapshot | null): boolean {
-    if (!hasAgentProviderAuth(snapshot)) return !allowUnauthenticatedWorkspaceHarness;
+    if (!hasAvailableAgentProvider(snapshot)) return !allowUnauthenticatedWorkspaceHarness;
     if (onboardingCompleted) return false;
     if (forceOnboarding && !onboardingCompleted) return true;
     return !skipOnboarding;
@@ -1101,7 +1102,7 @@
     authError = null;
     try {
       settingsSnapshot = await importExternalCredential(providerId, source);
-      onboardingCompleted = hasAgentProviderAuth(settingsSnapshot);
+      onboardingCompleted = hasAvailableAgentProvider(settingsSnapshot);
       onboarding = shouldShowOnboarding(settingsSnapshot);
       if (!onboarding) {
         tweaks = { ...tweaks, screen: "workspace" };
@@ -1139,7 +1140,7 @@
     authError = null;
     try {
       settingsSnapshot = await loginWithOauth(providerId, remoteConnection);
-      onboardingCompleted = hasAgentProviderAuth(settingsSnapshot);
+      onboardingCompleted = hasAvailableAgentProvider(settingsSnapshot);
       onboarding = shouldShowOnboarding(settingsSnapshot);
       if (!onboarding) {
         tweaks = { ...tweaks, screen: "workspace" };
@@ -1169,7 +1170,7 @@
       } else {
         settingsSnapshot = await loginWithApiKeyViaDaemon(providerId, apiKey);
       }
-      onboardingCompleted = hasAgentProviderAuth(settingsSnapshot);
+      onboardingCompleted = hasAvailableAgentProvider(settingsSnapshot);
       onboarding = shouldShowOnboarding(settingsSnapshot);
       if (!onboarding) {
         tweaks = { ...tweaks, screen: "workspace" };
@@ -1195,7 +1196,7 @@
         settingsSnapshot = await logoutProviderViaDaemon(providerId);
       }
       statusMessage = `Disconnected ${providerId}.`;
-      if (!hasAgentProviderAuth(settingsSnapshot)) {
+      if (!hasAvailableAgentProvider(settingsSnapshot)) {
         groups = [];
         selectedSession = null;
         sessionDetail = null;
