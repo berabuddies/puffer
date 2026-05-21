@@ -15,7 +15,7 @@ members = [
     "crates/puffer-observability",
     "crates/puffer-provider-openai",
     "crates/puffer-provider-registry",
-    "crates/puffer-provider-worldagent",
+    "crates/puffer-provider-worldrouter",
     "crates/puffer-resources",
     "crates/puffer-runner-api",
     "crates/puffer-runner-local",

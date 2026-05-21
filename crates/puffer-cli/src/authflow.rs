@@ -34,7 +34,7 @@ impl CallbackListener {
 
     /// Binds a fixed loopback port. Used for redirect URIs that must
     /// match an Auth Station allow-list entry exactly (such as the
-    /// worldagent provider). Returns an error if the port is in use.
+    /// worldrouter provider). Returns an error if the port is in use.
     pub(crate) fn bind_localhost_port(path: &str, port: u16) -> Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", port)).with_context(|| {
             format!("failed to bind callback listener on 127.0.0.1:{port} for {path}")

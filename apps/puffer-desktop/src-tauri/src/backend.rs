@@ -109,15 +109,15 @@ impl BackendState {
             "load_settings_snapshot" => serde_value(self.load_settings_snapshot()?),
             "login_with_oauth" => {
                 let provider_id = string_param(&params, &["providerId", "provider_id"])?;
-                if provider_id == "worldagent" {
+                if provider_id == "worldrouter" {
                     // Detach: OAuth blocks up to 120 s on the localhost
                     // callback listener, which would freeze the GUI. The
                     // event emitter lets the spawned reaper thread fire
-                    // `worldagent:oauth-completed` so the GUI can swap
+                    // `worldrouter:oauth-completed` so the GUI can swap
                     // the spinner for the "Connected" affordance the
                     // moment the puffer subprocess exits.
                     self.run_puffer_cli_auth_subcommand(
-                        &["auth", "login", "worldagent"],
+                        &["auth", "login", "worldrouter"],
                         false,
                         Some(events.clone()),
                     )?;
@@ -129,9 +129,9 @@ impl BackendState {
             "login_with_api_key" => {
                 let provider_id = string_param(&params, &["providerId", "provider_id"])?;
                 let api_key = string_param(&params, &["apiKey", "api_key"])?;
-                if provider_id == "worldagent" {
+                if provider_id == "worldrouter" {
                     self.run_puffer_cli_auth_subcommand(
-                        &["auth", "set-api-key", "worldagent", &api_key],
+                        &["auth", "set-api-key", "worldrouter", &api_key],
                         true,
                         None,
                     )?;
@@ -142,9 +142,9 @@ impl BackendState {
             }
             "logout_provider" => {
                 let provider_id = string_param(&params, &["providerId", "provider_id"])?;
-                if provider_id == "worldagent" {
+                if provider_id == "worldrouter" {
                     self.run_puffer_cli_auth_subcommand(
-                        &["auth", "clear", "worldagent"],
+                        &["auth", "clear", "worldrouter"],
                         true,
                         None,
                     )?;
@@ -596,23 +596,23 @@ impl BackendState {
                 });
             }
         }
-        // worldagent lives in puffer-cli's AuthStore (~/.puffer/auth.json),
+        // worldrouter lives in puffer-cli's AuthStore (~/.puffer/auth.json),
         // not in corbina's own credentials file. Surface it so the GUI shows
-        // "Connected" after a successful `puffer auth login worldagent`.
+        // "Connected" after a successful `puffer auth login worldrouter`.
         //
         // We override `kind` to "oauth" when the stored key is an
         // `sk-worldrouter-…` token (minted via the /auth/exchange flow),
         // even though AuthStore tags it as `api_key`. This lets the
         // LoginView hide the "Paste API key" affordance for OAuth users
         // and only show "Disconnect".
-        if let Some(entry) = read_puffer_cli_credential("worldagent") {
+        if let Some(entry) = read_puffer_cli_credential("worldrouter") {
             let surfaced_kind = if entry.oauth_derived {
                 "oauth".to_string()
             } else {
                 entry.kind
             };
             out.push(AuthProviderStatusDto {
-                provider_id: "worldagent".to_string(),
+                provider_id: "worldrouter".to_string(),
                 kind: surfaced_kind,
                 email: None,
                 expires_at_ms: None,
@@ -1100,7 +1100,7 @@ impl BackendState {
     /// for up to 120 s waiting for the browser callback; blocking the
     /// Tauri command handler that long freezes the GUI. When `events`
     /// is supplied with `wait = false`, the reaper thread fires
-    /// `worldagent:oauth-completed` once the child exits so the
+    /// `worldrouter:oauth-completed` once the child exits so the
     /// frontend can clear its "Opening browser…" spinner without
     /// having to poll `load_settings_snapshot`.
     fn run_puffer_cli_auth_subcommand(
@@ -1146,7 +1146,7 @@ impl BackendState {
                         ),
                     };
                     events.emit(
-                        "worldagent:oauth-completed",
+                        "worldrouter:oauth-completed",
                         json!({"success": success, "error": error}),
                     );
                 }
@@ -1214,16 +1214,16 @@ fn tail_auth_subcommand_stdout(stdout: std::process::ChildStdout) {
         if !opened && trimmed.starts_with("https://") {
             opened = true;
             let target = trimmed.to_string();
-            eprintln!("[worldagent oauth] opening browser at {target}");
+            eprintln!("[worldrouter oauth] opening browser at {target}");
             match Command::new("open").arg(&target).spawn() {
                 Ok(_) => {}
                 Err(error) => {
-                    eprintln!("[worldagent oauth] failed to launch `open`: {error}");
+                    eprintln!("[worldrouter oauth] failed to launch `open`: {error}");
                 }
             }
             continue;
         }
-        eprintln!("[worldagent oauth] {line}");
+        eprintln!("[worldrouter oauth] {line}");
     }
 }
 
@@ -2392,11 +2392,11 @@ fn provider_summaries() -> Vec<ProviderSummaryDto> {
             source_path: None,
         },
         ProviderSummaryDto {
-            id: "worldagent".to_string(),
-            display_name: "WorldAgent".to_string(),
+            id: "worldrouter".to_string(),
+            display_name: "WorldRouter".to_string(),
             base_url: "https://inference-api.worldrouter.ai".to_string(),
             default_api: "openai-completions".to_string(),
-            model_count: provider_models("worldagent").len(),
+            model_count: provider_models("worldrouter").len(),
             auth_modes: vec!["oauth".to_string(), "api_key".to_string()],
             source_kind: "builtin".to_string(),
             source_path: None,
@@ -2408,9 +2408,9 @@ fn provider_models(provider_id: &str) -> Vec<Value> {
     match canonical_backend_provider_id(provider_id).as_str() {
         "puffer" => vec![model("default", "Default", "puffer", false)],
         "claude" => claude_models(),
-        "worldagent" => vec![
-            model("kimi-k2.6", "Kimi K2.6", "worldagent", true),
-            model("qwen3.5-flash", "Qwen 3.5 Flash", "worldagent", true),
+        "worldrouter" => vec![
+            model("kimi-k2.6", "Kimi K2.6", "worldrouter", true),
+            model("qwen3.5-flash", "Qwen 3.5 Flash", "worldrouter", true),
         ],
         _ => codex_app_server_models().unwrap_or_default(),
     }

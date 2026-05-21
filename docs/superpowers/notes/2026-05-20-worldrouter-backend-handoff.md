@@ -1,4 +1,4 @@
-# worldagent 端到端联调 — 待解决问题
+# worldrouter 端到端联调 — 待解决问题
 
 Date: 2026-05-20
 Author: sean (with Claude)
@@ -8,19 +8,19 @@ Status: 阻塞中，待 Auth + Infer 后端处理
 
 ## 背景
 
-puffer 桌面端新增 `worldagent` provider，OAuth 登录流程：
+puffer 桌面端新增 `worldrouter` provider，OAuth 登录流程：
 
 ```
-puffer-cli auth login worldagent
+puffer-cli auth login worldrouter
   → 浏览器打开 https://auth.worldrouter.ai/login?redirect_uri=http://127.0.0.1:1456/callback&client_state=...
   → 用户登录（Auth Station + WorkOS AuthKit）
   → Auth Station 302 回 http://127.0.0.1:1456/callback?token=<JWT>&refresh_token=...&state=...
   → puffer 监听器抓回调
   → puffer 用 token JWT 调 control-api 创建 WR api_key
-  → 把 api_key 落本地 AuthStore，worldagent 就能跑 inference
+  → 把 api_key 落本地 AuthStore，worldrouter 就能跑 inference
 ```
 
-代码已经实现并 push 到 `feat/worldagent-provider` 分支（commit `1132c94` 及之前），单测 7/7 通过，workspace 编译干净。下面是**联调时发现的两个上游问题**，puffer 这边已经做不了，需要后端改。
+代码已经实现并 push 到 `feat/worldrouter-provider` 分支（commit `1132c94` 及之前），单测 7/7 通过，workspace 编译干净。下面是**联调时发现的两个上游问题**，puffer 这边已经做不了，需要后端改。
 
 ---
 
@@ -146,7 +146,7 @@ Body:  {"key_alias": "puffer-<uuid>"}
 
 ### 含义
 
-桌面端只能拿到 Auth Station JWT（OIDC 标准、面向所有接入方）。**桌面端没法直接拿到 infer-session JWT**——那是 worldagent dashboard / infer BFF 自己签的，浏览器侧只有 cookie，没有原始 JWT。
+桌面端只能拿到 Auth Station JWT（OIDC 标准、面向所有接入方）。**桌面端没法直接拿到 infer-session JWT**——那是 worldrouter dashboard / infer BFF 自己签的，浏览器侧只有 cookie，没有原始 JWT。
 
 所以 puffer 现在的实现里 `exchange_jwt_for_api_key()` 第一行 `decode_jwt_profile(jwt).default_team_id.ok_or_else(...)` 会立刻失败，整个流程在那一步炸。
 
@@ -162,7 +162,7 @@ Body:  {"key_alias": "puffer-<uuid>"}
 
 ### 2026-05-20 实测：完整跑通 e2e 流程，得到决定性证据
 
-puffer 端加了 `PUFFER_WORLDAGENT_TEAM_ID` env 兜底（先不依赖 JWT 的 `default_team_id`），实际触发了一次完整 OAuth → control-api 调用：
+puffer 端加了 `PUFFER_WORLDROUTER_TEAM_ID` env 兜底（先不依赖 JWT 的 `default_team_id`），实际触发了一次完整 OAuth → control-api 调用：
 
 ```
 POST https://control-api-pre-7f819c.worldrouter.ai/platform/v1/teams/6afdef35-ea87-54a9-9662-8b8bf090c0fd/keys
@@ -183,23 +183,23 @@ Body: {"key_alias":"puffer-<uuid>"}
 
 ```bash
 cd /Users/shun/Data/Code/tomo/agentenv/puffer
-PUFFER_WORLDAGENT_TEAM_ID=<your team uuid>  # 方案 A 落地后可去掉
-  cargo run -p puffer-cli -- auth login worldagent
+PUFFER_WORLDROUTER_TEAM_ID=<your team uuid>  # 方案 A 落地后可去掉
+  cargo run -p puffer-cli -- auth login worldrouter
 ```
 
-期望 stdout 末行：`stored oauth credentials for worldagent`；`~/Library/Application Support/com.tomo.puffer/auth.json` 应该包含 `worldagent → {kind: api_key, key: sk-worldrouter-...}`。
+期望 stdout 末行：`stored oauth credentials for worldrouter`；`~/Library/Application Support/com.tomo.puffer/auth.json` 应该包含 `worldrouter → {kind: api_key, key: sk-worldrouter-...}`。
 
 浏览器打开 puffer 打印的 URL → 用一个 Production 已有的账号登录 → puffer 终端打印：
 
 ```
-stored oauth credentials for worldagent       # 或类似 "stored api key for worldagent"
+stored oauth credentials for worldrouter       # 或类似 "stored api key for worldrouter"
 ```
 
 然后立刻验证 api_key 真能用：
 
 ```bash
 cat ~/Library/Application\ Support/com.tomo.puffer/auth.json \
-  | jq '.providers.worldagent'
+  | jq '.providers.worldrouter'
 
 # 期望看到 { "kind": "api_key", "key": "sk-worldrouter-..." }
 
@@ -215,10 +215,10 @@ curl -sS https://inference-api.worldrouter.ai/v1/models \
 
 | 项目 | 位置 |
 |---|---|
-| puffer 实现 | `feat/worldagent-provider` 分支，head `1132c94`（spec → impl → cleanup） |
-| `exchange_jwt_for_api_key` 实现 | `crates/puffer-provider-worldagent/src/auth.rs:279`（带 TODO 说明 API 会调整） |
-| 设计文档 | `docs/superpowers/specs/2026-05-20-worldagent-provider-design.md` |
-| 实现 plan | `docs/superpowers/plans/2026-05-20-worldagent-provider.md` |
+| puffer 实现 | `feat/worldrouter-provider` 分支，head `1132c94`（spec → impl → cleanup） |
+| `exchange_jwt_for_api_key` 实现 | `crates/puffer-provider-worldrouter/src/auth.rs:279`（带 TODO 说明 API 会调整） |
+| 设计文档 | `docs/superpowers/specs/2026-05-20-worldrouter-provider-design.md` |
+| 实现 plan | `docs/superpowers/plans/2026-05-20-worldrouter-provider.md` |
 | Auth Station 源码 | `/Users/shun/Data/Code/tomo/worldclaw/infer-monorepo/auth/` |
 | 白名单校验逻辑 | `auth/src/lib/sanitize.ts::validateRedirectUri` |
 | 白名单 env 读取 | `auth/src/lib/config.ts::allowedRedirectOrigins` |
@@ -228,7 +228,7 @@ curl -sS https://inference-api.worldrouter.ai/v1/models \
 | Inference API（OpenAI 兼容） | `https://inference-api.worldrouter.ai/v1/...` |
 | Control API（创建 key 用） | `https://control-api-pre-7f819c.worldrouter.ai`（预览，会变） |
 | Vercel project | `nubit/auth-worldrouter`，prj id `prj_4Mi7OqkeMQ5bOaNzzMOiLHsPRDGl` |
-| puffer 端 env override | `PUFFER_WORLDAGENT_AUTH_URL`、`PUFFER_WORLDAGENT_CONTROL_URL` |
+| puffer 端 env override | `PUFFER_WORLDROUTER_AUTH_URL`、`PUFFER_WORLDROUTER_CONTROL_URL` |
 
 ## 附录 B：puffer 端固定 callback
 

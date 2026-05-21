@@ -1,4 +1,4 @@
-# worldagent Provider — Design
+# worldrouter Provider — Design
 
 Date: 2026-05-20
 Status: Draft (awaiting user approval)
@@ -17,7 +17,7 @@ provider entry so users can:
    `https://auth-worldrouter.vercel.app`), opening the auth website in
    the default browser and capturing a callback locally.
 
-Long-term framing (from user): worldagent is a **brand entry point**.
+Long-term framing (from user): worldrouter is a **brand entry point**.
 The provider role is the minimum-impact form for the current Puffer
 flow (provider + model + routing + auth all reuse existing plumbing).
 Future iterations will let the OAuth session resolve to either a
@@ -34,7 +34,7 @@ defined backend-side** and is a clearly marked TODO in code.
 - Replacing existing OpenAI provider crate functionality.
 - Reworking LoginView UI. The component is already generic over
   `authModes`.
-- Renaming the provider id (`worldagent` vs `worldclaw`). Pick one id
+- Renaming the provider id (`worldrouter` vs `worldclaw`). Pick one id
   now and keep it stable; display name can change later via yaml.
 
 ## 3. High-level architecture
@@ -48,7 +48,7 @@ defined backend-side** and is a clearly marked TODO in code.
                                                        │ dispatch by oauth_family
                                                        ▼
                           ┌────────────────────────────────────────┐
-                          │ puffer-provider-worldagent             │
+                          │ puffer-provider-worldrouter             │
                           │  build_login_url + parse_callback +    │
                           │  decode_jwt + refresh_token            │
                           └────────────┬───────────────────────────┘
@@ -73,14 +73,14 @@ API-key path is unchanged: LoginView submits api_key → existing
 
 ## 4. Provider yaml
 
-`resources/providers/worldagent.yaml`:
+`resources/providers/worldrouter.yaml`:
 
 ```yaml
-id: worldagent
-display_name: WorldAgent
+id: worldrouter
+display_name: WorldRouter
 base_url: https://inference-api.worldrouter.ai
 default_api: openai-completions
-oauth_family: worldagent
+oauth_family: worldrouter
 auth_modes:
   - api_key
   - oauth
@@ -95,7 +95,7 @@ models:
   # Seed list — actual catalog comes from /v1/models discovery.
   - id: gpt-5
     display_name: GPT-5 (via WorldRouter)
-    provider: worldagent
+    provider: worldrouter
     api: openai-completions
     context_window: 200000
     max_output_tokens: 8192
@@ -105,7 +105,7 @@ models:
 Notes:
 - `default_api: openai-completions` → reuses the existing OpenAI
   Chat-Completions transport (Bearer api_key, `/v1/chat/completions`).
-- `oauth_family: worldagent` is a new field (§5). When unset, the
+- `oauth_family: worldrouter` is a new field (§5). When unset, the
   registry falls back to the existing API-family inference.
 - The model seed list is intentionally minimal; `discovery` will
   populate the rest at runtime against `/v1/models`.
@@ -133,18 +133,18 @@ pub struct ProviderDescriptor {
 1. Read `descriptor.oauth_family` first; map known strings to enum:
    - `"openai"` → `OauthFamily::OpenAi`
    - `"anthropic"` → `OauthFamily::Anthropic`
-   - `"worldagent"` → `OauthFamily::WorldAgent` (new)
+   - `"worldrouter"` → `OauthFamily::WorldRouter` (new)
 2. If unset, fall back to the existing `default_api` switch (no
    behavior change for any existing yaml).
 
-`OauthFamily` enum grows one variant: `WorldAgent`.
+`OauthFamily` enum grows one variant: `WorldRouter`.
 
-## 6. New crate: `puffer-provider-worldagent`
+## 6. New crate: `puffer-provider-worldrouter`
 
 Layout:
 
 ```
-crates/puffer-provider-worldagent/
+crates/puffer-provider-worldrouter/
 ├── Cargo.toml
 └── src/
     ├── lib.rs    — public re-exports
@@ -155,21 +155,21 @@ Public surface (`src/auth.rs`):
 
 ```rust
 /// Default Auth Station base URL (Sandbox).
-pub const WORLDAGENT_AUTH_BASE_URL: &str = "https://auth-worldrouter.vercel.app";
+pub const WORLDROUTER_AUTH_BASE_URL: &str = "https://auth-worldrouter.vercel.app";
 
 /// Env var that overrides the Auth Station base URL.
-pub const WORLDAGENT_AUTH_URL_OVERRIDE_ENV: &str = "PUFFER_WORLDAGENT_AUTH_URL";
+pub const WORLDROUTER_AUTH_URL_OVERRIDE_ENV: &str = "PUFFER_WORLDROUTER_AUTH_URL";
 
 /// Fixed loopback callback used by Puffer desktop. The auth team
 /// must allow-list this redirect URI on both Sandbox and Production
 /// `ALLOWED_REDIRECT_ORIGINS`.
-pub const WORLDAGENT_CALLBACK_PATH: &str = "/callback";
-pub const WORLDAGENT_CALLBACK_PORT: u16 = 1456;
-pub const WORLDAGENT_DEFAULT_REDIRECT_URI: &str =
+pub const WORLDROUTER_CALLBACK_PATH: &str = "/callback";
+pub const WORLDROUTER_CALLBACK_PORT: u16 = 1456;
+pub const WORLDROUTER_DEFAULT_REDIRECT_URI: &str =
     "http://127.0.0.1:1456/callback";
 
-/// Persisted Auth Station credentials for the worldagent provider.
-pub struct WorldAgentOAuthCredentials {
+/// Persisted Auth Station credentials for the worldrouter provider.
+pub struct WorldRouterOAuthCredentials {
     pub access_token: String,
     pub refresh_token: String,
     pub expires_at_ms: u64,
@@ -179,23 +179,23 @@ pub struct WorldAgentOAuthCredentials {
 }
 
 /// Parameters required to build the Auth Station login URL.
-pub struct WorldAgentLoginConfig {
+pub struct WorldRouterLoginConfig {
     pub auth_base_url: String,
     pub redirect_uri: String,
     pub client_state: String,
 }
 
-impl Default for WorldAgentLoginConfig { /* env override + defaults */ }
+impl Default for WorldRouterLoginConfig { /* env override + defaults */ }
 
 /// Generate an opaque random client_state.
 pub fn generate_client_state() -> String;
 
 /// Build the GET URL for `<auth>/login?redirect_uri=&client_state=`.
-pub fn build_login_url(config: &WorldAgentLoginConfig) -> String;
+pub fn build_login_url(config: &WorldRouterLoginConfig) -> String;
 
 /// Parsed callback fields. Each field is `None` when the parameter
 /// was absent from the callback URL.
-pub struct WorldAgentCallback {
+pub struct WorldRouterCallback {
     pub token: Option<String>,
     pub refresh_token: Option<String>,
     pub state: Option<String>,
@@ -205,10 +205,10 @@ pub struct WorldAgentCallback {
 
 /// Extract `token`, `refresh_token`, `state`, `error`,
 /// `error_description` from a callback URL.
-pub fn parse_callback_input(input: &str) -> WorldAgentCallback;
+pub fn parse_callback_input(input: &str) -> WorldRouterCallback;
 
 /// Decoded JWT profile fields, best-effort.
-pub struct WorldAgentJwtProfile {
+pub struct WorldRouterJwtProfile {
     pub sub: Option<String>,
     pub email: Option<String>,
     pub name: Option<String>,
@@ -216,14 +216,14 @@ pub struct WorldAgentJwtProfile {
 
 /// Decode `sub`/`email`/`name` from the access token JWT payload
 /// (best-effort; failures yield empty fields).
-pub fn decode_jwt_profile(access_token: &str) -> WorldAgentJwtProfile;
+pub fn decode_jwt_profile(access_token: &str) -> WorldRouterJwtProfile;
 
 /// Exchange a stored refresh token for a new access token via
 /// `POST <auth>/token/refresh`.
 pub fn refresh_oauth_token(
     refresh_token: &str,
     auth_base_url: Option<&str>,
-) -> Result<WorldAgentOAuthCredentials>;
+) -> Result<WorldRouterOAuthCredentials>;
 ```
 
 Auth Station's `/login` flow is **simpler than OAuth**: there is no
@@ -239,21 +239,21 @@ including tests).
 third arm:
 
 ```rust
-Some(OauthFamily::WorldAgent) => {
+Some(OauthFamily::WorldRouter) => {
     let parsed = parse_callback_input(&callback);
     if let Some(err) = parsed.error.as_deref() {
         let desc = parsed.error_description.as_deref().unwrap_or("");
-        bail!("worldagent login failed: {err} {desc}");
+        bail!("worldrouter login failed: {err} {desc}");
     }
     if parsed.state.as_deref() != Some(bundle.state.as_str()) {
-        bail!("oauth state mismatch for worldagent");
+        bail!("oauth state mismatch for worldrouter");
     }
     let token = parsed
         .token
-        .ok_or_else(|| anyhow!("worldagent callback missing token"))?;
+        .ok_or_else(|| anyhow!("worldrouter callback missing token"))?;
     let refresh = parsed.refresh_token.unwrap_or_default();
     let profile = decode_jwt_profile(&token);
-    let credential = WorldAgentOAuthCredentials {
+    let credential = WorldRouterOAuthCredentials {
         access_token: token,
         refresh_token: refresh,
         expires_at_ms: now_ms() + 24 * 3600 * 1000, // matches Auth Station spec
@@ -264,19 +264,19 @@ Some(OauthFamily::WorldAgent) => {
     set_stored_credential(
         &mut inputs.auth_store,
         provider_id.to_string(),
-        StoredCredential::OAuth(to_registry_oauth_credential_worldagent(credential)),
+        StoredCredential::OAuth(to_registry_oauth_credential_worldrouter(credential)),
     );
 }
 ```
 
 `oauth_login_bundle_for_provider` (auth_provider.rs) likewise gains a
-`WorldAgent` arm that builds the bundle from
-`WorldAgentLoginConfig`. The bundle's `verifier` is unused for
-worldagent — we set it to an empty string. `automatic_authorization_url`
+`WorldRouter` arm that builds the bundle from
+`WorldRouterLoginConfig`. The bundle's `verifier` is unused for
+worldrouter — we set it to an empty string. `automatic_authorization_url`
 is `None` (single URL, no manual fallback).
 
 `puffer-cli/src/main.rs::run_login_flow` adds the matching arm so the
-CLI path (`puffer auth login worldagent`) works the same way.
+CLI path (`puffer auth login worldrouter`) works the same way.
 
 `puffer-cli/src/authflow.rs` is unchanged. The `CallbackListener::bind_localhost`
 helper accepts the fixed port via a new optional binder
@@ -286,7 +286,7 @@ default — we only branch when the caller asks for a fixed port).
 ## 8. TODO: JWT → api_key exchange
 
 A clearly named module placeholder is added in
-`puffer-provider-worldagent/src/lib.rs`:
+`puffer-provider-worldrouter/src/lib.rs`:
 
 ```rust
 /// TODO (waiting on worldrouter backend):
@@ -300,7 +300,7 @@ pub fn exchange_jwt_for_api_key(
     _access_token: &str,
 ) -> Result<String> {
     anyhow::bail!(
-        "worldagent JWT-to-api-key exchange is not yet implemented; \
+        "worldrouter JWT-to-api-key exchange is not yet implemented; \
          paste your WorldRouter API key for now."
     )
 }
@@ -322,10 +322,10 @@ LoginView already supports the API-key + OAuth dual layout. The only
 desktop-side change is:
 
 - `apps/puffer-desktop/src/lib/providerVisuals.ts` — register a
-  `worldagent` entry (icon path + accent color). A simple text-based
+  `worldrouter` entry (icon path + accent color). A simple text-based
   monogram icon is acceptable for v1; designer can replace later.
 - A short banner above the OAuth button when the active provider is
-  worldagent and only an OAuth credential exists (no api_key): "Auto
+  worldrouter and only an OAuth credential exists (no api_key): "Auto
   api-key exchange is not yet enabled. Paste a WorldRouter API key
   to start running models."
 
@@ -334,7 +334,7 @@ No new Tauri commands. No new daemon RPCs beyond reusing
 
 ## 10. Tests
 
-- `puffer-provider-worldagent`:
+- `puffer-provider-worldrouter`:
   - `build_login_url_contains_redirect_uri_and_client_state`
   - `parse_callback_input_extracts_token_refresh_state`
   - `parse_callback_input_returns_error_when_present`
@@ -346,9 +346,9 @@ No new Tauri commands. No new daemon RPCs beyond reusing
 - `puffer-cli/auth_provider`:
   - `oauth_family_uses_explicit_field_when_set`
   - `oauth_family_falls_back_to_default_api_when_unset`
-  - `oauth_family_recognizes_worldagent`
+  - `oauth_family_recognizes_worldrouter`
 - `puffer-cli/daemon` (with `tokio::test`):
-  - Smoke test for `handle_login_with_oauth` with a fake worldagent
+  - Smoke test for `handle_login_with_oauth` with a fake worldrouter
     callback URL passed through the bundle path.
 
 `cargo test --workspace` must stay green.
@@ -357,17 +357,17 @@ No new Tauri commands. No new daemon RPCs beyond reusing
 
 No moves. New files:
 
-- `resources/providers/worldagent.yaml`
-- `crates/puffer-provider-worldagent/Cargo.toml`
-- `crates/puffer-provider-worldagent/src/lib.rs`
-- `crates/puffer-provider-worldagent/src/auth.rs`
+- `resources/providers/worldrouter.yaml`
+- `crates/puffer-provider-worldrouter/Cargo.toml`
+- `crates/puffer-provider-worldrouter/src/lib.rs`
+- `crates/puffer-provider-worldrouter/src/auth.rs`
 
 New per-component spec files (per AGENTS.md convention):
 
-- `specs/puffer-provider-worldagent/00.md` — crate overview
+- `specs/puffer-provider-worldrouter/00.md` — crate overview
 - `specs/puffer-provider-registry/06.md` — `oauth_family` field
 - `specs/puffer-cli/<next>.md` — auth_provider dispatch + daemon arm
-- `specs/puffer-resources/<next>.md` — worldagent.yaml entry
+- `specs/puffer-resources/<next>.md` — worldrouter.yaml entry
 - `specs/puffer-desktop/<next>.md` — providerVisuals entry + banner
 
 Each component spec is concise (≤ 60 lines) per existing style.
@@ -378,9 +378,9 @@ Each component spec is concise (≤ 60 lines) per existing style.
   `http://127.0.0.1:1456/callback` on **both** Sandbox and
   Production `ALLOWED_REDIRECT_ORIGINS`.
 - Confirm `aud=worldclaw` is the correct audience claim for the
-  worldagent product (the current docs use `worldclaw`; if a
+  worldrouter product (the current docs use `worldclaw`; if a
   separate audience is preferred for this product, surface it now).
-- Confirm the final brand name (`worldagent` vs `worldclaw`) for the
+- Confirm the final brand name (`worldrouter` vs `worldclaw`) for the
   yaml `id`. If you want to switch later, the cost is one yaml
   rename plus a credentials migration step.
 
@@ -393,8 +393,8 @@ Each component spec is concise (≤ 60 lines) per existing style.
 - Profile UI showing the authenticated email / org from the JWT.
 - Refresh token rotation when access_token expires (one-line cron in
   daemon: call `refresh_oauth_token` and re-store the credential).
-- "Switch account" button = `puffer auth logout worldagent` + repeat
+- "Switch account" button = `puffer auth logout worldrouter` + repeat
   the OAuth flow.
 - If/when the brand becomes the primary entry point: hoist the
-  worldagent OAuth flow to the onboarding root, push the
+  worldrouter OAuth flow to the onboarding root, push the
   raw-OpenAI/Anthropic providers into an "Advanced" sub-screen.

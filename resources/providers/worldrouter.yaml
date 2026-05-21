@@ -1,8 +1,8 @@
-id: worldagent
-display_name: WorldAgent
+id: worldrouter
+display_name: WorldRouter
 base_url: https://inference-api.worldrouter.ai
 default_api: openai-completions
-oauth_family: worldagent
+oauth_family: worldrouter
 auth_modes:
   - api_key
   - oauth
@@ -19,14 +19,14 @@ models:
   # (kimi-k2.6 and qwen3.5-flash both return 200 on /v1/chat/completions).
   - id: kimi-k2.6
     display_name: Kimi K2.6
-    provider: worldagent
+    provider: worldrouter
     api: openai-completions
     context_window: 128000
     max_output_tokens: 8192
     supports_reasoning: true
   - id: qwen3.5-flash
     display_name: Qwen 3.5 Flash
-    provider: worldagent
+    provider: worldrouter
     api: openai-completions
     context_window: 128000
     max_output_tokens: 8192

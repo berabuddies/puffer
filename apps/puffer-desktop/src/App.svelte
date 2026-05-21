@@ -185,7 +185,7 @@
   let turnQuestionLookup = $state<Record<string, { turnId: string; requestId: string }>>({});
   let replayTextByTurn: Record<string, string> = {};
   let sessionEventUnlisten: UnlistenFn | null = null;
-  let worldagentOauthUnsubscribe: (() => void) | null = null;
+  let worldrouterOauthUnsubscribe: (() => void) | null = null;
   let subscribedSessionId: string | null = null;
   let sessionSubscriptionGeneration = 0;
   let liveSidebarSessionEventUnlisteners: Record<string, UnlistenFn> = {};
@@ -1045,9 +1045,9 @@
       window.removeEventListener("blur", armRecapBlurTimer);
       window.removeEventListener("focus", cancelRecapBlurTimer);
       window.removeEventListener("keydown", handleShellKeydown, true);
-      if (worldagentOauthUnsubscribe) {
-        worldagentOauthUnsubscribe();
-        worldagentOauthUnsubscribe = null;
+      if (worldrouterOauthUnsubscribe) {
+        worldrouterOauthUnsubscribe();
+        worldrouterOauthUnsubscribe = null;
       }
     };
   });
@@ -1073,15 +1073,15 @@
       .then((client) => {
         attachDaemonClient(client);
         // Fired by the Rust reaper thread when `puffer auth login
-        // worldagent` exits. The handler that kicked off the flow
+        // worldrouter` exits. The handler that kicked off the flow
         // (`handleOauthLogin`) keeps `authBusyProviderId` set so the
         // GUI shows "Waiting for browser login…" until this event
         // arrives.
-        if (worldagentOauthUnsubscribe) worldagentOauthUnsubscribe();
-        worldagentOauthUnsubscribe = client.on<{ success?: boolean; error?: string | null }>(
-          "worldagent:oauth-completed",
+        if (worldrouterOauthUnsubscribe) worldrouterOauthUnsubscribe();
+        worldrouterOauthUnsubscribe = client.on<{ success?: boolean; error?: string | null }>(
+          "worldrouter:oauth-completed",
           (payload) => {
-            void handleWorldagentOauthCompleted(payload);
+            void handleWorldrouterOauthCompleted(payload);
           }
         );
       })
@@ -1188,11 +1188,11 @@
     authBusyProviderId = providerId;
     authError = null;
     try {
-      if (providerId === "worldagent") {
+      if (providerId === "worldrouter") {
         // The Tauri handler returns immediately after spawning the
-        // detached `puffer auth login worldagent` subprocess (it
+        // detached `puffer auth login worldrouter` subprocess (it
         // blocks up to 120 s on the localhost callback). The reaper
-        // thread emits `worldagent:oauth-completed` when the child
+        // thread emits `worldrouter:oauth-completed` when the child
         // exits; that listener clears `authBusyProviderId`, refreshes
         // the snapshot, and decides whether to navigate.
         statusMessage = "Opening browser — finish the login to continue.";
@@ -1212,23 +1212,23 @@
     } catch (error) {
       authError = String(error);
       statusMessage = authError;
-      if (providerId === "worldagent") {
+      if (providerId === "worldrouter") {
         authBusyProviderId = null;
       }
     } finally {
-      if (providerId !== "worldagent") {
+      if (providerId !== "worldrouter") {
         authBusyProviderId = null;
       }
     }
   }
 
-  async function handleWorldagentOauthCompleted(payload: {
+  async function handleWorldrouterOauthCompleted(payload: {
     success?: boolean;
     error?: string | null;
   }) {
     try {
       if (payload?.success) {
-        statusMessage = "WorldAgent connected.";
+        statusMessage = "WorldRouter connected.";
         await refreshSnapshot();
         if ((settingsSnapshot?.auth?.length ?? 0) > 0) {
           onboarding = false;
@@ -1238,13 +1238,13 @@
         const reason = payload?.error?.trim();
         authError = reason && reason.length > 0
           ? reason
-          : "WorldAgent login failed. Please try again.";
+          : "WorldRouter login failed. Please try again.";
         statusMessage = authError;
       }
     } finally {
       // The OAuth flow has reached a terminal state regardless of
       // success — clear the spinner so the user can retry.
-      if (authBusyProviderId === "worldagent") {
+      if (authBusyProviderId === "worldrouter") {
         authBusyProviderId = null;
       }
     }

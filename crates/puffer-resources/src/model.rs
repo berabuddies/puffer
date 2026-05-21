@@ -559,18 +559,18 @@ mod tests {
         );
     }
 
-    /// Confirms the bundled `worldagent.yaml` parses as a
+    /// Confirms the bundled `worldrouter.yaml` parses as a
     /// `ProviderPack` and that the `oauth_family` field round-trips
     /// through `into_descriptor`. Without this end-to-end wiring the
     /// runtime would silently fall back to OpenAI OAuth.
     #[test]
-    fn worldagent_yaml_parses_with_oauth_family() {
-        let yaml = include_str!("../../../resources/providers/worldagent.yaml");
-        let pack: ProviderPack = serde_yaml::from_str(yaml).expect("worldagent.yaml parses");
-        assert_eq!(pack.id, "worldagent");
-        assert_eq!(pack.oauth_family.as_deref(), Some("worldagent"));
+    fn worldrouter_yaml_parses_with_oauth_family() {
+        let yaml = include_str!("../../../resources/providers/worldrouter.yaml");
+        let pack: ProviderPack = serde_yaml::from_str(yaml).expect("worldrouter.yaml parses");
+        assert_eq!(pack.id, "worldrouter");
+        assert_eq!(pack.oauth_family.as_deref(), Some("worldrouter"));
         let descriptor = pack.into_descriptor();
-        assert_eq!(descriptor.oauth_family.as_deref(), Some("worldagent"));
+        assert_eq!(descriptor.oauth_family.as_deref(), Some("worldrouter"));
         assert!(descriptor.auth_modes.contains(&AuthMode::ApiKey));
         assert!(descriptor.auth_modes.contains(&AuthMode::OAuth));
     }

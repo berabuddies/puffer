@@ -277,7 +277,7 @@
                     : undefined}
                 >
                   {isBusy
-                    ? provider.id === "worldagent"
+                    ? provider.id === "worldrouter"
                       ? "Waiting for browser login…"
                       : "Opening browser…"
                     : remoteEnabled

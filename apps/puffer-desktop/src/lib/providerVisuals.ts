@@ -23,7 +23,7 @@ const PROVIDER_ACCENTS: Record<string, string> = {
   openrouter: "#06b6d4",
   "vercel-ai-gateway": "#0f172a",
   vllm: "#16a34a",
-  worldagent: "#1f6feb",
+  worldrouter: "#1f6feb",
   xai: "#0f172a"
 };
 
@@ -43,7 +43,7 @@ const PROVIDER_ICONS: Record<string, string> = {
   openrouter: "llm",
   "vercel-ai-gateway": "vercel",
   vllm: "llm",
-  worldagent: "ai",
+  worldrouter: "ai",
   xai: "ai"
 };
 

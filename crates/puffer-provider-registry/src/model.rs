@@ -335,7 +335,7 @@ pub struct ProviderDescriptor {
     /// callers infer the family from `default_api` (preserving every
     /// yaml that did not opt in). When `Some`, callers use the named
     /// family directly. Known values today: `"openai"`, `"anthropic"`,
-    /// `"worldagent"`. This is the seam that lets a provider whose
+    /// `"worldrouter"`. This is the seam that lets a provider whose
     /// transport is `openai-completions` use a non-OpenAI OAuth flow.
     #[serde(default)]
     pub oauth_family: Option<String>,
@@ -372,13 +372,13 @@ id: example
 display_name: Example
 base_url: https://example.invalid
 default_api: openai-completions
-oauth_family: worldagent
+oauth_family: worldrouter
 auth_modes:
   - oauth
 "#;
         let provider: ProviderDescriptor =
             serde_yaml::from_str(yaml).expect("provider yaml parses");
-        assert_eq!(provider.oauth_family.as_deref(), Some("worldagent"));
+        assert_eq!(provider.oauth_family.as_deref(), Some("worldrouter"));
     }
 
     #[test]

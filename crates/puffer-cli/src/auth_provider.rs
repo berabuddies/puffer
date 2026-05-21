@@ -14,7 +14,7 @@ use puffer_transport_anthropic::{
 pub(crate) enum OauthFamily {
     Anthropic,
     OpenAi,
-    WorldAgent,
+    WorldRouter,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,7 +40,7 @@ pub(crate) fn oauth_family_for_provider(
         return match family {
             "openai" => Some(OauthFamily::OpenAi),
             "anthropic" => Some(OauthFamily::Anthropic),
-            "worldagent" => Some(OauthFamily::WorldAgent),
+            "worldrouter" => Some(OauthFamily::WorldRouter),
             _ => None,
         };
     }
@@ -99,10 +99,10 @@ pub(crate) fn oauth_start_bundle_for_provider(
                 manual_redirect_uri: Some(ANTHROPIC_MANUAL_REDIRECT_URL.to_string()),
             })
         }
-        Some(OauthFamily::WorldAgent) => {
-            let config = puffer_provider_worldagent::WorldAgentLoginConfig::default();
+        Some(OauthFamily::WorldRouter) => {
+            let config = puffer_provider_worldrouter::WorldRouterLoginConfig::default();
             Ok(OauthStartBundle {
-                authorization_url: puffer_provider_worldagent::build_login_url(&config),
+                authorization_url: puffer_provider_worldrouter::build_login_url(&config),
                 automatic_authorization_url: None,
                 verifier: String::new(),
                 state: config.client_state,
@@ -164,13 +164,13 @@ pub(crate) fn oauth_login_bundle_for_provider(
                 manual_redirect_uri: Some(manual.redirect_uri),
             })
         }
-        Some(OauthFamily::WorldAgent) => {
-            let config = puffer_provider_worldagent::WorldAgentLoginConfig {
+        Some(OauthFamily::WorldRouter) => {
+            let config = puffer_provider_worldrouter::WorldRouterLoginConfig {
                 redirect_uri: redirect_uri.to_string(),
-                ..puffer_provider_worldagent::WorldAgentLoginConfig::default()
+                ..puffer_provider_worldrouter::WorldRouterLoginConfig::default()
             };
             Ok(OauthStartBundle {
-                authorization_url: puffer_provider_worldagent::build_login_url(&config),
+                authorization_url: puffer_provider_worldrouter::build_login_url(&config),
                 automatic_authorization_url: None,
                 verifier: String::new(),
                 state: config.client_state,
@@ -270,15 +270,15 @@ mod tests {
     fn oauth_family_uses_explicit_oauth_family_field() {
         let mut providers = ProviderRegistry::new();
         let mut descriptor = provider(
-            "worldagent",
+            "worldrouter",
             "openai-completions",
             vec![AuthMode::OAuth, AuthMode::ApiKey],
         );
-        descriptor.oauth_family = Some("worldagent".to_string());
+        descriptor.oauth_family = Some("worldrouter".to_string());
         providers.register(descriptor);
         assert_eq!(
-            oauth_family_for_provider(&providers, "worldagent"),
-            Some(OauthFamily::WorldAgent)
+            oauth_family_for_provider(&providers, "worldrouter"),
+            Some(OauthFamily::WorldRouter)
         );
     }
 

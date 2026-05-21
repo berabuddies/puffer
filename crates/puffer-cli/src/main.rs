@@ -47,11 +47,11 @@ use puffer_provider_openai::{
 use puffer_provider_registry::{
     canonical_provider_id, AuthMode, AuthStore, ProviderRegistry, StoredCredential,
 };
-use puffer_provider_worldagent::{
-    exchange_jwt_for_api_key as exchange_worldagent_jwt_for_api_key,
-    parse_callback_input as parse_worldagent_callback_input,
-    refresh_oauth_token as refresh_worldagent_oauth_token,
-    WORLDAGENT_CALLBACK_PATH, WORLDAGENT_CALLBACK_PORT,
+use puffer_provider_worldrouter::{
+    exchange_jwt_for_api_key as exchange_worldrouter_jwt_for_api_key,
+    parse_callback_input as parse_worldrouter_callback_input,
+    refresh_oauth_token as refresh_worldrouter_oauth_token,
+    WORLDROUTER_CALLBACK_PATH, WORLDROUTER_CALLBACK_PORT,
 };
 use puffer_resources::load_resources;
 use puffer_session_store::{SessionMetadata, SessionStore};
@@ -73,7 +73,7 @@ use crate::auth_credentials::{
     anthropic_refresh_scopes, inferred_anthropic_redirect_uri,
     registry_to_anthropic_oauth_credential, set_stored_credential, store_anthropic_credential,
     store_ready_credential_from_anthropic, to_registry_oauth_credential_openai,
-    to_registry_oauth_credential_worldagent,
+    to_registry_oauth_credential_worldrouter,
 };
 use crate::auth_provider::{
     oauth_family_for_provider, oauth_login_bundle_for_provider, oauth_start_bundle_for_provider,
@@ -970,10 +970,10 @@ fn run_auth_command(
                     )?;
                     store_anthropic_credential(auth_store, &provider, credential)?;
                 }
-                Some(OauthFamily::WorldAgent) => {
+                Some(OauthFamily::WorldRouter) => {
                     anyhow::bail!(
-                        "worldagent does not use the OAuth code-exchange flow; \
-                         run `puffer auth login worldagent` instead"
+                        "worldrouter does not use the OAuth code-exchange flow; \
+                         run `puffer auth login worldrouter` instead"
                     );
                 }
                 None => anyhow::bail!("oauth exchange is not implemented for {provider}"),
@@ -1003,9 +1003,9 @@ fn run_auth_command(
                         Some(&registry_to_anthropic_oauth_credential(existing)),
                     )?)?
                 }
-                Some(OauthFamily::WorldAgent) => {
-                    StoredCredential::OAuth(to_registry_oauth_credential_worldagent(
-                        refresh_worldagent_oauth_token(&existing.refresh_token, None)?,
+                Some(OauthFamily::WorldRouter) => {
+                    StoredCredential::OAuth(to_registry_oauth_credential_worldrouter(
+                        refresh_worldrouter_oauth_token(&existing.refresh_token, None)?,
                     ))
                 }
                 None => anyhow::bail!("oauth refresh is not implemented for {provider}"),
@@ -1048,11 +1048,11 @@ fn run_login_flow(
         None
     } else if matches!(
         oauth_family_for_provider(providers, provider),
-        Some(OauthFamily::WorldAgent)
+        Some(OauthFamily::WorldRouter)
     ) {
         Some(authflow::CallbackListener::bind_localhost_port(
-            WORLDAGENT_CALLBACK_PATH,
-            WORLDAGENT_CALLBACK_PORT,
+            WORLDROUTER_CALLBACK_PATH,
+            WORLDROUTER_CALLBACK_PORT,
         )?)
     } else {
         Some(authflow::CallbackListener::bind_localhost("/callback")?)
@@ -1124,20 +1124,20 @@ fn run_login_flow(
             )?;
             store_anthropic_credential(auth_store, provider, credential)?;
         }
-        Some(OauthFamily::WorldAgent) => {
-            let parsed = parse_worldagent_callback_input(&input);
+        Some(OauthFamily::WorldRouter) => {
+            let parsed = parse_worldrouter_callback_input(&input);
             if let Some(err) = parsed.error.as_deref() {
                 let desc = parsed.error_description.as_deref().unwrap_or("");
-                anyhow::bail!("worldagent login failed: {err} {desc}");
+                anyhow::bail!("worldrouter login failed: {err} {desc}");
             }
             if parsed.state.as_deref() != Some(bundle.state.as_str()) {
-                anyhow::bail!("oauth state mismatch for worldagent");
+                anyhow::bail!("oauth state mismatch for worldrouter");
             }
             let access_token = parsed
                 .token
-                .ok_or_else(|| anyhow::anyhow!("worldagent callback missing token"))?;
-            let exchanged = exchange_worldagent_jwt_for_api_key(&access_token)
-                .context("worldagent JWT→api_key exchange failed")?;
+                .ok_or_else(|| anyhow::anyhow!("worldrouter callback missing token"))?;
+            let exchanged = exchange_worldrouter_jwt_for_api_key(&access_token)
+                .context("worldrouter JWT→api_key exchange failed")?;
             auth_store.set_api_key(provider.to_string(), exchanged.api_key);
         }
         None => anyhow::bail!("oauth login is not implemented for {provider}"),

@@ -4257,7 +4257,7 @@ dependencies = [
  "puffer-observability",
  "puffer-provider-openai",
  "puffer-provider-registry",
- "puffer-provider-worldagent",
+ "puffer-provider-worldrouter",
  "puffer-resources",
  "puffer-runner-api",
  "puffer-runner-grpc",
@@ -4575,7 +4575,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "puffer-provider-worldagent"
+name = "puffer-provider-worldrouter"
 version = "0.1.0"
 dependencies = [
  "anyhow",

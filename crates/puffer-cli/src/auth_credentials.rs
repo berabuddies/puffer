@@ -118,15 +118,15 @@ pub(crate) fn store_ready_credential_from_anthropic(
     }
 }
 
-/// Converts worldagent OAuth credentials into the registry storage shape.
+/// Converts worldrouter OAuth credentials into the registry storage shape.
 /// The Auth Station `sub` claim is stored as `account_id` so the
 /// existing AuthStore reuse path (organization_id, plan_type, etc.)
 /// stays untouched. `name` is intentionally not persisted yet — the
 /// existing `OAuthCredential` shape has no slot for it; if the UI
 /// needs the display name later, we can either reuse `email` or
 /// extend the struct.
-pub(crate) fn to_registry_oauth_credential_worldagent(
-    credential: puffer_provider_worldagent::WorldAgentOAuthCredentials,
+pub(crate) fn to_registry_oauth_credential_worldrouter(
+    credential: puffer_provider_worldrouter::WorldRouterOAuthCredentials,
 ) -> puffer_provider_registry::OAuthCredential {
     puffer_provider_registry::OAuthCredential {
         access_token: credential.access_token,
@@ -159,11 +159,11 @@ pub(crate) fn set_stored_credential(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use puffer_provider_worldagent::WorldAgentOAuthCredentials;
+    use puffer_provider_worldrouter::WorldRouterOAuthCredentials;
 
     #[test]
-    fn worldagent_credential_maps_email_and_account_id() {
-        let credential = WorldAgentOAuthCredentials {
+    fn worldrouter_credential_maps_email_and_account_id() {
+        let credential = WorldRouterOAuthCredentials {
             access_token: "acc".to_string(),
             refresh_token: "ref".to_string(),
             expires_at_ms: 42,
@@ -171,7 +171,7 @@ mod tests {
             email: Some("dev@example.com".to_string()),
             name: Some("Dev".to_string()),
         };
-        let stored = to_registry_oauth_credential_worldagent(credential);
+        let stored = to_registry_oauth_credential_worldrouter(credential);
         assert_eq!(stored.access_token, "acc");
         assert_eq!(stored.refresh_token, "ref");
         assert_eq!(stored.expires_at_ms, 42);
