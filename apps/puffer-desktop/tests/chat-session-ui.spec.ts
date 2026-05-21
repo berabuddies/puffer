@@ -246,6 +246,82 @@ test("pending submitted prompt survives switching away and back before turn id",
   await expect(page.getByRole("button", { name: "Stop turn" })).toBeVisible();
 });
 
+test("accepted prompt stays out of the draft when reopened after delayed turn start", async ({
+  page
+}) => {
+  const prompt = "Alpha accepted while hidden";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-alpha-accepted-hidden",
+        displayName: "Alpha accepted hidden",
+        title: "Alpha accepted hidden",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "alpha-accepted-hidden-seed",
+            text: "Alpha accepted hidden seed",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      },
+      {
+        sessionId: "session-beta-accepted-hidden",
+        displayName: "Beta accepted hidden",
+        title: "Beta accepted hidden",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 1,
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "beta-accepted-hidden-seed",
+            text: "Beta accepted hidden seed",
+            createdAtMs: baseTime - 90_000
+          }
+        ]
+      }
+    ]
+  });
+  daemon.delayResponse(
+    "run_agent_turn",
+    (request) => request.params.sessionId === "session-alpha-accepted-hidden",
+    140
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Alpha accepted hidden/);
+  await expect(page.getByText("Alpha accepted hidden seed")).toBeVisible();
+  const composer = page.locator(".pf-composer textarea");
+  await composer.fill(prompt);
+  await page.getByRole("button", { name: "Send" }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-alpha-accepted-hidden" &&
+      request.params.message === prompt
+  );
+  await expect(page.locator('.pf-msg[data-role="user"]').filter({ hasText: prompt })).toHaveCount(1);
+
+  await openSession(page, /Beta accepted hidden/);
+  await expect(page.getByText("Beta accepted hidden seed")).toBeVisible();
+  await page.waitForTimeout(190);
+  await expect(page.getByText(prompt)).toHaveCount(0);
+
+  await openSession(page, /Alpha accepted hidden/);
+  await expect(page.locator('.pf-msg[data-role="user"]').filter({ hasText: prompt })).toHaveCount(1);
+  await expect(composer).toHaveValue("");
+  await expect(page.getByRole("button", { name: "Stop turn" })).toBeVisible();
+});
+
 test("completed turn while away does not restore stale running controls", async ({
   page
 }) => {

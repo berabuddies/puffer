@@ -2288,7 +2288,7 @@
         if (!settledBeforeRpcReturned) {
           markCachedTurnStarted(submitSessionId, turnId);
         }
-        return false;
+        return true;
       }
       if (settledBeforeRpcReturned) {
         currentTurnId = null;
