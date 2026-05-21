@@ -71,6 +71,8 @@ pub struct ClaudeBashInput {
     pub run_in_background: bool,
     #[serde(default, rename = "dangerouslyDisableSandbox")]
     pub dangerously_disable_sandbox: bool,
+    #[serde(default)]
+    pub tty: bool,
 }
 
 /// Claude-compatible output payload for the `Bash` tool.
@@ -102,6 +104,8 @@ pub struct ClaudeBashOutput {
     pub return_code_interpretation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "noOutputExpected")]
     pub no_output_expected: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "processId")]
+    pub process_id: Option<i32>,
 }
 
 /// Normalized result envelope for one Claude-style Bash execution.
@@ -127,10 +131,11 @@ pub fn execute_from_value(
     cwd: &Path,
     session_id: &Uuid,
     input: Value,
+    process_store: Option<&std::sync::Arc<std::sync::Mutex<crate::runtime::process_store::ProcessStore>>>,
 ) -> Result<ClaudeBashExecution> {
     let typed: ClaudeBashInput =
         serde_json::from_value(input).context("invalid Bash tool input payload")?;
-    execute(cwd, session_id, typed)
+    execute(cwd, session_id, typed, process_store)
 }
 
 /// Executes a Claude-style `Bash` tool invocation in the provided working directory.
@@ -138,11 +143,96 @@ pub fn execute(
     cwd: &Path,
     session_id: &Uuid,
     input: ClaudeBashInput,
+    process_store: Option<&std::sync::Arc<std::sync::Mutex<crate::runtime::process_store::ProcessStore>>>,
 ) -> Result<ClaudeBashExecution> {
+    if input.tty {
+        if let Some(store) = process_store {
+            return execute_interactive(cwd, &input, store);
+        }
+    }
     if input.run_in_background {
         return execute_background(cwd, session_id, input);
     }
     execute_foreground(cwd, input)
+}
+
+fn execute_interactive(
+    cwd: &Path,
+    input: &ClaudeBashInput,
+    store: &std::sync::Arc<std::sync::Mutex<crate::runtime::process_store::ProcessStore>>,
+) -> Result<ClaudeBashExecution> {
+    let timeout_ms = input
+        .timeout
+        .unwrap_or_else(resolved_default_timeout_ms)
+        .clamp(1, resolved_max_timeout_ms());
+    let yield_ms = timeout_ms.min(5_000);
+
+    let process_id = {
+        let mut guard = store.lock().unwrap();
+        let pid = guard.allocate_id();
+        let entry = crate::runtime::process_store::spawn_tracked_process(
+            &input.command,
+            cwd,
+            pid,
+            true,
+        )
+        .with_context(|| format!("failed to spawn PTY process in {}", cwd.display()))?;
+        guard.insert(entry);
+        pid
+    };
+
+    // Collect initial output
+    thread::sleep(Duration::from_millis(yield_ms.min(500)));
+    let deadline = Instant::now() + Duration::from_millis(yield_ms);
+    loop {
+        {
+            let guard = store.lock().unwrap();
+            if let Some(e) = guard.peek(process_id) {
+                if e.total_output_bytes() > 0 || e.has_exited() {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    let (stdout, exited, _exit_code) = {
+        let mut guard = store.lock().unwrap();
+        if let Some(e) = guard.get_mut(process_id) {
+            let output = e.collect_output();
+            let text = String::from_utf8_lossy(&output).to_string();
+            let exited = e.has_exited();
+            let code = e.exit_code();
+            if exited {
+                guard.remove(process_id);
+            }
+            (text, exited, code)
+        } else {
+            (String::new(), true, None)
+        }
+    };
+
+    Ok(ClaudeBashExecution {
+        success: true,
+        output: ClaudeBashOutput {
+            stdout,
+            stderr: String::new(),
+            interrupted: false,
+            background_task_id: None,
+            output_file: None,
+            backgrounded_by_user: None,
+            assistant_auto_backgrounded: None,
+            dangerously_disable_sandbox: Some(input.dangerously_disable_sandbox),
+            return_code_interpretation: None,
+            no_output_expected: None,
+            process_id: if exited { None } else { Some(process_id) },
+        },
+    })
 }
 
 fn execute_background(
@@ -224,6 +314,7 @@ fn execute_background(
             dangerously_disable_sandbox: Some(input.dangerously_disable_sandbox),
             return_code_interpretation: None,
             no_output_expected: Some(true),
+            process_id: None,
         },
     })
 }
@@ -258,6 +349,7 @@ fn execute_foreground(cwd: &Path, input: ClaudeBashInput) -> Result<ClaudeBashEx
             dangerously_disable_sandbox: Some(input.dangerously_disable_sandbox),
             return_code_interpretation: classify_return_code(timed.output.status.code()),
             no_output_expected: Some(no_output_expected),
+            process_id: None,
         },
     })
 }
@@ -464,6 +556,7 @@ mod tests {
             description: None,
             run_in_background: false,
             dangerously_disable_sandbox: false,
+            tty: false,
         };
         assert_eq!(tool_description(&input), "Run shell command");
     }
@@ -476,6 +569,7 @@ mod tests {
             description: Some("Show greeting".to_string()),
             run_in_background: false,
             dangerously_disable_sandbox: false,
+            tty: false,
         };
         assert_eq!(tool_description(&input), "Show greeting");
     }
@@ -493,7 +587,9 @@ mod tests {
                     description: None,
                     run_in_background: false,
                     dangerously_disable_sandbox: false,
+                    tty: false,
                 },
+                None,
             )
             .unwrap();
             assert!(result.success, "command failed: {}", result.output.stderr);
@@ -516,7 +612,9 @@ mod tests {
                     description: None,
                     run_in_background: false,
                     dangerously_disable_sandbox: true,
+                    tty: false,
                 },
+                None,
             )
             .unwrap();
             assert!(!result.success);
@@ -539,7 +637,9 @@ mod tests {
                     description: None,
                     run_in_background: true,
                     dangerously_disable_sandbox: false,
+                    tty: false,
                 },
+                None,
             )
             .unwrap();
             assert!(result.success);
@@ -562,7 +662,9 @@ mod tests {
                     description: Some("Sleep briefly".to_string()),
                     run_in_background: true,
                     dangerously_disable_sandbox: false,
+                    tty: false,
                 },
+                None,
             )
             .unwrap();
 
@@ -612,7 +714,7 @@ mod tests {
                 "run_in_background": false,
                 "dangerouslyDisableSandbox": true
             });
-            let result = execute_from_value(temp.path(), &test_session_id(), input).unwrap();
+            let result = execute_from_value(temp.path(), &test_session_id(), input, None).unwrap();
             assert!(result.success, "command failed: {}", result.output.stderr);
             assert_eq!(result.output.stdout, "ok");
             assert_eq!(result.output.dangerously_disable_sandbox, Some(true));
@@ -627,6 +729,7 @@ mod tests {
             description: None,
             run_in_background: false,
             dangerously_disable_sandbox: false,
+            tty: false,
         };
         let error = summary_line(&input).unwrap_err();
         assert!(error.to_string().contains("cannot be empty"));
@@ -694,7 +797,9 @@ mod tests {
                     description: None,
                     run_in_background: false,
                     dangerously_disable_sandbox: false,
+                    tty: false,
                 },
+                None,
             )
             .unwrap();
             assert!(result.success, "command failed: {}", result.output.stderr);

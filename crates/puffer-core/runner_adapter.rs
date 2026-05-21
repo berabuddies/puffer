@@ -63,7 +63,7 @@ pub fn execute_runner_tool(req: &ToolRequest, _sink: &mut dyn ChunkSink) -> Resu
     match req.tool_id.as_str() {
         "Bash" => {
             let session_id = parse_session_id(req.session_id.as_deref())?;
-            let execution = bash::execute_from_value(cwd, &session_id, input)?;
+            let execution = bash::execute_from_value(cwd, &session_id, input, None)?;
             let stdout = serde_json::to_string_pretty(&execution.output)
                 .context("failed to serialize Bash output")?;
             Ok(plain_result(

@@ -96,7 +96,9 @@ pub(crate) fn execute_tool(
     input: Value,
     provider_context: ProviderToolContext<'_>,
 ) -> Result<ToolExecutionResult> {
-    if runner_adapter::is_runner_supported(definition.id.as_str()) {
+    let skip_runner = definition.id == "Bash"
+        && input.get("tty").and_then(|v| v.as_bool()).unwrap_or(false);
+    if !skip_runner && runner_adapter::is_runner_supported(definition.id.as_str()) {
         if let Some(result) =
             try_runner_dispatch(state, definition, cwd, &input, filesystem_policy)?
         {
@@ -105,7 +107,12 @@ pub(crate) fn execute_tool(
     }
     match definition.id.as_str() {
         "Bash" => {
-            let execution = bash::execute_from_value(cwd, &state.session.id, input)?;
+            let execution = bash::execute_from_value(
+                cwd,
+                &state.session.id,
+                input,
+                Some(&state.process_store),
+            )?;
             let output = serde_json::to_string_pretty(&execution.output)
                 .context("failed to serialize Bash output")?;
             Ok(tool_result(definition, execution.success, output))

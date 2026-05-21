@@ -13,8 +13,8 @@ const DEFAULT_YIELD_MS: u64 = 5_000;
 #[derive(Debug, Clone, Deserialize)]
 pub struct WriteStdinInput {
     pub process_id: i32,
-    #[serde(default)]
-    pub chars: String,
+    #[serde(default, alias = "chars")]
+    pub input: String,
     #[serde(default)]
     pub yield_time_ms: Option<u64>,
 }
@@ -52,9 +52,9 @@ pub fn execute(store: &Mutex<ProcessStore>, input: Value) -> Result<(bool, Strin
             return Ok((false, serde_json::to_string_pretty(&out)?));
         };
 
-        if !args.chars.is_empty() {
+        if !args.input.is_empty() {
             entry
-                .write_stdin(args.chars.as_bytes())
+                .write_stdin(args.input.as_bytes())
                 .with_context(|| {
                     format!("failed to write stdin to process {}", args.process_id)
                 })?;

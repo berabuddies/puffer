@@ -87,6 +87,15 @@ input_schema:
     dangerouslyDisableSandbox:
       type: boolean
       description: Set this to true to dangerously override sandbox mode and run commands without sandboxing.
+    tty:
+      type: boolean
+      description: |-
+        Set to true to run the command in a pseudo-terminal (PTY) instead of a
+        pipe. Use this for interactive programs that require a terminal (e.g.,
+        python3, lldb, node, irb). The command runs in the background and returns
+        a process_id you can use with WriteStdin to send further input. Initial
+        output is collected and returned. If the process is still running you can
+        interact with it using WriteStdin.
   required:
     - command
   additionalProperties: false

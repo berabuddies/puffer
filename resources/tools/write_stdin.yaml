@@ -1,0 +1,46 @@
+id: WriteStdin
+name: WriteStdin
+description: |-
+  Send input to a running interactive process spawned with Bash tty mode.
+
+  Use this tool to interact with processes started via Bash with tty: true.
+  Provide the process_id returned by the Bash call and the text to send.
+  The tool writes the input to the process's stdin, waits briefly for new
+  output, and returns any new output produced since the last read along with
+  the process state (running or exited with exit code).
+
+  Typical workflow:
+  1. Start an interactive program: Bash with command "python3" and tty: true
+  2. Get back process_id and initial output (the Python REPL prompt)
+  3. Use WriteStdin to send commands: process_id + "print('hello')\n"
+  4. Get back the output and whether the process is still running
+  5. Repeat as needed. Send "exit()\n" or similar to end the session.
+
+  Notes:
+  - Always include a trailing newline (\n) in your input to simulate pressing
+    Enter.
+  - The tool polls for up to 3 seconds for new output after writing.
+  - If the process has already exited, the tool returns remaining buffered
+    output and reports the exit code.
+handler: runtime:claude_write_stdin
+approval_policy: on-request
+sandbox_policy: workspace-write
+input_schema:
+  type: object
+  properties:
+    process_id:
+      type: integer
+      description: The process_id returned by a previous Bash call with tty true.
+    input:
+      type: string
+      description: |-
+        The text to send to the process's standard input. Include a trailing
+        newline (\n) to simulate pressing Enter.
+  required:
+    - process_id
+    - input
+  additionalProperties: false
+display:
+  group: shell
+  title: WriteStdin
+  show_in_status: false
