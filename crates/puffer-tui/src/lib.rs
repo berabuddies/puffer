@@ -845,8 +845,9 @@ fn handle_overlay_key(
     if active_overlay.accepts_text_input() {
         match key.code {
             KeyCode::Esc => {
-                let next = onboarding::back_overlay(active_overlay, providers, auth_store)?;
-                set_overlay_state(tui, next);
+                let overlay_snapshot = active_overlay.clone();
+                let next = onboarding::back_overlay(&overlay_snapshot, providers, auth_store)?;
+                set_back_overlay_state(tui, &overlay_snapshot, next);
             }
             KeyCode::Left => {
                 if let Some(overlay) = tui.overlay.as_mut() {
@@ -940,10 +941,8 @@ fn handle_overlay_key(
     let overlay_snapshot = active_overlay.clone();
     match key.code {
         KeyCode::Esc => {
-            set_overlay_state(
-                tui,
-                onboarding::back_overlay(&overlay_snapshot, providers, auth_store)?,
-            );
+            let next = onboarding::back_overlay(&overlay_snapshot, providers, auth_store)?;
+            set_back_overlay_state(tui, &overlay_snapshot, next);
         }
         KeyCode::Up => {
             if let Some(overlay) = tui.overlay.as_mut() {
@@ -1441,5 +1440,17 @@ fn handle_overlay_key(
     }
     Ok(false)
 }
+
+fn set_back_overlay_state(
+    tui: &mut TuiState,
+    active_overlay: &OverlayState,
+    next: Option<OverlayState>,
+) {
+    if active_overlay.is_onboarding() && next.is_none() {
+        tui.defer_prompt(None);
+    }
+    set_overlay_state(tui, next);
+}
+
 #[cfg(test)]
 mod tests;

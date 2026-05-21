@@ -324,3 +324,96 @@ fn stale_provider_prompt_opens_provider_picker() {
         other => panic!("expected provider picker, got {other:?}"),
     }
 }
+
+#[test]
+fn canceling_onboarding_clears_deferred_prompt() {
+    let tempdir = tempdir().unwrap();
+    let _home = crate::test_env::ScopedPufferHome::new("cancel-onboarding-deferred-prompt");
+    let workspace = tempdir.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    let paths = ConfigPaths::discover(&workspace);
+    ensure_workspace_dirs(&paths).unwrap();
+    save_user_config(&paths, &PufferConfig::default()).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store.create_session(workspace.clone()).unwrap();
+    let mut state = AppState::new(PufferConfig::default(), workspace, session);
+    state.current_provider = Some("removed-provider".to_string());
+    state.current_model = Some("removed-provider/missing-model".to_string());
+    let auth_path = paths.user_config_dir.join("auth.json");
+    let mut resources = sample_resources();
+    let mut providers = openai_only_providers();
+    let mut auth_store = AuthStore::default();
+    let mut tui = TuiState::default();
+
+    handle_prompt_submit(
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        "hello with stale provider".to_string(),
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(
+        tui.deferred_prompt.as_deref(),
+        Some("hello with stale provider")
+    );
+    assert!(matches!(
+        tui.overlay,
+        Some(OverlayState::ProviderPicker {
+            onboarding: true,
+            ..
+        })
+    ));
+
+    handle_overlay_key(
+        KeyEvent::from(KeyCode::Esc),
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+    assert!(matches!(
+        tui.overlay,
+        Some(OverlayState::ThemePicker { .. })
+    ));
+
+    handle_overlay_key(
+        KeyEvent::from(KeyCode::Esc),
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+
+    assert!(tui.overlay.is_none());
+    assert!(tui.deferred_prompt.is_none());
+    submit_queued_prompt_if_ready(
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        true,
+    )
+    .unwrap();
+    assert!(!tui.has_pending_submit());
+    assert!(state.transcript.is_empty());
+}
