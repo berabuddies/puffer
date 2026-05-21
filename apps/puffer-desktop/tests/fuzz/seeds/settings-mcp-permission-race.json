@@ -1,0 +1,88 @@
+{
+  "id": "settings-mcp-permission-race",
+  "title": "Settings MCP and permissions save races",
+  "focus": "MCP add/update/remove/test and permissions save while stale settings refreshes or reconnects occur.",
+  "severityTarget": "P1 settings data loss, duplicate server creation, stale test result on wrong server, or disabled settings form without recovery.",
+  "primaryRoutes": ["settings-mcp", "settings-permissions"],
+  "defaultIterations": 8,
+  "defaultSteps": 14,
+  "setup": [
+    {
+      "id": "setup-open-settings-mcp",
+      "action": "open-settings-mcp",
+      "kind": "ui",
+      "target": "settings-mcp",
+      "coverage": ["route:settings-mcp", "state:settings.clean", "state:daemon.connected"]
+    }
+  ],
+  "actions": [
+    {
+      "id": "add-mcp-server",
+      "kind": "ui",
+      "target": "settings.mcp-add",
+      "weight": 8,
+      "params": { "id": { "oneOf": ["playwright", "browser", "tmp-server"] }, "target": { "oneOf": ["npx @playwright/mcp", "http://127.0.0.1:9000/sse", ""] } },
+      "expectedDaemon": "add_mcp_server",
+      "coverage": ["control:settings.mcp-add", "state:settings.saving", "async:duplicate-submit"]
+    },
+    {
+      "id": "emit-mcp-list-refresh",
+      "kind": "daemon",
+      "target": "list_mcp_servers",
+      "weight": 8,
+      "coverage": ["async:server-push-update", "async:delayed-list-refresh", "state:settings.saving"]
+    },
+    {
+      "id": "late-mcp-test-result",
+      "kind": "daemon",
+      "target": "list_mcp_servers",
+      "weight": 7,
+      "coverage": ["async:late-success", "async:stale-session-event"]
+    },
+    {
+      "id": "open-permissions",
+      "kind": "ui",
+      "target": "settings-permissions",
+      "weight": 7,
+      "coverage": ["route:settings-permissions", "state:settings.clean"]
+    },
+    {
+      "id": "save-permissions",
+      "kind": "ui",
+      "target": "settings.permissions-save",
+      "weight": 8,
+      "expectedDaemon": "save_permissions",
+      "coverage": ["control:settings.permissions-save", "state:settings.saving", "async:late-failure"]
+    },
+    {
+      "id": "emit-permissions-refresh",
+      "kind": "daemon",
+      "target": "list_permissions",
+      "weight": 7,
+      "coverage": ["async:server-push-update", "async:delayed-list-refresh"]
+    },
+    {
+      "id": "disconnect-reconnect",
+      "kind": "daemon",
+      "target": "websocket",
+      "weight": 6,
+      "coverage": ["state:daemon.reconnecting", "async:reconnect"]
+    },
+    {
+      "id": "resize-narrow",
+      "kind": "ui",
+      "target": "viewport",
+      "weight": 4,
+      "params": { "width": { "oneOf": [480, 640] }, "height": { "oneOf": [560, 720] } },
+      "coverage": ["state:viewport.narrow"]
+    }
+  ],
+  "invariants": [
+    "app-no-crash",
+    "one-request-per-intent",
+    "controls-disabled-while-pending",
+    "draft-preserved-on-failure",
+    "stale-error-scoped",
+    "no-permanent-loading"
+  ]
+}

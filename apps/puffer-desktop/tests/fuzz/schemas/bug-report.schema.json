@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PufferUiuxBugReport",
+  "type": "object",
+  "required": [
+    "title",
+    "category",
+    "severity",
+    "bugSignature",
+    "expected",
+    "actual",
+    "reproSteps",
+    "evidence",
+    "environment"
+  ],
+  "properties": {
+    "title": { "type": "string" },
+    "category": { "type": "string" },
+    "severity": { "enum": ["P0", "P1", "P2", "P3", "NeedsReview"] },
+    "bugSignature": { "type": "string" },
+    "duplicateOf": { "type": ["string", "null"] },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "expected": { "type": "string" },
+    "actual": { "type": "string" },
+    "userImpact": { "type": "string" },
+    "rootCauseHypothesis": { "type": "string" },
+    "reproSteps": { "type": "array", "items": { "type": "string" } },
+    "replayScript": { "type": "string" },
+    "replaySuccessRate": { "type": "number" },
+    "evidence": {
+      "type": "object",
+      "required": ["stateHash", "traceId"],
+      "properties": {
+        "stateHash": { "type": "string" },
+        "elementId": { "type": "string" },
+        "traceId": { "type": "string" },
+        "caseId": { "type": "string" },
+        "seedId": { "type": "string" },
+        "screenshot": { "type": "string" },
+        "video": { "type": "string" },
+        "traceZip": { "type": "string" },
+        "logs": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "properties": {
+        "role": { "type": "string" },
+        "viewport": { "type": "string" },
+        "theme": { "type": "string" },
+        "locale": { "type": "string" },
+        "browser": { "type": "string" },
+        "terminal": { "type": "string" },
+        "fakeDaemon": { "type": "boolean" },
+        "featureFlags": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

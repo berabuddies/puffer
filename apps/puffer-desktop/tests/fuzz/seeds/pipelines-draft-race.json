@@ -1,0 +1,57 @@
+{
+  "id": "pipelines-draft-race",
+  "title": "Pipelines draft and refresh races",
+  "focus": "Pipeline node editing, trigger editing, tab switches, and stale workflow refreshes.",
+  "severityTarget": "P1 workflow draft loss, invalid graph save, or blocked pipeline editing after refresh.",
+  "primaryRoutes": ["pipelines"],
+  "defaultIterations": 6,
+  "defaultSteps": 12,
+  "setup": [
+    {
+      "id": "setup-open-pipelines",
+      "action": "open-pipelines",
+      "kind": "ui",
+      "target": "pipelines",
+      "coverage": ["route:pipelines", "state:daemon.connected"]
+    }
+  ],
+  "actions": [
+    {
+      "id": "edit-pipeline-node",
+      "kind": "ui",
+      "target": "pipelines.node-editor",
+      "weight": 8,
+      "params": { "field": { "oneOf": ["id", "name", "tool", "prompt"] } },
+      "coverage": ["control:pipelines.node-editor", "async:server-push-update"]
+    },
+    {
+      "id": "edit-pipeline-trigger",
+      "kind": "ui",
+      "target": "pipelines.trigger-editor",
+      "weight": 8,
+      "params": { "field": { "oneOf": ["kind", "cron", "event"] } },
+      "coverage": ["control:pipelines.trigger-editor", "async:delayed-list-refresh"]
+    },
+    {
+      "id": "emit-pipeline-refresh",
+      "kind": "daemon",
+      "target": "workflow_list",
+      "weight": 7,
+      "coverage": ["async:late-success", "async:server-push-update"]
+    },
+    {
+      "id": "disconnect-reconnect",
+      "kind": "daemon",
+      "target": "websocket",
+      "weight": 5,
+      "coverage": ["state:daemon.reconnecting", "async:reconnect"]
+    }
+  ],
+  "invariants": [
+    "app-no-crash",
+    "no-data-loss",
+    "draft-preserved-on-failure",
+    "stale-error-scoped",
+    "no-permanent-loading"
+  ]
+}

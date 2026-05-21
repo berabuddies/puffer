@@ -1,0 +1,111 @@
+{
+  "id": "workspace-session-race",
+  "title": "Workspace board search, selection, pin, and reconnect races",
+  "focus": "Workspace landing page, search/filter, project groups, active-agent sidebar, pin state, and session selection under stale refreshes.",
+  "severityTarget": "P1 wrong session opened, blocked project/session selection, duplicate pin state, or stale refresh hiding active work.",
+  "primaryRoutes": ["workspace", "agent-detail", "connect-project-modal"],
+  "defaultIterations": 10,
+  "defaultSteps": 16,
+  "setup": [
+    {
+      "id": "setup-open-workspace",
+      "action": "open-workspace",
+      "kind": "ui",
+      "target": "workspace",
+      "coverage": ["route:workspace", "state:daemon.connected", "state:session.idle"]
+    }
+  ],
+  "actions": [
+    {
+      "id": "type-search",
+      "kind": "keyboard",
+      "target": "workspace.search",
+      "weight": 8,
+      "params": { "text": { "oneOf": ["browser", "tmp", "missing", "session", "puffer"] } },
+      "maxPerCase": 4,
+      "produces": ["resource:workspace.search.filtered"],
+      "coverage": ["control:workspace.search", "async:delayed-list-refresh"]
+    },
+    {
+      "id": "clear-search",
+      "kind": "keyboard",
+      "target": "workspace.search",
+      "weight": 5,
+      "maxPerCase": 4,
+      "requires": ["resource:workspace.search.filtered"],
+      "consumes": ["resource:workspace.search.filtered"],
+      "coverage": ["control:workspace.search"]
+    },
+    {
+      "id": "open-agent-card",
+      "kind": "ui",
+      "target": "workspace.agent-card",
+      "weight": 9,
+      "params": { "session": { "oneOf": ["session-browser", "session-second", "session-third"] } },
+      "maxPerCase": 4,
+      "blocks": ["resource:workspace.search.filtered"],
+      "expectedDaemon": "load_session_detail",
+      "coverage": ["control:workspace.agent-card", "route:agent-detail", "state:session.loading", "async:late-success"]
+    },
+    {
+      "id": "pin-agent",
+      "kind": "ui",
+      "target": "workspace.pin-agent",
+      "weight": 6,
+      "maxPerCase": 2,
+      "blocks": ["state:viewport.narrow", "resource:connect-project.modal-open"],
+      "expectedDaemon": "set_desktop_pin",
+      "coverage": ["control:workspace.pin-agent", "async:duplicate-submit", "async:late-failure"]
+    },
+    {
+      "id": "open-connect-project",
+      "kind": "ui",
+      "target": "workspace.connect-project",
+      "weight": 7,
+      "blocks": ["resource:connect-project.modal-open"],
+      "produces": ["resource:connect-project.modal-open"],
+      "maxPerCase": 2,
+      "coverage": ["route:connect-project-modal", "control:workspace.connect-project", "invariant:focus-restored"]
+    },
+    {
+      "id": "emit-grouped-session-refresh",
+      "kind": "daemon-event",
+      "target": "workspace:sessions:changed",
+      "weight": 8,
+      "maxPerCase": 3,
+      "coverage": ["async:delayed-list-refresh", "async:server-push-update", "state:session.loading"]
+    },
+    {
+      "id": "emit-active-agent-change",
+      "kind": "daemon-event",
+      "target": "workspace:sessions:changed",
+      "weight": 7,
+      "maxPerCase": 3,
+      "coverage": ["async:server-push-update", "async:stale-session-event"]
+    },
+    {
+      "id": "disconnect-reconnect",
+      "kind": "daemon",
+      "target": "websocket",
+      "weight": 7,
+      "maxPerCase": 1,
+      "coverage": ["state:daemon.reconnecting", "state:daemon.disconnected", "async:reconnect"]
+    },
+    {
+      "id": "resize-narrow",
+      "kind": "ui",
+      "target": "viewport",
+      "weight": 4,
+      "params": { "width": { "oneOf": [420, 640, 800] }, "height": { "oneOf": [560, 720] } },
+      "coverage": ["state:viewport.narrow"]
+    }
+  ],
+  "invariants": [
+    "app-no-crash",
+    "active-session-stable",
+    "one-request-per-intent",
+    "stale-error-scoped",
+    "focus-restored",
+    "no-permanent-loading"
+  ]
+}

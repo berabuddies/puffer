@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PufferFuzzActionEvent",
+  "type": "object",
+  "required": ["traceId", "step", "timestamp", "action", "beforeStateHash"],
+  "properties": {
+    "traceId": { "type": "string" },
+    "caseId": { "type": "string" },
+    "seedId": { "type": "string" },
+    "step": { "type": "integer" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "beforeStateHash": { "type": "string" },
+    "afterStateHash": { "type": "string" },
+    "edgeId": { "type": "string" },
+    "action": {
+      "type": "object",
+      "required": ["id", "kind", "target"],
+      "properties": {
+        "id": { "type": "string" },
+        "kind": { "type": "string" },
+        "target": { "type": "string" },
+        "params": { "type": "object" },
+        "expectedDaemon": { "type": ["string", "null"] }
+      }
+    },
+    "daemonRequests": { "type": "array", "items": { "type": "object" } },
+    "consoleErrors": { "type": "array", "items": { "type": "string" } },
+    "pageErrors": { "type": "array", "items": { "type": "string" } },
+    "coverageGain": {
+      "type": "object",
+      "properties": {
+        "newStates": { "type": "array", "items": { "type": "string" } },
+        "newEdges": { "type": "array", "items": { "type": "string" } },
+        "newElements": { "type": "array", "items": { "type": "string" } },
+        "newTags": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "artifacts": { "type": "array", "items": { "type": "string" } }
+  }
+}
