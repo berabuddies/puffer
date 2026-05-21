@@ -152,39 +152,50 @@ export class DaemonClient {
   }
 
   on<T = unknown>(event: string, handler: (payload: T) => void): () => void {
+    const cleanups: (() => void)[] = [];
+
     if (this.useWebSocket) {
       const wrapped = handler as (payload: unknown) => void;
       const listeners = this.eventListeners.get(event) ?? new Set();
       listeners.add(wrapped);
       this.eventListeners.set(event, listeners);
       void this.connect().catch(() => {});
-      return () => {
+      cleanups.push(() => {
         listeners.delete(wrapped);
         if (listeners.size === 0) this.eventListeners.delete(event);
-      };
+      });
     }
 
-    let active = true;
-    let unlisten: UnlistenFn | null = null;
-    const pending = listen<BackendEventEnvelope>("corbina:event", (nativeEvent) => {
-      if (!active) return;
-      const payload = nativeEvent.payload;
-      if (payload?.event === event) {
-        handler(payload.payload as T);
-      }
-    });
-    void pending.then((next) => {
-      unlisten = next;
-      if (!active) unlisten();
-    });
+    // Tauri host events (e.g. corbina-emitted `worldrouter:oauth-completed`)
+    // arrive on the `corbina:event` channel and never traverse the daemon's
+    // WebSocket. Subscribe regardless of `useWebSocket` so Tauri-only events
+    // still reach handlers when the daemon happens to be a ws:// endpoint.
+    if (canInvokeTauri()) {
+      let active = true;
+      let unlisten: UnlistenFn | null = null;
+      const pending = listen<BackendEventEnvelope>("corbina:event", (nativeEvent) => {
+        if (!active) return;
+        const payload = nativeEvent.payload;
+        if (payload?.event === event) {
+          handler(payload.payload as T);
+        }
+      });
+      void pending.then((next) => {
+        unlisten = next;
+        if (!active) unlisten();
+      });
+      cleanups.push(() => {
+        active = false;
+        if (unlisten) {
+          unlisten();
+        } else {
+          void pending.then((next) => next());
+        }
+      });
+    }
 
     return () => {
-      active = false;
-      if (unlisten) {
-        unlisten();
-      } else {
-        void pending.then((next) => next());
-      }
+      for (const cleanup of cleanups) cleanup();
     };
   }
 
