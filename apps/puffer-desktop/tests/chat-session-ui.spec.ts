@@ -4301,6 +4301,106 @@ test("send in flight stays pending across backend reconnect until transcript rel
   });
 });
 
+test("composer blocks new submits while backend is disconnected", async ({ page }) => {
+  const prompt = "Wait for backend before sending";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-disconnected-submit",
+        displayName: "Disconnected submit",
+        title: "Disconnected submit",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Disconnected submit/);
+  const composer = page.locator(".pf-composer textarea");
+  await composer.fill(prompt);
+  await daemon.dropConnections();
+  await expect(page.locator(".connection-banner")).toContainText("Puffer backend disconnected.");
+  await expect(page.getByRole("button", { name: "Send", exact: true })).toBeDisabled();
+  await expect(page.locator(".pf-composer-hint")).toContainText("Reconnect the Puffer backend");
+  await page.getByRole("button", { name: "Send", exact: true }).click({ force: true });
+
+  await page.waitForTimeout(80);
+  expect(
+    daemon.requests.filter(
+      (request) =>
+        request.method === "run_agent_turn" &&
+        request.params.sessionId === "session-disconnected-submit"
+    )
+  ).toHaveLength(0);
+  await expect(composer).toHaveValue(prompt);
+});
+
+test("backend reconnect re-subscribes the active session event stream", async ({ page }) => {
+  await page.addInitScript(() => {
+    const win = window as typeof window & {
+      __PUFFER_DESKTOP_TEST_HOOKS__?: {
+        beforeSessionSubscribe?: (sessionId: string) => void | Promise<void>;
+      };
+      __subscribeAttempts?: string[];
+    };
+    win.__subscribeAttempts = [];
+    win.__PUFFER_DESKTOP_TEST_HOOKS__ = {
+      beforeSessionSubscribe(sessionId: string) {
+        win.__subscribeAttempts?.push(sessionId);
+      }
+    };
+  });
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-resubscribe-reconnect",
+        displayName: "Resubscribe reconnect",
+        title: "Resubscribe reconnect",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Resubscribe reconnect/);
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        ((window as typeof window & { __subscribeAttempts?: string[] }).__subscribeAttempts ?? [])
+          .filter((sessionId) => sessionId === "session-resubscribe-reconnect")
+          .length
+      )
+    )
+    .toBe(1);
+
+  await reconnectBackend(page, daemon);
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        ((window as typeof window & { __subscribeAttempts?: string[] }).__subscribeAttempts ?? [])
+          .filter((sessionId) => sessionId === "session-resubscribe-reconnect")
+          .length
+      )
+    )
+    .toBeGreaterThanOrEqual(2);
+});
+
 test("lost turn-start response clears pending start after idle reconnect", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

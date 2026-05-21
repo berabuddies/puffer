@@ -37,6 +37,7 @@
     turnThinking?: boolean;
     turnStatusHint?: string | null;
     settingsSnapshot?: SettingsSnapshot | null;
+    backendConnected?: boolean;
     userDisplayName?: string;
     onBack: () => void;
     onSubmitMessage: (message: string, options?: AgentTurnOptions) => SubmitMessageResult;
@@ -66,6 +67,7 @@
     turnThinking = false,
     turnStatusHint = null,
     settingsSnapshot = null,
+    backendConnected = true,
     userDisplayName = "Otter",
     onBack,
     onSubmitMessage,
@@ -611,6 +613,7 @@
         {turnThinking}
         {turnStatusHint}
         {settingsSnapshot}
+        {backendConnected}
         {userDisplayName}
         {onSubmitMessage}
         {onResolvePermission}
@@ -662,6 +665,7 @@
           {turnThinking}
           {turnStatusHint}
           {settingsSnapshot}
+          {backendConnected}
           {userDisplayName}
           {onSubmitMessage}
           {onResolvePermission}

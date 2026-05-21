@@ -62,6 +62,7 @@
     turnThinking?: boolean;
     turnStatusHint?: string | null;
     settingsSnapshot?: SettingsSnapshot | null;
+    backendConnected?: boolean;
     onSubmitMessage: (message: string, options?: AgentTurnOptions) => SubmitMessageResult;
     onResolvePermission: (permissionId: string, choice: string) => void;
     onResolveUserQuestion: (
@@ -90,6 +91,7 @@
     turnThinking = false,
     turnStatusHint = null,
     settingsSnapshot = null,
+    backendConnected = true,
     onSubmitMessage,
     onResolvePermission,
     onResolveUserQuestion,
@@ -225,7 +227,10 @@
       (agentState === "running" || agentState === "thinking" || agentState === "awaiting")
   );
   let composerDisabled = $derived(
-    !session || agentBusy || (!selectedProviderAuthenticated && !providerSwitchCanRecover)
+    !session ||
+      !backendConnected ||
+      agentBusy ||
+      (!selectedProviderAuthenticated && !providerSwitchCanRecover)
   );
   let modelPickerDisabled = $derived(
     turnRunning || (!selectedProviderAuthenticated && !providerSwitchCanRecover)
@@ -235,6 +240,8 @@
       ? agentState === "awaiting"
         ? "Respond to the pending request before starting another turn."
         : "Wait for the running agent turn to finish."
+      : !backendConnected
+        ? "Reconnect the Puffer backend before sending another message."
       : selectedProviderAuthenticated
       ? selectedModelReady
         ? null
@@ -247,6 +254,7 @@
     Boolean(
       draft.trim() &&
         session &&
+        backendConnected &&
         !turnRunning &&
         !agentBusy &&
         !submitInFlight &&
@@ -860,6 +868,9 @@
       if ((session?.id ?? null) === targetSessionId) {
         threadEl?.scrollTo({ top: threadEl.scrollHeight, behavior: "smooth" });
       }
+    } catch {
+      setDraftForSession(targetSessionId, previousDraft);
+      if ((session?.id ?? null) === targetSessionId && !draft.trim()) draft = previousDraft;
     } finally {
       setSubmitInFlight(targetSessionId, false);
     }

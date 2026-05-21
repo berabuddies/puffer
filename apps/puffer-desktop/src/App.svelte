@@ -159,6 +159,7 @@
   let dismissedPermissionIds = $state<string[]>([]);
   let dismissedQuestionIds = $state<string[]>([]);
   const DISMISSED_IDS_CAP = 200;
+  const SETTLED_TURN_KEYS_CAP = 500;
   let resolvingPermissionIds = $state<string[]>([]);
   let resolvingQuestionIds = $state<string[]>([]);
 
@@ -909,9 +910,15 @@
           desktopPinInFlightKeys = [];
           desktopPinInFlightStates = {};
           desktopPinQueuedStates = {};
+          if (sessionEventUnlisten) {
+            sessionEventUnlisten();
+            sessionEventUnlisten = null;
+          }
+          subscribedSessionId = null;
           void refreshPins();
           void refreshSettings();
           void refreshGroups();
+          void ensureSessionSubscription();
           if (selectedSession && openAgentSessionId === selectedSession.id) {
             void openSession(selectedSession, { showLoading: false, resetLiveState: true });
           }
@@ -2119,6 +2126,7 @@
   }
 
   function onSelectScreen(id: ScreenId) {
+    saveCurrentTransientConversationState(selectedSession?.id);
     tweaks = { ...tweaks, screen: id };
     openProjectId = null;
     openAgentSessionId = null;
@@ -2142,6 +2150,7 @@
   }
 
   function onCloseAgent() {
+    saveCurrentTransientConversationState(selectedSession?.id);
     openAgentSessionId = null;
     clearRememberedSession();
   }
@@ -2254,6 +2263,7 @@
     if (
       submitMessageInFlightGuards.has(submitSessionId) ||
       submitMessageInFlightFor(submitSessionId) ||
+      connectionState !== "open" ||
       turnStartedAtMs !== null ||
       currentTurnId !== null ||
       sessionAtSubmit.activityStatus === "running" ||
@@ -2282,9 +2292,12 @@
     setSubmitMessageInFlight(submitSessionId, true);
     const now = Date.now();
     const localUserId = `local-user-${now}`;
-    submittedMessageBaselineIds[localUserId] = (sessionDetail?.timeline ?? [])
-      .map((item) => item.id)
-      .filter((id) => id.length > 0);
+    submittedMessageBaselineIds = {
+      ...submittedMessageBaselineIds,
+      [localUserId]: (sessionDetail?.timeline ?? [])
+        .map((item) => item.id)
+        .filter((id) => id.length > 0)
+    };
     submittedMessages = [
       ...submittedMessages,
       {
@@ -2342,7 +2355,8 @@
         return false;
       }
       submittedMessages = submittedMessages.filter((item) => item.id !== localUserId);
-      delete submittedMessageBaselineIds[localUserId];
+      const { [localUserId]: _drop, ...restBaselineIds } = submittedMessageBaselineIds;
+      submittedMessageBaselineIds = restBaselineIds;
       currentTurnId = null;
       cancelingTurnId = null;
       turnStartedAtMs = null;
@@ -2786,6 +2800,15 @@
 
   function rememberSettledTurn(sessionId: string, turnId: string) {
     settledTurnKeys.add(turnKey(sessionId, turnId));
+    if (settledTurnKeys.size > SETTLED_TURN_KEYS_CAP) {
+      const overflow = settledTurnKeys.size - SETTLED_TURN_KEYS_CAP;
+      let removed = 0;
+      for (const key of settledTurnKeys) {
+        settledTurnKeys.delete(key);
+        removed += 1;
+        if (removed >= overflow) break;
+      }
+    }
   }
 
   function forgetSettledTurn(sessionId: string, turnId: string) {
@@ -3185,6 +3208,7 @@
                 turnThinking={turnThinking}
                 turnStatusHint={turnStatusHint}
                 settingsSnapshot={settingsSnapshot}
+                backendConnected={connectionState === "open"}
                 userDisplayName={tweaks.userName}
                 onBack={onCloseAgent}
                 onSubmitMessage={submitMessage}
