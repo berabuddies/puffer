@@ -1838,6 +1838,29 @@
     });
   }
 
+  function dismissPermissionId(scopedPermissionId: string) {
+    if (dismissedPermissionIds.includes(scopedPermissionId)) return;
+    dismissedPermissionIds = [...dismissedPermissionIds, scopedPermissionId].slice(-DISMISSED_IDS_CAP);
+  }
+
+  function clearCachedResolvedPermission(
+    sessionId: string | null,
+    permissionId: string,
+    turnId: string
+  ) {
+    if (!sessionId) return;
+    const cached = transientConversationStates[sessionId];
+    if (!cached) return;
+    const { [permissionId]: _drop, ...nextLookup } = cached.turnPermissionLookup;
+    setTransientConversationState(sessionId, {
+      ...cached,
+      liveStreamItems: cached.liveStreamItems.filter((item) => item.id !== permissionId),
+      turnPermissionLookup: nextLookup,
+      turnThinking: cached.currentTurnId === turnId ? false : cached.turnThinking,
+      turnStatusHint: cached.currentTurnId === turnId ? "Running" : cached.turnStatusHint
+    });
+  }
+
   function clearSettledLoadedTurnState(
     sessionId: string,
     activityStatus: AgentActivityStatus,
@@ -2371,8 +2394,11 @@
       if (mapping) {
         try {
           await resolveTurnPermission(mapping.turnId, mapping.requestId, mapPermissionAction(choice));
-          if (selectedSession?.id !== responseSessionId) return;
-          dismissedPermissionIds = [...dismissedPermissionIds, scopedPermissionId].slice(-DISMISSED_IDS_CAP);
+          dismissPermissionId(scopedPermissionId);
+          if (selectedSession?.id !== responseSessionId) {
+            clearCachedResolvedPermission(responseSessionId, permissionId, mapping.turnId);
+            return;
+          }
           statusMessage = `${choice} sent to agent.`;
           if (currentTurnId === mapping.turnId) {
             turnThinking = false;
@@ -2387,7 +2413,7 @@
           appendAgentError("Permission response failed", detail, "permission-error");
         }
       } else {
-        dismissedPermissionIds = [...dismissedPermissionIds, scopedPermissionId].slice(-DISMISSED_IDS_CAP);
+        dismissPermissionId(scopedPermissionId);
         statusMessage = `${choice} selected (no in-flight turn).`;
       }
     } finally {

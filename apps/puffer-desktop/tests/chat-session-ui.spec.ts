@@ -2898,6 +2898,91 @@ test("successful permission response clears the awaiting approval hint", async (
   await expect(page.getByText(/Running/)).toBeVisible();
 });
 
+test("successful permission response stays dismissed after switching away before it returns", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-permission-success-switch-a",
+        displayName: "Permission success switch A",
+        title: "Permission success switch A",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        activityStatus: "idle",
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      },
+      {
+        sessionId: "session-permission-success-switch-b",
+        displayName: "Permission success switch B",
+        title: "Permission success switch B",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 1,
+        activityStatus: "idle",
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: [
+          {
+            kind: "assistant_message",
+            id: "permission-success-switch-b-seed",
+            text: "Permission success switch B seed",
+            createdAtMs: baseTime - 30_000
+          }
+        ]
+      }
+    ]
+  });
+  daemon.delayResponse(
+    "resolve_permission",
+    (request) =>
+      request.params.turnId === "turn-permission-success-switch" &&
+      request.params.requestId === "permission-success-switch",
+    250
+  );
+
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Permission success switch A/);
+  daemon.emit("session:session-permission-success-switch-a:event", {
+    type: "permission-request",
+    turnId: "turn-permission-success-switch",
+    requestId: "permission-success-switch",
+    toolId: "bash",
+    summary: "Approve delayed command",
+    reason: "This approval should not reappear after success."
+  });
+
+  await expect(page.getByText("This approval should not reappear after success.")).toBeVisible();
+  await page.getByRole("button", { name: "Allow once" }).click();
+  await daemon.waitForRequest(
+    "resolve_permission",
+    (request) =>
+      request.params.turnId === "turn-permission-success-switch" &&
+      request.params.requestId === "permission-success-switch"
+  );
+
+  await openSession(page, /Permission success switch B/);
+  await expect(page.getByText("Permission success switch B seed")).toBeVisible();
+  await page.waitForTimeout(300);
+
+  await openSession(page, /Permission success switch A/);
+  await expect(page.getByText("This approval should not reappear after success.")).toHaveCount(0);
+  await expect(page.getByText("Approval needed")).toHaveCount(0);
+  await expect(page.getByText(/Awaiting approval/)).toHaveCount(0);
+  expect(
+    daemon.requests.filter((request) => request.method === "resolve_permission")
+  ).toHaveLength(1);
+});
+
 test("permission responses ignore duplicate clicks while the choice is in flight", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
