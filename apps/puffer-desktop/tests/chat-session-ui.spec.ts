@@ -3925,6 +3925,138 @@ test("default routing refresh updates an open session without explicit routing",
   });
 });
 
+test("session routing events refresh the open provider and model", async ({ page }) => {
+  const model = (provider: string, id: string, displayName = id) => ({
+    id,
+    displayName,
+    provider,
+    api: "openai-responses",
+    supportsTools: true,
+    supportsVision: false,
+    contextWindow: null,
+    maxOutputTokens: null,
+    thinkingOptions: [],
+    defaultThinkingOptionId: null,
+    isDefault: true
+  });
+  const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "codex",
+        kind: "oauth",
+        email: "tester@example.com",
+        expiresAtMs: null,
+        scopes: [],
+        planType: "test",
+        organizationName: null
+      },
+      {
+        providerId: "openrouter",
+        kind: "api_key",
+        email: null,
+        expiresAtMs: null,
+        scopes: [],
+        planType: null,
+        organizationName: null
+      }
+    ],
+    providers: [
+      {
+        id: "codex",
+        displayName: "Codex",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 1,
+        authModes: ["oauth"],
+        sourceKind: "test",
+        sourcePath: null
+      },
+      {
+        id: "openrouter",
+        displayName: "OpenRouter",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 1,
+        authModes: ["api_key"],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ],
+    sessions: [
+      {
+        sessionId: "session-route-event-refresh",
+        displayName: "Route event refresh",
+        title: "Route event refresh",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "codex-default",
+        timeline: []
+      }
+    ],
+    providerModels: {
+      codex: [model("codex", "codex-default", "Codex Default")],
+      openrouter: [
+        model("openrouter", "google/gemini-3.5-flash", "Google: Gemini 3.5 Flash")
+      ]
+    }
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Route event refresh/);
+  const picker = page.locator(".pf-composer .picker");
+  await expect(picker.locator(".trigger")).toContainText("codex-default");
+  await expect(page.locator(".pf-composer textarea")).toHaveAttribute(
+    "placeholder",
+    /Engineer \(Codex\)/
+  );
+
+  const loadsBefore = daemon.requests.filter(
+    (request) =>
+      request.method === "load_session_detail" &&
+      request.params.sessionId === "session-route-event-refresh"
+  ).length;
+  daemon.updateSessionMetadata("session-route-event-refresh", {
+    providerId: "openrouter",
+    modelId: "google/gemini-3.5-flash"
+  });
+  daemon.emit("workspace:sessions:changed", {
+    reason: "session_routing",
+    sessionId: "session-route-event-refresh"
+  });
+  await expect
+    .poll(() =>
+      daemon.requests.filter(
+        (request) =>
+          request.method === "load_session_detail" &&
+          request.params.sessionId === "session-route-event-refresh"
+      ).length
+    )
+    .toBe(loadsBefore + 1);
+
+  await expect(picker.locator(".trigger")).toContainText("google/gemini-3.5-flash");
+  await expect(page.locator(".pf-composer textarea")).toHaveAttribute(
+    "placeholder",
+    /Engineer \(OpenRouter\)/
+  );
+
+  await page.locator(".pf-composer textarea").fill("Use routed provider");
+  await page.getByRole("button", { name: "Send" }).click();
+  const request = await daemon.waitForRequest(
+    "run_agent_turn",
+    (item) => item.params.message === "Use routed provider"
+  );
+  expect(request.params).toMatchObject({
+    sessionId: "session-route-event-refresh",
+    providerId: "openrouter",
+    modelId: "google/gemini-3.5-flash"
+  });
+});
+
 test("send in flight stays pending across backend reconnect until transcript reload", async ({
   page
 }) => {

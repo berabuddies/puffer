@@ -938,7 +938,11 @@
         ) {
           if (settled) {
             void openSession(selectedSession, { showLoading: false, resetLiveState: true });
-          } else if (event.reason === "generated_title" || event.reason === "rename_session") {
+          } else if (
+            event.reason === "generated_title" ||
+            event.reason === "rename_session" ||
+            event.reason === "session_routing"
+          ) {
             void openSession(selectedSession, { showLoading: false, resetLiveState: false });
           }
         }

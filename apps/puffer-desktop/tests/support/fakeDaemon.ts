@@ -606,6 +606,17 @@ export class FakeDaemon {
     }
   }
 
+  updateSessionMetadata(sessionId: string, updates: JsonRecord): void {
+    const metadata = this.sessions.get(sessionId);
+    if (!metadata) return;
+    this.sessions.set(sessionId, {
+      ...metadata,
+      ...updates,
+      sessionId,
+      updatedAtMs: Date.now()
+    });
+  }
+
   private handleMessage(socket: WebSocketRoute, raw: string): void {
     let message: JsonRecord;
     try {
