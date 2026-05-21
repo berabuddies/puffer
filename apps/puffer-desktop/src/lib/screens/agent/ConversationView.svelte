@@ -313,17 +313,25 @@
     return model.supportsTools !== false;
   }
 
+  function configuredProviderDisplayName(providerId: string): string | null {
+    const providers = settingsSnapshot?.providers ?? [];
+    const exact = providers.find((provider) => provider.id.trim().toLowerCase() === providerId);
+    if (exact?.displayName.trim()) return exact.displayName.trim();
+    const equivalent = providers.find((provider) => providerIdsEquivalent(provider.id, providerId));
+    if (equivalent?.displayName.trim()) return equivalent.displayName.trim();
+    return null;
+  }
+
   function providerDisplayName(providerId: string | null | undefined): string {
     const normalized = providerId?.trim().toLowerCase();
     if (!normalized) return "Codex";
-    if (normalized === "codex" || normalized === "openai") return "Codex";
     if (normalized === "claude" || normalized === "anthropic") return "Claude";
+    const configured = configuredProviderDisplayName(normalized);
+    if (configured) return configured;
+    if (normalized === "codex") return "Codex";
+    if (normalized === "openai") return "OpenAI";
     if (normalized === "openrouter") return "OpenRouter";
     if (normalized === "puffer") return "Puffer";
-    const configured = settingsSnapshot?.providers?.find((provider) =>
-      providerIdsEquivalent(provider.id, normalized)
-    );
-    if (configured?.displayName.trim()) return configured.displayName.trim();
     return normalized
       .split(/[-_\s]+/)
       .filter(Boolean)

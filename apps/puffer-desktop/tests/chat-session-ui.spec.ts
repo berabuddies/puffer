@@ -4346,6 +4346,74 @@ test("composer controls handle provider-prefixed session model ids", async ({ pa
   });
 });
 
+test("configured OpenAI provider label is not rewritten to Codex", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "openai",
+        kind: "api_key",
+        email: null,
+        expiresAtMs: null,
+        scopes: [],
+        planType: null,
+        organizationName: null
+      }
+    ],
+    providers: [
+      {
+        id: "openai",
+        displayName: "OpenAI",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 1,
+        authModes: ["api_key"],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ],
+    sessions: [
+      {
+        sessionId: "session-openai-label",
+        displayName: "OpenAI label",
+        title: "OpenAI label",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "openai",
+        modelId: "gpt-5.4",
+        timeline: []
+      }
+    ],
+    providerModels: {
+      openai: [
+        {
+          id: "gpt-5.4",
+          displayName: "GPT-5.4",
+          provider: "openai",
+          api: "openai-responses",
+          supportsTools: true,
+          supportsVision: false,
+          contextWindow: null,
+          maxOutputTokens: null,
+          thinkingOptions: [],
+          defaultThinkingOptionId: null,
+          isDefault: true
+        }
+      ]
+    }
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /OpenAI label/);
+  await expect(page.locator(".pf-composer textarea")).toHaveAttribute(
+    "placeholder",
+    /Engineer \(OpenAI\)/
+  );
+});
+
 test("model picker only offers authenticated agent providers", async ({ page }) => {
   const daemon = new FakeDaemon({
     auth: [
