@@ -2693,6 +2693,21 @@ fn provider_command(provider: &str) -> String {
             return trimmed.to_string();
         }
     }
+    // For `puffer`, prefer the sibling-aware resolver used by the auth
+    // subcommand path. Packaged corbina ships `puffer` alongside the Tauri
+    // host but typically without adding it to PATH; without this fallback,
+    // chat-turn spawns would error even though OAuth login (which goes
+    // through `resolve_puffer_binary` directly) works. Only use the resolver
+    // result when it points at an actually-existing file, otherwise fall
+    // through to the PATH-based default so the error message in
+    // `ensure_provider_command` stays informative.
+    if provider == "puffer" {
+        if let Ok(path) = crate::daemon_launcher::resolve_puffer_binary() {
+            if path.exists() {
+                return path.display().to_string();
+            }
+        }
+    }
     match provider {
         "claude" => "claude".to_string(),
         "puffer" => "puffer".to_string(),
