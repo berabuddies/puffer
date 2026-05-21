@@ -1850,6 +1850,11 @@
     dismissedPermissionIds = [...dismissedPermissionIds, scopedPermissionId].slice(-DISMISSED_IDS_CAP);
   }
 
+  function dismissQuestionId(scopedQuestionId: string) {
+    if (dismissedQuestionIds.includes(scopedQuestionId)) return;
+    dismissedQuestionIds = [...dismissedQuestionIds, scopedQuestionId].slice(-DISMISSED_IDS_CAP);
+  }
+
   function clearCachedResolvedPermission(
     sessionId: string | null,
     permissionId: string,
@@ -1863,6 +1868,24 @@
       ...cached,
       liveStreamItems: cached.liveStreamItems.filter((item) => item.id !== permissionId),
       turnPermissionLookup: nextLookup,
+      turnThinking: cached.currentTurnId === turnId ? false : cached.turnThinking,
+      turnStatusHint: cached.currentTurnId === turnId ? "Running" : cached.turnStatusHint
+    });
+  }
+
+  function clearCachedResolvedQuestion(
+    sessionId: string | null,
+    questionId: string,
+    turnId: string
+  ) {
+    if (!sessionId) return;
+    const cached = transientConversationStates[sessionId];
+    if (!cached) return;
+    const { [questionId]: _drop, ...nextLookup } = cached.turnQuestionLookup;
+    setTransientConversationState(sessionId, {
+      ...cached,
+      liveStreamItems: cached.liveStreamItems.filter((item) => item.id !== questionId),
+      turnQuestionLookup: nextLookup,
       turnThinking: cached.currentTurnId === turnId ? false : cached.turnThinking,
       turnStatusHint: cached.currentTurnId === turnId ? "Running" : cached.turnStatusHint
     });
@@ -2449,8 +2472,11 @@
       if (mapping) {
         try {
           await resolveTurnUserQuestion(mapping.turnId, mapping.requestId, answers, annotations);
-          if (selectedSession?.id !== responseSessionId) return;
-          dismissedQuestionIds = [...dismissedQuestionIds, scopedQuestionId].slice(-DISMISSED_IDS_CAP);
+          dismissQuestionId(scopedQuestionId);
+          if (selectedSession?.id !== responseSessionId) {
+            clearCachedResolvedQuestion(responseSessionId, questionId, mapping.turnId);
+            return;
+          }
           statusMessage = "Answer sent to agent.";
           if (currentTurnId === mapping.turnId) {
             turnThinking = false;
@@ -2465,7 +2491,7 @@
           appendAgentError("Question response failed", detail, "question-error");
         }
       } else {
-        dismissedQuestionIds = [...dismissedQuestionIds, scopedQuestionId].slice(-DISMISSED_IDS_CAP);
+        dismissQuestionId(scopedQuestionId);
         statusMessage = "Answer selected (no in-flight turn).";
       }
     } finally {
