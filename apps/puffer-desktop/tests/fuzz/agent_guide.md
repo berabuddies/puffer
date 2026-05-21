@@ -17,22 +17,31 @@ Use this guide when an agent is asked to find Puffer desktop interaction bugs.
 
 ## Agent Loop
 
-1. Run `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs plan --profile core`.
+1. Run `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs schedule --limit 4 --out apps/puffer-desktop/tests/fuzz/.runs/manual/schedule.md --json-out apps/puffer-desktop/tests/fuzz/.runs/manual/schedule.json`.
 2. Run `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs validate` before using a changed seed.
 3. Run `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs smoke --profile core` when checking a fresh checkout or modified seed set.
 4. Run `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs frontier --profile core` and pick one high-risk uncovered target.
-5. Pick one seed with high priority and low recent validated coverage.
+5. Pick one scheduled shard with high score and respect its owned-node boundary.
 6. Run the seed with 8-20 iterations and 12-20 steps.
 7. Read the report and choose a case with high async coverage.
-8. Select diverse replay candidates with `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs top-cases --input <run.json> --limit 5 --out apps/puffer-desktop/tests/fuzz/.runs/<run>/top.json --report-out apps/puffer-desktop/tests/fuzz/.runs/<run>/top.md`.
-9. Replay them through the isolated bounded loop with `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-replay-loop.mjs --seeds <seed> --limit 5 --attempts 3 --namespace <run> --fail-on-new-finding`.
-10. Shrink the case.
-11. Decide whether it is a product bug.
-12. During fuzz-only campaigns, archive confirmed findings under
+8. Select diverse replay candidates with `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs top-cases --input <run.json> --shard <shard-id> --limit 5 --out apps/puffer-desktop/tests/fuzz/.runs/<run>/top.json --report-out apps/puffer-desktop/tests/fuzz/.runs/<run>/top.md`.
+9. Replay them through the isolated bounded loop with `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-replay-loop.mjs --seeds <seed> --shard <shard-id> --limit 5 --attempts 3 --namespace <run> --fail-on-new-finding`.
+10. Record feedback with `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs record-feedback --shard <shard-id> --input apps/puffer-desktop/tests/fuzz/.runs/<run>/bounded-replay-report.json`.
+11. Shrink the case.
+12. Decide whether it is a product bug.
+13. During fuzz-only campaigns, archive confirmed findings under
     `apps/puffer-desktop/tests/fuzz/.runs/<run>/findings.md`.
-13. Do not patch product code from a fuzz-only task.
-14. For a later product-fix task, add regression coverage and update or add a
+14. Do not patch product code from a fuzz-only task.
+15. For a later product-fix task, add regression coverage and update or add a
     concise component spec.
+
+## Shard Ownership
+
+Each scheduler shard has a `startNode`, `ownedNodes`, `allowedSetupNodes`,
+`allowedAsyncEvents`, and required `invariants`. Use setup nodes only as a path
+to the start node. Accept findings only when the blocked interaction belongs to
+the owned nodes. If the trigger exposes a real issue in a different subtree,
+record it as out-of-shard evidence so the scheduler can route it to the owner.
 
 ## Product Bug Threshold
 
@@ -87,12 +96,14 @@ last removed step. The final regression should normally be 4-10 steps:
 ```sh
 node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs validate
 node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs smoke --profile core
+node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs schedule --limit 4 --out apps/puffer-desktop/tests/fuzz/.runs/manual/schedule.md --json-out apps/puffer-desktop/tests/fuzz/.runs/manual/schedule.json
 node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs frontier --profile core --out apps/puffer-desktop/tests/fuzz/.runs/manual/frontier.md
 node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs gate --out apps/puffer-desktop/tests/fuzz/.runs/manual/ready.md
 node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs run --seed chat-turn-race --iterations 12 --steps 18 --profile core --out apps/puffer-desktop/tests/fuzz/.runs/manual/chat.json
 node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs report --input apps/puffer-desktop/tests/fuzz/.runs/manual/chat.json --out apps/puffer-desktop/tests/fuzz/.runs/manual/chat.md
-node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs top-cases --input apps/puffer-desktop/tests/fuzz/.runs/manual/chat.json --limit 5 --out apps/puffer-desktop/tests/fuzz/.runs/manual/chat-top.json --report-out apps/puffer-desktop/tests/fuzz/.runs/manual/chat-top.md
-node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-replay-loop.mjs --seeds chat-turn-race --limit 5 --attempts 3 --namespace manual-chat --fail-on-new-finding
+node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs top-cases --input apps/puffer-desktop/tests/fuzz/.runs/manual/chat.json --shard chat-composer-send --limit 5 --out apps/puffer-desktop/tests/fuzz/.runs/manual/chat-top.json --report-out apps/puffer-desktop/tests/fuzz/.runs/manual/chat-top.md
+node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-replay-loop.mjs --seeds chat-turn-race --shard chat-composer-send --limit 5 --attempts 3 --namespace manual-chat --fail-on-new-finding
+node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs record-feedback --shard chat-composer-send --input apps/puffer-desktop/tests/fuzz/.runs/manual-chat/bounded-replay-report.json
 node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs agent-task --seed chat-turn-race --out apps/puffer-desktop/tests/fuzz/.runs/manual/chat-agent.md
 ```
 

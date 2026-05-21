@@ -57,6 +57,7 @@ async function main() {
     .map((item) => item.trim())
     .filter(Boolean);
   const topLimit = Number(args.limit ?? process.env.PUFFER_REPLAY_LIMIT ?? 1);
+  const shard = args.shard ?? process.env.PUFFER_REPLAY_SHARD ?? "";
   const attempts = Number(args.attempts ?? process.env.PUFFER_REPLAY_ATTEMPTS ?? 1);
   const timeoutSeconds = Number(args.timeout ?? process.env.PUFFER_REPLAY_TIMEOUT_SECONDS ?? 120);
   const playwrightTimeoutMs = Math.max(
@@ -131,6 +132,7 @@ async function main() {
       runPath,
       "--limit",
       String(topLimit),
+      ...(shard ? ["--shard", shard] : []),
       "--out",
       topPath,
       "--report-out",
@@ -156,7 +158,7 @@ async function main() {
         fuzzCli,
         "replay",
         "--input",
-        runPath,
+        shard ? topPath : runPath,
         "--case-id",
         item.caseId,
         "--out",

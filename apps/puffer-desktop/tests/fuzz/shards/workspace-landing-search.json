@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "workspace-landing-search",
+  "title": "Workspace landing search and list refresh",
+  "priority": 8,
+  "seed": "workspace-session-race",
+  "startNode": "workspace/landing-search",
+  "entrypoint": "workspace.search",
+  "iterations": 12,
+  "steps": 12,
+  "replayLimit": 2,
+  "ownedNodes": ["workspace/landing-search"],
+  "allowedSetupNodes": ["app", "workspace"],
+  "ownedCoverage": ["route:workspace", "control:workspace.search", "async:delayed-list-refresh"],
+  "allowedAsyncEvents": ["delayed-list-refresh", "server-push-update", "reconnect"],
+  "invariants": ["app-no-crash", "no-permanent-loading", "focus-restored"]
+}

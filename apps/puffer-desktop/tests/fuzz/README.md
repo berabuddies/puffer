@@ -31,6 +31,26 @@ Generate a prioritized plan:
 node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs plan --profile core --out apps/puffer-desktop/tests/fuzz/.runs/manual/plan.md
 ```
 
+Generate a scheduler-selected shard batch from the UI tree, existing coverage
+ledger, and feedback from previous replay runs:
+
+```sh
+node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs schedule \
+  --limit 4 \
+  --namespace manual-shards \
+  --out apps/puffer-desktop/tests/fuzz/.runs/manual-shards/schedule.md \
+  --json-out apps/puffer-desktop/tests/fuzz/.runs/manual-shards/schedule.json
+```
+
+After running a shard replay, record its feedback so later schedules can reduce
+duplicates, flaky shards, and out-of-shard work:
+
+```sh
+node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs record-feedback \
+  --shard chat-composer-send \
+  --input apps/puffer-desktop/tests/fuzz/.runs/manual-shards-chat-composer-send/bounded-replay-report.json
+```
+
 Generate deterministic fuzz cases for one area:
 
 ```sh
@@ -90,6 +110,7 @@ the preferred way to generate and rerun replay specs:
 ```sh
 node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-replay-loop.mjs \
   --seeds chat-turn-race \
+  --shard chat-composer-send \
   --limit 3 \
   --attempts 3 \
   --namespace manual-chat \
@@ -112,11 +133,18 @@ agentflow run apps/puffer-desktop/tests/fuzz/agentflow_puffer_campaign.py \
 For faster iteration, run a subset of shards by area name or seed:
 
 ```sh
-PUFFER_AGENTFLOW_AREAS=chat-turn-lifecycle,browser-tabs-input \
+PUFFER_AGENTFLOW_SHARD_LIMIT=2 \
+PUFFER_AGENTFLOW_AREAS=chat-composer-send,browser-address-navigation \
 agentflow run apps/puffer-desktop/tests/fuzz/agentflow_puffer_campaign.py \
   --runs-dir apps/puffer-desktop/tests/fuzz/.runs/agentflow-local-runs \
   --output summary
 ```
+
+By default, AgentFlow asks the scheduler for a small batch of UI-tree shards
+instead of using a fixed area list. `PUFFER_AGENTFLOW_SHARD_LIMIT` controls the
+batch size. `PUFFER_AGENTFLOW_AREAS` can pin exact shard ids. Set
+`PUFFER_AGENTFLOW_LEGACY_AREAS=1` only when comparing against the older static
+area fanout.
 
 The campaign writes a deterministic aggregate report to
 `apps/puffer-desktop/tests/fuzz/.runs/agentflow-campaign/puffer_agentflow_fuzz_report.md`.
@@ -126,22 +154,24 @@ bounded replay results from a previous run.
 
 ## Recommended Workflow
 
-1. Start with `--profile core` unless the task explicitly targets a secondary pane.
-2. Pick a seed from `apps/puffer-desktop/tests/fuzz/seeds/` that matches the target area.
-3. Generate 8-20 cases with a named `--rng-seed`.
-4. Read the report and choose cases that include `async:late-*`,
+1. Start with `schedule --limit 2` or `schedule --limit 4` for small campaigns.
+2. Use the selected shard boundaries as the agent ownership boundary.
+3. Pick the generated commands for one shard from the schedule output.
+4. Generate 8-20 cases with a named `--rng-seed` if running manually.
+5. Read the report and choose cases that include `async:late-*`,
    `async:stale-*`, `async:duplicate-submit`, or `async:reconnect`.
-5. Replay chosen cases with `apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-replay-loop.mjs
+6. Replay chosen cases with `apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-replay-loop.mjs
    --fail-on-new-finding`, which keeps specs, logs, and Playwright output under
    `apps/puffer-desktop/tests/fuzz/.runs/<namespace>/`.
-6. If it reproduces a product bug, shrink the sequence to the smallest stable
+7. Record replay feedback with `record-feedback --shard <id> --input <bounded-replay-report.json>`.
+8. If it reproduces a product bug, shrink the sequence to the smallest stable
    reproducer.
-7. For fuzz-only campaigns, write the finding under
+9. For fuzz-only campaigns, write the finding under
    `apps/puffer-desktop/tests/fuzz/.runs/<namespace>/findings.md` and leave product fixes for a separate
    follow-up.
-8. When a separate product-fix task starts, add the deterministic Playwright
+10. When a separate product-fix task starts, add the deterministic Playwright
    regression and concise component spec there.
-9. Re-run the fuzz report and mark the covered tags as validated after the
+11. Re-run the fuzz report and mark the covered tags as validated after the
    regression exists.
 
 ## Ready Metrics
@@ -161,9 +191,14 @@ For day-to-day use, treat the app as ready only when:
 ## Files
 
 - `manifests/puffer-ui.json`: coverage target model.
+- `manifests/puffer-ui-tree.json`: UI tree model used to split agent-owned
+  exploration subtrees.
+- `shards/*.json`: scheduler units with start node, owned nodes, setup
+  boundaries, async events, and invariants.
 - `seeds/*.json`: weighted fuzz grammars for product areas.
 - `adapters/playwright-actions.json`: generated-action support map.
 - `coverage-ledger.json`: validated coverage and fixed finding ledger.
+- `feedback-ledger.json`: scheduler feedback from replay runs.
 - `bin/puffer-fuzz.mjs`: CLI entrypoint.
 - `lib/*.mjs`: deterministic generator, coverage summarizer, and formatters.
 - `playwright/pufferCoverage.ts`: reusable state, element, and trace helpers for Playwright replays.

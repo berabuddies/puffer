@@ -11,6 +11,8 @@
     "validate": "node bin/puffer-fuzz.mjs validate",
     "smoke": "node bin/puffer-fuzz.mjs smoke",
     "frontier": "node bin/puffer-fuzz.mjs frontier",
+    "schedule": "node bin/puffer-fuzz.mjs schedule",
+    "record-feedback": "node bin/puffer-fuzz.mjs record-feedback",
     "gate": "node bin/puffer-fuzz.mjs gate",
     "replay": "node bin/puffer-fuzz.mjs replay"
   }

@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "chat-session-switch-stale",
+  "title": "Chat session switch, transcript reload, and stale events",
+  "priority": 10,
+  "seed": "chat-turn-race",
+  "startNode": "chat/session-switch-stale",
+  "entrypoint": "workspace.agent-card",
+  "iterations": 22,
+  "steps": 20,
+  "replayLimit": 3,
+  "ownedNodes": ["chat/session-switch-stale"],
+  "allowedSetupNodes": ["app", "workspace", "agent-detail", "chat", "chat/composer-send"],
+  "ownedCoverage": ["control:workspace.agent-card", "state:session.loading", "async:stale-session-event", "async:delayed-list-refresh", "invariant:active-session-stable"],
+  "allowedAsyncEvents": ["stale-session-event", "delayed-list-refresh", "late-success", "late-failure", "reconnect"],
+  "invariants": ["app-no-crash", "active-session-stable", "stale-error-scoped", "draft-preserved-on-failure", "no-permanent-loading"]
+}

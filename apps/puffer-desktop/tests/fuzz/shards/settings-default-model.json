@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "settings-default-model",
+  "title": "Default provider and model save races",
+  "priority": 9,
+  "seed": "provider-auth-model-race",
+  "startNode": "settings/default-model",
+  "entrypoint": "settings.default-model-save",
+  "iterations": 16,
+  "steps": 16,
+  "replayLimit": 3,
+  "ownedNodes": ["settings/default-model"],
+  "allowedSetupNodes": ["app", "settings", "settings/provider-auth"],
+  "ownedCoverage": ["control:settings.default-model-save", "state:settings.saving", "async:late-success", "invariant:no-cross-provider-model"],
+  "allowedAsyncEvents": ["late-success", "late-failure", "delayed-list-refresh", "server-push-update", "reconnect"],
+  "invariants": ["app-no-crash", "no-cross-provider-model", "one-request-per-intent", "no-permanent-loading"]
+}

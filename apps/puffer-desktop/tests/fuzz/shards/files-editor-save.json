@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "files-editor-save",
+  "title": "Files editor dirty state, save, and stale restore",
+  "priority": 9,
+  "seed": "files-terminal-race",
+  "startNode": "files/editor-save",
+  "entrypoint": "files.editor",
+  "iterations": 14,
+  "steps": 16,
+  "replayLimit": 2,
+  "ownedNodes": ["files/editor-save"],
+  "allowedSetupNodes": ["app", "workspace", "agent-detail", "files"],
+  "ownedCoverage": ["route:files-pane", "control:files.open", "control:files.editor", "control:files.save", "state:files.dirty", "state:files.saving", "invariant:no-data-loss"],
+  "allowedAsyncEvents": ["late-success", "late-failure", "server-push-update", "stale-session-event", "reconnect"],
+  "invariants": ["app-no-crash", "no-data-loss", "draft-preserved-on-failure", "stale-error-scoped", "no-permanent-loading"]
+}

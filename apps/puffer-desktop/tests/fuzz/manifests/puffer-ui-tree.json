@@ -1,0 +1,304 @@
+{
+  "version": 1,
+  "name": "puffer-desktop-ui-tree",
+  "root": "app",
+  "sharedStates": [
+    "state:daemon.connected",
+    "state:daemon.disconnected",
+    "state:daemon.reconnecting",
+    "state:session.idle",
+    "state:session.loading",
+    "state:viewport.desktop",
+    "state:viewport.narrow"
+  ],
+  "nodes": [
+    {
+      "id": "app",
+      "kind": "root",
+      "parent": null,
+      "children": ["workspace", "agent-detail", "settings", "secondary-panes", "pipelines"],
+      "entrypoint": "launch-app",
+      "priority": 10,
+      "tags": ["invariant:app-no-crash"]
+    },
+    {
+      "id": "workspace",
+      "kind": "route",
+      "parent": "app",
+      "children": ["workspace/landing-search", "workspace/agent-card-selection", "workspace/connect-project-modal", "workspace/switch-workspace-modal"],
+      "entrypoint": "open-workspace",
+      "priority": 10,
+      "tags": ["route:workspace"]
+    },
+    {
+      "id": "workspace/landing-search",
+      "kind": "subtree",
+      "parent": "workspace",
+      "children": [],
+      "entrypoint": "workspace.search",
+      "priority": 8,
+      "tags": ["control:workspace.search", "async:delayed-list-refresh"]
+    },
+    {
+      "id": "workspace/agent-card-selection",
+      "kind": "subtree",
+      "parent": "workspace",
+      "children": [],
+      "entrypoint": "workspace.agent-card",
+      "priority": 10,
+      "tags": ["control:workspace.agent-card", "control:workspace.pin-agent", "route:agent-detail", "async:stale-session-event"]
+    },
+    {
+      "id": "workspace/connect-project-modal",
+      "kind": "modal",
+      "parent": "workspace",
+      "children": [],
+      "entrypoint": "workspace.connect-project",
+      "priority": 9,
+      "tags": ["route:connect-project-modal", "control:workspace.connect-project", "invariant:focus-restored"]
+    },
+    {
+      "id": "workspace/switch-workspace-modal",
+      "kind": "modal",
+      "parent": "workspace",
+      "children": [],
+      "entrypoint": "workspace.switch-workspace",
+      "priority": 9,
+      "tags": ["route:switch-workspace-modal", "control:workspace.switch-workspace", "invariant:focus-restored"]
+    },
+    {
+      "id": "agent-detail",
+      "kind": "route",
+      "parent": "app",
+      "children": ["new-agent", "chat", "browser", "files", "terminal"],
+      "entrypoint": "workspace.agent-card",
+      "priority": 10,
+      "tags": ["route:agent-detail", "state:session.loading", "state:session.idle"]
+    },
+    {
+      "id": "new-agent",
+      "kind": "modal",
+      "parent": "agent-detail",
+      "children": ["new-agent/base-create", "new-agent/provider-model"],
+      "entrypoint": "new-agent-modal",
+      "priority": 10,
+      "tags": ["route:new-agent-modal", "control:new-agent.provider", "control:new-agent.submit"]
+    },
+    {
+      "id": "new-agent/base-create",
+      "kind": "subtree",
+      "parent": "new-agent",
+      "children": [],
+      "entrypoint": "new-agent.submit",
+      "priority": 10,
+      "tags": ["route:new-agent-modal", "control:new-agent.submit", "state:session.loading", "async:duplicate-submit"]
+    },
+    {
+      "id": "new-agent/provider-model",
+      "kind": "subtree",
+      "parent": "new-agent",
+      "children": [],
+      "entrypoint": "new-agent.provider",
+      "priority": 10,
+      "tags": ["control:new-agent.provider", "control:settings.default-model-save", "invariant:no-cross-provider-model"]
+    },
+    {
+      "id": "chat",
+      "kind": "route",
+      "parent": "agent-detail",
+      "children": ["chat/composer-send", "chat/stop-cancel", "chat/permission-question", "chat/session-switch-stale", "chat/model-picker"],
+      "entrypoint": "chat.composer",
+      "priority": 10,
+      "tags": ["route:chat-composer", "control:chat.composer"]
+    },
+    {
+      "id": "chat/composer-send",
+      "kind": "subtree",
+      "parent": "chat",
+      "children": [],
+      "entrypoint": "chat.send",
+      "priority": 10,
+      "tags": ["control:chat.composer", "control:chat.send", "state:session.running", "async:duplicate-submit"]
+    },
+    {
+      "id": "chat/stop-cancel",
+      "kind": "subtree",
+      "parent": "chat",
+      "children": [],
+      "entrypoint": "chat.stop",
+      "priority": 9,
+      "tags": ["control:chat.stop", "state:session.running", "async:late-failure"]
+    },
+    {
+      "id": "chat/permission-question",
+      "kind": "subtree",
+      "parent": "chat",
+      "children": [],
+      "entrypoint": "chat.permission-response",
+      "priority": 10,
+      "tags": ["control:chat.permission-response", "control:chat.question-response", "state:session.awaiting-permission", "state:session.awaiting-question"]
+    },
+    {
+      "id": "chat/session-switch-stale",
+      "kind": "subtree",
+      "parent": "chat",
+      "children": [],
+      "entrypoint": "workspace.agent-card",
+      "priority": 10,
+      "tags": ["control:workspace.agent-card", "state:session.loading", "async:stale-session-event", "invariant:active-session-stable"]
+    },
+    {
+      "id": "chat/model-picker",
+      "kind": "subtree",
+      "parent": "chat",
+      "children": [],
+      "entrypoint": "chat.model-picker",
+      "priority": 9,
+      "tags": ["control:chat.model-picker", "invariant:no-cross-provider-model"]
+    },
+    {
+      "id": "settings",
+      "kind": "route-group",
+      "parent": "app",
+      "children": ["settings/provider-auth", "settings/default-model", "settings/mcp", "settings/permissions"],
+      "entrypoint": "open-settings",
+      "priority": 9,
+      "tags": ["route:settings-providers", "route:settings-mcp", "route:settings-permissions"]
+    },
+    {
+      "id": "settings/provider-auth",
+      "kind": "subtree",
+      "parent": "settings",
+      "children": [],
+      "entrypoint": "settings.provider-import",
+      "priority": 9,
+      "tags": ["control:settings.provider-import", "control:settings.provider-refresh", "state:auth.refreshing", "state:auth.multi-provider"]
+    },
+    {
+      "id": "settings/default-model",
+      "kind": "subtree",
+      "parent": "settings",
+      "children": [],
+      "entrypoint": "settings.default-model-save",
+      "priority": 9,
+      "tags": ["control:settings.default-model-save", "invariant:no-cross-provider-model"]
+    },
+    {
+      "id": "settings/mcp",
+      "kind": "subtree",
+      "parent": "settings",
+      "children": [],
+      "entrypoint": "settings.mcp-add",
+      "priority": 7,
+      "tags": ["route:settings-mcp", "control:settings.mcp-add", "state:settings.saving"]
+    },
+    {
+      "id": "settings/permissions",
+      "kind": "subtree",
+      "parent": "settings",
+      "children": [],
+      "entrypoint": "settings.permissions-save",
+      "priority": 7,
+      "tags": ["route:settings-permissions", "control:settings.permissions-save", "state:settings.saving"]
+    },
+    {
+      "id": "secondary-panes",
+      "kind": "route-group",
+      "parent": "app",
+      "children": ["browser", "files", "terminal"],
+      "entrypoint": "agent-detail",
+      "priority": 8,
+      "tags": ["route:browser-pane", "route:files-pane", "route:terminal-pane"]
+    },
+    {
+      "id": "browser",
+      "kind": "route",
+      "parent": "secondary-panes",
+      "children": ["browser/tab-lifecycle", "browser/address-navigation", "browser/page-input-frame"],
+      "entrypoint": "open-browser-pane",
+      "priority": 10,
+      "tags": ["route:browser-pane", "state:browser.one-tab"]
+    },
+    {
+      "id": "browser/tab-lifecycle",
+      "kind": "subtree",
+      "parent": "browser",
+      "children": [],
+      "entrypoint": "browser.tab",
+      "priority": 10,
+      "tags": ["control:browser.new-tab", "control:browser.close-tab", "control:browser.tab", "async:stale-tab-event"]
+    },
+    {
+      "id": "browser/address-navigation",
+      "kind": "subtree",
+      "parent": "browser",
+      "children": [],
+      "entrypoint": "browser.address",
+      "priority": 10,
+      "tags": ["control:browser.address", "control:browser.reload", "control:browser.back-forward", "state:browser.loading"]
+    },
+    {
+      "id": "browser/page-input-frame",
+      "kind": "subtree",
+      "parent": "browser",
+      "children": [],
+      "entrypoint": "browser.page-input",
+      "priority": 10,
+      "tags": ["control:browser.page-input", "state:browser.frame-streaming", "async:out-of-order-frame"]
+    },
+    {
+      "id": "files",
+      "kind": "route",
+      "parent": "secondary-panes",
+      "children": ["files/editor-save"],
+      "entrypoint": "files.open",
+      "priority": 8,
+      "tags": ["route:files-pane", "control:files.open"]
+    },
+    {
+      "id": "files/editor-save",
+      "kind": "subtree",
+      "parent": "files",
+      "children": [],
+      "entrypoint": "files.editor",
+      "priority": 9,
+      "tags": ["control:files.editor", "control:files.save", "state:files.dirty", "invariant:no-data-loss"]
+    },
+    {
+      "id": "terminal",
+      "kind": "route",
+      "parent": "secondary-panes",
+      "children": ["terminal/pty-lifecycle"],
+      "entrypoint": "terminal.new-tab",
+      "priority": 8,
+      "tags": ["route:terminal-pane", "control:terminal.new-tab"]
+    },
+    {
+      "id": "terminal/pty-lifecycle",
+      "kind": "subtree",
+      "parent": "terminal",
+      "children": [],
+      "entrypoint": "terminal.input",
+      "priority": 8,
+      "tags": ["control:terminal.input", "control:terminal.close-tab", "state:terminal.active", "state:terminal.closing"]
+    },
+    {
+      "id": "pipelines",
+      "kind": "route",
+      "parent": "app",
+      "children": ["pipelines/draft-graph"],
+      "entrypoint": "open-pipelines",
+      "priority": 6,
+      "tags": ["route:pipelines"]
+    },
+    {
+      "id": "pipelines/draft-graph",
+      "kind": "subtree",
+      "parent": "pipelines",
+      "children": [],
+      "entrypoint": "pipelines.node-editor",
+      "priority": 6,
+      "tags": ["control:pipelines.node-editor", "control:pipelines.trigger-editor", "invariant:draft-preserved-on-failure"]
+    }
+  ]
+}

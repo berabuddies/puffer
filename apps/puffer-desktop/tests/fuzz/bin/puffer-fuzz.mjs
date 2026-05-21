@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { mkdir, rmdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -13,6 +14,7 @@ import {
   loadSeeds,
   readJson,
   selectTopCases,
+  summarizeRun,
   validateFramework,
   writeJson,
   writeText
@@ -20,13 +22,24 @@ import {
 import { buildFrontier, formatFrontierMarkdown } from "../lib/frontier.mjs";
 import { evaluateGate, formatGateMarkdown } from "../lib/gate.mjs";
 import { buildReplayTemplate, defaultReplaySpecPath, formatReplayMarkdown, selectCase } from "../lib/replay-template.mjs";
+import {
+  applyReplayFeedback,
+  buildShardSchedule,
+  formatScheduleMarkdown,
+  loadFeedbackLedger,
+  loadShards,
+  validateSchedulerModel
+} from "../lib/scheduler.mjs";
 import { bugSignature, findDuplicateSignatures } from "../lib/signature.mjs";
 
 const fuzzRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const defaultManifestPath = path.join(fuzzRoot, "manifests", "puffer-ui.json");
+const defaultUiTreePath = path.join(fuzzRoot, "manifests", "puffer-ui-tree.json");
 const defaultSeedDir = path.join(fuzzRoot, "seeds");
+const defaultShardDir = path.join(fuzzRoot, "shards");
 const defaultAdapterPath = path.join(fuzzRoot, "adapters", "playwright-actions.json");
 const defaultLedgerPath = path.join(fuzzRoot, "coverage-ledger.json");
+const defaultFeedbackLedgerPath = path.join(fuzzRoot, "feedback-ledger.json");
 const defaultFakeDaemonPath = path.resolve(fuzzRoot, "..", "support", "fakeDaemon.ts");
 
 function parseArgs(argv) {
@@ -71,21 +84,29 @@ Commands:
   run --seed chat-turn-race --iterations 12 --steps 18 --profile core --out /tmp/puffer_fuzz_run.json
   report --input /tmp/puffer_fuzz_run.json --out /tmp/puffer_fuzz_report.md
   top-cases --input /tmp/puffer_fuzz_run.json --limit 5 --out /tmp/top.json --report-out /tmp/top.md
+  top-cases --input /tmp/puffer_fuzz_run.json --shard chat-composer-send --limit 5
   top-cases --input /tmp/puffer_fuzz_run.json --limit 5 --no-diversity
   agent-task --seed chat-turn-race --out /tmp/puffer_agent_task.md
   validate
   smoke
   frontier --out /tmp/puffer_fuzz_frontier.md
   gate --out /tmp/puffer_uiux_ready.md
+  schedule --limit 4 --out apps/puffer-desktop/tests/fuzz/.runs/manual/schedule.md
+  record-feedback --shard chat-composer-send --input apps/puffer-desktop/tests/fuzz/.runs/<run>/bounded-replay-report.json
   signature --finding finding.json
   replay --input run.json --case-id chat-turn-race-0001 --out /tmp/replay.spec.ts
 
 Options:
   --manifest <path>   Default: apps/puffer-desktop/tests/fuzz/manifests/puffer-ui.json
+  --ui-tree <path>    Default: apps/puffer-desktop/tests/fuzz/manifests/puffer-ui-tree.json
   --seed-dir <path>   Default: apps/puffer-desktop/tests/fuzz/seeds
+  --shard-dir <path>  Default: apps/puffer-desktop/tests/fuzz/shards
   --adapter <path>    Default: apps/puffer-desktop/tests/fuzz/adapters/playwright-actions.json
   --ledger <path>     Default: apps/puffer-desktop/tests/fuzz/coverage-ledger.json
+  --feedback-ledger <path> Default: apps/puffer-desktop/tests/fuzz/feedback-ledger.json
   --seed <id>         Select one seed; omit to run all seeds
+  --shards <ids>      Comma-separated shard ids for scheduler filtering
+  --shard <id>        Single shard id for top-cases or feedback
   --profile <name>    all, core, secondary, low-priority
   --iterations <n>    Generated cases per seed
   --steps <n>         Fuzz actions per case
@@ -156,7 +177,14 @@ async function main() {
 
   if (command === "top-cases") {
     if (!args.input) throw new Error("--input is required for top-cases");
-    const run = await readJson(args.input);
+    let run = await readJson(args.input);
+    if (args.shard) {
+      const { manifest } = await loadContext(args);
+      const shards = await loadShards(args["shard-dir"] ?? defaultShardDir);
+      const shard = shards.find((item) => item.id === args.shard);
+      if (!shard) throw new Error(`Unknown shard: ${args.shard}`);
+      run = filterRunToShard(run, manifest, shard);
+    }
     const selection = selectTopCases(run, { limit: args.limit, diversity: args["no-diversity"] ? false : true });
     const markdown = formatTopCasesMarkdown(selection);
     if (args.out) await writeJson(args.out, selection);
@@ -178,8 +206,11 @@ async function main() {
   }
 
   if (command === "validate") {
-    const { manifest, seeds } = await loadContext(args);
+    const { manifest, seeds, allSeeds } = await loadContext(args);
     const adapter = await readJson(args.adapter ?? defaultAdapterPath);
+    const uiTree = await readJson(args["ui-tree"] ?? defaultUiTreePath);
+    const shards = await loadShards(args["shard-dir"] ?? defaultShardDir);
+    const feedbackLedger = await loadFeedbackLedger(args["feedback-ledger"] ?? defaultFeedbackLedgerPath);
     let fakeDaemonSource = "";
     try {
       fakeDaemonSource = await readFileText(args["fake-daemon"] ?? defaultFakeDaemonPath);
@@ -187,26 +218,29 @@ async function main() {
       fakeDaemonSource = "";
     }
     const result = validateFramework(manifest, seeds, adapter, fakeDaemonSource);
+    const schedulerResult = validateSchedulerModel(manifest, allSeeds, uiTree, shards, feedbackLedger);
+    const errors = [...result.errors, ...schedulerResult.errors];
+    const warnings = [...result.warnings, ...schedulerResult.warnings];
     const lines = [
-      `Validation: ${result.ok ? "ok" : "failed"}`,
-      `Errors: ${result.errorCount}`,
-      `Warnings: ${result.warningCount}`,
+      `Validation: ${errors.length === 0 ? "ok" : "failed"}`,
+      `Errors: ${errors.length}`,
+      `Warnings: ${warnings.length}`,
       ""
     ];
-    if (result.errors.length > 0) {
+    if (errors.length > 0) {
       lines.push("Errors:");
-      for (const item of result.errors) lines.push(`- ${item}`);
+      for (const item of errors) lines.push(`- ${item}`);
       lines.push("");
     }
-    if (result.warnings.length > 0) {
+    if (warnings.length > 0) {
       lines.push("Warnings:");
-      for (const item of result.warnings) lines.push(`- ${item}`);
+      for (const item of warnings) lines.push(`- ${item}`);
       lines.push("");
     }
     const output = `${lines.join("\n")}\n`;
     if (args.out) await writeText(args.out, output);
     process.stdout.write(output);
-    if (!result.ok) process.exitCode = 1;
+    if (errors.length > 0) process.exitCode = 1;
     return;
   }
 
@@ -266,6 +300,58 @@ async function main() {
     return;
   }
 
+  if (command === "schedule") {
+    const { manifest, allSeeds } = await loadContext(args);
+    const uiTree = await readJson(args["ui-tree"] ?? defaultUiTreePath);
+    const shards = await loadShards(args["shard-dir"] ?? defaultShardDir);
+    const coverageLedger = await loadLedger(args.ledger ?? defaultLedgerPath);
+    const feedbackLedger = await loadFeedbackLedger(args["feedback-ledger"] ?? defaultFeedbackLedgerPath);
+    const validation = validateSchedulerModel(manifest, allSeeds, uiTree, shards, feedbackLedger);
+    if (!validation.ok) {
+      for (const item of validation.errors) process.stderr.write(`- ${item}\n`);
+      process.exitCode = 1;
+      return;
+    }
+    const schedule = buildShardSchedule(manifest, allSeeds, uiTree, shards, coverageLedger, feedbackLedger, {
+      limit: args.limit,
+      namespace: args.namespace,
+      shards: args.shards,
+      exclude: args.exclude,
+      "min-iterations": args["min-iterations"],
+      "max-iterations": args["max-iterations"]
+    });
+    const markdown = formatScheduleMarkdown(schedule);
+    if (args.out) await writeText(args.out, markdown);
+    if (args["json-out"]) await writeJson(args["json-out"], schedule);
+    if (args.format === "json") {
+      process.stdout.write(`${JSON.stringify(schedule, null, 2)}\n`);
+    } else {
+      process.stdout.write(markdown);
+    }
+    return;
+  }
+
+  if (command === "record-feedback") {
+    if (!args.input) throw new Error("--input is required for record-feedback");
+    if (!args.shard) throw new Error("--shard is required for record-feedback");
+    const feedbackLedgerPath = args["feedback-ledger"] ?? defaultFeedbackLedgerPath;
+    const outputLedgerPath = args.out ?? feedbackLedgerPath;
+    await withFileLock(outputLedgerPath, async () => {
+      const feedbackLedger = await loadFeedbackLedger(outputLedgerPath);
+      const replayReport = await readJson(args.input);
+      const next = applyReplayFeedback(feedbackLedger, replayReport, {
+        shard: args.shard,
+        namespace: args.namespace,
+        input: args.input,
+        "out-of-scope": args["out-of-scope"]
+      });
+      await writeJson(outputLedgerPath, next);
+    });
+    process.stdout.write(`Recorded feedback for shard ${args.shard}\n`);
+    process.stdout.write(`Ledger: ${outputLedgerPath}\n`);
+    return;
+  }
+
   if (command === "signature") {
     if (!args.finding && !args.input) throw new Error("--finding or --input is required for signature");
     const finding = await readJson(args.finding ?? args.input);
@@ -304,6 +390,170 @@ async function main() {
   throw new Error(`Unknown command: ${command}`);
 }
 
+function filterRunToShard(run, manifest, shard) {
+  const selectorCoverage = shardSelectorCoverage(shard);
+  const cases = (run.cases ?? []).filter((item) =>
+    (item.coverage ?? []).some((tag) => selectorCoverage.has(tag))
+  ).map((item) => projectCaseToShard(item, shard));
+  if (cases.length === 0) {
+    throw new Error(`No generated cases in ${run.options?.rngSeed ?? "run"} match shard ${shard.id}`);
+  }
+  return {
+    ...run,
+    cases,
+    summary: summarizeRun(manifest, cases),
+    shard: {
+      id: shard.id,
+      startNode: shard.startNode,
+      ownedNodes: shard.ownedNodes ?? [],
+      ownedCoverage: shard.ownedCoverage ?? [],
+      selectorCoverage: [...selectorCoverage].sort()
+    }
+  };
+}
+
+function projectCaseToShard(testCase, shard) {
+  const ownedCoverage = new Set(shard.ownedCoverage ?? []);
+  const wantedInvariants = new Set((shard.invariants ?? []).map((item) => `invariant:${item}`));
+  const allowedAsyncEvents = new Set((shard.allowedAsyncEvents ?? []).map((item) => `async:${item}`));
+  const relevantPrefixes = shardRelevantPrefixes(ownedCoverage);
+  const projectedSteps = [];
+  let sawOwnedAction = false;
+  let insertedNewAgentEntrypoint = false;
+  for (const step of testCase.steps ?? []) {
+    if (isShardSetupStep(step)) {
+      projectedSteps.push(step);
+      if (step.action === "open-new-agent") insertedNewAgentEntrypoint = true;
+      continue;
+    }
+    if (step.phase === "assert") {
+      if (wantedInvariants.has(`invariant:${step.target}`) || ownedCoverage.has(`invariant:${step.target}`)) {
+        projectedSteps.push(step);
+      }
+      continue;
+    }
+    const stepCoverage = coverageForStep(step);
+    const ownsStep = stepCoverage.some((tag) => ownedCoverage.has(tag));
+    if (ownsStep) {
+      if (!insertedNewAgentEntrypoint && step.target?.startsWith("new-agent.")) {
+        projectedSteps.push({
+          phase: "setup",
+          action: "open-new-agent",
+          kind: "ui",
+          target: "new-agent-modal",
+          params: {}
+        });
+        insertedNewAgentEntrypoint = true;
+      }
+      sawOwnedAction = true;
+      projectedSteps.push(step);
+      continue;
+    }
+    if (isRelevantShardAsyncStep(step, allowedAsyncEvents, relevantPrefixes)) {
+      projectedSteps.push(step);
+    }
+  }
+
+  const fallbackSteps = sawOwnedAction ? projectedSteps : testCase.steps ?? [];
+  const projectedCoverage = (testCase.coverage ?? []).filter((tag) =>
+    ownedCoverage.has(tag) ||
+    wantedInvariants.has(tag) ||
+    allowedAsyncEvents.has(tag) ||
+    tag.startsWith("state:daemon.") ||
+    tag.startsWith("state:session.")
+  );
+  return {
+    ...testCase,
+    diversityKey: `${testCase.seedId}|${shard.id}|${fallbackSteps.map((step) => step.action).join(">")}`,
+    coverage: projectedCoverage.length > 0 ? [...new Set(projectedCoverage)] : testCase.coverage,
+    steps: fallbackSteps,
+    shard: {
+      id: shard.id,
+      startNode: shard.startNode,
+      projected: sawOwnedAction
+    }
+  };
+}
+
+function isShardSetupStep(step) {
+  return step.phase === "setup" ||
+    [
+      "open-agent-detail",
+      "open-workspace",
+      "open-settings-providers",
+      "open-settings-mcp",
+      "open-permissions",
+      "open-new-agent",
+      "open-pipelines"
+    ].includes(step.action);
+}
+
+function coverageForStep(step) {
+  const tags = [];
+  if (step.target) {
+    if (String(step.target).includes(".")) tags.push(`control:${step.target}`);
+    if (["app-no-crash", "no-data-loss", "no-permanent-loading", "one-request-per-intent", "active-session-stable", "stale-error-scoped"].includes(step.target)) {
+      tags.push(`invariant:${step.target}`);
+    }
+  }
+  if (step.action === "open-terminal") tags.push("route:terminal-pane", "control:terminal.new-tab");
+  if (step.action === "type-terminal") tags.push("control:terminal.input");
+  if (step.action === "close-terminal") tags.push("control:terminal.close-tab");
+  if (step.action === "open-file") tags.push("route:files-pane", "control:files.open");
+  if (step.action === "edit-file") tags.push("control:files.editor");
+  if (step.action === "save-file") tags.push("control:files.save");
+  if (step.action === "open-browser") tags.push("route:browser-pane");
+  return [...new Set(tags)];
+}
+
+function shardRelevantPrefixes(ownedCoverage) {
+  const prefixes = new Set();
+  for (const tag of ownedCoverage) {
+    const match = tag.match(/^(?:control|route|state):([^.:-]+)/);
+    if (match) prefixes.add(match[1]);
+  }
+  return prefixes;
+}
+
+function isRelevantShardAsyncStep(step, allowedAsyncEvents, relevantPrefixes) {
+  if (step.action === "disconnect-reconnect") return allowedAsyncEvents.has("async:reconnect");
+  if (step.action === "emit-late-pty-output") {
+    return (allowedAsyncEvents.has("async:late-success") || allowedAsyncEvents.has("async:late-failure")) &&
+      relevantPrefixes.has("terminal");
+  }
+  if (step.action === "emit-file-restore") {
+    return allowedAsyncEvents.has("async:server-push-update") && relevantPrefixes.has("files");
+  }
+  if (step.action === "emit-permissions-refresh") {
+    return allowedAsyncEvents.has("async:late-success") && relevantPrefixes.has("settings");
+  }
+  if (step.action === "emit-mcp-list-refresh" || step.action === "late-mcp-test-result") {
+    return allowedAsyncEvents.has("async:late-success") && relevantPrefixes.has("settings");
+  }
+  if (step.action === "emit-state-for-old-tab" || step.action === "hold-next-browser-response") {
+    return relevantPrefixes.has("browser");
+  }
+  return false;
+}
+
+function shardSelectorCoverage(shard) {
+  const owned = shard.ownedCoverage ?? [];
+  const specific = owned.filter((tag) => {
+    if (tag.startsWith("invariant:")) return false;
+    if (tag.startsWith("async:")) return false;
+    if (tag.startsWith("state:daemon.")) return false;
+    if (tag.startsWith("state:session.idle")) return false;
+    if (tag.startsWith("control:modal.")) return false;
+    return !["route:workspace", "route:agent-detail"].includes(tag);
+  });
+  const controls = specific.filter((tag) => tag.startsWith("control:"));
+  if (controls.length > 0) return new Set(controls);
+  const routes = specific.filter((tag) => tag.startsWith("route:"));
+  if (routes.length > 0) return new Set(routes);
+  if (specific.length > 0) return new Set(specific);
+  return new Set(owned);
+}
+
 async function readFileText(filePath) {
   const { readFile } = await import("node:fs/promises");
   return readFile(filePath, "utf8");
@@ -314,6 +564,30 @@ function moduleSpecifier(fromFile, targetWithoutExtension) {
     .relative(path.dirname(fromFile), targetWithoutExtension)
     .replaceAll(path.sep, "/");
   return relative.startsWith(".") ? relative : `./${relative}`;
+}
+
+async function withFileLock(filePath, callback) {
+  const lockPath = `${path.resolve(filePath)}.lock`;
+  const startedAt = Date.now();
+  while (true) {
+    try {
+      await mkdir(lockPath, { recursive: false });
+      break;
+    } catch (error) {
+      if (!error || error.code !== "EEXIST") throw error;
+      if (Date.now() - startedAt > 30_000) throw new Error(`Timed out waiting for lock ${lockPath}`);
+      await sleep(100);
+    }
+  }
+  try {
+    return await callback();
+  } finally {
+    await rmdir(lockPath).catch(() => {});
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 main().catch((error) => {

@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "settings-mcp",
+  "title": "Settings MCP add, refresh, and stale test result",
+  "priority": 7,
+  "seed": "settings-mcp-permission-race",
+  "startNode": "settings/mcp",
+  "entrypoint": "settings.mcp-add",
+  "iterations": 12,
+  "steps": 14,
+  "replayLimit": 2,
+  "ownedNodes": ["settings/mcp"],
+  "allowedSetupNodes": ["app", "settings"],
+  "ownedCoverage": ["route:settings-mcp", "control:settings.mcp-add", "state:settings.saving", "async:server-push-update"],
+  "allowedAsyncEvents": ["duplicate-submit", "late-success", "late-failure", "delayed-list-refresh", "server-push-update", "reconnect"],
+  "invariants": ["app-no-crash", "one-request-per-intent", "controls-disabled-while-pending", "stale-error-scoped"]
+}

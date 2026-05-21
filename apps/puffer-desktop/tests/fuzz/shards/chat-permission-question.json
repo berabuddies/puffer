@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "chat-permission-question",
+  "title": "Chat permission and question response routing",
+  "priority": 10,
+  "seed": "chat-turn-race",
+  "startNode": "chat/permission-question",
+  "entrypoint": "chat.permission-response",
+  "iterations": 20,
+  "steps": 20,
+  "replayLimit": 3,
+  "ownedNodes": ["chat/permission-question"],
+  "allowedSetupNodes": ["app", "workspace", "agent-detail", "chat", "chat/composer-send"],
+  "ownedCoverage": ["control:chat.permission-response", "control:chat.question-response", "state:session.awaiting-permission", "state:session.awaiting-question"],
+  "allowedAsyncEvents": ["duplicate-submit", "late-success", "late-failure", "stale-session-event", "reconnect"],
+  "invariants": ["app-no-crash", "one-request-per-intent", "active-session-stable", "stale-error-scoped", "no-permanent-loading"]
+}

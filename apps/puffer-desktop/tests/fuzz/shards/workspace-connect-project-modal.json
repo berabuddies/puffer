@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "workspace-connect-project-modal",
+  "title": "Connect project modal entry, recovery, and focus",
+  "priority": 9,
+  "seed": "modal-focus-race",
+  "startNode": "workspace/connect-project-modal",
+  "entrypoint": "workspace.connect-project",
+  "iterations": 10,
+  "steps": 4,
+  "replayLimit": 2,
+  "ownedNodes": ["workspace/connect-project-modal"],
+  "allowedSetupNodes": ["app", "workspace"],
+  "ownedCoverage": ["route:connect-project-modal", "control:workspace.connect-project", "control:modal.initial-focus", "control:modal.focus-trap"],
+  "allowedAsyncEvents": ["reconnect"],
+  "invariants": ["app-no-crash", "modal-initial-focus", "modal-focus-trapped", "focus-restored"]
+}
