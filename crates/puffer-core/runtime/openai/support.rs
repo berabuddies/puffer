@@ -23,9 +23,35 @@ pub(crate) fn build_codex_openai_request_body(
     text: Option<OpenAIResponsesTextConfig>,
     stream: bool,
 ) -> Value {
+    build_codex_openai_request_body_with_reasoning_include(
+        state,
+        base_url,
+        model_id,
+        instructions,
+        input,
+        tools,
+        supports_reasoning,
+        text,
+        stream,
+        request_reasoning_encrypted_content_include(),
+    )
+}
+
+fn build_codex_openai_request_body_with_reasoning_include(
+    state: &AppState,
+    base_url: &str,
+    model_id: &str,
+    instructions: &str,
+    input: Value,
+    tools: &[OpenAIResponsesTool],
+    supports_reasoning: bool,
+    text: Option<OpenAIResponsesTextConfig>,
+    stream: bool,
+    include_reasoning_encrypted_content: bool,
+) -> Value {
     let reasoning = codex_reasoning_config(state, supports_reasoning);
     let mut include: Vec<Value> = Vec::new();
-    if reasoning.is_some() {
+    if reasoning.is_some() && include_reasoning_encrypted_content {
         include.push(json!(reasoning_encrypted_content_include(base_url)));
     }
     let store = std::env::var("PUFFER_OPENAI_STORE_RESPONSES")
@@ -62,6 +88,10 @@ pub(crate) fn build_codex_openai_request_body(
 
 fn reasoning_encrypted_content_include(_base_url: &str) -> &'static str {
     "reasoning.encryptedcontent"
+}
+
+fn request_reasoning_encrypted_content_include() -> bool {
+    env_flag("PUFFER_OPENAI_INCLUDE_REASONING_ENCRYPTED_CONTENT")
 }
 
 pub(super) fn prefer_native_structured_output(
@@ -147,6 +177,18 @@ pub(super) fn openai_stream_read_timeout() -> Duration {
         .unwrap_or(180_000)
         .clamp(1_000, 300_000);
     Duration::from_millis(timeout_ms)
+}
+
+pub(super) fn is_openai_include_validation_error(error: &Error) -> bool {
+    error.chain().any(|cause| {
+        let text = cause.to_string().to_ascii_lowercase();
+        text.contains("include[0]")
+            && text.contains("invalid")
+            && (text.contains("reasoning.encrypted_content")
+                || text.contains("reasoning.encryptedcontent")
+                || text.contains("rea...ent")
+                || text.contains("supported values"))
+    })
 }
 
 fn is_retryable_openai_transport_error(error: &Error) -> bool {
@@ -483,6 +525,8 @@ fn codex_reasoning_config(state: &AppState, supports_reasoning: bool) -> Option<
 #[cfg(test)]
 mod tests {
     use super::build_codex_openai_request_body;
+    use super::build_codex_openai_request_body_with_reasoning_include;
+    use super::is_openai_include_validation_error;
     use super::is_retryable_openai_transport_error;
     use super::openai_supports_response_threading;
     use crate::runtime::tests::state;
@@ -556,6 +600,18 @@ mod tests {
     }
 
     #[test]
+    fn detects_openai_include_validation_errors() {
+        let error = anyhow!(
+            "request failed with status 400 Bad Request: {{\"error\":{{\"message\":\"Invalid value: 'rea...ent'. Supported values are: 'reasoning.encryptedcontent'.\",\"param\":\"include[0]\"}}}}"
+        );
+
+        assert!(is_openai_include_validation_error(&error));
+        assert!(!is_openai_include_validation_error(&anyhow!(
+            "request failed with status 400 Bad Request: invalid model"
+        )));
+    }
+
+    #[test]
     fn request_body_uses_prompt_cache_key_override_when_present() {
         let mut state = state();
         state.prompt_cache_key_override = Some("benchmark-cache-key".to_string());
@@ -576,10 +632,10 @@ mod tests {
     }
 
     #[test]
-    fn public_responses_request_uses_compact_reasoning_include_selector() {
+    fn request_body_omits_reasoning_include_by_default() {
         let state = state();
 
-        let body = build_codex_openai_request_body(
+        let body = build_codex_openai_request_body_with_reasoning_include(
             &state,
             "https://api.openai.com",
             "gpt-5",
@@ -589,9 +645,11 @@ mod tests {
             true,
             None,
             true,
+            false,
         );
 
-        assert_eq!(body["include"][0], json!("reasoning.encryptedcontent"));
+        assert!(body["reasoning"].is_object(), "body: {body}");
+        assert_eq!(body["include"], json!([]), "body: {body}");
     }
 
     #[test]
@@ -616,10 +674,10 @@ mod tests {
     }
 
     #[test]
-    fn codex_backend_request_uses_compact_reasoning_include_selector() {
+    fn request_body_can_opt_into_encrypted_reasoning_include() {
         let state = state();
 
-        let body = build_codex_openai_request_body(
+        let body = build_codex_openai_request_body_with_reasoning_include(
             &state,
             OPENAI_CHATGPT_BASE_URL,
             "gpt-5",
@@ -628,6 +686,7 @@ mod tests {
             &Vec::new(),
             true,
             None,
+            true,
             true,
         );
 
