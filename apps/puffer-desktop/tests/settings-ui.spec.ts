@@ -1,6 +1,29 @@
 import { expect, test } from "@playwright/test";
 import { FakeDaemon } from "./support/fakeDaemon";
 
+test("empty provider registry still offers built-in setup options", async ({ page }) => {
+  const daemon = new FakeDaemon({ auth: [], providers: [] });
+  await daemon.install(page);
+  await daemon.open(page, { forceOnboarding: true, skipOnboarding: false });
+
+  await expect(page.getByText("Provider registry is empty.")).toBeVisible();
+  await expect(page.getByText("No providers are registered in this workspace.")).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "OpenAI" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Anthropic" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "OpenRouter" })).toBeVisible();
+
+  const anthropicCard = page.locator(".provider-card").filter({ hasText: "Anthropic" });
+  await anthropicCard.getByLabel("API key for Anthropic").fill("sk-ant-test");
+  await anthropicCard.getByRole("button", { name: "Connect", exact: true }).click();
+
+  const request = await daemon.waitForRequest("login_with_api_key");
+  expect(request.params).toMatchObject({
+    providerId: "anthropic",
+    apiKey: "sk-ant-test"
+  });
+  await expect(page.getByRole("button", { name: "Project", exact: true })).toBeVisible();
+});
+
 test("default model cannot be saved before provider models load", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayResponse(

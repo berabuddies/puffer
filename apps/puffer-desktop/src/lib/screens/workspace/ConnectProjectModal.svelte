@@ -16,6 +16,7 @@
     providerIsAvailableForAgent,
     providerIdsEquivalent
   } from "../../providerIds";
+  import { providerCatalogForSetup } from "../../providerFallbacks";
   import type { ProviderSummary, SettingsSnapshot } from "../../types";
 
   type CreatedSessionResult = Awaited<ReturnType<typeof createSession>>;
@@ -75,42 +76,9 @@
   let pickerLoadGeneration = 0;
   let selectedProvider = $state("");
 
-  const fallbackProviders: ProviderSummary[] = [
-    {
-      id: "openai",
-      displayName: "Codex",
-      baseUrl: "https://api.openai.com",
-      defaultApi: "openai-responses",
-      modelCount: 1,
-      authModes: ["api_key", "oauth"],
-      sourceKind: "builtin",
-      sourcePath: null
-    },
-    {
-      id: "anthropic",
-      displayName: "Anthropic",
-      baseUrl: "https://api.anthropic.com",
-      defaultApi: "anthropic-messages",
-      modelCount: 1,
-      authModes: ["api_key", "oauth"],
-      sourceKind: "builtin",
-      sourcePath: null
-    },
-    {
-      id: "puffer",
-      displayName: "Puffer",
-      baseUrl: "local-cli://puffer",
-      defaultApi: "cli",
-      modelCount: 1,
-      authModes: ["native"],
-      sourceKind: "builtin",
-      sourcePath: null
-    }
-  ];
-
   function providerOptionsFor(source: SettingsSnapshot | null): ProviderSummary[] {
     const authenticatedProviderIds = (source?.auth ?? []).map((entry) => entry.providerId);
-    return (source?.providers?.length ? source.providers : fallbackProviders).filter((provider) =>
+    return providerCatalogForSetup(source).filter((provider) =>
       source === null
         ? providerCanRunAgent(provider)
         : providerIsAvailableForAgent(provider, authenticatedProviderIds)

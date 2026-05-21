@@ -3,6 +3,7 @@
   import BrandLogo from "../design/BrandLogo.svelte";
   import Puffer from "../design/Puffer.svelte";
   import Icon from "../design/Icon.svelte";
+  import { providerCatalogForSetup } from "../providerFallbacks";
   import { providerIsAvailableForAgent } from "../providerIds";
   import type { ExternalCredential, SettingsSnapshot } from "../types";
 
@@ -25,7 +26,7 @@
 
   let authenticatedProviderIds = $derived((props.snapshot?.auth ?? []).map((auth) => auth.providerId));
   let agentProviderCount = $derived(
-    (props.snapshot?.providers ?? []).filter((provider) =>
+    providerCatalogForSetup(props.snapshot).filter((provider) =>
       providerIsAvailableForAgent(provider, authenticatedProviderIds)
     ).length
   );

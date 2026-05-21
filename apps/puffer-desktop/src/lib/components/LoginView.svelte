@@ -5,6 +5,10 @@
     providerIdsEquivalent,
     providerRunsWithoutAuth
   } from "../providerIds";
+  import {
+    providerCatalogForSetup,
+    usesFallbackProviderCatalog
+  } from "../providerFallbacks";
   import type { ExternalCredential, ProviderSummary, SettingsSnapshot } from "../types";
 
   export let snapshot: SettingsSnapshot | null = null;
@@ -68,7 +72,7 @@
   }
 
   $: filteredProviders = (() => {
-    const all = snapshot?.providers ?? [];
+    const all = providerCatalogForSetup(snapshot);
     const needle = query.trim().toLowerCase();
     if (!needle) return all;
     return all.filter((provider) => {
@@ -83,10 +87,11 @@
   $: connectedAuth = snapshot?.auth ?? [];
   $: authenticatedProviderIds = connectedAuth.map((auth) => auth.providerId);
   $: availableAgentProviders =
-    snapshot?.providers.filter((provider) =>
+    providerCatalogForSetup(snapshot).filter((provider) =>
       providerIsAvailableForAgent(provider, authenticatedProviderIds)
-    ) ?? [];
+    );
   $: showAvailableProviders = availableAgentProviders.length > connectedAuth.length;
+  $: usingFallbackProviders = usesFallbackProviderCatalog(snapshot);
 
   $: importsByProvider = (() => {
     const map: Record<string, ExternalCredential[]> = {};
@@ -183,11 +188,16 @@
     </button>
   </div>
 
+  {#if usingFallbackProviders}
+    <div class="provider-fallback-note" role="status">
+      Provider registry is empty. Built-in setup options are shown so you can connect a provider,
+      then refresh when resources reload.
+    </div>
+  {/if}
+
   <div class="provider-grid">
     {#if loading}
       <div class="empty-card">Loading providers and auth state…</div>
-    {:else if !snapshot?.providers.length}
-      <div class="empty-card">No providers are registered in this workspace.</div>
     {:else if !filteredProviders.length}
       <div class="empty-card">No providers match "{query}".</div>
     {:else}
@@ -400,6 +410,16 @@
   .refresh-btn:disabled {
     opacity: 0.6;
     cursor: progress;
+  }
+
+  .provider-fallback-note {
+    border-radius: 12px;
+    border: 1px solid color-mix(in oklab, var(--accent) 22%, rgba(111, 101, 89, 0.16));
+    background: color-mix(in oklab, var(--accent) 8%, rgba(255, 255, 255, 0.78));
+    color: var(--text-muted);
+    padding: 0.72rem 0.9rem;
+    font-size: 0.82rem;
+    line-height: 1.4;
   }
 
   @media (max-width: 680px) {

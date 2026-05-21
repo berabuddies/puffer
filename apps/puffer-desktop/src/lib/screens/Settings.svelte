@@ -8,6 +8,7 @@
     providerIsAvailableForAgent,
     providerIdsEquivalent
   } from "../providerIds";
+  import { providerCatalogForSetup, usesFallbackProviderCatalog } from "../providerFallbacks";
   import type { AccentKey, DensityKey, FontMixKey, ThemeKey, Tweaks } from "../shell/tweaks";
   import {
     addMcpServer,
@@ -338,10 +339,11 @@
   let authedProviderIds = $derived(new Set((props.snapshot?.auth ?? []).map((a) => a.providerId)));
   let defaultRouteProviders = $derived.by(() => {
     const authIds = (props.snapshot?.auth ?? []).map((auth) => auth.providerId);
-    return (props.snapshot?.providers ?? []).filter(
+    return providerCatalogForSetup(props.snapshot).filter(
       (provider) => providerIsAvailableForAgent(provider, authIds)
     );
   });
+  let usingFallbackProviders = $derived(usesFallbackProviderCatalog(props.snapshot));
 
   function defaultRouteProviderId(): string {
     const configured = props.snapshot?.config.defaultProvider;
@@ -603,6 +605,11 @@
       {#if !daemonReachable}
         <div class="pf-settings-note">
           Preview mode — launch Puffer in the desktop app to edit live routing.
+        </div>
+      {:else if usingFallbackProviders}
+        <div class="pf-settings-note">
+          Provider registry is empty. Built-in setup options are available below; refresh after
+          resources reload.
         </div>
       {/if}
       <div class="pf-settings-row" style="align-items: start;">

@@ -63,6 +63,7 @@
   } from "./lib/api/daemonClient";
   import { sessionDisplayName, sessionDisplayTitle } from "./lib/sessionDisplay";
   import { providerIdCanRunAgent, providerIdInSet, providerIsAvailableForAgent } from "./lib/providerIds";
+  import { providerCatalogForSetup } from "./lib/providerFallbacks";
   import type { UnlistenFn } from "@tauri-apps/api/event";
   import type {
     DesktopPreferences,
@@ -858,7 +859,7 @@
 
   function hasAvailableAgentProvider(snapshot: SettingsSnapshot | null): boolean {
     const authenticatedProviderIds = (snapshot?.auth ?? []).map((auth) => auth.providerId);
-    return (snapshot?.providers ?? []).some((provider) =>
+    return providerCatalogForSetup(snapshot).some((provider) =>
       providerIsAvailableForAgent(provider, authenticatedProviderIds)
     );
   }

@@ -1,6 +1,7 @@
 <script lang="ts">
   import Icon from "../../design/Icon.svelte";
   import { focusTrap } from "../../focusTrap";
+  import { providerCatalogForSetup } from "../../providerFallbacks";
   import {
     canonicalDaemonProviderId,
     providerCanRunAgent,
@@ -20,43 +21,10 @@
 
   let { cwd, snapshot, busy = false, error = null, onClose, onCreate }: Props = $props();
   let selectedProvider = $state("");
-
-  const fallbackProviders: ProviderSummary[] = [
-    {
-      id: "openai",
-      displayName: "Codex",
-      baseUrl: "https://api.openai.com",
-      defaultApi: "openai-responses",
-      modelCount: 1,
-      authModes: ["api_key", "oauth"],
-      sourceKind: "builtin",
-      sourcePath: null
-    },
-    {
-      id: "anthropic",
-      displayName: "Anthropic",
-      baseUrl: "https://api.anthropic.com",
-      defaultApi: "anthropic-messages",
-      modelCount: 1,
-      authModes: ["api_key", "oauth"],
-      sourceKind: "builtin",
-      sourcePath: null
-    },
-    {
-      id: "puffer",
-      displayName: "Puffer",
-      baseUrl: "local-cli://puffer",
-      defaultApi: "cli",
-      modelCount: 1,
-      authModes: ["native"],
-      sourceKind: "builtin",
-      sourcePath: null
-    }
-  ];
   let authenticatedProviderIds = $derived((snapshot?.auth ?? []).map((entry) => entry.providerId));
 
   let providerOptions = $derived(
-    (snapshot?.providers?.length ? snapshot.providers : fallbackProviders).filter((provider) =>
+    providerCatalogForSetup(snapshot).filter((provider) =>
       snapshot === null
         ? providerCanRunAgent(provider)
         : providerIsAvailableForAgent(provider, authenticatedProviderIds)
