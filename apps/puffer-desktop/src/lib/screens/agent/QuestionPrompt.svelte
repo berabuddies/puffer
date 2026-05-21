@@ -7,10 +7,11 @@
 
   type Props = {
     item: UserQuestionTimelineItem;
+    disabled?: boolean;
     onResolve: (questionId: string, answers: Answers, annotations?: Annotations) => void;
   };
 
-  let { item, onResolve }: Props = $props();
+  let { item, disabled = false, onResolve }: Props = $props();
   let selectedAnswers = $state<Answers>({});
   let customText = $state<Record<string, string>>({});
   let customActive = $state<Record<string, boolean>>({});
@@ -25,54 +26,61 @@
     collapsed = answered;
   });
 
-  function keyFor(question: AskUserQuestionItem): string {
+  function answerKeyFor(question: AskUserQuestionItem): string {
     return question.question;
   }
 
-  function selectedList(question: AskUserQuestionItem): string[] {
-    const current = selectedAnswers[keyFor(question)];
+  function draftKeyFor(index: number): string {
+    return `${item.id}:${index}`;
+  }
+
+  function selectedList(index: number): string[] {
+    const current = selectedAnswers[draftKeyFor(index)];
     return Array.isArray(current) ? current : [];
   }
 
-  function selectSingle(question: AskUserQuestionItem, label: string) {
-    const key = keyFor(question);
+  function selectSingle(index: number, label: string) {
+    const key = draftKeyFor(index);
     selectedAnswers = { ...selectedAnswers, [key]: label };
     customActive = { ...customActive, [key]: false };
   }
 
-  function toggleMulti(question: AskUserQuestionItem, label: string) {
-    const key = keyFor(question);
-    const list = selectedList(question);
+  function toggleMulti(index: number, label: string) {
+    const key = draftKeyFor(index);
+    const list = selectedList(index);
     const next = list.includes(label) ? list.filter((v) => v !== label) : [...list, label];
     selectedAnswers = { ...selectedAnswers, [key]: next };
   }
 
-  function setCustom(question: AskUserQuestionItem, value: string) {
-    const key = keyFor(question);
+  function setCustom(question: AskUserQuestionItem, index: number, value: string) {
+    const key = draftKeyFor(index);
     customText = { ...customText, [key]: value };
     if (!question.multiSelect) {
       customActive = { ...customActive, [key]: true };
     }
   }
 
-  function checked(question: AskUserQuestionItem, label: string): boolean {
-    const current = answered ? item.answers?.[keyFor(question)] : selectedAnswers[keyFor(question)];
+  function checked(question: AskUserQuestionItem, index: number, label: string): boolean {
+    const current = answered
+      ? item.answers?.[answerKeyFor(question)]
+      : selectedAnswers[draftKeyFor(index)];
     return Array.isArray(current) ? current.includes(label) : current === label;
   }
 
-  function customValue(question: AskUserQuestionItem): string {
-    return customText[keyFor(question)] ?? "";
+  function customValue(index: number): string {
+    return customText[draftKeyFor(index)] ?? "";
   }
 
-  function customChecked(question: AskUserQuestionItem): boolean {
+  function customChecked(question: AskUserQuestionItem, index: number): boolean {
     if (answered) return customAnswers(question).length > 0;
-    const text = customValue(question).trim();
+    const key = draftKeyFor(index);
+    const text = customValue(index).trim();
     if (!text) return false;
-    return question.multiSelect || customActive[keyFor(question)] === true;
+    return question.multiSelect || customActive[key] === true;
   }
 
   function customAnswers(question: AskUserQuestionItem): string[] {
-    const answer = item.answers?.[keyFor(question)];
+    const answer = item.answers?.[answerKeyFor(question)];
     const values = Array.isArray(answer) ? answer : typeof answer === "string" ? [answer] : [];
     const optionLabels = new Set(question.options.map((option) => option.label));
     return values.filter((value) => !optionLabels.has(value));
@@ -82,7 +90,7 @@
     const answers = item.answers ?? {};
     return item.questions
       .map((question) => {
-        const answer = answers[keyFor(question)];
+        const answer = answers[answerKeyFor(question)];
         if (!answer) return null;
         return Array.isArray(answer) ? answer.join(", ") : answer;
       })
@@ -90,40 +98,41 @@
       .join(" · ");
   }
 
-  function answerFor(question: AskUserQuestionItem): string | string[] | null {
-    const custom = customValue(question).trim();
+  function answerFor(question: AskUserQuestionItem, index: number): string | string[] | null {
+    const key = draftKeyFor(index);
+    const custom = customValue(index).trim();
     if (question.multiSelect) {
-      const values = selectedList(question);
+      const values = selectedList(index);
       const withCustom = custom ? [...values, custom] : values;
       return withCustom.length > 0 ? withCustom : null;
     }
-    if (customActive[keyFor(question)] === true && custom) return custom;
-    const selected = selectedAnswers[keyFor(question)];
+    if (customActive[key] === true && custom) return custom;
+    const selected = selectedAnswers[key];
     return typeof selected === "string" && selected.trim() ? selected : null;
   }
 
   function buildAnswers(): Answers {
     const next: Answers = {};
-    for (const question of item.questions) {
-      const answer = answerFor(question);
-      if (answer !== null) next[keyFor(question)] = answer;
+    for (const [index, question] of item.questions.entries()) {
+      const answer = answerFor(question, index);
+      if (answer !== null) next[answerKeyFor(question)] = answer;
     }
     return next;
   }
 
-  function hasAnswer(question: AskUserQuestionItem): boolean {
-    const answer = answerFor(question);
+  function hasAnswer(question: AskUserQuestionItem, index: number): boolean {
+    const answer = answerFor(question, index);
     if (Array.isArray(answer)) return answer.length > 0;
     return typeof answer === "string" && answer.trim().length > 0;
   }
 
   function canSubmit(): boolean {
-    if (answered) return false;
-    return item.questions.every((question) => hasAnswer(question));
+    if (answered || disabled) return false;
+    return item.questions.every((question, index) => hasAnswer(question, index));
   }
 
   function submit() {
-    if (answered || !canSubmit()) return;
+    if (answered || disabled || !canSubmit()) return;
     onResolve(item.id, buildAnswers(), {});
   }
 </script>
@@ -153,7 +162,7 @@
     {/if}
   </button>
   {#if !answered || !collapsed}
-    {#each item.questions as question, index (question.question)}
+    {#each item.questions as question, index (draftKeyFor(index))}
       <div class="pf-question-block">
         <div class="pf-question-kicker">{question.header}</div>
         <div class="pf-question-title">{question.question}</div>
@@ -166,18 +175,18 @@
           {#each question.options as option (option.label)}
             <label
               class="pf-question-option"
-              data-selected={checked(question, option.label)}
-              data-readonly={answered}
+              data-selected={checked(question, index, option.label)}
+              data-readonly={answered || disabled}
             >
               <input
                 type={question.multiSelect ? "checkbox" : "radio"}
                 name={`question-${item.id}-${index}`}
-                checked={checked(question, option.label)}
-                disabled={answered}
+                checked={checked(question, index, option.label)}
+                disabled={answered || disabled}
                 onchange={() =>
                   question.multiSelect
-                    ? toggleMulti(question, option.label)
-                    : selectSingle(question, option.label)}
+                    ? toggleMulti(index, option.label)
+                    : selectSingle(index, option.label)}
               />
               <span class="pf-question-option-body">
                 <span>{option.label}</span>
@@ -186,27 +195,31 @@
                   <pre>{option.preview}</pre>
                 {/if}
               </span>
-              {#if answered && checked(question, option.label)}
+              {#if answered && checked(question, index, option.label)}
                 <span class="pf-question-selected">Selected</span>
               {/if}
             </label>
           {/each}
         </div>
         {#if !answered || customAnswers(question).length > 0}
-          <label class="pf-question-other" data-selected={customChecked(question)} data-readonly={answered}>
+          <label
+            class="pf-question-other"
+            data-selected={customChecked(question, index)}
+            data-readonly={answered || disabled}
+          >
             <input
               class="pf-question-other-choice"
               type={question.multiSelect ? "checkbox" : "radio"}
               name={`question-${item.id}-${index}`}
-              checked={customChecked(question)}
-              disabled={answered}
+              checked={customChecked(question, index)}
+              disabled={answered || disabled}
               onchange={(event) => {
                 const checked = (event.currentTarget as HTMLInputElement).checked;
                 if (question.multiSelect) {
-                  if (!checked) setCustom(question, "");
+                  if (!checked) setCustom(question, index, "");
                   return;
                 }
-                customActive = { ...customActive, [keyFor(question)]: true };
+                customActive = { ...customActive, [draftKeyFor(index)]: true };
               }}
               aria-label="Use custom answer"
             />
@@ -217,13 +230,14 @@
             {:else}
               <input
                 class="pf-question-other-input"
-                value={customValue(question)}
+                value={customValue(index)}
+                disabled={disabled}
                 placeholder="Type another answer"
                 onfocus={() => {
-                  if (!question.multiSelect) customActive = { ...customActive, [keyFor(question)]: true };
+                  if (!question.multiSelect) customActive = { ...customActive, [draftKeyFor(index)]: true };
                 }}
                 oninput={(event) =>
-                  setCustom(question, (event.currentTarget as HTMLInputElement).value)}
+                  setCustom(question, index, (event.currentTarget as HTMLInputElement).value)}
               />
             {/if}
           </label>

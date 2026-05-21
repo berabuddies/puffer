@@ -14,6 +14,11 @@ pub(crate) fn refresh_status_line(
     state: &mut AppState,
     providers: &ProviderRegistry,
 ) -> Result<()> {
+    if !state.statusline_enabled {
+        state.status_line_text = None;
+        state.set_status_line_signature(None);
+        return Ok(());
+    }
     let Some(config) = state
         .config
         .ui
@@ -151,7 +156,7 @@ fn run_status_line_command(
     input: &str,
 ) -> Result<Option<String>> {
     let mut child = Command::new(puffer_tools::detected_shell())
-        .arg("-lc")
+        .arg("-c")
         .arg(command)
         .current_dir(cwd)
         .stdin(Stdio::piped())
@@ -240,6 +245,42 @@ mod tests {
 
         assert_eq!(state.status_line_text.as_deref(), Some("openai gpt-5"));
         assert!(state.status_line_signature().is_some());
+    }
+
+    #[test]
+    fn refresh_status_line_skips_command_when_disabled() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let marker = tempdir.path().join("statusline-ran");
+        let mut config = PufferConfig::default();
+        config.ui.status_line = Some(StatusLineConfig {
+            command: format!("printf ran > {}", marker.display()),
+            padding: 0,
+        });
+        let mut state = AppState::new(
+            config,
+            tempdir.path().to_path_buf(),
+            SessionMetadata {
+                id: Uuid::new_v4(),
+                display_name: Some("dockyard".to_string()),
+                generated_title: None,
+                cwd: tempdir.path().to_path_buf(),
+                created_at_ms: 0,
+                updated_at_ms: 0,
+                parent_session_id: None,
+                slug: None,
+                tags: Vec::new(),
+                note: None,
+            },
+        );
+        state.statusline_enabled = false;
+        state.status_line_text = Some("stale".to_string());
+        state.set_status_line_signature(Some("sig".to_string()));
+
+        refresh_status_line(&mut state, &ProviderRegistry::new()).unwrap();
+
+        assert!(state.status_line_text.is_none());
+        assert!(state.status_line_signature().is_none());
+        assert!(!marker.exists());
     }
 
     #[test]

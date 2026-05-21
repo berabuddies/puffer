@@ -14,10 +14,15 @@ pub(crate) struct SessionListItemDto {
     pub(crate) updated_at_ms: u64,
     pub(crate) created_at_ms: u64,
     pub(crate) event_count: usize,
+    pub(crate) activity_status: String,
     pub(crate) slug: Option<String>,
     pub(crate) tags: Vec<String>,
     pub(crate) note: Option<String>,
     pub(crate) parent_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) provider_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) model_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -154,10 +159,16 @@ pub(crate) struct SessionDetailDto {
     pub(crate) folder_path: String,
     pub(crate) updated_at_ms: u64,
     pub(crate) created_at_ms: u64,
+    pub(crate) event_count: usize,
+    pub(crate) activity_status: String,
     pub(crate) slug: Option<String>,
     pub(crate) tags: Vec<String>,
     pub(crate) note: Option<String>,
     pub(crate) parent_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) provider_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) model_id: Option<String>,
     pub(crate) timeline: Vec<TimelineItemDto>,
     pub(crate) latest_diff: Option<DiffSummaryDto>,
     pub(crate) diff_history: Vec<DiffSummaryDto>,
@@ -327,6 +338,15 @@ pub(crate) struct McpServerDto {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct ThinkingOptionDto {
+    pub(crate) id: String,
+    pub(crate) label: String,
+    pub(crate) description: String,
+    pub(crate) is_default: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ModelDescriptorDto {
     pub(crate) id: String,
     pub(crate) display_name: String,
@@ -335,4 +355,8 @@ pub(crate) struct ModelDescriptorDto {
     pub(crate) context_window: u32,
     pub(crate) max_output_tokens: u32,
     pub(crate) supports_reasoning: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) thinking_options: Vec<ThinkingOptionDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) default_thinking_option_id: Option<String>,
 }

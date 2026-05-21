@@ -3,7 +3,7 @@ use puffer_provider_openai::{
     build_authorization_url as build_openai_authorization_url,
     generate_pkce as generate_openai_pkce, OpenAIOAuthConfig,
 };
-use puffer_provider_registry::{AuthMode, ProviderRegistry};
+use puffer_provider_registry::{canonical_provider_id, AuthMode, ProviderRegistry};
 use puffer_transport_anthropic::{
     build_authorization_url as build_anthropic_authorization_url,
     generate_pkce as generate_anthropic_pkce, AnthropicOAuthConfig, ANTHROPIC_MANUAL_REDIRECT_URL,
@@ -50,7 +50,11 @@ pub(crate) fn oauth_start_bundle_for_provider(
     providers: &ProviderRegistry,
     provider_id: &str,
 ) -> Result<OauthStartBundle> {
-    match oauth_family_for_provider(providers, provider_id) {
+    let provider_id = providers
+        .provider(provider_id)
+        .map(|provider| provider.id.clone())
+        .unwrap_or_else(|| canonical_provider_id(provider_id));
+    match oauth_family_for_provider(providers, &provider_id) {
         Some(OauthFamily::OpenAi) => {
             let pkce = generate_openai_pkce();
             let config = OpenAIOAuthConfig {
@@ -96,7 +100,11 @@ pub(crate) fn oauth_login_bundle_for_provider(
     provider_id: &str,
     redirect_uri: &str,
 ) -> Result<OauthStartBundle> {
-    match oauth_family_for_provider(providers, provider_id) {
+    let provider_id = providers
+        .provider(provider_id)
+        .map(|provider| provider.id.clone())
+        .unwrap_or_else(|| canonical_provider_id(provider_id));
+    match oauth_family_for_provider(providers, &provider_id) {
         Some(OauthFamily::OpenAi) => {
             let pkce = generate_openai_pkce();
             let config = OpenAIOAuthConfig {

@@ -1,0 +1,115 @@
+{
+  "id": "modal-focus-race",
+  "title": "Core modal focus and keyboard containment",
+  "focus": "New agent, Create Project, and Switch workspace modal open flows with keyboard focus movement and Tab containment.",
+  "severityTarget": "P1 keyboard user blocked by focus remaining behind an active modal or escaping the modal while it is open.",
+  "primaryRoutes": ["workspace", "new-agent-modal", "connect-project-modal", "switch-workspace-modal"],
+  "defaultIterations": 9,
+  "defaultSteps": 3,
+  "setup": [
+    {
+      "id": "setup-open-workspace",
+      "action": "open-workspace",
+      "kind": "ui",
+      "target": "workspace",
+      "coverage": ["route:workspace", "state:daemon.connected", "state:session.idle"]
+    }
+  ],
+  "actions": [
+    {
+      "id": "open-new-agent",
+      "kind": "ui",
+      "target": "workspace.new-agent",
+      "weight": 8,
+      "maxPerCase": 1,
+      "blocks": ["resource:modal.open"],
+      "produces": ["resource:modal.open", "resource:modal.new-agent"],
+      "coverage": ["route:new-agent-modal"]
+    },
+    {
+      "id": "open-connect-project",
+      "kind": "ui",
+      "target": "workspace.connect-project",
+      "weight": 8,
+      "maxPerCase": 1,
+      "blocks": ["resource:modal.open"],
+      "produces": ["resource:modal.open", "resource:modal.create-project"],
+      "coverage": ["route:connect-project-modal", "control:workspace.connect-project"]
+    },
+    {
+      "id": "open-workspace-picker",
+      "kind": "ui",
+      "target": "workspace.switch-workspace",
+      "weight": 8,
+      "maxPerCase": 1,
+      "blocks": ["resource:modal.open"],
+      "produces": ["resource:modal.open", "resource:modal.switch-workspace"],
+      "coverage": ["route:switch-workspace-modal", "control:workspace.switch-workspace"]
+    },
+    {
+      "id": "assert-modal-initial-focus",
+      "kind": "assertion",
+      "target": "modal.initial-focus",
+      "weight": 12,
+      "maxPerCase": 1,
+      "requires": ["resource:modal.new-agent"],
+      "params": { "name": "New agent" },
+      "coverage": ["control:modal.initial-focus", "invariant:modal-initial-focus"]
+    },
+    {
+      "id": "assert-modal-initial-focus",
+      "kind": "assertion",
+      "target": "modal.initial-focus",
+      "weight": 12,
+      "maxPerCase": 1,
+      "requires": ["resource:modal.create-project"],
+      "params": { "name": "Create Project" },
+      "coverage": ["control:modal.initial-focus", "invariant:modal-initial-focus"]
+    },
+    {
+      "id": "assert-modal-initial-focus",
+      "kind": "assertion",
+      "target": "modal.initial-focus",
+      "weight": 12,
+      "maxPerCase": 1,
+      "requires": ["resource:modal.switch-workspace"],
+      "params": { "name": "Switch workspace" },
+      "coverage": ["control:modal.initial-focus", "invariant:modal-initial-focus"]
+    },
+    {
+      "id": "assert-modal-focus-trap",
+      "kind": "assertion",
+      "target": "modal.focus-trap",
+      "weight": 12,
+      "maxPerCase": 1,
+      "requires": ["resource:modal.new-agent"],
+      "params": { "name": "New agent", "tabs": 12 },
+      "coverage": ["control:modal.focus-trap", "invariant:modal-focus-trapped"]
+    },
+    {
+      "id": "assert-modal-focus-trap",
+      "kind": "assertion",
+      "target": "modal.focus-trap",
+      "weight": 12,
+      "maxPerCase": 1,
+      "requires": ["resource:modal.create-project"],
+      "params": { "name": "Create Project", "tabs": 16 },
+      "coverage": ["control:modal.focus-trap", "invariant:modal-focus-trapped"]
+    },
+    {
+      "id": "assert-modal-focus-trap",
+      "kind": "assertion",
+      "target": "modal.focus-trap",
+      "weight": 12,
+      "maxPerCase": 1,
+      "requires": ["resource:modal.switch-workspace"],
+      "params": { "name": "Switch workspace", "tabs": 16 },
+      "coverage": ["control:modal.focus-trap", "invariant:modal-focus-trapped"]
+    }
+  ],
+  "invariants": [
+    "app-no-crash",
+    "modal-initial-focus",
+    "modal-focus-trapped"
+  ]
+}

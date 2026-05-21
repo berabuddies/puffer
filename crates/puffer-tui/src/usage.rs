@@ -259,6 +259,11 @@ impl UsageOverlay {
             summary,
         })
     }
+
+    #[cfg(test)]
+    pub(crate) fn scroll_for_test(&self) -> u16 {
+        self.snapshot().scroll
+    }
 }
 
 impl PartialEq for UsageOverlay {

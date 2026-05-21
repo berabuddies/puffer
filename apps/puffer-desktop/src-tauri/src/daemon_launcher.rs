@@ -84,6 +84,7 @@ impl DaemonLauncher {
     }
 
     /// Returns the handshake for the local daemon, starting it if needed.
+    #[allow(dead_code)]
     pub(crate) fn ensure_started(&self) -> Result<DaemonHandshake> {
         let mut guard = self.child.lock().unwrap();
         if let Some(existing) = guard.as_ref() {
@@ -221,6 +222,7 @@ check that sshd allows TCP forwarding and that the remote daemon really bound"
 
 // try_wait returns Result<Option<ExitStatus>> — a thin wrapper that ignores
 // ECHILD on platforms where the subprocess has already been reaped.
+#[allow(dead_code)]
 trait ChildExt {
     fn try_wait_unchecked(&self) -> Result<Option<std::process::ExitStatus>>;
 }
@@ -283,6 +285,7 @@ fn spawn_daemon(workspace_cwd: PathBuf) -> Result<DaemonChild> {
 /// The default workspace cwd — `$HOME` unless the caller overrides it via
 /// `PUFFER_WORKSPACE`. The daemon inherits this as its working directory so
 /// sessions live under `<cwd>/.puffer/` (falling back to `~/.puffer/`).
+#[allow(dead_code)]
 fn default_workspace_cwd() -> PathBuf {
     if let Ok(explicit) = std::env::var("PUFFER_WORKSPACE") {
         let path = PathBuf::from(explicit);
@@ -296,6 +299,7 @@ fn default_workspace_cwd() -> PathBuf {
     PathBuf::from(".")
 }
 
+#[allow(dead_code)]
 fn dirs_home() -> Option<PathBuf> {
     // Avoid pulling in the `dirs` crate just for this — `$HOME` on Unix,
     // `%USERPROFILE%` on Windows cover the common cases.

@@ -3,6 +3,8 @@ use crate::codex::codex_user_agent;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod responses_include;
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -368,11 +370,16 @@ fn build_request_to_path<T: Serialize>(
         }
         url = parsed.to_string();
     }
+    let mut body = serde_json::to_value(request)?;
+    if normalized_path.ends_with("/responses") {
+        responses_include::normalize_responses_include(&mut body);
+    }
+
     Ok(BuiltOpenAIRequest {
         method: "POST",
         url,
         headers,
-        body: serde_json::to_string(request)?,
+        body: serde_json::to_string(&body)?,
     })
 }
 

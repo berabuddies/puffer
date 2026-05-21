@@ -4,7 +4,6 @@ use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
 use puffer_provider_registry::{AuthStore, ProviderDescriptor, ProviderRegistry};
 use puffer_resources::{LoadedItem, LoadedResources, PromptTemplate, SourceInfo, SourceKind};
 use puffer_session_store::SessionStore;
-use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 use tempfile::tempdir;
@@ -42,23 +41,13 @@ pub(super) fn lock_puffer_home() -> MutexGuard<'static, ()> {
 }
 
 pub(super) struct ScopedPufferHome {
-    old_home: Option<OsString>,
+    _override: puffer_config::PufferHomeOverride,
 }
 
 impl ScopedPufferHome {
     pub(super) fn set(path: &std::path::Path) -> Self {
-        let old_home = std::env::var_os("PUFFER_HOME");
-        std::env::set_var("PUFFER_HOME", path);
-        Self { old_home }
-    }
-}
-
-impl Drop for ScopedPufferHome {
-    fn drop(&mut self) {
-        if let Some(value) = self.old_home.take() {
-            std::env::set_var("PUFFER_HOME", value);
-        } else {
-            std::env::remove_var("PUFFER_HOME");
+        Self {
+            _override: puffer_config::set_puffer_home_override(path),
         }
     }
 }

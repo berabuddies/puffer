@@ -5,6 +5,9 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+const REQUIRE_TMUX_ENV: &str = "PUFFER_REQUIRE_TMUX_TESTS";
+const REQUIRE_TMUX_ENV_LEGACY: &str = "PUFFER_REQUIRE_TMUX";
+
 /// Describes tmux availability and optional version metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TmuxInfo {
@@ -24,6 +27,23 @@ pub fn tmux_available() -> bool {
     detect_tmux().available
 }
 
+/// Returns true when a tmux-backed test may continue, or skips with a clear gate.
+pub fn require_tmux_or_skip(test_name: &str) -> bool {
+    let info = detect_tmux();
+    if info.available {
+        return true;
+    }
+
+    let message = format!(
+        "tmux is not available; `{test_name}` did not exercise the TUI. Install tmux or unset {REQUIRE_TMUX_ENV} to allow local skips."
+    );
+    if require_tmux_tests() {
+        panic!("{message}");
+    }
+    eprintln!("skipping `{test_name}`: {message}");
+    false
+}
+
 /// Probes the local system for tmux and captures its version when available.
 pub fn detect_tmux() -> TmuxInfo {
     match run_command_capture("tmux", &["-V"], None) {
@@ -36,6 +56,27 @@ pub fn detect_tmux() -> TmuxInfo {
             version: None,
         },
     }
+}
+
+fn require_tmux_tests() -> bool {
+    [REQUIRE_TMUX_ENV, REQUIRE_TMUX_ENV_LEGACY]
+        .iter()
+        .any(|name| {
+            std::env::var(name)
+                .map(|value| tmux_require_env_value(Some(&value)))
+                .unwrap_or(false)
+        })
+}
+
+fn tmux_require_env_value(value: Option<&str>) -> bool {
+    value
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 /// Starts a detached tmux session that runs the provided program and arguments.
@@ -120,17 +161,53 @@ pub fn capture_tmux_visible_pane(session: &TmuxSession) -> Result<String> {
 
 /// Sends tmux key presses to the target session pane.
 pub fn send_tmux_keys(session: &TmuxSession, keys: &[&str]) -> Result<()> {
-    let mut args = vec!["send-keys", "-t", session.name.as_str()];
-    args.extend(keys.iter().copied());
-    let output = run_tmux_command(session, &args)?;
-    if output.status_code != 0 {
-        return Err(anyhow!(
-            "failed to send tmux keys to {}: {}",
-            session.name,
-            output.stderr.trim()
-        ));
+    for key in keys {
+        if tmux_key_name(key) {
+            let output =
+                run_tmux_command(session, &["send-keys", "-t", session.name.as_str(), key])?;
+            if output.status_code != 0 {
+                return Err(anyhow!(
+                    "failed to send tmux keys to {}: {}",
+                    session.name,
+                    output.stderr.trim()
+                ));
+            }
+            continue;
+        }
+
+        let output = run_tmux_command(
+            session,
+            &["send-keys", "-l", "-t", session.name.as_str(), key],
+        )?;
+        if output.status_code != 0 {
+            return Err(anyhow!(
+                "failed to send tmux keys to {}: {}",
+                session.name,
+                output.stderr.trim()
+            ));
+        }
     }
     Ok(())
+}
+
+fn tmux_key_name(key: &str) -> bool {
+    matches!(
+        key,
+        "Enter"
+            | "Escape"
+            | "Esc"
+            | "BSpace"
+            | "Backspace"
+            | "Delete"
+            | "Up"
+            | "Down"
+            | "Left"
+            | "Right"
+            | "Tab"
+            | "Space"
+    ) || key.starts_with("C-")
+        || key.starts_with("M-")
+        || key.starts_with("S-")
 }
 
 /// Waits until the tmux pane contains the requested text or the timeout expires.
@@ -139,16 +216,35 @@ pub fn wait_for_tmux_text(
     needle: &str,
     timeout: Duration,
 ) -> Result<String> {
+    wait_for_tmux_capture(session, needle, timeout, capture_tmux_pane)
+}
+
+/// Waits until the visible tmux pane contains the requested text.
+pub fn wait_for_tmux_visible_text(
+    session: &TmuxSession,
+    needle: &str,
+    timeout: Duration,
+) -> Result<String> {
+    wait_for_tmux_capture(session, needle, timeout, capture_tmux_visible_pane)
+}
+
+fn wait_for_tmux_capture(
+    session: &TmuxSession,
+    needle: &str,
+    timeout: Duration,
+    capture: fn(&TmuxSession) -> Result<String>,
+) -> Result<String> {
     let deadline = Instant::now() + timeout;
     loop {
-        let capture = capture_tmux_pane(session)?;
-        if capture.contains(needle) {
-            return Ok(capture);
+        let pane = capture(session)?;
+        if pane.contains(needle) {
+            return Ok(pane);
         }
         if Instant::now() >= deadline {
             return Err(anyhow!(
-                "timed out waiting for `{needle}` in tmux session {}",
-                session.name
+                "timed out waiting for `{needle}` in tmux session {}\nlast pane capture:\n{}",
+                session.name,
+                pane
             ));
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -206,7 +302,7 @@ mod tests {
 
     #[test]
     fn tmux_command_round_trips_output_when_available() {
-        if !tmux_available() {
+        if !require_tmux_or_skip("tmux_command_round_trips_output_when_available") {
             return;
         }
         let session =
@@ -218,7 +314,7 @@ mod tests {
 
     #[test]
     fn tmux_command_respects_requested_size() {
-        if !tmux_available() {
+        if !require_tmux_or_skip("tmux_command_respects_requested_size") {
             return;
         }
         let session = start_tmux_command_with_size(
@@ -241,5 +337,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(output.stdout.trim(), "80x24");
+    }
+
+    #[test]
+    fn tmux_require_env_values_are_explicit() {
+        assert!(!tmux_require_env_value(None));
+        assert!(!tmux_require_env_value(Some("")));
+        assert!(!tmux_require_env_value(Some("0")));
+        assert!(!tmux_require_env_value(Some("false")));
+        assert!(tmux_require_env_value(Some("1")));
+        assert!(tmux_require_env_value(Some("true")));
+        assert!(tmux_require_env_value(Some("YES")));
+        assert!(tmux_require_env_value(Some(" on ")));
     }
 }

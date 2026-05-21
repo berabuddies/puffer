@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Puffer interaction fuzz run",
+  "type": "object",
+  "required": ["version", "manifestVersion", "generatedAt", "cases", "summary"],
+  "properties": {
+    "version": { "type": "integer" },
+    "manifestVersion": { "type": "integer" },
+    "generatedAt": { "type": "string" },
+    "options": { "type": "object" },
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["caseId", "seedId", "steps", "coverage"],
+        "properties": {
+          "caseId": { "type": "string" },
+          "seedId": { "type": "string" },
+          "title": { "type": "string" },
+          "rngSeed": { "type": "string" },
+          "focus": { "type": "string" },
+          "severityTarget": { "type": "string" },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["action", "kind", "target", "phase"],
+              "properties": {
+                "id": { "type": "string" },
+                "action": { "type": "string" },
+                "kind": { "type": "string" },
+                "target": { "type": "string" },
+                "phase": { "type": "string" },
+                "params": { "type": "object" },
+                "coverage": { "type": "array", "items": { "type": "string" } },
+                "requires": { "type": "array", "items": { "type": "string" } },
+                "produces": { "type": "array", "items": { "type": "string" } },
+                "expectedDaemon": { "type": ["string", "null"] },
+                "note": { "type": ["string", "null"] }
+              }
+            }
+          },
+          "coverage": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      }
+    },
+    "summary": { "type": "object" }
+  }
+}

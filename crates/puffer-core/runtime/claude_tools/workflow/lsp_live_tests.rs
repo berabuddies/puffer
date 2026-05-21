@@ -252,7 +252,9 @@ fn execute_lsp_persists_publish_diagnostics_notifications() {
     );
     std::env::set_var("PUFFER_LSP_MOCK_DIAGNOSTICS", "1");
     let resources = test_resources();
-    let file_uri = url::Url::from_file_path(&source).unwrap().to_string();
+    let file_uri = url::Url::from_file_path(fs::canonicalize(&source).unwrap())
+        .unwrap()
+        .to_string();
 
     let _ = execute_lsp(
         &resources,

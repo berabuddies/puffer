@@ -35,8 +35,9 @@ use puffer_config::{
     ensure_workspace_dirs, load_config, save_user_config, ConfigPaths, PufferConfig,
 };
 use puffer_core::{
-    apply_model_preferences, execute_user_turn_streaming_with_permissions_and_cancel,
-    with_user_question_prompt_handler, AppState, CancelToken, MessageRole, PermissionPromptAction,
+    default_effort_level, execute_user_turn_streaming_with_permissions_and_cancel,
+    provider_preference_family, supported_effort_levels, with_user_question_prompt_handler,
+    AppState, CancelToken, MessageRole, ModelPreferenceFamily, PermissionPromptAction,
     PermissionPromptRequest, TurnStreamEvent, UserQuestionPromptRequest,
     UserQuestionPromptResponse,
 };
@@ -44,7 +45,9 @@ use puffer_provider_openai::{
     exchange_authorization_code as exchange_openai_authorization_code,
     parse_authorization_input as parse_openai_authorization_input,
 };
-use puffer_provider_registry::{AuthStore, ProviderRegistry, StoredCredential};
+use puffer_provider_registry::{
+    AuthStore, ModelDescriptor, ProviderDescriptor, ProviderRegistry, StoredCredential,
+};
 use puffer_resources::{load_resources, LoadedResources, McpServerSpec};
 use puffer_session_store::{MessageActor, SessionStore, TranscriptEvent};
 use puffer_transport_anthropic::{
@@ -59,8 +62,9 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufReader, Read};
 use std::net::SocketAddr;
+use std::path::Path;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{broadcast, Mutex as AsyncMutex};
@@ -76,14 +80,16 @@ use crate::auth_provider::{
 use crate::daemon_browser::BrowserRegistry;
 use crate::daemon_fs_watch::FsWatchRegistry;
 use crate::daemon_pty::PtyRegistry;
+use crate::daemon_turn_routing::persist_explicit_turn_routing;
 use crate::daemon_ui_state::{
-    load_file_tabs_state, load_pin_state, set_file_tabs_state, set_pin_state, DesktopFileTab,
-    DesktopFileTabsState, DesktopPinState,
+    load_file_tabs_state, load_pin_state, load_session_routing_state, set_file_tabs_state,
+    set_pin_state, set_session_routing_state, DesktopFileTab, DesktopFileTabsState,
+    DesktopPinState, DesktopSessionRouting,
 };
 use crate::desktop_api;
 use crate::desktop_api_types::{
     ExternalCredentialDto, FolderGroupDto, McpServerDto, ModelDescriptorDto, RepoActionResultDto,
-    RepoStatusDto, SessionDetailDto, SettingsSnapshotDto,
+    RepoStatusDto, SessionDetailDto, SettingsSnapshotDto, ThinkingOptionDto,
 };
 
 const PROTOCOL_VERSION: &str = "1";
@@ -283,8 +289,15 @@ impl DaemonState {
     }
 }
 
+#[derive(Clone)]
 struct TurnHandle {
+    session_id: String,
+    session_uuid: Uuid,
+    channel: String,
+    message: String,
     cancel: CancelToken,
+    cancel_reported: Arc<AtomicBool>,
+    user_prompt_persisted: Arc<AtomicBool>,
     pending: Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<PermissionPromptAction>>>>,
     pending_questions:
         Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<UserQuestionPromptResponse>>>>,
@@ -363,6 +376,14 @@ fn is_replay_channel(event: &str) -> bool {
 
 impl DaemonState {
     fn build_runtime_inputs(&self) -> Result<RuntimeInputs> {
+        self.build_runtime_inputs_with_discovery(true)
+    }
+
+    fn build_runtime_inputs_without_discovery(&self) -> Result<RuntimeInputs> {
+        self.build_runtime_inputs_with_discovery(false)
+    }
+
+    fn build_runtime_inputs_with_discovery(&self, discover_all: bool) -> Result<RuntimeInputs> {
         let auth_path = self.paths.user_config_dir.join("auth.json");
         let auth_store = AuthStore::load(&auth_path)?;
         let resources = load_resources(&self.paths, &puffer_runner_local::LocalToolRunner::new())?;
@@ -393,7 +414,9 @@ impl DaemonState {
                     .collect::<IndexMap<_, _>>(),
             );
         }
-        let _ = providers.discover_and_merge_all(&auth_store);
+        if discover_all {
+            let _ = providers.discover_and_merge_all(&auth_store);
+        }
         let session_store = SessionStore::from_paths(&self.paths)?;
         Ok(RuntimeInputs {
             resources,
@@ -672,7 +695,11 @@ async fn dispatch_request(
         "update_config" => respond!(detached!(|s, p| handle_update_config(&s, &p))),
         "create_pull_request" => respond!(handle_create_pull_request(&state, &params)),
         "merge_pull_request" => respond!(handle_merge_pull_request(&state, &params)),
-        "create_session" => respond!(handle_create_session(&state, &params)),
+        "create_session" => {
+            // Provider-specific sessions resolve runtime inputs, which may run
+            // model discovery through reqwest::blocking; keep that off tokio.
+            respond!(detached!(|s, p| handle_create_session(&s, &p)))
+        }
         "default_workspace" => respond!(handle_default_workspace(&state)),
         "git_clone" => respond!(handle_git_clone(&state, &params)),
         "pty_list" => respond!(handle_pty_list(&state, &params)),
@@ -780,8 +807,40 @@ async fn dispatch_request(
 
 fn handle_list_grouped_sessions(state: &DaemonState) -> Result<Value> {
     let session_store = SessionStore::from_paths(&state.paths)?;
-    let groups: Vec<FolderGroupDto> = desktop_api::list_grouped_sessions(&session_store)?;
+    let mut groups: Vec<FolderGroupDto> = desktop_api::list_grouped_sessions(&session_store)?;
+    apply_session_routing_to_groups(state, &mut groups)?;
     Ok(serde_json::to_value(groups)?)
+}
+
+fn apply_session_routing_to_groups(
+    state: &DaemonState,
+    groups: &mut [FolderGroupDto],
+) -> Result<()> {
+    for group in groups {
+        for session in &mut group.sessions {
+            match load_session_routing_state(&state.paths.user_config_dir, &session.session_id) {
+                Ok(routing) => {
+                    session.provider_id = routing.provider_id;
+                    session.model_id = routing.model_id;
+                }
+                Err(_) => {
+                    session.provider_id = None;
+                    session.model_id = None;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_session_routing_to_detail(
+    state: &DaemonState,
+    detail: &mut SessionDetailDto,
+) -> Result<()> {
+    let routing = load_session_routing_state(&state.paths.user_config_dir, &detail.session_id)?;
+    detail.provider_id = routing.provider_id;
+    detail.model_id = routing.model_id;
+    Ok(())
 }
 
 fn handle_load_desktop_pins(state: &DaemonState) -> Result<Value> {
@@ -885,7 +944,9 @@ fn handle_load_session_detail(state: &DaemonState, params: &Value) -> Result<Val
         .and_then(|v| v.as_str())
         .context("missing sessionId")?;
     let session_store = SessionStore::from_paths(&state.paths)?;
-    let detail: SessionDetailDto = desktop_api::load_session_detail(&session_store, session_id)?;
+    let mut detail: SessionDetailDto =
+        desktop_api::load_session_detail(&session_store, session_id)?;
+    apply_session_routing_to_detail(state, &mut detail)?;
     Ok(serde_json::to_value(detail)?)
 }
 
@@ -914,7 +975,9 @@ fn handle_rename_session(state: &DaemonState, params: &Value) -> Result<Value> {
             "sessionId": session_id,
         }),
     });
-    let detail: SessionDetailDto = desktop_api::load_session_detail(&session_store, session_id)?;
+    let mut detail: SessionDetailDto =
+        desktop_api::load_session_detail(&session_store, session_id)?;
+    apply_session_routing_to_detail(state, &mut detail)?;
     Ok(serde_json::to_value(detail)?)
 }
 
@@ -972,11 +1035,12 @@ fn handle_workflow_run_show(state: &DaemonState, params: &Value) -> Result<Value
 /// the refreshed settings snapshot so the UI can re-render without a
 /// second round-trip.
 fn handle_login_with_api_key(state: &DaemonState, params: &Value) -> Result<Value> {
-    let provider_id = params
+    let requested_provider_id = params
         .get("providerId")
         .or_else(|| params.get("provider_id"))
         .and_then(|v| v.as_str())
         .context("missing providerId")?;
+    let provider_id = canonical_desktop_provider_id(requested_provider_id);
     let api_key = params
         .get("apiKey")
         .or_else(|| params.get("api_key"))
@@ -989,14 +1053,14 @@ fn handle_login_with_api_key(state: &DaemonState, params: &Value) -> Result<Valu
         &mut inputs.auth_store,
         &inputs.providers,
         &auth_path,
-        provider_id,
+        &provider_id,
         api_key,
     )?;
     let _ = desktop_api::ensure_default_routing(
         &state.paths,
         &inputs.providers,
         &inputs.auth_store,
-        provider_id,
+        &provider_id,
     );
     reload_daemon_config(state)?;
     // Rebuild so provider discovery can pick up the newly-stored key.
@@ -1015,17 +1079,18 @@ fn handle_login_with_api_key(state: &DaemonState, params: &Value) -> Result<Valu
 
 /// Runs the provider OAuth flow from the daemon host and returns a fresh snapshot.
 fn handle_login_with_oauth(state: &DaemonState, params: &Value) -> Result<Value> {
-    let provider_id = params
+    let requested_provider_id = params
         .get("providerId")
         .or_else(|| params.get("provider_id"))
         .and_then(|v| v.as_str())
         .context("missing providerId")?;
+    let provider_id = canonical_desktop_provider_id(requested_provider_id);
 
     let mut inputs = state.build_runtime_inputs()?;
     let auth_path = state.paths.user_config_dir.join("auth.json");
     let listener = crate::authflow::CallbackListener::bind_localhost("/callback")?;
     let bundle =
-        oauth_login_bundle_for_provider(&inputs.providers, provider_id, listener.redirect_uri())?;
+        oauth_login_bundle_for_provider(&inputs.providers, &provider_id, listener.redirect_uri())?;
     let launch_url = bundle
         .automatic_authorization_url
         .as_deref()
@@ -1037,7 +1102,7 @@ fn handle_login_with_oauth(state: &DaemonState, params: &Value) -> Result<Value>
         .wait_for_callback_url(Duration::from_secs(180))?
         .ok_or_else(|| anyhow::anyhow!("timed out waiting for OAuth callback"))?;
 
-    match oauth_family_for_provider(&inputs.providers, provider_id) {
+    match oauth_family_for_provider(&inputs.providers, &provider_id) {
         Some(OauthFamily::OpenAi) => {
             let (code, parsed_state) = parse_openai_authorization_input(&callback);
             let code = code
@@ -1073,7 +1138,7 @@ fn handle_login_with_oauth(state: &DaemonState, params: &Value) -> Result<Value>
                 Some(&redirect_uri),
                 Some(ANTHROPIC_API_BASE_URL),
             )?;
-            store_anthropic_credential(&mut inputs.auth_store, provider_id, credential)?;
+            store_anthropic_credential(&mut inputs.auth_store, &provider_id, credential)?;
         }
         None => anyhow::bail!("oauth login is not implemented for {provider_id}"),
     }
@@ -1083,7 +1148,7 @@ fn handle_login_with_oauth(state: &DaemonState, params: &Value) -> Result<Value>
         &state.paths,
         &inputs.providers,
         &inputs.auth_store,
-        provider_id,
+        &provider_id,
     );
     reload_daemon_config(state)?;
     let fresh = state.build_runtime_inputs()?;
@@ -1109,11 +1174,12 @@ fn handle_list_external_credentials(state: &DaemonState) -> Result<Value> {
 
 /// Imports a discovered external credential and returns a fresh settings snapshot.
 fn handle_import_external_credential(state: &DaemonState, params: &Value) -> Result<Value> {
-    let provider_id = params
+    let requested_provider_id = params
         .get("providerId")
         .or_else(|| params.get("provider_id"))
         .and_then(|v| v.as_str())
         .context("missing providerId")?;
+    let provider_id = canonical_desktop_provider_id(requested_provider_id);
     let source = params
         .get("source")
         .and_then(|v| v.as_str())
@@ -1126,14 +1192,14 @@ fn handle_import_external_credential(state: &DaemonState, params: &Value) -> Res
         &mut inputs.auth_store,
         &inputs.providers,
         &auth_path,
-        provider_id,
+        &provider_id,
         source,
     )?;
     let _ = desktop_api::ensure_default_routing(
         &state.paths,
         &inputs.providers,
         &inputs.auth_store,
-        provider_id,
+        &provider_id,
     );
     reload_daemon_config(state)?;
     let fresh = state.build_runtime_inputs()?;
@@ -1158,14 +1224,15 @@ fn reload_daemon_config(state: &DaemonState) -> Result<()> {
 /// Removes stored credentials for a provider and returns the refreshed
 /// settings snapshot.
 fn handle_logout_provider(state: &DaemonState, params: &Value) -> Result<Value> {
-    let provider_id = params
+    let requested_provider_id = params
         .get("providerId")
         .or_else(|| params.get("provider_id"))
         .and_then(|v| v.as_str())
         .context("missing providerId")?;
+    let provider_id = canonical_desktop_provider_id(requested_provider_id);
     let mut inputs = state.build_runtime_inputs()?;
     let auth_path = state.paths.user_config_dir.join("auth.json");
-    desktop_api::logout_provider(&mut inputs.auth_store, &auth_path, provider_id)?;
+    desktop_api::logout_provider(&mut inputs.auth_store, &auth_path, &provider_id)?;
     let fresh = state.build_runtime_inputs()?;
     let config = state.config.lock().unwrap().clone();
     let snapshot: SettingsSnapshotDto = desktop_api::load_settings_snapshot(
@@ -1295,32 +1362,82 @@ fn mcp_server_dtos(resources: &LoadedResources) -> Vec<McpServerDto> {
 /// Returns the full model list for one provider. The snapshot only carries
 /// a count; the Settings → Models pane calls this to populate the picker.
 fn handle_list_provider_models(state: &DaemonState, params: &Value) -> Result<Value> {
-    let provider_id = params
+    let requested_provider_id = params
         .get("providerId")
         .or_else(|| params.get("provider_id"))
         .and_then(|v| v.as_str())
         .context("missing providerId")?;
-    let inputs = state.build_runtime_inputs()?;
+    let provider_id = canonical_desktop_provider_id(requested_provider_id);
+    let mut inputs = state.build_runtime_inputs_without_discovery()?;
+    inputs
+        .providers
+        .discover_and_merge_provider(&provider_id, &inputs.auth_store)?;
     let entry = inputs
         .providers
         .provider_entries()
         .find(|p| p.descriptor.id == provider_id)
         .with_context(|| format!("unknown provider `{provider_id}`"))?;
+    let family = provider_preference_family(&inputs.providers, &provider_id);
     let models: Vec<ModelDescriptorDto> = entry
         .descriptor
         .models
         .iter()
-        .map(|m| ModelDescriptorDto {
-            id: m.id.clone(),
-            display_name: m.display_name.clone(),
-            provider: m.provider.clone(),
-            api: m.api.clone(),
-            context_window: m.context_window,
-            max_output_tokens: m.max_output_tokens,
-            supports_reasoning: m.supports_reasoning,
-        })
+        .map(|model| model_descriptor_dto(family, model))
         .collect();
     Ok(json!({ "providerId": provider_id, "models": models }))
+}
+
+fn model_descriptor_dto(
+    family: ModelPreferenceFamily,
+    model: &ModelDescriptor,
+) -> ModelDescriptorDto {
+    let thinking_options = thinking_options_for_model(family, model);
+    let default_thinking_option_id = thinking_options
+        .iter()
+        .find(|option| option.is_default)
+        .map(|option| option.id.clone());
+    ModelDescriptorDto {
+        id: model.id.clone(),
+        display_name: model.display_name.clone(),
+        provider: model.provider.clone(),
+        api: model.api.clone(),
+        context_window: model.context_window,
+        max_output_tokens: model.max_output_tokens,
+        supports_reasoning: model.supports_reasoning,
+        thinking_options,
+        default_thinking_option_id,
+    }
+}
+
+fn thinking_options_for_model(
+    family: ModelPreferenceFamily,
+    model: &ModelDescriptor,
+) -> Vec<ThinkingOptionDto> {
+    if !model.supports_reasoning {
+        return Vec::new();
+    }
+    let default_effort = default_effort_level(family);
+    supported_effort_levels(family)
+        .iter()
+        .map(|effort| ThinkingOptionDto {
+            id: (*effort).to_string(),
+            label: effort_label(effort).to_string(),
+            description: format!("Use {effort} reasoning effort for this turn."),
+            is_default: *effort == default_effort,
+        })
+        .collect()
+}
+
+fn effort_label(effort: &str) -> &'static str {
+    match effort {
+        "minimal" => "Minimal",
+        "low" => "Low",
+        "medium" => "Medium",
+        "high" => "High",
+        "xhigh" => "X-high",
+        "max" => "Max",
+        _ => "Custom",
+    }
 }
 
 /// Workspace permissions are stored as a TOML map of `tool_id → policy`
@@ -1495,6 +1612,12 @@ fn handle_create_session(state: &DaemonState, params: &Value) -> Result<Value> {
         .and_then(|v| v.as_str())
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| state.cwd.clone());
+    let routing = resolve_create_session_routing(
+        state,
+        optional_trimmed_value(params, &["providerId", "provider_id"]),
+        optional_trimmed_value(params, &["modelId", "model_id"]),
+    )?;
+    ensure_session_cwd(&cwd)?;
     let display_name = params
         .get("displayName")
         .or_else(|| params.get("display_name"))
@@ -1506,6 +1629,13 @@ fn handle_create_session(state: &DaemonState, params: &Value) -> Result<Value> {
     let session = session_store.create_session(cwd)?;
     if let Some(display_name) = display_name {
         session_store.set_display_name(session.id, Some(display_name))?;
+    }
+    if routing.provider_id.is_some() || routing.model_id.is_some() {
+        set_session_routing_state(
+            &state.paths.user_config_dir,
+            &session.id.to_string(),
+            routing.clone(),
+        )?;
     }
     let session = session_store.load_session(session.id)?.metadata;
     // Broadcast so connected UIs can refresh their workspace board without
@@ -1525,7 +1655,130 @@ fn handle_create_session(state: &DaemonState, params: &Value) -> Result<Value> {
         "createdAtMs": session.created_at_ms,
         "updatedAtMs": session.updated_at_ms,
         "slug": session.slug,
+        "providerId": routing.provider_id,
+        "modelId": routing.model_id,
     }))
+}
+
+fn ensure_session_cwd(cwd: &Path) -> Result<()> {
+    if cwd.exists() {
+        if cwd.is_dir() {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "session cwd exists but is not a directory: {}",
+            cwd.display()
+        );
+    }
+    std::fs::create_dir_all(cwd)
+        .with_context(|| format!("failed to create session cwd {}", cwd.display()))
+}
+
+fn resolve_create_session_routing(
+    state: &DaemonState,
+    provider_id: Option<String>,
+    model_id: Option<String>,
+) -> Result<DesktopSessionRouting> {
+    if provider_id.is_none() && model_id.is_none() {
+        return Ok(DesktopSessionRouting::default());
+    }
+
+    let inputs = state.build_runtime_inputs()?;
+    if let Some(provider_id) = provider_id {
+        let provider_id = canonical_desktop_provider_id(&provider_id);
+        let provider = inputs
+            .providers
+            .provider(&provider_id)
+            .with_context(|| format!("unknown provider `{provider_id}`"))?;
+        let model_id = resolve_create_session_model_id(
+            &state.config.lock().unwrap(),
+            provider,
+            model_id.as_deref(),
+        )?;
+        return Ok(DesktopSessionRouting {
+            provider_id: Some(provider_id),
+            model_id,
+        });
+    }
+
+    let Some(requested_model) = model_id else {
+        return Ok(DesktopSessionRouting::default());
+    };
+    let (provider_id, model_id) = resolve_turn_model(&inputs.providers, &requested_model)?;
+    Ok(DesktopSessionRouting {
+        provider_id: Some(provider_id),
+        model_id: Some(model_id),
+    })
+}
+
+fn resolve_create_session_model_id(
+    config: &PufferConfig,
+    provider: &ProviderDescriptor,
+    requested_model: Option<&str>,
+) -> Result<Option<String>> {
+    let selected = requested_model
+        .and_then(|model| normalize_provider_model_id(provider, model))
+        .or_else(|| {
+            config
+                .default_model
+                .as_deref()
+                .filter(|_| {
+                    config
+                        .default_provider
+                        .as_deref()
+                        .is_some_and(|default| desktop_provider_ids_match(default, &provider.id))
+                })
+                .and_then(|model| normalize_provider_model_id(provider, model))
+        })
+        .or_else(|| provider.models.first().map(|model| model.id.clone()));
+
+    let Some(model_id) = selected else {
+        return Ok(None);
+    };
+    if provider.models.iter().any(|model| model.id == model_id) {
+        return Ok(Some(model_id));
+    }
+    anyhow::bail!("unknown model `{model_id}` for provider `{}`", provider.id)
+}
+
+fn normalize_provider_model_id(provider: &ProviderDescriptor, model_id: &str) -> Option<String> {
+    let trimmed = model_id.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if provider.models.iter().any(|model| model.id == trimmed) {
+        return Some(trimmed.to_string());
+    }
+    if let Some((prefix, model)) = trimmed.split_once('/') {
+        let model = model.trim();
+        if model.is_empty() {
+            return None;
+        }
+        let prefix = canonical_desktop_provider_id(prefix);
+        let provider_id = canonical_desktop_provider_id(&provider.id);
+        if prefix != provider_id {
+            return None;
+        }
+        if provider
+            .models
+            .iter()
+            .any(|descriptor| descriptor.id == model)
+        {
+            return Some(model.to_string());
+        }
+        if desktop_provider_model_prefix_is_alias(&provider_id) {
+            return Some(model.to_string());
+        }
+        return Some(trimmed.to_string());
+    }
+    Some(trimmed.to_string())
+}
+
+fn desktop_provider_model_prefix_is_alias(provider_id: &str) -> bool {
+    matches!(
+        canonical_desktop_provider_id(provider_id).as_str(),
+        "anthropic" | "openai"
+    )
 }
 
 /// Reports the daemon's default workspace — the cwd it booted in, which is
@@ -1907,8 +2160,11 @@ fn handle_cancel_turn(state: &DaemonState, params: &Value) -> Result<Value> {
         .or_else(|| params.get("turn_id"))
         .and_then(|v| v.as_str())
         .context("missing turnId")?;
-    let mut turns = state.turns.lock().unwrap();
-    if let Some(handle) = turns.get_mut(turn_id) {
+    let handle = {
+        let turns = state.turns.lock().unwrap();
+        turns.get(turn_id).cloned()
+    };
+    if let Some(handle) = handle {
         handle.cancel.cancel();
         let mut pending = handle.pending.lock().unwrap();
         for (_, tx) in pending.drain() {
@@ -1921,8 +2177,65 @@ fn handle_cancel_turn(state: &DaemonState, params: &Value) -> Result<Value> {
                 annotations: serde_json::Map::new(),
             });
         }
+        report_cancelled_turn(
+            state,
+            handle.session_uuid,
+            &handle.session_id,
+            &handle.channel,
+            turn_id,
+            &handle.message,
+            &handle.cancel_reported,
+            &handle.user_prompt_persisted,
+        )?;
+        state.turns.lock().unwrap().remove(turn_id);
+        Ok(json!({"ok": true}))
+    } else {
+        Ok(json!({"ok": false, "error": "turn not found"}))
     }
-    Ok(json!({"ok": true}))
+}
+
+const CANCELLED_TURN_MESSAGE: &str = "Interrupted by user.";
+
+fn report_cancelled_turn(
+    state: &DaemonState,
+    session_uuid: Uuid,
+    session_id: &str,
+    channel: &str,
+    turn_id: &str,
+    message: &str,
+    cancel_reported: &AtomicBool,
+    user_prompt_persisted: &AtomicBool,
+) -> Result<bool> {
+    if cancel_reported.swap(true, Ordering::SeqCst) {
+        return Ok(false);
+    }
+    let session_store = SessionStore::from_paths(&state.paths)?;
+    if !user_prompt_persisted.swap(true, Ordering::SeqCst) {
+        session_store.append_event(
+            session_uuid,
+            TranscriptEvent::UserMessage {
+                text: message.to_string(),
+                actor: None,
+            },
+        )?;
+    }
+    session_store.append_event(
+        session_uuid,
+        TranscriptEvent::SystemMessage {
+            text: CANCELLED_TURN_MESSAGE.to_string(),
+            actor: None,
+        },
+    )?;
+    publish_turn_error_event(
+        state,
+        channel,
+        session_id,
+        turn_id,
+        CANCELLED_TURN_MESSAGE.to_string(),
+        None,
+        Some("cancelled"),
+    );
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -1942,13 +2255,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         .and_then(|v| v.as_str())
         .context("missing message")?
         .to_string();
-    let model_override = params
-        .get("modelOverride")
-        .or_else(|| params.get("model_override"))
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(str::to_string);
+    let turn_options = TurnRequestOptions::from_params(&params);
 
     // Parse cheap, non-tokio-touching things synchronously so we can fail
     // fast with a clean error. Anything that builds a runtime (i.e. the
@@ -1965,21 +2272,40 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         Mutex<HashMap<String, std::sync::mpsc::Sender<UserQuestionPromptResponse>>>,
     > = Arc::new(Mutex::new(HashMap::new()));
     let cancel = CancelToken::new();
+    let cancel_reported = Arc::new(AtomicBool::new(false));
+    let user_prompt_persisted = Arc::new(AtomicBool::new(false));
 
-    state.turns.lock().unwrap().insert(
-        turn_id.clone(),
-        TurnHandle {
-            cancel: cancel.clone(),
-            pending: pending.clone(),
-            pending_questions: pending_questions.clone(),
-        },
-    );
+    {
+        let mut turns = state.turns.lock().unwrap();
+        if let Some((existing_turn_id, _)) = turns
+            .iter()
+            .find(|(_, handle)| handle.session_uuid == session_uuid)
+        {
+            anyhow::bail!("session {session_id} already has an in-flight turn {existing_turn_id}");
+        }
+        turns.insert(
+            turn_id.clone(),
+            TurnHandle {
+                session_id: session_id.clone(),
+                session_uuid,
+                channel: channel.clone(),
+                message: message.clone(),
+                cancel: cancel.clone(),
+                cancel_reported: cancel_reported.clone(),
+                user_prompt_persisted: user_prompt_persisted.clone(),
+                pending: pending.clone(),
+                pending_questions: pending_questions.clone(),
+            },
+        );
+    }
 
     let state_for_thread = state.clone();
     let turn_id_thread = turn_id.clone();
     let turn_id_resp = turn_id.clone();
     let channel_thread = channel.clone();
     let next_req_id = state.next_request_id.clone();
+    let cancel_reported_thread = cancel_reported.clone();
+    let user_prompt_persisted_thread = user_prompt_persisted.clone();
 
     // Run the synchronous agent loop on a fresh OS thread, *completely
     // detached* from tokio. `ProviderRegistry::discover_and_merge_all` +
@@ -1990,7 +2316,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     let setup_state = state.clone();
     let message_for_thread = message.clone();
     let session_id_for_thread = session_id.clone();
-    let model_override_for_thread = model_override.clone();
+    let turn_options_for_thread = turn_options.clone();
     std::thread::spawn(move || {
         setup_state.publish_event(ServerEnvelope::Event {
             event: channel_thread.clone(),
@@ -2003,14 +2329,15 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         let mut inputs = match setup_state.build_runtime_inputs() {
             Ok(v) => v,
             Err(err) => {
-                setup_state.publish_event(ServerEnvelope::Event {
-                    event: channel_thread.clone(),
-                    payload: json!({
-                        "type": "turn-error",
-                        "turnId": turn_id_thread,
-                        "error": format!("build_runtime_inputs: {err:#}"),
-                    }),
-                });
+                publish_turn_error_event(
+                    &setup_state,
+                    &channel_thread,
+                    &session_id_for_thread,
+                    &turn_id_thread,
+                    format!("build_runtime_inputs: {err:#}"),
+                    None,
+                    None,
+                );
                 setup_state.turns.lock().unwrap().remove(&turn_id_thread);
                 return;
             }
@@ -2018,14 +2345,15 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         let record = match inputs.session_store.load_session(session_uuid) {
             Ok(v) => v,
             Err(err) => {
-                setup_state.publish_event(ServerEnvelope::Event {
-                    event: channel_thread.clone(),
-                    payload: json!({
-                        "type": "turn-error",
-                        "turnId": turn_id_thread,
-                        "error": format!("load_session: {err:#}"),
-                    }),
-                });
+                publish_turn_error_event(
+                    &setup_state,
+                    &channel_thread,
+                    &session_id_for_thread,
+                    &turn_id_thread,
+                    format!("load_session: {err:#}"),
+                    None,
+                    None,
+                );
                 setup_state.turns.lock().unwrap().remove(&turn_id_thread);
                 return;
             }
@@ -2060,26 +2388,94 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         } else {
             None
         };
+        let mut effective_turn_options = turn_options_for_thread.clone();
+        let explicit_turn_routing = effective_turn_options.has_explicit_routing();
+        if effective_turn_options.model_override.is_none()
+            && effective_turn_options.provider_id.is_none()
+            && effective_turn_options.model_id.is_none()
+        {
+            match load_session_routing_state(
+                &setup_state.paths.user_config_dir,
+                &session_id_for_thread,
+            ) {
+                Ok(routing) => effective_turn_options.apply_session_routing(routing),
+                Err(err) => {
+                    publish_turn_error_event(
+                        &setup_state,
+                        &channel_thread,
+                        &session_id_for_thread,
+                        &turn_id_thread,
+                        format!("load session routing: {err:#}"),
+                        None,
+                        None,
+                    );
+                    setup_state.turns.lock().unwrap().remove(&turn_id_thread);
+                    return;
+                }
+            }
+        }
         let cfg_for_turn = setup_state.config.lock().unwrap().clone();
         let mut app_state = AppState::from_session_record(cfg_for_turn.clone(), record);
-        if setup_state.yolo {
-            apply_daemon_yolo_mode(&mut app_state);
+        if let Err(err) =
+            apply_turn_request_options(&mut app_state, &inputs.providers, &effective_turn_options)
+        {
+            publish_turn_error_event(
+                &setup_state,
+                &channel_thread,
+                &session_id_for_thread,
+                &turn_id_thread,
+                format!("turn options: {err:#}"),
+                None,
+                None,
+            );
+            setup_state.turns.lock().unwrap().remove(&turn_id_thread);
+            return;
         }
-        if let Some(model_override) = model_override_for_thread.as_deref() {
-            if let Err(err) =
-                apply_turn_model_override(&mut app_state, &inputs.providers, model_override)
-            {
-                setup_state.publish_event(ServerEnvelope::Event {
-                    event: channel_thread.clone(),
-                    payload: json!({
-                        "type": "turn-error",
-                        "turnId": turn_id_thread,
-                        "error": format!("modelOverride: {err:#}"),
-                    }),
-                });
+        match persist_explicit_turn_routing(
+            &setup_state.paths.user_config_dir,
+            &session_id_for_thread,
+            explicit_turn_routing,
+            app_state.current_provider.as_deref(),
+            app_state.current_model.as_deref(),
+        ) {
+            Ok(true) => setup_state.publish_event(ServerEnvelope::Event {
+                event: "workspace:sessions:changed".to_string(),
+                payload: json!({
+                    "reason": "session_routing",
+                    "sessionId": session_id_for_thread.clone(),
+                }),
+            }),
+            Ok(false) => {}
+            Err(err) => {
+                publish_turn_error_event(
+                    &setup_state,
+                    &channel_thread,
+                    &session_id_for_thread,
+                    &turn_id_thread,
+                    format!("persist session routing: {err:#}"),
+                    None,
+                    None,
+                );
                 setup_state.turns.lock().unwrap().remove(&turn_id_thread);
                 return;
             }
+        }
+        if setup_state.yolo {
+            apply_daemon_yolo_mode(&mut app_state);
+        }
+        if cancel.is_cancelled() {
+            let _ = report_cancelled_turn(
+                &setup_state,
+                session_uuid,
+                &session_id_for_thread,
+                &channel_thread,
+                &turn_id_thread,
+                &message_for_thread,
+                &cancel_reported_thread,
+                &user_prompt_persisted_thread,
+            );
+            setup_state.turns.lock().unwrap().remove(&turn_id_thread);
+            return;
         }
         let runner = crate::runner_selection::select_tool_runner(
             &cfg_for_turn,
@@ -2107,13 +2503,15 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         // Persist the user message before the turn starts so a crash
         // doesn't silently drop it.
         app_state.push_message(MessageRole::User, message_for_thread.clone());
-        let _ = inputs.session_store.append_event(
-            session_uuid,
-            TranscriptEvent::UserMessage {
-                text: message_for_thread.clone(),
-                actor: Some(app_state.user_actor()),
-            },
-        );
+        if !user_prompt_persisted_thread.swap(true, Ordering::SeqCst) {
+            let _ = inputs.session_store.append_event(
+                session_uuid,
+                TranscriptEvent::UserMessage {
+                    text: message_for_thread.clone(),
+                    actor: Some(app_state.user_actor()),
+                },
+            );
+        }
         let _ = &session_id_for_thread; // keep the String alive for logging
 
         let stream_actor = app_state.assistant_actor();
@@ -2316,16 +2714,31 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
             Err(err) => {
                 eprintln!("turn {turn_id_thread} failed: {err:#}");
                 let (friendly, category) = classify_turn_error(&err);
-                setup_state.publish_event(ServerEnvelope::Event {
-                    event: channel_thread.clone(),
-                    payload: json!({
-                        "type": "turn-error",
-                        "turnId": turn_id_thread,
-                        "error": friendly,
-                        "errorRaw": format!("{err:#}"),
-                        "category": category,
-                    }),
-                });
+                if category == "cancelled" && cancel_reported_thread.load(Ordering::SeqCst) {
+                    state_for_thread
+                        .turns
+                        .lock()
+                        .unwrap()
+                        .remove(&turn_id_thread);
+                    return;
+                }
+                let raw = format!("{err:#}");
+                let _ = inputs.session_store.append_event(
+                    session_uuid,
+                    TranscriptEvent::SystemMessage {
+                        text: friendly.clone(),
+                        actor: Some(stream_actor.clone()),
+                    },
+                );
+                publish_turn_error_event(
+                    &setup_state,
+                    &channel_thread,
+                    &session_id_for_thread,
+                    &turn_id_thread,
+                    friendly,
+                    Some(raw),
+                    Some(category),
+                );
             }
         }
 
@@ -2337,6 +2750,39 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     });
 
     Ok(json!({"turnId": turn_id_resp}))
+}
+
+fn publish_turn_error_event(
+    state: &DaemonState,
+    channel: &str,
+    session_id: &str,
+    turn_id: &str,
+    error: String,
+    error_raw: Option<String>,
+    category: Option<&str>,
+) {
+    let mut payload = json!({
+        "type": "turn-error",
+        "turnId": turn_id,
+        "error": error,
+    });
+    if let Some(raw) = error_raw {
+        payload["errorRaw"] = json!(raw);
+    }
+    if let Some(category) = category {
+        payload["category"] = json!(category);
+    }
+    state.publish_event(ServerEnvelope::Event {
+        event: channel.to_string(),
+        payload,
+    });
+    state.publish_event(ServerEnvelope::Event {
+        event: "workspace:sessions:changed".to_string(),
+        payload: json!({
+            "reason": "turn_error",
+            "sessionId": session_id,
+        }),
+    });
 }
 
 /// Translates a raw `anyhow::Error` from `execute_user_turn_streaming_*`
@@ -2382,19 +2828,204 @@ fn classify_turn_error(err: &anyhow::Error) -> (String, &'static str) {
     (chain, "other")
 }
 
+#[derive(Debug, Clone, Default)]
+struct TurnRequestOptions {
+    model_override: Option<String>,
+    provider_id: Option<String>,
+    model_id: Option<String>,
+    thinking_option_id: Option<String>,
+    fast_mode: Option<bool>,
+    permission_mode: Option<String>,
+}
+
+impl TurnRequestOptions {
+    fn from_params(params: &Value) -> Self {
+        Self {
+            model_override: optional_trimmed_value(params, &["modelOverride", "model_override"]),
+            provider_id: optional_trimmed_value(params, &["providerId", "provider_id"])
+                .map(|provider_id| canonical_desktop_provider_id(&provider_id)),
+            model_id: optional_trimmed_value(params, &["modelId", "model_id"]),
+            thinking_option_id: optional_trimmed_value(
+                params,
+                &["thinkingOptionId", "thinking_option_id", "effort"],
+            )
+            .filter(|value| value != "default"),
+            fast_mode: params
+                .get("fastMode")
+                .or_else(|| params.get("fast_mode"))
+                .and_then(Value::as_bool),
+            permission_mode: optional_trimmed_value(params, &["permissionMode", "permission_mode"])
+                .and_then(|mode| match mode.as_str() {
+                    "read-only" | "workspace-write" | "full-access" => Some(mode),
+                    _ => None,
+                }),
+        }
+    }
+
+    fn apply_session_routing(&mut self, routing: DesktopSessionRouting) {
+        if self.provider_id.is_none() {
+            self.provider_id = routing
+                .provider_id
+                .map(|provider_id| canonical_desktop_provider_id(&provider_id));
+        }
+        if self.model_id.is_none() {
+            self.model_id = routing.model_id;
+        }
+    }
+
+    fn has_explicit_routing(&self) -> bool {
+        self.model_override.is_some() || self.provider_id.is_some() || self.model_id.is_some()
+    }
+}
+
+fn optional_trimmed_value(params: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| params.get(*key))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn apply_turn_request_options(
+    app_state: &mut AppState,
+    providers: &ProviderRegistry,
+    options: &TurnRequestOptions,
+) -> Result<()> {
+    let effort = options
+        .thinking_option_id
+        .as_deref()
+        .unwrap_or(app_state.effort_level.as_str())
+        .to_string();
+    let fast_mode = options.fast_mode.unwrap_or(app_state.fast_mode);
+
+    if let Some(requested) = options.model_override.as_deref() {
+        apply_turn_model_override_with_preferences(
+            app_state, providers, requested, &effort, fast_mode,
+        )?;
+    } else if let Some(model_id) = options.model_id.as_deref() {
+        apply_turn_model_selection(
+            app_state,
+            providers,
+            options.provider_id.as_deref(),
+            model_id,
+            &effort,
+            fast_mode,
+        )?;
+    } else if let Some(provider_id) = options.provider_id.as_deref() {
+        apply_turn_provider_selection(app_state, providers, provider_id, &effort, fast_mode)?;
+    } else {
+        if let Some(effort) = options.thinking_option_id.as_deref() {
+            app_state.effort_level = effort.to_string();
+            app_state.config.effort_level = Some(effort.to_string());
+        }
+        if let Some(fast_mode) = options.fast_mode {
+            app_state.fast_mode = fast_mode;
+            app_state.config.fast_mode = fast_mode;
+        }
+    }
+
+    if let Some(mode) = options.permission_mode.as_deref() {
+        apply_turn_permission_mode(app_state, mode);
+    }
+    Ok(())
+}
+
+fn apply_turn_provider_selection(
+    app_state: &mut AppState,
+    providers: &ProviderRegistry,
+    provider_id: &str,
+    effort: &str,
+    fast_mode: bool,
+) -> Result<()> {
+    let provider_id = canonical_desktop_provider_id(provider_id);
+    let provider = providers
+        .provider(&provider_id)
+        .with_context(|| format!("provider {provider_id} not found"))?;
+    let model_id = resolve_create_session_model_id(&app_state.config, provider, None)?
+        .with_context(|| format!("provider `{provider_id}` has no models"))?;
+    apply_turn_model_preferences(app_state, &provider_id, &model_id, effort, fast_mode);
+    Ok(())
+}
+
+fn apply_turn_model_selection(
+    app_state: &mut AppState,
+    providers: &ProviderRegistry,
+    provider_id: Option<&str>,
+    model_id: &str,
+    effort: &str,
+    fast_mode: bool,
+) -> Result<()> {
+    let requested = if let Some(provider_id) = provider_id {
+        let provider_id = canonical_desktop_provider_id(provider_id);
+        let provider = providers
+            .provider(&provider_id)
+            .with_context(|| format!("provider {provider_id} not found"))?;
+        let model_id =
+            normalize_provider_model_id(provider, model_id).unwrap_or_else(|| model_id.to_string());
+        format!("{provider_id}/{model_id}")
+    } else {
+        model_id.to_string()
+    };
+    apply_turn_model_override_with_preferences(app_state, providers, &requested, effort, fast_mode)
+}
+
+fn apply_turn_model_override_with_preferences(
+    app_state: &mut AppState,
+    providers: &ProviderRegistry,
+    requested: &str,
+    effort: &str,
+    fast_mode: bool,
+) -> Result<()> {
+    let (provider_id, model_id) = resolve_turn_model(providers, requested)?;
+    apply_turn_model_preferences(app_state, &provider_id, &model_id, effort, fast_mode);
+    Ok(())
+}
+
+fn apply_turn_model_preferences(
+    app_state: &mut AppState,
+    provider_id: &str,
+    model_id: &str,
+    effort: &str,
+    fast_mode: bool,
+) {
+    app_state.current_provider = Some(provider_id.to_string());
+    app_state.current_model = Some(format!("{provider_id}/{model_id}"));
+    app_state.config.default_provider = Some(provider_id.to_string());
+    app_state.config.default_model = Some(format!("{provider_id}/{model_id}"));
+    app_state.effort_level = effort.to_string();
+    app_state.config.effort_level = if effort == "auto" {
+        None
+    } else {
+        Some(effort.to_string())
+    };
+    app_state.fast_mode = fast_mode;
+    app_state.config.fast_mode = fast_mode;
+}
+
+#[cfg(test)]
 fn apply_turn_model_override(
     app_state: &mut AppState,
     providers: &ProviderRegistry,
     requested: &str,
 ) -> Result<()> {
+    let effort = app_state.effort_level.clone();
+    let fast_mode = app_state.fast_mode;
+    apply_turn_model_override_with_preferences(app_state, providers, requested, &effort, fast_mode)
+}
+
+fn resolve_turn_model(providers: &ProviderRegistry, requested: &str) -> Result<(String, String)> {
     let (provider_id, model_id) = if let Some((provider_id, model_id)) = requested.split_once('/') {
+        let provider_id = canonical_desktop_provider_id(provider_id);
+        let model_id = model_id.trim();
         let provider = providers
-            .provider(provider_id)
+            .provider(&provider_id)
             .with_context(|| format!("provider {provider_id} not found"))?;
         let model = provider
             .models
             .iter()
             .find(|model| model.id == model_id)
+            .or_else(|| provider.models.iter().find(|model| model.id == requested))
             .with_context(|| format!("model {requested} not found"))?;
         (provider.id.clone(), model.id.clone())
     } else {
@@ -2411,9 +3042,34 @@ fn apply_turn_model_override(
         (provider.id.clone(), model.id.clone())
     };
 
-    let effort = app_state.effort_level.clone();
-    let fast_mode = app_state.fast_mode;
-    apply_model_preferences(app_state, &provider_id, &model_id, &effort, fast_mode)
+    Ok((provider_id, model_id))
+}
+
+fn canonical_desktop_provider_id(provider_id: &str) -> String {
+    let trimmed = provider_id.trim();
+    match trimmed.to_ascii_lowercase().as_str() {
+        "anthropic" => "anthropic".to_string(),
+        "claude" => "anthropic".to_string(),
+        "codex" => "openai".to_string(),
+        "openai" => "openai".to_string(),
+        _ => trimmed.to_string(),
+    }
+}
+
+fn desktop_provider_ids_match(left: &str, right: &str) -> bool {
+    canonical_desktop_provider_id(left) == canonical_desktop_provider_id(right)
+}
+
+fn apply_turn_permission_mode(app_state: &mut AppState, permission_mode: &str) {
+    match permission_mode {
+        "read-only" => {
+            app_state.sandbox_mode = "read-only".to_string();
+        }
+        "full-access" => apply_daemon_yolo_mode(app_state),
+        _ => {
+            app_state.sandbox_mode = "workspace-write".to_string();
+        }
+    }
 }
 
 fn apply_daemon_yolo_mode(app_state: &mut AppState) {
@@ -2424,17 +3080,106 @@ fn apply_daemon_yolo_mode(app_state: &mut AppState) {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_daemon_yolo_mode, apply_turn_model_override, handle_create_session, DaemonState,
+        apply_daemon_yolo_mode, apply_turn_model_override, apply_turn_request_options,
+        handle_create_session, handle_import_external_credential, handle_list_provider_models,
+        handle_login_with_api_key, handle_logout_provider, model_descriptor_dto,
+        resolve_create_session_model_id, run_off_runtime, DaemonState, TurnRequestOptions,
     };
     use indexmap::IndexMap;
     use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
-    use puffer_core::AppState;
+    use puffer_core::{AppState, ModelPreferenceFamily};
     use puffer_provider_registry::{
-        Modality, ModelDescriptor, ProviderDescriptor, ProviderRegistry,
+        AuthStore, Modality, ModelDescriptor, ProviderDescriptor, ProviderRegistry,
     };
     use puffer_session_store::{SessionMetadata, SessionStore};
     use serde_json::json;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
     use uuid::Uuid;
+
+    fn discovery_cache_env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    struct DiscoveryCacheEnvGuard {
+        cache_path: std::path::PathBuf,
+        previous: Option<std::ffi::OsString>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl DiscoveryCacheEnvGuard {
+        fn set() -> Self {
+            let lock = discovery_cache_env_lock();
+            let previous = std::env::var_os("PUFFER_DISCOVERY_CACHE_PATH");
+            let temp = tempfile::NamedTempFile::new().expect("cache file");
+            let cache_path = temp.path().to_path_buf();
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_millis() as u64;
+            let cache = json!({
+                "entries": {
+                    "llama-cpp": {"models": [], "cached_at_ms": now_ms},
+                    "lmstudio": {"models": [], "cached_at_ms": now_ms},
+                    "ollama": {"models": [], "cached_at_ms": now_ms},
+                    "vllm": {"models": [], "cached_at_ms": now_ms}
+                }
+            });
+            std::fs::write(&cache_path, cache.to_string()).expect("seed discovery cache");
+            let (_, path) = temp.keep().expect("persist cache file");
+            std::env::set_var("PUFFER_DISCOVERY_CACHE_PATH", path);
+            Self {
+                cache_path,
+                previous,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for DiscoveryCacheEnvGuard {
+        fn drop(&mut self) {
+            match self.previous.as_ref() {
+                Some(value) => std::env::set_var("PUFFER_DISCOVERY_CACHE_PATH", value),
+                None => std::env::remove_var("PUFFER_DISCOVERY_CACHE_PATH"),
+            }
+            let _ = std::fs::remove_file(&self.cache_path);
+        }
+    }
+
+    fn spawn_openai_discovery_server() -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind discovery server");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking discovery server");
+        let address = listener.local_addr().expect("discovery server address");
+        let handle = std::thread::spawn(move || {
+            for _ in 0..100 {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut buf = [0_u8; 1024];
+                        let _ = std::io::Read::read(&mut stream, &mut buf);
+                        let body = r#"{"data":[{"id":"gpt-local-discovered","name":"GPT Local"}]}"#;
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        std::io::Write::write_all(&mut stream, response.as_bytes())
+                            .expect("write discovery response");
+                        return;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept discovery request: {error}"),
+                }
+            }
+            panic!("discovery server was not contacted");
+        });
+        (format!("http://{address}"), handle)
+    }
 
     #[test]
     fn create_session_accepts_display_name() {
@@ -2481,6 +3226,331 @@ mod tests {
     }
 
     #[test]
+    fn create_session_creates_missing_cwd() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(
+            workspace_root.clone(),
+            paths.clone(),
+            "token".into(),
+            true,
+            false,
+            false,
+        )
+        .expect("daemon state");
+        let missing = workspace_root.join("new-project").join("nested");
+
+        let response = handle_create_session(
+            &state,
+            &json!({
+                "cwd": missing.display().to_string(),
+            }),
+        )
+        .expect("create session");
+
+        assert!(missing.is_dir());
+        let session_id = response["sessionId"].as_str().expect("sessionId");
+        let store = SessionStore::from_paths(&paths).expect("session store");
+        let session_id = uuid::Uuid::parse_str(session_id).expect("valid session id");
+        let session = store.load_session(session_id).expect("stored session");
+        assert_eq!(session.metadata.cwd, missing);
+    }
+
+    #[test]
+    fn create_session_provider_routing_runs_off_tokio_runtime() {
+        let _cache_guard = DiscoveryCacheEnvGuard::set();
+        let (openai_base_url, server) = spawn_openai_discovery_server();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(
+            workspace_root.clone(),
+            paths,
+            "token".into(),
+            true,
+            false,
+            false,
+        )
+        .expect("daemon state");
+        state.config.lock().unwrap().openai_base_url = Some(openai_base_url);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let response = runtime
+            .block_on(async move {
+                let params = json!({
+                    "cwd": workspace_root.display().to_string(),
+                    "providerId": "openai",
+                });
+                run_off_runtime(move || handle_create_session(&state, &params)).await
+            })
+            .expect("create session");
+
+        server.join().expect("discovery server");
+        assert_eq!(response["providerId"], "openai");
+        assert_eq!(response["modelId"], "gpt-local-discovered");
+    }
+
+    #[test]
+    fn create_session_accepts_desktop_provider_aliases_off_tokio_runtime() {
+        let _cache_guard = DiscoveryCacheEnvGuard::set();
+        let (openai_base_url, server) = spawn_openai_discovery_server();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(
+            workspace_root.clone(),
+            paths,
+            "token".into(),
+            true,
+            false,
+            false,
+        )
+        .expect("daemon state");
+        state.config.lock().unwrap().openai_base_url = Some(openai_base_url);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let response = runtime
+            .block_on(async move {
+                let params = json!({
+                    "cwd": workspace_root.display().to_string(),
+                    "providerId": "codex",
+                    "modelId": "codex/gpt-local-discovered",
+                });
+                run_off_runtime(move || handle_create_session(&state, &params)).await
+            })
+            .expect("create session");
+
+        server.join().expect("discovery server");
+        assert_eq!(response["providerId"], "openai");
+        assert_eq!(response["modelId"], "gpt-local-discovered");
+    }
+
+    #[test]
+    fn create_session_accepts_display_case_provider_names_off_tokio_runtime() {
+        let _cache_guard = DiscoveryCacheEnvGuard::set();
+        let (openai_base_url, server) = spawn_openai_discovery_server();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(
+            workspace_root.clone(),
+            paths,
+            "token".into(),
+            true,
+            false,
+            false,
+        )
+        .expect("daemon state");
+        state.config.lock().unwrap().openai_base_url = Some(openai_base_url);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let response = runtime
+            .block_on(async move {
+                let params = json!({
+                    "cwd": workspace_root.display().to_string(),
+                    "providerId": "OpenAI",
+                    "modelId": "OpenAI/gpt-local-discovered",
+                });
+                run_off_runtime(move || handle_create_session(&state, &params)).await
+            })
+            .expect("create session");
+
+        server.join().expect("discovery server");
+        assert_eq!(response["providerId"], "openai");
+        assert_eq!(response["modelId"], "gpt-local-discovered");
+    }
+
+    #[test]
+    fn list_provider_models_accepts_desktop_aliases() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let response = handle_list_provider_models(&state, &json!({ "providerId": "claude" }))
+            .expect("list provider models");
+
+        assert_eq!(response["providerId"], "anthropic");
+        assert!(
+            response["models"]
+                .as_array()
+                .is_some_and(|models| !models.is_empty()),
+            "{response}"
+        );
+    }
+
+    #[test]
+    fn list_provider_models_uses_fresh_discovery_over_static_models() {
+        let (openai_base_url, server) = spawn_openai_discovery_server();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+        state.config.lock().unwrap().openai_base_url = Some(openai_base_url);
+
+        let response = handle_list_provider_models(&state, &json!({ "providerId": "codex" }))
+            .expect("list provider models");
+
+        server.join().expect("discovery server");
+        let model_ids = response["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .filter_map(|model| model.get("id").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(response["providerId"], "openai");
+        assert!(model_ids.contains(&"gpt-local-discovered"), "{response}");
+        assert!(
+            !model_ids.contains(&"gpt-5"),
+            "fresh discovery should remove stale static models: {response}"
+        );
+    }
+
+    #[test]
+    fn login_with_api_key_accepts_desktop_provider_aliases() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let auth_path = paths.user_config_dir.join("auth.json");
+        let state = DaemonState::load(
+            workspace_root,
+            paths.clone(),
+            "token".into(),
+            true,
+            false,
+            false,
+        )
+        .expect("daemon state");
+
+        let response = handle_login_with_api_key(
+            &state,
+            &json!({ "providerId": "codex", "apiKey": "sk-test" }),
+        )
+        .expect("login with api key");
+        let auth = AuthStore::load(&auth_path).expect("auth store");
+
+        assert!(auth.get("openai").is_some());
+        assert!(auth.get("codex").is_none());
+        assert!(response["auth"]
+            .as_array()
+            .is_some_and(|auth| auth.iter().any(|item| item["providerId"] == "openai")));
+    }
+
+    #[test]
+    fn import_external_credential_accepts_desktop_provider_aliases() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let error = handle_import_external_credential(
+            &state,
+            &json!({ "providerId": "codex", "source": "not-real" }),
+        )
+        .expect_err("invalid source should fail after provider alias lookup");
+
+        assert!(error
+            .to_string()
+            .contains("unknown import source `not-real`"));
+    }
+
+    #[test]
+    fn logout_provider_accepts_desktop_provider_aliases() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let auth_path = paths.user_config_dir.join("auth.json");
+        let mut auth = AuthStore::default();
+        auth.set_api_key("openai", "sk-test");
+        auth.save(&auth_path).expect("seed auth store");
+        let state = DaemonState::load(
+            workspace_root,
+            paths.clone(),
+            "token".into(),
+            true,
+            false,
+            false,
+        )
+        .expect("daemon state");
+
+        let response = handle_logout_provider(&state, &json!({ "providerId": "codex" }))
+            .expect("logout provider");
+        let auth = AuthStore::load(&auth_path).expect("auth store");
+
+        assert!(auth.get("openai").is_none());
+        assert!(response["auth"]
+            .as_array()
+            .is_some_and(|auth| auth.iter().all(|item| item["providerId"] != "openai")));
+    }
+
+    #[test]
     fn turn_model_override_selects_matching_provider_model() {
         let temp = tempfile::tempdir().expect("tempdir");
         let metadata = SessionMetadata {
@@ -2517,6 +3587,331 @@ mod tests {
         );
         assert_eq!(state.effort_level, "off");
         assert!(state.fast_mode);
+    }
+
+    #[test]
+    fn turn_request_options_parse_desktop_fields() {
+        let options = TurnRequestOptions::from_params(&json!({
+            "providerId": "anthropic",
+            "modelId": "claude-sonnet-4-5",
+            "thinkingOptionId": "high",
+            "fastMode": true,
+            "permissionMode": "read-only",
+        }));
+
+        assert_eq!(options.provider_id.as_deref(), Some("anthropic"));
+        assert_eq!(options.model_id.as_deref(), Some("claude-sonnet-4-5"));
+        assert_eq!(options.thinking_option_id.as_deref(), Some("high"));
+        assert_eq!(options.fast_mode, Some(true));
+        assert_eq!(options.permission_mode.as_deref(), Some("read-only"));
+    }
+
+    #[test]
+    fn turn_request_options_apply_desktop_model_effort_and_permissions() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let metadata = SessionMetadata {
+            id: Uuid::new_v4(),
+            display_name: None,
+            generated_title: None,
+            cwd: temp.path().to_path_buf(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        };
+        let mut state = AppState::new(PufferConfig::default(), temp.path().to_path_buf(), metadata);
+        state.effort_level = "low".to_string();
+        state.fast_mode = true;
+
+        let mut providers = ProviderRegistry::new();
+        providers.register(provider("openai", &["gpt-5.4"]));
+        providers.register(provider("anthropic", &["claude-sonnet-4-5"]));
+        let options = TurnRequestOptions::from_params(&json!({
+            "providerId": "anthropic",
+            "modelId": "claude-sonnet-4-5",
+            "thinkingOptionId": "high",
+            "fastMode": false,
+            "permissionMode": "read-only",
+        }));
+
+        apply_turn_request_options(&mut state, &providers, &options).expect("turn options");
+
+        assert_eq!(state.current_provider.as_deref(), Some("anthropic"));
+        assert_eq!(
+            state.current_model.as_deref(),
+            Some("anthropic/claude-sonnet-4-5")
+        );
+        assert_eq!(state.effort_level, "high");
+        assert!(!state.fast_mode);
+        assert_eq!(state.sandbox_mode, "read-only");
+    }
+
+    #[test]
+    fn turn_request_options_provider_without_model_selects_provider_default() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let metadata = SessionMetadata {
+            id: Uuid::new_v4(),
+            display_name: None,
+            generated_title: None,
+            cwd: temp.path().to_path_buf(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        };
+        let mut state = AppState::new(PufferConfig::default(), temp.path().to_path_buf(), metadata);
+
+        let mut providers = ProviderRegistry::new();
+        providers.register(provider("openai", &["gpt-5"]));
+        providers.register(provider("anthropic", &["claude-sonnet-4-5"]));
+        let options = TurnRequestOptions::from_params(&json!({
+            "providerId": "anthropic",
+        }));
+
+        apply_turn_request_options(&mut state, &providers, &options).expect("turn options");
+
+        assert_eq!(state.current_provider.as_deref(), Some("anthropic"));
+        assert_eq!(
+            state.current_model.as_deref(),
+            Some("anthropic/claude-sonnet-4-5")
+        );
+    }
+
+    #[test]
+    fn turn_request_options_accept_desktop_provider_aliases() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let metadata = SessionMetadata {
+            id: Uuid::new_v4(),
+            display_name: None,
+            generated_title: None,
+            cwd: temp.path().to_path_buf(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        };
+        let mut state = AppState::new(PufferConfig::default(), temp.path().to_path_buf(), metadata);
+        state.effort_level = "low".to_string();
+
+        let mut providers = ProviderRegistry::new();
+        providers.register(provider("openai", &["gpt-5.4"]));
+        providers.register(provider("anthropic", &["claude-sonnet-4-5"]));
+        let options = TurnRequestOptions::from_params(&json!({
+            "providerId": "claude",
+            "modelId": "claude/claude-sonnet-4-5",
+            "thinkingOptionId": "high",
+        }));
+
+        apply_turn_request_options(&mut state, &providers, &options).expect("turn options");
+
+        assert_eq!(state.current_provider.as_deref(), Some("anthropic"));
+        assert_eq!(
+            state.current_model.as_deref(),
+            Some("anthropic/claude-sonnet-4-5")
+        );
+        assert_eq!(state.effort_level, "high");
+
+        let metadata = SessionMetadata {
+            id: Uuid::new_v4(),
+            display_name: None,
+            generated_title: None,
+            cwd: temp.path().to_path_buf(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        };
+        let mut state = AppState::new(PufferConfig::default(), temp.path().to_path_buf(), metadata);
+        let options = TurnRequestOptions::from_params(&json!({
+            "modelOverride": "codex/gpt-5.4",
+        }));
+
+        apply_turn_request_options(&mut state, &providers, &options).expect("turn options");
+
+        assert_eq!(state.current_provider.as_deref(), Some("openai"));
+        assert_eq!(state.current_model.as_deref(), Some("openai/gpt-5.4"));
+
+        let metadata = SessionMetadata {
+            id: Uuid::new_v4(),
+            display_name: None,
+            generated_title: None,
+            cwd: temp.path().to_path_buf(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        };
+        let mut state = AppState::new(PufferConfig::default(), temp.path().to_path_buf(), metadata);
+        let options = TurnRequestOptions::from_params(&json!({
+            "providerId": "OpenAI",
+            "modelId": "OpenAI/gpt-5.4",
+        }));
+
+        apply_turn_request_options(&mut state, &providers, &options).expect("turn options");
+
+        assert_eq!(state.current_provider.as_deref(), Some("openai"));
+        assert_eq!(state.current_model.as_deref(), Some("openai/gpt-5.4"));
+
+        let metadata = SessionMetadata {
+            id: Uuid::new_v4(),
+            display_name: None,
+            generated_title: None,
+            cwd: temp.path().to_path_buf(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        };
+        let mut state = AppState::new(PufferConfig::default(), temp.path().to_path_buf(), metadata);
+        let options = TurnRequestOptions::from_params(&json!({
+            "providerId": "Anthropic",
+            "modelId": "Anthropic/claude-sonnet-4-5",
+        }));
+
+        apply_turn_request_options(&mut state, &providers, &options).expect("turn options");
+
+        assert_eq!(state.current_provider.as_deref(), Some("anthropic"));
+        assert_eq!(
+            state.current_model.as_deref(),
+            Some("anthropic/claude-sonnet-4-5")
+        );
+    }
+
+    #[test]
+    fn turn_request_options_preserve_custom_provider_slash_model_ids() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let metadata = SessionMetadata {
+            id: Uuid::new_v4(),
+            display_name: None,
+            generated_title: None,
+            cwd: temp.path().to_path_buf(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            parent_session_id: None,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+        };
+        let mut state = AppState::new(PufferConfig::default(), temp.path().to_path_buf(), metadata);
+
+        let mut providers = ProviderRegistry::new();
+        providers.register(provider("openrouter", &["openrouter/owl-alpha"]));
+        let options = TurnRequestOptions::from_params(&json!({
+            "providerId": "openrouter",
+            "modelId": "openrouter/owl-alpha",
+        }));
+
+        apply_turn_request_options(&mut state, &providers, &options).expect("turn options");
+
+        assert_eq!(state.current_provider.as_deref(), Some("openrouter"));
+        assert_eq!(
+            state.current_model.as_deref(),
+            Some("openrouter/openrouter/owl-alpha")
+        );
+        let model_id = resolve_create_session_model_id(
+            &state.config,
+            providers.provider("openrouter").expect("provider"),
+            None,
+        )
+        .expect("saved default model");
+        assert_eq!(model_id.as_deref(), Some("openrouter/owl-alpha"));
+    }
+
+    #[test]
+    fn model_descriptor_dto_exposes_family_thinking_options() {
+        let provider = provider("anthropic", &["claude-sonnet-4-5"]);
+        let dto = model_descriptor_dto(ModelPreferenceFamily::Anthropic, &provider.models[0]);
+
+        let option_ids: Vec<&str> = dto
+            .thinking_options
+            .iter()
+            .map(|option| option.id.as_str())
+            .collect();
+        assert_eq!(option_ids, vec!["low", "medium", "high", "max"]);
+        assert_eq!(dto.default_thinking_option_id.as_deref(), Some("high"));
+        assert!(dto
+            .thinking_options
+            .iter()
+            .any(|option| option.id == "high" && option.is_default));
+
+        let mut no_reasoning = provider.models[0].clone();
+        no_reasoning.supports_reasoning = false;
+        let dto = model_descriptor_dto(ModelPreferenceFamily::Anthropic, &no_reasoning);
+        assert!(dto.thinking_options.is_empty());
+        assert_eq!(dto.default_thinking_option_id, None);
+    }
+
+    #[test]
+    fn create_session_model_routing_resolves_provider_default() {
+        let mut config = PufferConfig::default();
+        config.default_provider = Some("anthropic".to_string());
+        config.default_model = Some("anthropic/claude-sonnet-4-5".to_string());
+        let provider = provider("anthropic", &["claude-sonnet-4-5", "claude-haiku"]);
+
+        let model_id =
+            resolve_create_session_model_id(&config, &provider, None).expect("default model");
+        assert_eq!(model_id.as_deref(), Some("claude-sonnet-4-5"));
+
+        let model_id = resolve_create_session_model_id(&config, &provider, Some("claude-haiku"))
+            .expect("requested model");
+        assert_eq!(model_id.as_deref(), Some("claude-haiku"));
+    }
+
+    #[test]
+    fn create_session_model_routing_uses_alias_provider_default() {
+        let mut config = PufferConfig::default();
+        config.default_provider = Some("codex".to_string());
+        config.default_model = Some("codex/gpt-5.4".to_string());
+        let openai_provider = provider("openai", &["gpt-5", "gpt-5.4"]);
+
+        let model_id = resolve_create_session_model_id(&config, &openai_provider, None)
+            .expect("default model");
+        assert_eq!(model_id.as_deref(), Some("gpt-5.4"));
+
+        config.default_provider = Some("claude".to_string());
+        config.default_model = Some("claude/claude-opus-4-6".to_string());
+        let anthropic_provider = provider("anthropic", &["claude-sonnet-4-5", "claude-opus-4-6"]);
+
+        let model_id = resolve_create_session_model_id(&config, &anthropic_provider, None)
+            .expect("default model");
+        assert_eq!(model_id.as_deref(), Some("claude-opus-4-6"));
+    }
+
+    #[test]
+    fn create_session_model_routing_preserves_custom_provider_slash_model_ids() {
+        let mut config = PufferConfig::default();
+        config.default_provider = Some("openrouter".to_string());
+        config.default_model = Some("openrouter/owl-alpha".to_string());
+        let openrouter_provider = provider("openrouter", &["openrouter/owl-alpha"]);
+
+        let model_id = resolve_create_session_model_id(&config, &openrouter_provider, None)
+            .expect("default model");
+        assert_eq!(model_id.as_deref(), Some("openrouter/owl-alpha"));
+
+        let model_id = resolve_create_session_model_id(
+            &config,
+            &openrouter_provider,
+            Some("openrouter/owl-alpha"),
+        )
+        .expect("requested model");
+        assert_eq!(model_id.as_deref(), Some("openrouter/owl-alpha"));
+
+        config.default_model = Some("openrouter/openrouter/owl-alpha".to_string());
+        let model_id = resolve_create_session_model_id(&config, &openrouter_provider, None)
+            .expect("wrapped default model");
+        assert_eq!(model_id.as_deref(), Some("openrouter/owl-alpha"));
     }
 
     #[test]

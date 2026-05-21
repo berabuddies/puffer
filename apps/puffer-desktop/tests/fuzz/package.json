@@ -1,0 +1,17 @@
+{
+  "name": "puffer-interaction-fuzz",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "list": "node bin/puffer-fuzz.mjs list",
+    "plan": "node bin/puffer-fuzz.mjs plan",
+    "run": "node bin/puffer-fuzz.mjs run",
+    "report": "node bin/puffer-fuzz.mjs report",
+    "validate": "node bin/puffer-fuzz.mjs validate",
+    "smoke": "node bin/puffer-fuzz.mjs smoke",
+    "frontier": "node bin/puffer-fuzz.mjs frontier",
+    "gate": "node bin/puffer-fuzz.mjs gate",
+    "replay": "node bin/puffer-fuzz.mjs replay"
+  }
+}

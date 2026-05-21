@@ -1,0 +1,178 @@
+{
+  "id": "browser-tab-race",
+  "title": "Browser tab, address, frame, and stale event races",
+  "focus": "Managed Browser pane interactions that previously produced stale tab state, failed page input, renderer pressure, or daemon fallback failures.",
+  "severityTarget": "P0/P1 crashes, blocked browser input, stale tab/session pollution, or unrecoverable browser pane state.",
+  "primaryRoutes": ["agent-detail", "browser-pane"],
+  "defaultIterations": 12,
+  "defaultSteps": 16,
+  "setup": [
+    {
+      "id": "setup-open-browser-agent",
+      "action": "open-agent-detail",
+      "kind": "ui",
+      "target": "workspace.agent-card",
+      "coverage": ["route:workspace", "route:agent-detail", "control:workspace.agent-card", "state:daemon.connected", "state:session.idle"]
+    },
+    {
+      "id": "setup-open-browser-pane",
+      "action": "open-browser-pane",
+      "kind": "ui",
+      "target": "browser-pane",
+      "produces": ["resource:browser.page-focused"],
+      "coverage": ["route:browser-pane", "state:browser.one-tab", "control:browser.tab"]
+    }
+  ],
+  "actions": [
+    {
+      "id": "type-url",
+      "kind": "ui",
+      "target": "browser.address",
+      "weight": 8,
+      "params": { "url": { "oneOf": ["https://example.com", "https://google.com/search?q=puffer", "about:blank", "https://localhost:1420/#hash"] } },
+      "produces": ["resource:browser.address-draft"],
+      "coverage": ["control:browser.address", "state:browser.loading"]
+    },
+    {
+      "id": "press-address-enter",
+      "kind": "keyboard",
+      "target": "browser.address",
+      "weight": 8,
+      "requires": ["resource:browser.address-draft"],
+      "expectedDaemon": "browser_navigate",
+      "coverage": ["control:browser.address", "async:duplicate-submit"]
+    },
+    {
+      "id": "click-new-tab",
+      "kind": "ui",
+      "target": "browser.new-tab",
+      "weight": 9,
+      "expectedDaemon": "browser_agent",
+      "produces": ["resource:browser.multi-tab"],
+      "coverage": ["control:browser.new-tab", "state:browser.multi-tab", "async:late-success"]
+    },
+    {
+      "id": "close-active-tab",
+      "kind": "ui",
+      "target": "browser.close-tab",
+      "weight": 8,
+      "requires": ["resource:browser.multi-tab"],
+      "expectedDaemon": "browser_agent",
+      "coverage": ["control:browser.close-tab", "async:late-failure", "async:stale-tab-event"]
+    },
+    {
+      "id": "switch-tab",
+      "kind": "ui",
+      "target": "browser.tab",
+      "weight": 8,
+      "requires": ["resource:browser.multi-tab"],
+      "params": { "tabIndex": { "intRange": [0, 2] } },
+      "coverage": ["control:browser.tab", "state:browser.multi-tab", "async:stale-tab-event"]
+    },
+    {
+      "id": "reload",
+      "kind": "ui",
+      "target": "browser.reload",
+      "weight": 5,
+      "expectedDaemon": "browser_reload",
+      "coverage": ["control:browser.reload", "state:browser.loading", "async:late-failure"]
+    },
+    {
+      "id": "history",
+      "kind": "ui",
+      "target": "browser.back-forward",
+      "weight": 4,
+      "params": { "direction": { "oneOf": ["back", "forward"] } },
+      "expectedDaemon": "browser_history",
+      "coverage": ["control:browser.back-forward", "state:browser.loading", "async:late-success"]
+    },
+    {
+      "id": "type-page-input",
+      "kind": "keyboard",
+      "target": "browser.page-input",
+      "weight": 9,
+      "requires": ["resource:browser.page-focused"],
+      "params": { "text": { "oneOf": ["Iran", "puffer code", "abc123"] } },
+      "expectedDaemon": "browser_input",
+      "coverage": ["control:browser.page-input"]
+    },
+    {
+      "id": "special-key",
+      "kind": "keyboard",
+      "target": "browser.page-input",
+      "weight": 8,
+      "requires": ["resource:browser.page-focused"],
+      "params": { "key": { "oneOf": ["Enter", "Backspace", "Delete", "Escape", "ArrowLeft", "ArrowRight"] } },
+      "expectedDaemon": "browser_input",
+      "coverage": ["control:browser.page-input"]
+    },
+    {
+      "id": "emit-state-for-old-tab",
+      "kind": "daemon-event",
+      "target": "browser:<session>:browser:<tab>:state",
+      "weight": 8,
+      "params": { "url": { "oneOf": ["https://old.example.test", "https://stale.example.test"] }, "loading": { "oneOf": [true, false] } },
+      "coverage": ["async:stale-tab-event", "state:browser.loading"]
+    },
+    {
+      "id": "emit-frame-burst",
+      "kind": "daemon-event",
+      "target": "browser:<session>:browser:<tab>:frame",
+      "weight": 8,
+      "params": { "frames": { "repeat": [{ "width": { "intRange": [1, 1280] }, "height": { "intRange": [1, 900] } }, [8, 24]] } },
+      "coverage": ["state:browser.frame-streaming", "async:out-of-order-frame"]
+    },
+    {
+      "id": "emit-empty-tab-list",
+      "kind": "daemon-event",
+      "target": "browser:<session>:tabs",
+      "weight": 5,
+      "coverage": ["state:browser.no-tab", "async:server-push-update", "async:stale-tab-event"]
+    },
+    {
+      "id": "fail-next-browser-command",
+      "kind": "daemon",
+      "target": "browser_agent",
+      "weight": 5,
+      "coverage": ["state:browser.error", "async:late-failure"]
+    },
+    {
+      "id": "hold-next-browser-response",
+      "kind": "daemon",
+      "target": "browser_navigate",
+      "weight": 4,
+      "coverage": ["async:dropped-response", "state:browser.loading"]
+    },
+    {
+      "id": "disconnect-reconnect",
+      "kind": "daemon",
+      "target": "websocket",
+      "weight": 6,
+      "coverage": ["state:daemon.reconnecting", "async:reconnect"]
+    },
+    {
+      "id": "resize-narrow",
+      "kind": "ui",
+      "target": "viewport",
+      "weight": 4,
+      "params": { "width": { "oneOf": [480, 640, 800] }, "height": { "oneOf": [600, 720] } },
+      "coverage": ["state:viewport.narrow"]
+    },
+    {
+      "id": "resize-desktop",
+      "kind": "ui",
+      "target": "viewport",
+      "weight": 3,
+      "params": { "width": { "oneOf": [1280, 1440, 1600] }, "height": { "oneOf": [800, 900, 1000] } },
+      "coverage": ["state:viewport.desktop"]
+    }
+  ],
+  "invariants": [
+    "app-no-crash",
+    "active-tab-stable",
+    "stale-error-scoped",
+    "one-request-per-intent",
+    "draft-preserved-on-failure",
+    "no-permanent-loading"
+  ]
+}

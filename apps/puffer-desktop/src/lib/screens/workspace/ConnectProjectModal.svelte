@@ -1,14 +1,25 @@
 <script lang="ts">
   import Icon from "../../design/Icon.svelte";
+  import { focusTrap } from "../../focusTrap";
   import {
     cloneRepo,
     connectSshDaemon,
     createSession,
+    loadSettingsSnapshot,
     listDir,
     type DirEntry
   } from "../../api/desktop";
-  import { canInvokeTauri } from "../../api/daemonClient";
+  import { canInvokeTauri, currentDaemonClient, switchDaemonClient } from "../../api/daemonClient";
+  import {
+    canonicalDaemonProviderId,
+    providerCanRunAgent,
+    providerIsAvailableForAgent,
+    providerIdsEquivalent
+  } from "../../providerIds";
+  import { providerCatalogForSetup } from "../../providerFallbacks";
   import type { ProviderSummary, SettingsSnapshot } from "../../types";
+
+  type CreatedSessionResult = Awaited<ReturnType<typeof createSession>>;
 
   /** Native directory chooser — only works in Tauri. Silently becomes a
    *  no-op in the web preview so the modal can still be used for testing. */
@@ -29,9 +40,9 @@
 
   type Props = {
     onClose: () => void;
-    /** Fired when the modal finishes (clone + create_session) with the id
+    /** Fired when the modal finishes (clone + create_session) with the payload
      *  of the new session so the caller can open AgentDetail. */
-    onConnected?: (sessionId: string) => void | Promise<void>;
+    onConnected?: (created: CreatedSessionResult) => void | Promise<void>;
     /** Shown as the placeholder for the local path field. */
     defaultLocalPath?: string;
     snapshot?: SettingsSnapshot | null;
@@ -49,6 +60,7 @@
   // Remote mode
   let sshTarget = $state("");
   let remoteWorkspace = $state("~");
+  let remoteBinary = $state("");
   let remoteDest = $state("");
   let remoteGitUrl = $state("");
 
@@ -61,53 +73,58 @@
   let pickerEntries = $state<DirEntry[]>([]);
   let pickerLoading = $state(false);
   let pickerError = $state<string | null>(null);
+  let pickerLoadGeneration = 0;
   let selectedProvider = $state("");
 
-  const fallbackProviders: ProviderSummary[] = [
-    {
-      id: "codex",
-      displayName: "Codex",
-      baseUrl: "local-cli://codex",
-      defaultApi: "cli",
-      modelCount: 1,
-      authModes: ["native"],
-      sourceKind: "builtin",
-      sourcePath: null
-    },
-    {
-      id: "claude",
-      displayName: "Claude",
-      baseUrl: "local-cli://claude",
-      defaultApi: "cli",
-      modelCount: 1,
-      authModes: ["native"],
-      sourceKind: "builtin",
-      sourcePath: null
-    },
-    {
-      id: "puffer",
-      displayName: "Puffer",
-      baseUrl: "local-cli://puffer",
-      defaultApi: "cli",
-      modelCount: 1,
-      authModes: ["native"],
-      sourceKind: "builtin",
-      sourcePath: null
-    }
-  ];
+  function providerOptionsFor(source: SettingsSnapshot | null): ProviderSummary[] {
+    const authenticatedProviderIds = (source?.auth ?? []).map((entry) => entry.providerId);
+    return providerCatalogForSetup(source).filter((provider) =>
+      source === null
+        ? providerCanRunAgent(provider)
+        : providerIsAvailableForAgent(provider, authenticatedProviderIds)
+    );
+  }
 
-  let providerOptions = $derived(
-    (snapshot?.providers?.length ? snapshot.providers : fallbackProviders).filter((provider) =>
-      ["codex", "claude", "puffer"].includes(provider.id)
-    )
-  );
+  let providerOptions = $derived(providerOptionsFor(snapshot));
+
+  function defaultProviderIdFor(
+    source: SettingsSnapshot | null,
+    options: ProviderSummary[] = providerOptionsFor(source)
+  ): string {
+    const configured = source?.config.defaultProvider;
+    const configuredProvider = options.find((provider) =>
+      providerIdsEquivalent(provider.id, configured)
+    );
+    if (configuredProvider) {
+      return configuredProvider.id;
+    }
+    return options[0]?.id ?? "openai";
+  }
 
   function defaultProviderId(): string {
-    const configured = snapshot?.config.defaultProvider;
-    if (configured && providerOptions.some((provider) => provider.id === configured)) {
-      return configured;
+    return defaultProviderIdFor(snapshot, providerOptions);
+  }
+
+  function providerForSnapshot(
+    source: SettingsSnapshot | null,
+    requestedProviderId: string,
+    context: "local" | "remote" = "local"
+  ): string {
+    const options = providerOptionsFor(source);
+    if (options.length === 0) {
+      throw new Error(
+        context === "remote"
+          ? "Connect an agent provider on the remote host before starting a remote project."
+          : "Connect an agent provider in Settings before starting a project."
+      );
     }
-    return providerOptions[0]?.id ?? "codex";
+    const requested = requestedProviderId.trim();
+    const requestedProvider = options.find((provider) =>
+      providerIdsEquivalent(provider.id, requested)
+    );
+    return canonicalDaemonProviderId(
+      requestedProvider?.id ?? defaultProviderIdFor(source, options)
+    );
   }
 
   $effect(() => {
@@ -118,19 +135,57 @@
 
   let canSubmit = $derived(() => {
     if (busy) return false;
+    if (providerOptions.length === 0) return false;
     if (mode === "local") return localDest.trim().length > 0;
     return sshTarget.trim().length > 0 && remoteDest.trim().length > 0;
   });
 
+  function closePicker() {
+    pickerLoadGeneration += 1;
+    pickerOpen = false;
+    pickerLoading = false;
+    pickerError = null;
+  }
+
+  function selectMode(nextMode: Mode) {
+    if (busy || mode === nextMode) return;
+    if (pickerOpen) {
+      closePicker();
+    }
+    status = null;
+    error = null;
+    sshErrorHint = null;
+    mode = nextMode;
+  }
+
   $effect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy) onClose();
+      if (e.key !== "Escape" || busy) return;
+      if (pickerOpen) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!pickerLoading) {
+          closePicker();
+        }
+        return;
+      }
+      onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   });
 
+  // PLUS-117 follow-up: the in-modal directory picker only applies to the
+  // Local destination field — collapse it when the user flips to Remote so
+  // a stale picker doesn't linger above the SSH-specific inputs.
+  $effect(() => {
+    if (mode !== "local" && pickerOpen) {
+      pickerOpen = false;
+    }
+  });
+
   async function submit() {
+    if (!canSubmit()) return;
     busy = true;
     error = null;
     sshErrorHint = null;
@@ -179,9 +234,12 @@
     }
     // 2. Create a new session rooted at that directory.
     status = `Creating agent in ${targetCwd}…`;
-    const created = await createSession(targetCwd, selectedProvider || defaultProviderId());
+    const created = await createSession(
+      targetCwd,
+      providerForSnapshot(snapshot, selectedProvider || defaultProviderId())
+    );
     status = `Ready — session ${created.sessionId.slice(0, 8)}`;
-    await onConnected?.(created.sessionId);
+    await onConnected?.(created);
     onClose();
   }
 
@@ -189,28 +247,53 @@
     // 1. Spin up / attach to the remote daemon over SSH. From this point
     //    the app's shared DaemonClient points at the remote. Subsequent
     //    RPCs (clone + create_session) run on that host's filesystem.
+    const previousHandshake = currentDaemonClient()?.handshake ?? null;
+    let switchedToRemote = false;
     status = `Connecting to ${sshTarget}…`;
     try {
       await connectSshDaemon(sshTarget, {
-        remoteWorkspace: remoteWorkspace.trim() || undefined
+        remoteWorkspace: remoteWorkspace.trim() || undefined,
+        remoteBinary: remoteBinary.trim() || undefined
       });
+      switchedToRemote = true;
     } catch (e) {
       sshErrorHint = deriveSshHint(String(e instanceof Error ? e.message : e), sshTarget);
       throw e;
     }
 
-    // 2. Optional clone on the remote.
-    let targetCwd = remoteDest.trim();
-    const url = remoteGitUrl.trim();
-    if (url) {
-      targetCwd = await runStreamingClone(url, targetCwd, `Cloning on ${sshTarget}`);
-    }
+    let createdSession: CreatedSessionResult | null = null;
+    try {
+      // 2. Optional clone on the remote.
+      let targetCwd = remoteDest.trim();
+      const url = remoteGitUrl.trim();
+      if (url) {
+        targetCwd = await runStreamingClone(url, targetCwd, `Cloning on ${sshTarget}`);
+      }
 
-    // 3. Create a session on the remote and open it in the UI.
-    status = `Creating agent on ${sshTarget}…`;
-    const created = await createSession(targetCwd, selectedProvider || defaultProviderId());
-    status = `Ready — session ${created.sessionId.slice(0, 8)} on ${sshTarget}`;
-    await onConnected?.(created.sessionId);
+      // 3. Create a session on the remote. Only backend failures in this
+      // phase should roll back to the prior daemon.
+      status = `Creating agent on ${sshTarget}…`;
+      const remoteSnapshot = await loadSettingsSnapshot();
+      const created = await createSession(
+        targetCwd,
+        providerForSnapshot(remoteSnapshot, selectedProvider || defaultProviderId(), "remote")
+      );
+      createdSession = created;
+    } catch (e) {
+      if (switchedToRemote && previousHandshake) {
+        try {
+          await switchDaemonClient(previousHandshake);
+        } catch (rollbackError) {
+          console.warn("failed to restore previous daemon after remote connect failure", rollbackError);
+        }
+      }
+      throw e;
+    }
+    if (!createdSession) {
+      throw new Error("remote create_session did not return a session");
+    }
+    status = `Ready — session ${createdSession.sessionId.slice(0, 8)} on ${sshTarget}`;
+    await onConnected?.(createdSession);
     onClose();
   }
 
@@ -226,7 +309,7 @@
       return `Host key verification failed. Run \`ssh ${target}\` once from a terminal to accept the fingerprint.`;
     }
     if (m.includes("command not found") || m.includes("not found")) {
-      return "`puffer` binary not found on the remote. Install it, or pass `remoteBinary` if it lives elsewhere.";
+      return "`puffer` binary not found on the remote. Install it, or set the Remote binary field if it lives elsewhere.";
     }
     if (m.includes("could not resolve") || m.includes("name or service not known")) {
       return "Couldn't resolve the SSH hostname. Check your `~/.ssh/config` and DNS.";
@@ -260,17 +343,22 @@
 
   async function loadPickerPath(path: string) {
     const nextPath = path.trim() || "/";
+    const generation = ++pickerLoadGeneration;
     pickerLoading = true;
     pickerError = null;
     try {
       const entries = await listDir(nextPath);
+      if (generation !== pickerLoadGeneration) return;
       pickerPath = nextPath;
       pickerEntries = entries.filter((entry) => entry.kind === "directory" || entry.kind === "symlink");
     } catch (e) {
+      if (generation !== pickerLoadGeneration) return;
       pickerError = e instanceof Error ? e.message : String(e);
       pickerEntries = [];
     } finally {
-      pickerLoading = false;
+      if (generation === pickerLoadGeneration) {
+        pickerLoading = false;
+      }
     }
   }
 
@@ -294,15 +382,15 @@
     class="pf-modal pf-connect-modal"
     onclick={(e) => e.stopPropagation()}
     role="dialog"
-    aria-label="Connect project"
+    aria-label="Create Project"
     aria-modal="true"
     tabindex="-1"
+    use:focusTrap
     onkeydown={() => {}}
   >
     <div class="pf-modal-head">
       <div class="pf-modal-title-group">
-        <div class="pf-modal-eyebrow">New project</div>
-        <div class="pf-modal-title">Clone &amp; connect</div>
+        <div class="pf-modal-title">New Project</div>
       </div>
       <button type="button" class="pf-modal-close" onclick={onClose} aria-label="Close" disabled={busy}>
         <Icon name="x" size={14} />
@@ -316,7 +404,7 @@
         aria-selected={mode === "local"}
         class="pf-modal-seg-btn"
         data-active={mode === "local"}
-        onclick={() => (mode = "local")}
+        onclick={() => selectMode("local")}
         disabled={busy}
       >
         <Icon name="folder" size={13} />
@@ -331,7 +419,7 @@
         aria-selected={mode === "remote"}
         class="pf-modal-seg-btn"
         data-active={mode === "remote"}
-        onclick={() => (mode = "remote")}
+        onclick={() => selectMode("remote")}
         disabled={busy}
       >
         <Icon name="globe" size={13} />
@@ -347,19 +435,29 @@
         <div class="pf-field-label">Provider</div>
         <div class="pf-provider-seg" role="radiogroup" aria-label="Agent provider">
           {#each providerOptions as provider (provider.id)}
-            <button
-              type="button"
+            <label
               class="pf-provider-seg-btn"
               data-active={selectedProvider === provider.id}
-              role="radio"
-              aria-checked={selectedProvider === provider.id}
-              onclick={() => (selectedProvider = provider.id)}
-              disabled={busy}
             >
+              <input
+                class="pf-provider-seg-input"
+                type="radio"
+                name="connect-project-provider"
+                value={provider.id}
+                checked={selectedProvider === provider.id}
+                onchange={(event) => {
+                  event.stopPropagation();
+                  selectedProvider = provider.id;
+                }}
+                disabled={busy}
+              />
               {provider.displayName}
-            </button>
+            </label>
           {/each}
         </div>
+        {#if providerOptions.length === 0}
+          <div class="pf-field-hint">Connect a provider in Settings before starting a project.</div>
+        {/if}
       </div>
 
       {#if mode === "local"}
@@ -386,7 +484,7 @@
             >Browse…</button>
           </div>
           <div class="pf-field-hint">
-            If this directory doesn't exist Corbina will create it. Must be empty if a git URL is set below.
+            If this directory doesn't exist Puffer will create it. Must be empty if a git URL is set below.
           </div>
         </div>
         <div class="pf-field">
@@ -421,7 +519,7 @@
             />
           </div>
           <div class="pf-field-hint">
-            Corbina will connect over your existing SSH config and port-forward the workspace runtime locally.
+            Puffer will connect over your existing SSH config and port-forward the workspace runtime locally.
           </div>
         </div>
         <div class="pf-field">
@@ -437,6 +535,24 @@
               spellcheck="false"
               disabled={busy}
             />
+          </div>
+        </div>
+        <div class="pf-field">
+          <label class="pf-field-label" for="pf-remote-binary">
+            Remote binary <span class="pf-field-label-opt">advanced</span>
+          </label>
+          <div class="pf-field-input">
+            <Icon name="terminal" size={12} />
+            <input
+              id="pf-remote-binary"
+              bind:value={remoteBinary}
+              placeholder="puffer"
+              spellcheck="false"
+              disabled={busy}
+            />
+          </div>
+          <div class="pf-field-hint">
+            Set this only when <span class="pf-mono">puffer</span> is installed outside the remote's $PATH.
           </div>
         </div>
         <div class="pf-field">
@@ -469,11 +585,6 @@
         </div>
       {/if}
 
-      {#if status || error}
-        <div class="pf-modal-status" data-error={!!error}>
-          {error ?? status}
-        </div>
-      {/if}
       {#if pickerOpen}
         <div class="pf-dir-picker" role="group" aria-label="Choose directory">
           <div class="pf-dir-picker-head">
@@ -481,7 +592,7 @@
             <button
               type="button"
               class="pf-modal-close"
-              onclick={() => (pickerOpen = false)}
+              onclick={closePicker}
               aria-label="Close directory picker"
               disabled={pickerLoading}
             >
@@ -529,7 +640,7 @@
               disabled={pickerLoading || !pickerPath.trim() || !!pickerError}
               onclick={() => {
                 localDest = pickerPath.trim();
-                pickerOpen = false;
+                closePicker();
               }}
             >
               Use this directory
@@ -566,6 +677,19 @@
       {/if}
     </div>
 
+    <!-- PLUS-117: status / progress row lives between body and footer with a
+         reserved height so it cannot shift other content when it appears. -->
+    <div
+      class="pf-modal-status-row"
+      data-active={!!(status || error)}
+      data-error={!!error}
+      aria-live="polite"
+    >
+      {#if status || error}
+        <span class="pf-modal-status-text">{error ?? status}</span>
+      {/if}
+    </div>
+
     <div class="pf-modal-foot">
       <div class="pf-modal-foot-hint">
         {#if mode === "local"}
@@ -586,13 +710,13 @@
           disabled={!canSubmit()}
         >
           {#if busy}
-            <Icon name="refresh" size={13} />{status ?? "Working…"}
+            <Icon name="refresh" size={13} />Working…
           {:else if mode === "local" && localGitUrl.trim()}
-            Clone &amp; start
+            Clone &amp; create
           {:else if mode === "remote" && remoteGitUrl.trim()}
-            Clone &amp; start remote
+            Clone &amp; create remote
           {:else}
-            Start agent
+            Create
           {/if}
         </button>
       </div>
@@ -614,6 +738,32 @@
     color: oklch(0.5 0.2 25);
     border: 1px solid color-mix(in oklab, oklch(0.7 0.18 25) 30%, var(--border));
   }
+  /* PLUS-117 follow-up: a fixed-height reserved row between body and footer
+     for the clone/progress status. The slot keeps its height even when
+     empty so revealing the message does not shift surrounding layout. */
+  .pf-modal-status-row {
+    flex-shrink: 0;
+    min-height: 32px;
+    padding: 6px 20px 0;
+    display: flex; align-items: center;
+  }
+  .pf-modal-status-text {
+    flex: 1; min-width: 0;
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    background: color-mix(in oklab, var(--muted) 60%, var(--background));
+    color: var(--muted-foreground);
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pf-modal-status-row[data-error="true"] .pf-modal-status-text {
+    background: color-mix(in oklab, oklch(0.7 0.18 25) 12%, var(--background));
+    color: oklch(0.5 0.2 25);
+    border: 1px solid color-mix(in oklab, oklch(0.7 0.18 25) 30%, var(--border));
+  }
   .pf-provider-seg {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -626,17 +776,39 @@
     border-radius: 7px;
     background: var(--background);
     color: var(--foreground);
+    display: grid;
+    place-items: center;
     font: inherit;
     font-size: 12px;
     font-weight: 600;
     cursor: pointer;
+    position: relative;
+    transition: background 120ms, border-color 120ms;
   }
-  .pf-provider-seg-btn:hover:not(:disabled) {
-    background: var(--accent);
+  .pf-provider-seg-input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    opacity: 0;
+    cursor: inherit;
+  }
+  .pf-provider-seg-btn:has(.pf-provider-seg-input:disabled) {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+  .pf-provider-seg-btn:hover:not(:has(.pf-provider-seg-input:disabled)) {
+    border-color: transparent;
+    background: var(--pf-selected-bg-hover);
+  }
+  .pf-provider-seg-btn:focus-within {
+    outline: 2px solid color-mix(in oklab, var(--accent) 70%, transparent);
+    outline-offset: 2px;
   }
   .pf-provider-seg-btn[data-active="true"] {
-    border-color: var(--foreground);
-    box-shadow: 0 0 0 1px var(--foreground) inset;
+    border-color: transparent;
+    background: var(--pf-selected-bg);
   }
   .pf-modal-hint {
     font-size: 12px;
@@ -653,8 +825,8 @@
     gap: 10px;
     border: 1px solid var(--border);
     border-radius: 10px;
-    background: color-mix(in oklab, var(--background) 96%, var(--muted));
-    padding: 10px;
+    background: color-mix(in oklab, var(--muted) 70%, var(--background));
+    padding: 12px;
   }
   .pf-dir-picker-head,
   .pf-dir-picker-toolbar {
@@ -674,7 +846,8 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
-    max-height: 220px;
+    /* Height fixed so Parent reloads don't collapse the row — see PLUS-117. */
+    height: 200px;
     overflow: auto;
     border: 1px solid var(--border);
     border-radius: 8px;

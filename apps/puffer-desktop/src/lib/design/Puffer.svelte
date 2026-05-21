@@ -3,7 +3,7 @@
 
   type Props = {
     size?: number;
-    state?: "idle" | "thinking" | "running" | "awaiting";
+    state?: "idle" | "thinking" | "running" | "awaiting" | "review";
     accent?: string;
   };
 

@@ -2,11 +2,13 @@
   import { listProviderModels, type ModelDescriptorInfo } from "../../api/desktop";
   import type { SettingsSnapshot } from "../../types";
   import Icon from "../../design/Icon.svelte";
+  import { providerIsAvailableForAgent, providerIdsEquivalent } from "../../providerIds";
 
   type Props = {
     snapshot: SettingsSnapshot | null;
     currentProvider?: string | null;
     currentModel?: string | null;
+    contextKey?: string | null;
     allowProviderSwitch?: boolean;
     disabled?: boolean;
     onChange: (providerId: string, modelId: string) => void;
@@ -16,6 +18,7 @@
     snapshot,
     currentProvider: currentProviderOverride = null,
     currentModel: currentModelOverride = null,
+    contextKey = null,
     allowProviderSwitch = true,
     disabled = false,
     onChange
@@ -31,6 +34,11 @@
   let loadError = $state<string | null>(null);
   let triggerEl: HTMLButtonElement | null = $state(null);
   let menuEl: HTMLDivElement | null = $state(null);
+  let pendingProviderId = $state<string | null>(null);
+  let activeContextKey = $state<string | null>(null);
+  let providerSwitchRollback = $state<{ providerId: string; modelId: string } | null>(null);
+  let modelLoadGeneration = 0;
+  let providerSwitchGeneration = 0;
 
   let currentProvider = $derived(
     currentProviderOverride ?? snapshot?.config?.defaultProvider ?? ""
@@ -38,24 +46,33 @@
   let currentModel = $derived(
     currentModelOverride ?? snapshot?.config?.defaultModel ?? ""
   );
-  let authedProviderIds = $derived(
-    new Set((snapshot?.auth ?? []).map((entry) => entry.providerId))
-  );
-  let authedProviders = $derived(
-    (snapshot?.providers ?? []).filter((provider) => authedProviderIds.has(provider.id))
+  let activeProvider = $derived(pendingProviderId ?? currentProvider);
+  let activeModel = $derived(pendingProviderId ? "" : currentModel);
+  let authenticatedProviderIds = $derived((snapshot?.auth ?? []).map((entry) => entry.providerId));
+  let availableProviders = $derived(
+    (snapshot?.providers ?? []).filter(
+      (provider) =>
+        providerIsAvailableForAgent(provider, authenticatedProviderIds)
+    )
   );
   let providerLabel = $derived(
-    snapshot?.providers?.find((p) => p.id === currentProvider)?.displayName ?? currentProvider
+    providerEntryFor(activeProvider)?.displayName ??
+      activeProvider
   );
 
-  let currentProviderModels = $derived(modelsByProvider[currentProvider] ?? []);
+  let currentProviderEntry = $derived(
+    providerEntryFor(activeProvider)
+  );
+  let currentProviderModels = $derived(
+    modelsByProvider[activeProvider] ?? modelsByProvider[currentProviderEntry?.id ?? ""] ?? []
+  );
 
   // Filter models only within the selected provider. Provider switching is
   // explicit via the provider row above the model list.
   let filteredEntries = $derived.by(() => {
     const needle = query.trim().toLowerCase();
     const out: { provider: string; providerLabel: string; model: ModelDescriptorInfo }[] = [];
-    const provider = authedProviders.find((entry) => entry.id === currentProvider);
+    const provider = availableProviders.find((entry) => providerIdsEquivalent(entry.id, activeProvider));
     if (!provider) return out;
     for (const model of currentProviderModels) {
       if (
@@ -70,49 +87,86 @@
   });
 
   async function loadModels() {
+    const generation = ++modelLoadGeneration;
     busy = true;
     loadError = null;
     try {
       const next: Record<string, ModelDescriptorInfo[]> = { ...modelsByProvider };
-      const providers = allowProviderSwitch
-        ? authedProviders
-        : authedProviders.filter((provider) => provider.id === currentProvider);
+      const provider = currentProviderEntry ??
+        availableProviders.find((entry) => providerIdsEquivalent(entry.id, currentProvider));
+      const providers = provider ? [provider] : [];
       for (const provider of providers) {
-        if (next[provider.id]) continue;
         try {
           next[provider.id] = await listProviderModels(provider.id);
         } catch (error) {
-          next[provider.id] = [];
+          if (!Object.prototype.hasOwnProperty.call(next, provider.id)) {
+            next[provider.id] = [];
+          }
           loadError = `${provider.id}: ${error}`;
         }
       }
+      if (generation !== modelLoadGeneration) return;
       modelsByProvider = next;
     } finally {
-      busy = false;
+      if (generation === modelLoadGeneration) {
+        busy = false;
+      }
     }
+  }
+
+  function providerEntryFor(providerId: string | null | undefined) {
+    const normalized = providerId?.trim().toLowerCase();
+    if (!normalized) return null;
+    const exact = availableProviders.find(
+      (provider) => provider.id.trim().toLowerCase() === normalized
+    );
+    if (exact) return exact;
+    return availableProviders.find((provider) => providerIdsEquivalent(provider.id, normalized)) ?? null;
   }
 
   async function selectProvider(providerId: string) {
     if (!allowProviderSwitch || disabled) return;
-    if (providerId === currentProvider) return;
+    if (providerIdsEquivalent(providerId, activeProvider)) return;
+    const generation = ++providerSwitchGeneration;
+    if (providerSwitchRollback === null) {
+      providerSwitchRollback = { providerId: currentProvider, modelId: currentModel };
+    }
+    const rollback = providerSwitchRollback;
+    modelLoadGeneration += 1;
+    pendingProviderId = providerId;
     query = "";
-    let models = modelsByProvider[providerId] ?? [];
-    if (models.length === 0) {
-      busy = true;
-      loadError = null;
-      try {
-        models = await listProviderModels(providerId);
-        modelsByProvider = { ...modelsByProvider, [providerId]: models };
-      } catch (error) {
-        modelsByProvider = { ...modelsByProvider, [providerId]: [] };
-        loadError = `${providerId}: ${error}`;
-        models = [];
-      } finally {
+    onChange(providerId, "");
+    let models: ModelDescriptorInfo[] = [];
+    busy = true;
+    loadError = null;
+    try {
+      models = await listProviderModels(providerId);
+      if (generation !== providerSwitchGeneration) return;
+      modelsByProvider = { ...modelsByProvider, [providerId]: models };
+    } catch (error) {
+      if (generation !== providerSwitchGeneration) return;
+      modelsByProvider = { ...modelsByProvider, [providerId]: [] };
+      loadError = `${providerId}: ${error}`;
+      onChange(rollback.providerId, rollback.modelId);
+      providerSwitchRollback = null;
+      pendingProviderId = null;
+      return;
+    } finally {
+      if (generation === providerSwitchGeneration) {
         busy = false;
       }
     }
-    const defaultModel = models.find((model) => model.isDefault) ?? models[0];
+    if (generation !== providerSwitchGeneration) return;
+    const defaultModel =
+      models.find((model) => model.isDefault && modelSupportsAgentTools(model)) ??
+      models.find(modelSupportsAgentTools);
     onChange(providerId, defaultModel?.id ?? "");
+    providerSwitchRollback = null;
+    pendingProviderId = null;
+  }
+
+  function modelSupportsAgentTools(model: ModelDescriptorInfo): boolean {
+    return model.supportsTools !== false;
   }
 
   function toggle() {
@@ -125,6 +179,11 @@
 
   function pick(providerId: string, modelId: string) {
     if (disabled) return;
+    const providerModels = modelsByProvider[providerId] ?? [];
+    const model = providerModels.find((entry) => entry.id === modelId);
+    if (model && !modelSupportsAgentTools(model)) return;
+    pendingProviderId = null;
+    providerSwitchRollback = null;
     open = false;
     query = "";
     onChange(providerId, modelId);
@@ -139,10 +198,36 @@
     open = false;
   }
 
+  function handleDocumentKeydown(event: KeyboardEvent) {
+    if (!open || event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    open = false;
+    triggerEl?.focus();
+  }
+
+  $effect(() => {
+    const nextContextKey = contextKey ?? null;
+    if (nextContextKey === activeContextKey) return;
+    activeContextKey = nextContextKey;
+    modelLoadGeneration += 1;
+    providerSwitchGeneration += 1;
+    pendingProviderId = null;
+    providerSwitchRollback = null;
+    busy = false;
+    loadError = null;
+    query = "";
+    open = false;
+  });
+
   $effect(() => {
     if (typeof document === "undefined") return;
     document.addEventListener("mousedown", handleDocumentClick);
-    return () => document.removeEventListener("mousedown", handleDocumentClick);
+    document.addEventListener("keydown", handleDocumentKeydown);
+    return () => {
+      document.removeEventListener("mousedown", handleDocumentClick);
+      document.removeEventListener("keydown", handleDocumentKeydown);
+    };
   });
 </script>
 
@@ -154,13 +239,15 @@
     class:open
     onclick={toggle}
     disabled={disabled}
-    title={currentModel ? `${providerLabel} · ${currentModel}` : "Pick a model"}
+    aria-haspopup="listbox"
+    aria-expanded={open}
+    title={providerLabel ? `${providerLabel} · ${activeModel || "Pick model"}` : "Pick a model"}
   >
     <Icon name="sparkles" size={11} color="var(--muted-foreground)" />
-    <span class="model" class:placeholder={!currentModel}>
-      {currentModel || "Pick model"}
+    <span class="model" class:placeholder={!activeModel}>
+      {activeModel || (busy ? "Loading models" : "Pick model")}
     </span>
-    {#if providerLabel && currentModel}
+    {#if providerLabel}
       <span class="provider">{providerLabel}</span>
     {/if}
     <Icon name="chevD" size={10} color="var(--muted-foreground)" />
@@ -169,11 +256,12 @@
   {#if open}
     <div bind:this={menuEl} class="menu" role="listbox">
       {#if allowProviderSwitch}
-        <div class="providers" aria-label="Provider">
-          {#each authedProviders as provider (provider.id)}
+        <div class="providers" role="group" aria-label="Model provider">
+          {#each availableProviders as provider (provider.id)}
             <button
               type="button"
-              class:on={provider.id === currentProvider}
+              class:on={providerIdsEquivalent(provider.id, activeProvider)}
+              aria-pressed={providerIdsEquivalent(provider.id, activeProvider)}
               onclick={() => selectProvider(provider.id)}
             >
               {provider.displayName}
@@ -191,9 +279,9 @@
       />
       <div class="results">
         {#if busy && filteredEntries.length === 0}
-          <div class="hint">Loading models…</div>
+          <div class="hint">Loading {providerLabel || "provider"} models…</div>
         {:else if filteredEntries.length === 0}
-          {#if authedProviders.length === 0}
+          {#if availableProviders.length === 0}
             <div class="hint">Connect a provider first.</div>
           {:else if !currentProvider}
             <div class="hint">Pick a provider.</div>
@@ -205,18 +293,24 @@
         {:else}
           {#each filteredEntries as entry (entry.provider + "::" + entry.model.id)}
             {@const isCurrent =
-              entry.provider === currentProvider && entry.model.id === currentModel}
+              providerIdsEquivalent(entry.provider, activeProvider) && entry.model.id === activeModel}
+            {@const supportsAgentTools = modelSupportsAgentTools(entry.model)}
             <button
               type="button"
               class="row"
               class:on={isCurrent}
+              class:unsupported={!supportsAgentTools}
+              disabled={!supportsAgentTools}
               onclick={() => pick(entry.provider, entry.model.id)}
               role="option"
               aria-selected={isCurrent}
+              title={supportsAgentTools ? entry.model.id : `${entry.model.id} does not support agent tools`}
             >
               <span class="row-main">
                 <span class="row-name">{entry.model.displayName || entry.model.id}</span>
-                <span class="row-provider">{entry.providerLabel}</span>
+                <span class="row-provider">
+                  {entry.providerLabel}{supportsAgentTools ? "" : " · No agent tools"}
+                </span>
               </span>
               <span class="row-id">{entry.model.id}</span>
               {#if isCurrent}
@@ -252,7 +346,7 @@
     cursor: pointer;
     font: inherit;
     font-size: 11.5px;
-    line-height: 1;
+    line-height: 1.2;
     max-width: 240px;
     transition: background 120ms, border-color 120ms;
   }
@@ -376,6 +470,13 @@
   }
   .row:hover {
     background: color-mix(in oklab, var(--background) 90%, var(--muted));
+  }
+  .row:disabled {
+    cursor: not-allowed;
+    opacity: 0.58;
+  }
+  .row.unsupported:hover {
+    background: transparent;
   }
   .row.on {
     background: color-mix(in oklab, var(--accent) 12%, var(--background));

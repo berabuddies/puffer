@@ -87,8 +87,10 @@
   let selectedNodeId = $state<string | null>("codex-implement");
   let runIdx = $state<number | null>(null);
   let stepIdx = $state<number | null>(null);
-  let loading = $state(true);
+  let loading = $state(false);
   let error = $state<string | null>(null);
+  let refreshGeneration = 0;
+  let dirtyWorkflowSlugs = $state<string[]>([]);
   let saveNotice = $state("Draft changes are local until workflow save lands in the daemon.");
 
   let workflows = $derived(editorWorkflows);
@@ -239,27 +241,46 @@
   });
 
   async function refresh() {
+    if (loading) return;
+    const generation = ++refreshGeneration;
     loading = true;
     error = null;
     try {
       const next = await loadWorkflowSnapshot();
+      if (generation !== refreshGeneration) return;
+      const incoming = next.workflows.length > 0 ? next.workflows.map(editableFromWorkflow) : [starterWorkflow()];
+      const dirtyBySlug = new Map(
+        editorWorkflows
+          .filter((item) => dirtyWorkflowSlugs.includes(item.slug))
+          .map((item) => [item.slug, item])
+      );
+      const merged = incoming.map((item) => dirtyBySlug.get(item.slug) ?? item);
+      for (const dirty of dirtyBySlug.values()) {
+        if (!merged.some((item) => item.slug === dirty.slug)) merged.push(dirty);
+      }
       snapshot = {
         workflows: next.workflows,
         runs: [...next.runs].sort((a, b) => b.idx - a.idx)
       };
-      editorWorkflows = next.workflows.length > 0 ? next.workflows.map(editableFromWorkflow) : [starterWorkflow()];
+      editorWorkflows = merged;
       if (!workflowSlug || !editorWorkflows.some((item) => item.slug === workflowSlug)) {
         workflowSlug = editorWorkflows[0]?.slug ?? "agent-review-pipeline";
       }
-      selectedNodeId = editorWorkflows[0]?.pipeline.nodes[0]?.id ?? null;
+      const activeWorkflow = editorWorkflows.find((item) => item.slug === workflowSlug) ?? editorWorkflows[0];
+      if (!activeWorkflow?.pipeline.nodes.some((node) => node.id === selectedNodeId)) {
+        selectedNodeId = activeWorkflow?.pipeline.nodes[0]?.id ?? null;
+      }
     } catch (err) {
+      if (generation !== refreshGeneration) return;
       error = err instanceof Error ? err.message : String(err);
-      editorWorkflows = [starterWorkflow()];
+      if (editorWorkflows.length === 0) editorWorkflows = [starterWorkflow()];
       workflowSlug = editorWorkflows[0].slug;
       selectedNodeId = editorWorkflows[0].pipeline.nodes[0]?.id ?? null;
     } finally {
-      loading = false;
-      setTimeout(measure, 0);
+      if (generation === refreshGeneration) {
+        loading = false;
+        setTimeout(measure, 0);
+      }
     }
   }
 
@@ -280,7 +301,11 @@
 
   function updateCurrentWorkflow(mutator: (item: EditableWorkflow) => EditableWorkflow) {
     if (!workflow) return;
-    editorWorkflows = editorWorkflows.map((item) => (item.slug === workflow.slug ? mutator(item) : item));
+    const dirtySlug = workflow.slug;
+    editorWorkflows = editorWorkflows.map((item) => (item.slug === dirtySlug ? mutator(item) : item));
+    if (!dirtyWorkflowSlugs.includes(dirtySlug)) {
+      dirtyWorkflowSlugs = [...dirtyWorkflowSlugs, dirtySlug];
+    }
     saveNotice = "Edited locally. Save/export wiring can use this workflow shape.";
   }
 
@@ -341,6 +366,43 @@
     });
   }
 
+  function selectNodeProvider(provider: AgentProvider) {
+    if (!selectedNode) return;
+    changeProvider(selectedNode.id, provider);
+  }
+
+  function focusProviderButton(provider: AgentProvider) {
+    document.querySelector<HTMLButtonElement>(`[data-pipeline-provider="${provider}"]`)?.focus();
+  }
+
+  function moveProviderSelection(provider: AgentProvider, offset: number) {
+    const idx = providerOptions.findIndex((item) => item.id === provider);
+    if (idx < 0) return;
+    const next = providerOptions[(idx + offset + providerOptions.length) % providerOptions.length].id;
+    selectNodeProvider(next);
+    setTimeout(() => focusProviderButton(next), 0);
+  }
+
+  function handleProviderKeydown(event: KeyboardEvent, provider: AgentProvider) {
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+      event.preventDefault();
+      moveProviderSelection(provider, 1);
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+      event.preventDefault();
+      moveProviderSelection(provider, -1);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      const first = providerOptions[0].id;
+      selectNodeProvider(first);
+      setTimeout(() => focusProviderButton(first), 0);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      const last = providerOptions[providerOptions.length - 1].id;
+      selectNodeProvider(last);
+      setTimeout(() => focusProviderButton(last), 0);
+    }
+  }
+
   function addAgent(provider: AgentProvider) {
     if (!workflow) return;
     const meta = providerMeta(provider);
@@ -389,6 +451,10 @@
   function connectSelectedTo(targetId: string) {
     if (!selectedNode || selectedNode.id === targetId) return;
     toggleDependency(targetId, selectedNode.id, true);
+  }
+
+  function dependsOn(node: EditablePipelineNode, dependencyId: string): boolean {
+    return (node.depends_on ?? []).includes(dependencyId);
   }
 
   function toolsText(node: EditablePipelineNode): string {
@@ -563,8 +629,17 @@
           <Icon name="plus" size={12} />{provider.short}
         </button>
       {/each}
-      <button type="button" class="sc-btn" data-variant="ghost" data-size="sm" onclick={refresh}>
-        <Icon name="refresh" size={12} />Refresh
+      <button
+        type="button"
+        class="sc-btn"
+        data-variant="ghost"
+        data-size="sm"
+        aria-label="Refresh workflows"
+        aria-busy={loading}
+        disabled={loading}
+        onclick={refresh}
+      >
+        <Icon name="refresh" size={12} />{loading ? "Refreshing" : "Refresh"}
       </button>
     </div>
   </div>
@@ -674,6 +749,7 @@
                   data-type={node.type}
                   data-provider={node.provider ?? "trigger"}
                   data-state={st}
+                  aria-pressed={node.id === selectedNodeId}
                   onclick={() => node.node ? (selectedNodeId = node.id) : null}
                 >
                   <div class="pf-pipe-node-head">
@@ -757,12 +833,17 @@
               {/if}
             </div>
             {#if selectedNode}
-              <div class="pf-provider-switcher" role="group" aria-label="Agent provider">
+              <div class="pf-provider-switcher" role="radiogroup" aria-label="Agent provider">
                 {#each providerOptions as provider (provider.id)}
                   <button
                     type="button"
+                    role="radio"
                     data-selected={selectedNode.type === provider.id}
-                    onclick={() => changeProvider(selectedNode.id, provider.id)}
+                    data-pipeline-provider={provider.id}
+                    aria-checked={selectedNode.type === provider.id}
+                    tabindex={selectedNode.type === provider.id ? 0 : -1}
+                    onclick={() => selectNodeProvider(provider.id)}
+                    onkeydown={(event) => handleProviderKeydown(event, provider.id)}
                   >
                     {provider.label}
                   </button>
@@ -819,7 +900,14 @@
                 <span>Send selected output to</span>
               </div>
               {#each workflow.pipeline.nodes.filter((node) => node.id !== selectedNode?.id) as node (node.id)}
-                <button type="button" class="pf-wire-connect" onclick={() => connectSelectedTo(node.id)}>
+                {@const alreadyConnected = dependsOn(node, selectedNode.id)}
+                <button
+                  type="button"
+                  class="pf-wire-connect"
+                  onclick={() => connectSelectedTo(node.id)}
+                  disabled={alreadyConnected}
+                  aria-pressed={alreadyConnected}
+                >
                   <Icon name="link" size={12} />
                   {node.agent ?? node.id}
                 </button>
@@ -985,7 +1073,6 @@
   .pf-provider-card:hover {
     background: var(--pf-selected-bg-hover);
     border-color: transparent;
-    font-weight: 700;
   }
 
   .pf-provider-mark,
@@ -1242,6 +1329,24 @@
     border-color: transparent;
     background: var(--pf-selected-bg-hover);
     font-weight: 700;
+  }
+
+  .pf-wire-connect:disabled {
+    cursor: default;
+    color: var(--muted-foreground);
+    border-color: color-mix(in oklab, var(--border) 80%, var(--puffer-accent));
+    background: color-mix(in oklab, var(--puffer-accent) 8%, var(--card));
+    font-weight: 600;
+  }
+
+  .pf-wire-connect:disabled::after {
+    content: "connected";
+    margin-left: auto;
+    color: var(--puffer-accent);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
   }
 
   .pf-editor-runs {

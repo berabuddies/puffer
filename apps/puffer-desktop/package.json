@@ -4,10 +4,15 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "build:puffer-cli:dev": "cargo build -p puffer-cli",
+    "build:puffer-cli:release": "cargo build --release -p puffer-cli",
     "dev": "vite --host 127.0.0.1 --port 1420",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1 --port 1420",
     "check": "svelte-check --tsconfig ./tsconfig.json",
+    "test:desktop-ui": "playwright test tests/*ui.spec.ts tests/plus-*.spec.ts",
+    "test:desktop-ui:webkit": "playwright test tests/*ui.spec.ts tests/plus-*.spec.ts --browser=webkit",
+    "test:desktop": "playwright test",
     "test:codex-playwright": "playwright test tests/codex-playwright-mcp.spec.ts",
     "tauri": "tauri"
   },
@@ -16,7 +21,9 @@
     "@tauri-apps/plugin-dialog": "^2.0.0",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
+    "fflate": "^0.8.2",
     "lucide-svelte": "^1.0.1",
+    "pdfjs-dist": "^5.7.284",
     "svelte": "^5.0.0"
   },
   "devDependencies": {

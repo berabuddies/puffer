@@ -1,0 +1,113 @@
+{
+  "id": "files-terminal-race",
+  "title": "Files and Terminal stale operation races",
+  "focus": "Files dirty/save state, stale file restore, terminal close/focus, and late pty output.",
+  "severityTarget": "P1 data loss in file editor, terminal input sent to a closed pty, or blocked recovery after save/close failure.",
+  "primaryRoutes": ["agent-detail", "files-pane", "terminal-pane"],
+  "defaultIterations": 10,
+  "defaultSteps": 16,
+  "setup": [
+    {
+      "id": "setup-open-agent",
+      "action": "open-agent-detail",
+      "kind": "ui",
+      "target": "workspace.agent-card",
+      "coverage": ["route:workspace", "route:agent-detail", "state:daemon.connected", "state:session.idle"]
+    }
+  ],
+  "actions": [
+    {
+      "id": "open-file",
+      "kind": "ui",
+      "target": "files.open",
+      "weight": 8,
+      "params": { "path": { "oneOf": ["/tmp/puffer/src/main.rs", "/tmp/puffer/src/lib.rs", "/tmp/puffer/README.md"] } },
+      "expectedDaemon": "read_file",
+      "produces": ["resource:file.open"],
+      "coverage": ["route:files-pane", "control:files.open", "state:files.clean", "async:late-success"]
+    },
+    {
+      "id": "edit-file",
+      "kind": "keyboard",
+      "target": "files.editor",
+      "weight": 9,
+      "requires": ["resource:file.open"],
+      "params": { "text": { "oneOf": ["// fuzz edit", "let x = 1;", "temporary draft"] } },
+      "produces": ["resource:file.dirty"],
+      "coverage": ["control:files.editor", "state:files.dirty"]
+    },
+    {
+      "id": "save-file",
+      "kind": "ui",
+      "target": "files.save",
+      "weight": 8,
+      "requires": ["resource:file.dirty"],
+      "expectedDaemon": "write_file",
+      "coverage": ["control:files.save", "state:files.saving", "async:late-failure"]
+    },
+    {
+      "id": "emit-file-restore",
+      "kind": "daemon-event",
+      "target": "workspace:fs:changed",
+      "weight": 7,
+      "coverage": ["async:server-push-update", "async:stale-session-event", "state:files.dirty"]
+    },
+    {
+      "id": "open-terminal",
+      "kind": "ui",
+      "target": "terminal.new-tab",
+      "weight": 7,
+      "expectedDaemon": "pty_open",
+      "produces": ["resource:terminal.open"],
+      "coverage": ["route:terminal-pane", "control:terminal.new-tab", "state:terminal.active", "async:late-success"]
+    },
+    {
+      "id": "type-terminal",
+      "kind": "keyboard",
+      "target": "terminal.input",
+      "weight": 8,
+      "requires": ["resource:terminal.open"],
+      "params": { "text": { "oneOf": ["pwd", "ls", "cargo --version"] } },
+      "expectedDaemon": "pty_write",
+      "coverage": ["control:terminal.input", "state:terminal.active"]
+    },
+    {
+      "id": "close-terminal",
+      "kind": "ui",
+      "target": "terminal.close-tab",
+      "weight": 8,
+      "requires": ["resource:terminal.open"],
+      "expectedDaemon": "pty_close",
+      "coverage": ["control:terminal.close-tab", "state:terminal.closing", "async:late-failure"]
+    },
+    {
+      "id": "emit-late-pty-output",
+      "kind": "daemon-event",
+      "target": "pty:<pty>:data",
+      "weight": 7,
+      "coverage": ["async:stale-session-event", "state:terminal.closing"]
+    },
+    {
+      "id": "switch-session",
+      "kind": "ui",
+      "target": "workspace.agent-card",
+      "weight": 6,
+      "coverage": ["control:workspace.agent-card", "async:stale-session-event", "state:session.loading"]
+    },
+    {
+      "id": "disconnect-reconnect",
+      "kind": "daemon",
+      "target": "websocket",
+      "weight": 5,
+      "coverage": ["state:daemon.reconnecting", "async:reconnect"]
+    }
+  ],
+  "invariants": [
+    "app-no-crash",
+    "no-data-loss",
+    "active-session-stable",
+    "stale-error-scoped",
+    "one-request-per-intent",
+    "no-permanent-loading"
+  ]
+}

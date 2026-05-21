@@ -3,7 +3,12 @@
 
   import Icon, { type IconName } from "../design/Icon.svelte";
   import LoginView from "../components/LoginView.svelte";
-  import { currentDaemonClient } from "../api/daemonClient";
+  import {
+    providerIdCanRunAgent,
+    providerIsAvailableForAgent,
+    providerIdsEquivalent
+  } from "../providerIds";
+  import { providerCatalogForSetup, usesFallbackProviderCatalog } from "../providerFallbacks";
   import type { AccentKey, DensityKey, FontMixKey, ThemeKey, Tweaks } from "../shell/tweaks";
   import {
     addMcpServer,
@@ -29,6 +34,8 @@
     loading: boolean;
     tweaks: Tweaks;
     preferences: DesktopPreferences;
+    daemonUrl: string | null;
+    daemonWorkspaceRoot: string | null;
     remoteEnabled: boolean;
     remotePassword: string;
     remoteBusy: boolean;
@@ -53,6 +60,12 @@
   };
 
   let props: Props = $props();
+  let credentialBusy = $derived(props.busyProviderId != null || props.busyImportKey != null);
+
+  function refreshIfIdle() {
+    if (credentialBusy) return;
+    props.onRefresh();
+  }
 
   type Section = "general" | "providers" | "permissions" | "mcp" | "git" | "appearance" | "shortcuts";
   let section = $state<Section>("general");
@@ -69,9 +82,12 @@
 
   // Live permissions loaded from the daemon. `permissionRows` is the
   // editable working copy — changes are staged in memory and flushed on
-  // Save. `permissionSaving` blocks the Save button during the round-trip.
+  // Save. Loading state and generation guards keep late responses from
+  // clobbering in-progress edits.
   let permissionSnapshot = $state<PermissionsSnapshot | null>(null);
   let permissionRows = $state<{ tool: string; mode: string }[]>([]);
+  let permissionLoading = $state(false);
+  let permissionLoadGeneration = 0;
   let permissionSaving = $state(false);
   let permissionError = $state<string | null>(null);
   let permissionDirty = $state(false);
@@ -79,7 +95,9 @@
   // MCP servers discovered on disk plus a small manifest writer for new
   // workspace/user entries.
   let mcpServers = $state<McpServerInfo[]>([]);
+  let mcpLoaded = $state(false);
   let mcpLoading = $state(false);
+  let mcpLoadGeneration = 0;
   let mcpSaving = $state(false);
   let mcpError = $state<string | null>(null);
   let mcpSaved = $state<string | null>(null);
@@ -96,6 +114,7 @@
   // Per-provider model listings cached by providerId. Populated on demand
   // when the user expands the Providers pane.
   let providerModels = $state<Record<string, ModelDescriptorInfo[]>>({});
+  let modelLoadingByProvider = $state<Record<string, boolean>>({});
   let modelPickerProvider = $state<string>("");
   let modelPickerModel = $state<string>("");
   let modelSaving = $state(false);
@@ -119,14 +138,22 @@
   }
 
   async function loadMcpServers() {
+    const generation = ++mcpLoadGeneration;
     mcpLoading = true;
     mcpError = null;
     try {
-      mcpServers = await listMcpServers();
+      const servers = await listMcpServers();
+      if (generation !== mcpLoadGeneration) return;
+      mcpServers = servers;
     } catch (e) {
-      mcpError = (e as Error).message ?? String(e);
+      if (generation === mcpLoadGeneration) {
+        mcpError = (e as Error).message ?? String(e);
+      }
     } finally {
-      mcpLoading = false;
+      if (generation === mcpLoadGeneration) {
+        mcpLoaded = true;
+        mcpLoading = false;
+      }
     }
   }
 
@@ -140,7 +167,9 @@
   async function saveMcpServer() {
     const id = mcpForm.id.trim();
     const targetOrUrl = mcpTargetValue();
-    if (!id || !targetOrUrl) return;
+    if (mcpSaving || !id || !targetOrUrl) return;
+    mcpLoadGeneration += 1;
+    mcpLoading = false;
     mcpSaving = true;
     mcpError = null;
     mcpSaved = null;
@@ -154,6 +183,7 @@
         target: mcpForm.transport === "stdio" ? targetOrUrl : undefined,
         scope: mcpForm.scope
       });
+      mcpLoaded = true;
       mcpSaved = `Added ${id}`;
       mcpForm = {
         id: "",
@@ -173,25 +203,77 @@
   }
 
   async function loadPermissionSnapshot() {
+    const generation = ++permissionLoadGeneration;
+    permissionLoading = true;
+    permissionError = null;
     try {
       const snap = await listPermissions();
+      if (generation !== permissionLoadGeneration) return;
       permissionSnapshot = snap;
-      permissionRows = Object.entries(snap.tools)
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([tool, mode]) => ({ tool, mode }));
-      permissionDirty = false;
+      if (!permissionDirty && !permissionSaving) {
+        permissionRows = Object.entries(snap.tools)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([tool, mode]) => ({ tool, mode }));
+        permissionDirty = false;
+      }
     } catch (e) {
-      permissionError = (e as Error).message ?? String(e);
+      if (generation === permissionLoadGeneration) {
+        permissionError = (e as Error).message ?? String(e);
+      }
+    } finally {
+      if (generation === permissionLoadGeneration) {
+        permissionLoading = false;
+      }
     }
   }
 
   async function loadModelsForProvider(providerId: string) {
-    if (!providerId || providerModels[providerId]) return;
-    try {
-      providerModels = { ...providerModels, [providerId]: await listProviderModels(providerId) };
-    } catch (e) {
-      modelError = (e as Error).message ?? String(e);
+    if (
+      !providerId ||
+      !providerIdCanRunAgent(providerId, props.snapshot?.providers ?? [])
+    ) {
+      return;
     }
+    const cachedModels = providerModels[providerId];
+    if (cachedModels) {
+      if (modelPickerProvider === providerId && !modelIdInList(modelPickerModel, cachedModels)) {
+        modelPickerModel = defaultModelId(cachedModels);
+      }
+      return;
+    }
+    if (modelLoadingByProvider[providerId]) return;
+    modelLoadingByProvider = { ...modelLoadingByProvider, [providerId]: true };
+    modelError = null;
+    try {
+      const models = await listProviderModels(providerId);
+      providerModels = { ...providerModels, [providerId]: models };
+      if (modelPickerProvider === providerId && !modelIdInList(modelPickerModel, models)) {
+        modelPickerModel = defaultModelId(models);
+      }
+    } catch (e) {
+      if (modelPickerProvider === providerId) {
+        modelError = (e as Error).message ?? String(e);
+      }
+    } finally {
+      modelLoadingByProvider = { ...modelLoadingByProvider, [providerId]: false };
+    }
+  }
+
+  function modelSupportsAgentTools(model: ModelDescriptorInfo): boolean {
+    return model.supportsTools !== false;
+  }
+
+  function agentToolModels(models: ModelDescriptorInfo[]): ModelDescriptorInfo[] {
+    return models.filter(modelSupportsAgentTools);
+  }
+
+  function defaultModelId(models: ModelDescriptorInfo[]): string {
+    const availableModels = agentToolModels(models);
+    return (availableModels.find((model) => model.isDefault) ?? availableModels[0])?.id ?? "";
+  }
+
+  function modelIdInList(modelId: string, models: ModelDescriptorInfo[]): boolean {
+    return Boolean(modelId && agentToolModels(models).some((model) => model.id === modelId));
   }
 
   function addPermissionRow() {
@@ -212,6 +294,7 @@
   }
 
   async function savePermissionRows() {
+    if (permissionSaving || permissionLoading || !permissionDirty) return;
     permissionSaving = true;
     permissionError = null;
     try {
@@ -235,7 +318,7 @@
   }
 
   async function saveDefaultModel() {
-    if (!modelPickerProvider) return;
+    if (!modelPickerProvider || !modelPickerModel || modelPickerLoading || modelSaving) return;
     modelSaving = true;
     modelError = null;
     try {
@@ -254,16 +337,21 @@
   }
 
   let authedProviderIds = $derived(new Set((props.snapshot?.auth ?? []).map((a) => a.providerId)));
-
-  // The shared daemon client's handshake — shows the actual URL + workspace
-  // root the frontend is talking to. Undefined until the first connect.
-  let daemonUrl = $state<string | null>(null);
-  let daemonWorkspaceRoot = $state<string | null>(null);
-  $effect(() => {
-    const client = currentDaemonClient();
-    daemonUrl = client?.handshake.url ?? null;
-    daemonWorkspaceRoot = client?.handshake.workspaceRoot ?? null;
+  let defaultRouteProviders = $derived.by(() => {
+    const authIds = (props.snapshot?.auth ?? []).map((auth) => auth.providerId);
+    return providerCatalogForSetup(props.snapshot).filter(
+      (provider) => providerIsAvailableForAgent(provider, authIds)
+    );
   });
+  let usingFallbackProviders = $derived(usesFallbackProviderCatalog(props.snapshot));
+
+  function defaultRouteProviderId(): string {
+    const configured = props.snapshot?.config.defaultProvider;
+    const configuredProvider = defaultRouteProviders.find((provider) =>
+      providerIdsEquivalent(provider.id, configured)
+    );
+    return configuredProvider?.id ?? defaultRouteProviders[0]?.id ?? "";
+  }
 
   // Shortcuts the app actually wires up today. Keep this honest — when we
   // add more we'll add them here, not before.
@@ -271,7 +359,7 @@
     { combo: "Enter",            action: "Send composer message" },
     { combo: "Shift + Enter",    action: "Insert newline in composer" },
     { combo: "Esc",              action: "Close modal / cancel" },
-    { combo: "Cmd/Ctrl + ,",     action: "Open settings (via title bar)" }
+    { combo: "Cmd/Ctrl + ,",     action: "Open settings" }
   ];
 
   // Well-known git providers we surface on the Git & PRs pane. If the user
@@ -292,30 +380,88 @@
   ];
   const densities: DensityKey[] = ["compact", "comfortable", "airy"];
 
-  // Seed the model-picker from the snapshot so switching to the Providers tab
-  // shows the currently-persisted default without a refetch.
+  // Reset daemon-scoped local pane state when the parent refreshes to a
+  // different daemon/workspace/config source. Otherwise Settings can show
+  // permissions, MCP servers, or default model choices from the prior daemon.
+  let settingsSourceKey = $state("");
   $effect(() => {
-    if (!modelPickerProvider) {
-      modelPickerProvider = props.snapshot?.config.defaultProvider ?? "";
-    }
-    if (!modelPickerModel) {
-      modelPickerModel = props.snapshot?.config.defaultModel ?? "";
-    }
+    const nextKey = [
+      props.daemonUrl ?? "",
+      props.snapshot?.workspaceRoot ?? "",
+      (props.snapshot?.auth ?? []).map((auth) => auth.providerId).sort().join(","),
+      (props.snapshot?.providers ?? []).map((provider) => provider.id).sort().join(","),
+      props.snapshot?.config.defaultProvider ?? "",
+      props.snapshot?.config.defaultModel ?? ""
+    ].join("\0");
+    if (nextKey === settingsSourceKey) return;
+    settingsSourceKey = nextKey;
+
+    permissionLoadGeneration += 1;
+    permissionSnapshot = null;
+    permissionRows = [];
+    permissionLoading = false;
+    permissionError = null;
+    permissionDirty = false;
+
+    mcpServers = [];
+    mcpLoaded = false;
+    mcpLoading = false;
+    mcpLoadGeneration += 1;
+    mcpError = null;
+    mcpSaved = null;
+
+    providerModels = {};
+    modelLoadingByProvider = {};
+    const nextProvider = defaultRouteProviderId();
+    modelPickerProvider = nextProvider;
+    modelPickerModel = providerIdsEquivalent(nextProvider, props.snapshot?.config.defaultProvider)
+      ? props.snapshot?.config.defaultModel ?? ""
+      : "";
+    modelError = null;
   });
 
   // Skip RPC calls when the daemon isn't reachable — web previews render
   // static panes with a friendly "connect daemon" banner instead of a red
   // error. In Tauri the singleton connects on first `ensureLocalDaemonClient`.
   let daemonReachable = isDaemonReachable();
+  let mcpFormDisabled = $derived(!daemonReachable || mcpLoading || mcpSaving);
+  let modelPickerLoading = $derived(
+    Boolean(modelPickerProvider && modelLoadingByProvider[modelPickerProvider])
+  );
+  let modelPickerModels = $derived(agentToolModels(providerModels[modelPickerProvider] ?? []));
+  let modelPickerModelsLoaded = $derived(
+    Boolean(modelPickerProvider && providerModels[modelPickerProvider])
+  );
+  let modelPickerNoAgentModels = $derived(
+    modelPickerModelsLoaded && !modelPickerLoading && modelPickerModels.length === 0 && !modelError
+  );
+  let modelPickerProviderName = $derived(
+    defaultRouteProviders.find((p) => providerIdsEquivalent(p.id, modelPickerProvider))
+      ?.displayName ?? modelPickerProvider
+  );
+  let modelPickerDisabled = $derived(!daemonReachable || modelSaving);
+  let canSaveDefaultModel = $derived(
+    Boolean(
+      daemonReachable &&
+        modelPickerProvider &&
+        modelPickerModel &&
+        modelIdInList(modelPickerModel, providerModels[modelPickerProvider] ?? []) &&
+        !modelPickerLoading &&
+        !modelSaving
+    )
+  );
 
   // Lazy-load per-pane data when the user actually opens the tab so the
   // initial settings render stays a single RPC (the snapshot).
   $effect(() => {
     if (!daemonReachable) return;
-    if (section === "permissions" && permissionSnapshot === null) {
+    if (section === "providers" && !modelPickerProvider && defaultRouteProviders.length > 0) {
+      modelPickerProvider = defaultRouteProviderId();
+    }
+    if (section === "permissions" && permissionSnapshot === null && !permissionLoading) {
       void loadPermissionSnapshot();
     }
-    if (section === "mcp" && mcpServers.length === 0 && !mcpLoading) {
+    if (section === "mcp" && !mcpLoaded && !mcpLoading) {
       void loadMcpServers();
     }
     if (section === "providers" && modelPickerProvider) {
@@ -363,12 +509,12 @@
           <div class="label">Daemon</div>
           <div class="desc">The WebSocket endpoint this window is connected to.</div>
         </div>
-        <div class="pf-path" title={daemonUrl ?? ""}>
-          {#if daemonUrl}
-            <span style="color: var(--foreground);">{daemonUrl}</span>
-            {#if daemonWorkspaceRoot && daemonWorkspaceRoot !== props.snapshot?.workspaceRoot}
+        <div class="pf-path" title={props.daemonUrl ?? ""}>
+          {#if props.daemonUrl}
+            <span style="color: var(--foreground);">{props.daemonUrl}</span>
+            {#if props.daemonWorkspaceRoot && props.daemonWorkspaceRoot !== props.snapshot?.workspaceRoot}
               <div style="color: var(--muted-foreground); font-size: 11px; margin-top: 2px;">
-                → {daemonWorkspaceRoot}
+                -> {props.daemonWorkspaceRoot}
               </div>
             {/if}
           {:else}
@@ -395,15 +541,29 @@
           <div class="desc">{(props.snapshot?.auth.length ?? 0) === 0 ? "No providers signed in." : "Signed-in providers and session controls."}</div>
         </div>
         <div style="display: flex; flex-direction: column; gap: 6px; justify-self: end; align-items: flex-end;">
-          <button type="button" class="sc-btn" data-variant="outline" data-size="sm" onclick={props.onRefresh}>
+          <button
+            type="button"
+            class="sc-btn"
+            data-variant="outline"
+            data-size="sm"
+            disabled={credentialBusy}
+            onclick={refreshIfIdle}
+          >
             <Icon name="refresh" size={13} />Refresh
           </button>
           {#each props.snapshot?.auth ?? [] as a (a.providerId)}
             <div style="display: flex; align-items: center; gap: 8px; font-size: 12px;">
               <span style="font-family: var(--font-mono);">{a.providerId}</span>
               <span style="color: var(--muted-foreground);">· {a.kind}{a.email ? ` · ${a.email}` : ""}</span>
-              <button type="button" class="sc-btn" data-variant="ghost" data-size="sm" onclick={() => props.onLogout(a.providerId)}>
-                Sign out
+              <button
+                type="button"
+                class="sc-btn"
+                data-variant="ghost"
+                data-size="sm"
+                disabled={credentialBusy}
+                onclick={() => props.onLogout(a.providerId)}
+              >
+                {props.busyProviderId === a.providerId ? "Signing out..." : "Sign out"}
               </button>
             </div>
           {/each}
@@ -446,6 +606,11 @@
         <div class="pf-settings-note">
           Preview mode — launch Puffer in the desktop app to edit live routing.
         </div>
+      {:else if usingFallbackProviders}
+        <div class="pf-settings-note">
+          Provider registry is empty. Built-in setup options are available below; refresh after
+          resources reload.
+        </div>
       {/if}
       <div class="pf-settings-row" style="align-items: start;">
         <div class="meta">
@@ -458,6 +623,7 @@
             <select
               class="sc-input"
               value={modelPickerProvider}
+              disabled={modelPickerDisabled}
               onchange={(e) => {
                 modelPickerProvider = (e.currentTarget as HTMLSelectElement).value;
                 modelPickerModel = "";
@@ -465,7 +631,7 @@
               }}
             >
               <option value="">— none —</option>
-              {#each props.snapshot?.providers ?? [] as p (p.id)}
+              {#each defaultRouteProviders as p (p.id)}
                 <option value={p.id}>{p.displayName} ({p.id})</option>
               {/each}
             </select>
@@ -476,14 +642,29 @@
               class="sc-input"
               value={modelPickerModel}
               onchange={(e) => (modelPickerModel = (e.currentTarget as HTMLSelectElement).value)}
-              disabled={!modelPickerProvider}
+              disabled={modelPickerDisabled || !modelPickerProvider || modelPickerLoading}
             >
-              <option value="">— pick a model —</option>
-              {#each (providerModels[modelPickerProvider] ?? []) as m (m.id)}
+              <option value="">
+                {modelPickerLoading
+                  ? "Loading models..."
+                  : modelPickerNoAgentModels
+                    ? "No agent-capable models"
+                    : "— pick a model —"}
+              </option>
+              {#each modelPickerModels as m (m.id)}
                 <option value={m.id}>{m.displayName} ({m.id})</option>
               {/each}
             </select>
           </label>
+          {#if modelPickerLoading}
+            <div class="pf-model-loading-note">
+              Fetching {modelPickerProviderName} models...
+            </div>
+          {:else if modelPickerNoAgentModels}
+            <div class="pf-model-loading-note" data-error="true">
+              No {modelPickerProviderName} models support agent tools.
+            </div>
+          {/if}
           <div style="display: flex; justify-content: flex-end; gap: 8px;">
             {#if modelError}
               <span style="color: var(--destructive, #c03232); font-size: 11.5px; align-self: center;">{modelError}</span>
@@ -493,7 +674,7 @@
               class="sc-btn"
               data-variant="default"
               data-size="sm"
-              disabled={modelSaving || !modelPickerProvider || !daemonReachable}
+              disabled={!canSaveDefaultModel}
               onclick={saveDefaultModel}
             >
               {modelSaving ? "Saving…" : "Save default"}
@@ -527,6 +708,10 @@
         <div class="pf-settings-note">
           Preview mode — launch Puffer in the desktop app to edit workspace permissions.
         </div>
+      {:else if permissionLoading}
+        <div class="pf-settings-note">
+          Loading permissions...
+        </div>
       {:else if permissionSnapshot}
         <div class="pf-settings-note">
           Stored at <code>{permissionSnapshot.path}</code>.
@@ -551,11 +736,13 @@
               type="text"
               placeholder="bash, read_file, edit_file…"
               value={row.tool}
+              disabled={permissionLoading || permissionSaving || !daemonReachable}
               oninput={(e) => updatePermissionRow(i, "tool", (e.currentTarget as HTMLInputElement).value)}
             />
             <select
               class="sc-input"
               value={row.mode}
+              disabled={permissionLoading || permissionSaving || !daemonReachable}
               onchange={(e) => updatePermissionRow(i, "mode", (e.currentTarget as HTMLSelectElement).value)}
             >
               <option value="allow">allow</option>
@@ -568,6 +755,7 @@
               class="sc-btn"
               data-variant="ghost"
               data-size="sm"
+              disabled={permissionLoading || permissionSaving || !daemonReachable}
               onclick={() => removePermissionRow(i)}
               title="Remove rule"
             >
@@ -586,7 +774,7 @@
           class="sc-btn"
           data-variant="outline"
           data-size="sm"
-          disabled={!daemonReachable}
+          disabled={!daemonReachable || permissionLoading || permissionSaving}
           onclick={addPermissionRow}
         >
           <Icon name="plus" size={12} />Add rule
@@ -596,7 +784,7 @@
           class="sc-btn"
           data-variant="default"
           data-size="sm"
-          disabled={!permissionDirty || permissionSaving || !daemonReachable}
+          disabled={!permissionDirty || permissionSaving || permissionLoading || !daemonReachable}
           onclick={savePermissionRows}
         >
           {permissionSaving ? "Saving…" : "Save"}
@@ -635,6 +823,7 @@
                 class="sc-input"
                 placeholder="github"
                 value={mcpForm.id}
+                disabled={mcpFormDisabled}
                 oninput={(e) => (mcpForm.id = (e.currentTarget as HTMLInputElement).value)}
               />
             </label>
@@ -644,6 +833,7 @@
                 class="sc-input"
                 placeholder="GitHub"
                 value={mcpForm.displayName}
+                disabled={mcpFormDisabled}
                 oninput={(e) => (mcpForm.displayName = (e.currentTarget as HTMLInputElement).value)}
               />
             </label>
@@ -652,6 +842,7 @@
               <select
                 class="sc-input"
                 value={mcpForm.transport}
+                disabled={mcpFormDisabled}
                 onchange={(e) =>
                   (mcpForm.transport = (e.currentTarget as HTMLSelectElement).value as "stdio" | "sse" | "http")}
               >
@@ -665,6 +856,7 @@
               <select
                 class="sc-input"
                 value={mcpForm.scope}
+                disabled={mcpFormDisabled}
                 onchange={(e) =>
                   (mcpForm.scope = (e.currentTarget as HTMLSelectElement).value as "local" | "user")}
               >
@@ -681,6 +873,7 @@
                 ? "npx @modelcontextprotocol/server-github"
                 : "http://127.0.0.1:3000/mcp"}
               value={mcpForm.commandOrUrl}
+              disabled={mcpFormDisabled}
               oninput={(e) => (mcpForm.commandOrUrl = (e.currentTarget as HTMLInputElement).value)}
             />
           </label>
@@ -691,6 +884,7 @@
                 class="sc-input"
                 placeholder="--flag value"
                 value={mcpForm.args}
+                disabled={mcpFormDisabled}
                 oninput={(e) => (mcpForm.args = (e.currentTarget as HTMLInputElement).value)}
               />
             </label>
@@ -701,6 +895,7 @@
               class="sc-input"
               placeholder="Optional note"
               value={mcpForm.description}
+              disabled={mcpFormDisabled}
               oninput={(e) => (mcpForm.description = (e.currentTarget as HTMLInputElement).value)}
             />
           </label>
@@ -710,7 +905,7 @@
               class="sc-btn"
               data-variant="default"
               data-size="sm"
-              disabled={!daemonReachable || mcpSaving || !mcpForm.id.trim() || !mcpTargetValue()}
+              disabled={mcpFormDisabled || !mcpForm.id.trim() || !mcpTargetValue()}
               onclick={saveMcpServer}
             >
               <Icon name="plus" size={12} />{mcpSaving ? "Adding…" : "Add server"}
@@ -981,6 +1176,20 @@
     padding: 1px 5px;
     border-radius: 4px;
     color: var(--foreground);
+  }
+  .pf-model-loading-note {
+    border: 1px solid color-mix(in oklab, var(--accent) 28%, var(--border));
+    border-radius: 8px;
+    background: color-mix(in oklab, var(--accent) 7%, var(--background));
+    color: var(--muted-foreground);
+    font-size: 11.5px;
+    line-height: 1.4;
+    padding: 7px 9px;
+  }
+  .pf-model-loading-note[data-error="true"] {
+    border-color: color-mix(in oklab, var(--destructive, #c03232) 32%, var(--border));
+    background: color-mix(in oklab, var(--destructive, #c03232) 7%, var(--background));
+    color: var(--destructive, #c03232);
   }
   .pf-model-badge {
     display: inline-flex;

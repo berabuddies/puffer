@@ -21,6 +21,15 @@ pub(crate) struct DesktopFileTabsState {
     pub(crate) active_path: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopSessionRouting {
+    #[serde(default)]
+    pub(crate) provider_id: Option<String>,
+    #[serde(default)]
+    pub(crate) model_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopFileTab {
@@ -38,6 +47,8 @@ struct DesktopState {
     pinned_workspace_paths: Vec<String>,
     #[serde(default)]
     file_tabs_by_session: BTreeMap<String, DesktopFileTabsState>,
+    #[serde(default)]
+    session_routing_by_session: BTreeMap<String, DesktopSessionRouting>,
 }
 
 /// Loads daemon-persisted desktop pin state from the user config directory.
@@ -104,6 +115,41 @@ pub(crate) fn set_file_tabs_state(
     Ok(normalized)
 }
 
+/// Loads persisted provider/model routing for one agent session.
+pub(crate) fn load_session_routing_state(
+    user_config_dir: &Path,
+    session_id: &str,
+) -> Result<DesktopSessionRouting> {
+    let state = load_desktop_state(user_config_dir)?;
+    Ok(normalize_session_routing(
+        state
+            .session_routing_by_session
+            .get(session_id.trim())
+            .cloned()
+            .unwrap_or_default(),
+    ))
+}
+
+/// Persists provider/model routing for one agent session.
+pub(crate) fn set_session_routing_state(
+    user_config_dir: &Path,
+    session_id: &str,
+    routing: DesktopSessionRouting,
+) -> Result<DesktopSessionRouting> {
+    let trimmed = session_id.trim();
+    let mut state = load_desktop_state(user_config_dir)?;
+    let normalized = normalize_session_routing(routing);
+    if trimmed.is_empty() || (normalized.provider_id.is_none() && normalized.model_id.is_none()) {
+        state.session_routing_by_session.remove(trimmed);
+    } else {
+        state
+            .session_routing_by_session
+            .insert(trimmed.to_string(), normalized.clone());
+    }
+    save_desktop_state(user_config_dir, &state)?;
+    Ok(normalized)
+}
+
 fn load_desktop_state(user_config_dir: &Path) -> Result<DesktopState> {
     let path = pin_state_path(user_config_dir);
     if !path.exists() {
@@ -150,6 +196,13 @@ fn normalize_desktop_state(mut state: DesktopState) -> DesktopState {
         !session_id.trim().is_empty() && !tabs.tabs.is_empty()
     });
     state
+        .session_routing_by_session
+        .retain(|session_id, routing| {
+            *routing = normalize_session_routing(routing.clone());
+            !session_id.trim().is_empty()
+                && (routing.provider_id.is_some() || routing.model_id.is_some())
+        });
+    state
 }
 
 fn normalize_pin_state(mut state: DesktopPinState) -> DesktopPinState {
@@ -178,6 +231,22 @@ fn normalize_file_tabs_state(mut state: DesktopFileTabsState) -> DesktopFileTabs
     if state.active_path.is_none() {
         state.active_path = state.tabs.first().map(|tab| tab.path.clone());
     }
+    state
+}
+
+fn normalize_session_routing(mut state: DesktopSessionRouting) -> DesktopSessionRouting {
+    state.provider_id = state
+        .provider_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    state.model_id = state
+        .model_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
     state
 }
 
@@ -262,5 +331,24 @@ mod tests {
         assert_eq!(state.tabs.len(), 2);
         assert_eq!(state.tabs[0].path, "/tmp/a.rs");
         assert_eq!(state.active_path.as_deref(), Some("/tmp/a.rs"));
+    }
+
+    #[test]
+    fn session_routing_preserves_provider_and_model() {
+        let dir = tempfile::tempdir().unwrap();
+
+        set_session_routing_state(
+            dir.path(),
+            "session-a",
+            DesktopSessionRouting {
+                provider_id: Some(" anthropic ".to_string()),
+                model_id: Some(" claude-sonnet-4-5 ".to_string()),
+            },
+        )
+        .unwrap();
+
+        let routing = load_session_routing_state(dir.path(), "session-a").unwrap();
+        assert_eq!(routing.provider_id.as_deref(), Some("anthropic"));
+        assert_eq!(routing.model_id.as_deref(), Some("claude-sonnet-4-5"));
     }
 }

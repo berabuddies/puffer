@@ -1,0 +1,67 @@
+You are testing Puffer desktop UI/UX with the local fuzz framework.
+
+Repo: /dsk/hdd/home/llmft/Riema/puffer
+
+Rules:
+- Do not patch product code.
+- Do not commit or push.
+- Use the local `apps/puffer-desktop/tests/fuzz/` framework and follow its docs/instructions.
+- Count only real, user-visible UI/UX bugs triggered by click, type, keyboard, resize, reconnect, stale daemon event, or response ordering.
+- Do not count fixture-only, environment-only, or tooling-only failures.
+- Focus priority: chat/session/new agent/turn/reload core loop first; then workspace/session switching/provider/model flows; then Files/Terminal/Browser.
+- Use fake daemon unless the framework explicitly says otherwise.
+- Keep temporary replay specs and Playwright artifacts under `apps/puffer-desktop/tests/fuzz/.runs/`.
+
+Workflow:
+1. Read `apps/puffer-desktop/tests/fuzz/README.md`, `apps/puffer-desktop/tests/fuzz/agent_guide.md`, and `apps/puffer-desktop/tests/fuzz/playwright_adapter.md`.
+2. Run:
+   `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs validate`
+3. Generate a frontier/plan:
+   `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs frontier --out apps/puffer-desktop/tests/fuzz/.runs/manual/frontier.md`
+   `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs plan --profile core --out apps/puffer-desktop/tests/fuzz/.runs/manual/plan.md`
+4. Pick high-priority core seeds first. Start with:
+   - `chat-turn-race`
+   - `workspace-session-race`
+   - `provider-auth-model-race`
+   - `modal-focus-race`
+5. For each selected seed, run:
+   `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs run --seed <seed> --iterations 30 --steps <seed-appropriate-steps> --rng-seed <unique-run-name> --out apps/puffer-desktop/tests/fuzz/.runs/<unique-run-name>/<seed>.json`
+   `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs report --input apps/puffer-desktop/tests/fuzz/.runs/<unique-run-name>/<seed>.json --out apps/puffer-desktop/tests/fuzz/.runs/<unique-run-name>/<seed>.md`
+6. Pick high-value replay cases with diversity:
+   `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs top-cases --input apps/puffer-desktop/tests/fuzz/.runs/<unique-run-name>/<seed>.json --limit 5 --out apps/puffer-desktop/tests/fuzz/.runs/<unique-run-name>/<seed>-top.json --report-out apps/puffer-desktop/tests/fuzz/.runs/<unique-run-name>/<seed>-top.md`
+7. Run isolated bounded replay:
+   `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-replay-loop.mjs --seeds <seed> --limit 5 --attempts 3 --timeout 120 --rng-seed <unique-run-name> --namespace <unique-run-name> --fail-on-new-finding`
+8. Read `apps/puffer-desktop/tests/fuzz/.runs/<unique-run-name>/bounded-replay-report.md` and classify stable product candidates separately from harness preconditions, flakes, and duplicates.
+9. If a replay fails, use the repeated attempts in the bounded report to check stability.
+10. Shrink the repro mentally or by creating a smaller temporary probe under `apps/puffer-desktop/tests/fuzz/.runs/<unique-run-name>/` only if needed.
+
+For every accepted bug, write a detailed finding with:
+- Title
+- Severity estimate: P0/P1/P2
+- Area/component
+- Seed and replay case ID
+- Trigger steps
+- Expected behavior
+- Actual behavior
+- User impact
+- Why this is a product bug and not fixture/environment/tooling
+- Stability: how many times reproduced
+- Relevant source files/components likely involved
+- Suggested regression test target
+- Any screenshots/error-context paths if generated
+
+At the end:
+- Write the full report to `apps/puffer-desktop/tests/fuzz/.runs/<unique-run-name>/findings.md`.
+- Leave generated `apps/puffer-desktop/tests/fuzz/.runs/<unique-run-name>/` artifacts for review.
+- Do not modify product code.
+- Do not commit or push.
+- Treat `Known duplicate: yes` or `knownDuplicate: true` as duplicate evidence,
+  not as a fresh actionable finding.
+
+Final answer should summarize:
+- Commands run
+- Seeds tested
+- Replay cases tested
+- Confirmed real findings
+- Rejected false positives and why
+- Remaining coverage gaps

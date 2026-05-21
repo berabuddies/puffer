@@ -7,15 +7,14 @@ use puffer_core::{
     execute_user_turn_streaming_with_permissions_and_cancel, reload_runtime_resources,
     render_config_summary, render_context_panel, render_copy_actions, render_doctor_report,
     render_hooks_actions, render_ide_actions, render_mcp_actions, render_permissions_panel,
-    render_plugin_actions, render_sandbox_actions, render_skills_panel, run_resource_hooks,
-    with_user_question_prompt_handler, AppState, MessageRole, PermissionPromptAction,
-    PermissionPromptRequest, ToolInvocation, TurnStreamEvent, UserQuestionPromptRequest,
-    UserQuestionPromptResponse,
+    render_plugin_actions, render_sandbox_actions, render_session_panel, render_skills_panel,
+    resumable_sessions_for_picker, with_user_question_prompt_handler, AppState, MessageRole,
+    PermissionPromptAction, PermissionPromptRequest, ToolInvocation, TurnStreamEvent,
+    UserQuestionPromptRequest, UserQuestionPromptResponse,
 };
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use puffer_resources::LoadedResources;
-use puffer_session_store::{SessionStore, TranscriptEvent};
-use puffer_tools::{ToolInput, ToolRegistry};
+use puffer_session_store::{SessionStore, SessionSummary, TranscriptEvent};
 use std::io;
 use std::path::Path;
 use std::sync::mpsc::{self, TryRecvError};
@@ -41,6 +40,30 @@ pub(crate) use flow_auth::{handle_auth_command, run_embedded_auth_login};
 mod flow_loop;
 use flow_loop::try_handle_loop_command;
 pub(crate) use flow_loop::{advance_loop_after_turn, check_loop_interval};
+#[path = "flow_shell.rs"]
+mod flow_shell;
+pub(crate) use flow_shell::parse_shell_shortcut;
+use flow_shell::{
+    execute_shell_shortcut, execute_shell_shortcut_inline, finalize_shell_shortcut_result,
+};
+
+fn parsed_slash_command(submitted: &str) -> (&str, &str) {
+    let trimmed = submitted.trim();
+    let without_slash = trimmed.strip_prefix('/').unwrap_or(trimmed);
+    without_slash
+        .split_once(char::is_whitespace)
+        .map(|(name, args)| (name, args.trim()))
+        .unwrap_or((without_slash, ""))
+}
+
+fn canonical_overlay_command_name(name: &str) -> &str {
+    match name {
+        "settings" => "config",
+        "bashes" => "tasks",
+        "checkpoint" => "rewind",
+        _ => name,
+    }
+}
 
 /// Opens a TUI overlay for slash commands that map to picker UI.
 pub(crate) fn try_open_overlay(
@@ -52,11 +75,8 @@ pub(crate) fn try_open_overlay(
     tui: &mut TuiState,
     submitted: &str,
 ) -> Result<bool> {
-    let without_slash = submitted.trim_start_matches('/');
-    let (name, args) = without_slash
-        .split_once(' ')
-        .map(|(name, args)| (name, args.trim()))
-        .unwrap_or((without_slash, ""));
+    let (name, args) = parsed_slash_command(submitted);
+    let name = canonical_overlay_command_name(name);
     if name == "btw" && !args.is_empty() {
         set_overlay_state(
             tui,
@@ -111,6 +131,10 @@ pub(crate) fn try_open_overlay(
     }
     let text_overlay = match (name, args.is_empty()) {
         ("config", true) => Some(TextOverlay::open("Config", render_config_summary(state)?)),
+        ("cost", true) => Some(TextOverlay::open(
+            "Cost",
+            puffer_core::render_cost_summary(state),
+        )),
         ("context", true) => Some(TextOverlay::open(
             "Context",
             render_context_panel(state, resources, providers)?,
@@ -130,6 +154,7 @@ pub(crate) fn try_open_overlay(
             "Permissions",
             render_permissions_panel(state, resources)?,
         )),
+        ("session", true) => Some(TextOverlay::open("Session", render_session_panel(state))),
         ("skills", true) => Some(TextOverlay::open("Skills", render_skills_panel(resources))),
         _ => None,
     };
@@ -177,10 +202,7 @@ pub(crate) fn try_open_overlay(
             return Ok(true);
         }
     }
-    if matches!(
-        (name, args.is_empty()),
-        ("session", true) | ("remote", true)
-    ) {
+    if matches!((name, args.is_empty()), ("remote", true)) {
         set_overlay_state(tui, Some(SessionOverlay::open(state)));
         return Ok(true);
     }
@@ -225,6 +247,18 @@ pub(crate) fn is_provider_prompt_input(submitted: &str) -> bool {
         && !is_auth_command_input(submitted)
 }
 
+/// Returns true when input should wait for the active provider turn to finish.
+pub(crate) fn should_defer_while_turn_is_running(submitted: &str) -> bool {
+    let submitted = submitted.trim();
+    if submitted.is_empty() {
+        return false;
+    }
+    if is_provider_prompt_input(submitted) || parse_shell_shortcut(submitted).is_some() {
+        return true;
+    }
+    submitted.starts_with('/') && !is_read_only_pending_slash_command(submitted)
+}
+
 /// Handles one prompt submission from the interactive composer.
 pub(crate) fn handle_prompt_submit(
     state: &mut AppState,
@@ -241,11 +275,19 @@ pub(crate) fn handle_prompt_submit(
     if submitted.is_empty() {
         return Ok(());
     }
+    if tui.has_pending_submit() && should_defer_while_turn_is_running(&submitted) {
+        tui.enqueue_prompt(submitted);
+        return Ok(());
+    }
+    if is_loop_command_input(&submitted) {
+        ensure_persistent_session_for_prompt_submit(state, session_store, &submitted)?;
+    }
     if try_handle_loop_command(state, session_store, tui, &submitted)? {
         return Ok(());
     }
-    if tui.has_pending_submit() && is_provider_prompt_input(&submitted) {
-        tui.enqueue_prompt(submitted);
+    if let Some(shell_command) = parse_shell_shortcut(&submitted) {
+        ensure_persistent_session_for_prompt_submit(state, session_store, &submitted)?;
+        execute_shell_shortcut(state, resources, session_store, tui, shell_command)?;
         return Ok(());
     }
     if !is_provider_prompt_input(&submitted) {
@@ -270,7 +312,16 @@ pub(crate) fn handle_prompt_submit(
     if tui.has_pending_submit() {
         return Ok(());
     }
+    if providers.providers().next().is_some() {
+        if let Some(overlay) = onboarding::prompt_submission_overlay(state, providers, auth_store)?
+        {
+            tui.defer_prompt(Some(submitted));
+            tui.overlay = Some(overlay);
+            return Ok(());
+        }
+    }
 
+    ensure_persistent_session_for_prompt_submit(state, session_store, &submitted)?;
     state.push_message(MessageRole::User, submitted.clone());
     session_store.append_event(
         state.session.id,
@@ -279,6 +330,7 @@ pub(crate) fn handle_prompt_submit(
             actor: Some(state.user_actor()),
         },
     )?;
+    let transcript_start_len = state.transcript.len();
 
     let mut worker_state = state.clone();
     let worker_resources = resources.clone();
@@ -387,6 +439,7 @@ pub(crate) fn handle_prompt_submit(
     tui.pending_submit = Some(PendingSubmit {
         prompt: submitted,
         receiver,
+        transcript_persisted_len: transcript_start_len,
         pending_tool_calls: Vec::new(),
         rendered_tool_invocations: 0,
         started_at: std::time::Instant::now(),
@@ -425,7 +478,7 @@ pub(crate) fn cancel_pending_submit(
     Ok(true)
 }
 
-/// Starts the next queued prompt when no turn is currently running.
+/// Starts the next queued prompt when no turn or overlay is currently active.
 pub(crate) fn submit_next_queued_prompt(
     state: &mut AppState,
     resources: &mut LoadedResources,
@@ -436,9 +489,23 @@ pub(crate) fn submit_next_queued_prompt(
     tui: &mut TuiState,
     no_alt_screen: bool,
 ) -> Result<bool> {
+    if tui.has_pending_submit() || tui.overlay.is_some() {
+        return Ok(false);
+    }
     let Some(prompt) = tui.dequeue_prompt() else {
         return Ok(false);
     };
+    if try_open_overlay(
+        state,
+        resources,
+        providers,
+        auth_store,
+        session_store,
+        tui,
+        &prompt,
+    )? {
+        return Ok(true);
+    }
     handle_prompt_submit(
         state,
         resources,
@@ -491,10 +558,16 @@ pub(crate) fn poll_pending_submit(
                 break;
             }
             PendingSubmitEvent::ToolInvocations(invocations) => {
+                persist_pending_assistant_drafts(
+                    state,
+                    session_store,
+                    pending.transcript_persisted_len,
+                )?;
                 let completed = invocations.len().min(pending.pending_tool_calls.len());
                 pending.pending_tool_calls.drain(0..completed);
                 pending.rendered_tool_invocations += invocations.len();
                 append_tool_messages(state, session_store, &invocations)?;
+                pending.transcript_persisted_len = state.transcript.len();
             }
             PendingSubmitEvent::ReflectionCheckpoint(summary) => {
                 pending.status_hint = Some(summary);
@@ -541,6 +614,11 @@ pub(crate) fn poll_pending_submit(
                     }
                 }
             }
+            PendingSubmitEvent::ShellShortcutFinished(result) => {
+                completed = true;
+                finalize_shell_shortcut_result(state, session_store, result)?;
+                break;
+            }
             PendingSubmitEvent::Finished(result) => {
                 completed = true;
                 let rendered_tool_invocations = pending.rendered_tool_invocations;
@@ -557,11 +635,17 @@ pub(crate) fn poll_pending_submit(
                 match result.outcome {
                     Ok(turn) => {
                         if rendered_tool_invocations < turn.tool_invocations.len() {
+                            persist_pending_assistant_drafts(
+                                state,
+                                session_store,
+                                pending.transcript_persisted_len,
+                            )?;
                             append_tool_messages(
                                 state,
                                 session_store,
                                 &turn.tool_invocations[rendered_tool_invocations..],
                             )?;
+                            pending.transcript_persisted_len = state.transcript.len();
                         }
                         // TurnExecution carries every trace event produced
                         // during the turn (both streaming and non-streaming
@@ -577,6 +661,7 @@ pub(crate) fn poll_pending_submit(
                         finalize_assistant_text(state, session_store, &turn.assistant_text)?;
                     }
                     Err(error) => {
+                        discard_pending_assistant_drafts(state, pending.transcript_persisted_len);
                         let message = format!("Provider request failed: {error}");
                         state.push_message(MessageRole::System, message.clone());
                         session_store.append_event(
@@ -611,7 +696,7 @@ pub(crate) fn respond_to_permission_prompt(
         return false;
     };
     let _ = pending.response_tx.send(action);
-    set_overlay_state(tui, None);
+    close_prompt_overlay_preserving_input(tui);
     true
 }
 
@@ -624,8 +709,13 @@ pub(crate) fn respond_to_user_question(
         return false;
     };
     let _ = pending.response_tx.send(response);
-    set_overlay_state(tui, None);
+    close_prompt_overlay_preserving_input(tui);
     true
+}
+
+fn close_prompt_overlay_preserving_input(tui: &mut TuiState) {
+    tui.overlay = None;
+    tui.slash_selection = 0;
 }
 
 fn empty_user_question_response() -> UserQuestionPromptResponse {
@@ -650,6 +740,10 @@ pub(crate) fn handle_submit(
     if submitted.is_empty() {
         return Ok(());
     }
+    if resume_transient_picker_selection(state, session_store, &submitted)? {
+        return Ok(());
+    }
+    ensure_persistent_session_for_direct_submit(state, session_store)?;
 
     if handle_auth_command(
         state,
@@ -695,7 +789,7 @@ pub(crate) fn handle_submit(
     }
 
     if let Some(shell_command) = parse_shell_shortcut(&submitted) {
-        execute_shell_shortcut(state, resources, session_store, shell_command)?;
+        execute_shell_shortcut_inline(state, resources, session_store, shell_command)?;
         return Ok(());
     }
 
@@ -712,14 +806,7 @@ pub(crate) fn handle_submit(
     match execute_user_turn(state, resources, providers, auth_store, &submitted) {
         Ok(turn) => {
             append_tool_messages(state, session_store, &turn.tool_invocations)?;
-            state.push_message(MessageRole::Assistant, turn.assistant_text.clone());
-            session_store.append_event(
-                state.session.id,
-                TranscriptEvent::AssistantMessage {
-                    text: turn.assistant_text,
-                    actor: Some(state.assistant_actor()),
-                },
-            )?;
+            finalize_assistant_text(state, session_store, &turn.assistant_text)?;
             if puffer_core::project_memory_turn_completed(state) {
                 puffer_core::spawn_project_memory_review(state, resources, providers, auth_store);
             }
@@ -744,8 +831,146 @@ pub(crate) fn handle_submit(
     Ok(())
 }
 
+fn ensure_persistent_session_for_prompt_submit(
+    state: &mut AppState,
+    session_store: &SessionStore,
+    submitted: &str,
+) -> Result<()> {
+    if opens_resume_picker(submitted) {
+        return Ok(());
+    }
+    ensure_persistent_session(state, session_store)
+}
+
+fn ensure_persistent_session_for_direct_submit(
+    state: &mut AppState,
+    session_store: &SessionStore,
+) -> Result<()> {
+    ensure_persistent_session(state, session_store)
+}
+
+fn ensure_persistent_session(state: &mut AppState, session_store: &SessionStore) -> Result<()> {
+    if !state.session.id.is_nil() {
+        return Ok(());
+    }
+    state.session = session_store.create_session(state.cwd.clone())?;
+    Ok(())
+}
+
+fn opens_resume_picker(submitted: &str) -> bool {
+    let (name, args) = parsed_slash_command(submitted);
+    matches!(canonical_overlay_command_name(name), "resume" | "continue") && args.is_empty()
+}
+
+fn resume_transient_picker_selection(
+    state: &mut AppState,
+    session_store: &SessionStore,
+    submitted: &str,
+) -> Result<bool> {
+    if !state.session.id.is_nil() {
+        return Ok(false);
+    }
+    let Some(summary) = current_scope_resume_selection(state, session_store, submitted)? else {
+        return Ok(false);
+    };
+    let record = session_store.load_session(summary.id)?;
+    let pending_query_prompt = state.take_pending_query_prompt();
+    let config = state.config.clone();
+    *state = AppState::from_session_record(config, record);
+    if let Some(prompt) = pending_query_prompt {
+        state.queue_pending_query_prompt(prompt);
+    }
+    session_store.append_event(
+        state.session.id,
+        TranscriptEvent::CommandInvoked {
+            name: "resume".to_string(),
+            args: summary.id.to_string(),
+            actor: Some(state.user_actor()),
+        },
+    )?;
+    emit_system_message(
+        state,
+        session_store,
+        format!(
+            "Resumed session {} [{}].",
+            state.session.id,
+            state.session.display_name.as_deref().unwrap_or("<unnamed>")
+        ),
+    )?;
+    Ok(true)
+}
+
+fn current_scope_resume_selection(
+    state: &AppState,
+    session_store: &SessionStore,
+    submitted: &str,
+) -> Result<Option<SessionSummary>> {
+    let (name, args) = parsed_slash_command(submitted);
+    if !matches!(canonical_overlay_command_name(name), "resume" | "continue") {
+        return Ok(None);
+    }
+    let target_id = args.trim();
+    Ok(
+        resumable_sessions_for_picker(session_store, state.session.id, &state.cwd)?
+            .iter()
+            .find(|session| session.id.to_string() == target_id)
+            .cloned(),
+    )
+}
+
+fn is_loop_command_input(submitted: &str) -> bool {
+    let (name, _) = parsed_slash_command(submitted);
+    matches!(name, "loop" | "maximize" | "max" | "minimize" | "min")
+}
+
 fn is_auth_command_input(submitted: &str) -> bool {
     matches!(submit_command_name(submitted), "login" | "logout")
+}
+
+fn is_read_only_pending_slash_command(submitted: &str) -> bool {
+    let (name, args) = parsed_slash_command(submitted);
+    let name = canonical_overlay_command_name(name);
+    if name == "tasks" {
+        return is_read_only_tasks_command(args);
+    }
+    if !args.is_empty() {
+        return false;
+    }
+    matches!(
+        name,
+        "?" | "help"
+            | "status"
+            | "usage"
+            | "cost"
+            | "config"
+            | "context"
+            | "debug"
+            | "doctor"
+            | "files"
+            | "hooks"
+            | "ide"
+            | "marketplace"
+            | "mcp"
+            | "memory"
+            | "permissions"
+            | "allowed-tools"
+            | "plugin"
+            | "plugins"
+            | "sandbox"
+            | "skills"
+            | "session"
+            | "remote"
+    )
+}
+
+fn is_read_only_tasks_command(args: &str) -> bool {
+    let trimmed = args.trim();
+    matches!(
+        trimmed,
+        "" | "show" | "list" | "path" | "agents" | "teams" | "worktrees" | "todos"
+    ) || trimmed.starts_with("show ")
+        || trimmed.starts_with("get ")
+        || trimmed.starts_with("output ")
 }
 
 fn append_thinking_delta(state: &mut AppState, delta: &str) {
@@ -785,6 +1010,19 @@ fn finalize_assistant_text(
     session_store: &SessionStore,
     assistant_text: &str,
 ) -> Result<()> {
+    if assistant_text.trim().is_empty() {
+        if state.transcript.last().is_some_and(|message| {
+            message.role == MessageRole::Assistant
+                && message.text.trim().is_empty()
+                && message
+                    .thinking
+                    .as_deref()
+                    .is_none_or(|thinking| thinking.trim().is_empty())
+        }) {
+            state.transcript.pop();
+        }
+        return Ok(());
+    }
     if let Some(last) = state.transcript.last_mut() {
         if last.role == MessageRole::Assistant {
             last.text = assistant_text.to_string();
@@ -804,13 +1042,43 @@ fn finalize_assistant_text(
     Ok(())
 }
 
+fn discard_pending_assistant_drafts(state: &mut AppState, transcript_start_len: usize) {
+    let mut index = transcript_start_len.min(state.transcript.len());
+    while index < state.transcript.len() {
+        if state.transcript[index].role == MessageRole::Assistant {
+            state.transcript.remove(index);
+        } else {
+            index += 1;
+        }
+    }
+}
+
+fn persist_pending_assistant_drafts(
+    state: &AppState,
+    session_store: &SessionStore,
+    transcript_persisted_len: usize,
+) -> Result<()> {
+    for message in state
+        .transcript
+        .iter()
+        .skip(transcript_persisted_len.min(state.transcript.len()))
+    {
+        if message.role == MessageRole::Assistant && !message.text.trim().is_empty() {
+            session_store.append_event(
+                state.session.id,
+                TranscriptEvent::AssistantMessage {
+                    text: message.text.clone(),
+                    actor: Some(state.assistant_actor()),
+                },
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn submit_command_name(submitted: &str) -> &str {
-    submitted
-        .trim()
-        .trim_start_matches('/')
-        .split_once(' ')
-        .map(|(name, _)| name)
-        .unwrap_or_else(|| submitted.trim().trim_start_matches('/'))
+    let (name, _) = parsed_slash_command(submitted);
+    name
 }
 
 /// Persists the selected provider and clears any selected model until the user chooses one.
@@ -1050,116 +1318,44 @@ pub(crate) fn append_tool_messages(
     Ok(())
 }
 
-/// Executes a `!cmd` shell shortcut and records the result into the transcript.
-pub(crate) fn execute_shell_shortcut(
-    state: &mut AppState,
-    resources: &LoadedResources,
-    session_store: &SessionStore,
-    shell_command: &str,
-) -> Result<()> {
-    let rendered_command = format!("!{shell_command}");
-    state.push_message(MessageRole::User, rendered_command.clone());
-    session_store.append_event(
-        state.session.id,
-        TranscriptEvent::UserMessage {
-            text: rendered_command,
-            actor: Some(state.user_actor()),
-        },
-    )?;
-
-    let registry = ToolRegistry::from_resources(resources);
-    run_resource_hooks(
-        resources,
-        &state.cwd,
-        "tool_start",
-        &[
-            ("PUFFER_TOOL_ID", "bash".to_string()),
-            (
-                "PUFFER_TOOL_INPUT",
-                format!("{{\"command\":\"{}\"}}", shell_command.replace('"', "\\\"")),
-            ),
-            ("PUFFER_TOOL_SUCCESS", String::new()),
-            ("PUFFER_TOOL_STDOUT", String::new()),
-            ("PUFFER_TOOL_STDERR", String::new()),
-        ],
-    );
-    let result = registry.execute(
-        "bash",
-        &state.cwd,
-        ToolInput::Bash {
-            command: shell_command.to_string(),
-            timeout: None,
-            run_in_background: false,
-            dangerously_disable_sandbox: false,
-        },
-    )?;
-    state.record_task("bash", shell_command.to_string(), result.success);
-    run_resource_hooks(
-        resources,
-        &state.cwd,
-        "tool_end",
-        &[
-            ("PUFFER_TOOL_ID", "bash".to_string()),
-            (
-                "PUFFER_TOOL_INPUT",
-                format!("{{\"command\":\"{}\"}}", shell_command.replace('"', "\\\"")),
-            ),
-            (
-                "PUFFER_TOOL_SUCCESS",
-                if result.success { "true" } else { "false" }.to_string(),
-            ),
-            ("PUFFER_TOOL_STDOUT", result.output.stdout.clone()),
-            ("PUFFER_TOOL_STDERR", result.output.stderr.clone()),
-        ],
-    );
-
-    let reply = if result.output.stderr.is_empty() {
-        result.output.stdout
-    } else if result.output.stdout.is_empty() {
-        result.output.stderr
-    } else {
-        format!("{}\n{}", result.output.stdout, result.output.stderr)
-    };
-    let role = if result.success {
-        MessageRole::Assistant
-    } else {
-        MessageRole::System
-    };
-    state.push_message(role, reply.clone());
-    let event = if result.success {
-        TranscriptEvent::AssistantMessage {
-            text: reply,
-            actor: Some(state.assistant_actor()),
-        }
-    } else {
-        TranscriptEvent::SystemMessage {
-            text: reply,
-            actor: Some(state.system_actor()),
-        }
-    };
-    session_store.append_event(state.session.id, event)?;
-    Ok(())
-}
-
-/// Parses the `!cmd` shell shortcut form used by Claude/Codex-style CLIs.
-pub(crate) fn parse_shell_shortcut(input: &str) -> Option<&str> {
-    let command = input
-        .strip_prefix("!!")
-        .or_else(|| input.strip_prefix('!'))?;
-    let trimmed = command.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
-}
-
 /// Returns true for slash commands that should bypass startup onboarding.
 pub(crate) fn allow_prompt_before_onboarding(prompt: &str) -> bool {
-    matches!(
-        prompt.trim(),
-        "/help" | "/?" | "/theme" | "/doctor" | "/status" | "/usage" | "/context"
-    )
+    let trimmed = prompt.trim();
+    if !trimmed.starts_with('/') {
+        return false;
+    }
+    let (name, args) = parsed_slash_command(trimmed);
+    let name = canonical_overlay_command_name(name);
+    args.is_empty()
+        && matches!(
+            name,
+            "?" | "agents"
+                | "config"
+                | "context"
+                | "cost"
+                | "debug"
+                | "diff"
+                | "doctor"
+                | "files"
+                | "help"
+                | "hooks"
+                | "ide"
+                | "marketplace"
+                | "mcp"
+                | "memory"
+                | "permissions"
+                | "allowed-tools"
+                | "plugin"
+                | "plugins"
+                | "remote"
+                | "sandbox"
+                | "session"
+                | "skills"
+                | "status"
+                | "tasks"
+                | "theme"
+                | "usage"
+        )
 }
 
 fn command_requires_terminal_restore(submitted: &str) -> bool {

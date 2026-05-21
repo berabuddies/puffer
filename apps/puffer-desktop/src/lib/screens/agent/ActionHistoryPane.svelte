@@ -72,11 +72,30 @@
     return null;
   }
 
-  function actionKind(toolName: string): ActionKind | null {
+  function recordField(obj: Record<string, unknown> | null, name: string): Record<string, unknown> | null {
+    const value = obj?.[name];
+    return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
+  }
+
+  function mcpParts(name: string, input: Record<string, unknown> | null): { server: string; tool: string } | null {
+    const server = stringField(input, ["server"]);
+    const tool = stringField(input, ["tool"]);
+    if (server || tool) return { server: server ?? "mcp", tool: tool ?? "tool" };
+    const match = /^mcp__(.*?)__(.*)$/.exec(name);
+    if (!match) return null;
+    return { server: match[1] || "mcp", tool: match[2] || "tool" };
+  }
+
+  function browserArgs(input: Record<string, unknown> | null): Record<string, unknown> | null {
+    return recordField(input, "arguments") ?? input;
+  }
+
+  function actionKind(toolName: string, input: Record<string, unknown> | null): ActionKind | null {
     const normalized = toolName.toLowerCase();
     if (fileTools.has(normalized)) return "write";
     if (terminalTools.has(normalized)) return "terminal";
     if (browserTools.has(normalized)) return "browser";
+    if (mcpParts(toolName, input)?.server.toLowerCase() === "browser") return "browser";
     return null;
   }
 
@@ -87,9 +106,10 @@
     if (action.kind === "terminal") {
       return stringField(action.input, ["command"]) ?? action.toolName;
     }
+    const args = browserArgs(action.input);
     return [
-      stringField(action.input, ["action"]) ?? action.toolName,
-      stringField(action.input, ["tabId", "label", "url"])
+      stringField(args, ["action"]) ?? action.toolName,
+      stringField(args, ["tabId", "tab_id", "label", "url"])
     ].filter(Boolean).join(" ");
   }
 
@@ -98,9 +118,9 @@
     for (const item of items) {
       if (item.kind !== "tool") continue;
       const tool = item as ToolTimelineItem;
-      const kind = actionKind(tool.toolName || "");
-      if (!kind) continue;
       const input = tool.inputJson ?? parseJsonObject(tool.input);
+      const kind = actionKind(tool.toolName || "", input);
+      if (!kind) continue;
       const output = parseJsonObject(tool.output);
       out.push({
         id: tool.id,
@@ -291,9 +311,91 @@
 
   function framesForAction(action: ActionItem | null): RecordingFrame[] {
     if (!action || action.kind !== "browser") return [];
-    const tabId = stringField(action.input, ["tabId"]);
-    if (!tabId) return recordingFrames;
-    return recordingFrames.filter((frame) => frame.tabId === tabId);
+    const structural = recordingFrames.filter((frame) => browserFrameStructurallyMatchesAction(action, frame));
+    if (!shouldPreferBrowserActionUrl(action)) return structural;
+    const urlMatches = structural.filter((frame) => browserFrameUrlMatchesAction(action, frame));
+    if (urlMatches.length > 0) return urlMatches;
+    return structural.length <= 1 ? structural : [];
+  }
+
+  function browserFrameStructurallyMatchesAction(action: ActionItem, frame: BrowserRecordedFrame): boolean {
+    const args = browserArgs(action.input);
+    const backendSessionId = stringField(args, ["backendSessionId", "backend_session_id"]);
+    const tabId = stringField(args, ["tabId", "tab_id"]);
+    if (backendSessionId && frame.backendSessionId !== backendSessionId) return false;
+    if (tabId && frame.tabId !== tabId) return false;
+    return true;
+  }
+
+  function parseBrowserUrl(value: string): URL | null {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    try {
+      return new URL(trimmed);
+    } catch {
+      try {
+        return new URL(`https://${trimmed}`);
+      } catch {
+        return null;
+      }
+    }
+  }
+
+  function comparableBrowserHost(url: URL): string {
+    return url.hostname.toLowerCase().replace(/^www\./, "");
+  }
+
+  function browserHostsCompatible(actionUrl: URL, frameUrl: URL): boolean {
+    const actionHost = comparableBrowserHost(actionUrl);
+    const frameHost = comparableBrowserHost(frameUrl);
+    return (
+      actionHost === frameHost ||
+      frameHost.endsWith(`.${actionHost}`) ||
+      actionHost.endsWith(`.${frameHost}`)
+    );
+  }
+
+  function browserPathsCompatible(actionUrl: URL, frameUrl: URL): boolean {
+    const actionPath = actionUrl.pathname.replace(/\/+$/, "") || "/";
+    const framePath = frameUrl.pathname.replace(/\/+$/, "") || "/";
+    if (actionPath === "/") return true;
+    return framePath === actionPath || framePath.startsWith(`${actionPath}/`);
+  }
+
+  function browserSearchAndHashCompatible(actionUrl: URL, frameUrl: URL): boolean {
+    if (actionUrl.search && frameUrl.search !== actionUrl.search) return false;
+    if (actionUrl.hash && frameUrl.hash !== actionUrl.hash) return false;
+    return true;
+  }
+
+  function browserUrlsCompatible(actionUrlValue: string, frameUrlValue: string): boolean {
+    if (frameUrlValue === actionUrlValue || frameUrlValue.startsWith(`${actionUrlValue}#`)) {
+      return true;
+    }
+    const actionUrl = parseBrowserUrl(actionUrlValue);
+    const frameUrl = parseBrowserUrl(frameUrlValue);
+    if (!actionUrl || !frameUrl) return false;
+    return (
+      browserHostsCompatible(actionUrl, frameUrl) &&
+      browserPathsCompatible(actionUrl, frameUrl) &&
+      browserSearchAndHashCompatible(actionUrl, frameUrl)
+    );
+  }
+
+  function browserFrameUrlMatchesAction(action: ActionItem, frame: BrowserRecordedFrame): boolean {
+    const args = browserArgs(action.input);
+    const url = stringField(args, ["url"]);
+    if (!url) return true;
+    return browserUrlsCompatible(url, frame.url);
+  }
+
+  function shouldPreferBrowserActionUrl(action: ActionItem): boolean {
+    const args = browserArgs(action.input);
+    return Boolean(
+      stringField(args, ["url"]) &&
+        !stringField(args, ["backendSessionId", "backend_session_id"]) &&
+        !stringField(args, ["tabId", "tab_id"])
+    );
   }
 
   let visibleFrames = $derived(framesForAction(selected));

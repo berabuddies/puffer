@@ -263,6 +263,7 @@ impl BackendState {
         model_override: Option<String>,
     ) -> Result<Value> {
         let cwd = normalize_path(&cwd);
+        ensure_session_cwd(&cwd)?;
         let mut config = self.load_config()?;
         if config.default_provider.is_none() {
             config.default_provider = Some(DEFAULT_PROVIDER.to_string());
@@ -285,12 +286,17 @@ impl BackendState {
                     .clone()
                     .unwrap_or_else(|| DEFAULT_PROVIDER.to_string())
             });
+        let provider = canonical_backend_provider_id(&provider);
         validate_provider_id(&provider)?;
         let model = model_override
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .or_else(|| {
-                if provider == config.default_provider.clone().unwrap_or_default() {
+                if config
+                    .default_provider
+                    .as_deref()
+                    .is_some_and(|default| backend_provider_ids_match(default, &provider))
+                {
                     config.default_model.clone()
                 } else {
                     None
@@ -343,6 +349,8 @@ impl BackendState {
             folder_path: record.cwd.clone(),
             updated_at_ms: record.updated_at_ms,
             created_at_ms: record.created_at_ms,
+            event_count: record.events.len(),
+            activity_status: stored_session_activity_status(&record.events).to_string(),
             slug: record.slug.clone(),
             tags: record.tags.clone(),
             note: record.note.clone(),
@@ -450,6 +458,7 @@ impl BackendState {
             updated_at_ms: record.updated_at_ms,
             created_at_ms: record.created_at_ms,
             event_count: record.events.len(),
+            activity_status: stored_session_activity_status(&record.events).to_string(),
             slug: record.slug.clone(),
             tags: record.tags.clone(),
             note: record.note.clone(),
@@ -582,16 +591,17 @@ impl BackendState {
     }
 
     fn store_api_key(&self, provider_id: &str, api_key: &str) -> Result<()> {
+        let (provider_id, api_key) = validate_api_key_login(provider_id, api_key)?;
         let mut credentials = self.load_credentials()?;
-        credentials
-            .api_keys
-            .insert(provider_id.to_string(), api_key.to_string());
+        credentials.api_keys.insert(provider_id, api_key);
         self.save_credentials(&credentials)
     }
 
     fn remove_api_key(&self, provider_id: &str) -> Result<()> {
+        let provider_id = canonical_backend_provider_id(provider_id);
+        validate_provider_id(&provider_id)?;
         let mut credentials = self.load_credentials()?;
-        credentials.api_keys.remove(provider_id);
+        credentials.api_keys.remove(&provider_id);
         self.save_credentials(&credentials)
     }
 
@@ -948,7 +958,7 @@ impl BackendState {
             config.default_provider = if provider.trim().is_empty() {
                 None
             } else {
-                Some(provider.to_string())
+                Some(canonical_backend_provider_id(provider))
             };
             if params.get("defaultModel").is_none() {
                 config.default_model = default_model_for(provider);
@@ -1010,6 +1020,20 @@ impl BackendState {
     fn save_sessions(&self, sessions: &[SessionRecord]) -> Result<()> {
         write_json(&sessions_file()?, sessions)
     }
+}
+
+fn ensure_session_cwd(cwd: &Path) -> Result<()> {
+    if cwd.exists() {
+        if cwd.is_dir() {
+            return Ok(());
+        }
+        bail!(
+            "session cwd exists but is not a directory: {}",
+            cwd.display()
+        );
+    }
+    fs::create_dir_all(cwd)
+        .with_context(|| format!("failed to create session cwd {}", cwd.display()))
 }
 
 fn run_agent_turn_thread(
@@ -1136,23 +1160,9 @@ fn run_agent_turn_inner(
     )?;
 
     let config = read_config()?;
-    let provider = if provider_locked && !record.provider.trim().is_empty() {
-        record.provider.clone()
-    } else if let Some(provider) = options.provider_id.as_deref() {
-        provider.to_string()
-    } else if record.provider.trim().is_empty() {
-        config
-            .default_provider
-            .clone()
-            .unwrap_or_else(|| DEFAULT_PROVIDER.to_string())
-    } else {
-        record.provider.clone()
-    };
-    let model = options
-        .model_id
-        .clone()
-        .or(record.model.clone())
-        .or(config.default_model);
+    let routing = resolve_turn_routing(&record, &config, options, provider_locked);
+    let provider = routing.provider;
+    let model = routing.model;
     update_session_routing(session_id, &provider, model.as_deref())?;
     let credentials: StoredCredentials = read_json_or_default(&credentials_file()?)?;
     if provider == "codex" {
@@ -1869,6 +1879,29 @@ mod tests {
     use super::*;
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 
+    fn test_session_record(
+        provider: &str,
+        model: Option<&str>,
+        events: Vec<StoredEvent>,
+    ) -> SessionRecord {
+        SessionRecord {
+            id: "test-session".to_string(),
+            display_name: None,
+            generated_title: None,
+            title: "Test session".to_string(),
+            cwd: "/tmp/puffer-test".to_string(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+            slug: None,
+            tags: Vec::new(),
+            note: None,
+            parent_session_id: None,
+            provider: provider.to_string(),
+            model: model.map(ToOwned::to_owned),
+            events,
+        }
+    }
+
     #[test]
     fn untracked_diff_omits_large_files() {
         let dir = tempfile::tempdir().unwrap();
@@ -1887,6 +1920,157 @@ mod tests {
         assert!(patch.contains("+hello"));
         assert!(stat.contains("omitted by desktop diff limits"));
         assert!(!patch.contains("large.txt"));
+    }
+
+    #[test]
+    fn validate_api_key_login_rejects_empty_values() {
+        let empty_provider = validate_api_key_login("  ", "sk-test").unwrap_err();
+        assert!(empty_provider
+            .to_string()
+            .contains("provider id cannot be empty"));
+
+        let empty_key = validate_api_key_login("anthropic", "  ").unwrap_err();
+        assert!(empty_key.to_string().contains("api key cannot be empty"));
+    }
+
+    #[test]
+    fn validate_api_key_login_trims_values() {
+        let (provider, api_key) = validate_api_key_login("  anthropic  ", "  sk-test  ").unwrap();
+
+        assert_eq!(provider, "claude");
+        assert_eq!(api_key, "sk-test");
+    }
+
+    #[test]
+    fn validate_api_key_login_canonicalizes_desktop_provider_aliases() {
+        let (provider, _) = validate_api_key_login("openai", "sk-test").unwrap();
+        assert_eq!(provider, "codex");
+
+        let (provider, _) = validate_api_key_login("Claude", "sk-test").unwrap();
+        assert_eq!(provider, "claude");
+
+        let err = validate_api_key_login("unknown-provider", "sk-test").unwrap_err();
+        assert!(err.to_string().contains("unknown provider"));
+    }
+
+    #[test]
+    fn desktop_provider_aliases_map_to_tauri_cli_backends() {
+        assert_eq!(canonical_backend_provider_id("openai"), "codex");
+        assert_eq!(canonical_backend_provider_id("codex"), "codex");
+        assert_eq!(canonical_backend_provider_id("anthropic"), "claude");
+        assert_eq!(canonical_backend_provider_id("claude"), "claude");
+        assert_eq!(canonical_backend_provider_id("puffer"), "puffer");
+    }
+
+    #[test]
+    fn desktop_provider_aliases_match_for_default_routing() {
+        assert!(backend_provider_ids_match("openai", "codex"));
+        assert!(backend_provider_ids_match("anthropic", "claude"));
+        assert!(backend_provider_ids_match("Codex", "OPENAI"));
+        assert!(!backend_provider_ids_match("codex", "claude"));
+    }
+
+    #[test]
+    fn desktop_provider_validation_accepts_frontend_canonical_ids() {
+        validate_provider_id("openai").unwrap();
+        validate_provider_id("anthropic").unwrap();
+
+        let err = validate_provider_id("unknown-provider").unwrap_err();
+        assert!(err.to_string().contains("unknown provider"));
+    }
+
+    #[test]
+    fn desktop_default_models_accept_frontend_canonical_ids() {
+        assert_eq!(
+            default_model_for("anthropic"),
+            Some(DEFAULT_CLAUDE_MODEL.to_string())
+        );
+        assert_eq!(
+            default_model_for("puffer"),
+            Some(DEFAULT_PUFFER_MODEL.to_string())
+        );
+    }
+
+    #[test]
+    fn first_turn_provider_override_does_not_reuse_previous_provider_model() {
+        let record = test_session_record("claude", Some(DEFAULT_CLAUDE_MODEL), Vec::new());
+        let config = StoredConfig {
+            default_provider: Some("openai".to_string()),
+            default_model: Some("openai/gpt-5.4".to_string()),
+            ..StoredConfig::default()
+        };
+        let options = TurnLaunchOptions {
+            provider_id: Some("openai".to_string()),
+            ..TurnLaunchOptions::default()
+        };
+
+        let routing = resolve_turn_routing(&record, &config, &options, false);
+
+        assert_eq!(routing.provider, "codex");
+        assert_eq!(routing.model.as_deref(), Some("gpt-5.4"));
+    }
+
+    #[test]
+    fn turn_routing_keeps_locked_session_provider_despite_provider_override() {
+        let record = test_session_record(
+            "claude",
+            Some(DEFAULT_CLAUDE_MODEL),
+            vec![StoredEvent::User {
+                at_ms: 1,
+                text: "hello".to_string(),
+            }],
+        );
+        let config = StoredConfig {
+            default_provider: Some("openai".to_string()),
+            default_model: Some("openai/gpt-5.4".to_string()),
+            ..StoredConfig::default()
+        };
+        let options = TurnLaunchOptions {
+            provider_id: Some("openai".to_string()),
+            ..TurnLaunchOptions::default()
+        };
+
+        let routing = resolve_turn_routing(&record, &config, &options, true);
+
+        assert_eq!(routing.provider, "claude");
+        assert_eq!(routing.model.as_deref(), Some(DEFAULT_CLAUDE_MODEL));
+    }
+
+    #[test]
+    fn turn_routing_normalizes_explicit_matching_model_prefix() {
+        let record = test_session_record("codex", Some("gpt-5.4"), Vec::new());
+        let config = StoredConfig::default();
+        let options = TurnLaunchOptions {
+            provider_id: Some("anthropic".to_string()),
+            model_id: Some("anthropic/claude-sonnet-4-5".to_string()),
+            ..TurnLaunchOptions::default()
+        };
+
+        let routing = resolve_turn_routing(&record, &config, &options, false);
+
+        assert_eq!(routing.provider, "claude");
+        assert_eq!(routing.model.as_deref(), Some("claude-sonnet-4-5"));
+    }
+
+    #[test]
+    fn session_cwd_initializer_creates_missing_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("new-project").join("nested");
+
+        ensure_session_cwd(&missing).unwrap();
+
+        assert!(missing.is_dir());
+    }
+
+    #[test]
+    fn session_cwd_initializer_rejects_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("not-a-directory");
+        fs::write(&file, "not a directory").unwrap();
+
+        let err = ensure_session_cwd(&file).unwrap_err();
+
+        assert!(err.to_string().contains("not a directory"));
     }
 
     #[test]
@@ -2020,7 +2204,7 @@ fn provider_summaries() -> Vec<ProviderSummaryDto> {
 }
 
 fn provider_models(provider_id: &str) -> Vec<Value> {
-    match provider_id {
+    match canonical_backend_provider_id(provider_id).as_str() {
         "puffer" => vec![model("default", "Default", "puffer", false)],
         "claude" => claude_models(),
         _ => codex_app_server_models().unwrap_or_default(),
@@ -2168,7 +2352,7 @@ fn claude_model(
 }
 
 fn default_model_for(provider: &str) -> Option<String> {
-    match provider {
+    match canonical_backend_provider_id(provider).as_str() {
         "claude" => Some(DEFAULT_CLAUDE_MODEL.to_string()),
         "puffer" => Some(DEFAULT_PUFFER_MODEL.to_string()),
         _ => codex_app_server_catalog()
@@ -2178,10 +2362,102 @@ fn default_model_for(provider: &str) -> Option<String> {
 }
 
 fn validate_provider_id(provider: &str) -> Result<()> {
-    match provider {
+    match canonical_backend_provider_id(provider).as_str() {
         "puffer" | "codex" | "claude" => Ok(()),
         other => bail!("unknown provider `{other}`"),
     }
+}
+
+fn canonical_backend_provider_id(provider: &str) -> String {
+    let trimmed = provider.trim();
+    match trimmed.to_ascii_lowercase().as_str() {
+        "openai" | "codex" => "codex".to_string(),
+        "anthropic" | "claude" => "claude".to_string(),
+        "puffer" => "puffer".to_string(),
+        _ => trimmed.to_string(),
+    }
+}
+
+fn backend_provider_ids_match(left: &str, right: &str) -> bool {
+    canonical_backend_provider_id(left) == canonical_backend_provider_id(right)
+}
+
+fn resolve_turn_routing(
+    record: &SessionRecord,
+    config: &StoredConfig,
+    options: &TurnLaunchOptions,
+    provider_locked: bool,
+) -> TurnRouting {
+    let provider = if provider_locked && !record.provider.trim().is_empty() {
+        record.provider.clone()
+    } else if let Some(provider) = options.provider_id.as_deref() {
+        provider.to_string()
+    } else if record.provider.trim().is_empty() {
+        config
+            .default_provider
+            .clone()
+            .unwrap_or_else(|| DEFAULT_PROVIDER.to_string())
+    } else {
+        record.provider.clone()
+    };
+    let provider = canonical_backend_provider_id(&provider);
+    let model =
+        options
+            .model_id
+            .as_deref()
+            .and_then(|model| normalize_backend_model_id_for_provider(&provider, model))
+            .or_else(|| {
+                backend_provider_ids_match(&record.provider, &provider)
+                    .then(|| {
+                        record.model.as_deref().and_then(|model| {
+                            normalize_backend_model_id_for_provider(&provider, model)
+                        })
+                    })
+                    .flatten()
+            })
+            .or_else(|| {
+                config
+                    .default_provider
+                    .as_deref()
+                    .filter(|default| backend_provider_ids_match(default, &provider))
+                    .and_then(|_| {
+                        config.default_model.as_deref().and_then(|model| {
+                            normalize_backend_model_id_for_provider(&provider, model)
+                        })
+                    })
+            })
+            .or_else(|| default_model_for(&provider));
+    TurnRouting { provider, model }
+}
+
+fn normalize_backend_model_id_for_provider(provider_id: &str, model_id: &str) -> Option<String> {
+    let trimmed = model_id.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some((prefix, model)) = trimmed.split_once('/') {
+        let prefix = canonical_backend_provider_id(prefix);
+        let model = model.trim();
+        if prefix == canonical_backend_provider_id(provider_id) && !model.is_empty() {
+            return Some(model.to_string());
+        }
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+fn validate_api_key_login(provider_id: &str, api_key: &str) -> Result<(String, String)> {
+    let provider_id = provider_id.trim();
+    if provider_id.is_empty() {
+        bail!("provider id cannot be empty");
+    }
+    let provider_id = canonical_backend_provider_id(provider_id);
+    validate_provider_id(&provider_id)?;
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        bail!("api key cannot be empty");
+    }
+    Ok((provider_id, api_key.to_string()))
 }
 
 fn provider_command(provider: &str) -> String {
@@ -2353,6 +2629,58 @@ fn serde_value<T: Serialize>(value: T) -> Result<Value> {
     Ok(serde_json::to_value(value)?)
 }
 
+fn stored_session_activity_status(events: &[StoredEvent]) -> &'static str {
+    if latest_stored_action_requires_permission(events) {
+        return "awaiting";
+    }
+    if latest_stored_action_is_unanswered(events) {
+        return "running";
+    }
+    "idle"
+}
+
+fn latest_stored_action_requires_permission(events: &[StoredEvent]) -> bool {
+    for event in events.iter().rev() {
+        match event {
+            StoredEvent::System { text, .. } => return text_requires_permission(text),
+            StoredEvent::Tool { output, .. } => return output_requires_permission(output),
+            StoredEvent::User { .. } | StoredEvent::Assistant { .. } => return false,
+        }
+    }
+    false
+}
+
+fn latest_stored_action_is_unanswered(events: &[StoredEvent]) -> bool {
+    for event in events.iter().rev() {
+        match event {
+            StoredEvent::User { .. } => return true,
+            StoredEvent::Assistant { .. }
+            | StoredEvent::System { .. }
+            | StoredEvent::Tool { .. } => {
+                return false;
+            }
+        }
+    }
+    false
+}
+
+fn text_requires_permission(text: &str) -> bool {
+    output_requires_permission(text)
+        || text
+            .split_once('\n')
+            .and_then(|(_, rest)| rest.strip_prefix("input: "))
+            .and_then(|input| {
+                input
+                    .split_once('\n')
+                    .map(|(_, output)| output_requires_permission(output))
+            })
+            .unwrap_or(false)
+}
+
+fn output_requires_permission(output: &str) -> bool {
+    output.trim().strip_prefix("Permission required:").is_some()
+}
+
 fn read_json_or_default<T>(path: &Path) -> Result<T>
 where
     T: for<'de> Deserialize<'de> + Default,
@@ -2520,6 +2848,12 @@ struct ProviderLaunch {
     command: String,
     args: Vec<String>,
     json_stream: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TurnRouting {
+    provider: String,
+    model: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]

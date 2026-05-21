@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount, tick } from "svelte";
+  import { onDestroy, tick, untrack } from "svelte";
   import { Terminal } from "@xterm/xterm";
   import { FitAddon } from "@xterm/addon-fit";
   import "@xterm/xterm/css/xterm.css";
@@ -36,7 +36,10 @@
   let activePtyId = $state<string | null>(null);
   let ptyTabs = $state<PtyTabInfo[]>([]);
   let loading = $state(false);
+  let creatingPty = $state(false);
+  let closingPtyIds = $state<string[]>([]);
   let error = $state<string | null>(null);
+  let closeError = $state<string | null>(null);
   let disposed = false;
   let attachGeneration = 0;
   let dataDisposer: (() => void) | null = null;
@@ -44,11 +47,24 @@
   let inputDisposer: { dispose: () => void } | null = null;
   let resizeObserver: ResizeObserver | null = null;
   let seenSeqByPty = new Map<string, number>();
+  let restoreGeneration = 0;
   const previewMode = !isDaemonReachable();
 
-  onMount(() => {
-    if (previewMode) return;
-    void restoreOrCreateTerminal();
+  $effect(() => {
+    const targetSessionId = sessionId;
+    const targetCwd = cwd;
+    if (previewMode || targetSessionId === "preview") return;
+    untrack(() => {
+      const generation = ++restoreGeneration;
+      activePtyId = null;
+      ptyTabs = [];
+      creatingPty = false;
+      closingPtyIds = [];
+      closeError = null;
+      seenSeqByPty = new Map();
+      cleanupTerminalAttach();
+      void restoreOrCreateTerminal(targetSessionId, targetCwd, generation);
+    });
   });
 
   onDestroy(() => {
@@ -56,64 +72,90 @@
     cleanupTerminalAttach();
   });
 
-  async function restoreOrCreateTerminal() {
-    if (sessionId === "preview") return;
+  async function restoreOrCreateTerminal(targetSessionId: string, targetCwd: string, generation: number) {
+    if (targetSessionId === "preview") return;
     loading = true;
     error = null;
+    closeError = null;
     try {
-      const info = await listPtys(sessionId);
-      if (disposed) return;
+      const info = await listPtys(targetSessionId);
+      if (disposed || generation !== restoreGeneration || targetSessionId !== sessionId || targetCwd !== cwd) return;
       ptyTabs = info.tabs;
       const active = info.tabs.find((tab) => tab.active) ?? info.tabs[0];
       if (active) {
-        await activatePty(active.ptyId);
+        await activatePty(active.ptyId, targetSessionId, generation);
       } else if (!info.initialized) {
-        await createTerminalTab();
+        await createTerminalTab(targetSessionId, targetCwd, generation);
       }
     } catch (err) {
-      error = err instanceof Error ? err.message : String(err);
+      if (generation === restoreGeneration) error = err instanceof Error ? err.message : String(err);
     } finally {
-      loading = false;
+      if (generation === restoreGeneration) loading = false;
     }
   }
 
-  async function createTerminalTab() {
-    if (previewMode || sessionId === "preview") return;
+  async function createTerminalTab(targetSessionId = sessionId, targetCwd = cwd, generation = restoreGeneration) {
+    if (previewMode || targetSessionId === "preview" || creatingPty) return;
+    creatingPty = true;
     loading = true;
     error = null;
+    closeError = null;
     try {
       const title = nextTerminalTitle();
       const { ptyId } = await openPty({
-        sessionId,
-        cwd,
+        sessionId: targetSessionId,
+        cwd: targetCwd,
         cols: term?.cols ?? 80,
         rows: term?.rows ?? 24,
         title
       });
-      const info = await listPtys(sessionId);
-      if (disposed) return;
+      const info = await listPtys(targetSessionId);
+      if (disposed || generation !== restoreGeneration || targetSessionId !== sessionId || targetCwd !== cwd) return;
       ptyTabs = info.tabs;
-      await activatePty(ptyId);
+      await activatePty(ptyId, targetSessionId, generation);
     } catch (err) {
-      error = err instanceof Error ? err.message : String(err);
+      if (generation === restoreGeneration) error = err instanceof Error ? err.message : String(err);
     } finally {
-      loading = false;
+      if (generation === restoreGeneration) {
+        loading = false;
+        creatingPty = false;
+      }
     }
   }
 
-  async function activatePty(ptyId: string) {
-    if (disposed) return;
+  function terminalContextCurrent(targetSessionId: string, generation: number): boolean {
+    return !disposed && generation === restoreGeneration && targetSessionId === sessionId;
+  }
+
+  async function activatePty(
+    ptyId: string,
+    targetSessionId = sessionId,
+    generation = restoreGeneration
+  ) {
+    if (!terminalContextCurrent(targetSessionId, generation)) return;
+    if (ptyId === activePtyId && term && dataDisposer) return;
     activePtyId = ptyId;
     ptyTabs = ptyTabs.map((tab) => ({ ...tab, active: tab.ptyId === ptyId }));
     await focusPty(ptyId).catch(() => {});
-    await attachTerminal(ptyId);
+    if (!terminalContextCurrent(targetSessionId, generation)) return;
+    await attachTerminal(ptyId, targetSessionId, generation);
   }
 
-  async function attachTerminal(ptyId: string) {
+  async function attachTerminal(
+    ptyId: string,
+    targetSessionId = sessionId,
+    restoreContext = restoreGeneration
+  ) {
     const generation = ++attachGeneration;
     cleanupTerminalAttach();
     await tick();
-    if (disposed || generation !== attachGeneration || !container) return;
+    if (
+      !terminalContextCurrent(targetSessionId, restoreContext) ||
+      generation !== attachGeneration ||
+      !container
+    ) {
+      return;
+    }
 
     const t = new Terminal({
       cursorBlink: true,
@@ -149,10 +191,15 @@
     t.open(container);
     term = t;
     fit = fa;
-    fitTerminal(ptyId);
+    fitTerminal(ptyId, generation);
 
     const client = await ensureLocalDaemonClient();
-    if (disposed || generation !== attachGeneration) return;
+    if (
+      !terminalContextCurrent(targetSessionId, restoreContext) ||
+      generation !== attachGeneration
+    ) {
+      return;
+    }
 
     seenSeqByPty.set(ptyId, 0);
     let replaying = true;
@@ -176,17 +223,35 @@
 
     try {
       const chunks = await replayPty(ptyId);
-      if (disposed || generation !== attachGeneration) return;
+      if (
+        !terminalContextCurrent(targetSessionId, restoreContext) ||
+        generation !== attachGeneration
+      ) {
+        return;
+      }
       for (const chunk of chunks) writePtyEvent(ptyId, chunk);
     } catch (err) {
-      if (generation === attachGeneration) {
+      if (
+        terminalContextCurrent(targetSessionId, restoreContext) &&
+        generation === attachGeneration
+      ) {
         t.writeln(`\r\n\x1b[31mterminal replay: ${String(err)}\x1b[0m`);
       }
     } finally {
       replaying = false;
-      if (generation === attachGeneration) {
+      if (
+        terminalContextCurrent(targetSessionId, restoreContext) &&
+        generation === attachGeneration
+      ) {
         for (const event of queued) writePtyEvent(ptyId, event);
       }
+    }
+
+    if (
+      !terminalContextCurrent(targetSessionId, restoreContext) ||
+      generation !== attachGeneration
+    ) {
+      return;
     }
 
     inputDisposer = t.onData((str) => {
@@ -196,7 +261,7 @@
       void writePty(ptyId, btoa(bin)).catch(() => {});
     });
 
-    resizeObserver = new ResizeObserver(() => fitTerminal(ptyId));
+    resizeObserver = new ResizeObserver(() => fitTerminal(ptyId, generation));
     resizeObserver.observe(container);
   }
 
@@ -208,13 +273,19 @@
       seenSeqByPty.set(ptyId, event.seq);
     }
     try {
-      term.write(atob(event.data));
+      const raw = atob(event.data);
+      const bytes = new Uint8Array(raw.length);
+      for (let index = 0; index < raw.length; index += 1) {
+        bytes[index] = raw.charCodeAt(index);
+      }
+      term.write(bytes);
     } catch {
       /* malformed frame - skip */
     }
   }
 
-  function fitTerminal(ptyId: string) {
+  function fitTerminal(ptyId: string, generation = attachGeneration) {
+    if (disposed || generation !== attachGeneration || activePtyId !== ptyId) return;
     if (!term || !fit) return;
     try {
       fit.fit();
@@ -226,18 +297,43 @@
 
   async function closeTerminalTab(event: Event, ptyId: string) {
     event.stopPropagation();
-    const closingIndex = ptyTabs.findIndex((tab) => tab.ptyId === ptyId);
-    await closePty(ptyId).catch(() => {});
-    const nextTabs = ptyTabs.filter((tab) => tab.ptyId !== ptyId);
-    ptyTabs = nextTabs;
-    seenSeqByPty.delete(ptyId);
-    if (activePtyId !== ptyId) return;
-    const next = nextTabs[Math.min(closingIndex, nextTabs.length - 1)] ?? nextTabs[nextTabs.length - 1];
-    if (next) {
-      await activatePty(next.ptyId);
-    } else {
-      activePtyId = null;
-      cleanupTerminalAttach();
+    if (closingPtyIds.includes(ptyId)) return;
+    const targetSessionId = sessionId;
+    const generation = restoreGeneration;
+    closingPtyIds = [...closingPtyIds, ptyId];
+    try {
+      const closingIndex = ptyTabs.findIndex((tab) => tab.ptyId === ptyId);
+      try {
+        await closePty(ptyId);
+      } catch (err) {
+        if (disposed || generation !== restoreGeneration || targetSessionId !== sessionId) return;
+        const message = err instanceof Error ? err.message : String(err);
+        if (activePtyId === ptyId || ptyTabs.length <= 1) {
+          error = message;
+          closeError = null;
+        } else {
+          closeError = message;
+        }
+        return;
+      }
+      if (disposed || generation !== restoreGeneration || targetSessionId !== sessionId) return;
+      error = null;
+      closeError = null;
+      const nextTabs = ptyTabs.filter((tab) => tab.ptyId !== ptyId);
+      ptyTabs = nextTabs;
+      seenSeqByPty.delete(ptyId);
+      if (activePtyId !== ptyId) return;
+      const next = nextTabs[Math.min(closingIndex, nextTabs.length - 1)] ?? nextTabs[nextTabs.length - 1];
+      if (next) {
+        await activatePty(next.ptyId);
+      } else {
+        activePtyId = null;
+        cleanupTerminalAttach();
+      }
+    } finally {
+      if (!disposed && generation === restoreGeneration && targetSessionId === sessionId) {
+        closingPtyIds = closingPtyIds.filter((id) => id !== ptyId);
+      }
     }
   }
 
@@ -271,8 +367,8 @@
   {#if previewMode}
     <div class="terminal-empty">
       <Icon name="terminal" size={20} color="var(--muted-foreground)" />
-      <div class="title">Terminal is available in the Corbina desktop app</div>
-      <div class="sub">Launch Corbina locally to get a live shell in this session's cwd.</div>
+      <div class="title">Terminal is available in the Puffer desktop app</div>
+      <div class="sub">Launch Puffer locally to get a live shell in this session's cwd.</div>
     </div>
   {:else}
     <div class="terminal-tabs" role="tablist" aria-label="Terminal sessions">
@@ -292,8 +388,9 @@
           <button
             type="button"
             class="terminal-tab-close"
-            title="Close terminal"
+            title={`Close ${tab.title}`}
             aria-label="Close {tab.title}"
+            disabled={closingPtyIds.includes(tab.ptyId)}
             onclick={(event) => void closeTerminalTab(event, tab.ptyId)}
           >
             <Icon name="x" size={11} />
@@ -311,6 +408,10 @@
         <Icon name="plus" size={13} />
       </button>
     </div>
+
+    {#if closeError}
+      <div class="terminal-inline-error" role="alert">{closeError}</div>
+    {/if}
 
     {#if error}
       <div class="terminal-empty error">
@@ -392,7 +493,7 @@
     white-space: nowrap;
   }
   .terminal-tab-main:hover,
-  .terminal-tab-close:hover,
+  .terminal-tab-close:hover:not(:disabled),
   .terminal-new:hover:not(:disabled) {
     background: color-mix(in oklab, var(--accent) 55%, transparent);
     color: var(--foreground);
@@ -410,12 +511,26 @@
     color: var(--muted-foreground);
     cursor: pointer;
   }
+  .terminal-tab-close:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
   .terminal-new {
     border-right: 1px solid var(--border);
   }
   .terminal-new:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+  .terminal-inline-error {
+    flex-shrink: 0;
+    padding: 7px 10px;
+    border-bottom: 1px solid color-mix(in oklab, oklch(0.7 0.18 25) 28%, var(--border));
+    background: color-mix(in oklab, oklch(0.7 0.18 25) 10%, var(--background));
+    color: oklch(0.5 0.2 25);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.45;
   }
   .pf-terminal-host {
     flex: 1;

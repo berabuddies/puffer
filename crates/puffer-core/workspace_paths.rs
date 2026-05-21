@@ -64,7 +64,7 @@ pub(crate) fn validate_directory_for_workspace(
 
     let canonical_candidate = fs::canonicalize(&absolute_path)
         .with_context(|| format!("failed to canonicalize {}", absolute_path.display()))?;
-    for working_dir in workspace_roots(cwd, working_dirs) {
+    for working_dir in explicit_workspace_roots(cwd, working_dirs) {
         let canonical_working_dir = canonicalize_or_normalize(&working_dir)?;
         if canonical_candidate.starts_with(&canonical_working_dir) {
             return Ok(AddDirectoryValidation::AlreadyInWorkingDirectory {
@@ -239,31 +239,68 @@ pub(crate) fn sandbox_allows_all_paths(sandbox_mode: &str) -> bool {
 /// follow standard Unix scratch conventions and `workspace-write`
 /// sandbox mode actually permits it.
 pub(crate) fn workspace_roots(cwd: &Path, additional_roots: &[PathBuf]) -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    let mut seen = BTreeSet::new();
-    let mut push_root = |raw: &Path| {
-        let normalized = normalize_user_path(cwd, raw.to_string_lossy().as_ref());
-        if seen.insert(normalized.clone()) {
-            roots.push(normalized);
-        }
-    };
-    push_root(cwd);
-    for root in additional_roots {
-        push_root(root.as_path());
-    }
+    let mut roots = explicit_workspace_roots(cwd, additional_roots);
+    let mut seen = roots.iter().cloned().collect::<BTreeSet<_>>();
     // Default ephemeral scratch locations the model is trained to use.
     if cfg!(unix) {
         let slash_tmp = Path::new("/tmp");
         if slash_tmp.is_dir() {
-            push_root(slash_tmp);
+            push_normalized_root(&mut roots, &mut seen, cwd, slash_tmp);
         }
     }
     if let Some(tmpdir) = std::env::var_os("TMPDIR") {
         if !tmpdir.is_empty() {
-            push_root(Path::new(&tmpdir));
+            push_normalized_root(&mut roots, &mut seen, cwd, Path::new(&tmpdir));
         }
     }
     roots
+}
+
+fn explicit_workspace_roots(cwd: &Path, additional_roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let mut seen = BTreeSet::new();
+    push_normalized_root(&mut roots, &mut seen, cwd, cwd);
+    for root in additional_roots {
+        push_normalized_root(&mut roots, &mut seen, cwd, root.as_path());
+    }
+    roots
+}
+
+fn push_normalized_root(
+    roots: &mut Vec<PathBuf>,
+    seen: &mut BTreeSet<PathBuf>,
+    cwd: &Path,
+    raw: &Path,
+) {
+    let normalized = normalize_user_path(cwd, raw.to_string_lossy().as_ref());
+    if seen.insert(normalized.clone()) {
+        roots.push(normalized);
+    }
+}
+
+#[cfg(test)]
+struct ScopedEnvVar {
+    name: &'static str,
+    original: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl ScopedEnvVar {
+    fn set(name: &'static str, value: &Path) -> Self {
+        let original = std::env::var_os(name);
+        std::env::set_var(name, value);
+        Self { name, original }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScopedEnvVar {
+    fn drop(&mut self) {
+        match &self.original {
+            Some(value) => std::env::set_var(self.name, value),
+            None => std::env::remove_var(self.name),
+        }
+    }
 }
 
 fn normalize_user_path(cwd: &Path, raw_path: &str) -> PathBuf {
@@ -348,7 +385,10 @@ fn nearest_existing_ancestor(path: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_path_for_session, resolve_path_in_workspaces};
+    use super::{
+        resolve_path_for_session, resolve_path_in_workspaces, validate_directory_for_workspace,
+        AddDirectoryValidation, ScopedEnvVar,
+    };
     use std::path::Path;
     use tempfile::tempdir;
 
@@ -411,21 +451,37 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let temp = tempdir().unwrap();
-        let original = std::env::var_os("TMPDIR");
-        std::env::set_var("TMPDIR", temp.path());
+        let _tmpdir = ScopedEnvVar::set("TMPDIR", temp.path());
 
         let cwd = tempdir().unwrap();
         let roots = workspace_roots(cwd.path(), &[]);
         let normalized = PathBuf::from(temp.path());
 
-        match original {
-            Some(value) => std::env::set_var("TMPDIR", value),
-            None => std::env::remove_var("TMPDIR"),
-        }
-
         assert!(
             roots.iter().any(|root| root == &normalized),
             "default writable set must include $TMPDIR when set; got {roots:?}"
+        );
+    }
+
+    #[test]
+    fn add_dir_validation_allows_tmpdir_as_explicit_root() {
+        let _guard = crate::test_locks::env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let temp = tempdir().unwrap();
+        let cwd = temp.path().join("workspace");
+        let extra = temp.path().join("extra");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&extra).unwrap();
+        let _tmpdir = ScopedEnvVar::set("TMPDIR", temp.path());
+
+        let result = validate_directory_for_workspace(&cwd, &[], extra.to_str().unwrap()).unwrap();
+
+        assert_eq!(
+            result,
+            AddDirectoryValidation::Success {
+                absolute_path: extra
+            }
         );
     }
 

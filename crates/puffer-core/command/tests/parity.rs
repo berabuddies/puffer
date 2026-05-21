@@ -13,6 +13,19 @@ fn read_repo_file(relative_path: &str) -> String {
     fs::read_to_string(repo_root().join(relative_path)).unwrap()
 }
 
+fn claude_reference_available() -> bool {
+    repo_root().join("references/claude-code").is_dir()
+}
+
+macro_rules! require_claude_reference {
+    () => {
+        if !claude_reference_available() {
+            eprintln!("skipping Claude reference parity test; references/claude-code is absent");
+            return;
+        }
+    };
+}
+
 fn load_prompt(relative_path: &str) -> PromptTemplate {
     serde_yaml::from_str(&read_repo_file(relative_path)).unwrap()
 }
@@ -114,6 +127,7 @@ fn fenced(output: &str) -> String {
 
 #[test]
 fn init_prompt_matches_claude_reference() {
+    require_claude_reference!();
     let prompt = load_prompt("resources/prompts/init.yaml");
     let reference = read_repo_file("references/claude-code/src/commands/init.ts");
     let expected = normalize_reference_template(&extract_template_literal(
@@ -126,6 +140,7 @@ fn init_prompt_matches_claude_reference() {
 
 #[test]
 fn review_prompt_matches_claude_reference_when_rendered() {
+    require_claude_reference!();
     let rendered = render_prompt("resources/prompts/review.yaml", &[("ARGUMENTS", "123")]);
     let reference = read_repo_file("references/claude-code/src/commands/review.ts");
     let expected = normalize_reference_template(&extract_template_literal(
@@ -139,6 +154,7 @@ fn review_prompt_matches_claude_reference_when_rendered() {
 
 #[test]
 fn pr_comments_prompt_matches_claude_reference_when_rendered() {
+    require_claude_reference!();
     let rendered = render_prompt(
         "resources/prompts/pr-comments.yaml",
         &[(
@@ -158,6 +174,7 @@ fn pr_comments_prompt_matches_claude_reference_when_rendered() {
 
 #[test]
 fn security_review_prompt_matches_claude_reference_when_rendered() {
+    require_claude_reference!();
     let git_status = "On branch main\nnothing to commit, working tree clean";
     let files_modified = "src/lib.rs";
     let commits = "abc123 tighten prompt parity";
@@ -195,6 +212,7 @@ fn security_review_prompt_matches_claude_reference_when_rendered() {
 
 #[test]
 fn statusline_prompt_matches_claude_reference_when_rendered() {
+    require_claude_reference!();
     let rendered = render_prompt(
         "resources/prompts/statusline.yaml",
         &[("STATUSLINE_PROMPT_JSON", "\"Mirror my starship prompt\"")],
@@ -209,6 +227,7 @@ fn statusline_prompt_matches_claude_reference_when_rendered() {
 
 #[test]
 fn commit_prompt_matches_claude_reference_when_rendered() {
+    require_claude_reference!();
     let prompt = load_prompt("resources/prompts/commit.yaml");
     let rendered = prompt.render(&std::collections::BTreeMap::from([
         ("GIT_STATUS".to_string(), "STATUS".to_string()),
@@ -234,6 +253,7 @@ fn commit_prompt_matches_claude_reference_when_rendered() {
 
 #[test]
 fn ask_user_question_tool_prompt_matches_claude_reference() {
+    require_claude_reference!();
     let tool = load_tool("resources/tools/ask_user_question.yaml");
     let reference =
         read_repo_file("references/claude-code/src/tools/AskUserQuestionTool/prompt.ts");
@@ -251,6 +271,7 @@ fn ask_user_question_tool_prompt_matches_claude_reference() {
 
 #[test]
 fn enter_plan_mode_tool_prompt_matches_claude_reference() {
+    require_claude_reference!();
     let tool = load_tool("resources/tools/enter_plan_mode.yaml");
     let reference = read_repo_file("references/claude-code/src/tools/EnterPlanModeTool/prompt.ts");
     let what_happens = normalize_reference_template(&extract_template_literal(
@@ -267,6 +288,7 @@ fn enter_plan_mode_tool_prompt_matches_claude_reference() {
 
 #[test]
 fn exit_plan_mode_tool_prompt_matches_claude_reference() {
+    require_claude_reference!();
     let tool = load_tool("resources/tools/exit_plan_mode.yaml");
     let reference = read_repo_file("references/claude-code/src/tools/ExitPlanModeTool/prompt.ts");
     let expected = normalize_reference_template(&extract_template_literal(
@@ -280,6 +302,7 @@ fn exit_plan_mode_tool_prompt_matches_claude_reference() {
 
 #[test]
 fn plan_mode_interview_prompt_matches_claude_reference_when_rendered() {
+    require_claude_reference!();
     let rendered = render_prompt(
         "resources/prompts/plan-mode-interview.yaml",
         &[
@@ -316,6 +339,7 @@ fn plan_mode_interview_prompt_matches_claude_reference_when_rendered() {
 
 #[test]
 fn plan_mode_full_prompt_matches_claude_reference_when_rendered() {
+    require_claude_reference!();
     let phase4_section = "### Phase 4: Final Plan\nGoal: Write your final plan to the plan file (the only file you can edit).\n- Begin with a **Context** section: explain why this change is being made — the problem or need it addresses, what prompted it, and the intended outcome\n- Include only your recommended approach, not all alternatives\n- Ensure that the plan file is concise enough to scan quickly, but detailed enough to execute effectively\n- Include the paths of critical files to be modified\n- Reference existing functions and utilities you found that should be reused, with their file paths\n- Include a verification section describing how to test the changes end-to-end (run the code, use MCP tools, run tests)";
     let rendered = render_prompt(
         "resources/prompts/plan-mode-full.yaml",
@@ -358,6 +382,7 @@ fn plan_mode_full_prompt_matches_claude_reference_when_rendered() {
 
 #[test]
 fn plan_mode_sparse_prompt_matches_claude_reference_when_rendered() {
+    require_claude_reference!();
     let rendered = render_prompt(
         "resources/prompts/plan-mode-sparse.yaml",
         &[
@@ -389,6 +414,7 @@ fn plan_mode_sparse_prompt_matches_claude_reference_when_rendered() {
 
 #[test]
 fn plan_mode_subagent_prompt_matches_claude_reference_when_rendered() {
+    require_claude_reference!();
     let rendered = render_prompt(
         "resources/prompts/plan-mode-subagent.yaml",
         &[
@@ -413,6 +439,7 @@ fn plan_mode_subagent_prompt_matches_claude_reference_when_rendered() {
 
 #[test]
 fn plan_mode_reentry_prompt_matches_claude_reference_when_rendered() {
+    require_claude_reference!();
     let rendered = render_prompt(
         "resources/prompts/plan-mode-reentry.yaml",
         &[
@@ -434,6 +461,7 @@ fn plan_mode_reentry_prompt_matches_claude_reference_when_rendered() {
 
 #[test]
 fn plan_mode_exited_prompt_matches_claude_reference_when_rendered() {
+    require_claude_reference!();
     let rendered = render_prompt(
         "resources/prompts/plan-mode-exited.yaml",
         &[(
@@ -457,6 +485,7 @@ fn plan_mode_exited_prompt_matches_claude_reference_when_rendered() {
 
 #[test]
 fn todo_write_tool_prompt_matches_claude_reference() {
+    require_claude_reference!();
     let tool = load_tool("resources/tools/todo_write.yaml");
     let reference = read_repo_file("references/claude-code/src/tools/TodoWriteTool/prompt.ts");
     let expected = normalize_reference_template(&extract_template_literal(

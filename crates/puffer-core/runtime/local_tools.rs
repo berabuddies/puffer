@@ -62,7 +62,9 @@ pub(super) fn execute_runtime_local_tool(
     match definition.handler.as_str() {
         "runtime:skill" => execute_skill_tool(resources, input),
         "runtime:tool_search" => execute_tool_search(registry, input),
-        "runtime:browser" => browser::execute_browser_tool(cwd, &state.session.id, input),
+        "runtime:browser" => {
+            browser::execute_browser_tool(cwd, &state.browser_root_session_id(), input)
+        }
         "runtime:glob" => execute_glob_tool(cwd, &state.working_dirs, filesystem_policy, input),
         "runtime:sleep" => sleep::execute_sleep(input),
         "runtime:list_mcp_resources" => {
@@ -364,6 +366,10 @@ mod tests {
     use puffer_resources::{
         LoadedItem, McpServerSpec, SkillSpec, SourceInfo, SourceKind, ToolSpec,
     };
+    use puffer_runner_api::{
+        ChunkSink, DirEntry, McpPrompt, McpPromptContent, McpResourceContent, McpResult,
+        McpServerInfo, McpTool, RunnerCapabilities, RunnerPing, ToolRequest, ToolResult,
+    };
 
     fn workspace_write_filesystem_policy(root: &Path) -> FilesystemPermissionPolicy {
         FilesystemPermissionPolicy {
@@ -374,16 +380,144 @@ mod tests {
         }
     }
 
-    fn docs_spec() -> McpServerSpec {
-        McpServerSpec {
-            id: "docs".to_string(),
-            display_name: "Docs".to_string(),
-            transport: "stdio".to_string(),
-            endpoint: String::new(),
-            target: "docs-server".to_string(),
-            description: "Docs server".to_string(),
-            headers: Default::default(),
-            oauth: None,
+    #[derive(Debug)]
+    struct FakeMcpRunner;
+
+    impl FakeMcpRunner {
+        fn docs_record() -> McpResourceRecord {
+            McpResourceRecord {
+                server: "docs".to_string(),
+                uri: "mcp://manifest/docs".to_string(),
+                name: "Docs".to_string(),
+                mime_type: Some("application/yaml".to_string()),
+                description: Some("Docs server".to_string()),
+            }
+        }
+
+        fn missing_server_error(server: &str) -> RunnerError {
+            RunnerError::NotFound(format!(
+                "MCP server `{server}` not found. Available servers: docs",
+            ))
+        }
+    }
+
+    impl ToolRunner for FakeMcpRunner {
+        fn ping(&self) -> Result<RunnerPing, RunnerError> {
+            Ok(RunnerPing {
+                version: "test".to_string(),
+                uptime: Default::default(),
+            })
+        }
+
+        fn capabilities(&self) -> RunnerCapabilities {
+            RunnerCapabilities {
+                backend: "fake".to_string(),
+                mcp_supported: true,
+                ..RunnerCapabilities::default()
+            }
+        }
+
+        fn execute_tool(
+            &self,
+            _req: ToolRequest,
+            _sink: &mut dyn ChunkSink,
+        ) -> Result<ToolResult, RunnerError> {
+            Err(RunnerError::Unsupported(
+                "fake runner does not execute tools".to_string(),
+            ))
+        }
+
+        fn read_file(&self, _path: &Path) -> Result<Vec<u8>, RunnerError> {
+            Err(RunnerError::Unsupported(
+                "fake runner does not read files".to_string(),
+            ))
+        }
+
+        fn list_dir(&self, _path: &Path) -> Result<Vec<DirEntry>, RunnerError> {
+            Err(RunnerError::Unsupported(
+                "fake runner does not list directories".to_string(),
+            ))
+        }
+
+        fn glob(&self, _root: &Path, _pattern: &str) -> Result<Vec<PathBuf>, RunnerError> {
+            Err(RunnerError::Unsupported(
+                "fake runner does not glob files".to_string(),
+            ))
+        }
+
+        fn list_mcp_servers(&self) -> Result<Vec<McpServerInfo>, RunnerError> {
+            Ok(vec![McpServerInfo {
+                id: "docs".to_string(),
+                display_name: "Docs".to_string(),
+                transport: "stdio".to_string(),
+                target: "fake-docs".to_string(),
+                description: "Docs server".to_string(),
+            }])
+        }
+
+        fn list_mcp_tools(&self, _server: &str) -> Result<Vec<McpTool>, RunnerError> {
+            Err(RunnerError::Unsupported(
+                "fake runner does not list tools".to_string(),
+            ))
+        }
+
+        fn call_mcp_tool(
+            &self,
+            _server: &str,
+            _tool: &str,
+            _args: Value,
+            _sink: &mut dyn ChunkSink,
+        ) -> Result<McpResult, RunnerError> {
+            Err(RunnerError::Unsupported(
+                "fake runner does not call tools".to_string(),
+            ))
+        }
+
+        fn list_mcp_resources(
+            &self,
+            server: Option<&str>,
+        ) -> Result<Vec<McpResourceRecord>, RunnerError> {
+            match server.map(str::trim).filter(|value| !value.is_empty()) {
+                Some(value) if value.eq_ignore_ascii_case("docs") => Ok(vec![Self::docs_record()]),
+                Some(value) => Err(Self::missing_server_error(value)),
+                None => Ok(vec![Self::docs_record()]),
+            }
+        }
+
+        fn read_mcp_resource(
+            &self,
+            server: &str,
+            uri: &str,
+        ) -> Result<McpResourceContent, RunnerError> {
+            if !server.eq_ignore_ascii_case("docs") {
+                return Err(Self::missing_server_error(server));
+            }
+            Ok(McpResourceContent {
+                server: "docs".to_string(),
+                uri: uri.to_string(),
+                parts: vec![McpResourceContentPart::Text {
+                    uri: uri.to_string(),
+                    mime_type: Some("application/yaml".to_string()),
+                    text: "id: docs\n".to_string(),
+                }],
+            })
+        }
+
+        fn list_mcp_prompts(&self, _server: &str) -> Result<Vec<McpPrompt>, RunnerError> {
+            Err(RunnerError::Unsupported(
+                "fake runner does not list prompts".to_string(),
+            ))
+        }
+
+        fn get_mcp_prompt(
+            &self,
+            _server: &str,
+            _name: &str,
+            _args: Value,
+        ) -> Result<McpPromptContent, RunnerError> {
+            Err(RunnerError::Unsupported(
+                "fake runner does not render prompts".to_string(),
+            ))
         }
     }
 
@@ -471,7 +605,7 @@ mod tests {
 
     #[test]
     fn list_mcp_resources_returns_manifest_entries() {
-        let runner = LocalToolRunner::new().with_mcp_servers(vec![docs_spec()]);
+        let runner = FakeMcpRunner;
         let output = execute_list_mcp_resources(&runner, json!({})).unwrap();
         assert!(output.contains("\"server\": \"docs\""));
         assert!(output.contains("mcp://manifest/docs"));
@@ -479,14 +613,14 @@ mod tests {
 
     #[test]
     fn list_mcp_resources_filters_server_case_insensitively() {
-        let runner = LocalToolRunner::new().with_mcp_servers(vec![docs_spec()]);
+        let runner = FakeMcpRunner;
         let output = execute_list_mcp_resources(&runner, json!({"server": "DOCS"})).unwrap();
         assert!(output.contains("mcp://manifest/docs"));
     }
 
     #[test]
     fn list_mcp_resources_errors_for_unknown_server() {
-        let runner = LocalToolRunner::new().with_mcp_servers(vec![docs_spec()]);
+        let runner = FakeMcpRunner;
         let error = execute_list_mcp_resources(&runner, json!({"server": "missing"}))
             .unwrap_err()
             .to_string();
@@ -496,7 +630,7 @@ mod tests {
 
     #[test]
     fn read_mcp_resource_returns_contents() {
-        let runner = LocalToolRunner::new().with_mcp_servers(vec![docs_spec()]);
+        let runner = FakeMcpRunner;
         let output = execute_read_mcp_resource(
             &runner,
             json!({"server": "docs", "uri": "mcp://manifest/docs"}),
@@ -509,7 +643,7 @@ mod tests {
 
     #[test]
     fn read_mcp_resource_errors_for_unknown_server() {
-        let runner = LocalToolRunner::new().with_mcp_servers(vec![docs_spec()]);
+        let runner = FakeMcpRunner;
         let error = execute_read_mcp_resource(
             &runner,
             json!({"server": "missing", "uri": "mcp://manifest/docs"}),

@@ -46,8 +46,8 @@ fn header_snapshot_reports_compact_status() {
     .collect::<Vec<_>>()
     .join("\n");
     assert_snapshot!(
-                                                                                                                                snapshot,
-                                                                                                                                @r"
+                                                                                                                                        snapshot,
+                                                                                                                                        @r"
 Puffer Code
 Account   anthropic via API key
 Model     anthropic/claude-sonnet-4-5 · tools 3/4
@@ -55,7 +55,7 @@ Session   Shipyard · 12345678-1234-5678-1234-567812345678
 Mode      effort high · fast · vim
 Context   puffer · 2 msgs · 2 wds · dockyard@staging
 "
-                                                                                                                            );
+                                                                                                                                    );
 }
 
 #[test]
@@ -68,11 +68,11 @@ fn footer_snapshot_reports_compact_prompt_rail() {
         .collect::<Vec<_>>()
         .join("\n");
     assert_snapshot!(
-                                                                                                                                snapshot,
-                                                                                                                                @r"
+                                                                                                                                        snapshot,
+                                                                                                                                        @r"
 anthropic/claude-sonnet-4-5 · 99% left · /tmp/puffer · sandbox workspace-write
 "
-                                                                                                                            );
+                                                                                                                                    );
 }
 
 #[test]
@@ -95,8 +95,8 @@ fn header_snapshot_includes_oauth_identity_when_available() {
     .collect::<Vec<_>>()
     .join("\n");
     assert_snapshot!(
-                                                                                                                                snapshot,
-                                                                                                                                @r"
+                                                                                                                                        snapshot,
+                                                                                                                                        @r"
 Puffer Code
 Account   dev@example.com · plan Pro · acct acct-1
 Model     openai/gpt-5 · tools 3/4
@@ -104,7 +104,7 @@ Session   Shipyard · 12345678-1234-5678-1234-567812345678
 Mode      effort high · fast · vim
 Context   puffer · 2 msgs · 2 wds · dockyard@staging
 "
-                                                                                                                            );
+                                                                                                                                    );
 }
 
 #[test]
@@ -565,6 +565,37 @@ fn render_usage_overlay_shows_loading_state() {
     assert!(rendered.contains("Usage"));
     assert!(rendered.contains("Loading usage data..."));
     assert!(rendered.contains("Esc cancel"));
+}
+
+#[test]
+fn read_only_overlay_prompt_does_not_invite_typing() {
+    let state = sample_state();
+    let resources = sample_resources();
+    let providers = sample_providers();
+    let auth_store = sample_auth_store();
+    let overlay =
+        crate::status_overlay::StatusOverlay::open(&state, &resources, &providers, &auth_store);
+
+    assert_eq!(overlay_prompt_placeholder(Some(&overlay)), "Overlay open");
+    assert_eq!(
+        overlay_hint_line("", false, Some(&overlay)),
+        "Esc closes · / starts a command"
+    );
+}
+
+#[test]
+fn picker_overlay_prompt_still_invites_typing() {
+    let overlay = OverlayState::LoginPicker {
+        entries: vec![ModelPickerEntry {
+            selector: "openai".to_string(),
+            description: "OpenAI".to_string(),
+            command: None,
+        }],
+        selection: 0,
+    };
+
+    assert_eq!(overlay_prompt_placeholder(Some(&overlay)), "Type to jump");
+    assert!(overlay_hint_line("", false, Some(&overlay)).contains("Type to jump"));
 }
 
 #[test]

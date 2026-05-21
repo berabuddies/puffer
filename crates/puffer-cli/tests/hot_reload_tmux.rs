@@ -13,15 +13,15 @@
 //! `AppState`, and the resource reload that reaches `LoadedResources`.
 
 use puffer_test_support::{
-    capture_tmux_visible_pane, send_tmux_keys, start_tmux_command_with_size, temp_workspace,
-    tmux_available, wait_for_tmux_text, TerminalSize,
+    capture_tmux_visible_pane, require_tmux_or_skip, send_tmux_keys, start_tmux_command_with_size,
+    temp_workspace, wait_for_tmux_text, wait_for_tmux_visible_text, TerminalSize,
 };
 use std::fs;
 use std::time::Duration;
 
 #[test]
 fn tmux_tui_hot_reloads_newly_dropped_skill() {
-    if !tmux_available() {
+    if !require_tmux_or_skip("tmux_tui_hot_reloads_newly_dropped_skill") {
         return;
     }
 
@@ -82,7 +82,7 @@ tmux_golden_mode = true
     wait_for_tmux_text(&session, "Puffer Code", Duration::from_secs(15)).unwrap();
 
     // Sanity: the test skill doesn't exist yet — confirm via /skills.
-    send_tmux_keys(&session, &["/skills", "Enter"]).unwrap();
+    submit_skills_command(&session);
     // The /skills overlay surface uses different rendering depending on
     // the build. Give it a beat to render and capture.
     std::thread::sleep(Duration::from_millis(500));
@@ -112,13 +112,19 @@ tmux_golden_mode = true
     // the reload signal that the watcher raised. The "i" -> backspace
     // sequence is harmless: it just nudges the loop.
     send_tmux_keys(&session, &["i", "BSpace"]).unwrap();
+    wait_for_tmux_text(
+        &session,
+        "Reloaded plugin registry",
+        Duration::from_secs(5),
+    )
+    .unwrap();
 
     // Wait for the reload to have happened, then verify /skills sees it.
     // We try a few times because filesystem-watcher latency + main-loop
     // poll interval add up to a hundred milliseconds or two on macOS.
     let mut found = false;
     for _ in 0..30 {
-        send_tmux_keys(&session, &["/skills", "Enter"]).unwrap();
+        submit_skills_command(&session);
         std::thread::sleep(Duration::from_millis(300));
         let after = capture_tmux_visible_pane(&session).unwrap();
         if after.contains("hot-tmux-skill") {
@@ -134,4 +140,10 @@ tmux_golden_mode = true
         found,
         "hot-reloaded skill should appear in /skills overlay within a few seconds, final capture:\n{final_capture}"
     );
+}
+
+fn submit_skills_command(session: &puffer_test_support::TmuxSession) {
+    send_tmux_keys(session, &["/skills"]).unwrap();
+    wait_for_tmux_visible_text(session, "\u{276f} /skills", Duration::from_secs(15)).unwrap();
+    send_tmux_keys(session, &["Enter"]).unwrap();
 }

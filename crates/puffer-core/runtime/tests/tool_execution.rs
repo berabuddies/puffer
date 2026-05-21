@@ -2,13 +2,15 @@ use super::*;
 use puffer_config::PufferConfig;
 use puffer_session_store::SessionMetadata;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 use uuid::Uuid;
 
 #[path = "tool_execution/agent_team_e2e.rs"]
 mod agent_team_e2e;
+#[path = "tool_execution/legacy_alias_permissions.rs"]
+mod legacy_alias_permissions;
 #[path = "tool_execution/multi_agent_e2e.rs"]
 mod multi_agent_e2e;
 #[path = "tool_execution/request_scope_tests.rs"]
@@ -31,6 +33,35 @@ fn temp_state() -> AppState {
         note: None,
     };
     AppState::new(PufferConfig::default(), cwd, session)
+}
+
+fn outside_workspace_tempdir(cwd: &Path) -> tempfile::TempDir {
+    let mut bases = vec![PathBuf::from("/var/tmp")];
+    if let Some(home) = std::env::var_os("HOME") {
+        bases.push(PathBuf::from(home));
+    }
+    if let Ok(current) = std::env::current_dir() {
+        bases.push(current.join("target"));
+    }
+    let workspace_roots = crate::workspace_paths::workspace_roots(cwd, &[]);
+    for base in bases {
+        if fs::create_dir_all(&base).is_err() {
+            continue;
+        }
+        let Ok(tempdir) = tempfile::Builder::new()
+            .prefix("puffer-external-path-")
+            .tempdir_in(&base)
+        else {
+            continue;
+        };
+        if !workspace_roots
+            .iter()
+            .any(|root| tempdir.path().starts_with(root))
+        {
+            return tempdir;
+        }
+    }
+    panic!("failed to create tempdir outside default workspace roots");
 }
 
 fn write_sample_notebook(path: &Path) {
@@ -166,13 +197,9 @@ fn execute_openai_tool_calls_return_permission_denials_as_tool_results() {
 }
 
 #[test]
-fn execute_openai_tool_calls_enforce_working_directory_access_for_claude_file_tools() {
-    // Path outside cwd, /tmp, $TMPDIR, /add-dir under the codex-style
-    // default writable set; the gate should still reject this from the
-    // OpenAI tool-call dispatch path.
+fn execute_openai_tool_calls_prompt_before_external_file_access() {
     let mut state = temp_state();
-    let outside_file =
-        std::path::PathBuf::from("/__puffer_test_outside_writable_set__/secret.txt");
+    let outside_file = std::path::PathBuf::from("/__puffer_test_outside_writable_set__/secret.txt");
     let resources = LoadedResources {
         tools: vec![loaded_tool("Read", "Read file", "runtime:claude_read")],
         ..LoadedResources::default()
@@ -189,24 +216,219 @@ fn execute_openai_tool_calls_enforce_working_directory_access_for_claude_file_to
     }];
     let request_config = test_openai_request_config();
     let cwd = state.cwd.clone();
+    let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let prompt_log = prompts.clone();
 
-    let result = execute_openai_tool_calls(
-        &mut state,
-        &resources,
-        &providers,
-        &mut AuthStore::default(),
-        &tool_calls,
-        &registry,
-        &cwd,
-        &request_config,
-        "gpt-5",
-        None,
-        None,
+    let result = with_permission_prompt_handler(
+        move |request| {
+            prompt_log.lock().unwrap().push(format!(
+                "{}\n{}",
+                request.summary,
+                request.reason.unwrap_or_default()
+            ));
+            PermissionPromptAction::Deny
+        },
+        || {
+            execute_openai_tool_calls(
+                &mut state,
+                &resources,
+                &providers,
+                &mut AuthStore::default(),
+                &tool_calls,
+                &registry,
+                &cwd,
+                &request_config,
+                "gpt-5",
+                None,
+                None,
+            )
+        },
     )
     .unwrap();
 
     assert!(!result.invocations[0].success);
-    assert!(result.outputs[0].output.contains("working director"));
+    assert!(result.outputs[0]
+        .output
+        .contains("permission denied by user"));
+    let prompts = prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 1);
+    assert!(prompts[0].contains("Allow Read to access"));
+    assert!(prompts[0].contains("outside the current working directories"));
+}
+
+#[test]
+fn allow_once_external_file_access_executes_without_session_grant() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let outside = outside_workspace_tempdir(&cwd);
+    let outside_file = outside.path().join("secret.txt");
+    fs::write(&outside_file, "from outside workspace").unwrap();
+    let resources = LoadedResources {
+        tools: vec![loaded_tool("Read", "Read file", "runtime:claude_read")],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let mut providers = ProviderRegistry::new();
+    providers.register(openai_provider("http://127.0.0.1".to_string()));
+    let request_config = test_openai_request_config();
+    let prompts = Arc::new(Mutex::new(0_usize));
+    let prompt_count = prompts.clone();
+
+    let result = with_permission_prompt_handler(
+        move |_request| {
+            *prompt_count.lock().unwrap() += 1;
+            PermissionPromptAction::AllowOnce
+        },
+        || {
+            execute_tool_call(
+                &mut state,
+                &resources,
+                &providers,
+                &mut AuthStore::default(),
+                &registry,
+                "gpt-5",
+                &cwd,
+                ToolExecutionBackend::OpenAi {
+                    request_config: &request_config,
+                    structured_output: None,
+                },
+                None,
+                "Read",
+                json!({ "file_path": outside_file.display().to_string() }),
+            )
+        },
+    )
+    .unwrap();
+
+    assert!(result.success);
+    assert!(result.output.stdout.contains("from outside workspace"));
+    assert_eq!(*prompts.lock().unwrap(), 1);
+    assert!(state
+        .session_permission_state()
+        .grants()
+        .profile_view(false)
+        .path_prefix_grants
+        .is_empty());
+}
+
+#[test]
+fn allow_session_external_path_access_is_reused() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let outside = outside_workspace_tempdir(&cwd);
+    fs::write(outside.path().join("note.txt"), "hello").unwrap();
+    let resources = LoadedResources {
+        tools: vec![loaded_tool("Glob", "Find files", "runtime:claude_glob")],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let prompt_log = prompts.clone();
+    let outside_path = outside.path().display().to_string();
+    let outside_path_for_prompt = outside_path.clone();
+
+    with_permission_prompt_handler(
+        move |request| {
+            prompt_log.lock().unwrap().push(request.summary);
+            PermissionPromptAction::AllowSession
+        },
+        || {
+            let first = resolve_tool_permission(
+                &mut state,
+                &resources,
+                &registry,
+                &cwd,
+                "Glob",
+                &json!({
+                    "pattern": "*.txt",
+                    "path": outside_path_for_prompt.clone()
+                }),
+                None,
+            )
+            .unwrap();
+            assert!(matches!(first, PermissionOutcome::Allowed(_)));
+
+            let second = resolve_tool_permission(
+                &mut state,
+                &resources,
+                &registry,
+                &cwd,
+                "Glob",
+                &json!({
+                    "pattern": "*.txt",
+                    "path": outside_path_for_prompt.clone()
+                }),
+                None,
+            )
+            .unwrap();
+            assert!(matches!(second, PermissionOutcome::Allowed(_)));
+        },
+    );
+
+    let prompts = prompts.lock().unwrap();
+    assert_eq!(
+        prompts.as_slice(),
+        &[format!("Allow Glob to access {outside_path}")]
+    );
+    assert_eq!(
+        state
+            .session_permission_state()
+            .grants()
+            .profile_view(false)
+            .path_prefix_grants,
+        vec![outside.path().to_path_buf()]
+    );
+}
+
+#[test]
+fn agent_cwd_external_path_uses_manual_approval() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let outside = outside_workspace_tempdir(&cwd);
+    let resources = LoadedResources {
+        tools: vec![loaded_tool("Agent", "Delegate work", "runtime:agent")],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let prompt_log = prompts.clone();
+
+    let outcome = with_permission_prompt_handler(
+        move |request| {
+            prompt_log.lock().unwrap().push(format!(
+                "{}\n{}",
+                request.summary,
+                request.reason.unwrap_or_default()
+            ));
+            PermissionPromptAction::Deny
+        },
+        || {
+            resolve_tool_permission(
+                &mut state,
+                &resources,
+                &registry,
+                &cwd,
+                "Agent",
+                &json!({
+                    "description": "Inspect external project",
+                    "prompt": "List skills",
+                    "cwd": outside.path().display().to_string()
+                }),
+                None,
+            )
+        },
+    )
+    .unwrap();
+
+    let PermissionOutcome::Denied(result) = outcome else {
+        panic!("external Agent cwd should wait for manual approval");
+    };
+    assert!(!result.success);
+    assert!(result.output.stdout.contains("permission denied by user"));
+    let prompts = prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 1);
+    assert!(prompts[0].contains("Allow Agent to access"));
+    assert!(prompts[0].contains("outside the current working directories"));
 }
 
 #[test]

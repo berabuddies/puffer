@@ -19,6 +19,8 @@
 
   type Tab = "chat" | "diff" | "terminal" | "files" | "browser";
   type DiffSubTab = "agent" | "git" | "divergence";
+  type SubmitMessageResult = boolean | void | Promise<boolean | void>;
+  type FileOpenTarget = { path: string; line: number | null; requestId: number };
 
   type Props = {
     tab: Tab;
@@ -27,17 +29,21 @@
     timeline: TimelineItem[];
     pendingPermissions: PermissionTimelineItem[];
     pendingQuestions: UserQuestionTimelineItem[];
+    resolvingPermissionIds?: string[];
+    resolvingQuestionIds?: string[];
     loading: boolean;
     displayName: string;
     pufferState: AgentState;
     projectCwd: string;
     turnRunning: boolean;
+    turnCancelable: boolean;
     turnStartedAtMs: number | null;
     turnThinking: boolean;
     turnStatusHint: string | null;
     settingsSnapshot?: SettingsSnapshot | null;
+    backendConnected?: boolean;
     userDisplayName?: string;
-    onSubmitMessage: (message: string, options?: AgentTurnOptions) => void;
+    onSubmitMessage: (message: string, options?: AgentTurnOptions) => SubmitMessageResult;
     onResolvePermission: (permissionId: string, choice: string) => void;
     onResolveUserQuestion: (
       questionId: string,
@@ -46,7 +52,8 @@
     ) => void;
     onCancelTurn?: () => void;
     onOpenFileLink?: (path: string, line?: number | null) => void;
-    fileToOpen?: string | null;
+    onDraftChange?: (hasDraft: boolean) => void;
+    fileToOpen?: FileOpenTarget | null;
   };
 
   let {
@@ -56,21 +63,26 @@
     timeline,
     pendingPermissions,
     pendingQuestions,
+    resolvingPermissionIds = [],
+    resolvingQuestionIds = [],
     loading,
     displayName,
     pufferState,
     projectCwd,
     turnRunning,
+    turnCancelable,
     turnStartedAtMs,
     turnThinking,
     turnStatusHint,
     settingsSnapshot = null,
+    backendConnected = true,
     userDisplayName = "Otter",
     onSubmitMessage,
     onResolvePermission,
     onResolveUserQuestion,
     onCancelTurn,
     onOpenFileLink,
+    onDraftChange,
     fileToOpen = null
   }: Props = $props();
 
@@ -140,36 +152,55 @@
       timeline={timeline}
       pendingPermissions={pendingPermissions}
       pendingQuestions={pendingQuestions}
+      resolvingPermissionIds={resolvingPermissionIds}
+      resolvingQuestionIds={resolvingQuestionIds}
       loading={loading}
       turnRunning={turnRunning}
+      turnCancelable={turnCancelable}
       turnStartedAtMs={turnStartedAtMs}
       turnThinking={turnThinking}
       turnStatusHint={turnStatusHint}
       settingsSnapshot={settingsSnapshot}
+      {backendConnected}
       {userDisplayName}
       onSubmitMessage={onSubmitMessage}
       onResolvePermission={onResolvePermission}
       onResolveUserQuestion={onResolveUserQuestion}
       onCancelTurn={onCancelTurn}
       onOpenFileLink={onOpenFileLink}
+      onDraftChange={onDraftChange}
     />
   {:else if tab === "diff"}
-    <div class="diff-subtabs">
-      <button class="diff-subtab" class:on={diffTab === "agent"} onclick={() => (diffTab = "agent")}>
+    <div class="diff-subtabs" role="group" aria-label="Diff sources">
+      <button
+        type="button"
+        class="diff-subtab"
+        class:on={diffTab === "agent"}
+        aria-pressed={diffTab === "agent"}
+        onclick={() => (diffTab = "agent")}
+      >
         <Icon name="sparkles" size={11} />Agent
         {#if agentDiff.files.length > 0}
           <span class="pf-agent-tab-badge">{agentDiff.files.length}</span>
         {/if}
       </button>
-      <button class="diff-subtab" class:on={diffTab === "git"} onclick={() => (diffTab = "git")}>
+      <button
+        type="button"
+        class="diff-subtab"
+        class:on={diffTab === "git"}
+        aria-pressed={diffTab === "git"}
+        onclick={() => (diffTab = "git")}
+      >
         <Icon name="git" size={11} />Git
         {#if divergence.gitTotal > 0}
           <span class="pf-agent-tab-badge">{divergence.gitTotal}</span>
         {/if}
       </button>
       <button
+        type="button"
         class="diff-subtab"
         class:on={diffTab === "divergence"}
+        aria-pressed={diffTab === "divergence"}
         onclick={() => (diffTab = "divergence")}
         title={divergenceCount > 0 ? "Agent and git disagree on which files changed" : "Agent and git agree"}
       >
@@ -280,7 +311,13 @@
   {:else if tab === "terminal"}
     <TerminalPane cwd={projectCwd} sessionId={session?.id ?? "preview"} />
   {:else if tab === "files"}
-    <FilesPane cwd={projectCwd} sessionId={session?.id ?? "preview"} openPath={fileToOpen} />
+    <FilesPane
+      cwd={projectCwd}
+      sessionId={session?.id ?? "preview"}
+      openPath={fileToOpen?.path ?? null}
+      openLine={fileToOpen?.line ?? null}
+      openRequestId={fileToOpen?.requestId ?? null}
+    />
   {:else if tab === "browser"}
     <BrowserPane sessionId={session?.id ?? "preview"} />
   {/if}

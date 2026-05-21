@@ -387,8 +387,12 @@ fn resume_into_session(
     summary: &SessionSummary,
 ) -> Result<()> {
     let record = session_store.load_session(summary.id)?;
+    let pending_query_prompt = state.take_pending_query_prompt();
     let config = state.config.clone();
     *state = AppState::from_session_record(config, record);
+    if let Some(prompt) = pending_query_prompt {
+        state.queue_pending_query_prompt(prompt);
+    }
     emit_system(
         state,
         session_store,
@@ -403,9 +407,11 @@ fn resume_into_session(
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_resume_launch, resume_scope, search_sessions, session_scope_matches,
-        ResumeLaunchResolution,
+        resolve_resume_launch, resume_into_session, resume_scope, search_sessions,
+        session_scope_matches, ResumeLaunchResolution,
     };
+    use crate::AppState;
+    use puffer_config::PufferConfig;
     use puffer_config::{ensure_workspace_dirs, ConfigPaths};
     use puffer_session_store::SessionStore;
     use puffer_session_store::SessionSummary;
@@ -591,6 +597,40 @@ mod tests {
             }
             other => panic!("expected picker resolution, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn resume_into_session_preserves_pending_query_prompt() {
+        let tempdir = tempdir().unwrap();
+        let paths = ConfigPaths::discover(tempdir.path());
+        ensure_workspace_dirs(&paths).unwrap();
+        let session_store = SessionStore::from_paths(&paths).unwrap();
+        let current = session_store
+            .create_session(tempdir.path().join("current"))
+            .unwrap();
+        let target = session_store
+            .create_session(tempdir.path().join("target"))
+            .unwrap();
+        let summary = session_store
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|session| session.id == target.id)
+            .unwrap();
+        let mut state = AppState::new(
+            PufferConfig::default(),
+            tempdir.path().join("current"),
+            current,
+        );
+        state.queue_pending_query_prompt("follow up after picking session");
+
+        resume_into_session(&mut state, &session_store, &summary).unwrap();
+
+        assert_eq!(state.session.id, target.id);
+        assert_eq!(
+            state.take_pending_query_prompt().as_deref(),
+            Some("follow up after picking session")
+        );
     }
 
     fn init_git_repo(path: &Path) {

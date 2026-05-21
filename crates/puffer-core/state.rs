@@ -784,6 +784,22 @@ impl AppState {
         &self.tasks
     }
 
+    /// Returns the session id that desktop Browser panes use for this runtime.
+    pub(crate) fn browser_root_session_id(&self) -> uuid::Uuid {
+        self.session.parent_session_id.unwrap_or(self.session.id)
+    }
+
+    fn permission_session_id_for_tool(
+        &self,
+        definition: &puffer_tools::ToolDefinition,
+    ) -> uuid::Uuid {
+        if is_browser_tool_definition(definition) {
+            self.browser_root_session_id()
+        } else {
+            self.session.id
+        }
+    }
+
     pub(crate) fn allow_tool_for_session(&mut self, tool_id: &str) {
         let definition = puffer_tools::ToolDefinition {
             id: tool_id.to_string(),
@@ -810,15 +826,24 @@ impl AppState {
         definition: &puffer_tools::ToolDefinition,
         input: &serde_json::Value,
     ) {
+        let permission_session_id = self.permission_session_id_for_tool(definition);
         self.session_permission_state.grants_mut().grant_tool_call(
             definition,
             input,
-            &self.session.id,
+            &permission_session_id,
         );
         self.session_tool_permissions = self
             .session_permission_state
             .grants()
             .legacy_tool_permissions();
+    }
+
+    /// Grants filesystem access to one path prefix for the current session.
+    pub fn allow_path_for_session(&mut self, path: PathBuf) {
+        self.session_permission_state
+            .grants_mut()
+            .grant_path_prefix(path);
+        self.sync_session_tool_permissions_from_state();
     }
 
     /// Rebuilds legacy session tool permissions from the typed session state.
@@ -912,9 +937,16 @@ impl AppState {
     }
 }
 
+fn is_browser_tool_definition(definition: &puffer_tools::ToolDefinition) -> bool {
+    definition.handler == "runtime:browser"
+        || definition.id.eq_ignore_ascii_case("browser")
+        || definition.name.eq_ignore_ascii_case("browser")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::permissions::{EffectivePermissionProfile, PermissionsSettings, SandboxSettings};
     use puffer_session_store::TranscriptEvent;
     use uuid::Uuid;
 
@@ -931,6 +963,73 @@ mod tests {
             tags: Vec::new(),
             note: None,
         }
+    }
+
+    fn browser_tool_definition() -> puffer_tools::ToolDefinition {
+        puffer_tools::ToolDefinition {
+            id: "Browser".to_string(),
+            name: "Browser".to_string(),
+            description: "Managed browser".to_string(),
+            handler: "runtime:browser".to_string(),
+            aliases: Vec::new(),
+            handler_args: Vec::new(),
+            kind: puffer_tools::ToolKind::Custom,
+            input_schema: puffer_tools::ToolInputSchema::default(),
+            metadata: puffer_tools::ToolMetadata::default(),
+            policy: puffer_tools::ToolPolicyHints::default(),
+            shared_lib: None,
+            enabled_if: None,
+            display: puffer_tools::ToolDisplayHints::default(),
+        }
+    }
+
+    #[test]
+    fn browser_root_session_id_prefers_parent_session() {
+        let parent = Uuid::parse_str("2ba8b01d-5e7a-46b6-b747-7bfe5f6fa36a").unwrap();
+        let child = Uuid::parse_str("b4f239fd-1493-4be7-a3a1-9e58fe612576").unwrap();
+        let mut metadata = sample_metadata();
+        metadata.id = child;
+        metadata.parent_session_id = Some(parent);
+        let state = AppState::new(PufferConfig::default(), PathBuf::from("."), metadata);
+
+        assert_eq!(state.browser_root_session_id(), parent);
+    }
+
+    #[test]
+    fn browser_session_grants_use_parent_session_for_nested_agents() {
+        let parent = Uuid::parse_str("2ba8b01d-5e7a-46b6-b747-7bfe5f6fa36a").unwrap();
+        let child = Uuid::parse_str("b4f239fd-1493-4be7-a3a1-9e58fe612576").unwrap();
+        let mut metadata = sample_metadata();
+        metadata.id = child;
+        metadata.parent_session_id = Some(parent);
+        let mut state = AppState::new(PufferConfig::default(), PathBuf::from("."), metadata);
+
+        state.allow_permission_for_tool_call(
+            &browser_tool_definition(),
+            &serde_json::json!({"action":"evaluate", "script":"document.title"}),
+        );
+        let profile = EffectivePermissionProfile::from_legacy_sources(
+            Path::new("."),
+            &[],
+            &PermissionsSettings::default(),
+            &SandboxSettings::from_mode("workspace-write"),
+            &parent,
+            false,
+            state.session_permission_state().grants(),
+            false,
+            None,
+            None,
+        );
+
+        assert!(profile.browser_session_grant_allows(&serde_json::json!({
+            "action":"evaluate",
+            "script":"window.location.href"
+        })));
+        assert!(!profile.browser_session_grant_allows(&serde_json::json!({
+            "action":"evaluate",
+            "sessionId": child.to_string(),
+            "script":"window.location.href"
+        })));
     }
 
     #[test]

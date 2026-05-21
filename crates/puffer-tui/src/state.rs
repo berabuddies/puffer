@@ -127,6 +127,7 @@ pub(crate) enum PendingSubmitEvent {
         UserQuestionPromptRequest,
         Sender<UserQuestionPromptResponse>,
     ),
+    ShellShortcutFinished(ShellShortcutResult),
     Finished(PendingSubmitResult),
 }
 
@@ -134,6 +135,8 @@ pub(crate) enum PendingSubmitEvent {
 pub(crate) struct PendingSubmit {
     pub(crate) prompt: String,
     pub(crate) receiver: Receiver<PendingSubmitEvent>,
+    /// Transcript index through which live turn rows are already persisted.
+    pub(crate) transcript_persisted_len: usize,
     pub(crate) pending_tool_calls: Vec<ToolCallRequest>,
     pub(crate) rendered_tool_invocations: usize,
     pub(crate) started_at: std::time::Instant,
@@ -147,6 +150,14 @@ pub(crate) struct PendingSubmit {
     /// worker keeps running (burning tokens) until the LLM and tool
     /// calls finish on their own.
     pub(crate) cancel: puffer_core::CancelToken,
+}
+
+/// Carries an asynchronously completed `!cmd` shell shortcut back to the UI.
+pub(crate) struct ShellShortcutResult {
+    pub(crate) command: String,
+    pub(crate) success: bool,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
 }
 
 /// Stores the response channel for the currently visible permission prompt.
@@ -233,6 +244,7 @@ impl TuiState {
         self.cursor = 0;
         self.slash_selection = 0;
         self.pending_pastes.clear();
+        self.exit_history_navigation();
         self.sync(commands);
     }
 
@@ -322,15 +334,17 @@ impl TuiState {
     }
 
     /// Removes the character immediately before the cursor. If the cursor is
-    /// at the end of a `[Pasted text #N ...]` placeholder, removes the entire
+    /// inside a `[Pasted text #N ...]` placeholder, removes the entire
     /// placeholder and drops its stored content.
     pub(crate) fn backspace(&mut self, commands: &[CommandSpec]) {
         if self.cursor == 0 {
             return;
         }
         self.exit_history_navigation();
-        if let Some((start, placeholder)) = self.paste_placeholder_ending_at(self.cursor) {
-            self.input.drain(start..self.cursor);
+        if let Some((start, end, placeholder)) =
+            self.paste_placeholder_span_for_backspace(self.cursor)
+        {
+            self.input.drain(start..end);
             self.cursor = start;
             self.pending_pastes.retain(|(name, _)| *name != placeholder);
             self.sync(commands);
@@ -342,25 +356,56 @@ impl TuiState {
         self.sync(commands);
     }
 
-    /// Returns `(start_byte, placeholder)` when `end_byte` is the closing
-    /// boundary of a tracked paste placeholder.
-    fn paste_placeholder_ending_at(&self, end: usize) -> Option<(usize, String)> {
-        let prefix = self.input.get(..end)?;
+    /// Returns `(start_byte, end_byte, placeholder)` when `cursor` is inside
+    /// or at the closing boundary of a tracked paste placeholder.
+    fn paste_placeholder_span_for_backspace(
+        &self,
+        cursor: usize,
+    ) -> Option<(usize, usize, String)> {
+        self.paste_placeholder_span_at(cursor, false, true)
+    }
+
+    /// Returns `(start_byte, end_byte, placeholder)` when `cursor` is inside
+    /// or at the opening boundary of a tracked paste placeholder.
+    fn paste_placeholder_span_for_delete(&self, cursor: usize) -> Option<(usize, usize, String)> {
+        self.paste_placeholder_span_at(cursor, true, false)
+    }
+
+    fn paste_placeholder_span_at(
+        &self,
+        cursor: usize,
+        include_start: bool,
+        include_end: bool,
+    ) -> Option<(usize, usize, String)> {
         for (placeholder, _) in &self.pending_pastes {
-            if prefix.ends_with(placeholder) {
-                let start = end - placeholder.len();
-                return Some((start, placeholder.clone()));
+            for (start, _) in self.input.match_indices(placeholder) {
+                let end = start + placeholder.len();
+                let after_start = cursor > start || (include_start && cursor == start);
+                let before_end = cursor < end || (include_end && cursor == end);
+                if after_start && before_end {
+                    return Some((start, end, placeholder.clone()));
+                }
             }
         }
         None
     }
 
-    /// Removes the character immediately after the cursor.
+    /// Removes the character immediately after the cursor. If the cursor is
+    /// inside a `[Pasted text #N ...]` placeholder, removes the entire
+    /// placeholder and drops its stored content.
     pub(crate) fn delete(&mut self, commands: &[CommandSpec]) {
         if self.cursor >= self.input.len() {
             return;
         }
         self.exit_history_navigation();
+        if let Some((start, end, placeholder)) = self.paste_placeholder_span_for_delete(self.cursor)
+        {
+            self.input.drain(start..end);
+            self.cursor = start;
+            self.pending_pastes.retain(|(name, _)| *name != placeholder);
+            self.sync(commands);
+            return;
+        }
         let end = next_boundary(&self.input, self.cursor);
         self.input.drain(self.cursor..end);
         self.sync(commands);
@@ -386,8 +431,7 @@ impl TuiState {
 
     /// Applies the currently highlighted slash-command suggestion to the prompt.
     pub(crate) fn apply_selected_command(&mut self, commands: &[CommandSpec]) -> bool {
-        let rows = self.matching_rows(commands);
-        let Some(command) = rows.get(self.slash_selection).copied() else {
+        let Some(command) = self.selected_matching_command(commands) else {
             return false;
         };
         self.input = format!("/{}", command.name);
@@ -404,18 +448,30 @@ impl TuiState {
         if !self.input.starts_with('/') || self.input.contains(' ') {
             return false;
         }
-        let trimmed = self.input.trim_start_matches('/');
+        let trimmed = self.input.trim_start_matches('/').to_string();
         if trimmed.is_empty() {
             return false;
         }
-        let rows = self.matching_rows(commands);
-        let Some(command) = rows.get(self.slash_selection).copied() else {
+        let Some(command) = self.selected_matching_command(commands) else {
             return false;
         };
-        if command.name == trimmed || command.aliases.iter().any(|alias| alias == trimmed) {
+        if command.name == trimmed || command.aliases.iter().any(|alias| alias == &trimmed) {
             return false;
         }
         self.apply_selected_command(commands)
+    }
+
+    fn selected_matching_command<'a>(
+        &mut self,
+        commands: &'a [CommandSpec],
+    ) -> Option<&'a CommandSpec> {
+        let rows = self.matching_rows(commands);
+        if rows.is_empty() {
+            self.slash_selection = 0;
+            return None;
+        }
+        self.slash_selection = self.slash_selection.min(rows.len() - 1);
+        rows.get(self.slash_selection).copied()
     }
 
     /// Takes the current input, expanding any `[Pasted text #N]` placeholders
@@ -557,7 +613,7 @@ impl TuiState {
     }
 
     fn matching_rows<'a>(&self, commands: &'a [CommandSpec]) -> Vec<&'a CommandSpec> {
-        if self.input.starts_with('/') {
+        if self.input.starts_with('/') && !self.input.contains(' ') {
             popup_rows(&self.input, commands)
         } else {
             Vec::new()
@@ -734,11 +790,9 @@ impl OverlayState {
             Self::Session(overlay) => overlay.scroll_up(),
             Self::Status(overlay) => overlay.scroll_up(),
             Self::Text(overlay) => overlay.scroll_up(),
+            Self::Usage(overlay) => overlay.scroll_up(),
             Self::UserQuestionPrompt { overlay } => overlay.select_previous(),
-            Self::Help
-            | Self::ApiKeyPrompt { .. }
-            | Self::Usage(..)
-            | Self::OnboardingApiKey { .. } => {}
+            Self::Help | Self::ApiKeyPrompt { .. } | Self::OnboardingApiKey { .. } => {}
         }
     }
 
@@ -790,11 +844,9 @@ impl OverlayState {
             Self::Session(overlay) => overlay.scroll_down(),
             Self::Status(overlay) => overlay.scroll_down(),
             Self::Text(overlay) => overlay.scroll_down(),
+            Self::Usage(overlay) => overlay.scroll_down(),
             Self::UserQuestionPrompt { overlay } => overlay.select_next(),
-            Self::Help
-            | Self::ApiKeyPrompt { .. }
-            | Self::Usage(..)
-            | Self::OnboardingApiKey { .. } => {}
+            Self::Help | Self::ApiKeyPrompt { .. } | Self::OnboardingApiKey { .. } => {}
         }
     }
 
@@ -806,6 +858,7 @@ impl OverlayState {
             Self::Session(overlay) => overlay.page_up(),
             Self::Status(overlay) => overlay.page_up(),
             Self::Text(overlay) => overlay.page_up(),
+            Self::Usage(overlay) => overlay.page_up(),
             Self::UserQuestionPrompt { overlay } => overlay.page_up(),
             _ => {
                 for _ in 0..10 {
@@ -823,6 +876,7 @@ impl OverlayState {
             Self::Session(overlay) => overlay.page_down(),
             Self::Status(overlay) => overlay.page_down(),
             Self::Text(overlay) => overlay.page_down(),
+            Self::Usage(overlay) => overlay.page_down(),
             Self::UserQuestionPrompt { overlay } => overlay.page_down(),
             _ => {
                 for _ in 0..10 {
@@ -1003,9 +1057,69 @@ impl OverlayState {
         }
     }
 
+    /// Returns true when the selected entry still matches the typed query.
+    pub(crate) fn selection_matches_query(&self, query: &str) -> bool {
+        let query = normalize_picker_query(query);
+        if query.is_empty() || !self.accepts_filter_input() {
+            return true;
+        }
+        match self {
+            Self::SessionPicker {
+                sessions,
+                selection,
+            } => sessions
+                .get(*selection)
+                .is_some_and(|session| session_matches_query(session, &query)),
+            Self::AgentPicker { entries, selection }
+            | Self::ModelPicker {
+                entries, selection, ..
+            }
+            | Self::EffortPicker {
+                entries, selection, ..
+            }
+            | Self::FastModePicker {
+                entries, selection, ..
+            }
+            | Self::LoginPicker { entries, selection }
+            | Self::ProviderPicker {
+                entries, selection, ..
+            }
+            | Self::LogoutPicker { entries, selection }
+            | Self::ThemePicker { entries, selection }
+            | Self::CommandPicker {
+                entries, selection, ..
+            }
+            | Self::OnboardingTheme { entries, selection }
+            | Self::OnboardingProvider { entries, selection }
+            | Self::OnboardingAuth {
+                entries, selection, ..
+            }
+            | Self::OnboardingModel {
+                entries, selection, ..
+            } => entries
+                .get(*selection)
+                .is_some_and(|entry| model_entry_matches_query(entry, &query)),
+            Self::AuthPicker {
+                entries, selection, ..
+            } => entries
+                .get(*selection)
+                .is_some_and(|entry| auth_entry_matches_query(entry, &query)),
+            Self::PermissionPrompt { .. }
+            | Self::Help
+            | Self::Btw(..)
+            | Self::Session(..)
+            | Self::Status(..)
+            | Self::Text(..)
+            | Self::Usage(..)
+            | Self::UserQuestionPrompt { .. }
+            | Self::ApiKeyPrompt { .. }
+            | Self::OnboardingApiKey { .. } => true,
+        }
+    }
+
     /// Moves the selection to the first entry that matches the typed query.
     pub(crate) fn select_matching_query(&mut self, query: &str) {
-        let query = query.trim().to_ascii_lowercase();
+        let query = normalize_picker_query(query);
         if query.is_empty() {
             return;
         }
@@ -1014,34 +1128,10 @@ impl OverlayState {
                 sessions,
                 selection,
             } => {
-                if let Some(index) = sessions.iter().position(|session| {
-                    session.id.to_string().to_ascii_lowercase().contains(&query)
-                        || session
-                            .display_name
-                            .as_deref()
-                            .map(|name| name.to_ascii_lowercase().contains(&query))
-                            .unwrap_or(false)
-                        || session
-                            .slug
-                            .as_deref()
-                            .map(|slug| slug.to_ascii_lowercase().contains(&query))
-                            .unwrap_or(false)
-                        || session
-                            .note
-                            .as_deref()
-                            .map(|note| note.to_ascii_lowercase().contains(&query))
-                            .unwrap_or(false)
-                        || session
-                            .tags
-                            .iter()
-                            .any(|tag| tag.to_ascii_lowercase().contains(&query))
-                        || session
-                            .cwd
-                            .display()
-                            .to_string()
-                            .to_ascii_lowercase()
-                            .contains(&query)
-                }) {
+                if let Some(index) = sessions
+                    .iter()
+                    .position(|session| session_matches_query(session, &query))
+                {
                     *selection = index;
                 }
             }
@@ -1072,10 +1162,10 @@ impl OverlayState {
             | Self::OnboardingModel {
                 entries, selection, ..
             } => {
-                if let Some(index) = entries.iter().position(|entry| {
-                    entry.selector.to_ascii_lowercase().contains(&query)
-                        || entry.description.to_ascii_lowercase().contains(&query)
-                }) {
+                if let Some(index) = entries
+                    .iter()
+                    .position(|entry| model_entry_matches_query(entry, &query))
+                {
                     *selection = index;
                 }
             }
@@ -1089,10 +1179,10 @@ impl OverlayState {
             Self::AuthPicker {
                 entries, selection, ..
             } => {
-                if let Some(index) = entries.iter().position(|entry| {
-                    entry.label.to_ascii_lowercase().contains(&query)
-                        || entry.description.to_ascii_lowercase().contains(&query)
-                }) {
+                if let Some(index) = entries
+                    .iter()
+                    .position(|entry| auth_entry_matches_query(entry, &query))
+                {
                     *selection = index;
                 }
             }
@@ -1147,6 +1237,28 @@ impl OverlayState {
         matches!(
             self,
             Self::ApiKeyPrompt { .. } | Self::OnboardingApiKey { .. }
+        )
+    }
+
+    /// Returns true when printable typing should filter or jump selection.
+    pub(crate) fn accepts_filter_input(&self) -> bool {
+        matches!(
+            self,
+            Self::SessionPicker { .. }
+                | Self::AgentPicker { .. }
+                | Self::ModelPicker { .. }
+                | Self::EffortPicker { .. }
+                | Self::FastModePicker { .. }
+                | Self::LoginPicker { .. }
+                | Self::ProviderPicker { .. }
+                | Self::AuthPicker { .. }
+                | Self::LogoutPicker { .. }
+                | Self::ThemePicker { .. }
+                | Self::CommandPicker { .. }
+                | Self::OnboardingTheme { .. }
+                | Self::OnboardingProvider { .. }
+                | Self::OnboardingAuth { .. }
+                | Self::OnboardingModel { .. }
         )
     }
 
@@ -1289,6 +1401,49 @@ impl OverlayState {
     }
 }
 
+fn normalize_picker_query(query: &str) -> String {
+    query.trim().to_ascii_lowercase()
+}
+
+fn model_entry_matches_query(entry: &ModelPickerEntry, query: &str) -> bool {
+    entry.selector.to_ascii_lowercase().contains(query)
+        || entry.description.to_ascii_lowercase().contains(query)
+}
+
+fn auth_entry_matches_query(entry: &AuthPickerEntry, query: &str) -> bool {
+    entry.label.to_ascii_lowercase().contains(query)
+        || entry.description.to_ascii_lowercase().contains(query)
+}
+
+fn session_matches_query(session: &SessionSummary, query: &str) -> bool {
+    session.id.to_string().to_ascii_lowercase().contains(query)
+        || session
+            .display_name
+            .as_deref()
+            .map(|name| name.to_ascii_lowercase().contains(query))
+            .unwrap_or(false)
+        || session
+            .slug
+            .as_deref()
+            .map(|slug| slug.to_ascii_lowercase().contains(query))
+            .unwrap_or(false)
+        || session
+            .note
+            .as_deref()
+            .map(|note| note.to_ascii_lowercase().contains(query))
+            .unwrap_or(false)
+        || session
+            .tags
+            .iter()
+            .any(|tag| tag.to_ascii_lowercase().contains(query))
+        || session
+            .cwd
+            .display()
+            .to_string()
+            .to_ascii_lowercase()
+            .contains(query)
+}
+
 fn previous_boundary(input: &str, cursor: usize) -> usize {
     if cursor == 0 {
         return 0;
@@ -1375,6 +1530,38 @@ mod tests {
         tui.cursor = len;
         tui.backspace(&[]);
         assert!(tui.input.is_empty());
+        assert!(tui.pending_pastes.is_empty());
+    }
+
+    #[test]
+    fn backspace_inside_placeholder_removes_whole_paste() {
+        let mut tui = TuiState::default();
+        tui.insert_str("before ", &[]);
+        tui.handle_paste("one\ntwo", &[]);
+        tui.insert_str(" after", &[]);
+        let placeholder_start = "before ".len();
+        tui.cursor = placeholder_start + 4;
+
+        tui.backspace(&[]);
+
+        assert_eq!(tui.input, "before  after");
+        assert_eq!(tui.cursor, placeholder_start);
+        assert!(tui.pending_pastes.is_empty());
+    }
+
+    #[test]
+    fn delete_at_start_of_placeholder_removes_whole_paste() {
+        let mut tui = TuiState::default();
+        tui.insert_str("before ", &[]);
+        tui.handle_paste("one\ntwo", &[]);
+        tui.insert_str(" after", &[]);
+        let placeholder_start = "before ".len();
+        tui.cursor = placeholder_start;
+
+        tui.delete(&[]);
+
+        assert_eq!(tui.input, "before  after");
+        assert_eq!(tui.cursor, placeholder_start);
         assert!(tui.pending_pastes.is_empty());
     }
 

@@ -16,6 +16,15 @@ pub struct ProviderRegistry {
     providers: IndexMap<String, RegisteredProvider>,
 }
 
+/// Returns the canonical built-in provider id for a user-facing alias.
+pub fn canonical_provider_id(provider_id: &str) -> String {
+    match provider_id.trim().to_ascii_lowercase().as_str() {
+        "claude" | "anthropic" => "anthropic".to_string(),
+        "codex" | "openai" => "openai".to_string(),
+        _ => provider_id.trim().to_string(),
+    }
+}
+
 impl ProviderRegistry {
     /// Creates an empty provider registry.
     pub fn new() -> Self {
@@ -95,12 +104,27 @@ impl ProviderRegistry {
 
     /// Looks up a provider descriptor by id.
     pub fn provider(&self, id: &str) -> Option<&ProviderDescriptor> {
-        self.providers.get(id).map(|provider| &provider.descriptor)
+        let trimmed = id.trim();
+        self.providers
+            .get(trimmed)
+            .or_else(|| {
+                let canonical = canonical_provider_id(trimmed);
+                (canonical != trimmed)
+                    .then(|| self.providers.get(canonical.as_str()))
+                    .flatten()
+            })
+            .map(|provider| &provider.descriptor)
     }
 
     /// Looks up a registered provider entry by id.
     pub fn provider_entry(&self, id: &str) -> Option<&RegisteredProvider> {
-        self.providers.get(id)
+        let trimmed = id.trim();
+        self.providers.get(trimmed).or_else(|| {
+            let canonical = canonical_provider_id(trimmed);
+            (canonical != trimmed)
+                .then(|| self.providers.get(canonical.as_str()))
+                .flatten()
+        })
     }
 
     /// Returns an iterator over all known models across all providers.
@@ -280,7 +304,8 @@ impl ProviderRegistry {
         auth_store: &AuthStore,
         client: &ModelDiscoveryClient,
     ) -> Result<()> {
-        let Some(provider) = self.providers.get(provider_id).cloned() else {
+        let provider_key = canonical_provider_id(provider_id);
+        let Some(provider) = self.providers.get(provider_key.as_str()).cloned() else {
             return Err(anyhow!("provider {provider_id} is not registered"));
         };
         if provider.descriptor.discovery.is_none() {
@@ -288,14 +313,16 @@ impl ProviderRegistry {
         }
         // Skip discovery for remote providers that have no credentials — the
         // request would almost certainly fail with 401/403 anyway.
-        if auth_store.get(provider_id).is_none() && !is_local_url(&provider.descriptor.base_url) {
+        if auth_store.get(provider_key.as_str()).is_none()
+            && !is_local_url(&provider.descriptor.base_url)
+        {
             return Ok(());
         }
         let discovered = client.discover_models(&provider.descriptor, auth_store)?;
         if discovered.is_empty() {
             return Ok(());
         }
-        if let Some(entry) = self.providers.get_mut(provider_id) {
+        if let Some(entry) = self.providers.get_mut(provider_key.as_str()) {
             merge_discovered_models(&mut entry.descriptor.models, discovered);
         }
         Ok(())
@@ -486,7 +513,43 @@ mod tests {
     }
 
     #[test]
-    fn parse_openai_discovery_response_maps_models() {
+    fn registry_resolves_desktop_provider_aliases() {
+        let mut registry = ProviderRegistry::new();
+        let anthropic = provider_descriptor();
+        let mut openai = provider_descriptor();
+        openai.id = "openai".to_string();
+        openai.default_api = "openai-responses".to_string();
+        openai.models[0].id = "gpt-5".to_string();
+        openai.models[0].provider = "openai".to_string();
+        registry.register(anthropic.clone());
+        registry.register(openai.clone());
+
+        assert_eq!(canonical_provider_id("claude"), "anthropic");
+        assert_eq!(canonical_provider_id("Codex"), "openai");
+        assert_eq!(
+            registry.provider("claude").map(|p| p.id.as_str()),
+            Some("anthropic")
+        );
+        assert_eq!(
+            registry.provider("codex").map(|p| p.id.as_str()),
+            Some("openai")
+        );
+        assert_eq!(
+            registry
+                .resolve_model("codex/gpt-5")
+                .map(|model| model.provider.as_str()),
+            Some("openai")
+        );
+        registry
+            .discover_and_merge_provider("claude", &AuthStore::default())
+            .expect("claude alias should refresh the anthropic provider");
+        registry
+            .discover_and_merge_provider("codex", &AuthStore::default())
+            .expect("codex alias should refresh the openai provider");
+    }
+
+    #[test]
+    fn parse_openai_discovery_response_maps_models_through_codex_alias() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
         let address = listener.local_addr().expect("address");
         let server = thread::spawn(move || -> String {
@@ -533,7 +596,7 @@ mod tests {
         registry.register(provider);
 
         registry
-            .discover_and_merge_provider("openai", &auth)
+            .discover_and_merge_provider("codex", &auth)
             .expect("discovery succeeds");
 
         let request = server.join().expect("server thread");

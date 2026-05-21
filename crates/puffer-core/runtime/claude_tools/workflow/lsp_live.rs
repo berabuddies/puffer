@@ -30,6 +30,7 @@ use self::manager::with_lsp_session;
 use super::lsp_live_diagnostics::{diagnostics_for_file, record_publish_diagnostics};
 
 const LSP_REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
+const LSP_SHUTDOWN_REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_LSP_FILE_SIZE_BYTES: u64 = 10_000_000;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -441,6 +442,15 @@ impl LspSession {
     }
 
     pub(super) fn request(&mut self, method: &str, params: Value) -> Result<Value> {
+        self.request_with_timeout(method, params, LSP_REQUEST_TIMEOUT)
+    }
+
+    fn request_with_timeout(
+        &mut self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value> {
         self.drain_pending_messages()?;
         let id = self.next_id;
         self.next_id += 1;
@@ -454,7 +464,7 @@ impl LspSession {
         loop {
             let message = self
                 .messages
-                .recv_timeout(LSP_REQUEST_TIMEOUT)
+                .recv_timeout(timeout)
                 .map_err(|error| match error {
                     RecvTimeoutError::Timeout => {
                         anyhow!("timed out waiting for LSP response to `{method}`")
@@ -501,6 +511,23 @@ impl LspSession {
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => return Ok(()),
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => return Ok(()),
+            }
+        }
+    }
+
+    fn drain_pending_messages_until_idle(&mut self, idle_timeout: Duration) -> Result<()> {
+        loop {
+            match self.messages.recv_timeout(idle_timeout) {
+                Ok(message) => {
+                    let message = message?;
+                    if is_server_request(&message) {
+                        self.respond_to_server_request(&message)?;
+                        continue;
+                    }
+                    let _ = self.handle_notification(&message)?;
+                }
+                Err(RecvTimeoutError::Timeout) => return Ok(()),
+                Err(RecvTimeoutError::Disconnected) => return Ok(()),
             }
         }
     }
@@ -565,7 +592,11 @@ impl LspSession {
     }
 
     pub(super) fn shutdown(&mut self) -> Result<()> {
-        let _ = self.request("shutdown", Value::Object(Default::default()));
+        let _ = self.request_with_timeout(
+            "shutdown",
+            Value::Object(Default::default()),
+            LSP_SHUTDOWN_REQUEST_TIMEOUT,
+        );
         let _ = self.notify("exit", Value::Object(Default::default()));
         if let Ok(Some(_)) = self.child.try_wait() {
             return Ok(());

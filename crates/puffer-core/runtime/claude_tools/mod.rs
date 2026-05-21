@@ -125,7 +125,7 @@ pub(crate) fn execute_tool(
             }
             let output = read::execute_claude_read_tool(
                 cwd,
-                &state.working_dirs,
+                &filesystem_policy.workspace_roots,
                 &filesystem_policy.runner_policy(),
                 input.clone(),
             )?;
@@ -136,7 +136,7 @@ pub(crate) fn execute_tool(
             let mut read_state = clone_read_state(state);
             let output = write::execute_claude_write_tool(
                 cwd,
-                &state.working_dirs,
+                &filesystem_policy.workspace_roots,
                 &filesystem_policy.runner_policy(),
                 input.clone(),
                 &mut read_state,
@@ -153,7 +153,7 @@ pub(crate) fn execute_tool(
             }
             let output = edit::execute_claude_edit(
                 cwd,
-                &state.working_dirs,
+                &filesystem_policy.workspace_roots,
                 &filesystem_policy.runner_policy(),
                 input.clone(),
             )?;
@@ -167,7 +167,7 @@ pub(crate) fn execute_tool(
             true,
             glob::execute_claude_glob(
                 cwd,
-                &state.working_dirs,
+                &filesystem_policy.workspace_roots,
                 &filesystem_policy.runner_policy(),
                 input,
             )?,
@@ -177,7 +177,7 @@ pub(crate) fn execute_tool(
             true,
             grep::execute_claude_grep(
                 cwd,
-                &state.working_dirs,
+                &filesystem_policy.workspace_roots,
                 &filesystem_policy.runner_policy(),
                 input,
             )?,
@@ -191,7 +191,7 @@ pub(crate) fn execute_tool(
             }
             let output = notebook_edit::execute_notebook_edit_tool(
                 cwd,
-                &state.working_dirs,
+                &filesystem_policy.workspace_roots,
                 &filesystem_policy.runner_policy(),
                 input.clone(),
             )?;
@@ -444,7 +444,7 @@ fn try_runner_dispatch(
     let request = RunnerToolRequest {
         tool_id: tool_id.to_string(),
         cwd: cwd.to_path_buf(),
-        working_dirs: state.working_dirs.clone(),
+        working_dirs: filesystem_policy.workspace_roots.clone(),
         filesystem: filesystem_policy.runner_policy(),
         input: input.clone(),
         session_id: Some(state.session.id.to_string()),

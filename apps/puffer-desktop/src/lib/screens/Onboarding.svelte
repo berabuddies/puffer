@@ -3,6 +3,8 @@
   import BrandLogo from "../design/BrandLogo.svelte";
   import Puffer from "../design/Puffer.svelte";
   import Icon from "../design/Icon.svelte";
+  import { providerCatalogForSetup } from "../providerFallbacks";
+  import { providerIsAvailableForAgent } from "../providerIds";
   import type { ExternalCredential, SettingsSnapshot } from "../types";
 
   type Props = {
@@ -17,42 +19,32 @@
     onLoginApiKey: (providerId: string, apiKey: string) => void;
     onImportExternal: (providerId: string, source: "claude" | "codex") => void;
     onRefresh: () => void;
-    forceRepoStep?: boolean;
+    onFinish: () => void;
   };
 
   let props: Props = $props();
 
-  let signedIn = $derived(props.forceRepoStep || (props.snapshot?.auth?.length ?? 0) > 0);
-
-  const repos = [
-    { name: "puffer-web", desc: "Marketing site + dashboard · Next.js",  lang: "TypeScript", commits: "342 commits", sel: true },
-    { name: "stripe-api", desc: "Billing & webhooks · Node + Postgres",  lang: "TypeScript", commits: "1.2k commits", sel: true },
-    { name: "infra-tf",   desc: "Terraform · AWS, Cloudflare",           lang: "HCL",        commits: "89 commits",  sel: false },
-    { name: "ml-tools",   desc: "Internal scripts & notebooks",          lang: "Python",     commits: "210 commits", sel: false }
-  ];
-
-  let selected = $state(new Set(repos.filter((r) => r.sel).map((r) => r.name)));
-
-  function toggle(name: string) {
-    const next = new Set(selected);
-    if (next.has(name)) next.delete(name);
-    else next.add(name);
-    selected = next;
-  }
+  let authenticatedProviderIds = $derived((props.snapshot?.auth ?? []).map((auth) => auth.providerId));
+  let agentProviderCount = $derived(
+    providerCatalogForSetup(props.snapshot).filter((provider) =>
+      providerIsAvailableForAgent(provider, authenticatedProviderIds)
+    ).length
+  );
+  let signedIn = $derived(agentProviderCount > 0);
 
   let steps = $derived(
     signedIn
       ? [
           { label: "Connect a provider", done: true,  active: false },
           { label: "Connect GitHub",     done: true,  active: false },
-          { label: "Choose your repos",  done: false, active: true },
+          { label: "Open workspace",     done: false, active: true },
           { label: "Pick a model",       done: false, active: false },
           { label: "Set permissions",    done: false, active: false }
         ]
       : [
           { label: "Connect a provider", done: false, active: true },
           { label: "Connect GitHub",     done: false, active: false },
-          { label: "Choose your repos",  done: false, active: false },
+          { label: "Open workspace",     done: false, active: false },
           { label: "Pick a model",       done: false, active: false },
           { label: "Set permissions",    done: false, active: false }
         ]
@@ -81,37 +73,23 @@
   </div>
   <div class="pf-onboard-main">
     {#if signedIn}
-      <h2>Choose the repos Puffer can see</h2>
-      <p class="lead">You can change this any time. Corbina will only read what you grant.</p>
-      <div class="pf-onboard-grid">
-        {#each repos as r (r.name)}
-          {@const sel = selected.has(r.name)}
-          <button
-            type="button"
-            class="pf-onboard-pick"
-            data-selected={sel}
-            onclick={() => toggle(r.name)}
-          >
-            <div style="display: flex; align-items: center; gap: 8px;">
-              <Icon name="repo" size={15} color="var(--puffer-accent)" />
-              <span class="title">{r.name}</span>
-              {#if sel}
-                <span style="margin-left: auto;">
-                  <Icon name="check" size={14} color="var(--puffer-accent)" />
-                </span>
-              {/if}
-            </div>
-            <div class="desc">{r.desc}</div>
-            <div class="meta-row">
-              <span>● {r.lang}</span>
-              <span>{r.commits}</span>
-            </div>
-          </button>
-        {/each}
+      <h2>Workspace is ready</h2>
+      <p class="lead">An agent provider is ready. Open the workspace to start or connect a project.</p>
+      <div class="pf-onboard-ready">
+        <div class="pf-onboard-ready-icon">
+          <Icon name="check" size={18} color="var(--puffer-accent)" />
+        </div>
+        <div>
+          <div class="pf-onboard-ready-title">
+            {agentProviderCount} agent provider{agentProviderCount === 1 ? "" : "s"} ready
+          </div>
+          <div class="pf-onboard-ready-sub">
+            Repository access is managed from the workspace and provider settings.
+          </div>
+        </div>
       </div>
       <div style="display: flex; margin-top: 28px; gap: 10px; justify-content: flex-end;">
-        <button type="button" class="sc-btn" data-variant="ghost">Skip for now</button>
-        <button type="button" class="sc-btn" data-variant="default">
+        <button type="button" class="sc-btn" data-variant="default" onclick={props.onFinish}>
           Continue<Icon name="arrow" size={14} />
         </button>
       </div>
@@ -201,36 +179,34 @@
   .pf-onboard-main .lead {
     color: var(--muted-foreground); font-size: 14px; margin: 0 0 24px;
   }
-  .pf-onboard-grid {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 12px;
-  }
-  .pf-onboard-pick {
+  .pf-onboard-ready {
     border: 1px solid var(--border);
     background: var(--background);
-    border-radius: 12px;
-    padding: 16px;
-    cursor: pointer;
-    display: flex; flex-direction: column; gap: 8px;
-    transition: all 120ms;
-    text-align: left;
+    border-radius: 10px;
+    padding: 18px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .pf-onboard-ready-icon {
+    width: 38px;
+    height: 38px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: color-mix(in oklab, var(--puffer-accent) 10%, var(--background));
+    border: 1px solid color-mix(in oklab, var(--puffer-accent) 28%, var(--border));
+  }
+  .pf-onboard-ready-title {
+    font-size: 14px;
+    font-weight: 600;
     color: var(--foreground);
-    font: inherit;
   }
-  .pf-onboard-pick[data-selected="true"] {
-    border-color: var(--puffer-accent);
-    background: color-mix(in oklab, var(--puffer-accent) 6%, var(--background));
-    box-shadow: 0 0 0 3px color-mix(in oklab, var(--puffer-accent) 18%, transparent);
-  }
-  .pf-onboard-pick:hover {
-    border-color: var(--puffer-accent);
-  }
-  .pf-onboard-pick .title { font-weight: 600; font-size: 14px; }
-  .pf-onboard-pick .desc { font-size: 12.5px; color: var(--muted-foreground); }
-  .pf-onboard-pick .meta-row {
-    display: flex; align-items: center; gap: 8px; font-size: 11px;
-    color: var(--muted-foreground); font-family: var(--font-mono);
+  .pf-onboard-ready-sub {
+    margin-top: 4px;
+    font-size: 12.5px;
+    color: var(--muted-foreground);
   }
 
   @media (max-width: 900px) {

@@ -1,7 +1,14 @@
 <script lang="ts">
-  import { onDestroy, untrack } from "svelte";
+  import { onDestroy, tick, untrack } from "svelte";
   import HighlightedLine from "../../components/HighlightedLine.svelte";
   import Icon from "../../design/Icon.svelte";
+  import PdfDocumentPreview from "./PdfDocumentPreview.svelte";
+  import {
+    buildFilePreview,
+    hasRichFilePreview,
+    hasRichFilePreviewPath,
+    type FilePreview
+  } from "./filePreview";
   import {
     fsUnwatch,
     fsWatch,
@@ -20,8 +27,20 @@
   } from "../../api/desktop";
   import { ensureLocalDaemonClient } from "../../api/daemonClient";
 
-  type Props = { cwd: string; sessionId?: string; openPath?: string | null };
-  let { cwd, sessionId = "preview", openPath = null }: Props = $props();
+  type Props = {
+    cwd: string;
+    sessionId?: string;
+    openPath?: string | null;
+    openLine?: number | null;
+    openRequestId?: number | null;
+  };
+  let {
+    cwd,
+    sessionId = "preview",
+    openPath = null,
+    openLine = null,
+    openRequestId = null
+  }: Props = $props();
 
   type OpenFileTab = {
     path: string;
@@ -32,7 +51,11 @@
 
   type OpenFileOptions = {
     pinned?: boolean;
+    line?: number | null;
+    character?: number | null;
   };
+
+  const RICH_PREVIEW_MAX_BYTES = 24 * 1024 * 1024;
 
   // Directory cache: absolute path → its (already-loaded) entries. Keeps
   // the tree interactions snappy across expand/collapse cycles and lets
@@ -54,6 +77,10 @@
   let activeLoading = $state(false);
   let activeError = $state<string | null>(null);
   let draftContent = $state("");
+  let activePreview = $state<FilePreview | null>(null);
+  let activePreviewLoading = $state(false);
+  let activePreviewError = $state<string | null>(null);
+  let viewerMode = $state<"preview" | "raw">("preview");
   let saving = $state(false);
   let saveError = $state<string | null>(null);
   let selectedSymbol = $state<string | null>(null);
@@ -61,11 +88,15 @@
   let lspError = $state<string | null>(null);
   let lspResult = $state<LspInspectResult | null>(null);
   let lspAnchor = $state<{ line: number; character: number } | null>(null);
+  let fileReadGeneration = 0;
+  let filePreviewGeneration = 0;
+  let lspInspectGeneration = 0;
+  let editorEl = $state<HTMLTextAreaElement | null>(null);
   let editorGutterEl = $state<HTMLDivElement | null>(null);
   let editorHighlightEl = $state<HTMLPreElement | null>(null);
   let fileTabsReady = $state(false);
   let fileTabsSaveTimer: ReturnType<typeof setTimeout> | null = null;
-  let lastOpenPath: string | null = null;
+  let lastOpenRequestKey: string | null = null;
 
   // Root is derived from cwd — switching sessions resets everything.
   let root = $derived(cwd);
@@ -95,9 +126,12 @@
       activeFile = null;
       activeError = null;
       activeSize = 0;
+      clearActivePreview();
+      viewerMode = "preview";
       draftContent = "";
       saving = false;
       saveError = null;
+      fileReadGeneration += 1;
       clearLspState();
       void loadDir(next);
       void restoreFileTabs(next, nextSessionId);
@@ -113,9 +147,10 @@
 
   $effect(() => {
     const path = openPath;
-    if (!path || path === lastOpenPath || !root || previewMode) return;
-    lastOpenPath = path;
-    void revealAndOpenFile(path);
+    const requestKey = openRequestId == null ? `${path ?? ""}:${openLine ?? ""}` : String(openRequestId);
+    if (!path || requestKey === lastOpenRequestKey || !root || previewMode) return;
+    lastOpenRequestKey = requestKey;
+    void revealAndOpenFile(path, openLine);
   });
 
   // Filesystem-watcher lifecycle. When `cwd` is set, ask the daemon to watch
@@ -132,11 +167,20 @@
   let fsEventUnsubscribe: (() => void) | null = null;
   let destroyed = false;
 
+  function createFsWatchId(): string {
+    const random =
+      globalThis.crypto?.randomUUID?.() ??
+      `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    return `files-${random}`;
+  }
+
   async function rebuildWatch(target: string) {
     // Tear down whatever's left from the previous watch root first.
-    await teardownWatch();
+    teardownWatch();
     if (destroyed || !target) return;
 
+    const expectedWatchId = createFsWatchId();
+    currentWatchId = expectedWatchId;
     try {
       const client = await ensureLocalDaemonClient();
       const listener = (payload: FsChangedEvent) => {
@@ -152,8 +196,8 @@
 
       // Start the actual watch. If the pane was unmounted / rerooted while
       // this await was pending, unwatch immediately to avoid leaking.
-      const { watchId } = await fsWatch([target], true);
-      if (destroyed || target !== root) {
+      const { watchId } = await fsWatch([target], true, expectedWatchId);
+      if (destroyed || target !== root || currentWatchId !== expectedWatchId) {
         await fsUnwatch(watchId).catch(() => {
           /* best-effort */
         });
@@ -161,6 +205,9 @@
       }
       currentWatchId = watchId;
     } catch (_err) {
+      if (currentWatchId === expectedWatchId) currentWatchId = null;
+      fsEventUnsubscribe?.();
+      fsEventUnsubscribe = null;
       // Failing to install the watcher isn't fatal — the pane still works,
       // just without auto-refresh. Don't spam the user with a toast; the
       // cache fallback (expand/collapse) still works.
@@ -168,17 +215,15 @@
     }
   }
 
-  async function teardownWatch() {
+  function teardownWatch() {
     fsEventUnsubscribe?.();
     fsEventUnsubscribe = null;
     const id = currentWatchId;
     currentWatchId = null;
     if (id) {
-      try {
-        await fsUnwatch(id);
-      } catch {
+      void fsUnwatch(id).catch(() => {
         /* ignore — the daemon might be gone already */
-      }
+      });
     }
   }
 
@@ -280,14 +325,27 @@
   async function reloadActiveFile() {
     const target = activePath;
     if (!target) return;
-    if (isTabDirty(target)) return;
+    const wasDirty = isTabDirty(target);
+    const expectedRoot = root;
+    const expectedSessionId = sessionId;
+    const generation = fileReadGeneration;
     try {
-      const result = await readFile(target);
-      if (activePath === target) {
-        cacheFileResult(result, true);
+      const result = await readPreviewFile(target);
+      if (
+        generation === fileReadGeneration &&
+        activePath === target &&
+        root === expectedRoot &&
+        sessionId === expectedSessionId
+      ) {
+        cacheFileResult(result, !wasDirty, target);
       }
     } catch (err) {
-      if (activePath === target) {
+      if (
+        generation === fileReadGeneration &&
+        activePath === target &&
+        root === expectedRoot &&
+        sessionId === expectedSessionId
+      ) {
         activeError = err instanceof Error ? err.message : String(err);
       }
     }
@@ -359,6 +417,19 @@
     return path.split("/").pop() || path;
   }
 
+  function fileTabPathLabel(path: string): string {
+    if (root && path.startsWith(`${root}/`)) return path.slice(root.length + 1);
+    return path || "file";
+  }
+
+  function closeFileTabLabel(path: string): string {
+    return `Close ${fileTabPathLabel(path)}`;
+  }
+
+  function readPreviewFile(path: string): Promise<ReadFileResult> {
+    return readFile(path, hasRichFilePreviewPath(path) ? RICH_PREVIEW_MAX_BYTES : undefined);
+  }
+
   function tabFor(path: string, size: number, pinned: boolean): OpenFileTab {
     return {
       path,
@@ -380,26 +451,80 @@
     openTabs = next;
   }
 
-  function cacheFileResult(result: ReadFileResult, resetDraft: boolean) {
+  function cacheFileResult(
+    result: ReadFileResult,
+    resetDraft: boolean,
+    logicalPath = result.path
+  ) {
+    const cachedResult = result.path === logicalPath ? result : { ...result, path: logicalPath };
     const nextFiles = new Map(fileCache);
-    nextFiles.set(result.path, result);
+    nextFiles.set(logicalPath, cachedResult);
     fileCache = nextFiles;
 
-    if (resetDraft || !draftCache.has(result.path)) {
+    if (resetDraft || !draftCache.has(logicalPath)) {
       const nextDrafts = new Map(draftCache);
-      nextDrafts.set(result.path, result.encoding === "utf8" ? result.content : "");
+      nextDrafts.set(logicalPath, cachedResult.encoding === "utf8" ? cachedResult.content : "");
       draftCache = nextDrafts;
     }
 
     openTabs = openTabs.map((tab) =>
-      tab.path === result.path ? { ...tab, size: result.size } : tab
+      tab.path === logicalPath ? { ...tab, size: cachedResult.size } : tab
     );
 
-    if (activePath === result.path) {
-      activeFile = result;
-      activeSize = result.size;
+    if (activePath === logicalPath) {
+      activeFile = cachedResult;
+      activeSize = cachedResult.size;
       activeError = null;
-      draftContent = draftCache.get(result.path) ?? (result.encoding === "utf8" ? result.content : "");
+      draftContent = draftCache.get(logicalPath) ?? (cachedResult.encoding === "utf8" ? cachedResult.content : "");
+      void loadActivePreview(cachedResult);
+    }
+  }
+
+  function clearActivePreview() {
+    filePreviewGeneration += 1;
+    activePreview = null;
+    activePreviewLoading = false;
+    activePreviewError = null;
+  }
+
+  async function loadActivePreview(result: ReadFileResult) {
+    if (!hasRichFilePreview(result)) {
+      clearActivePreview();
+      return;
+    }
+    const expectedPath = result.path;
+    const expectedRoot = root;
+    const expectedSessionId = sessionId;
+    const generation = ++filePreviewGeneration;
+    activePreview = null;
+    activePreviewError = null;
+    activePreviewLoading = true;
+    try {
+      const preview = await buildFilePreview(result);
+      if (
+        generation !== filePreviewGeneration ||
+        activePath !== expectedPath ||
+        root !== expectedRoot ||
+        sessionId !== expectedSessionId
+      ) return;
+      activePreview = preview;
+    } catch (err) {
+      if (
+        generation !== filePreviewGeneration ||
+        activePath !== expectedPath ||
+        root !== expectedRoot ||
+        sessionId !== expectedSessionId
+      ) return;
+      activePreviewError = err instanceof Error ? err.message : String(err);
+    } finally {
+      if (
+        generation === filePreviewGeneration &&
+        activePath === expectedPath &&
+        root === expectedRoot &&
+        sessionId === expectedSessionId
+      ) {
+        activePreviewLoading = false;
+      }
     }
   }
 
@@ -456,7 +581,7 @@
     expanded = next;
   }
 
-  async function revealAndOpenFile(path: string) {
+  async function revealAndOpenFile(path: string, line: number | null = null) {
     const nextExpanded = new Set(expanded);
     const relative = path.startsWith(`${root}/`) ? path.slice(root.length + 1) : "";
     if (relative) {
@@ -468,7 +593,7 @@
       }
       expanded = nextExpanded;
     }
-    await openFile(path, 0, { pinned: true });
+    await openFile(path, 0, { pinned: true, line });
   }
 
   async function openFile(path: string, size: number, options: OpenFileOptions = {}) {
@@ -498,14 +623,24 @@
       openTabs = [...openTabs, nextTab];
     }
 
-    await activateFile(path, size);
+    await activateFile(path, size, options.line, options.character);
   }
 
-  async function activateFile(path: string, size?: number) {
+  async function activateFile(
+    path: string,
+    size?: number,
+    line: number | null = null,
+    character: number | null = null
+  ) {
+    const expectedRoot = root;
+    const expectedSessionId = sessionId;
+    const generation = fileReadGeneration;
     activePath = path;
     activeSize = size ?? openTabs.find((tab) => tab.path === path)?.size ?? 0;
     activeError = null;
     saveError = null;
+    clearActivePreview();
+    viewerMode = "preview";
     clearLspState();
 
     const cached = fileCache.get(path);
@@ -514,24 +649,44 @@
       activeSize = cached.size;
       draftContent = draftCache.get(path) ?? (cached.encoding === "utf8" ? cached.content : "");
       activeLoading = false;
+      void loadActivePreview(cached);
+      await focusEditorLine(path, line, character);
       return;
     }
 
     activeFile = null;
     draftContent = "";
     activeLoading = true;
+    let loaded = false;
     try {
-      const result = await readFile(path);
-      if (activePath === path) {
-        cacheFileResult(result, false);
+      const result = await readPreviewFile(path);
+      if (
+        generation === fileReadGeneration &&
+        activePath === path &&
+        root === expectedRoot &&
+        sessionId === expectedSessionId
+      ) {
+        cacheFileResult(result, false, path);
+        loaded = true;
       }
     } catch (err) {
-      if (activePath === path) {
+      if (
+        generation === fileReadGeneration &&
+        activePath === path &&
+        root === expectedRoot &&
+        sessionId === expectedSessionId
+      ) {
         activeError = err instanceof Error ? err.message : String(err);
       }
     } finally {
-      if (activePath === path) activeLoading = false;
+      if (
+        generation === fileReadGeneration &&
+        activePath === path &&
+        root === expectedRoot &&
+        sessionId === expectedSessionId
+      ) activeLoading = false;
     }
+    if (loaded) await focusEditorLine(path, line, character);
   }
 
   async function closeTab(event: Event, path: string) {
@@ -561,10 +716,19 @@
       activeFile = null;
       activeLoading = false;
       activeError = null;
+      clearActivePreview();
+      viewerMode = "preview";
       draftContent = "";
       saveError = null;
       clearLspState();
     }
+  }
+
+  function handleFileTabKeydown(event: KeyboardEvent, path: string, size: number) {
+    if (event.target !== event.currentTarget) return;
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    void activateFile(path, size);
   }
 
   function fmtSize(bytes: number): string {
@@ -599,8 +763,14 @@
       : ""
   );
   let canEdit = $derived(
-    !!activeFile && activeFile.encoding === "utf8" && !activeFile.truncated && !activeLoading
+    !!activeFile &&
+      activeFile.encoding === "utf8" &&
+      !activeFile.truncated &&
+      !activeLoading
   );
+  let hasPreview = $derived(!!activeFile && hasRichFilePreview(activeFile));
+  let canToggleRaw = $derived(canEdit && hasPreview);
+  let showRawEditor = $derived(canEdit && (!hasPreview || viewerMode === "raw"));
   let dirty = $derived(activePath ? isTabDirty(activePath) : false);
 
   function cancelEditing() {
@@ -612,22 +782,44 @@
   async function saveEditing() {
     const target = activePath;
     if (!target || !dirty || saving) return;
+    const expectedRoot = root;
+    const expectedSessionId = sessionId;
+    const generation = fileReadGeneration;
+    const content = draftContent;
     saving = true;
     saveError = null;
     try {
-      const result = await writeFile(target, draftContent);
+      const result = await writeFile(target, content);
+      if (
+        generation !== fileReadGeneration ||
+        root !== expectedRoot ||
+        sessionId !== expectedSessionId
+      ) {
+        return;
+      }
+      cacheFileResult(result, true, target);
+      pinTab(target);
       if (activePath === target) {
-        cacheFileResult(result, true);
-        pinTab(target);
         clearLspState();
       }
       void refreshDir(parentPath(target));
     } catch (err) {
-      if (activePath === target) {
+      if (
+        generation === fileReadGeneration &&
+        root === expectedRoot &&
+        sessionId === expectedSessionId &&
+        activePath === target
+      ) {
         saveError = err instanceof Error ? err.message : String(err);
       }
     } finally {
-      if (activePath === target) saving = false;
+      if (
+        generation === fileReadGeneration &&
+        root === expectedRoot &&
+        sessionId === expectedSessionId
+      ) {
+        saving = false;
+      }
     }
   }
 
@@ -642,8 +834,7 @@
     }
   }
 
-  function syncEditorScroll(event: Event) {
-    const target = event.currentTarget as HTMLTextAreaElement;
+  function syncEditorOverlays(target: HTMLTextAreaElement) {
     if (editorGutterEl) editorGutterEl.scrollTop = target.scrollTop;
     if (editorHighlightEl) {
       editorHighlightEl.scrollTop = target.scrollTop;
@@ -651,7 +842,49 @@
     }
   }
 
+  function syncEditorScroll(event: Event) {
+    const target = event.currentTarget as HTMLTextAreaElement;
+    syncEditorOverlays(target);
+  }
+
+  function offsetForLine(content: string, line: number): number {
+    const targetLine = Math.max(1, Math.floor(line));
+    let offset = 0;
+    for (let current = 1; current < targetLine; current += 1) {
+      const next = content.indexOf("\n", offset);
+      if (next === -1) return content.length;
+      offset = next + 1;
+    }
+    return Math.min(offset, content.length);
+  }
+
+  function offsetForLocation(content: string, line: number, character: number | null | undefined): number {
+    const lineOffset = offsetForLine(content, line);
+    if (!character || !Number.isFinite(character) || character < 1) return lineOffset;
+    const lineEnd = content.indexOf("\n", lineOffset);
+    const maxOffset = lineEnd === -1 ? content.length : lineEnd;
+    return Math.min(lineOffset + Math.floor(character) - 1, maxOffset);
+  }
+
+  async function focusEditorLine(
+    path: string,
+    line: number | null | undefined,
+    character: number | null | undefined = null
+  ) {
+    if (!line || !Number.isFinite(line) || line < 1) return;
+    await tick();
+    if (activePath !== path || !canEdit || !editorEl) return;
+    const offset = offsetForLocation(draftContent, line, character);
+    editorEl.focus();
+    editorEl.setSelectionRange(offset, offset);
+    const style = getComputedStyle(editorEl);
+    const lineHeight = Number.parseFloat(style.lineHeight) || 18;
+    editorEl.scrollTop = Math.max(0, (Math.floor(line) - 1) * lineHeight - editorEl.clientHeight / 3);
+    syncEditorOverlays(editorEl);
+  }
+
   function clearLspState() {
+    lspInspectGeneration += 1;
     selectedSymbol = null;
     lspLoading = false;
     lspError = null;
@@ -758,17 +991,44 @@
 
   async function inspectSymbol(lineIndex: number, character: number, symbol: string) {
     if (!activePath || !activeFile || activeFile.encoding !== "utf8") return;
+    const inspectPath = activePath;
+    const inspectRoot = root;
+    const inspectSessionId = sessionId;
+    const inspectGeneration = ++lspInspectGeneration;
     selectedSymbol = symbol;
     lspAnchor = { line: lineIndex, character };
     lspLoading = true;
     lspError = null;
     lspResult = null;
     try {
-      lspResult = await lspInspect(activePath, root, lineIndex, character);
+      const result = await lspInspect(inspectPath, inspectRoot, lineIndex, character);
+      if (
+        destroyed ||
+        inspectGeneration !== lspInspectGeneration ||
+        activePath !== inspectPath ||
+        root !== inspectRoot ||
+        sessionId !== inspectSessionId
+      ) return;
+      lspResult = result;
     } catch (err) {
+      if (
+        destroyed ||
+        inspectGeneration !== lspInspectGeneration ||
+        activePath !== inspectPath ||
+        root !== inspectRoot ||
+        sessionId !== inspectSessionId
+      ) return;
       lspError = err instanceof Error ? err.message : String(err);
     } finally {
-      lspLoading = false;
+      if (
+        !destroyed &&
+        inspectGeneration === lspInspectGeneration &&
+        activePath === inspectPath &&
+        root === inspectRoot &&
+        sessionId === inspectSessionId
+      ) {
+        lspLoading = false;
+      }
     }
   }
 
@@ -861,7 +1121,7 @@
 
   async function openLocation(location: LspLocation) {
     const path = resolvedLocationPath(location.file);
-    await openFile(path, 0);
+    await openFile(path, 0, { line: location.line, character: location.character });
   }
 
   type TreeRow = {
@@ -920,7 +1180,7 @@
       {#if previewMode}
         <div class="tree-empty">
           <div class="msg">Files view is live in the desktop app</div>
-          <div class="sub">Launch Corbina locally to browse this session's working directory.</div>
+          <div class="sub">Launch Puffer locally to browse this session's working directory.</div>
         </div>
       {:else if errors.has(root) && !cache.has(root)}
         <div class="tree-empty">
@@ -947,6 +1207,7 @@
               event.preventDefault();
               void openFile(row.path, row.size, { pinned: true });
             }}
+            aria-expanded={row.kind === "directory" || row.kind === "symlink" ? expanded.has(row.path) : undefined}
             title={row.path}
           >
             {#if row.kind === "directory"}
@@ -992,7 +1253,7 @@
       <div class="viewer-empty">
         <Icon name="file" size={20} color="var(--muted-foreground)" />
         <div class="title">File preview is live in the desktop app</div>
-        <div class="sub">Open Corbina locally to preview files from this session.</div>
+        <div class="sub">Open Puffer locally to preview files from this session.</div>
       </div>
     {:else if !activePath}
       <div class="viewer-empty">
@@ -1003,9 +1264,10 @@
     {:else}
       <div class="file-tabs" role="tablist" aria-label="Open files">
         {#each openTabs as tab (tab.path)}
-          <button
-            type="button"
+          {@const closeLabel = closeFileTabLabel(tab.path)}
+          <div
             role="tab"
+            tabindex="0"
             aria-selected={activePath === tab.path}
             class="file-tab"
             class:active={activePath === tab.path}
@@ -1014,27 +1276,23 @@
             title={tab.path}
             onclick={() => void activateFile(tab.path, tab.size)}
             ondblclick={() => pinTab(tab.path)}
+            onkeydown={(event) => handleFileTabKeydown(event, tab.path, tab.size)}
           >
             <Icon name="file" size={11} color="var(--muted-foreground)" />
             <span class="tab-title">{tab.name}</span>
             {#if isTabDirty(tab.path)}
               <span class="dirty-dot" aria-label="Unsaved changes"></span>
             {/if}
-            <span
-              role="button"
-              tabindex="0"
+            <button
+              type="button"
               class="tab-close"
-              aria-label="Close {tab.name}"
+              aria-label={closeLabel}
+              title={closeLabel}
               onclick={(event) => void closeTab(event, tab.path)}
-              onkeydown={(event) => {
-                if (event.key !== "Enter" && event.key !== " ") return;
-                event.preventDefault();
-                void closeTab(event, tab.path);
-              }}
             >
               <Icon name="x" size={11} />
-            </span>
-          </button>
+            </button>
+          </div>
         {/each}
       </div>
       <header class="viewer-head">
@@ -1048,6 +1306,26 @@
           <span class="save-error mono">{saveError}</span>
         {/if}
         <div class="viewer-actions">
+          {#if canToggleRaw}
+            <div class="viewer-mode" aria-label="File view mode">
+              <button
+                type="button"
+                class:active={viewerMode === "preview"}
+                aria-pressed={viewerMode === "preview"}
+                onclick={() => (viewerMode = "preview")}
+              >
+                Preview
+              </button>
+              <button
+                type="button"
+                class:active={viewerMode === "raw"}
+                aria-pressed={viewerMode === "raw"}
+                onclick={() => (viewerMode = "raw")}
+              >
+                Raw
+              </button>
+            </div>
+          {/if}
           {#if canEdit && dirty}
             <button
               type="button"
@@ -1073,7 +1351,11 @@
           <div class="viewer-msg sub">Loading...</div>
         {:else if activeError}
           <div class="viewer-msg err mono">{activeError}</div>
-        {:else if canEdit}
+        {:else if activePreviewLoading}
+          <div class="viewer-msg sub">Preparing preview...</div>
+        {:else if activePreviewError}
+          <div class="viewer-msg err mono">{activePreviewError}</div>
+        {:else if showRawEditor}
           <div class="editor-shell">
             <div class="editor-gutter" bind:this={editorGutterEl} aria-hidden="true">
               {#each draftLineNumbers as lineNumber}
@@ -1084,6 +1366,7 @@
               <pre class="editor-highlight" bind:this={editorHighlightEl} aria-hidden="true">{#each draftLines as line}<span class:symbol-line={lineHasSymbol(line, selectedSymbol)}><HighlightedLine text={line || " "} path={activePath} highlight={selectedSymbol} /></span>{/each}</pre>
               <textarea
                 class="editor"
+                bind:this={editorEl}
                 value={draftContent}
                 spellcheck="false"
                 wrap="off"
@@ -1095,6 +1378,81 @@
                 aria-label="Edit file contents"
               ></textarea>
             </div>
+          </div>
+        {:else if activePreview && activePreview.kind === "markdown"}
+          <article class="file-preview markdown-preview" aria-label="Markdown preview">
+            {@html activePreview.html}
+          </article>
+        {:else if activePreview && activePreview.kind === "csv"}
+          <div class="file-preview table-preview" aria-label="CSV preview">
+            <table>
+              <tbody>
+                {#each activePreview.rows as row, rowIndex}
+                  <tr>
+                    {#each row as cell}
+                      {#if rowIndex === 0}
+                        <th>{cell}</th>
+                      {:else}
+                        <td>{cell}</td>
+                      {/if}
+                    {/each}
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {:else if activePreview && activePreview.kind === "pdf"}
+          <div class="file-preview pdf-shell" aria-label="PDF preview">
+            <PdfDocumentPreview base64={activePreview.base64} textLines={activePreview.lines} />
+          </div>
+        {:else if activePreview && activePreview.kind === "docx"}
+          <article class="file-preview office-preview" aria-label="DOCX preview">
+            {#each activePreview.paragraphs as paragraph}
+              <p>{paragraph}</p>
+            {/each}
+          </article>
+        {:else if activePreview && activePreview.kind === "pptx"}
+          <div class="file-preview office-preview" aria-label="PowerPoint preview">
+            {#each activePreview.slides as slide}
+              <section>
+                <h2>{slide.title}</h2>
+                {#each slide.lines as line}
+                  <p>{line}</p>
+                {/each}
+              </section>
+            {/each}
+          </div>
+        {:else if activePreview && activePreview.kind === "xlsx"}
+          <div class="file-preview spreadsheet-preview" aria-label="Excel preview">
+            {#each activePreview.sheets as sheet}
+              <section>
+                <h2>{sheet.name}</h2>
+                <table>
+                  <tbody>
+                    {#each sheet.rows as row}
+                      <tr>
+                        {#each row as cell}
+                          <td>{cell}</td>
+                        {/each}
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+              </section>
+            {/each}
+          </div>
+        {:else if activePreview && activePreview.kind === "office-binary"}
+          <div class="file-preview office-preview" aria-label={activePreview.title}>
+            <section>
+              <h2>{activePreview.title}</h2>
+              {#if activePreview.html}
+                <div class="legacy-office-html">{@html activePreview.html}</div>
+              {:else}
+                {#each activePreview.lines as line}
+                  <p>{line}</p>
+                {/each}
+              {/if}
+            </section>
           </div>
         {:else if activeFile && activeFile.encoding === "utf8"}
           <pre class="code"><!--
@@ -1344,12 +1702,16 @@
   .tab-close {
     width: 18px;
     height: 18px;
+    padding: 0;
+    border: 0;
+    background: transparent;
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     border-radius: 4px;
     color: var(--muted-foreground);
+    cursor: pointer;
   }
   .tab-close:hover,
   .tab-close:focus-visible {
@@ -1404,6 +1766,38 @@
     align-items: center;
     gap: 6px;
     flex-shrink: 0;
+  }
+  .viewer-mode {
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--background);
+  }
+  .viewer-mode button {
+    height: 22px;
+    min-width: 54px;
+    padding: 0 8px;
+    border: 0;
+    border-right: 1px solid var(--border);
+    background: transparent;
+    color: var(--muted-foreground);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .viewer-mode button:last-child {
+    border-right: 0;
+  }
+  .viewer-mode button:hover {
+    background: var(--accent);
+    color: var(--foreground);
+  }
+  .viewer-mode button.active {
+    background: var(--foreground);
+    color: var(--background);
   }
   .file-action {
     height: 24px;
@@ -1460,6 +1854,122 @@
     font-family: var(--font-mono);
     white-space: pre-wrap;
     word-break: break-word;
+  }
+  .file-preview {
+    min-height: 100%;
+    padding: 18px 24px;
+    color: var(--foreground);
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  .markdown-preview {
+    max-width: 860px;
+  }
+  .markdown-preview :global(h1),
+  .markdown-preview :global(h2),
+  .markdown-preview :global(h3),
+  .office-preview h2,
+  .spreadsheet-preview h2 {
+    margin: 0 0 10px;
+    color: var(--foreground);
+    font-weight: 650;
+    line-height: 1.25;
+  }
+  .markdown-preview :global(h1) { font-size: 24px; }
+  .markdown-preview :global(h2),
+  .office-preview h2,
+  .spreadsheet-preview h2 { font-size: 16px; }
+  .markdown-preview :global(h3) { font-size: 14px; }
+  .markdown-preview :global(p),
+  .office-preview p {
+    margin: 0 0 10px;
+  }
+  .markdown-preview :global(ul) {
+    margin: 0 0 12px;
+    padding-left: 20px;
+  }
+  .markdown-preview :global(blockquote) {
+    margin: 0 0 12px;
+    padding: 8px 12px;
+    border-left: 3px solid var(--border);
+    color: var(--muted-foreground);
+    background: color-mix(in oklab, var(--background) 96%, var(--muted));
+  }
+  .markdown-preview :global(code) {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    background: var(--muted);
+    padding: 1px 4px;
+    border-radius: 4px;
+  }
+  .markdown-preview :global(pre) {
+    margin: 0 0 12px;
+    padding: 10px 12px;
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: color-mix(in oklab, var(--background) 95%, var(--muted));
+  }
+  .markdown-preview :global(pre code) {
+    padding: 0;
+    background: transparent;
+  }
+  .table-preview,
+  .spreadsheet-preview {
+    overflow: auto;
+  }
+  .table-preview table,
+  .spreadsheet-preview table {
+    border-collapse: collapse;
+    min-width: min(680px, 100%);
+    font-size: 12.5px;
+  }
+  .table-preview th,
+  .table-preview td,
+  .spreadsheet-preview td {
+    border: 1px solid var(--border);
+    padding: 6px 8px;
+    text-align: left;
+    vertical-align: top;
+    white-space: pre-wrap;
+  }
+  .table-preview th {
+    background: color-mix(in oklab, var(--background) 92%, var(--muted));
+    font-weight: 650;
+  }
+  .pdf-shell {
+    position: relative;
+    padding: clamp(10px, 2vw, 20px);
+    height: 100%;
+    overflow: hidden;
+    background: color-mix(in oklab, var(--background) 94%, var(--muted));
+  }
+  .office-preview section,
+  .spreadsheet-preview section {
+    margin: 0 0 18px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
+  }
+  .office-preview section:last-child,
+  .spreadsheet-preview section:last-child {
+    border-bottom: 0;
+  }
+  .legacy-office-html {
+    color: var(--ink);
+  }
+  .legacy-office-html :global(p),
+  .legacy-office-html :global(div) {
+    margin: 0 0 8px;
+  }
+  .legacy-office-html :global(table) {
+    border-collapse: collapse;
+    width: 100%;
+  }
+  .legacy-office-html :global(td),
+  .legacy-office-html :global(th) {
+    border: 1px solid var(--border);
+    padding: 6px 8px;
+    vertical-align: top;
   }
   .editor-shell {
     height: 100%;

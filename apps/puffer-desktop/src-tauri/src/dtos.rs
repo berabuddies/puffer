@@ -15,6 +15,7 @@ pub(crate) struct SessionListItemDto {
     pub updated_at_ms: u64,
     pub created_at_ms: u64,
     pub event_count: usize,
+    pub activity_status: String,
     pub slug: Option<String>,
     pub tags: Vec<String>,
     pub note: Option<String>,
@@ -164,6 +165,8 @@ pub(crate) struct SessionDetailDto {
     pub folder_path: String,
     pub updated_at_ms: u64,
     pub created_at_ms: u64,
+    pub event_count: usize,
+    pub activity_status: String,
     pub slug: Option<String>,
     pub tags: Vec<String>,
     pub note: Option<String>,
@@ -307,4 +310,13 @@ pub(crate) struct ExternalCredentialDto {
     pub kind: String,
     pub description: String,
     pub source_path: String,
+}
+
+/// Describes one remote scratchpad command or file operation result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RemoteOperationDto {
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
 }

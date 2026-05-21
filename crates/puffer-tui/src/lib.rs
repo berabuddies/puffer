@@ -17,6 +17,8 @@ mod status_overlay;
 mod statusline;
 mod task_overlay;
 mod task_panels;
+#[cfg(test)]
+mod test_env;
 mod text_overlay;
 mod usage;
 mod user_question_flow;
@@ -26,8 +28,8 @@ use crate::flow::{
     builtin_openai_base_url, builtin_openai_headers, builtin_openai_query_params,
     cancel_pending_submit, check_loop_interval, emit_system_message, handle_prompt_submit,
     handle_submit, maybe_apply_requested_reload, persist_user_config, poll_pending_submit,
-    run_embedded_auth_login, set_overlay_state, submit_next_queued_prompt,
-    submit_queued_prompt_if_ready, try_open_overlay,
+    run_embedded_auth_login, set_overlay_state, should_defer_while_turn_is_running,
+    submit_next_queued_prompt, submit_queued_prompt_if_ready, try_open_overlay,
 };
 use crate::permission_prompt_flow::handle_permission_prompt_key;
 use crate::render::initialize_top_panel_image_state;
@@ -49,8 +51,8 @@ use crossterm::terminal::{
 };
 use crossterm::ExecutableCommand;
 use puffer_config::ConfigPaths;
-use puffer_core::{command_surface, shutdown_runtime_services, AppState, CommandSpec};
 use puffer_core::ResourceWatcher;
+use puffer_core::{command_surface, shutdown_runtime_services, AppState, CommandSpec, MessageRole};
 use puffer_provider_registry::{AuthStore, ProviderRegistry, StoredCredential};
 use puffer_resources::LoadedResources;
 use puffer_session_store::SessionStore;
@@ -58,7 +60,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use state::TuiState;
 pub(crate) use state::{AuthPickerAction, ModelPickerEntry, OverlayState};
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::time::Duration;
 
@@ -86,6 +88,7 @@ pub fn run_app(
 ) -> Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         if let Some(prompt) = initial_prompt.filter(|prompt| !prompt.trim().is_empty()) {
+            let transcript_start = state.transcript.len();
             handle_submit(
                 state,
                 resources,
@@ -96,6 +99,7 @@ pub fn run_app(
                 prompt,
                 no_alt_screen,
             )?;
+            print_noninteractive_transcript_delta(state, transcript_start)?;
             return Ok(());
         }
         anyhow::bail!("interactive TUI requires stdin and stdout to be terminals");
@@ -415,6 +419,27 @@ fn apply_startup_action(
     Ok(())
 }
 
+fn print_noninteractive_transcript_delta(state: &AppState, transcript_start: usize) -> Result<()> {
+    let mut stdout = io::stdout();
+    let mut wrote = false;
+    for message in state.transcript.iter().skip(transcript_start) {
+        if message.role == MessageRole::User {
+            continue;
+        }
+        let text = message.text.trim_end();
+        if text.is_empty() {
+            continue;
+        }
+        if wrote {
+            writeln!(stdout)?;
+        }
+        writeln!(stdout, "{text}")?;
+        wrote = true;
+    }
+    stdout.flush()?;
+    Ok(())
+}
+
 fn sync_render_state(tui: &TuiState) {
     render::set_active_overlay(tui.overlay.clone());
     render::set_pending_submit_state(
@@ -670,15 +695,19 @@ fn handle_key(
                 return Ok(false);
             }
             let current_input = tui.input.clone();
-            if try_open_overlay(
-                state,
-                resources,
-                providers,
-                auth_store,
-                session_store,
-                tui,
-                &current_input,
-            )? {
+            let defer_current_input =
+                tui.has_pending_submit() && should_defer_while_turn_is_running(&current_input);
+            if !defer_current_input
+                && try_open_overlay(
+                    state,
+                    resources,
+                    providers,
+                    auth_store,
+                    session_store,
+                    tui,
+                    &current_input,
+                )?
+            {
                 return Ok(false);
             }
             let submitted = tui.take_input();
@@ -723,6 +752,32 @@ fn handle_overlay_key(
     tui: &mut TuiState,
     no_alt_screen: bool,
 ) -> Result<bool> {
+    if matches!(
+        tui.overlay.as_ref(),
+        Some(OverlayState::PermissionPrompt { .. } | OverlayState::UserQuestionPrompt { .. })
+    ) && matches!(key.code, KeyCode::Char('c'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && tui.has_pending_submit()
+    {
+        let loop_active = tui.active_loop.is_some();
+        cancel_pending_submit(state, session_store, tui)?;
+        tui.pending_permission_request = None;
+        tui.pending_user_question_request = None;
+        tui.overlay = None;
+        tui.slash_selection = 0;
+        if loop_active {
+            tui.active_loop = None;
+            tui.queued_prompts.clear();
+            tui.status_hint = Some(("Loop stopped.".into(), std::time::Instant::now()));
+        } else {
+            tui.status_hint = Some((
+                "Interrupted. Press Ctrl+C again to exit.".into(),
+                std::time::Instant::now(),
+            ));
+            tui.last_ctrl_c = Some(std::time::Instant::now());
+        }
+        return Ok(false);
+    }
     if matches!(
         tui.overlay.as_ref(),
         Some(OverlayState::PermissionPrompt { .. })
@@ -790,8 +845,9 @@ fn handle_overlay_key(
     if active_overlay.accepts_text_input() {
         match key.code {
             KeyCode::Esc => {
-                let next = onboarding::back_overlay(active_overlay, providers, auth_store)?;
-                set_overlay_state(tui, next);
+                let overlay_snapshot = active_overlay.clone();
+                let next = onboarding::back_overlay(&overlay_snapshot, providers, auth_store)?;
+                set_back_overlay_state(tui, &overlay_snapshot, next);
             }
             KeyCode::Left => {
                 if let Some(overlay) = tui.overlay.as_mut() {
@@ -844,9 +900,11 @@ fn handle_overlay_key(
                     )?;
                     return Ok(false);
                 }
+                let onboarding = active_overlay.is_onboarding();
                 auth_store.set_api_key(provider_id.clone(), key_value);
                 auth_store.save(auth_path)?;
-                let next = onboarding::provider_setup_overlay(providers, auth_store, &provider_id)?;
+                let next =
+                    onboarding::post_auth_overlay(providers, auth_store, &provider_id, onboarding)?;
                 set_overlay_state(tui, next);
                 submit_queued_prompt_if_ready(
                     state,
@@ -883,10 +941,8 @@ fn handle_overlay_key(
     let overlay_snapshot = active_overlay.clone();
     match key.code {
         KeyCode::Esc => {
-            set_overlay_state(
-                tui,
-                onboarding::back_overlay(&overlay_snapshot, providers, auth_store)?,
-            );
+            let next = onboarding::back_overlay(&overlay_snapshot, providers, auth_store)?;
+            set_back_overlay_state(tui, &overlay_snapshot, next);
         }
         KeyCode::Up => {
             if let Some(overlay) = tui.overlay.as_mut() {
@@ -908,7 +964,14 @@ fn handle_overlay_key(
                 overlay.page_down();
             }
         }
+        KeyCode::Left if overlay_snapshot.accepts_filter_input() => tui.move_left(),
+        KeyCode::Right if overlay_snapshot.accepts_filter_input() => tui.move_right(),
+        KeyCode::Home if overlay_snapshot.accepts_filter_input() => tui.move_home(),
+        KeyCode::End if overlay_snapshot.accepts_filter_input() => tui.move_end(),
         KeyCode::Backspace => {
+            if !overlay_snapshot.accepts_filter_input() {
+                return Ok(false);
+            }
             let commands = command_surface(resources);
             tui.backspace(&commands);
             if let Some(overlay) = tui.overlay.as_mut() {
@@ -916,6 +979,9 @@ fn handle_overlay_key(
             }
         }
         KeyCode::Delete => {
+            if !overlay_snapshot.accepts_filter_input() {
+                return Ok(false);
+            }
             let commands = command_surface(resources);
             tui.delete(&commands);
             if let Some(overlay) = tui.overlay.as_mut() {
@@ -923,6 +989,15 @@ fn handle_overlay_key(
             }
         }
         KeyCode::Enter => {
+            if overlay_snapshot.accepts_filter_input()
+                && !overlay_snapshot.selection_matches_query(&tui.input)
+            {
+                tui.status_hint = Some((
+                    "No matching picker item.".to_string(),
+                    std::time::Instant::now(),
+                ));
+                return Ok(false);
+            }
             if matches!(overlay_snapshot, OverlayState::ThemePicker { .. })
                 && onboarding::initial_overlay(state, providers, auth_store)?.is_some()
             {
@@ -955,7 +1030,7 @@ fn handle_overlay_key(
             }
             if let Some(provider_id) = overlay_snapshot.selected_provider().map(str::to_string) {
                 match &overlay_snapshot {
-                    OverlayState::ProviderPicker { .. } | OverlayState::LoginPicker { .. } => {
+                    OverlayState::ProviderPicker { .. } => {
                         apply_selected_provider(state, &provider_id)?;
                         let next = onboarding::provider_setup_overlay(
                             providers,
@@ -964,12 +1039,20 @@ fn handle_overlay_key(
                         )?;
                         set_overlay_state(tui, next);
                     }
+                    OverlayState::LoginPicker { .. } => {
+                        let next =
+                            onboarding::login_auth_overlay(providers, auth_store, &provider_id)?;
+                        set_overlay_state(tui, next);
+                    }
                     OverlayState::AuthPicker { .. } => {
                         let Some(action) = overlay_snapshot.selected_auth_action().cloned() else {
                             set_overlay_state(tui, None);
                             return Ok(false);
                         };
-                        apply_selected_provider(state, &provider_id)?;
+                        let onboarding = overlay_snapshot.is_onboarding();
+                        if onboarding {
+                            apply_selected_provider(state, &provider_id)?;
+                        }
                         match action {
                             AuthPickerAction::OAuth => {
                                 match run_embedded_auth_login(
@@ -979,10 +1062,11 @@ fn handle_overlay_key(
                                     no_alt_screen,
                                 ) {
                                     Ok(message) => {
-                                        let next = onboarding::provider_setup_overlay(
+                                        let next = onboarding::post_auth_overlay(
                                             providers,
                                             auth_store,
                                             &provider_id,
+                                            onboarding,
                                         )?;
                                         set_overlay_state(tui, next);
                                         emit_system_message(state, session_store, message)?;
@@ -1009,7 +1093,7 @@ fn handle_overlay_key(
                                         provider_id,
                                         value: String::new(),
                                         cursor: 0,
-                                        onboarding: overlay_snapshot.is_onboarding(),
+                                        onboarding,
                                     }),
                                 );
                             }
@@ -1064,18 +1148,20 @@ fn handle_overlay_key(
                                     providers.set_openai_query_params(query_params);
                                 }
                                 auth_store.save(auth_path)?;
-                                let next = onboarding::provider_setup_overlay(
+                                let next = onboarding::post_auth_overlay(
                                     providers,
                                     auth_store,
                                     &provider_id,
+                                    onboarding,
                                 )?;
                                 set_overlay_state(tui, next);
                             }
                             AuthPickerAction::UseStored | AuthPickerAction::NoneRequired => {
-                                let next = onboarding::provider_setup_overlay(
+                                let next = onboarding::post_auth_overlay(
                                     providers,
                                     auth_store,
                                     &provider_id,
+                                    onboarding,
                                 )?;
                                 set_overlay_state(tui, next);
                             }
@@ -1163,16 +1249,22 @@ fn handle_overlay_key(
                     _ => {
                         if let Some(command) = overlay_snapshot.selected_command() {
                             set_overlay_state(tui, None);
-                            handle_submit(
-                                state,
-                                resources,
-                                providers,
-                                auth_store,
-                                auth_path,
-                                session_store,
-                                command,
-                                no_alt_screen,
-                            )?;
+                            if tui.has_pending_submit()
+                                && should_defer_while_turn_is_running(&command)
+                            {
+                                tui.enqueue_prompt(command);
+                            } else {
+                                handle_submit(
+                                    state,
+                                    resources,
+                                    providers,
+                                    auth_store,
+                                    auth_path,
+                                    session_store,
+                                    command,
+                                    no_alt_screen,
+                                )?;
+                            }
                         } else {
                             set_overlay_state(tui, None);
                         }
@@ -1207,16 +1299,20 @@ fn handle_overlay_key(
                     return Ok(false);
                 }
                 set_overlay_state(tui, None);
-                handle_submit(
-                    state,
-                    resources,
-                    providers,
-                    auth_store,
-                    auth_path,
-                    session_store,
-                    command,
-                    no_alt_screen,
-                )?;
+                if tui.has_pending_submit() && should_defer_while_turn_is_running(&command) {
+                    tui.enqueue_prompt(command);
+                } else {
+                    handle_submit(
+                        state,
+                        resources,
+                        providers,
+                        auth_store,
+                        auth_path,
+                        session_store,
+                        command,
+                        no_alt_screen,
+                    )?;
+                }
             } else {
                 set_overlay_state(tui, None);
             }
@@ -1286,6 +1382,12 @@ fn handle_overlay_key(
                 )?;
             }
         }
+        KeyCode::Char('r' | 'R') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(OverlayState::Usage(overlay)) = tui.overlay.as_ref() {
+                overlay.retry();
+                return Ok(false);
+            }
+        }
         KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             // Vim-style keys for text overlays (j/k/g/G/H/L).
             if let Some(overlay) = tui.overlay.as_mut() {
@@ -1321,6 +1423,13 @@ fn handle_overlay_key(
                 tui.insert_char(ch, &commands);
                 return Ok(false);
             }
+            if tui
+                .overlay
+                .as_ref()
+                .is_some_and(|overlay| !overlay.accepts_filter_input())
+            {
+                return Ok(false);
+            }
             let commands = command_surface(resources);
             tui.insert_char(ch, &commands);
             if let Some(overlay) = tui.overlay.as_mut() {
@@ -1331,5 +1440,17 @@ fn handle_overlay_key(
     }
     Ok(false)
 }
+
+fn set_back_overlay_state(
+    tui: &mut TuiState,
+    active_overlay: &OverlayState,
+    next: Option<OverlayState>,
+) {
+    if active_overlay.is_onboarding() && next.is_none() {
+        tui.defer_prompt(None);
+    }
+    set_overlay_state(tui, next);
+}
+
 #[cfg(test)]
 mod tests;

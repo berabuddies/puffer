@@ -115,7 +115,7 @@ pub enum ConversationItem {
         output: ToolOutputPayload,
     },
     /// Assistant reasoning chain returned by the Responses API when `include`
-    /// contains `reasoning.encrypted_content`, or by the Anthropic Messages
+    /// contains `reasoning.encryptedcontent`, or by the Anthropic Messages
     /// API as a `thinking` / `redacted_thinking` content block. Aligned
     /// with Codex `ResponseItem::Reasoning`. Carrying this across turns
     /// lets the model resume its prior thought process instead of
@@ -130,7 +130,7 @@ pub enum ConversationItem {
         /// regular `thinking` blocks, OR the `data` payload for
         /// `redacted_thinking` blocks (depending on `redacted`). On the
         /// OpenAI Responses path this is the `encrypted_content` field
-        /// surfaced via `include: ["reasoning.encrypted_content"]`.
+        /// surfaced via `include: ["reasoning.encryptedcontent"]`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         encrypted_content: Option<String>,
         /// Pi-mono parity: when true, the upstream returned this as a

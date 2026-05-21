@@ -28,7 +28,8 @@ use super::conversation::{
     items_to_responses_input, managed_system_prompt_1_from_env, ConversationItem,
 };
 use super::support::{
-    apply_previous_response_id, build_codex_openai_request_body, openai_responses_path,
+    apply_previous_response_id, build_codex_openai_request_body,
+    is_openai_include_validation_error, openai_responses_path,
 };
 use super::support::{openai_model_supports_reasoning, openai_supports_response_threading};
 use super::{
@@ -74,6 +75,21 @@ pub(super) struct OpenAIResponsesTurnSession {
     pub continuation_start: Option<usize>,
 }
 
+fn request_builder_from_body(
+    body_value: Value,
+) -> impl Fn(&OpenAIRequestConfig) -> Result<puffer_provider_openai::BuiltOpenAIRequest> {
+    let body_str = body_value.to_string();
+    move |request_config: &OpenAIRequestConfig| {
+        let body: Value = serde_json::from_str(&body_str)
+            .map_err(|e| anyhow::anyhow!("body re-parse failed: {e}"))?;
+        build_json_post_request(
+            request_config,
+            openai_responses_path(&request_config.base_url),
+            &body,
+        )
+    }
+}
+
 impl OpenAIResponsesTurnSession {
     /// Slices the transcript to whatever the API still needs to see.
     fn build_wire_input(&self, items: &[ConversationItem]) -> Value {
@@ -92,13 +108,24 @@ impl OpenAIResponsesTurnSession {
     /// Constructs the JSON request body for one turn (streaming flag
     /// flips the `stream: true` field plus internal SSE expectations).
     fn build_request_body(&self, wire_input: Value, state: &AppState, stream: bool) -> Value {
+        self.build_request_body_with_reasoning(wire_input, state, stream, self.supports_reasoning)
+    }
+
+    fn build_request_body_with_reasoning(
+        &self,
+        wire_input: Value,
+        state: &AppState,
+        stream: bool,
+        supports_reasoning: bool,
+    ) -> Value {
         let mut body = build_codex_openai_request_body(
             state,
+            &self.execution.request_config.base_url,
             &self.model_id,
             &self.instructions,
             wire_input,
             &self.tools,
-            self.supports_reasoning,
+            supports_reasoning,
             self.text.clone(),
             stream,
         );
@@ -144,24 +171,35 @@ impl TurnSession for OpenAIResponsesTurnSession {
         // Pre-render the body so the per-attempt closure stays cheap
         // and avoids re-borrowing `state` mutably from inside a nested
         // closure (which the borrow checker rejects).
-        let body_value = self.build_request_body(wire_input, state, true);
-        let body_str = body_value.to_string();
-        let body_for_each_attempt = move |request_config: &OpenAIRequestConfig| {
-            let body: Value = serde_json::from_str(&body_str)
-                .map_err(|e| anyhow::anyhow!("body re-parse failed: {e}"))?;
-            build_json_post_request(
-                request_config,
-                openai_responses_path(&request_config.base_url),
-                &body,
-            )
-        };
+        let primary_body = self.build_request_body(wire_input.clone(), state, true);
         let mut sized = |event: TurnStreamEvent| on_event(event);
         let response = send_openai_request_with_refresh_streaming(
             auth_store,
             &mut self.execution,
-            body_for_each_attempt,
+            request_builder_from_body(primary_body),
             &mut sized,
-        )?;
+        )
+        .or_else(|error| {
+            if !self.supports_reasoning || !is_openai_include_validation_error(&error) {
+                return Err(error);
+            }
+            self.supports_reasoning = false;
+            sized(TurnStreamEvent::RetryAttempt {
+                attempt: 1,
+                max_attempts: 2,
+                error:
+                    "OpenAI rejected the reasoning include selector; retrying without reasoning."
+                        .to_string(),
+            });
+            let fallback_body =
+                self.build_request_body_with_reasoning(wire_input, state, true, false);
+            send_openai_request_with_refresh_streaming(
+                auth_store,
+                &mut self.execution,
+                request_builder_from_body(fallback_body),
+                &mut sized,
+            )
+        })?;
 
         // Update threading state.
         if self.supports_response_threading {
@@ -261,22 +299,25 @@ impl TurnSession for OpenAIResponsesTurnSession {
         let items_len_at_request = items.len();
         let wire_input = self.build_wire_input(items);
 
-        let body_value = self.build_request_body(wire_input, state, false);
-        let body_str = body_value.to_string();
-        let body_for_each_attempt = move |request_config: &OpenAIRequestConfig| {
-            let body: Value = serde_json::from_str(&body_str)
-                .map_err(|e| anyhow::anyhow!("body re-parse failed: {e}"))?;
-            build_json_post_request(
-                request_config,
-                openai_responses_path(&request_config.base_url),
-                &body,
-            )
-        };
+        let primary_body = self.build_request_body(wire_input.clone(), state, false);
         let response_value = send_openai_request_with_refresh(
             auth_store,
             &mut self.execution,
-            body_for_each_attempt,
-        )?;
+            request_builder_from_body(primary_body),
+        )
+        .or_else(|error| {
+            if !self.supports_reasoning || !is_openai_include_validation_error(&error) {
+                return Err(error);
+            }
+            self.supports_reasoning = false;
+            let fallback_body =
+                self.build_request_body_with_reasoning(wire_input, state, false, false);
+            send_openai_request_with_refresh(
+                auth_store,
+                &mut self.execution,
+                request_builder_from_body(fallback_body),
+            )
+        })?;
 
         // Typed parsing (re-uses paths from the legacy non-streaming code).
         let input_tokens = response_value

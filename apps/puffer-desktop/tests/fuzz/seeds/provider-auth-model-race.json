@@ -1,0 +1,167 @@
+{
+  "id": "provider-auth-model-race",
+  "title": "Provider auth, model list, and default route races",
+  "focus": "Credential import/refresh/logout, provider alias canonicalization, model list load, and active session model preservation.",
+  "severityTarget": "P1 wrong provider/model for a turn, impossible recovery from logged-out state, or stale credential result corrupting selected session.",
+  "primaryRoutes": ["settings-providers", "new-agent-modal", "agent-detail"],
+  "defaultIterations": 10,
+  "defaultSteps": 16,
+  "setup": [
+    {
+      "id": "setup-open-settings-providers",
+      "action": "open-settings-providers",
+      "kind": "ui",
+      "target": "settings-providers",
+      "produces": ["resource:auth.codex", "resource:auth.anthropic"],
+      "coverage": ["route:settings-providers", "state:daemon.connected", "state:auth.multi-provider"]
+    }
+  ],
+  "actions": [
+    {
+      "id": "import-credential",
+      "kind": "ui",
+      "target": "settings.provider-import",
+      "weight": 8,
+      "params": { "provider": { "oneOf": ["codex", "anthropic"] } },
+      "maxPerCase": 2,
+      "blocks": ["resource:new-agent.modal-open", "state:auth.none"],
+      "expectedDaemon": "import_external_credential",
+      "coverage": ["control:settings.provider-import", "state:auth.refreshing", "state:settings.saving", "async:duplicate-submit"]
+    },
+    {
+      "id": "refresh-credential",
+      "kind": "ui",
+      "target": "settings.provider-refresh",
+      "weight": 8,
+      "params": { "provider": { "oneOf": ["codex"] } },
+      "maxPerCase": 2,
+      "blocks": ["resource:new-agent.modal-open", "state:auth.none"],
+      "expectedDaemon": "login_with_oauth",
+      "coverage": ["control:settings.provider-refresh", "state:auth.refreshing", "async:late-failure"]
+    },
+    {
+      "id": "save-default-model-codex",
+      "kind": "ui",
+      "target": "settings.default-model-save",
+      "weight": 7,
+      "requires": ["resource:auth.codex"],
+      "params": { "provider": "codex", "model": { "oneOf": ["test-model", "gpt-5.5", "claude-sonnet-4-5"] } },
+      "maxPerCase": 2,
+      "blocks": ["resource:new-agent.modal-open", "state:auth.none"],
+      "expectedDaemon": "update_config",
+      "coverage": ["control:settings.default-model-save", "state:settings.saving", "async:late-success"]
+    },
+    {
+      "id": "save-default-model-anthropic",
+      "kind": "ui",
+      "target": "settings.default-model-save",
+      "weight": 7,
+      "requires": ["resource:auth.anthropic"],
+      "params": { "provider": "anthropic", "model": { "oneOf": ["test-model", "gpt-5.5", "claude-sonnet-4-5"] } },
+      "maxPerCase": 2,
+      "blocks": ["resource:new-agent.modal-open", "state:auth.none"],
+      "expectedDaemon": "update_config",
+      "coverage": ["control:settings.default-model-save", "state:settings.saving", "async:late-success"]
+    },
+    {
+      "id": "open-new-agent",
+      "kind": "ui",
+      "target": "new-agent-modal",
+      "weight": 7,
+      "blocks": ["resource:new-agent.modal-open", "state:auth.none"],
+      "produces": ["resource:new-agent.modal-open"],
+      "coverage": ["route:new-agent-modal", "control:new-agent.provider"]
+    },
+    {
+      "id": "switch-new-agent-provider-codex",
+      "kind": "ui",
+      "target": "new-agent.provider",
+      "weight": 8,
+      "requires": ["resource:new-agent.modal-open"],
+      "params": { "provider": "codex" },
+      "produces": ["resource:new-agent.provider-selected"],
+      "coverage": ["control:new-agent.provider", "async:late-success"]
+    },
+    {
+      "id": "switch-new-agent-provider-anthropic",
+      "kind": "ui",
+      "target": "new-agent.provider",
+      "weight": 8,
+      "requires": ["resource:new-agent.modal-open", "resource:auth.anthropic"],
+      "params": { "provider": "anthropic" },
+      "produces": ["resource:new-agent.provider-selected"],
+      "coverage": ["control:new-agent.provider", "async:late-success"]
+    },
+    {
+      "id": "submit-new-agent",
+      "kind": "ui",
+      "target": "new-agent.submit",
+      "weight": 6,
+      "requires": ["resource:new-agent.modal-open"],
+      "blocks": ["resource:create-session.pending"],
+      "consumes": ["resource:new-agent.modal-open", "resource:new-agent.provider-selected"],
+      "produces": ["resource:create-session.pending"],
+      "expectedDaemon": "create_session",
+      "coverage": ["control:new-agent.submit", "async:duplicate-submit", "state:session.loading"]
+    },
+    {
+      "id": "emit-auth-list-refresh",
+      "kind": "daemon",
+      "target": "load_settings_snapshot",
+      "weight": 7,
+      "params": { "authState": { "oneOf": ["multi-provider"] } },
+      "maxPerCase": 2,
+      "blocks": ["resource:new-agent.modal-open"],
+      "invalidates": ["state:auth.none", "state:auth.one-provider"],
+      "produces": ["resource:auth.codex", "resource:auth.anthropic"],
+      "coverage": ["state:auth.multi-provider", "async:server-push-update"]
+    },
+    {
+      "id": "emit-auth-one-provider-refresh",
+      "kind": "daemon",
+      "target": "load_settings_snapshot",
+      "weight": 5,
+      "params": { "authState": "one-provider" },
+      "maxPerCase": 1,
+      "blocks": ["resource:new-agent.modal-open"],
+      "invalidates": ["state:auth.none", "state:auth.multi-provider", "resource:auth.anthropic"],
+      "produces": ["resource:auth.codex"],
+      "coverage": ["state:auth.one-provider", "async:server-push-update"]
+    },
+    {
+      "id": "emit-auth-none-refresh",
+      "kind": "daemon",
+      "target": "load_settings_snapshot",
+      "weight": 4,
+      "params": { "authState": "none" },
+      "maxPerCase": 1,
+      "blocks": ["resource:new-agent.modal-open"],
+      "invalidates": ["state:auth.one-provider", "state:auth.multi-provider", "state:auth.refreshing", "resource:auth.codex", "resource:auth.anthropic"],
+      "coverage": ["state:auth.none", "async:server-push-update"]
+    },
+    {
+      "id": "delayed-model-list",
+      "kind": "daemon",
+      "target": "provider_models",
+      "weight": 7,
+      "maxPerCase": 2,
+      "coverage": ["async:late-success", "async:delayed-list-refresh"]
+    },
+    {
+      "id": "disconnect-reconnect",
+      "kind": "daemon",
+      "target": "websocket",
+      "weight": 5,
+      "maxPerCase": 1,
+      "coverage": ["state:daemon.reconnecting", "async:reconnect"]
+    }
+  ],
+  "invariants": [
+    "app-no-crash",
+    "no-cross-provider-model",
+    "one-request-per-intent",
+    "draft-preserved-on-failure",
+    "controls-disabled-while-pending",
+    "no-permanent-loading"
+  ]
+}

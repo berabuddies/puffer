@@ -1,22 +1,54 @@
 mod backend;
 mod browser;
 mod codex_app_server;
+mod daemon_launcher;
 mod dtos;
 mod events;
 mod files;
 mod fs_watch;
 mod lsp;
 mod pty;
+mod remote_client;
 mod repo_actions;
 mod websocket;
 
 use backend::BackendState;
+use daemon_launcher::DaemonLauncher;
 use events::EventEmitter;
+use serde::Serialize;
 use serde_json::{json, Value};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{AppHandle, Builder, State};
 
 type SharedBackend = Arc<BackendState>;
+type SharedDaemonLauncher = Arc<DaemonLauncher>;
+
+#[cfg(test)]
+const REGISTERED_TAURI_COMMANDS: &[&str] = &[
+    "backend_request",
+    "list_grouped_sessions",
+    "load_session_detail",
+    "refresh_repo_status",
+    "create_pull_request",
+    "merge_pull_request",
+    "load_settings_snapshot",
+    "login_with_oauth",
+    "login_with_api_key",
+    "logout_provider",
+    "list_external_credentials",
+    "import_external_credential",
+    "run_remote_bash",
+    "read_remote_file",
+    "write_remote_file",
+    "ensure_local_daemon",
+    "restart_local_daemon",
+    "start_ssh_daemon",
+    "run_agent_turn",
+    "resolve_permission",
+    "resolve_user_question",
+    "cancel_turn",
+];
 
 fn backend_call(
     app: AppHandle,
@@ -27,6 +59,18 @@ fn backend_call(
     state
         .handle(EventEmitter::new(app), method, params)
         .map_err(|error| error.to_string())
+}
+
+fn json_value<T: Serialize>(value: T) -> Result<Value, String> {
+    serde_json::to_value(value).map_err(|error| error.to_string())
+}
+
+fn required_remote_target(remote_target: String) -> Result<String, String> {
+    let trimmed = remote_target.trim();
+    if trimmed.is_empty() {
+        return Err("remote target is required".to_string());
+    }
+    Ok(trimmed.to_string())
 }
 
 #[tauri::command]
@@ -184,35 +228,96 @@ fn import_external_credential(
 
 #[tauri::command]
 fn run_remote_bash(
-    app: AppHandle,
-    state: State<'_, SharedBackend>,
+    remote_target: String,
+    remote_cwd: Option<String>,
+    remote_password: Option<String>,
     command: String,
 ) -> Result<Value, String> {
-    backend_call(app, state, "run_remote_bash", json!({ "command": command }))
+    let target = required_remote_target(remote_target)?;
+    json_value(
+        remote_client::run_remote_shell(
+            &target,
+            remote_cwd.as_deref(),
+            remote_password.as_deref(),
+            &command,
+        )
+        .map_err(|error| error.to_string())?,
+    )
 }
 
 #[tauri::command]
 fn read_remote_file(
-    app: AppHandle,
-    state: State<'_, SharedBackend>,
+    remote_target: String,
+    remote_cwd: Option<String>,
+    remote_password: Option<String>,
     path: String,
 ) -> Result<Value, String> {
-    backend_call(app, state, "read_remote_file", json!({ "path": path }))
+    let target = required_remote_target(remote_target)?;
+    json_value(
+        remote_client::read_remote_file(
+            &target,
+            remote_cwd.as_deref(),
+            remote_password.as_deref(),
+            &path,
+        )
+        .map_err(|error| error.to_string())?,
+    )
 }
 
 #[tauri::command]
 fn write_remote_file(
-    app: AppHandle,
-    state: State<'_, SharedBackend>,
+    remote_target: String,
+    remote_cwd: Option<String>,
+    remote_password: Option<String>,
     path: String,
     contents_base64: String,
 ) -> Result<Value, String> {
-    backend_call(
-        app,
-        state,
-        "write_remote_file",
-        json!({ "path": path, "contentsBase64": contents_base64 }),
+    let target = required_remote_target(remote_target)?;
+    json_value(
+        remote_client::write_remote_file(
+            &target,
+            remote_cwd.as_deref(),
+            remote_password.as_deref(),
+            &path,
+            &contents_base64,
+        )
+        .map_err(|error| error.to_string())?,
     )
+}
+
+#[tauri::command]
+fn ensure_local_daemon(
+    launcher: State<'_, SharedDaemonLauncher>,
+) -> Result<daemon_launcher::DaemonHandshake, String> {
+    launcher
+        .ensure_started()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn restart_local_daemon(
+    launcher: State<'_, SharedDaemonLauncher>,
+    cwd: String,
+) -> Result<daemon_launcher::DaemonHandshake, String> {
+    launcher
+        .restart_local(PathBuf::from(cwd))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn start_ssh_daemon(
+    launcher: State<'_, SharedDaemonLauncher>,
+    ssh_target: String,
+    remote_binary: Option<String>,
+    remote_workspace: Option<String>,
+) -> Result<daemon_launcher::DaemonHandshake, String> {
+    launcher
+        .start_ssh(
+            &ssh_target,
+            remote_binary.as_deref(),
+            remote_workspace.as_deref(),
+        )
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -276,11 +381,13 @@ fn cancel_turn(
 
 pub fn run() {
     let backend = Arc::new(BackendState::new());
+    let launcher = Arc::new(DaemonLauncher::new());
     websocket::start_backend_ws(backend.clone());
 
     Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(backend)
+        .manage(launcher)
         .invoke_handler(tauri::generate_handler![
             backend_request,
             list_grouped_sessions,
@@ -297,6 +404,9 @@ pub fn run() {
             run_remote_bash,
             read_remote_file,
             write_remote_file,
+            ensure_local_daemon,
+            restart_local_daemon,
+            start_ssh_daemon,
             run_agent_turn,
             resolve_permission,
             resolve_user_question,
@@ -304,4 +414,71 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Corbina desktop");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::REGISTERED_TAURI_COMMANDS;
+    use std::collections::BTreeSet;
+
+    fn direct_invoke_commands(source: &str) -> BTreeSet<String> {
+        let mut commands = BTreeSet::new();
+        let mut offset = 0;
+        while let Some(found) = source[offset..].find("invoke") {
+            let invoke_at = offset + found;
+            let Some(open_paren_at) = source[invoke_at..].find('(').map(|idx| invoke_at + idx)
+            else {
+                break;
+            };
+            let mut cursor = open_paren_at + 1;
+            while let Some(ch) = source[cursor..].chars().next() {
+                if !ch.is_whitespace() {
+                    break;
+                }
+                cursor += ch.len_utf8();
+            }
+            let Some(quote) = source[cursor..].chars().next() else {
+                break;
+            };
+            if quote == '"' || quote == '\'' {
+                cursor += quote.len_utf8();
+                if let Some(end) = source[cursor..].find(quote) {
+                    commands.insert(source[cursor..cursor + end].to_string());
+                    offset = cursor + end + quote.len_utf8();
+                    continue;
+                }
+            }
+            offset = open_paren_at + 1;
+        }
+        commands
+    }
+
+    #[test]
+    fn direct_frontend_invokes_have_registered_tauri_commands() {
+        let mut invoked = direct_invoke_commands(include_str!("../../src/lib/api/desktop.ts"));
+        invoked.extend(direct_invoke_commands(include_str!(
+            "../../src/lib/api/daemonClient.ts"
+        )));
+        let registered = REGISTERED_TAURI_COMMANDS
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let missing = invoked
+            .iter()
+            .filter(|command| !registered.contains(command.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(
+            missing.is_empty(),
+            "frontend invokes missing Tauri command registration: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn remote_scratchpad_rejects_empty_target() {
+        assert_eq!(
+            super::required_remote_target("  ".to_string()).unwrap_err(),
+            "remote target is required"
+        );
+    }
 }

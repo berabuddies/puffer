@@ -1,13 +1,14 @@
 use puffer_test_support::{
-    capture_tmux_visible_pane, send_tmux_keys, start_tmux_command, start_tmux_command_with_size,
-    temp_workspace, tmux_available, wait_for_tmux_text, TerminalSize,
+    capture_tmux_visible_pane, require_tmux_or_skip, send_tmux_keys, start_tmux_command,
+    start_tmux_command_with_size, temp_workspace, wait_for_tmux_text, wait_for_tmux_visible_text,
+    TerminalSize,
 };
 use std::fs;
 use std::time::Duration;
 
 #[test]
 fn tmux_smoke_renders_help_output() {
-    if !tmux_available() {
+    if !require_tmux_or_skip("tmux_smoke_renders_help_output") {
         return;
     }
 
@@ -60,7 +61,16 @@ tmux_golden_mode = true
     )
     .unwrap();
     wait_for_tmux_text(&session, "Puffer Code", Duration::from_secs(15)).unwrap();
-    send_tmux_keys(&session, &["/help", "Enter"]).unwrap();
+    send_tmux_keys(&session, &["/he"]).unwrap();
+    wait_for_tmux_visible_text(
+        &session,
+        "Show help and available commands",
+        Duration::from_secs(15),
+    )
+    .unwrap();
+    send_tmux_keys(&session, &["Enter"]).unwrap();
+    wait_for_tmux_visible_text(&session, "\u{276f} /help", Duration::from_secs(15)).unwrap();
+    send_tmux_keys(&session, &["Enter"]).unwrap();
     let capture =
         wait_for_tmux_text(&session, "Supported commands", Duration::from_secs(15)).unwrap();
     assert!(capture.contains("Supported commands"));
@@ -68,7 +78,7 @@ tmux_golden_mode = true
 
 #[test]
 fn tmux_no_alt_screen_clears_previous_terminal_contents() {
-    if !tmux_available() {
+    if !require_tmux_or_skip("tmux_no_alt_screen_clears_previous_terminal_contents") {
         return;
     }
 

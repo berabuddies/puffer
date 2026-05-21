@@ -1,10 +1,11 @@
 <script lang="ts">
   import "../../design/workspace.css";
 
+  import { readFile, writeFile } from "../../api/desktop";
   import Icon from "../../design/Icon.svelte";
-  import Puffer from "../../design/Puffer.svelte";
   import { sessionDisplayName, sessionDisplayTitle } from "../../sessionDisplay";
-  import type { AgentStatus, MockAgent } from "../../data/mockProjects";
+  import type { MockAgent } from "../../data/mockProjects";
+  import type { ReadFileResult } from "../../api/desktop";
   import type { FolderGroup, SessionListItem } from "../../types";
 
   type BoardColumn = {
@@ -36,6 +37,15 @@
   let { group, pinnedAgentIds = [], onBack, onOpenAgent, onNewAgent }: Props = $props();
   let tab = $state<"board" | "memory">("board");
   let selectedMemoryId = $state<string | null>(null);
+  let memoryContent = $state<string | null>(null);
+  let memoryError = $state<string | null>(null);
+  let memoryLoading = $state(false);
+  let memoryEditing = $state(false);
+  let memoryDraft = $state("");
+  let memorySaving = $state(false);
+  let memoryLoadedPath = $state<string | null>(null);
+  let memoryLoadKey = "";
+  let memoryLoadGeneration = 0;
 
   function formatAge(updatedAtMs: number): string {
     const delta = Date.now() - updatedAtMs;
@@ -48,11 +58,6 @@
     return `${days}d`;
   }
 
-  function agentStatus(session: SessionListItem): AgentStatus {
-    if (session.eventCount === 0) return "idle";
-    return "idle";
-  }
-
   function agentFromSession(session: SessionListItem): MockAgent {
     const title = sessionDisplayTitle(session);
     return {
@@ -62,7 +67,7 @@
       title,
       worktree: "",
       branch: "",
-      status: agentStatus(session),
+      status: session.activityStatus,
       progress: 0,
       step: session.note ?? (session.eventCount > 0 ? `${session.eventCount} transcript events` : "Ready to start"),
       tools: session.eventCount,
@@ -116,11 +121,11 @@
       kind: "project",
       tags: ["project", "workspace"]
     },
-    ...sortedSessions.slice(0, 5).map((session, index) => ({
+    ...sortedSessions.map((session, index) => ({
       id: session.id,
       name: `session-${index + 1}.md`,
       path: `${group.path}/.puffer/memory/sessions/session-${index + 1}.md`,
-      title: sessionDisplayTitle(session),
+      title: sessionDisplayTitle(session) || sessionDisplayName(session),
       body: `${sessionDisplayName(session)} last updated ${formatAge(session.updatedAtMs)} ago.\n\n${session.note ?? "No pinned session note yet."}`,
       updated: formatAge(session.updatedAtMs),
       kind: "session" as const,
@@ -130,6 +135,98 @@
   let selectedMemory = $derived(
     memoryFiles.find((file) => file.id === selectedMemoryId) ?? memoryFiles[0] ?? null
   );
+  let memoryDisplayBody = $derived(memoryContent ?? selectedMemory?.body ?? "");
+  let canEditMemory = $derived(
+    Boolean(
+      selectedMemory
+        && memoryContent !== null
+        && memoryLoadedPath === selectedMemory.path
+        && !memoryLoading
+        && !memorySaving
+        && !memoryError
+    )
+  );
+
+  function errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  function applyLoadedMemory(file: MemoryFile, result: ReadFileResult): void {
+    if (result.encoding !== "utf8") {
+      memoryContent = null;
+      memoryLoadedPath = null;
+      memoryError = "This memory file is binary, so it cannot be edited here.";
+      return;
+    }
+    memoryContent = result.content;
+    memoryLoadedPath = file.path;
+    memoryError = null;
+  }
+
+  async function loadMemoryFile(file: MemoryFile | null): Promise<void> {
+    const generation = ++memoryLoadGeneration;
+    memoryEditing = false;
+    memoryDraft = "";
+    memoryContent = null;
+    memoryLoadedPath = null;
+    memoryError = null;
+    if (!file) {
+      memoryLoading = false;
+      return;
+    }
+    memoryLoading = true;
+    try {
+      const result = await readFile(file.path);
+      if (generation !== memoryLoadGeneration) return;
+      applyLoadedMemory(file, result);
+    } catch (error) {
+      if (generation !== memoryLoadGeneration) return;
+      memoryContent = null;
+      memoryLoadedPath = null;
+      memoryError = `Showing generated preview because ${errorMessage(error)}`;
+    } finally {
+      if (generation === memoryLoadGeneration) memoryLoading = false;
+    }
+  }
+
+  function startMemoryEdit(): void {
+    if (!canEditMemory || !selectedMemory) return;
+    memoryDraft = memoryContent ?? selectedMemory.body;
+    memoryEditing = true;
+  }
+
+  function cancelMemoryEdit(): void {
+    memoryDraft = "";
+    memoryEditing = false;
+  }
+
+  async function saveMemoryEdit(): Promise<void> {
+    const file = selectedMemory;
+    if (!file || memorySaving) return;
+    const generation = ++memoryLoadGeneration;
+    memorySaving = true;
+    memoryError = null;
+    try {
+      const result = await writeFile(file.path, memoryDraft);
+      if (generation !== memoryLoadGeneration || selectedMemory?.path !== file.path) return;
+      applyLoadedMemory(file, result);
+      memoryEditing = false;
+      memoryDraft = "";
+    } catch (error) {
+      if (generation !== memoryLoadGeneration) return;
+      memoryError = `Could not save memory file: ${errorMessage(error)}`;
+    } finally {
+      if (generation === memoryLoadGeneration) memorySaving = false;
+    }
+  }
+
+  $effect(() => {
+    const file = selectedMemory;
+    const key = file ? `${file.id}:${file.path}` : "";
+    if (key === memoryLoadKey) return;
+    memoryLoadKey = key;
+    void loadMemoryFile(file);
+  });
 </script>
 
 <div class="pf-fpb">
@@ -140,8 +237,6 @@
     <div class="pf-fpb-title">
       <div class="name">
         <span>{group.label}</span>
-        <span class="sep">/</span>
-        <span class="label">Details</span>
       </div>
       <div class="meta">
         <span class="mono">{group.path}</span>
@@ -193,7 +288,7 @@
                 onclick={() => onOpenAgent?.(agent.id)}
               >
                 <div class="row">
-                  <Puffer size={15} state={agent.status === "running" ? "running" : "idle"} />
+                  <Icon name="bot" size={15} />
                   <span class="agent-name">{agent.name}</span>
                   <span class="elapsed">{agent.elapsed}</span>
                 </div>
@@ -236,9 +331,42 @@
           <div class="pf-pmem-detail-head">
             <span class="pf-pmem-kind" data-kind={selectedMemory.kind}>{selectedMemory.kind}</span>
             <span class="path">{selectedMemory.path}</span>
-            <button type="button" class="sc-btn" data-variant="ghost" data-size="sm">
-              <Icon name="edit" size={12} />Edit
-            </button>
+            <div class="pf-pmem-actions">
+              {#if memoryEditing}
+                <button
+                  type="button"
+                  class="sc-btn"
+                  data-variant="ghost"
+                  data-size="sm"
+                  disabled={memorySaving}
+                  onclick={cancelMemoryEdit}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  class="sc-btn"
+                  data-variant="default"
+                  data-size="sm"
+                  disabled={memorySaving}
+                  onclick={saveMemoryEdit}
+                >
+                  <Icon name="check" size={12} />{memorySaving ? "Saving" : "Save"}
+                </button>
+              {:else}
+                <button
+                  type="button"
+                  class="sc-btn"
+                  data-variant="ghost"
+                  data-size="sm"
+                  disabled={!canEditMemory}
+                  title={canEditMemory ? "Edit memory file" : "Memory file is not editable yet"}
+                  onclick={startMemoryEdit}
+                >
+                  <Icon name="edit" size={12} />Edit
+                </button>
+              {/if}
+            </div>
           </div>
           <div class="pf-pmem-detail-body">
             <h2 class="pf-pmem-title">{selectedMemory.title}</h2>
@@ -247,11 +375,29 @@
               <span class="sep">·</span>
               <span>updated {selectedMemory.updated} ago</span>
             </div>
-            <div class="pf-pmem-body">
-              {#each selectedMemory.body.split("\n\n") as paragraph}
-                <p>{paragraph}</p>
-              {/each}
-            </div>
+            {#if memoryError}
+              <div class="pf-pmem-status" data-kind="error">{memoryError}</div>
+            {:else if memoryLoading}
+              <div class="pf-pmem-status">Loading memory file…</div>
+            {/if}
+            {#if memoryEditing}
+              <textarea
+                class="pf-pmem-editor"
+                aria-label="Memory file content"
+                bind:value={memoryDraft}
+                disabled={memorySaving}
+              ></textarea>
+            {:else}
+              <div class="pf-pmem-body">
+                {#if memoryDisplayBody.trim()}
+                  {#each memoryDisplayBody.split("\n\n") as paragraph}
+                    <p>{paragraph}</p>
+                  {/each}
+                {:else}
+                  <p class="muted">This memory file is empty.</p>
+                {/if}
+              </div>
+            {/if}
             <div class="pf-pmem-tags">
               {#each selectedMemory.tags as tag}
                 <span class="pf-pmem-tag">#{tag}</span>

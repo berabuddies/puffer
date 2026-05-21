@@ -1,0 +1,230 @@
+{
+  "id": "chat-turn-race",
+  "title": "Chat turn lifecycle and session switch races",
+  "focus": "Composer, send, stop, pending permission/question, late transcript reload, and active session switches.",
+  "severityTarget": "P1 blocked send/stop, lost draft, duplicate turn, stale live output, or permission/question response routed to the wrong session.",
+  "primaryRoutes": ["agent-detail", "chat-composer"],
+  "defaultIterations": 12,
+  "defaultSteps": 18,
+  "setup": [
+    {
+      "id": "setup-open-agent",
+      "action": "open-agent-detail",
+      "kind": "ui",
+      "target": "workspace.agent-card",
+      "coverage": ["route:workspace", "route:agent-detail", "control:workspace.agent-card", "state:daemon.connected", "state:session.idle"]
+    }
+  ],
+  "actions": [
+    {
+      "id": "type-composer",
+      "kind": "keyboard",
+      "target": "chat.composer",
+      "weight": 9,
+      "params": { "text": { "oneOf": ["summarize this repo", "open google.com", "run tests", "what changed?"] } },
+      "blocks": ["resource:permission.pending", "resource:question.pending"],
+      "produces": ["resource:chat.draft"],
+      "coverage": ["route:chat-composer", "control:chat.composer"]
+    },
+    {
+      "id": "send-prompt",
+      "kind": "ui",
+      "target": "chat.send",
+      "weight": 10,
+      "maxPerCase": 1,
+      "requires": ["resource:chat.draft"],
+      "blocks": [
+        "resource:permission.pending",
+        "resource:question.pending",
+        "resource:turn.running",
+        "resource:turn.canceling",
+        "state:session.running",
+        "state:session.awaiting-permission",
+        "state:session.awaiting-question"
+      ],
+      "expectedDaemon": "run_agent_turn",
+      "consumes": ["resource:chat.draft"],
+      "produces": ["resource:turn.running"],
+      "coverage": ["control:chat.send", "state:session.running", "async:duplicate-submit"]
+    },
+    {
+      "id": "rapid-send-prompt",
+      "kind": "ui",
+      "target": "chat.send",
+      "weight": 9,
+      "maxPerCase": 1,
+      "requires": ["resource:chat.draft"],
+      "blocks": [
+        "resource:permission.pending",
+        "resource:question.pending",
+        "resource:turn.running",
+        "resource:turn.canceling",
+        "state:session.running",
+        "state:session.awaiting-permission",
+        "state:session.awaiting-question"
+      ],
+      "expectedDaemon": "run_agent_turn",
+      "consumes": ["resource:chat.draft"],
+      "produces": ["resource:turn.running"],
+      "coverage": ["control:chat.send", "state:session.running", "async:duplicate-submit"]
+    },
+    {
+      "id": "stop-turn",
+      "kind": "ui",
+      "target": "chat.stop",
+      "weight": 8,
+      "requires": ["resource:turn.running"],
+      "blocks": ["resource:permission.pending", "resource:question.pending"],
+      "consumes": ["resource:turn.running"],
+      "invalidates": ["state:session.running"],
+      "produces": ["resource:turn.canceling"],
+      "expectedDaemon": "cancel_turn",
+      "coverage": ["control:chat.stop", "async:late-failure"]
+    },
+    {
+      "id": "complete-turn",
+      "kind": "daemon-event",
+      "target": "session:<session>:event",
+      "weight": 7,
+      "requires": ["resource:turn.running"],
+      "blocks": ["resource:permission.pending", "resource:question.pending"],
+      "consumes": ["resource:turn.running"],
+      "invalidates": [
+        "state:session.running",
+        "state:session.awaiting-permission",
+        "state:session.awaiting-question"
+      ],
+      "produces": ["state:session.idle"],
+      "coverage": ["state:session.idle", "async:late-success"]
+    },
+    {
+      "id": "settle-canceled-turn",
+      "kind": "daemon-event",
+      "target": "session:<session>:event",
+      "weight": 6,
+      "requires": ["resource:turn.canceling"],
+      "consumes": ["resource:turn.canceling"],
+      "invalidates": [
+        "state:session.running",
+        "state:session.awaiting-permission",
+        "state:session.awaiting-question"
+      ],
+      "produces": ["state:session.idle"],
+      "coverage": ["state:session.idle", "async:late-failure"]
+    },
+    {
+      "id": "switch-session",
+      "kind": "ui",
+      "target": "workspace.agent-card",
+      "weight": 8,
+      "maxPerCase": 3,
+      "params": { "session": { "oneOf": ["session-browser", "session-second", "session-third"] } },
+      "blocks": ["resource:permission.pending", "resource:question.pending", "resource:turn.canceling"],
+      "invalidates": [
+        "resource:chat.draft",
+        "resource:turn.running",
+        "resource:turn.canceling",
+        "state:session.running",
+        "state:session.awaiting-permission",
+        "state:session.awaiting-question"
+      ],
+      "coverage": ["control:workspace.agent-card", "state:session.loading", "async:stale-session-event"]
+    },
+    {
+      "id": "emit-old-session-stream",
+      "kind": "daemon-event",
+      "target": "session:<session>:event",
+      "weight": 8,
+      "maxPerCase": 3,
+      "params": { "delta": { "oneOf": ["late token", "late tool call", "late final message"] } },
+      "coverage": ["async:stale-session-event"]
+    },
+    {
+      "id": "emit-permission",
+      "kind": "daemon-event",
+      "target": "session:<session>:event",
+      "weight": 6,
+      "params": { "tool": { "oneOf": ["bash", "browser", "edit"] } },
+      "requires": ["state:daemon.connected", "resource:turn.running"],
+      "blocks": ["resource:permission.pending", "resource:question.pending", "resource:turn.canceling"],
+      "produces": ["resource:permission.pending"],
+      "coverage": ["state:session.awaiting-permission", "control:chat.permission-response"]
+    },
+    {
+      "id": "answer-permission",
+      "kind": "ui",
+      "target": "chat.permission-response",
+      "weight": 7,
+      "requires": ["resource:permission.pending"],
+      "consumes": ["resource:permission.pending"],
+      "invalidates": ["state:session.awaiting-permission"],
+      "params": { "answer": { "oneOf": ["approve", "deny"] } },
+      "expectedDaemon": "resolve_permission",
+      "coverage": ["control:chat.permission-response", "async:duplicate-submit", "async:late-failure"]
+    },
+    {
+      "id": "emit-question",
+      "kind": "daemon-event",
+      "target": "session:<session>:event",
+      "weight": 5,
+      "requires": ["state:daemon.connected", "resource:turn.running"],
+      "blocks": ["resource:permission.pending", "resource:question.pending", "resource:turn.canceling"],
+      "produces": ["resource:question.pending"],
+      "coverage": ["state:session.awaiting-question", "control:chat.question-response"]
+    },
+    {
+      "id": "answer-question",
+      "kind": "ui",
+      "target": "chat.question-response",
+      "weight": 6,
+      "requires": ["resource:question.pending"],
+      "consumes": ["resource:question.pending"],
+      "invalidates": ["state:session.awaiting-question"],
+      "params": { "answer": { "oneOf": ["yes", "no", "custom answer"] } },
+      "expectedDaemon": "resolve_user_question",
+      "coverage": ["control:chat.question-response", "async:duplicate-submit", "async:late-success"]
+    },
+    {
+      "id": "change-model",
+      "kind": "ui",
+      "target": "chat.model-picker",
+      "weight": 6,
+      "params": { "model": { "oneOf": ["codex/test-model", "anthropic/claude-sonnet-4-5"] } },
+      "blocks": [
+        "resource:permission.pending",
+        "resource:question.pending",
+        "resource:turn.running",
+        "resource:turn.canceling",
+        "state:session.running",
+        "state:session.awaiting-permission",
+        "state:session.awaiting-question"
+      ],
+      "coverage": ["control:chat.model-picker", "async:late-success"]
+    },
+    {
+      "id": "delayed-transcript-refresh",
+      "kind": "daemon",
+      "target": "session_detail",
+      "weight": 7,
+      "maxPerCase": 3,
+      "coverage": ["state:session.loading", "async:delayed-list-refresh", "async:late-success"]
+    },
+    {
+      "id": "disconnect-reconnect",
+      "kind": "daemon",
+      "target": "websocket",
+      "weight": 6,
+      "maxPerCase": 2,
+      "produces": ["state:daemon.connected"],
+      "coverage": ["state:daemon.reconnecting", "async:reconnect"]
+    }
+  ],
+  "invariants": [
+    "app-no-crash",
+    "active-session-stable",
+    "draft-preserved-on-failure",
+    "one-request-per-intent",
+    "stale-error-scoped",
+    "no-permanent-loading"
+  ]
+}

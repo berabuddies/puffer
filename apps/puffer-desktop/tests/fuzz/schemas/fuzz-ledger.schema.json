@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PufferFuzzCoverageLedger",
+  "type": "object",
+  "required": ["version", "validatedTags", "fixedFindings"],
+  "properties": {
+    "version": { "type": "integer" },
+    "validatedTags": { "type": "array", "items": { "type": "string" } },
+    "replayedCases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["caseId", "status"],
+        "properties": {
+          "caseId": { "type": "string" },
+          "seedId": { "type": "string" },
+          "status": { "enum": ["passed", "failed", "flake", "unsupported", "harness-only"] },
+          "traceId": { "type": "string" },
+          "validatedTags": { "type": "array", "items": { "type": "string" } },
+          "bugSignature": { "type": "string" },
+          "updatedAt": { "type": "string" }
+        }
+      }
+    },
+    "fixedFindings": { "type": "array", "items": { "type": "object" } },
+    "knownBugSignatures": { "type": "array", "items": { "type": "string" } },
+    "metrics": {
+      "type": "object",
+      "properties": {
+        "replaySuccessRate": { "type": "number" },
+        "duplicateReportRate": { "type": "number" },
+        "flakeRate": { "type": "number" },
+        "falsePositiveRate": { "type": "number" }
+      }
+    },
+    "notes": { "type": "array", "items": { "type": "string" } }
+  }
+}

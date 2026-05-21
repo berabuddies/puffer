@@ -261,6 +261,7 @@ where
                     |request_config| {
                         let mut body = build_codex_openai_request_body(
                             state,
+                            &request_config.base_url,
                             &model_id,
                             &instructions,
                             wire_input.clone(),
@@ -476,7 +477,6 @@ pub(super) fn execute_openai_tool_calls(
 
     // ---------- Phase 2: Execute tools ----------
     // Clone immutable data needed by parallel tools.
-    let working_dirs = state.working_dirs.clone();
     let provider_context = super::claude_tools::ProviderToolContext::OpenAI {
         request_config,
         model_id,
@@ -514,7 +514,6 @@ pub(super) fn execute_openai_tool_calls(
                 }
             };
             let args = tc.arguments.clone();
-            let wd = &working_dirs;
             let pc = &provider_context;
             let sid = &state.session.id;
             let runner_clone = runner.clone();
@@ -524,7 +523,7 @@ pub(super) fn execute_openai_tool_calls(
                     match super::claude_tools::execute_parallel_tool(
                         &definition,
                         cwd,
-                        wd,
+                        &filesystem_policy.workspace_roots,
                         &filesystem_policy,
                         sid,
                         args,

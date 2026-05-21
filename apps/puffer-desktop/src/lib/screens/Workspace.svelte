@@ -4,9 +4,12 @@
   import Icon from "../design/Icon.svelte";
   import ProjectRow from "./workspace/ProjectRow.svelte";
   import ConnectProjectModal from "./workspace/ConnectProjectModal.svelte";
+  import type { createSession } from "../api/desktop";
   import { sessionDisplayName, sessionDisplayTitle } from "../sessionDisplay";
   import type { MockAgent, MockProject } from "../data/mockProjects";
   import type { FolderGroup, SessionListItem, SettingsSnapshot } from "../types";
+
+  type CreatedSessionResult = Awaited<ReturnType<typeof createSession>>;
 
   type Props = {
     /** Real folder-groups loaded from the daemon. */
@@ -20,15 +23,22 @@
     /** "New agent" was clicked on a project row. `cwd` is that project's
      *  path. Receives control to create the session + open AgentDetail. */
     onNewAgent?: (cwd: string) => void | Promise<void>;
-    /** Connect-project modal just finished with a new session id — the
+    /** Connect-project modal just finished with a new session — the
      *  parent should refresh the workspace and open AgentDetail. */
-    onSessionReady?: (sessionId: string) => void | Promise<void>;
+    onSessionReady?: (created: CreatedSessionResult) => void | Promise<void>;
     /** User clicked the workspace-cwd chip in the header — the parent
      *  should open the WorkspacePicker. */
     onOpenWorkspacePicker?: () => void;
     pinnedWorkspacePaths?: string[];
+    pinningWorkspacePaths?: string[];
     onToggleWorkspacePin?: (path: string, pinned: boolean) => void;
     settingsSnapshot?: SettingsSnapshot | null;
+  };
+
+  type RecentSession = {
+    session: SessionListItem;
+    projectLabel: string;
+    projectPath: string;
   };
 
   let {
@@ -41,11 +51,13 @@
     onSessionReady,
     onOpenWorkspacePicker,
     pinnedWorkspacePaths = [],
+    pinningWorkspacePaths = [],
     onToggleWorkspacePin,
     settingsSnapshot = null
   }: Props = $props();
 
   let showConnect = $state(false);
+  let searchQuery = $state("");
 
   // Stable palette so two renders of the same folder pick the same color.
   const PALETTE = [
@@ -94,7 +106,7 @@
       title: sessionDisplayTitle(session),
       worktree: "",
       branch: "",
-      status: "idle",
+      status: session.activityStatus,
       progress: 0,
       step: session.note ?? (session.eventCount > 0 ? `${session.eventCount} transcript events` : "Ready to start"),
       tools: session.eventCount,
@@ -105,15 +117,93 @@
 
   let projects = $derived<MockProject[]>(groups.map(projectFromGroup));
   let agents = $derived<MockAgent[]>(
-    groups.flatMap((g) => g.sessions.slice(0, 6).map((s) => agentFromSession(s, g.id)))
+    groups.flatMap((g) => g.sessions.map((s) => agentFromSession(s, g.id)))
+  );
+  let recentSessions = $derived<RecentSession[]>(
+    groups
+      .flatMap((group) =>
+        group.sessions.map((session) => ({
+          session,
+          projectLabel: group.label,
+          projectPath: group.path
+        }))
+      )
+      .sort((left, right) =>
+        right.session.updatedAtMs - left.session.updatedAtMs ||
+        left.projectLabel.localeCompare(right.projectLabel)
+      )
   );
 
+  function normalizeSearch(value: string): string {
+    return value.trim().toLowerCase();
+  }
+
+  function includesNeedle(value: string | null | undefined, needle: string): boolean {
+    return Boolean(value?.toLowerCase().includes(needle));
+  }
+
+  function projectMatches(project: MockProject, needle: string): boolean {
+    return (
+      includesNeedle(project.name, needle) ||
+      includesNeedle(project.path, needle) ||
+      includesNeedle(project.branch, needle) ||
+      includesNeedle(project.remote, needle)
+    );
+  }
+
+  function agentMatches(agent: MockAgent, needle: string): boolean {
+    return (
+      includesNeedle(agent.name, needle) ||
+      includesNeedle(agent.title, needle) ||
+      includesNeedle(agent.branch, needle) ||
+      includesNeedle(agent.step, needle) ||
+      includesNeedle(agent.model, needle)
+    );
+  }
+
+  function recentSessionMatches(row: RecentSession, needle: string): boolean {
+    return (
+      includesNeedle(sessionDisplayName(row.session), needle) ||
+      includesNeedle(sessionDisplayTitle(row.session), needle) ||
+      includesNeedle(row.session.note, needle) ||
+      includesNeedle(row.session.cwd, needle) ||
+      includesNeedle(row.projectLabel, needle) ||
+      includesNeedle(row.projectPath, needle)
+    );
+  }
+
+  function projectAgents(projectId: string): MockAgent[] {
+    return agents.filter((a) => a.project === projectId);
+  }
+
+  function visibleAgentsFor(project: MockProject): MockAgent[] {
+    const projectScopedAgents = projectAgents(project.id);
+    const needle = searchNeedle;
+    if (!needle || projectMatches(project, needle)) return projectScopedAgents;
+    return projectScopedAgents.filter((a) => agentMatches(a, needle));
+  }
+
+  let searchNeedle = $derived(normalizeSearch(searchQuery));
+  let visibleProjects = $derived<MockProject[]>(
+    projects.filter((project) => {
+      if (!searchNeedle) return true;
+      return projectMatches(project, searchNeedle) || projectAgents(project.id).some((a) => agentMatches(a, searchNeedle));
+    })
+  );
+  let visibleAgentCount = $derived(
+    visibleProjects.reduce((count, project) => count + visibleAgentsFor(project).length, 0)
+  );
   let agentCount = $derived(agents.length);
   let projectCount = $derived(projects.length);
-
+  let visibleProjectCount = $derived(visibleProjects.length);
+  let visibleRecentSessions = $derived<RecentSession[]>(
+    searchNeedle
+      ? recentSessions.filter((row) => recentSessionMatches(row, searchNeedle))
+      : recentSessions
+  );
   let headerSubtitle = $derived(
     loading
-      ? "loading…"
+      ? "loading..."
       : defaultWorkspaceCwd
         ? defaultWorkspaceCwd
         : `${agentCount} active ${agentCount === 1 ? "agent" : "agents"}`
@@ -123,28 +213,40 @@
     if (!onNewAgent) return;
     await onNewAgent(cwd);
   }
+
+  function sessionEventLabel(count: number): string {
+    return `${count} ${count === 1 ? "event" : "events"}`;
+  }
+
+  function recentSessionTitle(session: SessionListItem): string {
+    return sessionDisplayTitle(session) || sessionDisplayName(session);
+  }
 </script>
 
 <div class="pf-pw">
   <div class="pf-pw-top">
     <div class="pf-pw-top-left">
-      <span class="pf-screen-top-eyebrow">Workspace</span>
-      <h1>{projectCount} {projectCount === 1 ? "project" : "projects"}</h1>
+      <h1>{projectCount === 1 ? "Project" : "Projects"} {projectCount}</h1>
       {#if onOpenWorkspacePicker && defaultWorkspaceCwd}
         <button
           type="button"
           class="pf-pw-sub pf-pw-sub-btn"
           onclick={() => onOpenWorkspacePicker?.()}
           title="Switch workspace"
-        >· {headerSubtitle}</button>
+          aria-label="Switch workspace"
+        >{headerSubtitle}</button>
       {:else}
-        <span class="pf-pw-sub">· {headerSubtitle}</span>
+        <span class="pf-pw-sub">{headerSubtitle}</span>
       {/if}
     </div>
     <div class="pf-pw-top-right">
       <div class="pf-pw-search">
         <Icon name="search" size={12} />
-        <input placeholder="Search tasks, agents, branches…" />
+        <input
+          placeholder="Search tasks, agents, branches…"
+          aria-label="Search workspace"
+          bind:value={searchQuery}
+        />
       </div>
       <button
         type="button"
@@ -153,7 +255,7 @@
         data-size="sm"
         onclick={() => (showConnect = true)}
       >
-        <Icon name="plus" size={13} />Connect project
+        <Icon name="plus" size={13} />Create Project
       </button>
     </div>
   </div>
@@ -161,17 +263,50 @@
   {#if showConnect}
     <ConnectProjectModal
       onClose={() => (showConnect = false)}
-      onConnected={async (sessionId) => {
-        showConnect = false;
-        await onSessionReady?.(sessionId);
+      onConnected={async (created) => {
+        await onSessionReady?.(created);
       }}
       defaultLocalPath={defaultWorkspaceCwd || "~/code"}
       snapshot={settingsSnapshot}
     />
   {/if}
 
+  {#if visibleRecentSessions.length > 0}
+    <section class="pf-pw-history" aria-label="Session history">
+      <div class="pf-pw-history-head">
+        <div class="copy">
+          <span class="pf-screen-top-eyebrow">History</span>
+          <h2>Session history</h2>
+        </div>
+        <span class="count">{visibleRecentSessions.length} {visibleRecentSessions.length === 1 ? "session" : "sessions"}</span>
+      </div>
+      <div class="pf-pw-history-list">
+        {#each visibleRecentSessions as row (row.session.id)}
+          <button
+            type="button"
+            class="pf-pw-history-row"
+            onclick={() => onOpenAgent?.(row.session.id)}
+            title={`${recentSessionTitle(row.session)} - ${row.projectPath}`}
+          >
+            <span class="main">
+              <span class="title">{recentSessionTitle(row.session)}</span>
+              <span class="status-pill" data-status={row.session.activityStatus}>{row.session.activityStatus}</span>
+            </span>
+            <span class="meta">
+              <span>{row.projectLabel}</span>
+              <span class="sep">/</span>
+              <span>{sessionEventLabel(row.session.eventCount)}</span>
+              <span class="sep">/</span>
+              <span>{formatAge(row.session.updatedAtMs)}</span>
+            </span>
+          </button>
+        {/each}
+      </div>
+    </section>
+  {/if}
+
   <div class="pf-pw-list">
-    {#if projectCount === 0 && !loading}
+    {#if projectCount === 0 && !searchNeedle && !loading}
       <div class="pf-pw-empty">
         <div class="pf-pw-empty-inner">
           <h2>No sessions yet</h2>
@@ -180,41 +315,54 @@
             {#if defaultWorkspaceCwd}<code>{defaultWorkspaceCwd}</code>{/if}
             — you'll choose Codex, Claude, or Puffer before the chat opens.
           </p>
+          <button
+            type="button"
+            class="sc-btn"
+            data-variant="default"
+            data-size="sm"
+            onclick={() => handleNewAgent(defaultWorkspaceCwd)}
+            disabled={!onNewAgent || !defaultWorkspaceCwd}
+            aria-label="New agent in default workspace"
+          >
+            <Icon name="plus" size={13} />New agent
+          </button>
         </div>
       </div>
     {/if}
-    {#each projects as p (p.id)}
+    {#if searchNeedle && visibleProjectCount === 0 && !loading}
+      <div class="pf-pw-empty">
+        <div class="pf-pw-empty-inner">
+          <h2>No workspace results</h2>
+          <p>No projects or agents match <code>{searchQuery.trim()}</code>.</p>
+          <button
+            type="button"
+            class="sc-btn"
+            data-variant="outline"
+            data-size="sm"
+            onclick={() => (searchQuery = "")}
+          >
+            Clear search
+          </button>
+        </div>
+      </div>
+    {/if}
+    {#each visibleProjects as p (p.id)}
+      {@const projectPinned = pinnedWorkspacePaths.includes(p.path) || pinnedWorkspacePaths.includes(p.id)}
       <ProjectRow
         project={p}
-        agents={agents.filter((a) => a.project === p.id)}
-        pinned={pinnedWorkspacePaths.includes(p.path) || pinnedWorkspacePaths.includes(p.id)}
+        agents={visibleAgentsFor(p)}
+        pinned={projectPinned}
+        pinBusy={pinningWorkspacePaths.includes(p.path) || pinningWorkspacePaths.includes(p.id)}
         {onOpenAgent}
         {onOpenBoard}
         onNewAgent={onNewAgent ? () => handleNewAgent(p.path) : undefined}
-        onTogglePin={onToggleWorkspacePin ? () => onToggleWorkspacePin(p.path, !(pinnedWorkspacePaths.includes(p.path) || pinnedWorkspacePaths.includes(p.id))) : undefined}
+        onTogglePin={onToggleWorkspacePin ? () => onToggleWorkspacePin(p.path, !projectPinned) : undefined}
       />
     {/each}
   </div>
 </div>
 
 <style>
-  .pf-pw-sub-btn {
-    background: transparent;
-    border: none;
-    color: inherit;
-    cursor: pointer;
-    padding: 0;
-    font: inherit;
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    border-radius: 4px;
-  }
-  .pf-pw-sub-btn:hover {
-    color: var(--foreground);
-    text-decoration: underline;
-    text-underline-offset: 3px;
-  }
   .pf-pw-empty {
     padding: 20px 0 0;
     display: flex;

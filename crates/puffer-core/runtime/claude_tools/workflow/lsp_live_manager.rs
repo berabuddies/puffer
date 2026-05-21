@@ -6,6 +6,9 @@ use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
+
+const LSP_NOTIFICATION_DRAIN_IDLE: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct ManagerKey {
@@ -57,11 +60,18 @@ where
         .lock()
         .map_err(|_| anyhow::anyhow!("LSP session manager lock poisoned"))?;
     let managed = ensure_session(&mut sessions, key, server, workspace_root)?;
+    let should_drain_notifications = file_sync.is_some();
     if let Some(file_sync) = file_sync {
         sync_file(managed, &file_sync)?;
     }
     let result = operation(&mut managed.session)?;
-    managed.session.drain_pending_messages()?;
+    if should_drain_notifications {
+        managed
+            .session
+            .drain_pending_messages_until_idle(LSP_NOTIFICATION_DRAIN_IDLE)?;
+    } else {
+        managed.session.drain_pending_messages()?;
+    }
     Ok(result)
 }
 

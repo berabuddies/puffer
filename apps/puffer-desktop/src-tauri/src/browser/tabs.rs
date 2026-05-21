@@ -117,6 +117,9 @@ impl BrowserTabRegistry {
         tab_id: &str,
     ) -> Option<BrowserTabInfo> {
         let set = self.sessions.get_mut(root_session_id)?;
+        if !set.tabs.iter().any(|tab| tab.tab_id == tab_id) {
+            return None;
+        }
         set.active_tab_id = Some(tab_id.to_string());
         set.refresh_active_flags();
         set.tabs.iter().find(|tab| tab.tab_id == tab_id).cloned()
@@ -258,4 +261,39 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn browser_state(url: &str) -> BrowserState {
+        BrowserState {
+            url: url.to_string(),
+            title: "Fixture".to_string(),
+            loading: false,
+            width: 960,
+            height: 720,
+        }
+    }
+
+    #[test]
+    fn missing_focus_does_not_corrupt_active_tab() {
+        let mut registry = BrowserTabRegistry::default();
+        registry.open_tab(
+            "session",
+            Some("tab-1".to_string()),
+            None,
+            backend_session_id("session", "tab-1"),
+            browser_state("https://example.com"),
+            true,
+        );
+
+        let missing = registry.focus_tab("session", "missing-tab");
+
+        assert!(missing.is_none());
+        let state = registry.list("session");
+        assert_eq!(state.active_tab_id.as_deref(), Some("tab-1"));
+        assert!(state.tabs.iter().any(|tab| tab.tab_id == "tab-1" && tab.active));
+    }
 }

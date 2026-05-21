@@ -5,7 +5,7 @@ use puffer_provider_openai::{
     build_authorization_url as build_openai_authorization_url,
     generate_pkce as generate_openai_pkce, OpenAIOAuthConfig,
 };
-use puffer_provider_registry::{AuthMode, AuthStore, ProviderDescriptor};
+use puffer_provider_registry::{canonical_provider_id, AuthMode, AuthStore, ProviderDescriptor};
 use puffer_transport_anthropic::{
     build_authorization_url as build_anthropic_authorization_url,
     generate_pkce as generate_anthropic_pkce, AnthropicOAuthConfig, CONSOLE_AUTHORIZE_URL,
@@ -186,7 +186,7 @@ pub(crate) fn run_provider_login_flow(
     auth_store: &mut AuthStore,
     provider_id: &str,
 ) -> Result<String> {
-    let provider_id = provider_id.trim();
+    let provider_id = canonical_provider_id(provider_id);
     if provider_id.is_empty() {
         bail!("provider id is required");
     }
@@ -195,11 +195,11 @@ pub(crate) fn run_provider_login_flow(
         .user_config_dir
         .join("auth.json");
     run_login_command(LoginFlowRequest {
-        provider_id: provider_id.to_string(),
+        provider_id: provider_id.clone(),
         auth_path: auth_path.clone(),
     })?;
     *auth_store = AuthStore::load(&auth_path)?;
-    if !auth_store.has_auth(provider_id) {
+    if !auth_store.has_auth(&provider_id) {
         bail!("login flow for {provider_id} completed without storing credentials");
     }
     Ok(format!("Completed login flow for {provider_id}."))
@@ -211,9 +211,9 @@ pub(crate) fn remove_provider_credentials(
     auth_store: &mut AuthStore,
     provider_id: &str,
 ) -> Result<String> {
-    let provider_id = provider_id.trim();
-    let removed = auth_store.remove(provider_id);
-    let cleared_active_provider = active_selection_uses_provider(state, provider_id);
+    let provider_id = canonical_provider_id(provider_id);
+    let removed = auth_store.remove(&provider_id);
+    let cleared_active_provider = active_selection_uses_provider(state, &provider_id);
 
     if removed.is_some() {
         let auth_path = ConfigPaths::discover(&state.cwd)
@@ -271,13 +271,19 @@ fn run_login_command(request: LoginFlowRequest) -> Result<()> {
 }
 
 fn active_selection_uses_provider(state: &AppState, provider_id: &str) -> bool {
-    if state.current_provider.as_deref() == Some(provider_id) {
+    if state
+        .current_provider
+        .as_deref()
+        .map(canonical_provider_id)
+        .as_deref()
+        == Some(provider_id)
+    {
         return true;
     }
     state
         .current_model
         .as_deref()
         .and_then(|selector| selector.split_once('/'))
-        .map(|(provider, _)| provider == provider_id)
+        .map(|(provider, _)| canonical_provider_id(provider) == provider_id)
         .unwrap_or(false)
 }

@@ -30,10 +30,10 @@ type PendingRequest = {
 
 type WsResponseMessage = {
   type?: string;
-  id?: number;
+  id?: number | string;
   ok?: boolean;
   result?: unknown;
-  error?: string;
+  error?: string | { message?: string; code?: string };
 };
 
 type WsEventMessage = {
@@ -42,13 +42,12 @@ type WsEventMessage = {
   payload?: unknown;
 };
 
-const DEFAULT_WS_URL = "ws://127.0.0.1:1421/ws";
 const REQUEST_TIMEOUT_MS = 30000;
 
 export class DaemonClient {
   private connectionListeners = new Set<(state: ConnectionState) => void>();
   private eventListeners = new Map<string, Set<(payload: unknown) => void>>();
-  private pending = new Map<number, PendingRequest>();
+  private pending = new Map<string, PendingRequest>();
   private socket: WebSocket | null = null;
   private connectPromise: Promise<void> | null = null;
   private nextRequestId = 1;
@@ -89,7 +88,7 @@ export class DaemonClient {
 
     this.setState(this._state === "closed" ? "reconnecting" : "connecting");
     this.connectPromise = new Promise((resolve, reject) => {
-      const socket = new WebSocket(this.handshake.url);
+      const socket = new WebSocket(this.webSocketUrl());
       this.socket = socket;
 
       socket.onopen = () => {
@@ -101,7 +100,7 @@ export class DaemonClient {
         this.handleSocketMessage(String(event.data));
       };
       socket.onerror = () => {
-        const error = new Error(`Unable to connect to Corbina backend at ${this.handshake.url}`);
+        const error = new Error(`Unable to connect to Puffer daemon at ${this.handshake.url}`);
         if (this._state !== "open") {
           this.connectPromise = null;
           this.setState("closed");
@@ -111,7 +110,7 @@ export class DaemonClient {
       socket.onclose = () => {
         this.connectPromise = null;
         this.socket = null;
-        this.rejectPending(new Error("Corbina backend WebSocket closed."));
+        this.rejectPending(new Error("Puffer daemon WebSocket closed."));
         this.setState("closed");
       };
     });
@@ -127,22 +126,21 @@ export class DaemonClient {
     await this.connect();
     const socket = this.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-      throw new Error("Corbina backend WebSocket is not open.");
+      throw new Error("Puffer daemon WebSocket is not open.");
     }
 
-    const id = this.nextRequestId++;
+    const id = String(this.nextRequestId++);
     const request = {
       type: "request",
       id,
       method,
-      params,
-      token: this.handshake.token
+      params
     };
 
     return new Promise<T>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`Corbina backend request timed out: ${method}`));
+        reject(new Error(`Puffer daemon request timed out: ${method}`));
       }, REQUEST_TIMEOUT_MS);
       this.pending.set(id, {
         resolve: (value) => resolve(value as T),
@@ -197,7 +195,7 @@ export class DaemonClient {
   close(): void {
     this.socket?.close();
     this.socket = null;
-    this.rejectPending(new Error("Corbina backend client closed."));
+    this.rejectPending(new Error("Puffer daemon client closed."));
     this.setState("closed");
   }
 
@@ -209,7 +207,7 @@ export class DaemonClient {
       return;
     }
 
-    if (message.type === "event") {
+    if (message.type === "event" || (message as WsEventMessage).event) {
       const event = (message as WsEventMessage).event;
       if (!event) return;
       const listeners = this.eventListeners.get(event);
@@ -218,18 +216,35 @@ export class DaemonClient {
       return;
     }
 
-    if (message.type === "response") {
+    if (message.type === "response" || "id" in message) {
       const response = message as WsResponseMessage;
       if (response.id == null) return;
-      const pending = this.pending.get(response.id);
+      const id = String(response.id);
+      const pending = this.pending.get(id);
       if (!pending) return;
-      this.pending.delete(response.id);
+      this.pending.delete(id);
       clearTimeout(pending.timeout);
-      if (response.ok) {
+      if (response.error) {
+        pending.reject(new Error(responseErrorMessage(response.error)));
+      } else if (response.ok !== false) {
         pending.resolve(response.result);
       } else {
-        pending.reject(new Error(response.error || "Corbina backend request failed."));
+        pending.reject(new Error("Puffer daemon request failed."));
       }
+    }
+  }
+
+  private webSocketUrl(): string {
+    if (!this.handshake.token) return this.handshake.url;
+    try {
+      const url = new URL(this.handshake.url);
+      if (!url.searchParams.has("token")) {
+        url.searchParams.set("token", this.handshake.token);
+      }
+      return url.toString();
+    } catch (_error) {
+      const separator = this.handshake.url.includes("?") ? "&" : "?";
+      return `${this.handshake.url}${separator}token=${encodeURIComponent(this.handshake.token)}`;
     }
   }
 
@@ -265,27 +280,74 @@ export function configuredBrowserDaemonHandshake(): DaemonHandshake | null {
   const params = new URLSearchParams(window.location.search);
   const viteEnv = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
   const url =
+    params.get("pufferBackend") ||
     params.get("corbinaBackend") ||
     params.get("backendUrl") ||
     params.get("backend") ||
+    window.localStorage.getItem("puffer.backendUrl") ||
     window.localStorage.getItem("corbina.backendUrl") ||
-    viteEnv?.VITE_CORBINA_DAEMON_URL ||
-    DEFAULT_WS_URL;
+    viteEnv?.VITE_PUFFER_DAEMON_URL ||
+    viteEnv?.VITE_CORBINA_DAEMON_URL;
 
-  if (!url.startsWith("ws://") && !url.startsWith("wss://")) return null;
+  if (!url || (!url.startsWith("ws://") && !url.startsWith("wss://"))) return null;
 
   return {
     url,
     token:
+      params.get("pufferToken") ||
       params.get("corbinaToken") ||
       params.get("token") ||
+      window.localStorage.getItem("puffer.backendToken") ||
       window.localStorage.getItem("corbina.backendToken") ||
+      viteEnv?.VITE_PUFFER_DAEMON_TOKEN ||
       viteEnv?.VITE_CORBINA_DAEMON_TOKEN ||
       "dev",
     protocolVersion: "1",
     workspaceRoot:
       params.get("workspaceRoot") ||
+      window.localStorage.getItem("puffer.workspaceRoot") ||
       window.localStorage.getItem("corbina.workspaceRoot") ||
+      ""
+  };
+}
+
+export function configuredBrowserRemoteDaemonHandshake(): DaemonHandshake | null {
+  if (typeof window === "undefined") return null;
+
+  const params = new URLSearchParams(window.location.search);
+  const viteEnv = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
+  const url =
+    params.get("pufferRemoteBackend") ||
+    params.get("corbinaRemoteBackend") ||
+    params.get("remoteBackendUrl") ||
+    window.localStorage.getItem("puffer.remoteBackendUrl") ||
+    window.localStorage.getItem("corbina.remoteBackendUrl") ||
+    viteEnv?.VITE_PUFFER_REMOTE_DAEMON_URL ||
+    viteEnv?.VITE_CORBINA_REMOTE_DAEMON_URL;
+
+  if (!url || (!url.startsWith("ws://") && !url.startsWith("wss://"))) return null;
+
+  return {
+    url,
+    token:
+      params.get("pufferRemoteToken") ||
+      params.get("corbinaRemoteToken") ||
+      params.get("remoteToken") ||
+      window.localStorage.getItem("puffer.remoteBackendToken") ||
+      window.localStorage.getItem("corbina.remoteBackendToken") ||
+      viteEnv?.VITE_PUFFER_REMOTE_DAEMON_TOKEN ||
+      viteEnv?.VITE_CORBINA_REMOTE_DAEMON_TOKEN ||
+      "dev",
+    protocolVersion:
+      params.get("pufferRemoteProtocolVersion") ||
+      params.get("remoteProtocolVersion") ||
+      "1",
+    workspaceRoot:
+      params.get("pufferRemoteWorkspaceRoot") ||
+      params.get("corbinaRemoteWorkspaceRoot") ||
+      params.get("remoteWorkspaceRoot") ||
+      window.localStorage.getItem("puffer.remoteWorkspaceRoot") ||
+      window.localStorage.getItem("corbina.remoteWorkspaceRoot") ||
       ""
   };
 }
@@ -303,11 +365,19 @@ export async function ensureLocalDaemonClient(): Promise<DaemonClient> {
     return sharedClient;
   }
   if (!canInvokeTauri()) {
-    throw new Error("Corbina's Rust backend is only available through the backend WebSocket or inside the Tauri desktop app.");
+    throw new Error("Puffer's Rust daemon is only available through a configured WebSocket or inside the Tauri desktop app.");
   }
-  sharedClient = new DaemonClient();
+  sharedClient = new DaemonClient(await invoke<DaemonHandshake>("ensure_local_daemon"));
   await sharedClient.connect();
   return sharedClient;
+}
+
+function responseErrorMessage(error: string | { message?: string; code?: string }): string {
+  if (typeof error === "string") return error;
+  const message = error.message?.trim();
+  if (message) return message;
+  const code = error.code?.trim();
+  return code ? `Puffer daemon error: ${code}` : "Puffer daemon request failed.";
 }
 
 export async function ensureRemoteDaemonClient(

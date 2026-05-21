@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PufferUiState",
+  "type": "object",
+  "required": ["stateHash", "observedAt", "env", "appArea", "interactiveElements"],
+  "properties": {
+    "stateHash": { "type": "string" },
+    "observedAt": { "type": "string", "format": "date-time" },
+    "appArea": { "type": "string" },
+    "routePattern": { "type": "string" },
+    "modalStack": { "type": "array", "items": { "type": "string" } },
+    "activePanel": { "type": "string" },
+    "activeTab": { "type": "string" },
+    "focusRegion": { "type": "string" },
+    "daemonState": { "type": "string" },
+    "normalizedTextSignature": { "type": "string" },
+    "normalizedTreeSignature": { "type": "string" },
+    "screenshotHash": { "type": "string" },
+    "env": {
+      "type": "object",
+      "required": ["viewport", "browserOrShell"],
+      "properties": {
+        "role": { "type": "string" },
+        "viewport": { "type": "string" },
+        "theme": { "type": "string" },
+        "locale": { "type": "string" },
+        "browserOrShell": { "type": "string" },
+        "terminalSize": { "type": "string" },
+        "fakeDaemon": { "type": "boolean" }
+      }
+    },
+    "interactiveElements": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/interactiveElement" }
+    },
+    "artifacts": {
+      "type": "object",
+      "properties": {
+        "screenshot": { "type": "string" },
+        "trace": { "type": "string" },
+        "domSnapshot": { "type": "string" },
+        "tuiSnapshot": { "type": "string" }
+      }
+    }
+  },
+  "$defs": {
+    "interactiveElement": {
+      "type": "object",
+      "required": ["elementId", "groupId", "roleOrKind", "name", "seen"],
+      "properties": {
+        "elementId": { "type": "string" },
+        "groupId": { "type": "string" },
+        "roleOrKind": { "type": "string" },
+        "name": { "type": "string" },
+        "panel": { "type": "string" },
+        "component": { "type": "string" },
+        "locatorHint": { "type": "string" },
+        "seen": { "type": "boolean" },
+        "activated": { "type": "boolean" },
+        "riskWeight": { "type": "number" }
+      }
+    }
+  }
+}

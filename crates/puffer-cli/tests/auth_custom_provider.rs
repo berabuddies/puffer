@@ -57,10 +57,60 @@ models:
     assert!(stdout.contains("\"redirect_uri\""));
 }
 
+#[test]
+fn auth_commands_accept_desktop_provider_aliases() {
+    let (_tempdir, workspace) = workspace_with_resources();
+
+    let start = run_puffer(&workspace, &["auth", "oauth-start", "codex"]);
+    assert!(
+        start.status.success(),
+        "{}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    let start_stdout = String::from_utf8_lossy(&start.stdout);
+    assert!(start_stdout.contains("\"provider\": \"openai\""));
+    assert!(start_stdout.contains("auth.openai.com"));
+
+    let set_key = run_puffer(&workspace, &["auth", "set-api-key", "codex", "sk-test"]);
+    assert!(
+        set_key.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set_key.stderr)
+    );
+    assert!(String::from_utf8_lossy(&set_key.stdout).contains("stored api key for openai"));
+
+    let status = run_puffer(&workspace, &["auth", "status", "--text"]);
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let status_stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(status_stdout.contains("- openai (api_key)"));
+    assert!(!status_stdout.contains("codex"));
+
+    let clear = run_puffer(&workspace, &["auth", "clear", "codex"]);
+    assert!(
+        clear.status.success(),
+        "{}",
+        String::from_utf8_lossy(&clear.stderr)
+    );
+    assert!(String::from_utf8_lossy(&clear.stdout).contains("cleared credentials for openai"));
+}
+
 fn configured_workspace(
     name: &str,
     provider_yaml: &str,
 ) -> (tempfile::TempDir, std::path::PathBuf) {
+    let (tempdir, workspace) = workspace_with_resources();
+    let paths = ConfigPaths::discover(&workspace);
+    let provider_dir = paths.workspace_config_dir.join("resources/providers");
+    fs::create_dir_all(&provider_dir).expect("provider dir");
+    fs::write(provider_dir.join(format!("{name}.yaml")), provider_yaml).expect("provider yaml");
+    (tempdir, workspace)
+}
+
+fn workspace_with_resources() -> (tempfile::TempDir, std::path::PathBuf) {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let workspace = tempdir.path().join("workspace");
     fs::create_dir_all(&workspace).expect("workspace");
@@ -73,9 +123,6 @@ fn configured_workspace(
         .expect("repo root");
     std::os::unix::fs::symlink(repo_root.join("resources"), workspace.join("resources"))
         .expect("resource symlink");
-    let provider_dir = paths.workspace_config_dir.join("resources/providers");
-    fs::create_dir_all(&provider_dir).expect("provider dir");
-    fs::write(provider_dir.join(format!("{name}.yaml")), provider_yaml).expect("provider yaml");
     (tempdir, workspace)
 }
 
