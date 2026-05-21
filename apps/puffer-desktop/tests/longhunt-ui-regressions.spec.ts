@@ -1,10 +1,17 @@
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page, test, type WebSocketRoute } from "@playwright/test";
 import { FakeDaemon } from "./support/fakeDaemon";
+
+type RequestMessage = {
+  id: string | number;
+  method: string;
+  params?: Record<string, unknown>;
+};
 
 const ONE_PIXEL_PNG =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lzTnGQAAAABJRU5ErkJggg==";
 
 const baseTime = Date.now();
+const strictDaemonUrl = "ws://127.0.0.1:18881/ws";
 
 const openAiProvider = {
   id: "openai",
@@ -49,6 +56,199 @@ async function openProviderSettings(page: Page): Promise<void> {
   await page.getByRole("button", { name: "Settings" }).click();
   await page.getByRole("button", { name: "Providers" }).click();
   await expect(page.getByRole("heading", { name: "Providers" })).toBeVisible();
+}
+
+function responseFrame(id: string | number, result: unknown): string {
+  return JSON.stringify({ type: "response", id, ok: true, result });
+}
+
+function eventFrame(event: string, payload: unknown): string {
+  return JSON.stringify({ type: "event", event, payload });
+}
+
+class StrictSubscriptionDaemon {
+  readonly requests: RequestMessage[] = [];
+  readonly sockets = new Set<WebSocketRoute>();
+  readonly subscriptions = new Map<WebSocketRoute, Set<string>>();
+  rejectConnections = false;
+  nextPty = 1;
+  ptys: Record<string, unknown>[] = [];
+  activePtyId: string | null = null;
+
+  async install(page: Page): Promise<void> {
+    const expected = new URL(strictDaemonUrl);
+    await page.routeWebSocket((url) => {
+      return !this.rejectConnections && url.origin === expected.origin && url.pathname === expected.pathname;
+    }, (socket) => {
+      this.sockets.add(socket);
+      this.subscriptions.set(socket, new Set());
+      socket.onMessage((message) => this.handle(socket, String(message)));
+      socket.onClose(() => {
+        this.sockets.delete(socket);
+        this.subscriptions.delete(socket);
+      });
+    });
+  }
+
+  async open(page: Page): Promise<void> {
+    await page.goto(`/?skipOnboarding=1&corbinaBackend=${encodeURIComponent(strictDaemonUrl)}&corbinaToken=test`);
+  }
+
+  async disconnectAll(): Promise<void> {
+    const sockets = [...this.sockets];
+    await Promise.all(sockets.map((socket) => socket.close({ code: 1011, reason: "test reconnect" }).catch(() => undefined)));
+    for (const socket of sockets) {
+      this.sockets.delete(socket);
+      this.subscriptions.delete(socket);
+    }
+  }
+
+  emit(event: string, payload: unknown): void {
+    for (const socket of this.sockets) {
+      if (this.subscriptions.get(socket)?.has(event)) {
+        socket.send(eventFrame(event, payload));
+      }
+    }
+  }
+
+  waitFor(method: string, predicate: (request: RequestMessage) => boolean = () => true): Promise<RequestMessage> {
+    const existing = this.requests.find((request) => request.method === method && predicate(request));
+    if (existing) return Promise.resolve(existing);
+    return new Promise((resolve) => {
+      const check = setInterval(() => {
+        const request = this.requests.find((item) => item.method === method && predicate(item));
+        if (request) {
+          clearInterval(check);
+          resolve(request);
+        }
+      }, 10);
+    });
+  }
+
+  private handle(socket: WebSocketRoute, raw: string): void {
+    const message = JSON.parse(raw) as RequestMessage;
+    const params = message.params ?? {};
+    this.requests.push(message);
+    switch (message.method) {
+      case "subscribe_event":
+        this.subscriptions.get(socket)?.add(String(params.event ?? ""));
+        socket.send(responseFrame(message.id, {}));
+        return;
+      case "unsubscribe_event":
+        this.subscriptions.get(socket)?.delete(String(params.event ?? ""));
+        socket.send(responseFrame(message.id, {}));
+        return;
+      case "default_workspace":
+        socket.send(responseFrame(message.id, { cwd: "/tmp/puffer", workspaceRoot: "/tmp/puffer" }));
+        return;
+      case "load_settings_snapshot":
+        socket.send(responseFrame(message.id, this.settings()));
+        return;
+      case "load_desktop_pins":
+        socket.send(responseFrame(message.id, { pinnedAgentIds: [], pinnedWorkspacePaths: [] }));
+        return;
+      case "list_grouped_sessions":
+        socket.send(responseFrame(message.id, [{
+          folderId: "/tmp/puffer",
+          folderLabel: "puffer",
+          folderPath: "/tmp/puffer",
+          sessionCount: 1,
+          sessions: [this.session()]
+        }]));
+        return;
+      case "load_session_detail":
+        socket.send(responseFrame(message.id, {
+          session: this.session(),
+          timeline: [],
+          latestDiff: null,
+          diffHistory: [],
+          repoStatus: null,
+          agentDiff: { files: [], entries: [] },
+          divergence: { agentOnly: [], gitOnly: [], agentTotal: 0, gitTotal: 0 }
+        }));
+        return;
+      case "pty_list":
+        socket.send(responseFrame(message.id, {
+          initialized: this.ptys.length > 0,
+          activePtyId: this.activePtyId,
+          tabs: this.ptys
+        }));
+        return;
+      case "pty_open":
+        this.openPty(socket, message.id, params);
+        return;
+      case "pty_focus":
+        this.activePtyId = String(params.ptyId ?? "");
+        this.ptys = this.ptys.map((tab) => ({ ...tab, active: tab.ptyId === this.activePtyId }));
+        socket.send(responseFrame(message.id, {}));
+        return;
+      case "pty_close":
+        this.ptys = this.ptys.filter((tab) => tab.ptyId !== params.ptyId);
+        this.activePtyId = (this.ptys[0]?.ptyId as string | null) ?? null;
+        socket.send(responseFrame(message.id, {}));
+        return;
+      case "pty_resize":
+      case "pty_write":
+      case "pty_replay":
+        socket.send(responseFrame(message.id, message.method === "pty_replay" ? { chunks: [] } : {}));
+        return;
+      default:
+        socket.send(JSON.stringify({ type: "response", id: message.id, ok: false, error: `unhandled ${message.method}` }));
+    }
+  }
+
+  private openPty(socket: WebSocketRoute, id: string | number, params: Record<string, unknown>): void {
+    const ptyId = `pty-${this.nextPty++}`;
+    this.activePtyId = ptyId;
+    this.ptys = this.ptys.map((tab) => ({ ...tab, active: false }));
+    this.ptys.push({
+      ptyId,
+      sessionId: String(params.sessionId ?? "session-terminal-subscription"),
+      title: String(params.title ?? `Terminal ${this.nextPty - 1}`),
+      cwd: String(params.cwd ?? "/tmp/puffer"),
+      cols: Number(params.cols ?? 80),
+      rows: Number(params.rows ?? 24),
+      createdAtMs: Date.now(),
+      active: true
+    });
+    socket.send(responseFrame(id, { ptyId }));
+  }
+
+  private session(): Record<string, unknown> {
+    return {
+      sessionId: "session-terminal-subscription",
+      displayName: "Terminal subscription",
+      generatedTitle: null,
+      title: "Terminal subscription",
+      cwd: "/tmp/puffer",
+      folderPath: "/tmp/puffer",
+      updatedAtMs: baseTime,
+      createdAtMs: baseTime - 60_000,
+      eventCount: 0,
+      activityStatus: "idle",
+      slug: "terminal-subscription",
+      tags: [],
+      note: null,
+      parentSessionId: null,
+      providerId: "codex",
+      modelId: "test-model"
+    };
+  }
+
+  private settings(): Record<string, unknown> {
+    return {
+      workspaceRoot: "/tmp/puffer",
+      workspaceConfigFile: "/tmp/puffer/.puffer/config.json",
+      userConfigFile: "/tmp/home/.puffer/config.json",
+      authStoreFile: "/tmp/puffer/.puffer/auth.json",
+      builtinResourcesDir: "/tmp/puffer/resources",
+      config: { appName: "Puffer Code", defaultProvider: "codex", defaultModel: "test-model", theme: "system" },
+      resources: { providers: 1, tools: 1, agents: 0, prompts: 0, hooks: 0, skills: 0, mascots: 1, plugins: 0, mcpServers: 0, ides: 0 },
+      sessions: { totalSessions: 1, folderGroups: 1 },
+      auth: [{ providerId: "codex", kind: "oauth", email: "tester@example.com", expiresAtMs: null, scopes: [], planType: "test", organizationName: null }],
+      providers: [{ id: "codex", displayName: "Codex", baseUrl: "", defaultApi: "responses", modelCount: 1, authModes: ["oauth"], sourceKind: "test", sourcePath: null }]
+    };
+  }
 }
 
 test("browser state errors leave the address bar editable", async ({ page }) => {
@@ -316,4 +516,27 @@ test("settings provider credential success stays in provider settings", async ({
   await anthropicCard.getByRole("button", { name: /Use credentials from/ }).click();
   await daemon.waitForRequest("import_external_credential", (request) => request.params.providerId === "anthropic");
   await expect(page.getByRole("heading", { name: "Providers" })).toBeVisible();
+});
+
+test("terminal PTY data subscription is restored after websocket reconnect", async ({ page }) => {
+  const daemon = new StrictSubscriptionDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: /Terminal subscription/ }).first().click();
+  await page.locator(".pf-agent-tabs").getByRole("button", { name: "Terminal", exact: true }).click();
+  await daemon.waitFor("pty_open");
+  await daemon.waitFor("subscribe_event", (request) => request.params?.event === "pty:pty-1:data");
+
+  daemon.emit("pty:pty-1:data", { seq: 1, data: Buffer.from("before reconnect\n", "utf8").toString("base64") });
+  await expect(page.locator(".xterm-rows")).toContainText("before reconnect");
+
+  await daemon.disconnectAll();
+  await page.locator(".pf-terminal-host").click();
+  await page.keyboard.type("x");
+  await daemon.waitFor("pty_write");
+  await daemon.waitFor("subscribe_event", (request) => request.params?.event === "pty:pty-1:data");
+
+  daemon.emit("pty:pty-1:data", { seq: 2, data: Buffer.from("after reconnect\n", "utf8").toString("base64") });
+  await expect(page.locator(".xterm-rows")).toContainText("after reconnect");
 });
