@@ -508,6 +508,11 @@
     return reordered;
   }
 
+  function agentRowHasVisibleText(row: Extract<RowKind, { kind: "agent" }>): boolean {
+    if (row.item?.body.trim()) return true;
+    return row.children.some((child) => isActivityMessage(child) && child.body.trim());
+  }
+
   function stableTextHash(text: string): string {
     let hash = 2166136261;
     for (let index = 0; index < text.length; index += 1) {
@@ -914,18 +919,6 @@
     return out;
   });
 
-  let typingLabel = $derived.by(() => {
-    const elapsed = formatElapsed(turnStartedAtMs);
-    const suffix = elapsed ? ` (${elapsed})` : "";
-    if (turnRunning) {
-      if (turnStatusHint) return `${turnStatusHint}${suffix}`;
-      if (turnThinking) return `Thinking${suffix}`;
-      return `Running${suffix}`;
-    }
-    if (agentState === "awaiting") return `${engineerName} paused - waiting for your response`;
-    return null;
-  });
-
   type ActivityCategory = "thought" | "message" | "agent" | "write" | "read" | "browser" | "terminal" | "search" | "diff" | "other";
 
   type ActivitySummary = {
@@ -950,6 +943,32 @@
       if (distributedRows[index].kind === "agent") return index;
     }
     return -1;
+  });
+
+  let activeTurnHasVisibleText = $derived.by(() => {
+    if (!turnRunning) return false;
+    if (activeTurnAgentRowIndex >= 0) {
+      const row = distributedRows[activeTurnAgentRowIndex];
+      return row?.kind === "agent" && agentRowHasVisibleText(row);
+    }
+    for (let index = distributedRows.length - 1; index >= 0; index -= 1) {
+      const row = distributedRows[index];
+      if (row.kind === "agent") return agentRowHasVisibleText(row);
+    }
+    return false;
+  });
+
+  let typingLabel = $derived.by(() => {
+    const elapsed = formatElapsed(turnStartedAtMs);
+    const suffix = elapsed ? ` (${elapsed})` : "";
+    if (turnRunning) {
+      if (turnStatusHint) return `${turnStatusHint}${suffix}`;
+      if (turnThinking) return `Thinking${suffix}`;
+      if (activeTurnHasVisibleText) return null;
+      return `Running${suffix}`;
+    }
+    if (agentState === "awaiting") return `${engineerName} paused - waiting for your response`;
+    return null;
   });
 
   function shouldCollapseActivity(row: Extract<RowKind, { kind: "agent" }>, idx: number): boolean {

@@ -7598,6 +7598,7 @@ test("streamed assistant text stays visible through transcript reload", async ({
   });
 
   await expect(page.getByText(streamedText)).toBeVisible();
+  await expect(page.locator('.pf-msg[data-role="agent"]').filter({ hasText: /^Running\b/ })).toHaveCount(0);
   daemon.delayResponse(
     "load_session_detail",
     (request) => request.params.sessionId === "session-streaming",
