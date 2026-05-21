@@ -201,6 +201,33 @@ test("workspace picker clears local errors when switching modes", async ({ page 
   await expect(dialog.getByLabel("SSH target")).toBeVisible();
 });
 
+test("failed browser remote workspace switch restores the previous daemon", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await page.addInitScript(() => {
+    window.localStorage.setItem("puffer.remoteBackendUrl", "ws://127.0.0.1:9/ws");
+    window.localStorage.setItem("puffer.remoteBackendToken", "bad-token");
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByTitle("Switch workspace").click();
+  const dialog = page.getByRole("dialog", { name: "Switch workspace" });
+  await dialog.getByRole("tab", { name: /Remote/ }).click();
+  await dialog.getByLabel("SSH target").fill("tester@example.invalid");
+  await dialog.getByRole("button", { name: "Connect remote" }).click();
+
+  await expect(dialog.locator(".pf-modal-status", { hasText: "Unable to connect" })).toBeVisible();
+  await dialog.getByLabel("Close").click();
+  await page
+    .getByRole("region", { name: "Session history" })
+    .getByRole("button", { name: /Browser regression/ })
+    .click();
+
+  await expect(page.locator(".pf-agent-detail .primary-title")).toContainText("Browser regression");
+  await page.locator(".pf-agent-tabs").getByRole("button", { name: "Browser", exact: true }).click();
+  await daemon.waitForRequest("browser_open");
+});
+
 test("agent pin accepts a confirmed opposite toggle before the save response returns", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayResponse("set_desktop_pin", () => true, 500);
@@ -360,6 +387,91 @@ test("workspace search includes session notes in history results", async ({ page
   await expect(
     page.getByLabel("Session history").getByRole("button", { name: /Workspace note target/ })
   ).toBeVisible();
+});
+
+test("workspace search includes visible daemon activity status", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-running-status-search",
+        displayName: "Checkout status target",
+        title: "Checkout status target",
+        cwd: "/tmp/puffer-status-search",
+        folderPath: "/tmp/puffer-status-search",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1,
+        activityStatus: "running"
+      },
+      {
+        sessionId: "session-idle-status-search",
+        displayName: "Idle status neighbor",
+        title: "Idle status neighbor",
+        cwd: "/tmp/puffer-status-search",
+        folderPath: "/tmp/puffer-status-search",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 1,
+        activityStatus: "idle"
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByLabel("Search workspace").fill("running");
+
+  const project = page.locator(".pf-pw-project").filter({ hasText: "puffer-status-search" });
+  await expect(project.getByText("Checkout status target")).toBeVisible();
+  await expect(project.getByText("Idle status neighbor")).toHaveCount(0);
+});
+
+test("workspace search keeps keyboard focus when filtering removes the focused row", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-focused-search-drop",
+        displayName: "Focused search drop",
+        title: "Focused search drop",
+        cwd: "/tmp/puffer-focus-search",
+        folderPath: "/tmp/puffer-focus-search",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 1
+      },
+      {
+        sessionId: "session-stable-search-row",
+        displayName: "Stable search row",
+        title: "Stable search row",
+        cwd: "/tmp/puffer-focus-search",
+        folderPath: "/tmp/puffer-focus-search",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 1
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  const search = page.getByLabel("Search workspace");
+  await search.fill("focused search drop");
+  const row = page.getByRole("region", { name: "Session history" })
+    .getByRole("button", { name: /Focused search drop/ });
+  await expect(row).toBeVisible();
+  await row.focus();
+  await expect(row).toBeFocused();
+
+  await search.evaluate((input) => {
+    const el = input as HTMLInputElement;
+    el.value = "stable search row";
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+
+  await expect(row).toHaveCount(0);
+  await expect(search).toBeFocused();
 });
 
 test("workspace project rows collapse and expand their session list", async ({ page }) => {

@@ -318,7 +318,7 @@
   }
 
   async function saveDefaultModel() {
-    if (!modelPickerProvider || !modelPickerModel || modelPickerLoading || modelSaving) return;
+    if (!modelPickerProvider || !modelPickerModel || modelPickerLoading || modelSaving || credentialBusy) return;
     modelSaving = true;
     modelError = null;
     try {
@@ -439,7 +439,7 @@
     defaultRouteProviders.find((p) => providerIdsEquivalent(p.id, modelPickerProvider))
       ?.displayName ?? modelPickerProvider
   );
-  let modelPickerDisabled = $derived(!daemonReachable || modelSaving);
+  let modelPickerDisabled = $derived(!daemonReachable || modelSaving || credentialBusy);
   let canSaveDefaultModel = $derived(
     Boolean(
       daemonReachable &&
@@ -447,7 +447,8 @@
         modelPickerModel &&
         modelIdInList(modelPickerModel, providerModels[modelPickerProvider] ?? []) &&
         !modelPickerLoading &&
-        !modelSaving
+        !modelSaving &&
+        !credentialBusy
     )
   );
 

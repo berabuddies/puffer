@@ -1,6 +1,7 @@
 <script lang="ts">
   import "../design/workspace.css";
 
+  import { tick } from "svelte";
   import Icon from "../design/Icon.svelte";
   import ProjectRow from "./workspace/ProjectRow.svelte";
   import ConnectProjectModal from "./workspace/ConnectProjectModal.svelte";
@@ -58,6 +59,7 @@
 
   let showConnect = $state(false);
   let searchQuery = $state("");
+  let searchInput: HTMLInputElement | null = $state(null);
 
   // Stable palette so two renders of the same folder pick the same color.
   const PALETTE = [
@@ -156,6 +158,7 @@
       includesNeedle(agent.name, needle) ||
       includesNeedle(agent.title, needle) ||
       includesNeedle(agent.branch, needle) ||
+      includesNeedle(agent.status, needle) ||
       includesNeedle(agent.step, needle) ||
       includesNeedle(agent.model, needle)
     );
@@ -209,6 +212,16 @@
         : `${agentCount} active ${agentCount === 1 ? "agent" : "agents"}`
   );
 
+  $effect(() => {
+    visibleProjects;
+    visibleRecentSessions;
+    if (!searchNeedle) return;
+    void tick().then(() => {
+      if (document.activeElement !== document.body) return;
+      searchInput?.focus();
+    });
+  });
+
   async function handleNewAgent(cwd: string) {
     if (!onNewAgent) return;
     await onNewAgent(cwd);
@@ -243,6 +256,7 @@
       <div class="pf-pw-search">
         <Icon name="search" size={12} />
         <input
+          bind:this={searchInput}
           placeholder="Search tasks, agents, branches…"
           aria-label="Search workspace"
           bind:value={searchQuery}

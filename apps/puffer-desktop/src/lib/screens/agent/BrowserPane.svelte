@@ -1460,6 +1460,7 @@
     if (!["r", "l", "w"].includes(key)) return false;
     event.preventDefault();
     handledBrowserShortcutCodes.add(event.code);
+    releaseBrowserShortcutModifier(event);
     if (key === "r") {
       reloadActiveTab();
     } else if (key === "l") {
@@ -1469,6 +1470,27 @@
       closeTab(activeTabId);
     }
     return true;
+  }
+
+  function releaseBrowserShortcutModifier(event: KeyboardEvent) {
+    if (event.ctrlKey) {
+      sendBrowserInput({
+        kind: "key",
+        eventType: "keyUp",
+        key: "Control",
+        code: "ControlLeft",
+        modifiers: (event.altKey ? 1 : 0) | (event.metaKey ? 4 : 0) | (event.shiftKey ? 8 : 0)
+      });
+    }
+    if (event.metaKey) {
+      sendBrowserInput({
+        kind: "key",
+        eventType: "keyUp",
+        key: "Meta",
+        code: "MetaLeft",
+        modifiers: (event.altKey ? 1 : 0) | (event.ctrlKey ? 2 : 0) | (event.shiftKey ? 8 : 0)
+      });
+    }
   }
 
   function keyDown(event: KeyboardEvent) {

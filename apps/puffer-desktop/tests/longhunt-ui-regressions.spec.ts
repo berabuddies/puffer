@@ -540,3 +540,218 @@ test("terminal PTY data subscription is restored after websocket reconnect", asy
   daemon.emit("pty:pty-1:data", { seq: 2, data: Buffer.from("after reconnect\n", "utf8").toString("base64") });
   await expect(page.locator(".xterm-rows")).toContainText("after reconnect");
 });
+
+test("in-flight permission responses stay disabled across session round trips", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-permission-roundtrip-a",
+        displayName: "Permission roundtrip A",
+        title: "Permission roundtrip A",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0
+      },
+      {
+        sessionId: "session-permission-roundtrip-b",
+        displayName: "Permission roundtrip B",
+        title: "Permission roundtrip B",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 0
+      }
+    ]
+  });
+  daemon.delayResponse("resolve_permission", () => true, 500);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: /Permission roundtrip A/ }).first().click();
+  daemon.emit("session:session-permission-roundtrip-a:event", {
+    type: "permission-request",
+    turnId: "turn-permission-roundtrip",
+    requestId: "perm-roundtrip",
+    toolId: "bash",
+    summary: "Run duplicate-sensitive command",
+    reason: "Needs one approval only."
+  });
+  await page.getByRole("button", { name: "Allow once" }).click();
+  await daemon.waitForRequest("resolve_permission");
+
+  await page.getByRole("button", { name: /Permission roundtrip B/ }).first().click();
+  await page.getByRole("button", { name: /Permission roundtrip A/ }).first().click();
+  await expect(page.getByRole("button", { name: "Allow once" })).toBeDisabled();
+  await page.waitForTimeout(80);
+  expect(daemon.requests.filter((request) => request.method === "resolve_permission")).toHaveLength(1);
+});
+
+test("in-flight question responses stay disabled across session round trips", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-question-roundtrip-a",
+        displayName: "Question roundtrip A",
+        title: "Question roundtrip A",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0
+      },
+      {
+        sessionId: "session-question-roundtrip-b",
+        displayName: "Question roundtrip B",
+        title: "Question roundtrip B",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 0
+      }
+    ]
+  });
+  daemon.delayResponse("resolve_user_question", () => true, 500);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: /Question roundtrip A/ }).first().click();
+  daemon.emit("session:session-question-roundtrip-a:event", {
+    type: "user-question-request",
+    turnId: "turn-question-roundtrip",
+    requestId: "question-roundtrip",
+    questions: [
+      {
+        header: "Path",
+        question: "Which path?",
+        options: [{ label: "src", description: "Source" }]
+      }
+    ]
+  });
+  await page.locator(".pf-question-option").filter({ hasText: "src" }).click();
+  await page.getByRole("button", { name: "Send answer" }).click();
+  await daemon.waitForRequest("resolve_user_question");
+
+  await page.getByRole("button", { name: /Question roundtrip B/ }).first().click();
+  await page.getByRole("button", { name: /Question roundtrip A/ }).first().click();
+  await expect(page.getByRole("button", { name: "Send answer" })).toBeDisabled();
+  await page.waitForTimeout(80);
+  expect(daemon.requests.filter((request) => request.method === "resolve_user_question")).toHaveLength(1);
+});
+
+test("hidden turn-start failures are shown when returning to the session", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-hidden-start-fail-a",
+        displayName: "Hidden start fail A",
+        title: "Hidden start fail A",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0
+      },
+      {
+        sessionId: "session-hidden-start-fail-b",
+        displayName: "Hidden start fail B",
+        title: "Hidden start fail B",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime - 1_000,
+        createdAtMs: baseTime - 120_000,
+        eventCount: 0
+      }
+    ]
+  });
+  daemon.delayFailure(
+    "run_agent_turn",
+    (request) => request.params.sessionId === "session-hidden-start-fail-a",
+    "queued turn rejected",
+    120
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: /Hidden start fail A/ }).first().click();
+  await page.locator(".pf-composer textarea").fill("fail while hidden");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await daemon.waitForRequest("run_agent_turn");
+  await page.getByRole("button", { name: /Hidden start fail B/ }).first().click();
+  await page.waitForTimeout(180);
+  await page.getByRole("button", { name: /Hidden start fail A/ }).first().click();
+
+  await expect(page.getByText("Agent start failed")).toBeVisible();
+  await expect(page.getByText("queued turn rejected")).toBeVisible();
+});
+
+test("submitted prompt survives reload while turn start is pending", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-reload-pending-prompt",
+        displayName: "Reload pending prompt",
+        title: "Reload pending prompt",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0
+      }
+    ]
+  });
+  daemon.delayResponse("run_agent_turn", () => true, 1_000);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: /Reload pending prompt/ }).first().click();
+  await page.locator(".pf-composer textarea").fill("reload should keep this prompt");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await daemon.waitForRequest("run_agent_turn");
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.getByRole("button", { name: /Reload pending prompt/ }).first().click();
+  await expect(page.getByText("reload should keep this prompt")).toBeVisible();
+});
+
+test("browser Ctrl+L releases the remote Control modifier", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await openBrowserPane(page, daemon);
+
+  await page.locator(".pf-browser-canvas").click();
+  const before = daemon.requests.length;
+  await page.keyboard.press("Control+L");
+  await expect(page.getByLabel("URL")).toBeFocused();
+  const inputs = daemon.requests
+    .slice(before)
+    .filter((request) => request.method === "browser_input")
+    .map((request) => request.params.event as Record<string, unknown>);
+  expect(inputs.some((event) => event.eventType === "keyUp" && event.key === "Control")).toBe(true);
+});
+
+test("pending credential import disables default model save", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    auth: [],
+    providers: [openAiProvider, anthropicProvider],
+    externalCredentials: [
+      {
+        providerId: "anthropic",
+        source: "claude",
+        sourcePath: "/home/tester/.claude/.credentials.json",
+        kind: "api_key"
+      }
+    ]
+  });
+  daemon.delayResponse("import_external_credential", () => true, 500);
+  await daemon.install(page);
+  await daemon.open(page, { allowUnauthenticatedWorkspace: true });
+  await openProviderSettings(page);
+
+  const anthropicCard = page.locator(".provider-card").filter({ hasText: "Anthropic" });
+  await anthropicCard.getByRole("button", { name: /Use credentials from/ }).click();
+  await daemon.waitForRequest("import_external_credential");
+  await expect(page.getByRole("button", { name: "Save default" })).toBeDisabled();
+});
