@@ -1901,8 +1901,8 @@
         const remainingLiveItems = stillMissingFromPersisted(timeline, liveStreamItems);
         submittedMessages = remainingSubmittedMessages;
         liveStreamItems = remainingLiveItems;
+        clearCanceledLoadedTurnState(detail.session.id, detail.session.activityStatus);
         if (resetLiveState) {
-          clearCanceledLoadedTurnState(detail.session.id, detail.session.activityStatus);
           clearSettledLoadedTurnState(
             detail.session.id,
             detail.session.activityStatus,

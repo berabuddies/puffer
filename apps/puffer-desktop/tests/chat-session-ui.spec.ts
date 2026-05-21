@@ -6335,6 +6335,56 @@ test("workspace settled event clears selected canceled turn state", async ({ pag
   await expect(page.locator(".pf-agent-status-pill")).toContainText("Idle");
 });
 
+test("canceled selected idle session stays idle when reopened from workspace", async ({ page }) => {
+  const prompt = "Cancel same selected session";
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-cancel-same-reopen",
+        displayName: "Cancel same reopen",
+        title: "Cancel same reopen",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        activityStatus: "idle",
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Cancel same reopen/);
+  await page.locator(".pf-composer textarea").fill(prompt);
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) =>
+      request.params.sessionId === "session-cancel-same-reopen" &&
+      request.params.message === prompt
+  );
+
+  await page.getByRole("button", { name: "Stop turn" }).click();
+  await daemon.waitForRequest(
+    "cancel_turn",
+    (request) => request.params.turnId === "turn-session-cancel-same-reopen"
+  );
+
+  await page.getByRole("button", { name: "Back" }).click();
+
+  const card = page.locator(".pf-pw-agent").filter({ hasText: "Cancel same reopen" });
+  await expect(card.locator('.status-pill[data-status="idle"]')).toContainText("Idle");
+
+  await card.click();
+  await expect(page.locator(".pf-agent-status-pill")).toContainText("Idle");
+  await expect(page.getByRole("button", { name: "Stop turn" })).toHaveCount(0);
+  await expect(page.locator(".pf-composer textarea")).toBeEnabled();
+});
+
 test("canceled idle session does not revive running state when reopened", async ({ page }) => {
   const prompt = "Cancel then reopen idle";
   const daemon = new FakeDaemon({
