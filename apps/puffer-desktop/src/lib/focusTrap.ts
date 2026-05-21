@@ -31,6 +31,7 @@ function restoreFocus(element: HTMLElement | null) {
   if (!element?.isConnected) return;
   element.focus({ preventScroll: true });
   window.requestAnimationFrame(() => {
+    if (document.querySelector("[role='dialog'][aria-modal='true']")) return;
     if (element.isConnected && document.activeElement !== element) {
       element.focus({ preventScroll: true });
     }

@@ -43,10 +43,11 @@ export function providerCanRunAgent(provider: ProviderCapability | null | undefi
 
 /** True when a provider can run agent sessions without credentials. */
 export function providerRunsWithoutAuth(provider: ProviderAuthCapability | null | undefined): boolean {
+  const authModes = provider?.authModes;
   return (
     providerCanRunAgent(provider) &&
-    Array.isArray(provider?.authModes) &&
-    provider.authModes.length === 0
+    Array.isArray(authModes) &&
+    (authModes.length === 0 || authModes.some((mode) => mode.trim().toLowerCase() === "native"))
   );
 }
 

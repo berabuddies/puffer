@@ -2110,8 +2110,31 @@ test("dismissed transcript permissions stay scoped to their session", async ({ p
   await expect(page.getByText("Approval needed")).toBeVisible();
 });
 
-test("logged-out provider sessions cannot start new turns", async ({ page }) => {
+test("logging out the last provider clears active session state", async ({ page }) => {
   const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "anthropic",
+        kind: "api_key",
+        email: null,
+        expiresAtMs: null,
+        scopes: [],
+        planType: null,
+        organizationName: null
+      }
+    ],
+    providers: [
+      {
+        id: "anthropic",
+        displayName: "Claude",
+        baseUrl: "",
+        defaultApi: "anthropic-messages",
+        modelCount: 1,
+        authModes: ["api_key"],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ],
     sessions: [
       {
         sessionId: "session-anthropic-history",
@@ -2150,14 +2173,10 @@ test("logged-out provider sessions cannot start new turns", async ({ page }) => 
   const logout = await daemon.waitForRequest("logout_provider");
   expect(logout.params).toMatchObject({ providerId: "anthropic" });
 
-  await page.getByRole("button", { name: "Project" }).click();
-  await openSession(page, /Claude history/);
-  const composer = page.locator(".pf-composer textarea");
-  await expect(composer).toBeDisabled();
-  await expect(page.locator(".pf-composer-hint")).toContainText(
-    "Reconnect Claude to continue this session."
-  );
-  await expect(page.getByRole("button", { name: "Send" })).toBeDisabled();
+  await expect(page.getByText("0 providers connected")).toBeVisible();
+  await expect(page.getByText("Connect a provider before starting an agent.")).toBeVisible();
+  await expect(page.getByRole("button", { name: /Claude history/ })).toHaveCount(0);
+  await expect(page.locator(".pf-agent-detail")).toHaveCount(0);
   await page.keyboard.press("Enter");
   await page.waitForTimeout(50);
   expect(
@@ -5167,6 +5186,77 @@ test("model picker only offers authenticated agent providers", async ({ page }) 
   await expect(providerList.getByRole("button", { name: "GitHub", exact: true })).toHaveCount(0);
 });
 
+test("native agent providers are available without stored auth", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    auth: [],
+    providers: [
+      {
+        id: "puffer",
+        displayName: "Puffer Native",
+        baseUrl: "",
+        defaultApi: "puffer",
+        modelCount: 1,
+        authModes: ["native"],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ],
+    sessions: [
+      {
+        sessionId: "session-native-provider",
+        displayName: "Native provider",
+        title: "Native provider",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "puffer",
+        modelId: "puffer-native",
+        timeline: []
+      }
+    ],
+    providerModels: {
+      puffer: [
+        {
+          id: "puffer-native",
+          displayName: "Puffer Native",
+          provider: "puffer",
+          api: "puffer",
+          supportsTools: true,
+          supportsVision: false,
+          contextWindow: null,
+          maxOutputTokens: null,
+          thinkingOptions: [],
+          defaultThinkingOptionId: null,
+          isDefault: true
+        }
+      ]
+    }
+  });
+  daemon.setSettingsConfig({
+    defaultProvider: "puffer",
+    defaultModel: "puffer-native"
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Native provider/);
+  const composer = page.locator(".pf-composer textarea");
+  await expect(composer).toBeEnabled();
+  await expect(page.locator(".pf-composer-hint")).not.toContainText("Reconnect");
+  await composer.fill("Use native provider");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  const request = await daemon.waitForRequest(
+    "run_agent_turn",
+    (item) => item.params.message === "Use native provider"
+  );
+  expect(request.params).toMatchObject({
+    providerId: "puffer",
+    modelId: "puffer-native"
+  });
+});
+
 test("model picker provider buttons expose selected state", async ({ page }) => {
   const model = (provider: string, id: string) => ({
     id,
@@ -7519,6 +7609,39 @@ test("auto recap waits while the composer has an unsent draft", async ({ page })
     )
   ).toHaveLength(0);
   await expect(composer).toHaveValue("Half-written thought");
+});
+
+test("auto recap does not run for an empty session", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-empty-recap",
+        displayName: "Empty recap",
+        title: "Empty recap",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await page.addInitScript(() => {
+    (window as unknown as { __RECAP_IDLE_MS_OVERRIDE: number }).__RECAP_IDLE_MS_OVERRIDE = 100;
+  });
+  await daemon.open(page);
+
+  await openSession(page, /Empty recap/);
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+  await page.waitForTimeout(180);
+
+  expect(
+    daemon.requests.filter(
+      (request) => request.method === "run_agent_turn" && request.params.message === "/recap"
+    )
+  ).toHaveLength(0);
 });
 
 test("auto recap does not run after returning to the workspace board", async ({ page }) => {

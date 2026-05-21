@@ -135,6 +135,12 @@
       statusMessage = "Desktop workspace ready.";
       statusDismissTimer = null;
     }, 4000);
+    return () => {
+      if (statusDismissTimer) {
+        clearTimeout(statusDismissTimer);
+        statusDismissTimer = null;
+      }
+    };
   });
   let showWorkspacePicker = $state(false);
   let newSessionCwd = $state<string | null>(null);
@@ -701,10 +707,24 @@
   let recapBlurSessionId: string | null = null;
   let composerHasDraft = $state(false);
 
+  function recapIdleMs(): number {
+    if (typeof window === "undefined") return RECAP_IDLE_MS;
+    const override = (window as unknown as { __RECAP_IDLE_MS_OVERRIDE?: unknown })
+      .__RECAP_IDLE_MS_OVERRIDE;
+    return typeof override === "number" && override > 0 ? override : RECAP_IDLE_MS;
+  }
+
+  function selectedSessionHasConversation(): boolean {
+    if (!selectedSession) return false;
+    if ((sessionDetail?.timeline.length ?? 0) > 0) return true;
+    return selectedSession.eventCount > 0;
+  }
+
   function armRecapBlurTimer() {
     if (turnRunning || composerHasDraft) return;
     if (recapBlurTimer != null) return;
     const sessionIdAtBlur = selectedSession?.id ?? null;
+    if (!selectedSessionHasConversation()) return;
     if (!sessionIdAtBlur || openAgentSessionId !== sessionIdAtBlur) return;
     recapBlurSessionId = sessionIdAtBlur;
     recapBlurTimer = setTimeout(() => {
@@ -712,9 +732,10 @@
       recapBlurSessionId = null;
       if (!selectedSession || turnRunning || composerHasDraft) return;
       if (selectedSession.id !== sessionIdAtBlur) return;
+      if (!selectedSessionHasConversation()) return;
       if (openAgentSessionId !== sessionIdAtBlur) return;
       void submitMessage("/recap", {});
-    }, RECAP_IDLE_MS);
+    }, recapIdleMs());
   }
 
   function cancelRecapBlurTimer() {
@@ -1036,13 +1057,12 @@
   });
 
   async function init() {
-    void loadDefaultWorkspace()
-      .then((info) => {
-        defaultWorkspaceCwd = info.cwd;
-      })
-      .catch(() => {
-        /* daemon might be remote / unavailable; keep default empty */
-      });
+    try {
+      const info = await loadDefaultWorkspace();
+      defaultWorkspaceCwd = info.cwd;
+    } catch {
+      /* daemon might be remote / unavailable; keep default empty */
+    }
     // Observe daemon connection state so the banner reflects reality.
     void ensureLocalDaemonClient()
       .then((client) => {
@@ -1208,10 +1228,11 @@
         settingsSnapshot = await logoutProviderViaDaemon(providerId);
       }
       statusMessage = `Disconnected ${providerId}.`;
-      if (!hasAvailableAgentProvider(settingsSnapshot)) {
-        groups = [];
-        selectedSession = null;
-        sessionDetail = null;
+      resetDaemonScopedSessionState();
+      if (hasAvailableAgentProvider(settingsSnapshot)) {
+        onboarding = false;
+        await refreshGroups();
+      } else {
         onboarding = true;
       }
     } catch (error) {
@@ -1922,6 +1943,7 @@
   }
 
   async function openSession(session: SessionListItem, options: OpenSessionOptions = {}) {
+    if (selectedSession?.id !== session.id) cancelRecapBlurTimer();
     const showLoading = options.showLoading ?? selectedSession?.id !== session.id;
     const sameSession = selectedSession?.id === session.id;
     const resetLiveState = options.resetLiveState ?? !sameSession;
@@ -2035,6 +2057,7 @@
   }
 
   function resetDaemonScopedSessionState() {
+    cancelRecapBlurTimer();
     selectedSession = null;
     groups = [];
     groupsLoading = false;
@@ -2695,9 +2718,13 @@
   ): TimelineItem[] {
     const missing = stillMissingFromPersisted(items, pending);
     const missingIds = new Set(missing.map((item) => item.id));
+    let nextBaselineIds = submittedMessageBaselineIds;
     for (const item of pending) {
-      if (!missingIds.has(item.id)) delete submittedMessageBaselineIds[item.id];
+      if (missingIds.has(item.id)) continue;
+      if (nextBaselineIds === submittedMessageBaselineIds) nextBaselineIds = { ...submittedMessageBaselineIds };
+      delete nextBaselineIds[item.id];
     }
+    if (nextBaselineIds !== submittedMessageBaselineIds) submittedMessageBaselineIds = nextBaselineIds;
     return missing;
   }
 
@@ -2727,7 +2754,7 @@
     return [
       ...items,
       {
-        id: `live-complete-assistant-${Date.now()}`,
+        id: `live-complete-assistant-${turnId}`,
         kind: "assistant",
         title: "Assistant",
         summary: trimmed,
