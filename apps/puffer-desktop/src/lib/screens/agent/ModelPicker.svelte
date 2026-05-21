@@ -56,12 +56,12 @@
     )
   );
   let providerLabel = $derived(
-    snapshot?.providers?.find((p) => providerIdsEquivalent(p.id, activeProvider))?.displayName ??
+    providerEntryFor(activeProvider)?.displayName ??
       activeProvider
   );
 
   let currentProviderEntry = $derived(
-    availableProviders.find((provider) => providerIdsEquivalent(provider.id, activeProvider)) ?? null
+    providerEntryFor(activeProvider)
   );
   let currentProviderModels = $derived(
     modelsByProvider[activeProvider] ?? modelsByProvider[currentProviderEntry?.id ?? ""] ?? []
@@ -112,6 +112,16 @@
         busy = false;
       }
     }
+  }
+
+  function providerEntryFor(providerId: string | null | undefined) {
+    const normalized = providerId?.trim().toLowerCase();
+    if (!normalized) return null;
+    const exact = availableProviders.find(
+      (provider) => provider.id.trim().toLowerCase() === normalized
+    );
+    if (exact) return exact;
+    return availableProviders.find((provider) => providerIdsEquivalent(provider.id, normalized)) ?? null;
   }
 
   async function selectProvider(providerId: string) {

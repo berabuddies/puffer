@@ -4616,6 +4616,119 @@ test("configured OpenAI provider label is not rewritten to Codex", async ({ page
   );
 });
 
+test("exact OpenAI provider keeps its own model catalog when Codex alias also exists", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    auth: [
+      {
+        providerId: "openai",
+        kind: "api_key",
+        email: null,
+        expiresAtMs: null,
+        scopes: [],
+        planType: null,
+        organizationName: null
+      }
+    ],
+    providers: [
+      {
+        id: "codex",
+        displayName: "Codex",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 1,
+        authModes: ["oauth"],
+        sourceKind: "test",
+        sourcePath: null
+      },
+      {
+        id: "openai",
+        displayName: "OpenAI",
+        baseUrl: "",
+        defaultApi: "openai-responses",
+        modelCount: 1,
+        authModes: ["api_key"],
+        sourceKind: "test",
+        sourcePath: null
+      }
+    ],
+    sessions: [
+      {
+        sessionId: "session-openai-exact-catalog",
+        displayName: "OpenAI exact catalog",
+        title: "OpenAI exact catalog",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "openai",
+        modelId: "gpt-5.4",
+        timeline: []
+      }
+    ],
+    providerModels: {
+      codex: [
+        {
+          id: "codex-default",
+          displayName: "Codex Default",
+          provider: "codex",
+          api: "openai-responses",
+          supportsTools: true,
+          supportsVision: false,
+          contextWindow: null,
+          maxOutputTokens: null,
+          thinkingOptions: [],
+          defaultThinkingOptionId: null,
+          isDefault: true
+        }
+      ],
+      openai: [
+        {
+          id: "gpt-5.4",
+          displayName: "GPT-5.4",
+          provider: "openai",
+          api: "openai-responses",
+          supportsTools: true,
+          supportsVision: false,
+          contextWindow: null,
+          maxOutputTokens: null,
+          thinkingOptions: [],
+          defaultThinkingOptionId: null,
+          isDefault: true
+        }
+      ]
+    }
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /OpenAI exact catalog/);
+  const catalogRequest = await daemon.waitForRequest(
+    "list_provider_models",
+    (request) =>
+      request.params.providerId === "codex" || request.params.providerId === "openai"
+  );
+  expect(catalogRequest.params).toMatchObject({ providerId: "openai" });
+  await expect(page.locator(".pf-composer textarea")).toHaveAttribute(
+    "placeholder",
+    /Engineer \(OpenAI\)/
+  );
+  const composer = page.locator(".pf-composer textarea");
+  await composer.fill("Use exact OpenAI catalog");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  const turnRequest = await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.message === "Use exact OpenAI catalog"
+  );
+  expect(turnRequest.params).toMatchObject({
+    providerId: "openai",
+    modelId: "gpt-5.4"
+  });
+});
+
 test("model picker only offers authenticated agent providers", async ({ page }) => {
   const daemon = new FakeDaemon({
     auth: [

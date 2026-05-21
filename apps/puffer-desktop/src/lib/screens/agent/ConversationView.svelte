@@ -144,12 +144,7 @@
 
   let fastModeAvailable = $derived(modelSupportsFastMode(selectedModelId));
   let selectedProviderModelSourceId = $derived.by(() => {
-    if (!selectedProviderId) return null;
-    return (
-      settingsSnapshot?.providers?.find((provider) =>
-        providerIdsEquivalent(provider.id, selectedProviderId)
-      )?.id ?? selectedProviderId
-    );
+    return providerModelSourceId(selectedProviderId);
   });
   let selectedModelInfo = $derived(
     selectedProviderModelSourceId &&
@@ -320,6 +315,16 @@
     const equivalent = providers.find((provider) => providerIdsEquivalent(provider.id, providerId));
     if (equivalent?.displayName.trim()) return equivalent.displayName.trim();
     return null;
+  }
+
+  function providerModelSourceId(providerId: string | null | undefined): string | null {
+    const normalized = providerId?.trim().toLowerCase();
+    if (!normalized) return null;
+    const providers = settingsSnapshot?.providers ?? [];
+    const exact = providers.find((provider) => provider.id.trim().toLowerCase() === normalized);
+    if (exact) return exact.id;
+    const equivalent = providers.find((provider) => providerIdsEquivalent(provider.id, normalized));
+    return equivalent?.id ?? providerId ?? null;
   }
 
   function providerDisplayName(providerId: string | null | undefined): string {
