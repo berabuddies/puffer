@@ -797,7 +797,10 @@
       ) {
         return;
       }
-      cacheFileResult(result, true, target);
+      const latestDraft = draftCache.get(target);
+      const draftStillMatchesSavedContent =
+        latestDraft == null || latestDraft === content;
+      cacheFileResult(result, draftStillMatchesSavedContent, target);
       pinTab(target);
       if (activePath === target) {
         clearLspState();

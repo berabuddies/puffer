@@ -26,8 +26,14 @@
     collapsed = answered;
   });
 
-  function answerKeyFor(question: AskUserQuestionItem): string {
-    return question.question;
+  function answerKeyFor(question: AskUserQuestionItem, index?: number): string {
+    const duplicateCount = item.questions.filter(
+      (candidate) => candidate.question === question.question
+    ).length;
+    if (duplicateCount <= 1) return question.question;
+    const prefix = question.header?.trim();
+    if (prefix) return `${prefix}: ${question.question}`;
+    return typeof index === "number" ? `${question.question} #${index + 1}` : question.question;
   }
 
   function draftKeyFor(index: number): string {
@@ -62,7 +68,7 @@
 
   function checked(question: AskUserQuestionItem, index: number, label: string): boolean {
     const current = answered
-      ? item.answers?.[answerKeyFor(question)]
+      ? item.answers?.[answerKeyFor(question, index)]
       : selectedAnswers[draftKeyFor(index)];
     return Array.isArray(current) ? current.includes(label) : current === label;
   }
@@ -72,15 +78,15 @@
   }
 
   function customChecked(question: AskUserQuestionItem, index: number): boolean {
-    if (answered) return customAnswers(question).length > 0;
+    if (answered) return customAnswers(question, index).length > 0;
     const key = draftKeyFor(index);
     const text = customValue(index).trim();
     if (!text) return false;
     return question.multiSelect || customActive[key] === true;
   }
 
-  function customAnswers(question: AskUserQuestionItem): string[] {
-    const answer = item.answers?.[answerKeyFor(question)];
+  function customAnswers(question: AskUserQuestionItem, index?: number): string[] {
+    const answer = item.answers?.[answerKeyFor(question, index)];
     const values = Array.isArray(answer) ? answer : typeof answer === "string" ? [answer] : [];
     const optionLabels = new Set(question.options.map((option) => option.label));
     return values.filter((value) => !optionLabels.has(value));
@@ -90,7 +96,8 @@
     const answers = item.answers ?? {};
     return item.questions
       .map((question) => {
-        const answer = answers[answerKeyFor(question)];
+        const index = item.questions.indexOf(question);
+        const answer = answers[answerKeyFor(question, index)];
         if (!answer) return null;
         return Array.isArray(answer) ? answer.join(", ") : answer;
       })
@@ -115,7 +122,7 @@
     const next: Answers = {};
     for (const [index, question] of item.questions.entries()) {
       const answer = answerFor(question, index);
-      if (answer !== null) next[answerKeyFor(question)] = answer;
+      if (answer !== null) next[answerKeyFor(question, index)] = answer;
     }
     return next;
   }
@@ -201,7 +208,7 @@
             </label>
           {/each}
         </div>
-        {#if !answered || customAnswers(question).length > 0}
+        {#if !answered || customAnswers(question, index).length > 0}
           <label
             class="pf-question-other"
             data-selected={customChecked(question, index)}
@@ -225,7 +232,7 @@
             />
             {#if answered}
               <div class="pf-question-other-readonly">
-                {customAnswers(question).join(", ")}
+                {customAnswers(question, index).join(", ")}
               </div>
             {:else}
               <input

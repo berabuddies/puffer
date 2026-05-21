@@ -94,6 +94,7 @@ export class DaemonClient {
       socket.onopen = () => {
         this.connectPromise = null;
         this.setState("open");
+        void this.resubscribeActiveEvents();
         resolve();
       };
       socket.onmessage = (event) => {
@@ -158,9 +159,13 @@ export class DaemonClient {
       listeners.add(wrapped);
       this.eventListeners.set(event, listeners);
       void this.connect().catch(() => {});
+      void this.subscribeEvent(event);
       return () => {
         listeners.delete(wrapped);
-        if (listeners.size === 0) this.eventListeners.delete(event);
+        if (listeners.size === 0) {
+          this.eventListeners.delete(event);
+          void this.unsubscribeEvent(event);
+        }
       };
     }
 
@@ -246,6 +251,26 @@ export class DaemonClient {
       const separator = this.handshake.url.includes("?") ? "&" : "?";
       return `${this.handshake.url}${separator}token=${encodeURIComponent(this.handshake.token)}`;
     }
+  }
+
+  private async subscribeEvent(event: string): Promise<void> {
+    try {
+      await this.request("subscribe_event", { event });
+    } catch {
+      /* Older daemons broadcast all events; keep the local listener active. */
+    }
+  }
+
+  private async unsubscribeEvent(event: string): Promise<void> {
+    try {
+      await this.request("unsubscribe_event", { event });
+    } catch {
+      /* Connection teardown already drops server-side subscriptions. */
+    }
+  }
+
+  private async resubscribeActiveEvents(): Promise<void> {
+    await Promise.all([...this.eventListeners.keys()].map((event) => this.subscribeEvent(event)));
   }
 
   private rejectPending(error: Error): void {

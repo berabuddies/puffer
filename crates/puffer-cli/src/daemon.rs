@@ -60,7 +60,7 @@ use puffer_workflow::WorkflowStore;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufReader, Read};
 use std::net::SocketAddr;
 use std::path::Path;
@@ -506,6 +506,7 @@ fn event_payload_with_actor(mut payload: Value, actor: &MessageActor) -> Value {
 async fn handle_socket(socket: WebSocket, state: Arc<DaemonState>) {
     let (ws_tx, mut ws_rx) = socket.split();
     let tx = Arc::new(AsyncMutex::new(ws_tx));
+    let subscriptions = Arc::new(AsyncMutex::new(HashSet::<String>::new()));
 
     // Say hello.
     let _ = send_envelope(
@@ -540,8 +541,12 @@ async fn handle_socket(socket: WebSocket, state: Arc<DaemonState>) {
     // Fan out global events to this client.
     let mut events_rx = state.events.subscribe();
     let tx_events = tx.clone();
+    let event_subscriptions = subscriptions.clone();
     let event_forwarder = tokio::spawn(async move {
         while let Ok(env) = events_rx.recv().await {
+            if !should_forward_live_event(&env, &event_subscriptions).await {
+                continue;
+            }
             if send_envelope(&tx_events, &env).await.is_err() {
                 break;
             }
@@ -573,10 +578,27 @@ async fn handle_socket(socket: WebSocket, state: Arc<DaemonState>) {
                 continue;
             }
         };
-        dispatch_request(request, state.clone(), tx.clone()).await;
+        dispatch_request(request, state.clone(), tx.clone(), subscriptions.clone()).await;
     }
 
     event_forwarder.abort();
+}
+
+async fn should_forward_live_event(
+    env: &ServerEnvelope,
+    subscriptions: &Arc<AsyncMutex<HashSet<String>>>,
+) -> bool {
+    let ServerEnvelope::Event { event, .. } = env else {
+        return true;
+    };
+    if !requires_explicit_subscription(event) {
+        return true;
+    }
+    subscriptions.lock().await.contains(event)
+}
+
+fn requires_explicit_subscription(event: &str) -> bool {
+    event.starts_with("browser:") && (event.ends_with(":frame") || event.ends_with(":recording"))
 }
 
 async fn send_envelope(
@@ -611,6 +633,7 @@ async fn dispatch_request(
     request: ClientRequest,
     state: Arc<DaemonState>,
     tx: Arc<AsyncMutex<futures::stream::SplitSink<WebSocket, Message>>>,
+    subscriptions: Arc<AsyncMutex<HashSet<String>>>,
 ) {
     let id = request.id.clone().unwrap_or_default();
     let params = request.params;
@@ -652,6 +675,47 @@ async fn dispatch_request(
     }
 
     match request.method.as_str() {
+        "subscribe_event" => {
+            if let Some(event) = params.get("event").and_then(Value::as_str) {
+                subscriptions.lock().await.insert(event.to_string());
+                let _ = send_envelope(
+                    &tx,
+                    &ServerEnvelope::Response {
+                        id,
+                        result: Some(json!({"ok": true})),
+                        error: None,
+                    },
+                )
+                .await;
+            } else {
+                let _ = send_envelope(
+                    &tx,
+                    &ServerEnvelope::Response {
+                        id,
+                        result: None,
+                        error: Some(RpcError {
+                            code: "invalid-params".to_string(),
+                            message: "subscribe_event requires an event string".to_string(),
+                        }),
+                    },
+                )
+                .await;
+            }
+        }
+        "unsubscribe_event" => {
+            if let Some(event) = params.get("event").and_then(Value::as_str) {
+                subscriptions.lock().await.remove(event);
+            }
+            let _ = send_envelope(
+                &tx,
+                &ServerEnvelope::Response {
+                    id,
+                    result: Some(json!({"ok": true})),
+                    error: None,
+                },
+            )
+            .await;
+        }
         "ping" => {
             let _ = send_envelope(
                 &tx,
@@ -3246,7 +3310,8 @@ mod tests {
         browser_permission_payload_json, handle_create_session, handle_import_external_credential,
         handle_list_permissions, handle_list_provider_models, handle_login_with_api_key,
         handle_logout_provider, handle_save_permissions, model_descriptor_dto,
-        permission_review_payload_json, resolve_create_session_model_id, run_off_runtime,
+        permission_review_payload_json, requires_explicit_subscription,
+        resolve_create_session_model_id, run_off_runtime,
         DaemonState, TurnRequestOptions,
     };
     use indexmap::IndexMap;
@@ -3310,6 +3375,22 @@ mod tests {
             }
             let _ = std::fs::remove_file(&self.cache_path);
         }
+    }
+
+    #[test]
+    fn high_volume_browser_events_require_explicit_subscription() {
+        assert!(requires_explicit_subscription(
+            "browser:session:browser:tab-1:frame"
+        ));
+        assert!(requires_explicit_subscription("browser:session:recording"));
+        assert!(!requires_explicit_subscription(
+            "browser:session:browser:tab-1:state"
+        ));
+        assert!(!requires_explicit_subscription("browser:session:tabs"));
+        assert!(!requires_explicit_subscription("session:abc:events"));
+        assert!(!requires_explicit_subscription(
+            "workspace:sessions:changed"
+        ));
     }
 
     fn spawn_openai_discovery_server() -> (String, std::thread::JoinHandle<()>) {

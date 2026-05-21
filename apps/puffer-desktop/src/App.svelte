@@ -958,6 +958,9 @@
         ) {
           clearLiveSidebarAgentState(event.sessionId, null);
           clearCachedTurnRuntimeState(event.sessionId);
+          if (selectedSession?.id === event.sessionId) {
+            clearTurnRuntimeState(event.sessionId, currentTurnId);
+          }
         }
         void refreshGroups();
         if (
@@ -1132,11 +1135,12 @@
     if (importBusyKey || authBusyProviderId) return;
     importBusyKey = `${providerId}::${source}`;
     authError = null;
+    const wasOnboarding = onboarding;
     try {
       settingsSnapshot = await importExternalCredential(providerId, source);
       onboardingCompleted = hasAvailableAgentProvider(settingsSnapshot);
       onboarding = shouldShowOnboarding(settingsSnapshot);
-      if (!onboarding) {
+      if (wasOnboarding && !onboarding) {
         tweaks = { ...tweaks, screen: "workspace" };
       }
       statusMessage = `Imported ${source} credential into ${providerId}.`;
@@ -1170,11 +1174,12 @@
     if (authBusyProviderId || importBusyKey) return;
     authBusyProviderId = providerId;
     authError = null;
+    const wasOnboarding = onboarding;
     try {
       settingsSnapshot = await loginWithOauth(providerId, remoteConnection);
       onboardingCompleted = hasAvailableAgentProvider(settingsSnapshot);
       onboarding = shouldShowOnboarding(settingsSnapshot);
-      if (!onboarding) {
+      if (wasOnboarding && !onboarding) {
         tweaks = { ...tweaks, screen: "workspace" };
       }
       statusMessage = `Connected to ${providerId}.`;
@@ -1191,6 +1196,7 @@
     if (authBusyProviderId || importBusyKey) return;
     authBusyProviderId = providerId;
     authError = null;
+    const wasOnboarding = onboarding;
     try {
       // Prefer the daemon path; it reuses the workspace auth store and
       // lets remote daemons (SSH) pick up credentials server-side. Falls
@@ -1204,7 +1210,7 @@
       }
       onboardingCompleted = hasAvailableAgentProvider(settingsSnapshot);
       onboarding = shouldShowOnboarding(settingsSnapshot);
-      if (!onboarding) {
+      if (wasOnboarding && !onboarding) {
         tweaks = { ...tweaks, screen: "workspace" };
       }
       statusMessage = `Stored API key for ${providerId}.`;

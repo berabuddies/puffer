@@ -1736,7 +1736,7 @@
                       {/if}
                     {/if}
                     {#each row.approvals as p (p.id)}
-                      <Approval item={p} disabled={isPermissionResolving(p)} onResolve={onResolvePermission} />
+                      <Approval item={p} disabled={!turnCancelable || isPermissionResolving(p)} onResolve={onResolvePermission} />
                     {/each}
                     {#each row.questions as q (q.id)}
                       <QuestionPrompt item={q} disabled={isQuestionResolving(q)} onResolve={onResolveUserQuestion} />
