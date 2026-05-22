@@ -43,43 +43,27 @@ if (!hasActionableReplaySignal(replaySummary, replayFindings)) {
   process.exit(0);
 }
 
-const response = await fetch(`${baseUrl}/chat/completions`, {
-  method: "POST",
-  headers: {
-    "Authorization": `Bearer ${apiKey}`,
-    "Content-Type": "application/json",
-    "HTTP-Referer": "https://github.com/berabuddies/puffer",
-    "X-Title": "Puffer UIUX Fuzz"
-  },
-  body: JSON.stringify({
-    model,
-    temperature: 0.2,
-    max_tokens: 4096,
-    messages: [
-      {
-        role: "system",
-        content: [
-          "You are a small-model UI/UX fuzz shard triager.",
-          "Do not plan globally. Do not suggest product code changes.",
-          "Only classify the provided shard artifacts and write a precise report.",
-          "Accept only user-visible, reproducible interaction blockers from the assigned shard.",
-          "Reject fixture-only, environment-only, dependency-only, and tooling-only failures."
-        ].join(" ")
-      },
-      {
-        role: "user",
-        content: buildPrompt({ namespace, shard, seed, model, artifacts })
-      }
-    ]
-  })
+const payload = await openRouterChat({
+  model,
+  temperature: 0.2,
+  max_tokens: 4096,
+  messages: [
+    {
+      role: "system",
+      content: [
+        "You are a small-model UI/UX fuzz shard triager.",
+        "Do not plan globally. Do not suggest product code changes.",
+        "Only classify the provided shard artifacts and write a precise report.",
+        "Accept only user-visible, reproducible interaction blockers from the assigned shard.",
+        "Reject fixture-only, environment-only, dependency-only, and tooling-only failures."
+      ].join(" ")
+    },
+    {
+      role: "user",
+      content: buildPrompt({ namespace, shard, seed, model, artifacts })
+    }
+  ]
 });
-
-const bodyText = await response.text();
-if (!response.ok) {
-  throw new Error(`OpenRouter request failed with ${response.status}: ${bodyText.slice(0, 1000)}`);
-}
-
-const payload = JSON.parse(bodyText);
 const content = payload?.choices?.[0]?.message?.content?.trim();
 if (!content) {
   throw new Error("OpenRouter response did not include message content");
@@ -136,6 +120,36 @@ function hasActionableReplaySignal(summary, findings) {
     Number(summary.productCandidateFindings ?? 0) > 0 ||
     Number(summary.stableFailed ?? 0) > 0 ||
     findings.length > 0;
+}
+
+async function openRouterChat(body) {
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    try {
+      const response = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          "HTTP-Referer": "https://github.com/berabuddies/puffer",
+          "X-Title": "Puffer UIUX Fuzz"
+        },
+        body: JSON.stringify(body)
+      });
+      const bodyText = await response.text();
+      if (!response.ok) {
+        throw new Error(`OpenRouter request failed with ${response.status}: ${bodyText.slice(0, 1000)}`);
+      }
+      return JSON.parse(bodyText);
+    } catch (error) {
+      if (attempt === 4) throw error;
+      await sleep(750 * attempt);
+    }
+  }
+  throw new Error("OpenRouter request failed");
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function deterministicNoFindingReport({ namespace, shard, seed, replaySummary, artifacts }) {

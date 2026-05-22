@@ -38,12 +38,7 @@ if (allowedActions.length === 0) {
   throw new Error(`No allowed actions for shard ${shardId} and seed ${seedId}`);
 }
 const explorerResources = new Set();
-for (const setup of seed.setup ?? []) {
-  applyResourceTransitions(explorerResources, {
-    ...setup,
-    params: materializeParams(setup.params ?? {}, rng)
-  });
-}
+applySetupResources(explorerResources);
 
 const messages = [
   {
@@ -97,6 +92,7 @@ if (selectedActions.length === 0) {
   const fallback = allowedActions[0];
   selectedActions.push({ actionId: fallback.id, params: materializeParams(fallback.params ?? {}, rng), reason: "fallback first allowed action" });
 }
+ensureOwnedCoverage();
 
 const testCase = buildCase({ seed, shard, namespace, selectedActions, rng });
 const run = {
@@ -119,28 +115,36 @@ await writeJson(outPath, run);
 process.stdout.write(`OPENROUTER_EXPLORER_OK ${relative(outPath)}\n`);
 
 async function openRouterChat(messages) {
-  const response = await fetch(`${baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": "https://github.com/berabuddies/puffer",
-      "X-Title": "Puffer UIUX Fuzz"
-    },
-    body: JSON.stringify({
-      model,
-      temperature: 0.4,
-      max_tokens: 2048,
-      messages,
-      tools: explorerTools(allowedActions),
-      tool_choice: "auto"
-    })
-  });
-  const bodyText = await response.text();
-  if (!response.ok) {
-    throw new Error(`OpenRouter explorer request failed with ${response.status}: ${bodyText.slice(0, 1000)}`);
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    try {
+      const response = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          "HTTP-Referer": "https://github.com/berabuddies/puffer",
+          "X-Title": "Puffer UIUX Fuzz"
+        },
+        body: JSON.stringify({
+          model,
+          temperature: 0.4,
+          max_tokens: 2048,
+          messages,
+          tools: explorerTools(allowedActions),
+          tool_choice: "auto"
+        })
+      });
+      const bodyText = await response.text();
+      if (!response.ok) {
+        throw new Error(`OpenRouter explorer request failed with ${response.status}: ${bodyText.slice(0, 1000)}`);
+      }
+      return JSON.parse(bodyText);
+    } catch (error) {
+      if (attempt === 4) throw error;
+      await sleep(750 * attempt);
+    }
   }
-  return JSON.parse(bodyText);
+  throw new Error("OpenRouter explorer request failed");
 }
 
 function addStep(input) {
@@ -184,6 +188,62 @@ function addStep(input) {
     remainingSteps: Math.max(0, maxSteps - selectedActions.length),
     availableResources: [...explorerResources].sort()
   };
+}
+
+function ensureOwnedCoverage() {
+  const hasOwnedCoverage = selectedActions.some((selected) => {
+    const action = allowedActions.find((item) => item.id === selected.actionId);
+    return hasPrimaryOwnedCoverage(action);
+  });
+  if (hasOwnedCoverage) return;
+
+  selectedActions.length = 0;
+  explorerResources.clear();
+  applySetupResources(explorerResources);
+
+  const candidates = allowedActions
+    .filter((action) => hasPrimaryOwnedCoverage(action))
+    .sort((left, right) => {
+      const leftEntrypoint = left.target === shard.entrypoint ? 0 : 1;
+      const rightEntrypoint = right.target === shard.entrypoint ? 0 : 1;
+      return leftEntrypoint - rightEntrypoint;
+    });
+  for (const candidate of candidates) {
+    if (appendActionWithPrereqs(candidate, new Set())) return;
+  }
+}
+
+function appendActionWithPrereqs(action, stack) {
+  if (stack.has(action.id)) return false;
+  stack.add(action.id);
+
+  for (const required of action.requires ?? []) {
+    if (explorerResources.has(required)) continue;
+    const producer = allowedActions.find((item) => (item.produces ?? []).includes(required));
+    if (!producer || !appendActionWithPrereqs(producer, stack)) return false;
+  }
+
+  const blocked = (action.blocks ?? []).some((tag) => explorerResources.has(tag));
+  if (blocked) return false;
+  while (selectedActions.length >= maxSteps) selectedActions.pop();
+  const step = {
+    ...action,
+    params: materializeParams(action.params ?? {}, rng)
+  };
+  applyResourceTransitions(explorerResources, step);
+  selectedActions.push({
+    actionId: action.id,
+    params: step.params,
+    reason: "Auto-added to ensure the generated case reaches the shard-owned interaction."
+  });
+  return true;
+}
+
+function hasPrimaryOwnedCoverage(action) {
+  if (!action) return false;
+  if (action.target === shard.entrypoint) return true;
+  const ownedCoverage = new Set(shard.ownedCoverage ?? []);
+  return (action.coverage ?? []).some((tag) => tag.startsWith("control:") && ownedCoverage.has(tag));
 }
 
 function buildCase({ seed, shard, namespace, selectedActions, rng }) {
@@ -259,10 +319,27 @@ function buildAllowedActions(seed, shard) {
   const byCoverage = (action) =>
     (action.coverage ?? []).some((tag) => ownedCoverage.has(tag) || allowedAsync.has(tag));
   const setupActions = new Set((seed.setup ?? []).map((step) => step.action));
-  const selected = (seed.actions ?? []).filter((action) => {
-    if (setupActions.has(action.id)) return false;
-    return byCoverage(action);
-  });
+  const selectedIds = new Set();
+  for (const action of seed.actions ?? []) {
+    if (setupActions.has(action.id)) continue;
+    if (byCoverage(action)) selectedIds.add(action.id);
+  }
+
+  const selectedActions = (seed.actions ?? []).filter((action) => selectedIds.has(action.id));
+  const neededResources = new Set(selectedActions.flatMap((action) => action.requires ?? []));
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const action of seed.actions ?? []) {
+      if (setupActions.has(action.id) || selectedIds.has(action.id)) continue;
+      if (!(action.produces ?? []).some((resource) => neededResources.has(resource))) continue;
+      selectedIds.add(action.id);
+      for (const required of action.requires ?? []) neededResources.add(required);
+      changed = true;
+    }
+  }
+
+  const selected = (seed.actions ?? []).filter((action) => selectedIds.has(action.id));
   return selected.map((action) => ({
     id: action.id,
     kind: action.kind,
@@ -426,6 +503,15 @@ function applyResourceTransitions(resources, step) {
   for (const tag of step.produces ?? []) resources.add(tag);
 }
 
+function applySetupResources(resources) {
+  for (const setup of seed.setup ?? []) {
+    applyResourceTransitions(resources, {
+      ...setup,
+      params: materializeParams(setup.params ?? {}, rng)
+    });
+  }
+}
+
 function parseToolArguments(raw) {
   if (!raw) return {};
   if (typeof raw === "object") return raw;
@@ -469,4 +555,8 @@ function requireArg(args, name) {
 
 function relative(filePath) {
   return path.relative(repoRoot, filePath).replaceAll(path.sep, "/");
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
