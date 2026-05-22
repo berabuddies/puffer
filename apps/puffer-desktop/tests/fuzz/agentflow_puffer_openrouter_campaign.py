@@ -137,7 +137,7 @@ cat > "$out_dir/planner.md" <<'PLANNER_EOF'
 {{ nodes.plan.output }}
 PLANNER_EOF
 node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs validate
-node apps/puffer-desktop/tests/fuzz/bin/puffer-openrouter-explorer.mjs --namespace {{ item.namespace }} --shard {{ item.name }} --seed {{ item.seed }} --steps {{ item.steps }} --model ${PUFFER_OPENROUTER_MODEL:-inclusionai/ling-2.6-flash} --out "$out_dir/run.json"
+node apps/puffer-desktop/tests/fuzz/bin/puffer-openrouter-explorer.mjs --namespace {{ item.namespace }} --shard {{ item.name }} --seed {{ item.seed }} --steps {{ item.steps }} --cases ${PUFFER_OPENROUTER_CASES:-1} --model ${PUFFER_OPENROUTER_MODEL:-inclusionai/ling-2.6-flash} --out "$out_dir/run.json"
 node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs report --input "$out_dir/run.json" --out "$out_dir/report.md"
 node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs top-cases --input "$out_dir/run.json" --shard {{ item.name }} --limit {{ item.replay_limit }} --out "$out_dir/top.json" --report-out "$out_dir/top.md"
 node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-replay-loop.mjs --input "$out_dir/run.json" --seeds {{ item.seed }} --shard {{ item.name }} --limit {{ item.replay_limit }} --attempts 2 --timeout 120 --rng-seed {{ item.namespace }} --namespace {{ item.namespace }} --fail-on-new-finding

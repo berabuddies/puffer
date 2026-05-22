@@ -23,6 +23,7 @@ const model = args.model ?? process.env.PUFFER_OPENROUTER_MODEL ?? "inclusionai/
 const baseUrl = (process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1").replace(/\/+$/, "");
 const apiKey = process.env.OPENROUTER_API_KEY;
 const maxSteps = Number(args.steps ?? 8);
+const caseCount = Math.max(1, Number(args.cases ?? process.env.PUFFER_OPENROUTER_CASES ?? 1));
 const runDir = path.resolve(fuzzRoot, ".runs", namespace);
 const plannerGuidance = readOptional(path.join(runDir, "planner.md"));
 const manifest = await readJson(path.join(fuzzRoot, "manifests", "puffer-ui.json"));
@@ -40,61 +41,11 @@ if (allowedActions.length === 0) {
 const explorerResources = new Set();
 applySetupResources(explorerResources);
 
-const messages = [
-  {
-    role: "system",
-    content: [
-      "You are a cheap GUI explorer agent with strong tool-use.",
-      "Do not plan globally. Do not edit files. Do not report bugs.",
-      "Use tools to build one high-value GUI interaction sequence for the assigned shard.",
-      "Prefer user-visible click/type/keyboard actions plus async races allowed by the shard.",
-      "Never describe CLI commands as GUI steps.",
-      "Stop once the sequence is likely to trigger a blocked interaction or stale-state bug."
-    ].join(" ")
-  },
-  {
-    role: "user",
-    content: buildExplorerPrompt({ namespace, shard, seed, allowedActions, maxSteps, plannerGuidance })
-  }
-];
-
-for (let round = 0; round < maxSteps + 4; round += 1) {
-  const response = await openRouterChat(messages);
-  const message = response.choices?.[0]?.message;
-  if (!message) throw new Error("OpenRouter response did not include a message");
-  messages.push(message);
-
-  const toolCalls = message.tool_calls ?? [];
-  if (toolCalls.length === 0) {
-    break;
-  }
-
-  let finished = false;
-  for (const call of toolCalls) {
-    const name = call.function?.name;
-    const parsedArgs = parseToolArguments(call.function?.arguments);
-    if (name === "add_step") {
-      const result = addStep(parsedArgs);
-      messages.push(toolResult(call.id, result));
-      continue;
-    }
-    if (name === "finish_case") {
-      messages.push(toolResult(call.id, { ok: true, selectedSteps: selectedActions.length }));
-      finished = true;
-      break;
-    }
-    messages.push(toolResult(call.id, { ok: false, error: `Unknown tool ${name}` }));
-  }
-  if (finished || selectedActions.length >= maxSteps) break;
+const testCases = [];
+for (let caseIndex = 1; caseIndex <= caseCount; caseIndex += 1) {
+  const selectedActionsForCase = await generateSelectedActions(caseIndex);
+  testCases.push(buildCase({ seed, shard, namespace, selectedActions: selectedActionsForCase, rng, caseIndex }));
 }
-
-if (selectedActions.length === 0) {
-  const fallback = allowedActions[0];
-  selectedActions.push({ actionId: fallback.id, params: materializeParams(fallback.params ?? {}, rng), reason: "fallback first allowed action" });
-}
-ensureOwnedCoverage();
-
-const testCase = buildCase({ seed, shard, namespace, selectedActions, rng });
 const run = {
   version: 1,
   manifestVersion: manifest.version,
@@ -105,14 +56,80 @@ const run = {
     namespace,
     shard: shardId,
     seed: seedId,
-    steps: maxSteps
+    steps: maxSteps,
+    cases: caseCount
   },
-  cases: [testCase],
-  summary: summarizeRun(manifest, [testCase])
+  cases: testCases,
+  summary: summarizeRun(manifest, testCases)
 };
 
 await writeJson(outPath, run);
 process.stdout.write(`OPENROUTER_EXPLORER_OK ${relative(outPath)}\n`);
+
+async function generateSelectedActions(caseIndex) {
+  selectedActions.length = 0;
+  explorerResources.clear();
+  applySetupResources(explorerResources);
+
+  const messages = [
+    {
+      role: "system",
+      content: [
+        "You are a cheap GUI explorer agent with strong tool-use.",
+        "Do not plan globally. Do not edit files. Do not report bugs.",
+        "Use tools to build one high-value GUI interaction sequence for the assigned shard.",
+        "Prefer user-visible click/type/keyboard actions plus async races allowed by the shard.",
+        "Never describe CLI commands as GUI steps.",
+        "Stop once the sequence is likely to trigger a blocked interaction or stale-state bug."
+      ].join(" ")
+    },
+    {
+      role: "user",
+      content: buildExplorerPrompt({ namespace, shard, seed, allowedActions, maxSteps, plannerGuidance, caseIndex, caseCount })
+    }
+  ];
+
+  for (let round = 0; round < maxSteps + 4; round += 1) {
+    const response = await openRouterChat(messages);
+    const message = response.choices?.[0]?.message;
+    if (!message) throw new Error("OpenRouter response did not include a message");
+    messages.push(message);
+
+    const toolCalls = message.tool_calls ?? [];
+    if (toolCalls.length === 0) {
+      break;
+    }
+
+    let finished = false;
+    for (const call of toolCalls) {
+      const name = call.function?.name;
+      const parsedArgs = parseToolArguments(call.function?.arguments);
+      if (name === "add_step") {
+        const result = addStep(parsedArgs);
+        messages.push(toolResult(call.id, result));
+        continue;
+      }
+      if (name === "finish_case") {
+        messages.push(toolResult(call.id, { ok: true, selectedSteps: selectedActions.length }));
+        finished = true;
+        break;
+      }
+      messages.push(toolResult(call.id, { ok: false, error: `Unknown tool ${name}` }));
+    }
+    if (finished || selectedActions.length >= maxSteps) break;
+  }
+
+  if (selectedActions.length === 0) {
+    const fallback = allowedActions[caseIndex % allowedActions.length];
+    selectedActions.push({ actionId: fallback.id, params: materializeParams(fallback.params ?? {}, rng), reason: "fallback allowed action" });
+  }
+  ensureOwnedCoverage();
+  return selectedActions.map((action) => ({
+    actionId: action.actionId,
+    params: action.params,
+    reason: action.reason
+  }));
+}
 
 async function openRouterChat(messages) {
   for (let attempt = 1; attempt <= 4; attempt += 1) {
@@ -246,7 +263,7 @@ function hasPrimaryOwnedCoverage(action) {
   return (action.coverage ?? []).some((tag) => tag.startsWith("control:") && ownedCoverage.has(tag));
 }
 
-function buildCase({ seed, shard, namespace, selectedActions, rng }) {
+function buildCase({ seed, shard, namespace, selectedActions, rng, caseIndex }) {
   const steps = [];
   const resources = new Set();
   for (const setup of seed.setup ?? []) {
@@ -296,7 +313,7 @@ function buildCase({ seed, shard, namespace, selectedActions, rng }) {
   }
 
   return {
-    caseId: `${seed.id}-explorer-0001`,
+    caseId: `${seed.id}-explorer-${String(caseIndex).padStart(4, "0")}`,
     seedId: seed.id,
     title: `${seed.title} (${shard.id} explorer)`,
     rngSeed: `${namespace}:openrouter-explorer`,
@@ -403,11 +420,12 @@ function explorerTools(allowedActions) {
   ];
 }
 
-function buildExplorerPrompt({ namespace, shard, seed, allowedActions, maxSteps, plannerGuidance }) {
+function buildExplorerPrompt({ namespace, shard, seed, allowedActions, maxSteps, plannerGuidance, caseIndex, caseCount }) {
   return [
     `Namespace: ${namespace}`,
     `Shard: ${shard.id} - ${shard.title}`,
     `Seed: ${seed.id} - ${seed.title}`,
+    `Candidate case: ${caseIndex}/${caseCount}`,
     `Focus: ${seed.focus}`,
     `Severity target: ${seed.severityTarget}`,
     `Start node: ${shard.startNode}`,
@@ -419,6 +437,7 @@ function buildExplorerPrompt({ namespace, shard, seed, allowedActions, maxSteps,
     plannerGuidance || "(none)",
     "",
     "Use add_step repeatedly to build one high-value interaction sequence.",
+    "Make this case materially different from other candidates in this shard.",
     "Prefer sequences that combine user actions with allowed async races.",
     "Start with prerequisite GUI state. For example, type-composer must happen before send-prompt.",
     "If add_step returns missing required state/resource, choose a prerequisite action next.",
