@@ -51,6 +51,19 @@ export type PufferTraceEvent = {
   [key: string]: unknown;
 };
 
+export type PufferActionEdge = {
+  edgeId: string;
+  actionFingerprint: string;
+  beforeStateHash: string;
+  afterStateHash: string;
+  routePattern: string;
+  activePanel: string;
+  activeTab: string;
+  focusRegion: string;
+  daemonState: string;
+  coverage: string[];
+};
+
 export function createTraceId(prefix = "puffer-uiux"): string {
   return `${prefix}-${Date.now().toString(36)}-${crypto.randomBytes(4).toString("hex")}`;
 }
@@ -209,12 +222,44 @@ export async function collectPufferUiState(page: Page, env: PufferCoverageEnv): 
 }
 
 export function appendTraceEvent(trace: PufferTraceEvent[], event: Omit<PufferTraceEvent, "timestamp">): void {
-  trace.push({ ...event, timestamp: new Date().toISOString() });
+  trace.push({ ...event, timestamp: new Date().toISOString() } as PufferTraceEvent);
 }
 
 export function writeTraceJsonl(filePath: string, trace: PufferTraceEvent[]): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `${trace.map((event) => JSON.stringify(event)).join("\n")}\n`);
+}
+
+export function createPufferActionEdge(
+  action: unknown,
+  beforeState: PufferUiState,
+  afterState: PufferUiState,
+  coverage: string[] = []
+): PufferActionEdge {
+  const fingerprint = actionFingerprint(action);
+  return {
+    edgeId: `edge:${sha256(`${beforeState.stateHash}|${fingerprint}|${afterState.stateHash}`).slice(0, 24)}`,
+    actionFingerprint: fingerprint,
+    beforeStateHash: beforeState.stateHash,
+    afterStateHash: afterState.stateHash,
+    routePattern: afterState.routePattern,
+    activePanel: afterState.activePanel,
+    activeTab: afterState.activeTab,
+    focusRegion: afterState.focusRegion,
+    daemonState: afterState.daemonState,
+    coverage
+  };
+}
+
+export function actionFingerprint(action: unknown): string {
+  const source = action && typeof action === "object" ? action as Record<string, unknown> : {};
+  const core = {
+    id: source.id ?? source.action ?? "",
+    kind: source.kind ?? "",
+    target: source.target ?? "",
+    params: normalizeParams(source.params ?? {})
+  };
+  return `act:${sha256(stableJson(core)).slice(0, 16)}`;
 }
 
 function sha256(value: string): string {
@@ -236,4 +281,28 @@ function normalizeRoute(value: string): string {
   return String(value || "/")
     .replace(/[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}/g, ":uuid")
     .replace(/\/\d+(?=\/|$)/g, "/:num");
+}
+
+function normalizeParams(value: unknown): unknown {
+  if (value === null || typeof value !== "object") return normalizeText(String(value ?? "")).slice(0, 200);
+  if (Array.isArray(value)) return value.map(normalizeParams);
+  const result: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    result[key] = normalizeParams(item);
+  }
+  return result;
+}
+
+function stableJson(value: unknown): string {
+  return JSON.stringify(sortValue(value));
+}
+
+function sortValue(value: unknown): unknown {
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(sortValue);
+  return Object.fromEntries(
+    Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => [key, sortValue(item)])
+  );
 }

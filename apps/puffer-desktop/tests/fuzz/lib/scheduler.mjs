@@ -115,6 +115,7 @@ export function buildShardSchedule(manifest, seeds, uiTree, shards, coverageLedg
       validatedTags,
       feedbackCoveredTags,
       feedback: feedbackLedger.shards?.[shard.id] ?? {},
+      runtimeCoverage: coverageLedger.runtimeCoverage?.shards?.[shard.id] ?? {},
       treeNode: treeNodeById.get(shard.startNode),
       namespace,
       minIterations: options["min-iterations"],
@@ -160,6 +161,7 @@ export function formatScheduleMarkdown(schedule) {
     lines.push(`- Priority: ${item.priority}`);
     lines.push(`- Missing owned coverage: ${item.reason.missingOwnedCoverage.join(", ") || "none"}`);
     lines.push(`- Feedback: runs=${item.reason.feedbackRuns}, replaySuccess=${item.reason.replaySuccessRate}, flakeRate=${item.reason.flakeRate}, duplicateRate=${item.reason.duplicateRate}, outOfScope=${item.reason.outOfScopeCount}`);
+    lines.push(`- Runtime coverage: states=${item.reason.runtimeStateCount}, edges=${item.reason.runtimeEdgeCount}`);
     lines.push(`- Owned nodes: ${item.ownedNodes.join(", ")}`);
     lines.push(`- Allowed setup nodes: ${item.allowedSetupNodes.join(", ")}`);
     lines.push(`- Allowed async events: ${item.allowedAsyncEvents.join(", ") || "none"}`);
@@ -256,6 +258,8 @@ function scoreShard(shard, context) {
   const outOfScopeCount = Number(feedback.outOfScopeFindings ?? 0);
   const newFindingCount = Number(feedback.newCandidateFindings ?? 0);
   const actionableFailures = Number(feedback.actionableFailures ?? 0);
+  const runtimeStateCount = Number(context.runtimeCoverage.stateCount ?? 0);
+  const runtimeEdgeCount = Number(context.runtimeCoverage.edgeCount ?? 0);
   const priority = Number(shard.priority ?? context.treeNode?.priority ?? 0);
 
   let score = priority * 10;
@@ -268,6 +272,7 @@ function scoreShard(shard, context) {
   score -= Math.round(flakeRate * 25);
   score -= Math.round(duplicateRate * 20);
   score -= outOfScopeCount * 6;
+  score -= Math.min(runtimeEdgeCount, 20);
 
   const baseIterations = Number(shard.iterations ?? 8);
   const minIterations = Number(context.minIterations ?? 4);
@@ -310,7 +315,9 @@ function scoreShard(shard, context) {
       duplicateRate,
       outOfScopeCount,
       newFindingCount,
-      actionableFailures
+      actionableFailures,
+      runtimeStateCount,
+      runtimeEdgeCount
     },
     artifacts: {
       runPath,

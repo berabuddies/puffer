@@ -16,7 +16,7 @@ export function buildReplayTemplate(testCase, options = {}) {
   const lines = [
     "import { expect, test } from \"@playwright/test\";",
     `import { FakeDaemon } from "${fakeDaemonImport}";`,
-    `import { appendTraceEvent, collectPufferUiState, createTraceId, installRuntimeOracle, writeTraceJsonl } from "${relativeCoverageImport}";`,
+    `import { appendTraceEvent, collectPufferUiState, createPufferActionEdge, createTraceId, installRuntimeOracle, writeTraceJsonl } from "${relativeCoverageImport}";`,
     "",
     `const replayMetadata = ${JSON.stringify(replayMetadata, null, 2)} as const;`,
     "",
@@ -45,12 +45,14 @@ export function buildReplayTemplate(testCase, options = {}) {
   for (const action of testCase.steps ?? []) {
     if (action.phase === "assert") continue;
     lines.push(`  // Step ${step}: ${action.action}${action.params ? ` ${JSON.stringify(action.params)}` : ""}`);
+    lines.push(`  const beforeState${step} = await collectPufferUiState(page, { viewport: "desktop", browserOrShell: "chromium", fakeDaemon: true });`);
     lines.push("  {");
     for (const command of commandsForAction(action)) {
       lines.push(`    ${command}`);
     }
     lines.push("  }");
-    lines.push(`  appendTraceEvent(trace, { type: "action", traceId, step: ${step}, action: ${JSON.stringify(action)}, state: await collectPufferUiState(page, { viewport: "desktop", browserOrShell: "chromium", fakeDaemon: true }) });`);
+    lines.push(`  const afterState${step} = await collectPufferUiState(page, { viewport: "desktop", browserOrShell: "chromium", fakeDaemon: true });`);
+    lines.push(`  appendTraceEvent(trace, { type: "action", traceId, step: ${step}, action: ${JSON.stringify(action)}, beforeState: beforeState${step}, afterState: afterState${step}, edge: createPufferActionEdge(${JSON.stringify(action)}, beforeState${step}, afterState${step}, ${JSON.stringify(action.coverage ?? [])}) });`);
     lines.push("");
     step += 1;
   }

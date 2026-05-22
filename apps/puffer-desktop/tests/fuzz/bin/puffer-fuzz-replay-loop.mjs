@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { lstat, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -76,6 +76,7 @@ async function main() {
   const specDir = path.join(tmpDir, "tests");
   const logDir = path.join(tmpDir, "logs");
   const playwrightOutputDir = path.join(tmpDir, "playwright-output");
+  const runtimeCoveragePath = path.join(tmpDir, "runtime-coverage.json");
   const reuseExistingServer = args["no-reuse-server"] ? false : true;
   const ledger = await readJsonIfExists(ledgerPath);
   const knownBugSignatures = ledger.knownBugSignatures ?? [];
@@ -172,6 +173,7 @@ async function main() {
 
       for (let attempt = 1; attempt <= attempts; attempt += 1) {
         const logPath = path.join(logDir, `${item.caseId}-attempt-${attempt}.log`);
+        const attemptOutputDir = path.join(playwrightOutputDir, `${item.caseId}-attempt-${attempt}`);
         const result = await runCommand("timeout", [
           `${shellTimeoutSeconds}s`,
           "npx",
@@ -184,7 +186,7 @@ async function main() {
           "--reporter=list",
           "--timeout",
           String(playwrightTimeoutMs),
-          `--output=${path.join(playwrightOutputDir, `${item.caseId}-attempt-${attempt}`)}`
+          `--output=${attemptOutputDir}`
         ], {
           cwd: desktopRoot,
           timeoutSeconds: shellTimeoutSeconds + 20,
@@ -192,17 +194,20 @@ async function main() {
           allowFailure: true
         });
         await writeFile(logPath, result.output);
+        const runtimeCoverage = await collectRuntimeCoverage(attemptOutputDir);
         replay.attempts.push({
           attempt,
           status: result.exitCode === 0 ? "passed" : result.exitCode === 124 ? "timeout" : "failed",
           exitCode: result.exitCode,
           logPath,
           excerpt: excerptFailure(result.output),
-          failureSignature: failureSignature(result.output)
+          failureSignature: failureSignature(result.output),
+          runtimeCoverage
         });
       }
       Object.assign(replay, classifyReplay(replay));
       replay.knownDuplicate = knownBugMatch(replay.failureSignature ?? "", knownBugSignatures);
+      replay.runtimeCoverage = aggregateRuntimeCoverage(replay.attempts.map((attempt) => attempt.runtimeCoverage));
       results.push(replay);
     }
   }
@@ -210,6 +215,7 @@ async function main() {
   const finishedAt = new Date().toISOString();
   const summary = summarize(results);
   const findings = collectFindings(results, knownBugSignatures);
+  const runtimeCoverage = aggregateRuntimeCoverage(results.map((item) => item.runtimeCoverage));
   const payload = {
     version: 1,
     startedAt,
@@ -226,11 +232,14 @@ async function main() {
     artifactDir: tmpDir,
     playwrightConfigPath,
     ledgerPath,
+    runtimeCoveragePath,
     knownBugSignatures,
     summary,
+    runtimeCoverage,
     findings,
     results
   };
+  await writeFile(runtimeCoveragePath, `${JSON.stringify(runtimeCoverage, null, 2)}\n`);
   await writeFile(jsonOut, `${JSON.stringify(payload, null, 2)}\n`);
   await writeFile(out, formatMarkdown(payload));
   process.stdout.write(`Report: ${out}\nJSON: ${jsonOut}\n`);
@@ -326,6 +335,7 @@ function summarize(results) {
       else newCandidateFindings += 1;
     }
   }
+  const runtimeCoverage = aggregateRuntimeCoverage(results.map((item) => item.runtimeCoverage));
   return {
     total: results.length,
     passed,
@@ -338,7 +348,15 @@ function summarize(results) {
     knownDuplicateFailures,
     nonPassingFailures,
     actionableFailures,
-    byClassification
+    byClassification,
+    runtimeCoverage: {
+      states: runtimeCoverage.states.length,
+      edges: runtimeCoverage.edges.length,
+      asyncEdges: runtimeCoverage.asyncEdges.length,
+      asyncInvariantPairs: runtimeCoverage.asyncInvariantPairs.length,
+      routeControlStateTriples: runtimeCoverage.routeControlStateTriples.length,
+      invariantObservations: runtimeCoverage.invariantObservations.length
+    }
   };
 }
 
@@ -383,6 +401,140 @@ function collectFindings(results, knownBugSignatures = []) {
   return findings;
 }
 
+async function collectRuntimeCoverage(rootDir) {
+  const traceFiles = await findTraceFiles(rootDir);
+  const states = new Map();
+  const edges = new Map();
+  const asyncEdges = new Set();
+  const asyncInvariantPairs = new Set();
+  const routeControlStateTriples = new Set();
+  const invariantObservations = new Set();
+  const traceArtifacts = [];
+
+  for (const traceFile of traceFiles) {
+    traceArtifacts.push(relativeRepoPath(traceFile));
+    const text = await readFile(traceFile, "utf8").catch(() => "");
+    for (const line of text.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      collectState(states, event.state);
+      collectState(states, event.beforeState);
+      collectState(states, event.afterState);
+      if (event.edge?.edgeId) {
+        edges.set(event.edge.edgeId, {
+          ...event.edge,
+          trace: relativeRepoPath(traceFile),
+          step: event.step ?? null
+        });
+        for (const tag of event.edge.coverage ?? []) {
+          if (String(tag).startsWith("async:")) asyncEdges.add(`${event.edge.edgeId}|${tag}`);
+          if (String(tag).startsWith("invariant:")) invariantObservations.add(`${event.edge.afterStateHash}|${tag}`);
+        }
+        const route = firstCoverage(event.edge.coverage, "route") ?? event.edge.routePattern ?? "route:unknown";
+        const control = firstCoverage(event.edge.coverage, "control") ?? event.action?.target ?? event.action?.action ?? "control:unknown";
+        const state = firstCoverage(event.edge.coverage, "state") ?? event.edge.afterStateHash ?? "state:unknown";
+        routeControlStateTriples.add(`${route}|${control}|${state}`);
+      }
+      const coverage = event.edge?.coverage ?? event.action?.coverage ?? [];
+      const asyncTags = coverage.filter((tag) => String(tag).startsWith("async:"));
+      const invariantTags = coverage.filter((tag) => String(tag).startsWith("invariant:"));
+      for (const asyncTag of asyncTags) {
+        for (const invariantTag of invariantTags) asyncInvariantPairs.add(`${asyncTag}|${invariantTag}`);
+      }
+    }
+  }
+
+  return {
+    traceArtifacts,
+    states: [...states.values()].sort((left, right) => left.stateHash.localeCompare(right.stateHash)),
+    edges: [...edges.values()].sort((left, right) => left.edgeId.localeCompare(right.edgeId)),
+    asyncEdges: [...asyncEdges].sort(),
+    asyncInvariantPairs: [...asyncInvariantPairs].sort(),
+    routeControlStateTriples: [...routeControlStateTriples].sort(),
+    invariantObservations: [...invariantObservations].sort()
+  };
+}
+
+async function findTraceFiles(rootDir) {
+  const files = [];
+  async function visit(current) {
+    let entries;
+    try {
+      entries = await readdir(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const entryPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        await visit(entryPath);
+      } else if (entry.name.endsWith(".jsonl")) {
+        files.push(entryPath);
+      }
+    }
+  }
+  await visit(rootDir);
+  return files.sort();
+}
+
+function collectState(states, state) {
+  if (!state?.stateHash) return;
+  states.set(state.stateHash, {
+    stateHash: state.stateHash,
+    routePattern: state.routePattern ?? "",
+    appArea: state.appArea ?? "",
+    activePanel: state.activePanel ?? "",
+    activeTab: state.activeTab ?? "",
+    focusRegion: state.focusRegion ?? "",
+    daemonState: state.daemonState ?? "",
+    modalStack: state.modalStack ?? [],
+    normalizedTextSignature: state.normalizedTextSignature ?? "",
+    normalizedTreeSignature: state.normalizedTreeSignature ?? ""
+  });
+}
+
+function aggregateRuntimeCoverage(items = []) {
+  const states = new Map();
+  const edges = new Map();
+  const asyncEdges = new Set();
+  const asyncInvariantPairs = new Set();
+  const routeControlStateTriples = new Set();
+  const invariantObservations = new Set();
+  const traceArtifacts = new Set();
+  for (const item of items) {
+    if (!item) continue;
+    for (const state of item.states ?? []) {
+      if (state?.stateHash) states.set(state.stateHash, state);
+    }
+    for (const edge of item.edges ?? []) {
+      if (edge?.edgeId) edges.set(edge.edgeId, edge);
+    }
+    for (const value of item.asyncEdges ?? []) asyncEdges.add(value);
+    for (const value of item.asyncInvariantPairs ?? []) asyncInvariantPairs.add(value);
+    for (const value of item.routeControlStateTriples ?? []) routeControlStateTriples.add(value);
+    for (const value of item.invariantObservations ?? []) invariantObservations.add(value);
+    for (const value of item.traceArtifacts ?? []) traceArtifacts.add(value);
+  }
+  return {
+    traceArtifacts: [...traceArtifacts].sort(),
+    states: [...states.values()].sort((left, right) => left.stateHash.localeCompare(right.stateHash)),
+    edges: [...edges.values()].sort((left, right) => left.edgeId.localeCompare(right.edgeId)),
+    asyncEdges: [...asyncEdges].sort(),
+    asyncInvariantPairs: [...asyncInvariantPairs].sort(),
+    routeControlStateTriples: [...routeControlStateTriples].sort(),
+    invariantObservations: [...invariantObservations].sort()
+  };
+}
+
+function firstCoverage(coverage = [], dimension) {
+  return coverage.find((tag) => String(tag).startsWith(`${dimension}:`));
+}
+
 function knownBugMatch(signature, knownBugSignatures = []) {
   if (!signature) return false;
   return knownBugSignatures.some((known) => {
@@ -421,6 +573,7 @@ function formatMarkdown(payload) {
     `Artifact dir: ${relativeRepoPath(payload.artifactDir)}`,
     `Playwright config: ${relativeRepoPath(payload.playwrightConfigPath)}`,
     `Known-signature ledger: ${relativeRepoPath(payload.ledgerPath)}`,
+    `Runtime coverage: ${relativeRepoPath(payload.runtimeCoveragePath)}`,
     "",
     "## Summary",
     "",
@@ -435,6 +588,11 @@ function formatMarkdown(payload) {
     `- Known duplicate failures: ${payload.summary.knownDuplicateFailures ?? 0}`,
     `- Non-passing failures: ${payload.summary.nonPassingFailures ?? 0}`,
     `- Actionable product failures: ${payload.summary.actionableFailures ?? 0}`,
+    `- Runtime states: ${payload.summary.runtimeCoverage?.states ?? 0}`,
+    `- Runtime edges: ${payload.summary.runtimeCoverage?.edges ?? 0}`,
+    `- Runtime async edges: ${payload.summary.runtimeCoverage?.asyncEdges ?? 0}`,
+    `- Runtime async-invariant pairs: ${payload.summary.runtimeCoverage?.asyncInvariantPairs ?? 0}`,
+    `- Runtime route-control-state triples: ${payload.summary.runtimeCoverage?.routeControlStateTriples ?? 0}`,
     "",
     "## Classification",
     ""
@@ -497,6 +655,8 @@ function formatMarkdown(payload) {
     if (item.diversityKey) lines.push(`- Diversity key: ${item.diversityKey}`);
     lines.push(`- Spec path: ${relativeRepoPath(item.specPath)}`);
     lines.push(`- Log path: ${last.logPath}`);
+    lines.push(`- Runtime states: ${item.runtimeCoverage?.states?.length ?? 0}`);
+    lines.push(`- Runtime edges: ${item.runtimeCoverage?.edges?.length ?? 0}`);
     lines.push(`- Coverage: ${item.coverage.join(", ")}`);
     lines.push(`- Steps: ${item.steps.join(" -> ")}`);
     if (last.excerpt) {

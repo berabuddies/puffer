@@ -3,6 +3,7 @@ import { mkdir, readFile, rmdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  applyReplayCoverageToLedger,
   buildPlan,
   buildRun,
   filterSeedsByProfile,
@@ -114,6 +115,7 @@ Options:
   --shard-dir <path>  Default: apps/puffer-desktop/tests/fuzz/shards
   --adapter <path>    Default: apps/puffer-desktop/tests/fuzz/adapters/playwright-actions.json
   --ledger <path>     Default: apps/puffer-desktop/tests/fuzz/coverage-ledger.json
+  --no-coverage-ledger Do not update runtime coverage when recording feedback
   --feedback-ledger <path> Default: apps/puffer-desktop/tests/fuzz/feedback-ledger.json
   --bug-list <path> Default: apps/puffer-desktop/tests/fuzz/BUGS.md
   --prompt-guide <path> Default: apps/puffer-desktop/tests/fuzz/prompt_evolution.md
@@ -354,9 +356,11 @@ async function main() {
     if (!args.shard) throw new Error("--shard is required for record-feedback");
     const feedbackLedgerPath = args["feedback-ledger"] ?? defaultFeedbackLedgerPath;
     const outputLedgerPath = args.out ?? feedbackLedgerPath;
+    const coverageLedgerPath = args.ledger ?? defaultLedgerPath;
+    const coverageOutputPath = args["coverage-ledger-out"] ?? coverageLedgerPath;
+    const replayReport = await readJson(args.input);
     await withFileLock(outputLedgerPath, async () => {
       const feedbackLedger = await loadFeedbackLedger(outputLedgerPath);
-      const replayReport = await readJson(args.input);
       const next = applyReplayFeedback(feedbackLedger, replayReport, {
         shard: args.shard,
         namespace: args.namespace,
@@ -365,8 +369,19 @@ async function main() {
       });
       await writeJson(outputLedgerPath, next);
     });
+    if (!args["no-coverage-ledger"]) {
+      await withFileLock(coverageOutputPath, async () => {
+        const coverageLedger = await loadLedger(coverageOutputPath);
+        const nextCoverage = applyReplayCoverageToLedger(coverageLedger, replayReport, {
+          shard: args.shard,
+          namespace: args.namespace
+        });
+        await writeJson(coverageOutputPath, nextCoverage);
+      });
+    }
     process.stdout.write(`Recorded feedback for shard ${args.shard}\n`);
     process.stdout.write(`Ledger: ${outputLedgerPath}\n`);
+    if (!args["no-coverage-ledger"]) process.stdout.write(`Coverage ledger: ${coverageOutputPath}\n`);
     return;
   }
 
