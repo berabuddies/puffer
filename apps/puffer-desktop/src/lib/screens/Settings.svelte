@@ -87,6 +87,7 @@
   let permissionSnapshot = $state<PermissionsSnapshot | null>(null);
   let permissionRows = $state<{ tool: string; mode: string }[]>([]);
   let permissionLoading = $state(false);
+  let permissionLoaded = $state(false);
   let permissionLoadGeneration = 0;
   let permissionSaving = $state(false);
   let permissionError = $state<string | null>(null);
@@ -222,6 +223,7 @@
       }
     } finally {
       if (generation === permissionLoadGeneration) {
+        permissionLoaded = true;
         permissionLoading = false;
       }
     }
@@ -400,6 +402,7 @@
     permissionSnapshot = null;
     permissionRows = [];
     permissionLoading = false;
+    permissionLoaded = false;
     permissionError = null;
     permissionDirty = false;
 
@@ -459,7 +462,7 @@
     if (section === "providers" && !modelPickerProvider && defaultRouteProviders.length > 0) {
       modelPickerProvider = defaultRouteProviderId();
     }
-    if (section === "permissions" && permissionSnapshot === null && !permissionLoading) {
+    if (section === "permissions" && permissionSnapshot === null && !permissionLoading && !permissionLoaded) {
       void loadPermissionSnapshot();
     }
     if (section === "mcp" && !mcpLoaded && !mcpLoading) {
@@ -719,7 +722,19 @@
         </div>
       {/if}
       {#if permissionError}
-        <div class="pf-settings-note warn">{permissionError}</div>
+        <div class="pf-settings-note warn">
+          <span>{permissionError}</span>
+          <button
+            type="button"
+            class="sc-btn"
+            data-variant="outline"
+            data-size="sm"
+            disabled={!daemonReachable || permissionLoading || permissionSaving}
+            onclick={() => void loadPermissionSnapshot()}
+          >
+            Retry
+          </button>
+        </div>
       {/if}
 
       <div class="pf-perm-table">

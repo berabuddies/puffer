@@ -1071,6 +1071,26 @@ test("permissions settings save tool policies through the daemon", async ({ page
   });
 });
 
+test("permissions load errors do not auto-retry until the user retries", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.delayFailure("list_permissions", () => true, "permissions file is temporarily locked", 20);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Permissions" }).click();
+
+  await expect(page.getByText("permissions file is temporarily locked")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry" })).toBeEnabled();
+  await page.waitForTimeout(160);
+  expect(daemon.requests.filter((request) => request.method === "list_permissions")).toHaveLength(1);
+
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect.poll(() =>
+    daemon.requests.filter((request) => request.method === "list_permissions").length
+  ).toBe(2);
+});
+
 test("permissions save is ignored while already saving", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayResponse("save_permissions", () => true, 500);
