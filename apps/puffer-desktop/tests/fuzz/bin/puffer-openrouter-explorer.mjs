@@ -74,6 +74,7 @@ async function generateSelectedActions(caseIndex) {
   selectedActions.length = 0;
   explorerResources.clear();
   applySetupResources(explorerResources);
+  let fallbackReason = "fallback allowed action";
 
   const messages = [
     {
@@ -104,9 +105,20 @@ async function generateSelectedActions(caseIndex) {
   ];
 
   for (let round = 0; round < maxSteps + 4; round += 1) {
-    const response = await openRouterChat(messages);
+    let response;
+    try {
+      response = await openRouterChat(messages);
+    } catch (error) {
+      fallbackReason = `fallback after OpenRouter explorer error: ${String(error?.message ?? error).slice(0, 160)}`;
+      process.stderr.write(`OPENROUTER_EXPLORER_FALLBACK ${namespace} ${fallbackReason}\n`);
+      break;
+    }
     const message = response.choices?.[0]?.message;
-    if (!message) throw new Error("OpenRouter response did not include a message");
+    if (!message) {
+      fallbackReason = "fallback after OpenRouter response without a message";
+      process.stderr.write(`OPENROUTER_EXPLORER_FALLBACK ${namespace} ${fallbackReason}\n`);
+      break;
+    }
     messages.push(message);
 
     const toolCalls = message.tool_calls ?? [];
@@ -135,7 +147,7 @@ async function generateSelectedActions(caseIndex) {
 
   if (selectedActions.length === 0) {
     const fallback = allowedActions[caseIndex % allowedActions.length];
-    selectedActions.push({ actionId: fallback.id, params: materializeParams(fallback.params ?? {}, rng), reason: "fallback allowed action" });
+    selectedActions.push({ actionId: fallback.id, params: materializeParams(fallback.params ?? {}, rng), reason: fallbackReason });
   }
   ensureOwnedCoverage();
   return selectedActions.map((action) => ({
