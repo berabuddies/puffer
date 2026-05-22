@@ -14,16 +14,9 @@ Puffer's managed Chrome Browser tab: opening a page, switching tabs, inspecting
 visible UI, clicking controls, filling fields, pressing keys, uploading files,
 capturing screenshots, evaluating page JavaScript, or checking page text.
 Browser is not a model tool and must not be requested as a provider tool call.
-Invoke it as `browser ...` when the shell alias is installed, or as
-`puffer internal-tool browser ...` everywhere.
+Run Browser commands as `browser ...` inside Bash.
 
 Target: $target
-
-Alias setup:
-
-- `puffer internal-tool aliases` prints shell aliases such as
-  `alias browser='puffer internal-tool browser'`.
-- If the alias is missing, use the full `puffer internal-tool browser` command.
 
 Workflow:
 

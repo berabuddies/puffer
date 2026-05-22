@@ -284,7 +284,7 @@ fn execute_background(
     let mut command = Command::new(puffer_tools::detected_shell());
     command
         .arg("-lc")
-        .arg(&input.command)
+        .arg(command_with_internal_tool_helpers(&input.command)?)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
@@ -360,6 +360,7 @@ fn execute_foreground(
         .unwrap_or_else(resolved_default_timeout_ms)
         .clamp(1, resolved_max_timeout_ms());
     let command = input.command.clone();
+    let command = command_with_internal_tool_helpers(&command)?;
     let timed = run_bash_command(cwd, &command, timeout_ms, internal_permissions)?;
     let mut stderr = String::from_utf8_lossy(&timed.output.stderr).to_string();
     if timed.timed_out {
@@ -473,6 +474,23 @@ fn run_bash_command(
         }
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn command_with_internal_tool_helpers(command: &str) -> Result<String> {
+    Ok(format!("{}\n{command}", internal_tool_shell_helpers()?))
+}
+
+fn internal_tool_shell_helpers() -> Result<String> {
+    let current_exe = std::env::current_exe().context("resolve puffer executable")?;
+    let current_exe = current_exe.to_string_lossy();
+    Ok(format!(
+        "browser() {{\n  {} internal-tool browser \"$@\"\n}}",
+        shell_word(&current_exe)
+    ))
+}
+
+fn shell_word(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 const MAX_OUTPUT_CHARS: usize = 30_000;
@@ -638,6 +656,28 @@ mod tests {
             assert!(result.success, "command failed: {}", result.output.stderr);
             assert_eq!(result.output.stdout, "hello");
             assert!(!result.output.interrupted);
+        });
+    }
+
+    #[test]
+    fn execute_foreground_exposes_browser_helper() {
+        with_bash_timeout_env(None, None, || {
+            let temp = tempfile::tempdir().unwrap();
+            let result = execute(
+                temp.path(),
+                &test_session_id(),
+                ClaudeBashInput {
+                    command: "type browser".to_string(),
+                    timeout: Some(5_000),
+                    description: None,
+                    run_in_background: false,
+                    tty: false,
+                },
+                None,
+            )
+            .unwrap();
+            assert!(result.success, "command failed: {}", result.output.stderr);
+            assert!(result.output.stdout.contains("browser"));
         });
     }
 
