@@ -44,11 +44,13 @@ import {
 } from "../lib/scheduler.mjs";
 import { bugSignature, findDuplicateSignatures } from "../lib/signature.mjs";
 import { shrinkRunCase } from "../lib/shrinker.mjs";
+import { buildScenarioPlan, formatScenarioPlanMarkdown, writeScenarioPlan, writeScenarioPlanMarkdown } from "../lib/scenario-plan.mjs";
 
 const fuzzRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const defaultManifestPath = path.join(fuzzRoot, "manifests", "puffer-ui.json");
 const defaultUiTreePath = path.join(fuzzRoot, "manifests", "puffer-ui-tree.json");
 const defaultIntentManifestPath = path.join(fuzzRoot, "manifests", "puffer-intents.json");
+const defaultScenarioManifestPath = path.join(fuzzRoot, "manifests", "puffer-scenarios.json");
 const defaultSeedDir = path.join(fuzzRoot, "seeds");
 const defaultShardDir = path.join(fuzzRoot, "shards");
 const defaultAdapterPath = path.join(fuzzRoot, "adapters", "playwright-actions.json");
@@ -116,6 +118,7 @@ Commands:
   corpus --from-replay apps/puffer-desktop/tests/fuzz/.runs/<run>/bounded-replay-report.json --out apps/puffer-desktop/tests/fuzz/.runs/<run>/corpus.json
   corpus --input apps/puffer-desktop/tests/fuzz/.runs/<run>/corpus.json --run-out apps/puffer-desktop/tests/fuzz/.runs/<run>/corpus-run.json
   bug-memory --runs-dir apps/puffer-desktop/tests/fuzz/.runs --out /tmp/puffer_bug_memory.json --report-out /tmp/puffer_bug_memory.md
+  scenario-plan --out /tmp/puffer_scenarios.json --report-out /tmp/puffer_scenarios.md
   signature --finding finding.json
   replay --input run.json --case-id chat-turn-race-0001 --out /tmp/replay.spec.ts
   shrink --input run.json --case-id chat-turn-race-0001 --out /tmp/shrunk-run.json --report-out /tmp/shrink.md
@@ -129,6 +132,7 @@ Options:
   --manifest <path>   Default: apps/puffer-desktop/tests/fuzz/manifests/puffer-ui.json
   --ui-tree <path>    Default: apps/puffer-desktop/tests/fuzz/manifests/puffer-ui-tree.json
   --intents <path>    Default: apps/puffer-desktop/tests/fuzz/manifests/puffer-intents.json
+  --scenarios <path>  Default: apps/puffer-desktop/tests/fuzz/manifests/puffer-scenarios.json
   --seed-dir <path>   Default: apps/puffer-desktop/tests/fuzz/seeds
   --shard-dir <path>  Default: apps/puffer-desktop/tests/fuzz/shards
   --adapter <path>    Default: apps/puffer-desktop/tests/fuzz/adapters/playwright-actions.json
@@ -456,6 +460,15 @@ async function main() {
     if (args.out) await writeBugMemory(args.out, memory);
     if (args["report-out"]) await writeBugMemoryMarkdown(args["report-out"], memory);
     process.stdout.write(formatBugMemoryMarkdown(memory));
+    return;
+  }
+
+  if (command === "scenario-plan") {
+    const scenarioManifest = await readJson(args.scenarios ?? defaultScenarioManifestPath);
+    const plan = buildScenarioPlan(scenarioManifest, { limit: args.limit });
+    if (args.out) await writeScenarioPlan(args.out, plan);
+    if (args["report-out"]) await writeScenarioPlanMarkdown(args["report-out"], plan);
+    process.stdout.write(formatScenarioPlanMarkdown(plan));
     return;
   }
 
