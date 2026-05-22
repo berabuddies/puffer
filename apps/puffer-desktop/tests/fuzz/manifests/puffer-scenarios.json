@@ -83,5 +83,23 @@
       "paths": ["stable-daemon", "reconnect-during-pending"],
       "property": "Reconnect does not duplicate completed actions or lose draft state."
     }
+  ],
+  "multiClientScenarios": [
+    {
+      "id": "dual-client-session-stale-push",
+      "priority": 8,
+      "description": "Two windows share one fake daemon while one switches sessions and the other receives stale session push events.",
+      "clients": 2,
+      "shards": ["workspace-agent-card-selection", "chat-session-switch-stale"],
+      "invariants": ["active-session-stable", "stale-error-scoped"]
+    },
+    {
+      "id": "dual-client-provider-new-agent",
+      "priority": 7,
+      "description": "One window changes provider/model state while another opens New Agent and submits a chat turn.",
+      "clients": 2,
+      "shards": ["settings-provider-auth", "new-agent-provider-model", "chat-composer-send"],
+      "invariants": ["no-cross-provider-model", "one-request-per-intent"]
+    }
   ]
 }

@@ -40,6 +40,18 @@ export type PufferUiState = {
   normalizedTreeSignature: string;
   env: PufferCoverageEnv;
   interactiveElements: PufferInteractiveElement[];
+  a11y: {
+    activeRoleOrKind: string;
+    activeName: string;
+    keyboardReachableCount: number;
+    dialogCount: number;
+  };
+  visual: {
+    viewportWidth: number;
+    viewportHeight: number;
+    visibleInteractiveCount: number;
+    possibleOcclusionCount: number;
+  };
   artifacts?: Record<string, string>;
 };
 
@@ -168,6 +180,8 @@ export async function collectPufferUiState(page: Page, env: PufferCoverageEnv): 
 
     const activeElement = document.activeElement;
     const activePanel = activeElement ? panelName(activeElement) : "unknown";
+    const activeRoleOrKind = activeElement ? activeElement.getAttribute("role") || activeElement.tagName.toLowerCase() : "";
+    const activeName = activeElement ? visibleText(activeElement) : "";
     const dialogs = Array.from(document.querySelectorAll("[role='dialog'], dialog, .pf-modal, .modal"))
       .filter((element) => {
         const rect = (element as HTMLElement).getBoundingClientRect();
@@ -183,6 +197,15 @@ export async function collectPufferUiState(page: Page, env: PufferCoverageEnv): 
       : bodyText.includes("Connecting")
         ? "reconnecting"
         : "connected-or-unknown";
+    const keyboardReachableCount = elements.filter((element) =>
+      ["button", "a", "input", "select", "textarea", "textbox", "tab"].includes(element.roleOrKind) ||
+      element.locatorHint.includes("tabindex")
+    ).length;
+    const possibleOcclusionCount = Array.from(document.querySelectorAll("[style*='z-index'], .overlay, .modal, [role='dialog']"))
+      .filter((element) => {
+        const rect = (element as HTMLElement).getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      }).length;
 
     return {
       routePattern: location.pathname || "/",
@@ -193,7 +216,19 @@ export async function collectPufferUiState(page: Page, env: PufferCoverageEnv): 
       modalStack: dialogs,
       daemonState: daemonText,
       bodyText,
-      elements
+      elements,
+      a11y: {
+        activeRoleOrKind,
+        activeName,
+        keyboardReachableCount,
+        dialogCount: dialogs.length
+      },
+      visual: {
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
+        visibleInteractiveCount: elements.length,
+        possibleOcclusionCount
+      }
     };
   });
 
@@ -213,7 +248,9 @@ export async function collectPufferUiState(page: Page, env: PufferCoverageEnv): 
     normalizedTextSignature,
     normalizedTreeSignature,
     env,
-    interactiveElements: observed.elements
+    interactiveElements: observed.elements,
+    a11y: observed.a11y,
+    visual: observed.visual
   };
   return {
     ...stateWithoutHash,

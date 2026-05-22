@@ -5,7 +5,8 @@ export function buildScenarioPlan(scenarioManifest, options = {}) {
   const rows = [
     ...(scenarioManifest.scenarios ?? []).map((item) => ({ ...item, layer: "scenario" })),
     ...(scenarioManifest.personas ?? []).map((item) => ({ ...item, layer: "persona" })),
-    ...(scenarioManifest.metamorphicOracles ?? []).map((item) => ({ ...item, layer: "metamorphic" }))
+    ...(scenarioManifest.metamorphicOracles ?? []).map((item) => ({ ...item, layer: "metamorphic" })),
+    ...(scenarioManifest.multiClientScenarios ?? []).map((item) => ({ ...item, layer: "multi-client" }))
   ].sort((left, right) => {
     if (Number(right.priority ?? 0) !== Number(left.priority ?? 0)) return Number(right.priority ?? 0) - Number(left.priority ?? 0);
     return left.id.localeCompare(right.id);
@@ -38,6 +39,7 @@ export function formatScenarioPlanMarkdown(plan) {
     if (item.invariants) lines.push(`- Invariants: ${item.invariants.join(", ")}`);
     if (item.paths) lines.push(`- Paths: ${item.paths.join(" vs ")}`);
     if (item.property) lines.push(`- Property: ${item.property}`);
+    if (item.clients) lines.push(`- Clients: ${item.clients}`);
     if (item.env) lines.push(`- Environment: ${JSON.stringify(item.env)}`);
     lines.push("");
   }

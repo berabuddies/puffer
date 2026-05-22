@@ -519,7 +519,9 @@ function collectState(states, state) {
     daemonState: state.daemonState ?? "",
     modalStack: state.modalStack ?? [],
     normalizedTextSignature: state.normalizedTextSignature ?? "",
-    normalizedTreeSignature: state.normalizedTreeSignature ?? ""
+    normalizedTreeSignature: state.normalizedTreeSignature ?? "",
+    a11y: state.a11y ?? {},
+    visual: state.visual ?? {}
   });
 }
 
