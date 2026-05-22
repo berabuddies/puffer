@@ -62,6 +62,13 @@ pub fn load_resources(paths: &ConfigPaths, runner: &dyn ToolRunner) -> Result<Lo
             &mut loaded.diagnostics,
         );
         merge_by_id(
+            &mut loaded.internal_tools,
+            load_yaml_dir::<ToolSpec>(runner, &root.join("internal_tools"), kind)?,
+            |item| MergeKey::simple(item.value.id.clone()),
+            "internal_tool",
+            &mut loaded.diagnostics,
+        );
+        merge_by_id(
             &mut loaded.agents,
             load_yaml_dir::<AgentSpec>(runner, &root.join("agents"), kind)?,
             |item| MergeKey::simple(item.value.id.clone()),
@@ -137,6 +144,9 @@ fn filter_browser_resources(resources: &mut LoadedResources, no_browser: bool) {
     if !no_browser {
         return;
     }
+    resources
+        .internal_tools
+        .retain(|tool| tool.value.id.trim() != "Browser");
     resources
         .skills
         .retain(|skill| skill.value.name.trim() != "browser");
@@ -1218,6 +1228,19 @@ mod tests {
                     kind: SourceKind::Builtin,
                 },
             }],
+            internal_tools: vec![LoadedItem {
+                value: ToolSpec {
+                    id: "Browser".to_string(),
+                    name: "Browser".to_string(),
+                    description: "Browser".to_string(),
+                    handler: "runtime:browser".to_string(),
+                    ..ToolSpec::default()
+                },
+                source_info: SourceInfo {
+                    path: PathBuf::from("internal_tools/browser.yaml"),
+                    kind: SourceKind::Builtin,
+                },
+            }],
             ..LoadedResources::default()
         };
 
@@ -1225,6 +1248,7 @@ mod tests {
 
         assert!(skill_by_name(&resources, "browser").is_none());
         assert_eq!(resources.plugins[0].value.skills, vec!["reviewer"]);
+        assert!(resources.internal_tools.is_empty());
     }
 
     #[test]
@@ -1652,7 +1676,7 @@ mod tests {
             .any(|item| item.value.id == "disabled"));
     }
 
-    /// Smoke test: every embedded `resources/tools/*.yaml` must parse as a
+    /// Smoke test: every embedded tool-like yaml must parse as a
     /// `ToolSpec`. Regression guard for bugs like browser.yaml's unquoted
     /// `actions: u` substring, which YAML silently parsed as a nested
     /// mapping and broke 6 of 14 `tool_visibility::*` tests on master
@@ -1660,11 +1684,14 @@ mod tests {
     /// fast, with the offending path in the panic message.
     #[test]
     fn all_embedded_tool_yamls_parse() {
-        let dir = BUILTIN_RESOURCES
-            .get_dir("tools")
-            .expect("embedded resources/tools directory");
-        let mut files: Vec<_> = dir.files().collect();
-        files.sort_by_key(|f| f.path().to_path_buf());
+        let mut files = Vec::new();
+        for dir_name in ["tools", "internal_tools"] {
+            let dir = BUILTIN_RESOURCES
+                .get_dir(dir_name)
+                .unwrap_or_else(|| panic!("embedded resources/{dir_name} directory"));
+            files.extend(dir.files());
+        }
+        files.sort_by_key(|file| file.path().to_path_buf());
 
         let mut yaml_count = 0usize;
         for file in files {

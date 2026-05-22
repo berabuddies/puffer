@@ -11,7 +11,7 @@
 //! a debounce, but from a background thread.
 //!
 //! Scope of what we watch:
-//! - `<paths.user_config_dir>/resources/{skills,mcp_servers,plugins,prompts,agents,tools,hooks,ides}/`
+//! - `<paths.user_config_dir>/resources/{skills,mcp_servers,plugins,prompts,agents,tools,internal_tools,hooks,ides}/`
 //! - `<paths.workspace_config_dir>/resources/{...}` (same set)
 //! - `<paths.builtin_resources_dir>/{...}` (developer convenience —
 //!   editing builtin yaml in-place during local development triggers a
@@ -53,6 +53,7 @@ const WATCHED_SUBDIRS: &[&str] = &[
     "prompts",
     "agents",
     "tools",
+    "internal_tools",
     "hooks",
     "ides",
     "mascots",

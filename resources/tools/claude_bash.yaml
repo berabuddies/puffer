@@ -37,9 +37,9 @@ description: |-
     unless the User explicitly requests it.
   - Do not use unnecessary `sleep` commands. If you started a background task,
     do not poll it immediately.
-  - Commands run in a sandbox by default. Use
-    `dangerouslyDisableSandbox: true` only when you explicitly need to bypass
-    sandbox restrictions.
+  - Commands are permission-gated by effective command name. Safe inspection
+    commands such as `ls`, `cat`, `grep`, and `sed` can run by default;
+    other commands require approval or a project ACL rule.
   - Commands that look destructively broad (for example `rm -rf /`) or that
     pipe downloaded content directly into a shell may still require approval
     even when Bash is otherwise available.
@@ -84,9 +84,6 @@ input_schema:
     run_in_background:
       type: boolean
       description: Set to true to run this command in the background. Only use this when you do not need the result immediately and are okay being notified later.
-    dangerouslyDisableSandbox:
-      type: boolean
-      description: Set this to true to dangerously override sandbox mode and run commands without sandboxing.
     tty:
       type: boolean
       description: |-

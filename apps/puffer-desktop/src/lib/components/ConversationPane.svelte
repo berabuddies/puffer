@@ -118,7 +118,7 @@
 
   function permissionIcon(choice: string): "allow_once" | "allow_session" | "deny" {
     const normalized = choice.toLowerCase();
-    if (normalized.includes("session")) {
+    if (normalized.includes("always") || normalized.includes("session")) {
       return "allow_session";
     }
     if (normalized.includes("deny")) {

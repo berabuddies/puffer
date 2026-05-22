@@ -21,6 +21,7 @@ use std::time::UNIX_EPOCH;
 use uuid::Uuid;
 
 pub mod bash;
+pub(crate) mod bash_internal_permissions;
 pub mod edit;
 pub mod glob;
 pub mod grep;
@@ -96,8 +97,7 @@ pub(crate) fn execute_tool(
     input: Value,
     provider_context: ProviderToolContext<'_>,
 ) -> Result<ToolExecutionResult> {
-    let skip_runner = definition.id == "Bash"
-        && input.get("tty").and_then(|v| v.as_bool()).unwrap_or(false);
+    let skip_runner = definition.id == "Bash";
     if !skip_runner && runner_adapter::is_runner_supported(definition.id.as_str()) {
         if let Some(result) =
             try_runner_dispatch(state, definition, cwd, &input, filesystem_policy)?
@@ -107,11 +107,30 @@ pub(crate) fn execute_tool(
     }
     match definition.id.as_str() {
         "Bash" => {
-            let execution = bash::execute_from_value(
+            let session_id = state.session.id;
+            let process_store = state.process_store.clone();
+            let mut internal_permission_handler = |request| match request {
+                bash_internal_permissions::InternalToolBrokerRequest::Permission(request) => {
+                    bash_internal_permissions::InternalToolBrokerResponse::Permission(
+                        super::internal_tool_permissions::resolve_internal_tool_permission(
+                            state, resources, registry, cwd, request,
+                        ),
+                    )
+                }
+                bash_internal_permissions::InternalToolBrokerRequest::Execution(request) => {
+                    bash_internal_permissions::InternalToolBrokerResponse::Execution(
+                        super::internal_tool_permissions::execute_internal_tool_request(
+                            state, resources, registry, cwd, request,
+                        ),
+                    )
+                }
+            };
+            let execution = bash::execute_from_value_with_internal_permissions(
                 cwd,
-                &state.session.id,
+                &session_id,
                 input,
-                Some(&state.process_store),
+                Some(&process_store),
+                Some(&mut internal_permission_handler),
             )?;
             let output = serde_json::to_string_pretty(&execution.output)
                 .context("failed to serialize Bash output")?;
@@ -311,7 +330,7 @@ pub(crate) fn execute_tool(
 /// touched, enabling concurrent execution via `std::thread::scope`.
 ///
 /// For tools in `runner_adapter::is_runner_supported(...)` (currently
-/// `Bash | Glob | Grep | WebFetch`), execution is routed through the supplied
+/// `Glob | Grep | WebFetch` in the parallel path), execution is routed through the supplied
 /// `Arc<dyn ToolRunner>` so a `RemoteToolRunner` can intercept parallel
 /// batches the same way it intercepts serial calls. The remaining
 /// parallel-safe tools (`WebSearch | ToolSearch | Skill`) intentionally stay
@@ -707,6 +726,7 @@ pub fn execute_workflow_tool(
         "CronCreate" => workflow::cron_create::execute_cron_create(state, cwd, input),
         "CronDelete" => workflow::cron_delete::execute_cron_delete(state, cwd, input),
         "CronList" => workflow::cron_list::execute_cron_list(state, cwd, input),
+        "Email" => workflow::email_configure::execute_email(state, cwd, input),
         "EmailConfigure" => workflow::email_configure::execute_email_configure(state, cwd, input),
         "EnterPlanMode" => workflow::enter_plan_mode::execute_enter_plan_mode(state, cwd, input),
         "EnterWorktree" => workflow::enter_worktree::execute_enter_worktree(state, cwd, input),
@@ -757,6 +777,7 @@ pub fn execute_workflow_tool(
         "TaskUpdate" => workflow::task_update::execute_task_update(state, cwd, input),
         "TeamCreate" => workflow::team_create::execute_team_create(state, cwd, input),
         "TeamDelete" => workflow::team_delete::execute_team_delete(state, cwd, input),
+        "Telegram" => workflow::telegram_login::execute_telegram(state, cwd, input),
         "TelegramLoginStart" => {
             workflow::telegram_login::execute_telegram_login_start(state, cwd, input)
         }
@@ -933,9 +954,7 @@ mod tests {
 
     /// Verifies the parallel-tool path routes runner-supported tools through
     /// `Arc<dyn ToolRunner>::execute_tool` instead of calling in-process
-    /// helpers directly. This is the regression test for the gap where a
-    /// parallel batch of two Bash calls bypassed `RemoteToolRunner` even
-    /// though a single serial Bash call went through it.
+    /// helpers directly.
     #[test]
     fn parallel_path_dispatches_through_runner() {
         let inner: Arc<dyn ToolRunner> = Arc::new(crate::runner_adapter::LocalToolRunner::new());
@@ -952,7 +971,7 @@ mod tests {
 
         // Claude-parity tools use capitalized ids that the dispatcher
         // matches on; build minimal definitions directly so neither the
-        // builtin lowercase `bash` nor a `runtime:` handler mismatch
+        // builtin lowercase ids nor a `runtime:` handler mismatch
         // perturbs the dispatch path under test.
         fn claude_tool_def(id: &str, handler: &str) -> ToolDefinition {
             ToolDefinition {
@@ -971,34 +990,41 @@ mod tests {
                 display: ToolDisplayHints::default(),
             }
         }
-        let bash_def = claude_tool_def("Bash", "runtime:claude_bash");
+        std::fs::write(cwd.join("sample.txt"), "parallel-runner\n").expect("write sample");
+        let grep_def = claude_tool_def("Grep", "runtime:claude_grep");
         let glob_def = claude_tool_def("Glob", "runtime:claude_glob");
 
-        let bash_input = json!({"command": "echo parallel-runner"});
         let filesystem_policy = FilesystemPermissionPolicy {
             approval: EffectiveApprovalPolicy::Allow,
             sandbox_mode: EffectiveSandboxMode::DangerFullAccess,
             workspace_roots: vec![cwd.clone()],
             session_granted: true,
+            allow_all_paths: true,
         };
-        let bash_result = execute_parallel_tool(
-            &bash_def,
+        let grep_input = json!({"pattern": "parallel-runner", "path": "sample.txt"});
+        let grep_result = execute_parallel_tool(
+            &grep_def,
             &cwd,
             &working_dirs,
             &filesystem_policy,
             &session_id,
-            bash_input,
+            grep_input,
             &resources,
             &registry,
             &provider_context,
             &runner,
         )
-        .expect("Bash through runner");
-        assert!(bash_result.success, "Bash should succeed");
-        assert!(
-            bash_result.output.stdout.contains("parallel-runner"),
-            "Bash stdout missing marker: {}",
-            bash_result.output.stdout
+        .expect("Grep through runner");
+        assert!(grep_result.success, "Grep should succeed");
+        let grep_stdout: Value =
+            serde_json::from_str(&grep_result.output.stdout).expect("Grep JSON stdout");
+        assert_eq!(
+            grep_stdout
+                .get("filenames")
+                .and_then(Value::as_array)
+                .and_then(|filenames| filenames.first())
+                .and_then(Value::as_str),
+            Some("sample.txt")
         );
 
         let glob_input = json!({"pattern": "*"});

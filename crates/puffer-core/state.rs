@@ -1059,7 +1059,11 @@ mod tests {
 
         state.allow_permission_for_tool_call(
             &browser_tool_definition(),
-            &serde_json::json!({"action":"evaluate", "script":"document.title"}),
+            &serde_json::json!({
+                "action":"evaluate",
+                "url":"https://docs.example.com/page",
+                "script":"document.title"
+            }),
         );
         let profile = EffectivePermissionProfile::from_session_state(
             Path::new("."),
@@ -1075,11 +1079,13 @@ mod tests {
 
         assert!(profile.browser_session_grant_allows(&serde_json::json!({
             "action":"evaluate",
+            "url":"https://docs.example.com/other",
             "script":"window.location.href"
         })));
         assert!(!profile.browser_session_grant_allows(&serde_json::json!({
             "action":"evaluate",
             "sessionId": child.to_string(),
+            "url":"https://docs.example.com/other",
             "script":"window.location.href"
         })));
     }

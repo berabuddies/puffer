@@ -19,7 +19,7 @@ fn poll_pending_submit_opens_permission_prompt_overlay() {
     let request = PermissionPromptRequest {
         tool_id: "Bash".to_string(),
         summary: "git push origin master".to_string(),
-        reason: Some("shell command matches sandbox exclusion `git push`".to_string()),
+        reason: Some("shell command matches project shell exclusion `git push`".to_string()),
         browser: None,
         review: None,
     };
@@ -104,6 +104,8 @@ fn permission_prompt_response_preserves_composer_draft() {
         tool_id: "Bash".to_string(),
         summary: "cat <<'EOF'".to_string(),
         reason: Some("pasted shell input requires approval".to_string()),
+        browser: None,
+        review: None,
     };
     let (response_tx, response_rx) = mpsc::channel();
     let draft = "next message [Pasted text #1 +2 lines]".to_string();
@@ -144,7 +146,9 @@ fn permission_prompt_ctrl_c_denies_and_closes_overlay() {
     let request = PermissionPromptRequest {
         tool_id: "Bash".to_string(),
         summary: "git push origin master".to_string(),
-        reason: Some("shell command matches sandbox exclusion `git push`".to_string()),
+        reason: Some("shell command matches project shell exclusion `git push`".to_string()),
+        browser: None,
+        review: None,
     };
     let (response_tx, response_rx) = mpsc::channel();
     let mut tui = TuiState {
@@ -189,7 +193,9 @@ fn permission_prompt_ctrl_c_interrupts_pending_turn() {
     let request = PermissionPromptRequest {
         tool_id: "Bash".to_string(),
         summary: "git push origin master".to_string(),
-        reason: Some("shell command matches sandbox exclusion `git push`".to_string()),
+        reason: Some("shell command matches project shell exclusion `git push`".to_string()),
+        browser: None,
+        review: None,
     };
     let (_event_tx, event_rx) = mpsc::channel();
     let (response_tx, response_rx) = mpsc::channel();
@@ -250,7 +256,7 @@ fn render_permission_prompt_shows_codex_style_options() {
         overlay: ApprovalOverlay::new(PermissionPromptRequest {
             tool_id: "Bash".to_string(),
             summary: "git push origin master".to_string(),
-            reason: Some("shell command matches sandbox exclusion `git push`".to_string()),
+            reason: Some("shell command matches project shell exclusion `git push`".to_string()),
             browser: None,
             review: None,
         }),
@@ -276,9 +282,9 @@ fn render_permission_prompt_shows_codex_style_options() {
         .unwrap();
     let rendered = buffer_to_string(terminal.backend().buffer());
     assert!(rendered.contains("Would you like to grant these permissions?"));
-    assert!(rendered.contains("Yes, grant these permissions"));
-    assert!(rendered.contains("Yes, grant these permissions for this session"));
-    assert!(rendered.contains("Yes, allow ALL tools for this session"));
+    assert!(rendered.contains("Approve once"));
+    assert!(rendered.contains("Always allow this request"));
+    assert!(!rendered.contains("Always allow all project actions"));
     assert!(rendered.contains("No, continue without permissions"));
 }
 
@@ -330,11 +336,11 @@ fn render_browser_permission_prompt_shows_context_with_generic_options() {
     let rendered = buffer_to_string(terminal.backend().buffer());
     assert!(rendered.contains("Action: "));
     assert!(rendered.contains("Open https://docs.example.com/a"));
-    assert!(rendered.contains("Yes, grant these permissions"));
-    assert!(rendered.contains("Yes, allow this browser context for this session"));
-    assert!(!rendered.contains("Yes, allow ALL tools for this session"));
-    assert!(!rendered.contains("all for session"));
-    assert!(rendered.contains("context for session"));
+    assert!(rendered.contains("Approve once"));
+    assert!(rendered.contains("Always allow this browser context"));
+    assert!(!rendered.contains("Always allow all project actions"));
+    assert!(!rendered.contains("always allow all"));
+    assert!(rendered.contains("always allow context"));
     assert!(!rendered.contains("Source: "));
     assert!(!rendered.contains("Action Set: "));
     assert!(!rendered.contains("Reason: "));
@@ -474,8 +480,8 @@ fn render_browser_fallback_prompt_does_not_show_reviewer_payload() {
     let rendered = buffer_to_string(terminal.backend().buffer());
     assert!(rendered.contains("Action: "));
     assert!(rendered.contains("Open https://docs.example.com/a"));
-    assert!(rendered.contains("Yes, grant these permissions"));
-    assert!(rendered.contains("Yes, allow this browser context for this session"));
+    assert!(rendered.contains("Approve once"));
+    assert!(rendered.contains("Always allow this browser context"));
     assert!(!rendered.contains("Reviewer Decision: "));
     assert!(!rendered.contains("Reviewer Risk: "));
     assert!(!rendered.contains("Reviewer Rationale: "));

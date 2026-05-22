@@ -9,26 +9,15 @@ use crate::runtime::{
     BrowserPermissionPromptActionSet, BrowserPermissionPromptSource,
     BrowserPermissionPromptTargetClass, PermissionPromptRequest,
 };
+use puffer_tools::internal_permissions::InternalToolPermissionRequest;
 
 fn browser_resources() -> LoadedResources {
     let mut tool = loaded_tool("Browser", "Managed browser", "runtime:browser");
     tool.value.approval_policy = Some("auto".to_string());
     tool.value.sandbox_policy = Some("workspace-write".to_string());
     LoadedResources {
-        tools: vec![tool],
-        ..LoadedResources::default()
-    }
-}
-
-fn browser_and_bash_resources() -> LoadedResources {
-    let mut browser = loaded_tool("Browser", "Managed browser", "runtime:browser");
-    browser.value.approval_policy = Some("auto".to_string());
-    browser.value.sandbox_policy = Some("workspace-write".to_string());
-    let mut bash = loaded_tool("Bash", "Run shell", "runtime:claude_bash");
-    bash.value.approval_policy = Some("on-request".to_string());
-    bash.value.sandbox_policy = Some("workspace-write".to_string());
-    LoadedResources {
-        tools: vec![browser, bash],
+        tools: vec![tool.clone()],
+        internal_tools: vec![tool],
         ..LoadedResources::default()
     }
 }
@@ -169,10 +158,9 @@ fn allow_session_browser_approval_does_not_expand_without_target_context() {
     );
 
     let prompts = prompts.lock().unwrap();
-    assert_eq!(prompts.len(), 3);
+    assert_eq!(prompts.len(), 2);
     assert!(prompts[0].contains("executes page JavaScript"));
     assert!(prompts[1].contains("navigation and interaction require approval"));
-    assert!(prompts[2].contains("executes page JavaScript"));
     assert!(state.session_permission_state().has_browser_grant());
 }
 
@@ -345,8 +333,8 @@ fn browser_permission_prompt_summary_uses_action_and_target() {
 }
 
 #[test]
-fn browser_tool_session_grant_is_reused_by_shell_browser_route() {
-    let resources = browser_and_bash_resources();
+fn browser_tool_session_grant_is_reused_by_internal_browser_route() {
+    let resources = browser_resources();
     let registry = ToolRegistry::from_resources(&resources);
     let providers = empty_providers();
     let mut auth_store = AuthStore::default();
@@ -370,48 +358,47 @@ fn browser_tool_session_grant_is_reused_by_shell_browser_route() {
             .unwrap();
             assert!(matches!(first, PermissionOutcome::Allowed(_)));
 
-            let second = resolve_tool_permission(
-                &mut state,
-                &resources,
-                &providers,
-                &mut auth_store,
-                &registry,
-                &cwd,
-                "Bash",
-                &json!({"command":"puffer browser navigate https://docs.example.com/b"}),
-                None,
-            )
-            .unwrap();
-            assert!(matches!(second, PermissionOutcome::Allowed(_)));
+            let second =
+                crate::runtime::internal_tool_permissions::resolve_internal_tool_permission(
+                    &mut state,
+                    &resources,
+                    &registry,
+                    &cwd,
+                    InternalToolPermissionRequest {
+                        tool_id: "browser".to_string(),
+                        input: json!({"action":"navigate","url":"https://docs.example.com/b"}),
+                    },
+                );
+            assert!(second.is_allowed(), "{second:?}");
         },
     );
 }
 
 #[test]
-fn shell_browser_session_grant_is_reused_by_browser_tool_route() {
-    let resources = browser_and_bash_resources();
+fn internal_browser_session_grant_is_reused_by_browser_tool_route() {
+    let resources = browser_resources();
     let registry = ToolRegistry::from_resources(&resources);
     let providers = empty_providers();
     let mut auth_store = AuthStore::default();
     let mut state = temp_state();
     let cwd = state.cwd.clone();
+    let prompts = Arc::new(Mutex::new(Vec::<PermissionPromptRequest>::new()));
 
-    with_permission_prompt_handler(
-        move |_request| PermissionPromptAction::AllowSession,
+    capture_permission_prompts(
+        Arc::clone(&prompts),
+        PermissionPromptAction::AllowSession,
         || {
-            let first = resolve_tool_permission(
+            let first = crate::runtime::internal_tool_permissions::resolve_internal_tool_permission(
                 &mut state,
                 &resources,
-                &providers,
-                &mut auth_store,
                 &registry,
                 &cwd,
-                "Bash",
-                &json!({"command":"puffer browser navigate https://docs.example.com/a"}),
-                None,
-            )
-            .unwrap();
-            assert!(matches!(first, PermissionOutcome::Allowed(_)));
+                InternalToolPermissionRequest {
+                    tool_id: "browser".to_string(),
+                    input: json!({"action":"navigate","url":"https://docs.example.com/a"}),
+                },
+            );
+            assert!(first.is_allowed(), "{first:?}");
 
             let second = resolve_tool_permission(
                 &mut state,
@@ -427,6 +414,13 @@ fn shell_browser_session_grant_is_reused_by_browser_tool_route() {
             .unwrap();
             assert!(matches!(second, PermissionOutcome::Allowed(_)));
         },
+    );
+
+    let prompts = prompts.lock().unwrap();
+    let browser = prompts[0].browser.as_ref().expect("browser prompt");
+    assert_eq!(
+        browser.source,
+        BrowserPermissionPromptSource::BrowserInternalTool
     );
 }
 
@@ -1221,12 +1215,9 @@ fn resolve_and_execute_browser_permission_stay_in_sync() {
 
     assert!(execution.success);
     assert_eq!(*resolve_reviews.lock().unwrap(), 1);
-    assert_eq!(*execute_reviews.lock().unwrap(), 1);
+    assert_eq!(*execute_reviews.lock().unwrap(), 0);
     let resolve_prompts = resolve_prompts.lock().unwrap();
     let execute_prompts = execute_prompts.lock().unwrap();
     assert_eq!(resolve_prompts.len(), 1);
-    assert_eq!(execute_prompts.len(), 1);
-    assert_eq!(resolve_prompts[0].summary, execute_prompts[0].summary);
-    assert_eq!(resolve_prompts[0].reason, execute_prompts[0].reason);
-    assert_eq!(resolve_prompts[0].browser, execute_prompts[0].browser);
+    assert!(execute_prompts.is_empty());
 }

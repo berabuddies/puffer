@@ -1032,8 +1032,7 @@ pub(super) fn execute_powershell(state: &mut AppState, cwd: &Path, input: Value)
             "interrupted": false,
             "backgroundTaskId": task_id,
             "outputFile": output_file.display().to_string(),
-            "processId": child.id(),
-            "dangerouslyDisableSandbox": parsed.dangerously_disable_sandbox
+            "processId": child.id()
         }))?);
     }
 
@@ -1059,7 +1058,6 @@ pub(super) fn execute_powershell(state: &mut AppState, cwd: &Path, input: Value)
         "stdout": timed.stdout,
         "stderr": timed.stderr,
         "interrupted": timed.timed_out,
-        "dangerouslyDisableSandbox": parsed.dangerously_disable_sandbox,
         "timeoutMs": timeout_ms
     }))?)
 }

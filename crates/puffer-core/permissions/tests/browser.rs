@@ -832,7 +832,7 @@ fn browser_surface_only_session_grant_does_not_allow_evaluate() {
 }
 
 #[test]
-fn allow_all_tools_does_not_bypass_browser_evaluator_for_shell_browser_calls() {
+fn allow_all_tools_allows_shell_browser_commands_as_bash() {
     let context = runtime_context(
         PermissionsSettings::default(),
         SandboxSettings::from_mode("workspace-write"),
@@ -850,12 +850,11 @@ fn allow_all_tools_does_not_bypass_browser_evaluator_for_shell_browser_calls() {
         }),
     );
 
-    assert_eq!(decision.behavior, ToolPermissionBehavior::Ask);
-    assert!(decision.reason.unwrap_or_default().contains("browser"));
+    assert_eq!(decision.behavior, ToolPermissionBehavior::Allow);
 }
 
 #[test]
-fn bash_browser_command_maps_into_same_browser_permission_context() {
+fn bash_browser_command_does_not_map_into_browser_permission_context() {
     let session_id = "2ba8b01d-5e7a-46b6-b747-7bfe5f6fa36a";
     let browser = browser_permission_context_for_tool(
         "Browser",
@@ -877,11 +876,14 @@ fn bash_browser_command_maps_into_same_browser_permission_context() {
     );
 
     assert_eq!(browser.action, Some(BrowserActionCategory::Inspect));
-    assert_eq!(browser, shell);
+    assert_eq!(shell.action, None);
+    assert_eq!(shell.target, None);
+    assert_eq!(shell.tab_id, None);
+    assert_eq!(shell.root_session_id, session_id);
 }
 
 #[test]
-fn bash_browser_tab_focus_is_classified_as_navigate() {
+fn bash_browser_tab_focus_is_not_browser_classified() {
     let context = browser_permission_context_for_tool(
         "Bash",
         &serde_json::json!({
@@ -891,7 +893,10 @@ fn bash_browser_tab_focus_is_classified_as_navigate() {
         &[],
     );
 
-    assert_eq!(context.action, Some(BrowserActionCategory::Navigate));
-    assert_eq!(context.tab_id.as_deref(), Some("t4"));
-    assert_eq!(context.root_session_id, "root-9");
+    assert_eq!(context.action, None);
+    assert_eq!(context.tab_id, None);
+    assert_eq!(
+        context.root_session_id,
+        "2ba8b01d-5e7a-46b6-b747-7bfe5f6fa36a"
+    );
 }

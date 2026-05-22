@@ -24,14 +24,17 @@ mod agent_support;
 mod agents;
 mod anthropic;
 mod anthropic_sse;
+mod auto_approval_review;
 pub mod background_tasks;
 mod blocking_loop;
 mod browser_auto_review;
 pub mod claude_tools;
 mod context_usage;
 pub mod errors;
+mod filesystem_access;
 pub mod goals;
 mod hook_support;
+pub(crate) mod internal_tool_permissions;
 mod local_tools;
 pub mod mcp_discovery;
 mod microcompact;
@@ -809,7 +812,8 @@ fn local_simple_turn_reply(input: &str) -> &'static str {
         _ => "Hi.",
     }
 }
-fn resolve_provider_and_model<'a>(
+/// Resolves the active provider descriptor and model id for a runtime turn.
+pub(super) fn resolve_provider_and_model<'a>(
     state: &AppState,
     providers: &'a ProviderRegistry,
 ) -> Result<(&'a ProviderDescriptor, String)> {

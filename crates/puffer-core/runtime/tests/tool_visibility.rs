@@ -324,11 +324,16 @@ fn powershell_tool_description_matches_claude_reference_for_anthropic_and_openai
             "Set to true to run this command in the background. Use Read to read the output later."
         )
     );
+    let mut property_names = openai_definition.parameters["properties"]
+        .as_object()
+        .expect("properties object")
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    property_names.sort_unstable();
     assert_eq!(
-        openai_definition.parameters["properties"]["dangerouslyDisableSandbox"]["description"],
-        json!(
-            "Set this to true to dangerously override sandbox mode and run commands without sandboxing."
-        )
+        property_names,
+        vec!["command", "description", "run_in_background", "timeout"]
     );
 }
 

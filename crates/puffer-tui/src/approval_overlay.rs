@@ -203,18 +203,18 @@ impl ApprovalOverlay {
     fn footer_hint(&self) -> Line<'static> {
         let mut spans = vec![
             Span::styled("y", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" allow  "),
+            Span::raw(" approve once  "),
             Span::styled("a", Style::default().add_modifier(Modifier::BOLD)),
         ];
         if self.request.browser.is_some() {
-            spans.push(Span::raw(" context for session  "));
+            spans.push(Span::raw(" always allow context  "));
         } else {
-            spans.push(Span::raw(" tool for session  "));
+            spans.push(Span::raw(" always allow  "));
             spans.push(Span::styled(
                 "A",
                 Style::default().add_modifier(Modifier::BOLD),
             ));
-            spans.push(Span::raw(" all for session  "));
+            spans.push(Span::raw(" always allow all  "));
         }
         spans.push(Span::styled(
             "n",
@@ -233,30 +233,22 @@ impl ApprovalOverlay {
 fn permissions_options(request: &PermissionPromptRequest) -> Vec<ApprovalOption> {
     let mut options = vec![
         ApprovalOption {
-            label: "Yes, grant these permissions".to_string(),
+            label: "Approve once".to_string(),
             action: PermissionPromptAction::AllowOnce,
             shortcuts: vec!['y'],
             description: None,
         },
         ApprovalOption {
             label: if request.browser.is_some() {
-                "Yes, allow this browser context for this session".to_string()
+                "Always allow this browser context".to_string()
             } else {
-                "Yes, grant these permissions for this session".to_string()
+                "Always allow this request".to_string()
             },
             action: PermissionPromptAction::AllowSession,
             shortcuts: vec!['a'],
             description: None,
         },
     ];
-    if request.browser.is_none() {
-        options.push(ApprovalOption {
-            label: "Yes, allow ALL tools for this session".to_string(),
-            action: PermissionPromptAction::AllowAllSession,
-            shortcuts: vec!['A'],
-            description: None,
-        });
-    }
     options.push(ApprovalOption {
         label: "No, continue without permissions".to_string(),
         action: PermissionPromptAction::Deny,

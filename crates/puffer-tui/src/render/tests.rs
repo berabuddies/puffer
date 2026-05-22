@@ -70,7 +70,7 @@ fn footer_snapshot_reports_compact_prompt_rail() {
     assert_snapshot!(
                                                                                                                                         snapshot,
                                                                                                                                         @r"
-anthropic/claude-sonnet-4-5 · 99% left · /tmp/puffer · sandbox workspace-write
+anthropic/claude-sonnet-4-5 · 99% left · /tmp/puffer · permissions ACL
 "
                                                                                                                                     );
 }
@@ -174,7 +174,7 @@ fn render_layout_includes_header_body_and_composer() {
     assert!(lines.iter().any(|line| line.contains("Session")));
     assert!(lines.iter().any(|line| line.contains("working tree clean")));
     assert!(rendered.contains("anthropic/claude-sonnet-4-5"));
-    assert!(rendered.contains("sandbox workspace-write"));
+    assert!(rendered.contains("permissions ACL"));
 }
 
 #[test]

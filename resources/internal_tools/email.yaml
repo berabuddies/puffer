@@ -1,0 +1,68 @@
+id: Email
+name: Email
+aliases:
+  - email
+description: |-
+  Internal CLI-only Email subscriber surface. Agents should use the `email`
+  skill and run `email ...` through Bash instead of receiving this as a
+  provider tool call.
+
+  The internal CLI sends execution back to the parent Puffer runtime so the
+  long-lived subscription manager owns the email subscriber process.
+handler: runtime:workflow:email
+approval_policy: ask
+sandbox_policy: workspace-write
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - configure
+      description: Email subscriber action to perform.
+    imap_host:
+      type: string
+      description: IMAP server host, for example imap.gmail.com.
+    imap_port:
+      type: integer
+      minimum: 0
+      maximum: 65535
+      description: IMAP server port. Use 0 to let the subscriber default it.
+    smtp_host:
+      type: string
+      description: SMTP server host, for example smtp.gmail.com.
+    smtp_port:
+      type: integer
+      minimum: 0
+      maximum: 65535
+      description: SMTP server port. Use 0 to let the subscriber default it.
+    username:
+      type: string
+      description: Login username, usually the full email address.
+    password:
+      type: string
+      description: Email password or app-specific password.
+    from_address:
+      type: string
+      description: From address to use for outbound email.
+    allowed_senders:
+      type: array
+      items:
+        type: string
+      description: Optional sender addresses or domain suffixes to allow.
+  required:
+    - action
+    - imap_host
+    - smtp_host
+    - username
+    - password
+    - from_address
+  additionalProperties: false
+metadata:
+  may_spawn_processes: true
+  may_read_files: false
+  may_write_files: true
+display:
+  group: subscribers
+  title: Email
+  show_in_status: true

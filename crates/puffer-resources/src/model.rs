@@ -492,6 +492,7 @@ impl ProviderPack {
 pub struct LoadedResources {
     pub providers: Vec<LoadedItem<ProviderPack>>,
     pub tools: Vec<LoadedItem<ToolSpec>>,
+    pub internal_tools: Vec<LoadedItem<ToolSpec>>,
     pub agents: Vec<LoadedItem<AgentSpec>>,
     pub prompts: Vec<LoadedItem<PromptTemplate>>,
     pub hooks: Vec<LoadedItem<HookSpec>>,

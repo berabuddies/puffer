@@ -1,4 +1,3 @@
-use super::common::open_text_file_in_editor;
 use super::emit_system;
 use super::CommandActionEntry;
 use crate::config_settings::{
@@ -7,8 +6,7 @@ use crate::config_settings::{
     scope_label, set_config_value as set_state_config_value,
 };
 use crate::permissions::{
-    load_or_initialize_permissions, load_or_initialize_sandbox_settings, normalize_tool_id,
-    write_permissions, write_sandbox_settings, PermissionsSettings, SandboxSettings,
+    load_or_initialize_permissions, normalize_tool_id, write_permissions, PermissionsSettings,
 };
 use crate::AppState;
 use anyhow::Result;
@@ -599,207 +597,22 @@ fn browser_section_message(path: &PathBuf) -> String {
 pub(crate) fn handle_sandbox_command(
     state: &mut AppState,
     session_store: &SessionStore,
-    args: &str,
+    _args: &str,
 ) -> Result<()> {
-    let paths = ConfigPaths::discover(&state.cwd);
-    ensure_workspace_dirs(&paths)?;
-    let sandbox_path = paths.workspace_config_dir.join("sandbox.toml");
-    let mut settings = load_or_initialize_sandbox_settings(&sandbox_path, state)?;
-    let trimmed = args.trim();
-
-    if trimmed.is_empty() || trimmed == "show" {
-        return emit_system(
-            state,
-            session_store,
-            render_sandbox_summary(&sandbox_path, &settings),
-        );
-    }
-
-    if trimmed == "path" {
-        return emit_system(
-            state,
-            session_store,
-            format!("Sandbox config path: {}", sandbox_path.display()),
-        );
-    }
-
-    if matches!(trimmed, "open" | "edit") {
-        return open_sandbox_config(state, session_store, &sandbox_path);
-    }
-
-    if let Some(pattern) = trimmed.strip_prefix("exclude ") {
-        let pattern = pattern.trim().trim_matches('"');
-        if pattern.is_empty() {
-            anyhow::bail!("expected a command pattern after `exclude`");
-        }
-        if !settings
-            .excluded_commands
-            .iter()
-            .any(|existing| existing == pattern)
-        {
-            settings.excluded_commands.push(pattern.to_string());
-        }
-        write_sandbox_settings(&sandbox_path, &settings)?;
-        return emit_system(
-            state,
-            session_store,
-            format!(
-                "Added sandbox exclusion `{pattern}` in {}.",
-                sandbox_path.display()
-            ),
-        );
-    }
-
-    if trimmed == "clear-excludes" {
-        settings.excluded_commands.clear();
-        write_sandbox_settings(&sandbox_path, &settings)?;
-        return emit_system(
-            state,
-            session_store,
-            format!("Cleared sandbox exclusions in {}.", sandbox_path.display()),
-        );
-    }
-
-    if let Some(value) = trimmed.strip_prefix("allow-unsandboxed ") {
-        settings.allow_unsandboxed_fallback = parse_bool(value.trim())?;
-        write_sandbox_settings(&sandbox_path, &settings)?;
-        return emit_system(
-            state,
-            session_store,
-            format!(
-                "allow_unsandboxed_fallback set to {} in {}.",
-                settings.allow_unsandboxed_fallback,
-                sandbox_path.display()
-            ),
-        );
-    }
-
-    if let Some(value) = trimmed.strip_prefix("auto-allow ") {
-        settings.auto_allow = parse_bool(value.trim())?;
-        write_sandbox_settings(&sandbox_path, &settings)?;
-        return emit_system(
-            state,
-            session_store,
-            format!(
-                "auto_allow set to {} in {}.",
-                settings.auto_allow,
-                sandbox_path.display()
-            ),
-        );
-    }
-
-    let mode = trimmed
-        .strip_prefix("mode ")
-        .map(str::trim)
-        .unwrap_or(trimmed)
-        .to_string();
-    settings.mode = mode.clone();
-    state.sandbox_mode = mode;
-    write_sandbox_settings(&sandbox_path, &settings)?;
     emit_system(
         state,
         session_store,
-        format!(
-            "Sandbox mode set to {} in {}.",
-            state.sandbox_mode,
-            sandbox_path.display()
-        ),
+        "Sandbox mode has been removed. Use `/permissions` to inspect or edit the project ACL."
+            .to_string(),
     )
 }
 
 /// Builds the interactive `/sandbox` action list used by the TUI picker.
-pub(crate) fn render_sandbox_actions(state: &AppState) -> Result<Vec<CommandActionEntry>> {
-    let paths = ConfigPaths::discover(&state.cwd);
-    ensure_workspace_dirs(&paths)?;
-    let sandbox_path = paths.workspace_config_dir.join("sandbox.toml");
-    let settings = load_or_initialize_sandbox_settings(&sandbox_path, state)?;
-    let mut actions = vec![
-        CommandActionEntry {
-            command: "/sandbox workspace-write".to_string(),
-            description: sandbox_mode_description(&settings.mode, "workspace-write"),
-        },
-        CommandActionEntry {
-            command: "/sandbox read-only".to_string(),
-            description: sandbox_mode_description(&settings.mode, "read-only"),
-        },
-        CommandActionEntry {
-            command: format!(
-                "/sandbox auto-allow {}",
-                if settings.auto_allow { "false" } else { "true" }
-            ),
-            description: format!(
-                "Auto-allow tool prompts: {}",
-                if settings.auto_allow { "on" } else { "off" }
-            ),
-        },
-        CommandActionEntry {
-            command: format!(
-                "/sandbox allow-unsandboxed {}",
-                if settings.allow_unsandboxed_fallback {
-                    "false"
-                } else {
-                    "true"
-                }
-            ),
-            description: format!(
-                "Allow unsandboxed Bash fallback: {}",
-                if settings.allow_unsandboxed_fallback {
-                    "on"
-                } else {
-                    "off"
-                }
-            ),
-        },
-        CommandActionEntry {
-            command: "/sandbox open".to_string(),
-            description: format!("Open sandbox config ({})", sandbox_path.display()),
-        },
-        CommandActionEntry {
-            command: "/sandbox path".to_string(),
-            description: "Show sandbox config path".to_string(),
-        },
-    ];
-    if !settings.excluded_commands.is_empty() {
-        actions.push(CommandActionEntry {
-            command: "/sandbox clear-excludes".to_string(),
-            description: format!(
-                "Clear {} excluded command pattern{}",
-                settings.excluded_commands.len(),
-                if settings.excluded_commands.len() == 1 {
-                    ""
-                } else {
-                    "s"
-                }
-            ),
-        });
-    }
-    Ok(actions)
-}
-
-fn parse_bool(value: &str) -> Result<bool> {
-    match value {
-        "true" | "on" | "1" => Ok(true),
-        "false" | "off" | "0" => Ok(false),
-        _ => anyhow::bail!("expected a boolean value, got `{value}`"),
-    }
-}
-
-fn open_sandbox_config(
-    state: &mut AppState,
-    session_store: &SessionStore,
-    sandbox_path: &PathBuf,
-) -> Result<()> {
-    match open_text_file_in_editor(sandbox_path) {
-        Ok(status) => emit_system(state, session_store, status),
-        Err(error) => emit_system(
-            state,
-            session_store,
-            format!(
-                "Could not open sandbox config in an editor: {error}\nPath: {}",
-                sandbox_path.display()
-            ),
-        ),
-    }
+pub(crate) fn render_sandbox_actions(_state: &AppState) -> Result<Vec<CommandActionEntry>> {
+    Ok(vec![CommandActionEntry {
+        command: "/permissions".to_string(),
+        description: "Sandbox mode has been removed; use project ACL permissions.".to_string(),
+    }])
 }
 
 fn default_keybindings_contents() -> &'static str {
@@ -810,30 +623,6 @@ fn default_hooks_contents() -> &'static str {
     "id: tool-end\n\
 event: tool_end\n\
 command: echo \"$PUFFER_TOOL_ID:$PUFFER_TOOL_SUCCESS\"\n"
-}
-
-fn render_sandbox_summary(path: &PathBuf, settings: &SandboxSettings) -> String {
-    let exclusions = if settings.excluded_commands.is_empty() {
-        String::from("<none>")
-    } else {
-        settings.excluded_commands.join(", ")
-    };
-    format!(
-        "Sandbox summary:\npath={}\nmode={}\nauto_allow={}\nallow_unsandboxed_fallback={}\nexcluded_commands={}",
-        path.display(),
-        settings.mode,
-        settings.auto_allow,
-        settings.allow_unsandboxed_fallback,
-        exclusions
-    )
-}
-
-fn sandbox_mode_description(current_mode: &str, candidate_mode: &str) -> String {
-    if current_mode == candidate_mode {
-        format!("Sandbox mode: {candidate_mode} (current)")
-    } else {
-        format!("Switch sandbox mode to {candidate_mode}")
-    }
 }
 
 #[cfg(test)]

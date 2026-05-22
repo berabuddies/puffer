@@ -11,23 +11,33 @@ pub(crate) struct FilesystemPermissionPolicy {
     pub(crate) sandbox_mode: EffectiveSandboxMode,
     pub(crate) workspace_roots: Vec<PathBuf>,
     pub(crate) session_granted: bool,
+    pub(crate) allow_all_paths: bool,
 }
 
 impl FilesystemPermissionPolicy {
-    /// Returns true when the filesystem sandbox grants access to all paths.
+    /// Returns true when the permission policy grants access to all paths.
     pub(crate) fn allow_all_paths(&self) -> bool {
-        matches!(self.sandbox_mode, EffectiveSandboxMode::DangerFullAccess)
+        self.allow_all_paths
     }
 
     /// Converts the policy into the runner transport DTO.
     pub(crate) fn runner_policy(&self) -> FilesystemExecutionPolicy {
         FilesystemExecutionPolicy {
-            sandbox_mode: match self.sandbox_mode {
+            sandbox_mode: match self.runner_sandbox_mode() {
                 EffectiveSandboxMode::ReadOnly => FilesystemSandboxMode::ReadOnly,
                 EffectiveSandboxMode::WorkspaceWrite => FilesystemSandboxMode::WorkspaceWrite,
                 EffectiveSandboxMode::DangerFullAccess => FilesystemSandboxMode::DangerFullAccess,
                 EffectiveSandboxMode::Custom => FilesystemSandboxMode::Custom,
             },
+        }
+    }
+
+    /// Returns the filesystem mode passed to legacy runner APIs.
+    pub(crate) fn runner_sandbox_mode(&self) -> EffectiveSandboxMode {
+        if self.allow_all_paths {
+            EffectiveSandboxMode::DangerFullAccess
+        } else {
+            EffectiveSandboxMode::WorkspaceWrite
         }
     }
 }
@@ -73,9 +83,14 @@ impl DerivedPermissionPolicy {
         Self {
             filesystem: FilesystemPermissionPolicy {
                 approval: filesystem_surface.default_approval,
-                sandbox_mode: profile.sandbox_mode,
+                sandbox_mode: if profile.grants.allow_all_tools {
+                    EffectiveSandboxMode::DangerFullAccess
+                } else {
+                    EffectiveSandboxMode::WorkspaceWrite
+                },
                 workspace_roots: profile.workspace_roots.clone(),
                 session_granted: filesystem_surface.session_granted,
+                allow_all_paths: profile.grants.allow_all_tools,
             },
             process: ProcessPermissionPolicy {
                 approval: process_surface.default_approval,

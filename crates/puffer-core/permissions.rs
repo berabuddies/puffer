@@ -2,6 +2,7 @@ use crate::plans::plan_file_path;
 use crate::tool_names::canonical_tool_name;
 use crate::AppState;
 use anyhow::{bail, Result};
+pub(crate) mod acl;
 pub(crate) mod browser_action;
 pub(crate) mod browser_evaluator;
 pub(crate) mod browser_grants;
@@ -22,9 +23,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-pub use self::browser_action::{
-    browser_action_set_for_action, browser_action_set_for_shell_command, BrowserActionSet,
-};
+pub use self::browser_action::{browser_action_set_for_action, BrowserActionSet};
 pub(crate) use self::execution::{DerivedPermissionPolicy, FilesystemPermissionPolicy};
 pub use profile::SessionPermissionState;
 pub(crate) use profile::{
@@ -89,6 +88,7 @@ pub(crate) struct ToolPermissionDecision {
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimePermissionContext {
     permissions: PermissionsSettings,
+    acl: acl::ProjectPermissionAcl,
     browser_policy: browser_policy::BrowserPolicySettings,
     sandbox: SandboxSettings,
     profile: EffectivePermissionProfile,
@@ -177,14 +177,17 @@ impl RuntimePermissionContext {
                 reason: Some("tool metadata currently disables it".to_string()),
             };
         }
-        if let Some(decision) = self.browser_decision_for_tool(&definition.id, input) {
-            return decision;
-        }
-        if self.profile.grants.allow_all_tools && canonical_tool_name(&definition.id) != "browser" {
+        if self.profile.grants.allow_all_tools {
             return ToolPermissionDecision {
                 behavior: ToolPermissionBehavior::Allow,
                 reason: None,
             };
+        }
+        if let Some(decision) = self.browser_decision_for_tool(&definition.id, input) {
+            return decision;
+        }
+        if let Some(decision) = self.bash_decision_for_tool(definition, input) {
+            return decision;
         }
         if self
             .profile
@@ -223,10 +226,14 @@ impl RuntimePermissionContext {
         if browser_action::browser_permission_value_for_tool_call(tool_id, input).is_none() {
             return None;
         }
+        let context = self.profile.browser_context_for_tool(tool_id, input);
+        if let Some(decision) = self.acl.decision_for_browser_context(&context) {
+            return Some(tool_decision_from_acl(decision));
+        }
         let evaluation = browser_evaluator::evaluate_browser_permission(
             &self.profile,
             &self.browser_policy,
-            &self.profile.browser_context_for_tool(tool_id, input),
+            &context,
         );
         Some(match evaluation.decision {
             browser_evaluator::BrowserPermissionDecision::Allow => ToolPermissionDecision {
@@ -241,6 +248,61 @@ impl RuntimePermissionContext {
                 behavior: ToolPermissionBehavior::Ask,
                 reason: evaluation.reason,
             },
+        })
+    }
+
+    fn bash_decision_for_tool(
+        &self,
+        definition: &ToolDefinition,
+        input: &Value,
+    ) -> Option<ToolPermissionDecision> {
+        if !tool_matches_any_name(definition, &["Bash", "PowerShell"]) {
+            return None;
+        }
+        let command = input.get("command").and_then(Value::as_str)?.trim();
+        if command.is_empty() {
+            return Some(ToolPermissionDecision {
+                behavior: ToolPermissionBehavior::Ask,
+                reason: Some("shell command cannot be empty".to_string()),
+            });
+        }
+        if let Some(decision) = acl::bash_decision_for_input(&self.acl, input) {
+            if matches!(decision, acl::AclDecision::Allow(_))
+                && acl::bash_command_has_control_operator(command)
+            {
+                return Some(ToolPermissionDecision {
+                    behavior: ToolPermissionBehavior::Ask,
+                    reason: Some(
+                        "shell command contains shell control or redirection operators".to_string(),
+                    ),
+                });
+            }
+            return Some(tool_decision_from_acl(decision));
+        }
+        if let Some(reason) = shell_sandbox_reason(input, &self.sandbox) {
+            return Some(ToolPermissionDecision {
+                behavior: ToolPermissionBehavior::Ask,
+                reason: Some(reason),
+            });
+        }
+        if let Some(reason) = shell_command_reason(definition, input) {
+            return Some(ToolPermissionDecision {
+                behavior: ToolPermissionBehavior::Ask,
+                reason: Some(reason),
+            });
+        }
+        if acl::bash_command_has_control_operator(command) {
+            return Some(ToolPermissionDecision {
+                behavior: ToolPermissionBehavior::Ask,
+                reason: Some(
+                    "shell command contains shell control or redirection operators".to_string(),
+                ),
+            });
+        }
+        let argv0 = acl::effective_bash_argv0(command).unwrap_or_else(|| "<unknown>".to_string());
+        Some(ToolPermissionDecision {
+            behavior: ToolPermissionBehavior::Ask,
+            reason: Some(format!("shell command `{argv0}` requires approval")),
         })
     }
 
@@ -361,25 +423,14 @@ impl RuntimePermissionContext {
                     ". Use `/permissions allow {}` to allow it for this workspace.",
                     definition.id
                 );
-                if shell_requests_unsandboxed(definition, input) {
-                    message.push_str(
-                        " If you intended to bypass sandboxing, enable `/sandbox allow-unsandboxed true` first.",
-                    );
-                }
                 bail!(message)
             }
         }
     }
 
     fn approval_reason(&self, definition: &ToolDefinition, input: &Value) -> Option<String> {
-        if let Some(reason) = shell_sandbox_reason(definition, input, &self.sandbox) {
+        if let Some(reason) = shell_sandbox_reason(input, &self.sandbox) {
             return Some(reason);
-        }
-        if let Some(reason) = browser_action::ambiguous_browser_shell_command_reason_for_tool_call(
-            &definition.id,
-            input,
-        ) {
-            return Some(reason.to_string());
         }
         if let Some(reason) = shell_command_reason(definition, input) {
             return Some(reason);
@@ -404,6 +455,19 @@ impl RuntimePermissionContext {
             canonical_tool_name(&definition.id).as_str(),
             "write" | "edit"
         ) && tool_targets_active_plan_file(input, self.profile.active_plan_path.as_deref())
+    }
+}
+
+fn tool_decision_from_acl(decision: acl::AclDecision) -> ToolPermissionDecision {
+    match decision {
+        acl::AclDecision::Allow(reason) => ToolPermissionDecision {
+            behavior: ToolPermissionBehavior::Allow,
+            reason: Some(reason),
+        },
+        acl::AclDecision::Deny(reason) => ToolPermissionDecision {
+            behavior: ToolPermissionBehavior::Deny,
+            reason: Some(reason),
+        },
     }
 }
 
@@ -556,19 +620,6 @@ pub(crate) fn load_runtime_sandbox_settings(
     Ok(SandboxSettings::from_mode(&state.sandbox_mode))
 }
 
-/// Loads or initializes the workspace sandbox settings file.
-pub(crate) fn load_or_initialize_sandbox_settings(
-    path: &Path,
-    state: &AppState,
-) -> Result<SandboxSettings> {
-    if path.exists() {
-        return Ok(toml::from_str(&fs::read_to_string(path)?)?);
-    }
-    let settings = SandboxSettings::from_mode(&state.sandbox_mode);
-    write_sandbox_settings(path, &settings)?;
-    Ok(settings)
-}
-
 /// Loads the effective permission context for one model turn or tool invocation.
 pub(crate) fn load_runtime_permission_context(
     cwd: &Path,
@@ -604,6 +655,7 @@ pub(crate) fn load_runtime_permission_context_with_inputs(
     };
     let browser_policy = loaded_permissions.browser;
     let sandbox = load_runtime_sandbox_settings(cwd, state)?;
+    let acl = acl::ProjectPermissionAcl::load(cwd)?;
     let browser_root_session_id = state.browser_root_session_id();
     let profile = EffectivePermissionProfile::from_session_state(
         cwd,
@@ -619,6 +671,7 @@ pub(crate) fn load_runtime_permission_context_with_inputs(
     let derived_policy = profile.derived_policy();
     Ok(RuntimePermissionContext {
         permissions,
+        acl,
         browser_policy,
         sandbox,
         profile,
@@ -670,12 +723,6 @@ pub(crate) fn write_permissions(path: &Path, settings: &PermissionsSettings) -> 
         browser_policy::BrowserPolicySettings::default()
     };
     write_permissions_with_browser(path, settings, &browser)
-}
-
-/// Writes the sandbox settings file to disk.
-pub(crate) fn write_sandbox_settings(path: &Path, settings: &SandboxSettings) -> Result<()> {
-    fs::write(path, toml::to_string_pretty(settings)?)?;
-    Ok(())
 }
 
 fn normalize_policy_value(value: &str) -> String {
@@ -737,19 +784,7 @@ fn tool_skips_permission_enforcement(definition: &ToolDefinition) -> bool {
     tool_matches_any_name(definition, &["SendUserMessage", "Brief"])
 }
 
-fn shell_requests_unsandboxed(definition: &ToolDefinition, input: &Value) -> bool {
-    tool_matches_any_name(definition, &["Bash", "PowerShell"])
-        && input
-            .get("dangerouslyDisableSandbox")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-}
-
-fn shell_sandbox_reason(
-    definition: &ToolDefinition,
-    input: &Value,
-    sandbox: &SandboxSettings,
-) -> Option<String> {
+fn shell_sandbox_reason(input: &Value, sandbox: &SandboxSettings) -> Option<String> {
     let command = input.get("command").and_then(Value::as_str)?;
     if let Some(pattern) = sandbox
         .excluded_commands
@@ -760,15 +795,9 @@ fn shell_sandbox_reason(
             return None;
         }
         return Some(format!(
-            "shell command matches sandbox exclusion `{}`",
+            "shell command matches project shell exclusion `{}`",
             pattern.trim()
         ));
-    }
-    if shell_requests_unsandboxed(definition, input) && !sandbox.allow_unsandboxed_fallback {
-        return Some(
-            "shell command requested dangerouslyDisableSandbox without unsandboxed fallback enabled"
-                .to_string(),
-        );
     }
     None
 }

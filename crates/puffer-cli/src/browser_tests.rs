@@ -1,7 +1,10 @@
 use super::*;
-use crate::cli_args::{BrowserCommand, BrowserKeyboardCommand, BrowserTabCommand, Cli, Command};
+use crate::browser_args::{
+    BrowserCommand, BrowserKeyboardCommand, BrowserTabCommand, BrowserTargetArgs,
+};
+use crate::cli_args::{Cli, Command};
 use clap::Parser;
-use puffer_core::{browser_action_set_for_action, browser_action_set_for_shell_command};
+use puffer_core::browser_action_set_for_action;
 
 #[test]
 fn resume_flag_without_value_uses_empty_sentinel() {
@@ -400,16 +403,6 @@ fn browser_cli_actions_share_core_action_set_mapping() {
     assert_eq!(
         browser_action_set_for_action("focus_ref").map(|set| format!("{set:?}")),
         Some("Interact".to_string())
-    );
-    assert_eq!(
-        browser_action_set_for_shell_command("puffer browser tab select t5")
-            .map(|set| format!("{set:?}")),
-        Some("Navigate".to_string())
-    );
-    assert_eq!(
-        browser_action_set_for_shell_command("puffer browser screenshot --tab-id t1")
-            .map(|set| format!("{set:?}")),
-        Some("Inspect".to_string())
     );
 }
 

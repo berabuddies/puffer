@@ -3,11 +3,9 @@ name: Browser
 aliases:
   - browser
 description: |-
-  Control the Puffer Browser tab's managed Chrome sessions. Use this for
-  opening tabs, listing tabs, navigating pages, taking DOM snapshots, and
-  interacting with fresh element refs from the latest snapshot. The `open`
-  action creates or reuses a tab and navigates to `url` when one is provided;
-  do not follow `open` with a duplicate `navigate` to the same URL.
+  Internal CLI-only Browser surface. Agents should use the `browser` skill and
+  run `puffer internal-tool browser ...` through Bash instead of receiving this
+  as a provider tool call.
 handler: runtime:browser
 approval_policy: auto
 sandbox_policy: workspace-write

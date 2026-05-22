@@ -6,7 +6,7 @@ type StreamActorFields = {
 };
 
 export type BrowserPermissionDisplayPayload = {
-  source: "browser_tool" | "browser_cli_via_shell";
+  source: "browser_tool" | "browser_internal_tool";
   actionSet: "inspect" | "navigate" | "interact" | "evaluate";
   url: string | null;
   origin: string | null;

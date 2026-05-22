@@ -87,8 +87,8 @@ pub struct BrowserAutoReviewRequest {
 pub enum BrowserAutoReviewSource {
     /// The `Browser` tool triggered the request.
     BrowserTool,
-    /// A Browser-shaped shell command triggered the request.
-    BrowserCliViaShell,
+    /// A first-party internal Browser tool triggered the request.
+    BrowserInternalTool,
 }
 
 /// Groups Browser actions into stable reviewer-facing buckets.
@@ -342,8 +342,8 @@ pub fn build_browser_auto_review_request(
         reason,
         source: match browser.source {
             BrowserPermissionPromptSource::BrowserTool => BrowserAutoReviewSource::BrowserTool,
-            BrowserPermissionPromptSource::BrowserCliViaShell => {
-                BrowserAutoReviewSource::BrowserCliViaShell
+            BrowserPermissionPromptSource::BrowserInternalTool => {
+                BrowserAutoReviewSource::BrowserInternalTool
             }
         },
         action_set: match browser.action_set {

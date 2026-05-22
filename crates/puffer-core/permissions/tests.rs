@@ -91,6 +91,7 @@ fn runtime_context_with_inputs(
     );
     RuntimePermissionContext {
         browser_policy: BrowserPolicySettings::default(),
+        acl: acl::ProjectPermissionAcl::parse(&cwd, ""),
         derived_policy: profile.derived_policy(),
         profile,
         permissions,
@@ -123,6 +124,7 @@ fn runtime_context_with_session_grants(
     );
     RuntimePermissionContext {
         browser_policy: BrowserPolicySettings::default(),
+        acl: acl::ProjectPermissionAcl::parse(&cwd, ""),
         derived_policy: profile.derived_policy(),
         profile,
         permissions,
@@ -590,7 +592,7 @@ fn effective_profile_maps_legacy_settings_and_session_grants() {
 }
 
 #[test]
-fn derived_policy_keeps_approval_and_sandbox_axes_separate() {
+fn derived_policy_keeps_approval_and_runner_path_axes_separate() {
     let mut sandbox = SandboxSettings::from_mode("danger-full-access");
     sandbox.allow_unsandboxed_fallback = true;
     sandbox.excluded_commands = vec!["sudo".to_string(), "docker".to_string()];
@@ -615,8 +617,9 @@ fn derived_policy_keeps_approval_and_sandbox_axes_separate() {
     assert_eq!(derived.filesystem().approval, EffectiveApprovalPolicy::Ask);
     assert_eq!(
         derived.filesystem().sandbox_mode,
-        EffectiveSandboxMode::DangerFullAccess
+        EffectiveSandboxMode::WorkspaceWrite
     );
+    assert!(!derived.filesystem().allow_all_paths());
     assert_eq!(
         derived.filesystem().workspace_roots,
         vec![PathBuf::from("/repo"), PathBuf::from("/repo/extra")]
@@ -877,14 +880,14 @@ fn session_grants_flow_into_derived_policies_without_flipping_sandbox() {
 }
 
 #[test]
-fn custom_sandbox_mode_survives_in_derived_filesystem_policy() {
+fn yolo_session_grant_opens_the_derived_filesystem_policy() {
     let profile = EffectivePermissionProfile::from_session_state(
         PathBuf::from("/repo").as_path(),
         &[],
         &PermissionsSettings::default(),
         &SandboxSettings::from_mode("custom"),
         &Uuid::nil(),
-        &SessionPermissionState::default(),
+        &SessionPermissionState::new(true, SessionPermissionGrants::default()),
         false,
         None,
         None,
@@ -893,6 +896,7 @@ fn custom_sandbox_mode_survives_in_derived_filesystem_policy() {
 
     assert_eq!(
         derived.filesystem().sandbox_mode,
-        EffectiveSandboxMode::Custom
+        EffectiveSandboxMode::DangerFullAccess
     );
+    assert!(derived.filesystem().allow_all_paths());
 }

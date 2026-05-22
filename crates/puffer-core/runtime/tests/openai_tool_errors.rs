@@ -42,6 +42,7 @@ fn spawn_tool_error_server() -> (String, Arc<Mutex<Vec<String>>>, thread::JoinHa
         while handled < responses.len() && Instant::now() < deadline {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
                     let mut buffer = vec![0_u8; 65_536];
                     let bytes = stream.read(&mut buffer).unwrap();
                     request_log

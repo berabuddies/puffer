@@ -46,6 +46,8 @@ impl RegisteredTool {
 pub struct ToolRegistry {
     tools: BTreeMap<String, RegisteredTool>,
     aliases: BTreeMap<String, String>,
+    internal_tools: BTreeMap<String, RegisteredTool>,
+    internal_aliases: BTreeMap<String, String>,
     has_mcp_resource_servers: bool,
 }
 
@@ -67,6 +69,13 @@ impl ToolRegistry {
                 .iter()
                 .filter_map(|item| definition_from_spec(&item.value)),
         );
+        for definition in resources
+            .internal_tools
+            .iter()
+            .filter_map(|item| definition_from_spec(&item.value))
+        {
+            let _ = registry.register_internal(definition);
+        }
         registry.has_mcp_resource_servers =
             !resources.mcp_servers.is_empty() || !plugin_mcp_servers(resources).is_empty();
         if let Some(tool) = registry.tools.get_mut("Agent") {
@@ -128,10 +137,22 @@ impl ToolRegistry {
     pub fn register(&mut self, definition: ToolDefinition) -> Result<()> {
         let runtime = runtime_from_definition(&definition)?;
         let canonical_id = definition.id.clone();
-        for alias in &definition.aliases {
-            self.aliases.insert(alias.clone(), canonical_id.clone());
-        }
+        register_aliases(&mut self.aliases, &definition);
         self.tools.insert(
+            canonical_id,
+            RegisteredTool {
+                spec: definition,
+                runtime,
+            },
+        );
+        Ok(())
+    }
+
+    fn register_internal(&mut self, definition: ToolDefinition) -> Result<()> {
+        let runtime = runtime_from_definition(&definition)?;
+        let canonical_id = definition.id.clone();
+        register_aliases(&mut self.internal_aliases, &definition);
+        self.internal_tools.insert(
             canonical_id,
             RegisteredTool {
                 spec: definition,
@@ -161,6 +182,11 @@ impl ToolRegistry {
         self.tools.values()
     }
 
+    /// Returns all registered internal tools in stable id order.
+    pub fn internal_tools(&self) -> impl Iterator<Item = &RegisteredTool> {
+        self.internal_tools.values()
+    }
+
     /// Returns all model-facing tool definitions in stable id order.
     pub fn definitions(&self) -> impl Iterator<Item = &ToolDefinition> {
         self.tools.values().map(RegisteredTool::definition)
@@ -178,6 +204,20 @@ impl ToolRegistry {
     /// Looks up a model-facing tool definition by id.
     pub fn definition(&self, tool_id: &str) -> Option<&ToolDefinition> {
         self.tool(tool_id).map(RegisteredTool::definition)
+    }
+
+    /// Looks up an internal tool by id.
+    pub fn internal_tool(&self, tool_id: &str) -> Option<&RegisteredTool> {
+        self.internal_tools.get(tool_id).or_else(|| {
+            self.internal_aliases
+                .get(tool_id)
+                .and_then(|canonical_id| self.internal_tools.get(canonical_id))
+        })
+    }
+
+    /// Looks up an internal tool definition by id.
+    pub fn internal_definition(&self, tool_id: &str) -> Option<&ToolDefinition> {
+        self.internal_tool(tool_id).map(RegisteredTool::definition)
     }
 
     /// Executes a registered tool by id with typed input.
@@ -269,6 +309,13 @@ fn puffer_builtin_browser_disabled() -> bool {
     std::env::var("PUFFER_NO_BROWSER")
         .ok()
         .is_some_and(|value| enabled_if_value_disables_tool(&value) || value.trim() == "1")
+}
+
+fn register_aliases(aliases: &mut BTreeMap<String, String>, definition: &ToolDefinition) {
+    let canonical_id = definition.id.clone();
+    for alias in &definition.aliases {
+        aliases.insert(alias.clone(), canonical_id.clone());
+    }
 }
 
 fn parse_mcp_input_schema(schema: Option<&serde_json::Value>) -> ToolInputSchema {
@@ -404,47 +451,14 @@ fn enabled_if_value_disables_tool(value: &str) -> bool {
 }
 
 #[cfg(test)]
+#[path = "registry_visibility_tests.rs"]
+mod registry_visibility_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use puffer_resources::{LoadedItem, SourceInfo, SourceKind};
-    use std::collections::BTreeSet;
-    use std::fs;
     use std::path::PathBuf;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    fn workspace_builtin_tool_resources() -> LoadedResources {
-        let tools_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/tools");
-        let mut tool_paths = fs::read_dir(&tools_dir)
-            .expect("read builtin tool dir")
-            .map(|entry| entry.expect("directory entry").path())
-            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("yaml"))
-            .collect::<Vec<_>>();
-        tool_paths.sort();
-
-        let tools = tool_paths
-            .into_iter()
-            .map(|path| {
-                let spec = serde_yaml::from_str::<ToolSpec>(
-                    &fs::read_to_string(&path).expect("read builtin tool resource"),
-                )
-                .expect("parse builtin tool resource");
-                LoadedItem {
-                    value: spec,
-                    source_info: SourceInfo {
-                        path,
-                        kind: SourceKind::Builtin,
-                    },
-                }
-            })
-            .collect();
-
-        LoadedResources {
-            tools,
-            ..LoadedResources::default()
-        }
-    }
 
     fn bash_tool_spec() -> ToolSpec {
         ToolSpec {
@@ -455,24 +469,6 @@ mod tests {
             aliases: Vec::new(),
             handler_args: Vec::new(),
             approval_policy: Some("on-request".to_string()),
-            sandbox_policy: Some("workspace-write".to_string()),
-            shared_lib: None,
-            enabled_if: None,
-            input_schema: None,
-            metadata: Default::default(),
-            display: Default::default(),
-        }
-    }
-
-    fn browser_tool_spec() -> ToolSpec {
-        ToolSpec {
-            id: "Browser".to_string(),
-            name: "Browser".to_string(),
-            description: "Control browser".to_string(),
-            handler: "runtime:browser".to_string(),
-            aliases: vec!["browser".to_string()],
-            handler_args: Vec::new(),
-            approval_policy: Some("auto".to_string()),
             sandbox_policy: Some("workspace-write".to_string()),
             shared_lib: None,
             enabled_if: None,
@@ -543,73 +539,6 @@ mod tests {
             definition.input_schema.as_json_schema()["required"],
             serde_json::json!(["duration_ms"])
         );
-    }
-
-    #[test]
-    fn puffer_no_browser_hides_builtin_browser_tool() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        std::env::set_var("PUFFER_NO_BROWSER", "1");
-        let resources = LoadedResources {
-            tools: vec![LoadedItem {
-                value: browser_tool_spec(),
-                source_info: SourceInfo {
-                    path: PathBuf::from("browser.yaml"),
-                    kind: SourceKind::Builtin,
-                },
-            }],
-            ..LoadedResources::default()
-        };
-        let registry = ToolRegistry::from_resources(&resources);
-        std::env::remove_var("PUFFER_NO_BROWSER");
-
-        assert!(registry.definition("Browser").is_none());
-        assert!(registry.definition("browser").is_none());
-    }
-
-    #[test]
-    fn puffer_browser_tool_registers_when_not_disabled() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("PUFFER_NO_BROWSER");
-        let resources = LoadedResources {
-            tools: vec![LoadedItem {
-                value: browser_tool_spec(),
-                source_info: SourceInfo {
-                    path: PathBuf::from("browser.yaml"),
-                    kind: SourceKind::Builtin,
-                },
-            }],
-            ..LoadedResources::default()
-        };
-        let registry = ToolRegistry::from_resources(&resources);
-
-        assert!(registry.definition("Browser").is_some());
-        assert!(registry.definition("browser").is_some());
-    }
-
-    #[test]
-    fn workspace_builtin_tool_resources_are_registerable() {
-        let resources = workspace_builtin_tool_resources();
-        let registry = ToolRegistry::from_resources(&resources);
-        let expected = resources
-            .tools
-            .iter()
-            .filter_map(|item| definition_from_spec(&item.value))
-            .map(|definition| definition.id)
-            .collect::<BTreeSet<_>>();
-        let registered = registry
-            .definitions()
-            .map(|definition| definition.id.clone())
-            .collect::<BTreeSet<_>>();
-        let missing = expected
-            .difference(&registered)
-            .cloned()
-            .collect::<Vec<_>>();
-
-        assert!(
-            missing.is_empty(),
-            "builtin resources produced unsupported tool registrations: {missing:?}"
-        );
-        assert!(registry.definition("Sleep").is_some());
     }
 
     #[test]

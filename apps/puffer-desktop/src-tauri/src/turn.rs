@@ -489,7 +489,10 @@ fn drive_turn(
                 tool_id: request.tool_id,
                 summary: request.summary,
                 reason: request.reason,
-                browser: request.browser.as_ref().map(browser_permission_payload_json),
+                browser: request
+                    .browser
+                    .as_ref()
+                    .map(browser_permission_payload_json),
                 actor: on_perm_actor.clone(),
             },
         );
@@ -581,11 +584,13 @@ fn drive_turn(
     Ok(outcome.assistant_text)
 }
 
-fn browser_permission_payload_json(payload: &puffer_core::BrowserPermissionPromptPayload) -> serde_json::Value {
+fn browser_permission_payload_json(
+    payload: &puffer_core::BrowserPermissionPromptPayload,
+) -> serde_json::Value {
     json!({
         "source": match payload.source {
             BrowserPermissionPromptSource::BrowserTool => "browser_tool",
-            BrowserPermissionPromptSource::BrowserCliViaShell => "browser_cli_via_shell",
+            BrowserPermissionPromptSource::BrowserInternalTool => "browser_internal_tool",
         },
         "actionSet": match payload.action_set {
             BrowserPermissionPromptActionSet::Inspect => "inspect",
