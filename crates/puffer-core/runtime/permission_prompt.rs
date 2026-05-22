@@ -258,7 +258,29 @@ fn permission_request_summary(definition: &ToolDefinition, input: &Value) -> Str
             .unwrap_or_else(|| definition.id.clone()),
         "AskUserQuestion" => "Answer questions?".to_string(),
         "ExitPlanMode" => "Exit plan mode?".to_string(),
+        "Email" => email_permission_summary(input),
+        "Telegram" => telegram_permission_summary(input),
         _ => definition.id.clone(),
+    }
+}
+
+fn email_permission_summary(input: &Value) -> String {
+    match input.get("action").and_then(Value::as_str) {
+        Some("configure") => "Configure email subscriber".to_string(),
+        _ => "Use email internal tool".to_string(),
+    }
+}
+
+fn telegram_permission_summary(input: &Value) -> String {
+    match input.get("action").and_then(Value::as_str) {
+        Some("login_start") => input
+            .get("phone")
+            .and_then(Value::as_str)
+            .map(|phone| format!("Start Telegram login for {phone}"))
+            .unwrap_or_else(|| "Start Telegram login".to_string()),
+        Some("login_submit_code") => "Submit Telegram login code".to_string(),
+        Some("login_submit_password") => "Submit Telegram 2FA password".to_string(),
+        _ => "Use Telegram internal tool".to_string(),
     }
 }
 

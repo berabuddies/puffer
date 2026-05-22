@@ -109,10 +109,21 @@ pub(crate) fn execute_tool(
         "Bash" => {
             let session_id = state.session.id;
             let process_store = state.process_store.clone();
-            let mut internal_permission_handler = |request| {
-                super::internal_tool_permissions::resolve_internal_tool_permission(
-                    state, resources, registry, cwd, request,
-                )
+            let mut internal_permission_handler = |request| match request {
+                bash_internal_permissions::InternalToolBrokerRequest::Permission(request) => {
+                    bash_internal_permissions::InternalToolBrokerResponse::Permission(
+                        super::internal_tool_permissions::resolve_internal_tool_permission(
+                            state, resources, registry, cwd, request,
+                        ),
+                    )
+                }
+                bash_internal_permissions::InternalToolBrokerRequest::Execution(request) => {
+                    bash_internal_permissions::InternalToolBrokerResponse::Execution(
+                        super::internal_tool_permissions::execute_internal_tool_request(
+                            state, resources, registry, cwd, request,
+                        ),
+                    )
+                }
             };
             let execution = bash::execute_from_value_with_internal_permissions(
                 cwd,
@@ -715,6 +726,7 @@ pub fn execute_workflow_tool(
         "CronCreate" => workflow::cron_create::execute_cron_create(state, cwd, input),
         "CronDelete" => workflow::cron_delete::execute_cron_delete(state, cwd, input),
         "CronList" => workflow::cron_list::execute_cron_list(state, cwd, input),
+        "Email" => workflow::email_configure::execute_email(state, cwd, input),
         "EmailConfigure" => workflow::email_configure::execute_email_configure(state, cwd, input),
         "EnterPlanMode" => workflow::enter_plan_mode::execute_enter_plan_mode(state, cwd, input),
         "EnterWorktree" => workflow::enter_worktree::execute_enter_worktree(state, cwd, input),
@@ -765,6 +777,7 @@ pub fn execute_workflow_tool(
         "TaskUpdate" => workflow::task_update::execute_task_update(state, cwd, input),
         "TeamCreate" => workflow::team_create::execute_team_create(state, cwd, input),
         "TeamDelete" => workflow::team_delete::execute_team_delete(state, cwd, input),
+        "Telegram" => workflow::telegram_login::execute_telegram(state, cwd, input),
         "TelegramLoginStart" => {
             workflow::telegram_login::execute_telegram_login_start(state, cwd, input)
         }

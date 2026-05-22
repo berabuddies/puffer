@@ -169,7 +169,8 @@ secrets in env vars, etc.). Default policy:
 - Always send: tool name, success, duration_ms.
 - Conditionally send (when `include_content = true`): full input + output.
 - Hard cap on per-attribute size (4 KiB) to keep spans bounded.
-- Tool ids on a denylist (`AuthSetApiKey`, `EmailConfigure`) always
+- Tool ids on a denylist (`AuthSetApiKey`, `Email`, `Telegram`, legacy
+  `EmailConfigure`) always
   redact regardless of flag.
 
 ## Performance budget

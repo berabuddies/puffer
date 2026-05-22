@@ -3,6 +3,7 @@
 use crate::browser;
 use crate::browser_args::BrowserArgs;
 use crate::cli_args::InternalToolCommand;
+use crate::subscriber_tools;
 use anyhow::Result;
 use puffer_config::ConfigPaths;
 use puffer_tools::internal_tools::internal_cli_tools;
@@ -17,6 +18,8 @@ pub(crate) fn run_internal_tool_command(
     match command {
         InternalToolCommand::Aliases => print_alias_setup(),
         InternalToolCommand::Browser(args) => run_browser(cwd, paths, args),
+        InternalToolCommand::Email(args) => subscriber_tools::run_email(args),
+        InternalToolCommand::Telegram(args) => subscriber_tools::run_telegram(args),
     }
 }
 

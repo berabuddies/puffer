@@ -12,12 +12,26 @@ pub struct InternalCliToolDescriptor {
 }
 
 const BROWSER_ALIASES: &[&str] = &["browser"];
+const EMAIL_ALIASES: &[&str] = &["email"];
+const TELEGRAM_ALIASES: &[&str] = &["telegram"];
 
-const INTERNAL_CLI_TOOLS: &[InternalCliToolDescriptor] = &[InternalCliToolDescriptor {
-    id: "browser",
-    aliases: BROWSER_ALIASES,
-    skill_name: "browser",
-}];
+const INTERNAL_CLI_TOOLS: &[InternalCliToolDescriptor] = &[
+    InternalCliToolDescriptor {
+        id: "browser",
+        aliases: BROWSER_ALIASES,
+        skill_name: "browser",
+    },
+    InternalCliToolDescriptor {
+        id: "email",
+        aliases: EMAIL_ALIASES,
+        skill_name: "email",
+    },
+    InternalCliToolDescriptor {
+        id: "telegram",
+        aliases: TELEGRAM_ALIASES,
+        skill_name: "telegram",
+    },
+];
 
 /// Returns all CLI-only internal tool descriptors.
 pub fn internal_cli_tools() -> &'static [InternalCliToolDescriptor] {
@@ -59,6 +73,10 @@ mod tests {
 
         assert!(helpers.contains("browser()"));
         assert!(helpers.contains("'/tmp/puffer' internal-tool 'browser' \"$@\""));
+        assert!(helpers.contains("email()"));
+        assert!(helpers.contains("'/tmp/puffer' internal-tool 'email' \"$@\""));
+        assert!(helpers.contains("telegram()"));
+        assert!(helpers.contains("'/tmp/puffer' internal-tool 'telegram' \"$@\""));
     }
 
     #[test]

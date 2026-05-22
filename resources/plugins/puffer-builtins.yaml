@@ -12,6 +12,8 @@ skills:
   - project-memory
   - reviewer
   - browser
+  - email
+  - telegram
 mcp_servers:
   - id: filesystem
     display_name: Filesystem

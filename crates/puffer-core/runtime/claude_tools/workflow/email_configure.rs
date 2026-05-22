@@ -1,6 +1,8 @@
-//! `EmailConfigure` workflow tool — installs IMAP/SMTP credentials into
-//! the email subscriber, persists them to its state directory, and starts
-//! the polling loop.
+//! Email subscriber workflow actions.
+//!
+//! The consolidated internal `Email` tool installs IMAP/SMTP credentials into
+//! the email subscriber, persists them to its state directory, and starts the
+//! polling loop.
 
 use crate::AppState;
 use anyhow::{anyhow, Context, Result};
@@ -12,6 +14,17 @@ use std::path::{Path, PathBuf};
 use super::subscription_globals;
 
 const EMAIL_TOPIC: &str = "email";
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EmailAction {
+    Configure,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmailInput {
+    action: EmailAction,
+}
 
 #[derive(Debug, Deserialize)]
 struct ConfigureInput {
@@ -26,6 +39,15 @@ struct ConfigureInput {
     from_address: String,
     #[serde(default)]
     allowed_senders: Vec<String>,
+}
+
+/// Executes the consolidated internal `Email` workflow action.
+pub fn execute_email(state: &mut AppState, cwd: &Path, input: Value) -> Result<String> {
+    let parsed: EmailInput =
+        serde_json::from_value(input.clone()).context("invalid Email input")?;
+    match parsed.action {
+        EmailAction::Configure => execute_email_configure(state, cwd, input),
+    }
 }
 
 /// Executes `EmailConfigure`. Ensures the subscriber is running, then

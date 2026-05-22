@@ -1,5 +1,6 @@
 use crate::browser_args::BrowserArgs;
 use crate::non_interactive::NonInteractiveArgs;
+use crate::subscriber_tool_args::{EmailArgs, TelegramArgs};
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
@@ -250,6 +251,10 @@ pub(crate) enum InternalToolCommand {
     Aliases,
     /// Control the managed Chrome browser for this workspace.
     Browser(#[command(flatten)] BrowserArgs),
+    /// Configure the email subscriber through the parent runtime.
+    Email(#[command(flatten)] EmailArgs),
+    /// Log in the Telegram personal-account subscriber through the parent runtime.
+    Telegram(#[command(flatten)] TelegramArgs),
 }
 
 #[derive(Debug, Subcommand)]

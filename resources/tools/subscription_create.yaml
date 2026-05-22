@@ -21,7 +21,9 @@ description: |-
   ## Source topics
 
   - `telegram-user` — every message in every Telegram chat the logged-in user is in.
-    Requires the user to log in via TelegramLoginStart first.
+    Requires the user to log in through the `telegram` skill first.
+  - `email` — inbound email from the configured mailbox.
+    Requires the user to configure email through the `email` skill first.
 
   ## Actions
 

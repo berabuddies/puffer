@@ -1,4 +1,4 @@
-//! Shared wire protocol for first-party internal tool permission preflights.
+//! Shared wire protocol for first-party internal tool permission and execution callbacks.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -39,6 +39,29 @@ pub struct InternalToolPermissionEnvelope {
     pub token: String,
     /// Structured permission request.
     pub request: InternalToolPermissionRequest,
+}
+
+/// Describes a structured execution request from an internal tool CLI.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InternalToolExecutionRequest {
+    /// Stable internal tool id, such as `email` or `telegram`.
+    pub tool_id: String,
+    /// Tool-native structured input for the attempted action.
+    #[serde(default)]
+    pub input: Value,
+}
+
+/// Wire envelope used when an internal CLI asks the parent runtime to execute.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InternalToolExecutionEnvelope {
+    /// Protocol version used by the sender.
+    pub protocol_version: String,
+    /// Bearer token copied from [`INTERNAL_PERMISSION_TOKEN_ENV`].
+    pub token: String,
+    /// Structured execution request.
+    pub execution: InternalToolExecutionRequest,
 }
 
 /// Permission decision returned by the parent runtime.
@@ -83,6 +106,40 @@ impl InternalToolPermissionResponse {
     }
 }
 
+/// Response returned by the parent runtime after an internal execution request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InternalToolExecutionResponse {
+    /// Whether the parent runtime completed the execution successfully.
+    pub success: bool,
+    /// Tool output, normally a JSON string, when execution succeeded.
+    #[serde(default)]
+    pub output: Option<String>,
+    /// Human-readable denial or failure reason.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+impl InternalToolExecutionResponse {
+    /// Builds a successful execution response.
+    pub fn success(output: impl Into<String>) -> Self {
+        Self {
+            success: true,
+            output: Some(output.into()),
+            reason: None,
+        }
+    }
+
+    /// Builds a failed execution response with a human-readable reason.
+    pub fn failure(reason: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            output: None,
+            reason: Some(reason.into()),
+        }
+    }
+}
+
 /// Sends a structured permission request to the parent runtime when available.
 ///
 /// Returns `Ok(None)` when the environment does not contain an internal
@@ -99,6 +156,22 @@ pub fn require_internal_tool_permission_from_env(
 ) -> Result<InternalToolPermissionResponse> {
     request_internal_tool_permission_from_env_impl(request, true)?
         .context("internal permission endpoint is required but unavailable")
+}
+
+/// Sends an execution request to the parent runtime and requires the callback.
+pub fn require_internal_tool_execution_from_env(
+    request: InternalToolExecutionRequest,
+) -> Result<InternalToolExecutionResponse> {
+    let Some(addr) = std::env::var(INTERNAL_PERMISSION_ADDR_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        bail!("internal execution endpoint is required but unavailable");
+    };
+    let token = std::env::var(INTERNAL_PERMISSION_TOKEN_ENV)
+        .context("internal execution endpoint is missing its token")?;
+    request_internal_tool_execution(&addr, &token, request)
 }
 
 fn request_internal_tool_permission_from_env_impl(
@@ -160,6 +233,36 @@ pub fn request_internal_tool_permission(
     serde_json::from_str(response.trim()).context("decode internal permission response")
 }
 
+/// Sends a structured execution request to a specific callback endpoint.
+pub fn request_internal_tool_execution(
+    addr: &str,
+    token: &str,
+    request: InternalToolExecutionRequest,
+) -> Result<InternalToolExecutionResponse> {
+    let mut stream = TcpStream::connect(addr)
+        .with_context(|| format!("connect internal execution endpoint {addr}"))?;
+    let envelope = InternalToolExecutionEnvelope {
+        protocol_version: INTERNAL_PERMISSION_PROTOCOL_VERSION.to_string(),
+        token: token.to_string(),
+        execution: request,
+    };
+    let line = serde_json::to_string(&envelope)?;
+    stream
+        .write_all(line.as_bytes())
+        .context("write internal execution request")?;
+    stream
+        .write_all(b"\n")
+        .context("finish internal execution request")?;
+    stream.flush().context("flush internal execution request")?;
+
+    let mut reader = BufReader::new(stream);
+    let mut response = String::new();
+    reader
+        .read_line(&mut response)
+        .context("read internal execution response")?;
+    serde_json::from_str(response.trim()).context("decode internal execution response")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,6 +304,48 @@ mod tests {
         .unwrap();
 
         assert!(response.is_allowed());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn execution_request_round_trips_over_localhost_protocol() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let envelope: InternalToolExecutionEnvelope =
+                serde_json::from_str(line.trim()).unwrap();
+            assert_eq!(
+                envelope.protocol_version,
+                INTERNAL_PERMISSION_PROTOCOL_VERSION
+            );
+            assert_eq!(envelope.token, "test-token");
+            assert_eq!(envelope.execution.tool_id, "telegram");
+
+            let mut stream = reader.into_inner();
+            let response = serde_json::to_string(&InternalToolExecutionResponse::success(
+                r#"{"status":"ok"}"#,
+            ))
+            .unwrap();
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.write_all(b"\n").unwrap();
+        });
+
+        let response = request_internal_tool_execution(
+            &addr.to_string(),
+            "test-token",
+            InternalToolExecutionRequest {
+                tool_id: "telegram".to_string(),
+                input: serde_json::json!({"action":"login_start"}),
+            },
+        )
+        .unwrap();
+
+        assert!(response.success);
+        assert_eq!(response.output.as_deref(), Some(r#"{"status":"ok"}"#));
         server.join().unwrap();
     }
 }

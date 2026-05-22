@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
 use puffer_tools::internal_permissions::{
+    InternalToolExecutionEnvelope, InternalToolExecutionRequest, InternalToolExecutionResponse,
     InternalToolPermissionEnvelope, InternalToolPermissionRequest, InternalToolPermissionResponse,
     INTERNAL_PERMISSION_ADDR_ENV, INTERNAL_PERMISSION_PROTOCOL_VERSION,
     INTERNAL_PERMISSION_REQUIRED_ENV, INTERNAL_PERMISSION_TOKEN_ENV,
 };
+use serde_json::Value;
 use std::io::{ErrorKind, Read as IoRead, Write as IoWrite};
 use std::net::{TcpListener, TcpStream};
 use uuid::Uuid;
@@ -11,7 +13,17 @@ use uuid::Uuid;
 const MAX_INTERNAL_PERMISSION_REQUEST_BYTES: usize = 64 * 1024;
 
 pub(crate) type InternalPermissionHandler<'a> =
-    dyn FnMut(InternalToolPermissionRequest) -> InternalToolPermissionResponse + 'a;
+    dyn FnMut(InternalToolBrokerRequest) -> InternalToolBrokerResponse + 'a;
+
+pub(crate) enum InternalToolBrokerRequest {
+    Permission(InternalToolPermissionRequest),
+    Execution(InternalToolExecutionRequest),
+}
+
+pub(crate) enum InternalToolBrokerResponse {
+    Permission(InternalToolPermissionResponse),
+    Execution(InternalToolExecutionResponse),
+}
 
 pub(crate) struct InternalPermissionBroker {
     listener: Option<TcpListener>,
@@ -120,18 +132,19 @@ fn poll_internal_permission_request(
                 return Ok(PendingInternalPermissionOutcome::Remove)
             }
             Ok(0) => {
-                let response =
-                    InternalToolPermissionResponse::deny("incomplete internal permission request");
-                write_internal_permission_response(&mut pending.stream, &response)?;
+                let response = InternalToolBrokerResponse::Permission(
+                    InternalToolPermissionResponse::deny("incomplete internal tool request"),
+                );
+                write_internal_tool_response(&mut pending.stream, &response)?;
                 return Ok(PendingInternalPermissionOutcome::Remove);
             }
             Ok(read) => {
                 pending.buffer.extend_from_slice(&chunk[..read]);
                 if pending.buffer.len() > MAX_INTERNAL_PERMISSION_REQUEST_BYTES {
-                    let response = InternalToolPermissionResponse::deny(
-                        "internal permission request is too large",
+                    let response = InternalToolBrokerResponse::Permission(
+                        InternalToolPermissionResponse::deny("internal tool request is too large"),
                     );
-                    write_internal_permission_response(&mut pending.stream, &response)?;
+                    write_internal_tool_response(&mut pending.stream, &response)?;
                     return Ok(PendingInternalPermissionOutcome::Remove);
                 }
                 if let Some(newline) = pending.buffer.iter().position(|byte| *byte == b'\n') {
@@ -139,16 +152,8 @@ fn poll_internal_permission_request(
                     if line.ends_with(b"\r") {
                         line.pop();
                     }
-                    let response =
-                        match serde_json::from_slice::<InternalToolPermissionEnvelope>(&line) {
-                            Ok(envelope) => {
-                                resolve_internal_permission_envelope(token, envelope, handler)
-                            }
-                            Err(error) => InternalToolPermissionResponse::deny(format!(
-                                "invalid internal permission request: {error}"
-                            )),
-                        };
-                    write_internal_permission_response(&mut pending.stream, &response)?;
+                    let response = resolve_internal_tool_line(token, &line, handler);
+                    write_internal_tool_response(&mut pending.stream, &response)?;
                     return Ok(PendingInternalPermissionOutcome::Remove);
                 }
             }
@@ -158,6 +163,39 @@ fn poll_internal_permission_request(
             Err(error) if error.kind() == ErrorKind::Interrupted => {}
             Err(error) => return Err(error).context("read internal permission request"),
         }
+    }
+}
+
+fn resolve_internal_tool_line(
+    token: &str,
+    line: &[u8],
+    handler: Option<&mut InternalPermissionHandler<'_>>,
+) -> InternalToolBrokerResponse {
+    let value = match serde_json::from_slice::<Value>(line) {
+        Ok(value) => value,
+        Err(error) => {
+            return InternalToolBrokerResponse::Permission(InternalToolPermissionResponse::deny(
+                format!("invalid internal tool request: {error}"),
+            ));
+        }
+    };
+    if value.get("execution").is_some() {
+        return match serde_json::from_value::<InternalToolExecutionEnvelope>(value) {
+            Ok(envelope) => resolve_internal_execution_envelope(token, envelope, handler),
+            Err(error) => {
+                InternalToolBrokerResponse::Execution(InternalToolExecutionResponse::failure(
+                    format!("invalid internal execution request: {error}"),
+                ))
+            }
+        };
+    }
+    match serde_json::from_value::<InternalToolPermissionEnvelope>(value) {
+        Ok(envelope) => InternalToolBrokerResponse::Permission(
+            resolve_internal_permission_envelope(token, envelope, handler),
+        ),
+        Err(error) => InternalToolBrokerResponse::Permission(InternalToolPermissionResponse::deny(
+            format!("invalid internal permission request: {error}"),
+        )),
     }
 }
 
@@ -175,24 +213,55 @@ fn resolve_internal_permission_envelope(
     let Some(handler) = handler else {
         return InternalToolPermissionResponse::deny("internal permission handler is unavailable");
     };
-    handler(envelope.request)
+    match handler(InternalToolBrokerRequest::Permission(envelope.request)) {
+        InternalToolBrokerResponse::Permission(response) => response,
+        InternalToolBrokerResponse::Execution(_) => {
+            InternalToolPermissionResponse::deny("internal permission handler returned execution")
+        }
+    }
 }
 
-fn write_internal_permission_response(
+fn resolve_internal_execution_envelope(
+    token: &str,
+    envelope: InternalToolExecutionEnvelope,
+    handler: Option<&mut InternalPermissionHandler<'_>>,
+) -> InternalToolBrokerResponse {
+    if envelope.protocol_version != INTERNAL_PERMISSION_PROTOCOL_VERSION {
+        return InternalToolBrokerResponse::Execution(InternalToolExecutionResponse::failure(
+            "unsupported internal execution protocol",
+        ));
+    }
+    if envelope.token != token {
+        return InternalToolBrokerResponse::Execution(InternalToolExecutionResponse::failure(
+            "invalid internal execution token",
+        ));
+    }
+    let Some(handler) = handler else {
+        return InternalToolBrokerResponse::Execution(InternalToolExecutionResponse::failure(
+            "internal execution handler is unavailable",
+        ));
+    };
+    handler(InternalToolBrokerRequest::Execution(envelope.execution))
+}
+
+fn write_internal_tool_response(
     stream: &mut TcpStream,
-    response: &InternalToolPermissionResponse,
+    response: &InternalToolBrokerResponse,
 ) -> Result<()> {
     stream
         .set_nonblocking(false)
-        .context("configure internal permission response stream")?;
-    let serialized = serde_json::to_string(response)?;
+        .context("configure internal tool response stream")?;
+    let serialized = match response {
+        InternalToolBrokerResponse::Permission(response) => serde_json::to_string(response)?,
+        InternalToolBrokerResponse::Execution(response) => serde_json::to_string(response)?,
+    };
     stream
         .write_all(serialized.as_bytes())
-        .context("write internal permission response")?;
+        .context("write internal tool response")?;
     stream
         .write_all(b"\n")
-        .context("finish internal permission response")?;
-    stream.flush().context("flush internal permission response")
+        .context("finish internal tool response")?;
+    stream.flush().context("flush internal tool response")
 }
 
 #[cfg(test)]
@@ -219,11 +288,14 @@ mod tests {
     #[test]
     fn internal_permission_envelope_delegates_structured_request() {
         let mut saw_request = false;
-        let mut handler = |request: InternalToolPermissionRequest| {
+        let mut handler = |request: InternalToolBrokerRequest| {
+            let InternalToolBrokerRequest::Permission(request) = request else {
+                panic!("expected permission request");
+            };
             saw_request = true;
             assert_eq!(request.tool_id, "browser");
             assert_eq!(request.input, json!({"action":"snapshot"}));
-            InternalToolPermissionResponse::allow()
+            InternalToolBrokerResponse::Permission(InternalToolPermissionResponse::allow())
         };
 
         let response = resolve_internal_permission_envelope(
@@ -245,9 +317,8 @@ mod tests {
 
     #[test]
     fn internal_permission_envelope_rejects_wrong_token() {
-        let mut handler = |_request: InternalToolPermissionRequest| {
-            panic!("handler should not run for wrong token")
-        };
+        let mut handler =
+            |_request: InternalToolBrokerRequest| panic!("handler should not run for wrong token");
 
         let response = resolve_internal_permission_envelope(
             "token",
@@ -267,5 +338,39 @@ mod tests {
             response.reason.as_deref(),
             Some("invalid internal permission token")
         );
+    }
+
+    #[test]
+    fn internal_execution_envelope_delegates_structured_request() {
+        let mut saw_request = false;
+        let mut handler = |request: InternalToolBrokerRequest| {
+            let InternalToolBrokerRequest::Execution(request) = request else {
+                panic!("expected execution request");
+            };
+            saw_request = true;
+            assert_eq!(request.tool_id, "telegram");
+            assert_eq!(request.input, json!({"action":"login_start"}));
+            InternalToolBrokerResponse::Execution(InternalToolExecutionResponse::success(
+                r#"{"status":"awaiting_code"}"#,
+            ))
+        };
+        let response = resolve_internal_execution_envelope(
+            "token",
+            InternalToolExecutionEnvelope {
+                protocol_version: INTERNAL_PERMISSION_PROTOCOL_VERSION.to_string(),
+                token: "token".to_string(),
+                execution: InternalToolExecutionRequest {
+                    tool_id: "telegram".to_string(),
+                    input: json!({"action":"login_start"}),
+                },
+            },
+            Some(&mut handler),
+        );
+
+        let InternalToolBrokerResponse::Execution(response) = response else {
+            panic!("expected execution response");
+        };
+        assert!(response.success);
+        assert!(saw_request);
     }
 }

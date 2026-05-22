@@ -1,8 +1,8 @@
-//! Natural-language Telegram login tools.
+//! Natural-language Telegram login workflow actions.
 //!
-//! These three workflow tools (`TelegramLoginStart`,
-//! `TelegramLoginSubmitCode`, `TelegramLoginSubmitPassword`) drive the
-//! login state machine inside the `telegram-user` subscriber process.
+//! The consolidated internal `Telegram` tool drives the login state machine
+//! inside the `telegram-user` subscriber process with three actions:
+//! `login_start`, `login_submit_code`, and `login_submit_password`.
 //!
 //! The agent is responsible for the conversation: it asks the user for
 //! their phone number, then for the code Telegram sent them, and (only if
@@ -30,6 +30,19 @@ const TELEGRAM_USER_TOPIC: &str = "telegram-user";
 const TELEGRAM_LOGIN_EVENT_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TelegramAction {
+    LoginStart,
+    LoginSubmitCode,
+    LoginSubmitPassword,
+}
+
+#[derive(Debug, Deserialize)]
+struct TelegramInput {
+    action: TelegramAction,
+}
+
+#[derive(Debug, Deserialize)]
 struct LoginStartInput {
     /// E.164 phone number including the leading `+`.
     phone: String,
@@ -43,10 +56,23 @@ struct LoginStartInput {
     api_hash: Option<String>,
 }
 
+/// Executes the consolidated internal `Telegram` workflow action.
+pub fn execute_telegram(state: &mut AppState, cwd: &Path, input: Value) -> Result<String> {
+    let parsed: TelegramInput =
+        serde_json::from_value(input.clone()).context("invalid Telegram input")?;
+    match parsed.action {
+        TelegramAction::LoginStart => execute_telegram_login_start(state, cwd, input),
+        TelegramAction::LoginSubmitCode => execute_telegram_login_submit_code(state, cwd, input),
+        TelegramAction::LoginSubmitPassword => {
+            execute_telegram_login_submit_password(state, cwd, input)
+        }
+    }
+}
+
 /// Starts the Telegram login flow. After a successful call, the subscriber
 /// will emit a `login_awaiting_code` event and a code is texted to the
-/// user's Telegram apps; the agent should then collect the code and call
-/// `TelegramLoginSubmitCode`.
+/// user's Telegram apps; the agent should then collect the code and run
+/// `telegram login-submit-code`.
 pub fn execute_telegram_login_start(
     _state: &mut AppState,
     _cwd: &Path,
@@ -73,7 +99,7 @@ pub fn execute_telegram_login_start(
         "login_awaiting_code" => Ok(json!({
             "status": "awaiting_code",
             "phone": phone,
-            "next": "Telegram accepted the login-code request. Ask the user for the code from Telegram, then call TelegramLoginSubmitCode."
+            "next": "Telegram accepted the login-code request. Ask the user for the code from Telegram, then run `telegram login-submit-code <code>`."
         })
         .to_string()),
         "login_complete" => Ok(json!({
@@ -102,7 +128,7 @@ struct SubmitCodeInput {
 
 /// Submits the login code. On success the subscriber emits
 /// `login_complete`; on `PASSWORD_REQUIRED` it emits `login_awaiting_password`
-/// and the agent should call `TelegramLoginSubmitPassword`.
+/// and the agent should run `telegram login-submit-password`.
 pub fn execute_telegram_login_submit_code(
     _state: &mut AppState,
     _cwd: &Path,
@@ -127,7 +153,7 @@ pub fn execute_telegram_login_submit_code(
         .to_string()),
         "login_awaiting_password" => Ok(json!({
             "status": "awaiting_password",
-            "next": "Telegram requires the user's 2FA cloud password. Ask the user for it, then call TelegramLoginSubmitPassword.",
+            "next": "Telegram requires the user's 2FA cloud password. Ask the user for it, then run `telegram login-submit-password --password-stdin`.",
             "payload": event.event.payload,
         })
         .to_string()),

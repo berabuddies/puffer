@@ -168,6 +168,12 @@ fn workspace_builtin_tool_resources_are_registerable() {
     );
     assert!(registry.definition("Sleep").is_some());
     assert!(!registered.contains("Browser"));
+    assert!(!registered.contains("Email"));
+    assert!(!registered.contains("Telegram"));
+    assert!(registry.definition("EmailConfigure").is_none());
+    assert!(registry.definition("TelegramLoginStart").is_none());
+    assert!(registry.definition("TelegramLoginSubmitCode").is_none());
+    assert!(registry.definition("TelegramLoginSubmitPassword").is_none());
 }
 
 #[test]
@@ -196,5 +202,9 @@ fn workspace_builtin_internal_tool_resources_are_registerable() {
         "builtin resources produced unsupported internal tool registrations: {missing:?}"
     );
     assert!(registry.internal_definition("Browser").is_some());
+    assert!(registry.internal_definition("Email").is_some());
+    assert!(registry.internal_definition("Telegram").is_some());
     assert!(registry.definition("Browser").is_none());
+    assert!(registry.definition("Email").is_none());
+    assert!(registry.definition("Telegram").is_none());
 }

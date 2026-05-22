@@ -26,6 +26,8 @@ mod internal_tools;
 mod non_interactive;
 mod resource_fs;
 mod runner_selection;
+mod subscriber_tool_args;
+mod subscriber_tools;
 mod subscriptions;
 mod workflow_runtime;
 mod workflows;
