@@ -55,6 +55,7 @@ CLAUDE_PLANNER_ENV = {
 
 def scheduled_areas():
     """Return scheduler-selected shards for the small-model run."""
+    target_count = max(1, int(SHARD_LIMIT))
     requested = [
         item.strip()
         for item in os.environ.get("PUFFER_OPENROUTER_AREAS", "").split(",")
@@ -75,7 +76,7 @@ def scheduled_areas():
         command.extend(["--shards", ",".join(requested)])
     payload = subprocess.check_output(command, cwd=REPO_ROOT, text=True)
     schedule = json.loads(payload)
-    return [
+    base_items = [
         {
             "name": item["shardId"],
             "seed": item["seed"],
@@ -94,6 +95,19 @@ def scheduled_areas():
         }
         for item in schedule["items"]
     ]
+    if not base_items:
+        return []
+    if len(base_items) >= target_count:
+        return base_items[:target_count]
+    expanded = []
+    for index in range(target_count):
+        item = dict(base_items[index % len(base_items)])
+        round_index = index // len(base_items)
+        if round_index > 0:
+            item["namespace"] = f"{NAMESPACE}-r{round_index:02d}-{item['name']}"
+            item["priority"] = f"{item['priority']} replica {round_index}"
+        expanded.append(item)
+    return expanded
 
 
 SELECTED_AREAS = scheduled_areas()
