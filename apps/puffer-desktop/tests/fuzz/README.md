@@ -175,6 +175,34 @@ At startup it clears the selected `apps/puffer-desktop/tests/fuzz/.runs/agentflo
 and the aggregate output directory so reports cannot accidentally reuse stale
 bounded replay results from a previous run.
 
+Run a small Claude-planned, OpenRouter-backed campaign when testing cheaper
+worker models before scaling out:
+
+```sh
+export OPENROUTER_API_KEY="<key>"
+export ANTHROPIC_BASE_URL="https://api-infer.agentsey.ai"
+export ANTHROPIC_AUTH_TOKEN="<infer-key>"
+export ANTHROPIC_API_KEY=""
+PUFFER_OPENROUTER_SHARD_LIMIT=2 \
+PUFFER_OPENROUTER_CONCURRENCY=2 \
+PUFFER_OPENROUTER_PLANNER_MODEL=claude-opus-4-6 \
+PUFFER_OPENROUTER_MODEL=inclusionai/ling-2.6-flash \
+agentflow run apps/puffer-desktop/tests/fuzz/agentflow_puffer_openrouter_campaign.py \
+  --runs-dir apps/puffer-desktop/tests/fuzz/.runs/openrouter-local-runs \
+  --output summary
+```
+
+The OpenRouter campaign uses the same UI-tree scheduler and `BUG_LIST_APPEND`
+handoff. Claude Opus plans the shard boundaries and report expectations, the
+harness executes each assigned GUI trigger/replay workflow, and an
+OpenRouter-backed small-model triage step writes the shard finding report. It
+defaults to two shards and two-way concurrency. The triage step has a
+deterministic replay gate: it suppresses `BUG_LIST_APPEND` when bounded replay
+does not report a new candidate, product candidate, stable failure, or
+actionable failure. Increase
+`PUFFER_OPENROUTER_SHARD_LIMIT` and `PUFFER_OPENROUTER_CONCURRENCY` only after
+the small run shows acceptable instruction-following and false-positive rates.
+
 ## Recommended Workflow
 
 1. Start with `schedule --limit 2` or `schedule --limit 4` for small campaigns.
@@ -234,6 +262,8 @@ For day-to-day use, treat the app as ready only when:
 - `agent_guide.md`: instructions for agents using this framework.
 - `playwright_adapter.md`: mapping from generated actions to current Playwright
   fake daemon helpers.
+- `agentflow_puffer_openrouter_campaign.py`: small-model OpenRouter campaign
+  for low-cost shard smoke tests.
 
 ## Current Limitation
 

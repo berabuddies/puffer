@@ -15,6 +15,8 @@
     "record-feedback": "node bin/puffer-fuzz.mjs record-feedback",
     "gate": "node bin/puffer-fuzz.mjs gate",
     "replay": "node bin/puffer-fuzz.mjs replay",
-    "bug-list": "node bin/puffer-fuzz.mjs bug-list"
+    "bug-list": "node bin/puffer-fuzz.mjs bug-list",
+    "openrouter-aggregate": "node bin/puffer-openrouter-aggregate.mjs",
+    "openrouter-triage": "node bin/puffer-openrouter-triage.mjs"
   }
 }
