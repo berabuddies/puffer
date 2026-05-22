@@ -47,6 +47,7 @@ import { shrinkRunCase } from "../lib/shrinker.mjs";
 const fuzzRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const defaultManifestPath = path.join(fuzzRoot, "manifests", "puffer-ui.json");
 const defaultUiTreePath = path.join(fuzzRoot, "manifests", "puffer-ui-tree.json");
+const defaultIntentManifestPath = path.join(fuzzRoot, "manifests", "puffer-intents.json");
 const defaultSeedDir = path.join(fuzzRoot, "seeds");
 const defaultShardDir = path.join(fuzzRoot, "shards");
 const defaultAdapterPath = path.join(fuzzRoot, "adapters", "playwright-actions.json");
@@ -125,6 +126,7 @@ Related helper:
 Options:
   --manifest <path>   Default: apps/puffer-desktop/tests/fuzz/manifests/puffer-ui.json
   --ui-tree <path>    Default: apps/puffer-desktop/tests/fuzz/manifests/puffer-ui-tree.json
+  --intents <path>    Default: apps/puffer-desktop/tests/fuzz/manifests/puffer-intents.json
   --seed-dir <path>   Default: apps/puffer-desktop/tests/fuzz/seeds
   --shard-dir <path>  Default: apps/puffer-desktop/tests/fuzz/shards
   --adapter <path>    Default: apps/puffer-desktop/tests/fuzz/adapters/playwright-actions.json
@@ -338,6 +340,7 @@ async function main() {
   if (command === "schedule") {
     const { manifest, allSeeds } = await loadContext(args);
     const uiTree = await readJson(args["ui-tree"] ?? defaultUiTreePath);
+    const intentManifest = await readJson(args.intents ?? defaultIntentManifestPath);
     const shards = await loadShards(args["shard-dir"] ?? defaultShardDir);
     const coverageLedger = await loadLedger(args.ledger ?? defaultLedgerPath);
     const feedbackLedger = await loadFeedbackLedger(args["feedback-ledger"] ?? defaultFeedbackLedgerPath);
@@ -352,6 +355,7 @@ async function main() {
       namespace: args.namespace,
       shards: args.shards,
       exclude: args.exclude,
+      intentManifest,
       "min-iterations": args["min-iterations"],
       "max-iterations": args["max-iterations"]
     });

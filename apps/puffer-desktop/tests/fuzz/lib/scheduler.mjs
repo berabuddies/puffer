@@ -116,6 +116,7 @@ export function buildShardSchedule(manifest, seeds, uiTree, shards, coverageLedg
       feedbackCoveredTags,
       feedback: feedbackLedger.shards?.[shard.id] ?? {},
       runtimeCoverage: coverageLedger.runtimeCoverage?.shards?.[shard.id] ?? {},
+      layeredFrontier: layeredFrontierForShard(shard, options.intentManifest),
       treeNode: treeNodeById.get(shard.startNode),
       namespace,
       minIterations: options["min-iterations"],
@@ -162,6 +163,7 @@ export function formatScheduleMarkdown(schedule) {
     lines.push(`- Missing owned coverage: ${item.reason.missingOwnedCoverage.join(", ") || "none"}`);
     lines.push(`- Feedback: runs=${item.reason.feedbackRuns}, replaySuccess=${item.reason.replaySuccessRate}, flakeRate=${item.reason.flakeRate}, duplicateRate=${item.reason.duplicateRate}, outOfScope=${item.reason.outOfScopeCount}`);
     lines.push(`- Runtime coverage: states=${item.reason.runtimeStateCount}, edges=${item.reason.runtimeEdgeCount}`);
+    lines.push(`- Layered frontier: intents=${item.reason.intentIds.join(", ") || "none"}, races=${item.reason.raceIds.join(", ") || "none"}`);
     lines.push(`- Owned nodes: ${item.ownedNodes.join(", ")}`);
     lines.push(`- Allowed setup nodes: ${item.allowedSetupNodes.join(", ")}`);
     lines.push(`- Allowed async events: ${item.allowedAsyncEvents.join(", ") || "none"}`);
@@ -260,6 +262,9 @@ function scoreShard(shard, context) {
   const actionableFailures = Number(feedback.actionableFailures ?? 0);
   const runtimeStateCount = Number(context.runtimeCoverage.stateCount ?? 0);
   const runtimeEdgeCount = Number(context.runtimeCoverage.edgeCount ?? 0);
+  const intentIds = context.layeredFrontier.intentIds;
+  const raceIds = context.layeredFrontier.raceIds;
+  const layeredPriority = context.layeredFrontier.priority;
   const priority = Number(shard.priority ?? context.treeNode?.priority ?? 0);
 
   let score = priority * 10;
@@ -268,6 +273,7 @@ function scoreShard(shard, context) {
   score += highPriorityMissing.length * 6;
   score += newFindingCount * 10;
   score += actionableFailures * 4;
+  score += layeredPriority * 2;
   score -= feedbackRuns * 3;
   score -= Math.round(flakeRate * 25);
   score -= Math.round(duplicateRate * 20);
@@ -317,7 +323,10 @@ function scoreShard(shard, context) {
       newFindingCount,
       actionableFailures,
       runtimeStateCount,
-      runtimeEdgeCount
+      runtimeEdgeCount,
+      intentIds,
+      raceIds,
+      layeredPriority
     },
     artifacts: {
       runPath,
@@ -333,6 +342,25 @@ function scoreShard(shard, context) {
       `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-replay-loop.mjs --seeds ${shard.seed} --shard ${shard.id} --limit ${replayLimit} --attempts 3 --timeout 120 --rng-seed ${namespace} --namespace ${namespace} --fail-on-new-finding`,
       `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs record-feedback --shard ${shard.id} --input ${replayJsonPath}`
     ]
+  };
+}
+
+function layeredFrontierForShard(shard, intentManifest = {}) {
+  const shardId = shard.id;
+  const intents = (intentManifest.intents ?? []).filter((intent) =>
+    intent.owner === shardId || (intent.secondaryOwners ?? []).includes(shardId)
+  );
+  const races = (intentManifest.races ?? []).filter((race) =>
+    race.owner === shardId || intents.some((intent) => intent.id === race.intent)
+  );
+  return {
+    intentIds: intents.map((intent) => intent.id).sort(),
+    raceIds: races.map((race) => race.id).sort(),
+    priority: Math.max(
+      0,
+      ...intents.map((intent) => Number(intent.priority ?? 0)),
+      ...races.map((race) => Number(race.priority ?? 0))
+    )
   };
 }
 
