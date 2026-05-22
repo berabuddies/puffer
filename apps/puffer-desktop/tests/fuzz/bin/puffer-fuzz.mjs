@@ -42,6 +42,7 @@ import {
   validateSchedulerModel
 } from "../lib/scheduler.mjs";
 import { bugSignature, findDuplicateSignatures } from "../lib/signature.mjs";
+import { shrinkRunCase } from "../lib/shrinker.mjs";
 
 const fuzzRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const defaultManifestPath = path.join(fuzzRoot, "manifests", "puffer-ui.json");
@@ -114,6 +115,7 @@ Commands:
   corpus --input apps/puffer-desktop/tests/fuzz/.runs/<run>/corpus.json --run-out apps/puffer-desktop/tests/fuzz/.runs/<run>/corpus-run.json
   signature --finding finding.json
   replay --input run.json --case-id chat-turn-race-0001 --out /tmp/replay.spec.ts
+  shrink --input run.json --case-id chat-turn-race-0001 --out /tmp/shrunk-run.json --report-out /tmp/shrink.md
   bug-list --append --title "..." --severity P1 --area chat --shard chat-composer-send --evidence apps/.../final.md
   bug-list --set-status --id PUF-FUZZ-0001 --status fixed --note "fixed by abc123"
 
@@ -471,6 +473,20 @@ async function main() {
     const markdown = formatReplayMarkdown(selected, outputPath);
     if (args["report-out"]) await writeText(args["report-out"], markdown);
     process.stdout.write(markdown);
+    return;
+  }
+
+  if (command === "shrink") {
+    if (!args.input) throw new Error("--input is required for shrink");
+    if (!args["case-id"]) throw new Error("--case-id is required for shrink");
+    const manifest = await readJson(args.manifest ?? defaultManifestPath);
+    const run = await readJson(args.input);
+    const result = shrinkRunCase(manifest, run, args["case-id"], {
+      verified: Boolean(args.verified)
+    });
+    if (args.out) await writeJson(args.out, result.run);
+    if (args["report-out"]) await writeText(args["report-out"], result.report);
+    process.stdout.write(result.report);
     return;
   }
 
