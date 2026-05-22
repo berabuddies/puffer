@@ -721,6 +721,33 @@ test("provider API key connect requires a non-empty key", async ({ page }) => {
   });
 });
 
+test("provider API key input clears after a successful update", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.delayResponse(
+    "login_with_api_key",
+    (request) => request.params.providerId === "anthropic",
+    120
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Providers" }).click();
+
+  const input = page.getByLabel("API key for Anthropic");
+  await input.fill("sk-should-not-remain-visible");
+  await page
+    .locator(".provider-card")
+    .filter({ hasText: "Anthropic" })
+    .getByRole("button", { name: "Update key" })
+    .click();
+
+  await daemon.waitForRequest("login_with_api_key");
+  await expect(input).toBeDisabled();
+  await expect(input).toBeEnabled();
+  await expect(input).toHaveValue("");
+});
+
 test("provider API key enter submit is ignored while login is already busy", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayResponse(
