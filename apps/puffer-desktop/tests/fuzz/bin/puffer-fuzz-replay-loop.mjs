@@ -3,6 +3,7 @@ import { lstat, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/pro
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { aggregateTarpit, detectTarpit } from "../lib/tarpit.mjs";
 
 const fuzzRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = path.resolve(fuzzRoot, "..", "..", "..", "..");
@@ -356,7 +357,9 @@ function summarize(results) {
       asyncEdges: runtimeCoverage.asyncEdges.length,
       asyncInvariantPairs: runtimeCoverage.asyncInvariantPairs.length,
       routeControlStateTriples: runtimeCoverage.routeControlStateTriples.length,
-      invariantObservations: runtimeCoverage.invariantObservations.length
+      invariantObservations: runtimeCoverage.invariantObservations.length,
+      tarpitCount: runtimeCoverage.tarpitSummary?.tarpitCount ?? 0,
+      escapeSuggestedCount: runtimeCoverage.tarpitSummary?.escapeSuggestedCount ?? 0
     }
   };
 }
@@ -406,6 +409,8 @@ async function collectRuntimeCoverage(rootDir) {
   const traceFiles = await findTraceFiles(rootDir);
   const states = new Map();
   const edges = new Map();
+  const observedStateHashes = [];
+  let actionEventCount = 0;
   const asyncEdges = new Set();
   const asyncInvariantPairs = new Set();
   const routeControlStateTriples = new Set();
@@ -426,6 +431,10 @@ async function collectRuntimeCoverage(rootDir) {
       collectState(states, event.state);
       collectState(states, event.beforeState);
       collectState(states, event.afterState);
+      collectObservedState(observedStateHashes, event.state);
+      collectObservedState(observedStateHashes, event.beforeState);
+      collectObservedState(observedStateHashes, event.afterState);
+      if (event.type === "action") actionEventCount += 1;
       if (event.edge?.edgeId) {
         edges.set(event.edge.edgeId, {
           ...event.edge,
@@ -450,14 +459,22 @@ async function collectRuntimeCoverage(rootDir) {
     }
   }
 
-  return {
+  const repeatedStateCount = observedStateHashes.filter((stateHash, index) => index > 0 && observedStateHashes[index - 1] === stateHash).length;
+  const result = {
     traceArtifacts,
+    observedStateCount: observedStateHashes.length,
+    actionEventCount,
+    repeatedStateCount,
     states: [...states.values()].sort((left, right) => left.stateHash.localeCompare(right.stateHash)),
     edges: [...edges.values()].sort((left, right) => left.edgeId.localeCompare(right.edgeId)),
     asyncEdges: [...asyncEdges].sort(),
     asyncInvariantPairs: [...asyncInvariantPairs].sort(),
     routeControlStateTriples: [...routeControlStateTriples].sort(),
     invariantObservations: [...invariantObservations].sort()
+  };
+  return {
+    ...result,
+    tarpit: detectTarpit(result)
   };
 }
 
@@ -499,6 +516,10 @@ function collectState(states, state) {
   });
 }
 
+function collectObservedState(observedStateHashes, state) {
+  if (state?.stateHash) observedStateHashes.push(state.stateHash);
+}
+
 function aggregateRuntimeCoverage(items = []) {
   const states = new Map();
   const edges = new Map();
@@ -507,8 +528,16 @@ function aggregateRuntimeCoverage(items = []) {
   const routeControlStateTriples = new Set();
   const invariantObservations = new Set();
   const traceArtifacts = new Set();
+  let observedStateCount = 0;
+  let actionEventCount = 0;
+  let repeatedStateCount = 0;
+  const tarpitItems = [];
   for (const item of items) {
     if (!item) continue;
+    observedStateCount += Number(item.observedStateCount ?? 0);
+    actionEventCount += Number(item.actionEventCount ?? 0);
+    repeatedStateCount += Number(item.repeatedStateCount ?? 0);
+    if (item.tarpit) tarpitItems.push(item);
     for (const state of item.states ?? []) {
       if (state?.stateHash) states.set(state.stateHash, state);
     }
@@ -521,14 +550,22 @@ function aggregateRuntimeCoverage(items = []) {
     for (const value of item.invariantObservations ?? []) invariantObservations.add(value);
     for (const value of item.traceArtifacts ?? []) traceArtifacts.add(value);
   }
-  return {
+  const result = {
     traceArtifacts: [...traceArtifacts].sort(),
+    observedStateCount,
+    actionEventCount,
+    repeatedStateCount,
     states: [...states.values()].sort((left, right) => left.stateHash.localeCompare(right.stateHash)),
     edges: [...edges.values()].sort((left, right) => left.edgeId.localeCompare(right.edgeId)),
     asyncEdges: [...asyncEdges].sort(),
     asyncInvariantPairs: [...asyncInvariantPairs].sort(),
     routeControlStateTriples: [...routeControlStateTriples].sort(),
-    invariantObservations: [...invariantObservations].sort()
+    invariantObservations: [...invariantObservations].sort(),
+    tarpitSummary: aggregateTarpit(tarpitItems)
+  };
+  return {
+    ...result,
+    tarpit: detectTarpit(result)
   };
 }
 
@@ -594,6 +631,8 @@ function formatMarkdown(payload) {
     `- Runtime async edges: ${payload.summary.runtimeCoverage?.asyncEdges ?? 0}`,
     `- Runtime async-invariant pairs: ${payload.summary.runtimeCoverage?.asyncInvariantPairs ?? 0}`,
     `- Runtime route-control-state triples: ${payload.summary.runtimeCoverage?.routeControlStateTriples ?? 0}`,
+    `- Tarpit cases: ${payload.summary.runtimeCoverage?.tarpitCount ?? 0}`,
+    `- Escape suggested: ${payload.summary.runtimeCoverage?.escapeSuggestedCount ?? 0}`,
     "",
     "## Classification",
     ""
@@ -658,6 +697,7 @@ function formatMarkdown(payload) {
     lines.push(`- Log path: ${last.logPath}`);
     lines.push(`- Runtime states: ${item.runtimeCoverage?.states?.length ?? 0}`);
     lines.push(`- Runtime edges: ${item.runtimeCoverage?.edges?.length ?? 0}`);
+    lines.push(`- Tarpit: ${item.runtimeCoverage?.tarpit?.tarpit ? "yes" : "no"}${item.runtimeCoverage?.tarpit?.reasons?.length ? ` (${item.runtimeCoverage.tarpit.reasons.join(", ")})` : ""}`);
     lines.push(`- Coverage: ${item.coverage.join(", ")}`);
     lines.push(`- Steps: ${item.steps.join(" -> ")}`);
     if (last.excerpt) {
