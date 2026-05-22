@@ -114,12 +114,14 @@ Read only these files:
 - {TASK_PATH}
 - apps/puffer-desktop/tests/fuzz/README.md
 - apps/puffer-desktop/tests/fuzz/agent_guide.md
+- apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight/prompt-evolution.md
 - apps/puffer-desktop/tests/fuzz/playwright_adapter.md
 - apps/puffer-desktop/tests/fuzz/BUGS.md
 
 Produce a short execution plan for small-model worker shards:
 - strict scope boundaries
 - likely false-positive patterns
+- prompt-evolution checklist items that workers must obey
 - exact report format requirements
 - reminder that workers must output BUG_LIST_APPEND blocks, not edit BUGS.md
 - reminder that workers should execute the fixed commands instead of
@@ -133,6 +135,7 @@ SHARD_SCRIPT = """\
 set -euo pipefail
 out_dir="apps/puffer-desktop/tests/fuzz/.runs/{{ item.namespace }}"
 mkdir -p "$out_dir"
+cp apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight/prompt-evolution.md "$out_dir/prompt-evolution.md"
 cat > "$out_dir/planner.md" <<'PLANNER_EOF'
 {{ nodes.plan.output }}
 PLANNER_EOF
@@ -176,6 +179,7 @@ with Graph(
             + CLEAN_SELECTED_ARTIFACTS
             + "mkdir -p apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight\n"
             "node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs validate\n"
+            "node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs evolve-prompt --out apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight/prompt-evolution.md --json-out apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight/prompt-evolution.json\n"
             "node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs schedule --limit ${PUFFER_OPENROUTER_SHARD_LIMIT:-2} --namespace ${PUFFER_OPENROUTER_NAMESPACE:-openrouter-small} --out apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight/schedule.md --json-out apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight/schedule.json\n"
             "echo OPENROUTER_PREFLIGHT_OK\n"
         ),

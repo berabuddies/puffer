@@ -10,6 +10,7 @@ import {
   summarizeRun,
   writeJson
 } from "../lib/fuzz-core.mjs";
+import { promptEvolutionExcerpt } from "../lib/prompt-evolution.mjs";
 import { createRng } from "../lib/seeded-rng.mjs";
 
 const fuzzRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -26,6 +27,9 @@ const maxSteps = Number(args.steps ?? 8);
 const caseCount = Math.max(1, Number(args.cases ?? process.env.PUFFER_OPENROUTER_CASES ?? 1));
 const runDir = path.resolve(fuzzRoot, ".runs", namespace);
 const plannerGuidance = readOptional(path.join(runDir, "planner.md"));
+const promptEvolutionGuidance =
+  readOptional(path.join(runDir, "prompt-evolution.md")) ||
+  readOptional(path.join(fuzzRoot, "prompt_evolution.md"));
 const manifest = await readJson(path.join(fuzzRoot, "manifests", "puffer-ui.json"));
 const seed = await readJson(path.join(fuzzRoot, "seeds", `${seedId}.json`));
 const shard = await readJson(path.join(fuzzRoot, "shards", `${shardId}.json`));
@@ -85,7 +89,17 @@ async function generateSelectedActions(caseIndex) {
     },
     {
       role: "user",
-      content: buildExplorerPrompt({ namespace, shard, seed, allowedActions, maxSteps, plannerGuidance, caseIndex, caseCount })
+      content: buildExplorerPrompt({
+        namespace,
+        shard,
+        seed,
+        allowedActions,
+        maxSteps,
+        plannerGuidance,
+        promptEvolutionGuidance,
+        caseIndex,
+        caseCount
+      })
     }
   ];
 
@@ -420,7 +434,7 @@ function explorerTools(allowedActions) {
   ];
 }
 
-function buildExplorerPrompt({ namespace, shard, seed, allowedActions, maxSteps, plannerGuidance, caseIndex, caseCount }) {
+function buildExplorerPrompt({ namespace, shard, seed, allowedActions, maxSteps, plannerGuidance, promptEvolutionGuidance, caseIndex, caseCount }) {
   return [
     `Namespace: ${namespace}`,
     `Shard: ${shard.id} - ${shard.title}`,
@@ -435,6 +449,9 @@ function buildExplorerPrompt({ namespace, shard, seed, allowedActions, maxSteps,
     "",
     "Main-agent planner guidance:",
     plannerGuidance || "(none)",
+    "",
+    "Prompt evolution guidance and gold-standard checklist:",
+    promptEvolutionExcerpt(promptEvolutionGuidance, 6000),
     "",
     "Use add_step repeatedly to build one high-value interaction sequence.",
     "Make this case materially different from other candidates in this shard.",

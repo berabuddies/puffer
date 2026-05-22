@@ -13,6 +13,7 @@
     "frontier": "node bin/puffer-fuzz.mjs frontier",
     "schedule": "node bin/puffer-fuzz.mjs schedule",
     "record-feedback": "node bin/puffer-fuzz.mjs record-feedback",
+    "evolve-prompt": "node bin/puffer-fuzz.mjs evolve-prompt",
     "gate": "node bin/puffer-fuzz.mjs gate",
     "replay": "node bin/puffer-fuzz.mjs replay",
     "bug-list": "node bin/puffer-fuzz.mjs bug-list",

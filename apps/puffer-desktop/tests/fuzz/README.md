@@ -74,6 +74,20 @@ node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs bug-list \
   --note "fixed by <commit> with Playwright regression"
 ```
 
+Generate a prompt-evolution pack from the gold checklist, feedback ledger,
+main bug list, `/tmp/puffer_issue.md`, and supplemental picture filenames:
+
+```sh
+node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs evolve-prompt \
+  --out apps/puffer-desktop/tests/fuzz/.runs/manual/prompt-evolution.md \
+  --json-out apps/puffer-desktop/tests/fuzz/.runs/manual/prompt-evolution.json
+```
+
+Small-model OpenRouter campaigns generate this pack during preflight and copy it
+into each shard run directory. Explorer and triage prompts then read the same
+gold-standard acceptance/rejection checklist, so validation feedback can reduce
+false positives before increasing shard count.
+
 Generate deterministic fuzz cases for one area:
 
 ```sh

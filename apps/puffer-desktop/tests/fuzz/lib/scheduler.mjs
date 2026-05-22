@@ -185,7 +185,7 @@ export function applyReplayFeedback(feedbackLedger, replayReport, options = {}) 
     shardId,
     namespace,
     recordedAt: new Date().toISOString(),
-    artifactDir: replayReport.artifactDir ?? "",
+    artifactDir: normalizeRepoPath(replayReport.artifactDir ?? ""),
     jsonReport: options.input ?? "",
     total: Number(summary.total ?? results.length ?? 0),
     passed: Number(summary.passed ?? 0),
@@ -229,6 +229,13 @@ export function applyReplayFeedback(feedbackLedger, replayReport, options = {}) 
     duplicateRate: total === 0 ? 0 : Number((duplicateFailures / total).toFixed(3))
   };
   return next;
+}
+
+function normalizeRepoPath(value) {
+  const text = String(value ?? "");
+  const marker = "apps/puffer-desktop/tests/fuzz/";
+  const index = text.indexOf(marker);
+  return index < 0 ? text : text.slice(index);
 }
 
 function scoreShard(shard, context) {

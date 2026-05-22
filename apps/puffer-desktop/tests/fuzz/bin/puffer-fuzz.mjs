@@ -21,6 +21,7 @@ import {
 } from "../lib/fuzz-core.mjs";
 import { buildFrontier, formatFrontierMarkdown } from "../lib/frontier.mjs";
 import { evaluateGate, formatGateMarkdown } from "../lib/gate.mjs";
+import { buildPromptEvolutionPack } from "../lib/prompt-evolution.mjs";
 import { buildReplayTemplate, defaultReplaySpecPath, formatReplayMarkdown, selectCase } from "../lib/replay-template.mjs";
 import {
   applyReplayFeedback,
@@ -41,6 +42,9 @@ const defaultAdapterPath = path.join(fuzzRoot, "adapters", "playwright-actions.j
 const defaultLedgerPath = path.join(fuzzRoot, "coverage-ledger.json");
 const defaultFeedbackLedgerPath = path.join(fuzzRoot, "feedback-ledger.json");
 const defaultBugListPath = path.join(fuzzRoot, "BUGS.md");
+const defaultPromptEvolutionPath = path.join(fuzzRoot, "prompt_evolution.md");
+const defaultIssuePath = "/tmp/puffer_issue.md";
+const defaultPicsDir = path.resolve(fuzzRoot, "..", "..", "..", "..", "bugs", "pics");
 const defaultFakeDaemonPath = path.resolve(fuzzRoot, "..", "support", "fakeDaemon.ts");
 
 function parseArgs(argv) {
@@ -94,6 +98,7 @@ Commands:
   gate --out /tmp/puffer_uiux_ready.md
   schedule --limit 4 --out apps/puffer-desktop/tests/fuzz/.runs/manual/schedule.md
   record-feedback --shard chat-composer-send --input apps/puffer-desktop/tests/fuzz/.runs/<run>/bounded-replay-report.json
+  evolve-prompt --out apps/puffer-desktop/tests/fuzz/.runs/manual/prompt-evolution.md
   signature --finding finding.json
   replay --input run.json --case-id chat-turn-race-0001 --out /tmp/replay.spec.ts
   bug-list --append --title "..." --severity P1 --area chat --shard chat-composer-send --evidence apps/.../final.md
@@ -111,6 +116,9 @@ Options:
   --ledger <path>     Default: apps/puffer-desktop/tests/fuzz/coverage-ledger.json
   --feedback-ledger <path> Default: apps/puffer-desktop/tests/fuzz/feedback-ledger.json
   --bug-list <path> Default: apps/puffer-desktop/tests/fuzz/BUGS.md
+  --prompt-guide <path> Default: apps/puffer-desktop/tests/fuzz/prompt_evolution.md
+  --issue <path>      Default: /tmp/puffer_issue.md
+  --pics-dir <path>   Default: bugs/pics
   --seed <id>         Select one seed; omit to run all seeds
   --shards <ids>      Comma-separated shard ids for scheduler filtering
   --shard <id>        Single shard id for top-cases or feedback
@@ -356,6 +364,20 @@ async function main() {
     });
     process.stdout.write(`Recorded feedback for shard ${args.shard}\n`);
     process.stdout.write(`Ledger: ${outputLedgerPath}\n`);
+    return;
+  }
+
+  if (command === "evolve-prompt") {
+    const result = await buildPromptEvolutionPack({
+      baseGuidePath: args["prompt-guide"] ?? defaultPromptEvolutionPath,
+      bugListPath: args["bug-list"] ?? defaultBugListPath,
+      feedbackLedgerPath: args["feedback-ledger"] ?? defaultFeedbackLedgerPath,
+      issuePath: args.issue ?? defaultIssuePath,
+      picsDir: args["pics-dir"] ?? defaultPicsDir
+    });
+    if (args.out) await writeText(args.out, result.markdown);
+    if (args["json-out"]) await writeJson(args["json-out"], result.pack);
+    process.stdout.write(result.markdown);
     return;
   }
 

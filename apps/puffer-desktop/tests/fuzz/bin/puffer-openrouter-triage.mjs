@@ -3,6 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { promptEvolutionExcerpt } from "../lib/prompt-evolution.mjs";
+
 const fuzzRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = path.resolve(fuzzRoot, "..", "..", "..", "..");
 const args = parseArgs(process.argv.slice(2));
@@ -24,7 +26,10 @@ const artifacts = {
   top: readOptional(path.join(runDir, "top.md")),
   replay: readOptional(path.join(runDir, "bounded-replay-report.md")),
   replayJson: readOptional(path.join(runDir, "bounded-replay-report.json")),
-  report: readOptional(path.join(runDir, "report.md"))
+  report: readOptional(path.join(runDir, "report.md")),
+  promptEvolution:
+    readOptional(path.join(runDir, "prompt-evolution.md")) ||
+    readOptional(path.join(fuzzRoot, "prompt_evolution.md"))
 };
 const replayData = parseJsonOptional(artifacts.replayJson);
 const replaySummary = replayData?.summary ?? {};
@@ -107,6 +112,7 @@ function buildPrompt({ namespace, shard, seed, model, artifacts }) {
     "Do not emit BUG_LIST_APPEND unless bounded replay reports a new candidate, product candidate, stable failure, or actionable failure.",
     "",
     section("Planner guidance", artifacts.planner),
+    section("Prompt evolution guidance", promptEvolutionExcerpt(artifacts.promptEvolution, 8000)),
     section("Top replay candidates", artifacts.top),
     section("Bounded replay markdown", artifacts.replay),
     section("Bounded replay JSON", artifacts.replayJson),

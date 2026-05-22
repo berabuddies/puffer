@@ -24,20 +24,21 @@ Use this guide when an agent is asked to find Puffer desktop interaction bugs.
 2. Run `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs validate` before using a changed seed.
 3. Run `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs smoke --profile core` when checking a fresh checkout or modified seed set.
 4. Run `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs frontier --profile core` and pick one high-risk uncovered target.
-5. Pick one scheduled shard with high score and respect its owned-node boundary.
-6. Run the seed with 8-20 iterations and 12-20 steps.
-7. Read the report and choose a case with high async coverage.
-8. Select diverse replay candidates with `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs top-cases --input <run.json> --shard <shard-id> --limit 5 --out apps/puffer-desktop/tests/fuzz/.runs/<run>/top.json --report-out apps/puffer-desktop/tests/fuzz/.runs/<run>/top.md`.
-9. Replay them through the isolated bounded loop with `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-replay-loop.mjs --seeds <seed> --shard <shard-id> --limit 5 --attempts 3 --namespace <run> --fail-on-new-finding`.
-10. Record feedback with `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs record-feedback --shard <shard-id> --input apps/puffer-desktop/tests/fuzz/.runs/<run>/bounded-replay-report.json`.
-11. Shrink the case.
-12. Decide whether it is a product bug.
-13. During fuzz-only campaigns, archive confirmed findings under
+5. Generate prompt guidance with `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs evolve-prompt --out apps/puffer-desktop/tests/fuzz/.runs/<run>/prompt-evolution.md`.
+6. Pick one scheduled shard with high score and respect its owned-node boundary.
+7. Run the seed with 8-20 iterations and 12-20 steps.
+8. Read the report and choose a case with high async coverage.
+9. Select diverse replay candidates with `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs top-cases --input <run.json> --shard <shard-id> --limit 5 --out apps/puffer-desktop/tests/fuzz/.runs/<run>/top.json --report-out apps/puffer-desktop/tests/fuzz/.runs/<run>/top.md`.
+10. Replay them through the isolated bounded loop with `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-replay-loop.mjs --seeds <seed> --shard <shard-id> --limit 5 --attempts 3 --namespace <run> --fail-on-new-finding`.
+11. Record feedback with `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs record-feedback --shard <shard-id> --input apps/puffer-desktop/tests/fuzz/.runs/<run>/bounded-replay-report.json`.
+12. Shrink the case.
+13. Decide whether it is a product bug using the prompt-evolution acceptance and false-positive checklist.
+14. During fuzz-only campaigns, archive confirmed findings under
     `apps/puffer-desktop/tests/fuzz/.runs/<run>/findings.md`.
-14. For each accepted finding, include a `BUG_LIST_APPEND` block in the shard
+15. For each accepted finding, include a `BUG_LIST_APPEND` block in the shard
     report so the main agent can append it to `BUGS.md`.
-15. Do not patch product code from a fuzz-only task.
-16. For a later product-fix task, add regression coverage and update or add a
+16. Do not patch product code from a fuzz-only task.
+17. For a later product-fix task, add regression coverage and update or add a
     concise component spec.
 
 ## Shard Ownership
