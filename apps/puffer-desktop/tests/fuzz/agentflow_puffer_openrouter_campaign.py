@@ -36,7 +36,7 @@ import json
 import os
 import subprocess
 
-from agentflow import Graph, claude, fanout, shell
+from agentflow import Graph, fanout, shell
 
 
 REPO_ROOT = "/dsk/hdd/home/llmft/Riema/puffer"
@@ -145,6 +145,98 @@ Do not modify files.
 """
 
 
+FALLBACK_PLANNER_TEXT = f"""\
+# OpenRouter Small-Model UI/UX Fuzz Fallback Plan
+
+Claude Opus planner guidance was unavailable for this round. Continue with this
+deterministic fallback instead of skipping shard execution.
+
+## Scope Boundaries
+
+- Each worker owns only its scheduled shard and the `ownedNodes` recorded in the
+  preflight schedule.
+- `allowedSetupNodes` may be used only to reach the shard start node.
+- Out-of-shard observations must be reported as routing notes, not accepted
+  findings.
+- Prioritize core user loops first: chat composer, turn lifecycle, session
+  switching, permission/question flows, transcript reload, new-agent creation,
+  and provider/model selection.
+- Secondary panes such as Browser, Files, Terminal, Settings, Pipelines, and
+  Workspace are valid when the scheduler assigns them.
+
+## False-Positive Filters
+
+- Reject missing local dependencies, missing auth, missing browser binary,
+  network failures, and fake-daemon fixture gaps.
+- Reject cosmetic layout/copy issues unless they block or corrupt interaction.
+- Reject generated candidates without bounded replay evidence.
+- Reject known duplicates from the replay report or BUGS ledger.
+- Reject disabled controls when a visible recovery path exists.
+- Reject timeouts that do not leave a product-visible stuck or corrupted state.
+
+## Worker Checklist
+
+- Generate candidate UI paths only inside the assigned shard.
+- Combine one visible user action with one async stressor when possible:
+  late success, late failure, duplicate submit, reconnect, stale event, reload,
+  or rapid session switch.
+- Keep candidates materially different by varying the control, timing, or state
+  transition.
+- Run the fixed command sequence from the shard script. Do not patch product
+  code, commit, push, or edit BUGS.md.
+- Promote a finding only when bounded replay provides stable evidence and the
+  issue blocks, duplicates, loses, corrupts, or misroutes a user-visible result.
+
+## Accepted Finding Format
+
+Accepted findings must include title, severity, area/component, seed, replay
+case ID, minimal trigger steps, expected behavior, actual behavior, user impact,
+why this is a product bug, shard ownership, stability, likely source area,
+regression test target, and artifact paths.
+
+Accepted findings must include a BUG_LIST_APPEND block. Workers must not edit
+apps/puffer-desktop/tests/fuzz/BUGS.md directly.
+"""
+
+
+PLAN_SCRIPT = f"""\
+set -euo pipefail
+preflight_dir="apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight"
+mkdir -p "$preflight_dir"
+prompt_file="$preflight_dir/planner-prompt.txt"
+fallback_file="$preflight_dir/fallback-plan.md"
+output_file="$preflight_dir/planner-output.md"
+error_file="$preflight_dir/planner-error.log"
+cat > "$prompt_file" <<'PLANNER_PROMPT_EOF'
+{PLANNER_PROMPT}
+PLANNER_PROMPT_EOF
+cat > "$fallback_file" <<'FALLBACK_PLAN_EOF'
+{FALLBACK_PLANNER_TEXT}
+FALLBACK_PLAN_EOF
+planner_timeout="${{PUFFER_OPENROUTER_CLAUDE_PLAN_TIMEOUT_SECONDS:-120}}"
+if timeout "$planner_timeout" claude \
+  --model "${{PUFFER_OPENROUTER_PLANNER_MODEL:-claude-opus-4-6}}" \
+  --print \
+  --permission-mode plan \
+  --tools Read \
+  < "$prompt_file" \
+  > "$output_file" 2> "$error_file" && [[ -s "$output_file" ]]; then
+  cat "$output_file"
+  echo
+  echo "OPENROUTER_PLAN_OK claude"
+else
+  echo "OPENROUTER_PLAN_FALLBACK"
+  if [[ -s "$error_file" ]]; then
+    echo
+    echo "Claude planner error excerpt:"
+    tail -n 20 "$error_file"
+    echo
+  fi
+  cat "$fallback_file"
+fi
+"""
+
+
 SHARD_SCRIPT = """\
 set -euo pipefail
 out_dir="apps/puffer-desktop/tests/fuzz/.runs/{{ item.namespace }}"
@@ -157,9 +249,17 @@ node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs validate
 node apps/puffer-desktop/tests/fuzz/bin/puffer-openrouter-explorer.mjs --namespace {{ item.namespace }} --shard {{ item.name }} --seed {{ item.seed }} --steps {{ item.steps }} --cases ${PUFFER_OPENROUTER_CASES:-1} --model ${PUFFER_OPENROUTER_MODEL:-inclusionai/ling-2.6-flash} --out "$out_dir/run.json"
 node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs report --input "$out_dir/run.json" --out "$out_dir/report.md"
 node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs top-cases --input "$out_dir/run.json" --shard {{ item.name }} --limit {{ item.replay_limit }} --out "$out_dir/top.json" --report-out "$out_dir/top.md"
+set +e
 node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-replay-loop.mjs --input "$out_dir/run.json" --seeds {{ item.seed }} --shard {{ item.name }} --limit {{ item.replay_limit }} --attempts 2 --timeout 120 --rng-seed {{ item.namespace }} --namespace {{ item.namespace }} --fail-on-new-finding
-node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs record-feedback --shard {{ item.name }} --input "$out_dir/bounded-replay-report.json" --namespace {{ item.namespace }}
-node apps/puffer-desktop/tests/fuzz/bin/puffer-openrouter-triage.mjs --namespace {{ item.namespace }} --shard {{ item.name }} --seed {{ item.seed }} --model ${PUFFER_OPENROUTER_MODEL:-inclusionai/ling-2.6-flash} --out "$out_dir/findings.md"
+replay_status=$?
+set -e
+echo OPENROUTER_REPLAY_STATUS "$replay_status"
+if [[ -s "$out_dir/bounded-replay-report.json" ]]; then
+  node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs record-feedback --shard {{ item.name }} --input "$out_dir/bounded-replay-report.json" --namespace {{ item.namespace }}
+  node apps/puffer-desktop/tests/fuzz/bin/puffer-openrouter-triage.mjs --namespace {{ item.namespace }} --shard {{ item.name }} --seed {{ item.seed }} --model ${PUFFER_OPENROUTER_MODEL:-inclusionai/ling-2.6-flash} --out "$out_dir/findings.md"
+else
+  echo OPENROUTER_REPLAY_REPORT_MISSING {{ item.namespace }}
+fi
 echo OPENROUTER_SHARD_OK {{ item.namespace }}
 """
 
@@ -201,11 +301,11 @@ with Graph(
         success_criteria=[{"kind": "output_contains", "value": "OPENROUTER_PREFLIGHT_OK"}],
     )
 
-    plan = claude(
+    plan = shell(
         task_id="plan",
-        prompt=PLANNER_PROMPT,
-        tools="read_only",
-        timeout_seconds=int(os.environ.get("PUFFER_OPENROUTER_PLANNER_TIMEOUT_SECONDS", "900")),
+        script=PLAN_SCRIPT,
+        timeout_seconds=int(os.environ.get("PUFFER_OPENROUTER_PLAN_NODE_TIMEOUT_SECONDS", "180")),
+        success_criteria=[{"kind": "output_contains", "value": "OPENROUTER_PLAN"}],
     )
 
     run_shard = fanout(

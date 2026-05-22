@@ -234,7 +234,7 @@ async function main() {
   await writeFile(jsonOut, `${JSON.stringify(payload, null, 2)}\n`);
   await writeFile(out, formatMarkdown(payload));
   process.stdout.write(`Report: ${out}\nJSON: ${jsonOut}\n`);
-  process.stdout.write(`Passed: ${summary.passed}, Stable failed: ${summary.stableFailed}, Flaky: ${summary.flaky}, Timeout: ${summary.timeout}, Actionable failures: ${summary.actionableFailures}\n`);
+  process.stdout.write(`Passed: ${summary.passed}, Stable failed: ${summary.stableFailed}, Flaky: ${summary.flaky}, Timeout: ${summary.timeout}, Non-passing failures: ${summary.nonPassingFailures}, Actionable product failures: ${summary.actionableFailures}\n`);
   if ((summary.stableFailed > 0 || summary.flaky > 0 || summary.timeout > 0) && args["fail-on-finding"]) process.exitCode = 2;
   if (summary.actionableFailures > 0 && args["fail-on-new-finding"]) process.exitCode = 2;
 }
@@ -306,6 +306,7 @@ function summarize(results) {
   let knownDuplicateFindings = 0;
   let newCandidateFindings = 0;
   let knownDuplicateFailures = 0;
+  let nonPassingFailures = 0;
   let actionableFailures = 0;
   const byClassification = {};
   for (const item of results) {
@@ -317,7 +318,8 @@ function summarize(results) {
     const classification = item.classification ?? "unknown";
     byClassification[classification] = (byClassification[classification] ?? 0) + 1;
     if (failed && item.knownDuplicate) knownDuplicateFailures += 1;
-    if (failed && !item.knownDuplicate) actionableFailures += 1;
+    if (failed && !item.knownDuplicate) nonPassingFailures += 1;
+    if (failed && !item.knownDuplicate && isActionableReplayFailure(item)) actionableFailures += 1;
     if (failed && classification.startsWith("product-candidate:")) {
       productCandidateFindings += 1;
       if (item.knownDuplicate) knownDuplicateFindings += 1;
@@ -334,9 +336,18 @@ function summarize(results) {
     newCandidateFindings,
     knownDuplicateFindings,
     knownDuplicateFailures,
+    nonPassingFailures,
     actionableFailures,
     byClassification
   };
+}
+
+function isActionableReplayFailure(item) {
+  const classification = item.classification ?? "";
+  if (classification.startsWith("product-candidate:")) return true;
+  if (classification === "needs-manual-triage") return true;
+  if (classification.startsWith("needs-manual-triage:")) return true;
+  return false;
 }
 
 function collectFindings(results, knownBugSignatures = []) {
@@ -422,7 +433,8 @@ function formatMarkdown(payload) {
     `- New product-candidate findings: ${payload.summary.newCandidateFindings ?? 0}`,
     `- Known duplicate findings: ${payload.summary.knownDuplicateFindings ?? 0}`,
     `- Known duplicate failures: ${payload.summary.knownDuplicateFailures ?? 0}`,
-    `- Actionable failures: ${payload.summary.actionableFailures ?? 0}`,
+    `- Non-passing failures: ${payload.summary.nonPassingFailures ?? 0}`,
+    `- Actionable product failures: ${payload.summary.actionableFailures ?? 0}`,
     "",
     "## Classification",
     ""

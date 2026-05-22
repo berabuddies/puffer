@@ -49,6 +49,7 @@ function readShard(dir) {
   const findingsText = fs.existsSync(findingsMd)
     ? fs.readFileSync(findingsMd, "utf8")
     : "";
+  const summary = normalizeShardSummary(data?.summary ?? emptySummary());
   return {
     name,
     dir: relative(dir),
@@ -56,10 +57,32 @@ function readShard(dir) {
     reportMd: relative(reportMd),
     findingsMd: relative(findingsMd),
     missingReplay: data === null,
-    summary: data?.summary ?? emptySummary(),
+    summary,
     findings: data?.findings ?? [],
     bugListAppendBlocks: extractBugListAppendBlocks(findingsText),
     finalReportPresent: findingsText.trim().length > 0
+  };
+}
+
+function normalizeShardSummary(summary) {
+  const byClassification = summary.byClassification ?? {};
+  const nonPassingFailures = Number(
+    summary.nonPassingFailures ??
+    ((summary.total ?? 0) - (summary.passed ?? 0) - (summary.knownDuplicateFailures ?? 0))
+  );
+  const actionableFailures = summary.nonPassingFailures === undefined
+    ? Object.entries(byClassification)
+      .filter(([classification]) =>
+        classification.startsWith("product-candidate:") ||
+        classification === "needs-manual-triage" ||
+        classification.startsWith("needs-manual-triage:")
+      )
+      .reduce((total, [, count]) => total + Number(count ?? 0), 0)
+    : Number(summary.actionableFailures ?? 0);
+  return {
+    ...summary,
+    nonPassingFailures: Math.max(0, nonPassingFailures),
+    actionableFailures: Math.max(0, actionableFailures)
   };
 }
 
@@ -73,6 +96,7 @@ function summarize(shards) {
     totalReplayCases: 0,
     newCandidateFindings: 0,
     knownDuplicateFindings: 0,
+    nonPassingFailures: 0,
     actionableFailures: 0
   };
   for (const shard of shards) {
@@ -86,6 +110,7 @@ function summarize(shards) {
     summary.totalReplayCases += Number(shard.summary.total ?? 0);
     summary.newCandidateFindings += Number(shard.summary.newCandidateFindings ?? 0);
     summary.knownDuplicateFindings += Number(shard.summary.knownDuplicateFindings ?? 0);
+    summary.nonPassingFailures += Number(shard.summary.nonPassingFailures ?? shard.summary.actionableFailures ?? 0);
     summary.actionableFailures += Number(shard.summary.actionableFailures ?? 0);
   }
   return summary;
@@ -96,6 +121,7 @@ function emptySummary() {
     total: 0,
     newCandidateFindings: 0,
     knownDuplicateFindings: 0,
+    nonPassingFailures: 0,
     actionableFailures: 0
   };
 }
@@ -124,7 +150,8 @@ function formatMarkdown(payload) {
     `- Replay cases: ${payload.summary.totalReplayCases}`,
     `- New candidate findings: ${payload.summary.newCandidateFindings}`,
     `- Known duplicate findings: ${payload.summary.knownDuplicateFindings}`,
-    `- Actionable failures: ${payload.summary.actionableFailures}`,
+    `- Non-passing failures: ${payload.summary.nonPassingFailures}`,
+    `- Actionable product failures: ${payload.summary.actionableFailures}`,
     "",
     "## Shards",
     ""
@@ -140,7 +167,8 @@ function formatMarkdown(payload) {
     lines.push(`- Replay cases: ${shard.summary.total ?? 0}`);
     lines.push(`- New candidates: ${shard.summary.newCandidateFindings ?? 0}`);
     lines.push(`- Known duplicates: ${shard.summary.knownDuplicateFindings ?? 0}`);
-    lines.push(`- Actionable failures: ${shard.summary.actionableFailures ?? 0}`);
+    lines.push(`- Non-passing failures: ${shard.summary.nonPassingFailures ?? shard.summary.actionableFailures ?? 0}`);
+    lines.push(`- Actionable product failures: ${shard.summary.actionableFailures ?? 0}`);
     lines.push(`- BUG_LIST_APPEND blocks: ${shard.bugListAppendBlocks.length}`);
     lines.push("");
   }
