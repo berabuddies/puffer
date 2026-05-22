@@ -46,6 +46,8 @@ impl RegisteredTool {
 pub struct ToolRegistry {
     tools: BTreeMap<String, RegisteredTool>,
     aliases: BTreeMap<String, String>,
+    internal_tools: BTreeMap<String, RegisteredTool>,
+    internal_aliases: BTreeMap<String, String>,
     has_mcp_resource_servers: bool,
 }
 
@@ -67,6 +69,13 @@ impl ToolRegistry {
                 .iter()
                 .filter_map(|item| definition_from_spec(&item.value)),
         );
+        for definition in resources
+            .internal_tools
+            .iter()
+            .filter_map(|item| definition_from_spec(&item.value))
+        {
+            let _ = registry.register_internal(definition);
+        }
         registry.has_mcp_resource_servers =
             !resources.mcp_servers.is_empty() || !plugin_mcp_servers(resources).is_empty();
         if let Some(tool) = registry.tools.get_mut("Agent") {
@@ -128,10 +137,22 @@ impl ToolRegistry {
     pub fn register(&mut self, definition: ToolDefinition) -> Result<()> {
         let runtime = runtime_from_definition(&definition)?;
         let canonical_id = definition.id.clone();
-        for alias in &definition.aliases {
-            self.aliases.insert(alias.clone(), canonical_id.clone());
-        }
+        register_aliases(&mut self.aliases, &definition);
         self.tools.insert(
+            canonical_id,
+            RegisteredTool {
+                spec: definition,
+                runtime,
+            },
+        );
+        Ok(())
+    }
+
+    fn register_internal(&mut self, definition: ToolDefinition) -> Result<()> {
+        let runtime = runtime_from_definition(&definition)?;
+        let canonical_id = definition.id.clone();
+        register_aliases(&mut self.internal_aliases, &definition);
+        self.internal_tools.insert(
             canonical_id,
             RegisteredTool {
                 spec: definition,
@@ -161,12 +182,14 @@ impl ToolRegistry {
         self.tools.values()
     }
 
+    /// Returns all registered internal tools in stable id order.
+    pub fn internal_tools(&self) -> impl Iterator<Item = &RegisteredTool> {
+        self.internal_tools.values()
+    }
+
     /// Returns all model-facing tool definitions in stable id order.
     pub fn definitions(&self) -> impl Iterator<Item = &ToolDefinition> {
-        self.tools
-            .values()
-            .map(RegisteredTool::definition)
-            .filter(|definition| tool_definition_is_model_visible(definition))
+        self.tools.values().map(RegisteredTool::definition)
     }
 
     /// Looks up a registered tool by id.
@@ -181,6 +204,20 @@ impl ToolRegistry {
     /// Looks up a model-facing tool definition by id.
     pub fn definition(&self, tool_id: &str) -> Option<&ToolDefinition> {
         self.tool(tool_id).map(RegisteredTool::definition)
+    }
+
+    /// Looks up an internal tool by id.
+    pub fn internal_tool(&self, tool_id: &str) -> Option<&RegisteredTool> {
+        self.internal_tools.get(tool_id).or_else(|| {
+            self.internal_aliases
+                .get(tool_id)
+                .and_then(|canonical_id| self.internal_tools.get(canonical_id))
+        })
+    }
+
+    /// Looks up an internal tool definition by id.
+    pub fn internal_definition(&self, tool_id: &str) -> Option<&ToolDefinition> {
+        self.internal_tool(tool_id).map(RegisteredTool::definition)
     }
 
     /// Executes a registered tool by id with typed input.
@@ -268,14 +305,17 @@ fn definition_from_spec(spec: &ToolSpec) -> Option<ToolDefinition> {
     Some(definition)
 }
 
-fn tool_definition_is_model_visible(definition: &ToolDefinition) -> bool {
-    definition.handler != "runtime:browser"
-}
-
 fn puffer_builtin_browser_disabled() -> bool {
     std::env::var("PUFFER_NO_BROWSER")
         .ok()
         .is_some_and(|value| enabled_if_value_disables_tool(&value) || value.trim() == "1")
+}
+
+fn register_aliases(aliases: &mut BTreeMap<String, String>, definition: &ToolDefinition) {
+    let canonical_id = definition.id.clone();
+    for alias in &definition.aliases {
+        aliases.insert(alias.clone(), canonical_id.clone());
+    }
 }
 
 fn parse_mcp_input_schema(schema: Option<&serde_json::Value>) -> ToolInputSchema {

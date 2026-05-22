@@ -48,7 +48,7 @@ pub struct PermissionPromptReviewPayload {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserPermissionPromptSource {
     BrowserTool,
-    BrowserCliViaShell,
+    BrowserInternalTool,
 }
 
 /// Identifies one stable Browser action-set bucket shown in permission prompts.
@@ -180,7 +180,7 @@ fn browser_prompt_payload(
     );
     let source = match canonical_tool_name(&definition.id).as_str() {
         "browser" => BrowserPermissionPromptSource::BrowserTool,
-        _ => BrowserPermissionPromptSource::BrowserCliViaShell,
+        _ => BrowserPermissionPromptSource::BrowserInternalTool,
     };
     let action_set = match context.action {
         Some(BrowserActionCategory::Inspect) => BrowserPermissionPromptActionSet::Inspect,

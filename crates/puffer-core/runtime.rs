@@ -34,6 +34,7 @@ pub mod errors;
 mod filesystem_access;
 pub mod goals;
 mod hook_support;
+pub(crate) mod internal_tool_permissions;
 mod local_tools;
 pub mod mcp_discovery;
 mod microcompact;

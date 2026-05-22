@@ -311,10 +311,12 @@ fn append_resource_section(
     writeln!(text, "Resources:")?;
     writeln!(
         text,
-        "- prompts={} tools={} executable_tools={} skills={} plugins={} mcp_servers={} ides={} hooks={}",
+        "- prompts={} tools={} internal_tools={} executable_tools={} internal_executable_tools={} skills={} plugins={} mcp_servers={} ides={} hooks={}",
         resources.prompts.len(),
         resources.tools.len(),
+        resources.internal_tools.len(),
         tool_registry.tools().count(),
+        tool_registry.internal_tools().count(),
         resources.skills.len(),
         resources.plugins.len(),
         resources.mcp_servers.len(),

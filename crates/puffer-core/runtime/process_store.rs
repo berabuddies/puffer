@@ -32,13 +32,8 @@ impl ProcessEntry {
     pub fn write_stdin(&mut self, data: &[u8]) -> io::Result<()> {
         #[cfg(unix)]
         if let Some(master_fd) = self.pty_master_fd {
-            let written = unsafe {
-                libc::write(
-                    master_fd,
-                    data.as_ptr() as *const libc::c_void,
-                    data.len(),
-                )
-            };
+            let written =
+                unsafe { libc::write(master_fd, data.as_ptr() as *const libc::c_void, data.len()) };
             if written < 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -273,6 +268,7 @@ pub(crate) fn spawn_pty_process(
     process_id: i32,
     store_buffer: Arc<Mutex<HeadTailBuffer>>,
     store_exit: Arc<Mutex<Option<i32>>>,
+    envs: &[(&str, String)],
 ) -> io::Result<ProcessEntry> {
     use std::os::unix::process::CommandExt;
 
@@ -285,7 +281,15 @@ pub(crate) fn spawn_pty_process(
         ws_ypixel: 0,
     };
 
-    let ret = unsafe { libc::openpty(&mut master_fd, &mut slave_fd, std::ptr::null_mut(), std::ptr::null_mut(), &mut ws) };
+    let ret = unsafe {
+        libc::openpty(
+            &mut master_fd,
+            &mut slave_fd,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut ws,
+        )
+    };
     if ret != 0 {
         return Err(io::Error::last_os_error());
     }
@@ -293,6 +297,9 @@ pub(crate) fn spawn_pty_process(
     let shell = puffer_tools::detected_shell();
     let mut cmd = std::process::Command::new(shell);
     cmd.arg("-lc").arg(command).current_dir(cwd);
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
 
     // Each Stdio::from_raw_fd takes ownership, so dup the slave for stdout/stderr.
     let slave_stdout = unsafe { libc::dup(slave_fd) };
@@ -300,8 +307,12 @@ pub(crate) fn spawn_pty_process(
     if slave_stdout < 0 || slave_stderr < 0 {
         unsafe {
             libc::close(slave_fd);
-            if slave_stdout >= 0 { libc::close(slave_stdout); }
-            if slave_stderr >= 0 { libc::close(slave_stderr); }
+            if slave_stdout >= 0 {
+                libc::close(slave_stdout);
+            }
+            if slave_stderr >= 0 {
+                libc::close(slave_stderr);
+            }
             libc::close(master_fd);
         }
         return Err(io::Error::last_os_error());
@@ -374,16 +385,20 @@ pub(crate) fn spawn_pipe_process(
     process_id: i32,
     store_buffer: Arc<Mutex<HeadTailBuffer>>,
     store_exit: Arc<Mutex<Option<i32>>>,
+    envs: &[(&str, String)],
 ) -> io::Result<ProcessEntry> {
     let shell = puffer_tools::detected_shell();
-    let mut child = std::process::Command::new(shell)
-        .arg("-lc")
+    let mut cmd = std::process::Command::new(shell);
+    cmd.arg("-lc")
         .arg(command)
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+    let mut child = cmd.spawn()?;
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -423,8 +438,6 @@ pub(crate) fn spawn_pipe_process(
     // The child handle must move into the waiter thread so it can call wait().
     // We keep stdin alive in the entry for write_stdin support.
     let stdin = child.stdin.take();
-    let child_id = child.id();
-
     std::thread::spawn(move || {
         let status = child.wait();
         let code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
@@ -452,17 +465,27 @@ pub(crate) fn spawn_tracked_process(
     process_id: i32,
     tty: bool,
 ) -> io::Result<ProcessEntry> {
+    spawn_tracked_process_with_env(command, cwd, process_id, tty, Vec::new())
+}
+
+/// Spawns a tracked shell process with extra environment variables.
+pub(crate) fn spawn_tracked_process_with_env(
+    command: &str,
+    cwd: &std::path::Path,
+    process_id: i32,
+    tty: bool,
+    envs: Vec<(&'static str, String)>,
+) -> io::Result<ProcessEntry> {
     let buffer = Arc::new(Mutex::new(HeadTailBuffer::default()));
     let exit_code = Arc::new(Mutex::new(None));
 
     #[cfg(unix)]
     if tty {
-        return spawn_pty_process(command, cwd, process_id, buffer, exit_code);
+        return spawn_pty_process(command, cwd, process_id, buffer, exit_code, &envs);
     }
 
-    spawn_pipe_process(command, cwd, process_id, buffer, exit_code)
+    spawn_pipe_process(command, cwd, process_id, buffer, exit_code, &envs)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -553,6 +576,7 @@ mod tests {
             9999,
             buffer,
             exit_code,
+            &[],
         )
         .unwrap();
 
@@ -576,12 +600,13 @@ mod tests {
         let buffer = Arc::new(Mutex::new(HeadTailBuffer::default()));
         let exit_code = Arc::new(Mutex::new(None));
 
-        let mut entry = spawn_pipe_process(
+        let entry = spawn_pipe_process(
             "printf 'pipe-test'",
             temp.path(),
             8888,
             buffer,
             exit_code,
+            &[],
         )
         .unwrap();
 

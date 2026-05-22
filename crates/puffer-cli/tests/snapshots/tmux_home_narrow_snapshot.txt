@@ -1,11 +1,11 @@
 ╭ Puffer Code ─────────────────────────────────────────────────────────╮
 │Account   anthropic via API key                                       │
-│Model     anthropic/claude-sonnet-4-5 · tools 51/59                   │
+│Model     anthropic/claude-sonnet-4-5 · tools 55/63                   │
 │Session   session-<id><id>│
 │Mode      effort auto                                                 │
-│Context   dockyard · 0 msgs · 0 wds · sandbox workspace-write · 100...│
+│Context   dockyard · 0 msgs · 0 wds · permissions ACL · 100% left     │
 ╰──────────────────────────────────────────────────────────────────────╯
 
 ────────────────────────────────────────────────────────────────────────
 ❯ Review changes, ask a question, or type /
-anthropic/claude-sonnet-4-5 · 100% left · ~/dockyard · sandbox workspace
+anthropic/claude-sonnet-4-5 · 100% left · ~/dockyard

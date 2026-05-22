@@ -5,6 +5,7 @@ mod benchmark_reflection;
 mod benchmark_run;
 mod browser;
 mod browser_args;
+mod browser_output;
 mod cli_args;
 mod command_surface;
 mod connectors;
@@ -266,6 +267,7 @@ fn main() -> Result<()> {
                 serde_json::to_string_pretty(&serde_json::json!({
                     "prompts": resources.prompts,
                     "tools": resources.tools,
+                    "internal_tools": resources.internal_tools,
                     "skills": resources.skills,
                     "plugins": resources.plugins,
                     "mcp_servers": resources.mcp_servers,

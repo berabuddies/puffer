@@ -806,9 +806,10 @@ fn execute_local_command(
             );
             let _ = writeln!(
                 &mut text,
-                "\nResource counts: prompts={} tools={} skills={} plugins={} mcp_servers={} ides={}",
+                "\nResource counts: prompts={} tools={} internal_tools={} skills={} plugins={} mcp_servers={} ides={}",
                 resources.prompts.len(),
                 resources.tools.len(),
+                resources.internal_tools.len(),
                 resources.skills.len(),
                 resources.plugins.len(),
                 resources.mcp_servers.len(),

@@ -85,6 +85,11 @@ pub(crate) fn run_doctor_command(
         auth_store.provider_ids().count()
     );
     let _ = writeln!(&mut text, "tools={}", resources.tools.len());
+    let _ = writeln!(
+        &mut text,
+        "internal_tools={}",
+        resources.internal_tools.len()
+    );
     let _ = writeln!(&mut text, "prompts={}", resources.prompts.len());
     let _ = writeln!(&mut text, "skills={}", resources.skills.len());
     let _ = writeln!(&mut text, "plugins={}", resources.plugins.len());

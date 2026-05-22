@@ -42,10 +42,10 @@ pub use model_preferences::{
     default_effort_level, effort_level_is_supported, normalized_effort_level,
     provider_preference_family, supported_effort_levels, ModelPreferenceFamily,
 };
+pub use permissions::browser_action_set_for_action;
 pub use permissions::is_browser_tool_selector;
 pub use permissions::BrowserActionSet;
 pub use permissions::SessionPermissionState;
-pub use permissions::{browser_action_set_for_action, browser_action_set_for_shell_command};
 pub use plan_mode::enter_plan_mode;
 pub use runtime::background_tasks;
 pub use runtime::claude_tools::execute_workflow_tool;

@@ -3,9 +3,9 @@ name: Browser
 aliases:
   - browser
 description: |-
-  Internal CLI-only Browser surface retained for resource provenance. Browser
-  is not advertised as a model tool; agents should use the `browser` skill and
-  run `puffer internal-tool browser ...` through Bash instead.
+  Internal CLI-only Browser surface. Agents should use the `browser` skill and
+  run `puffer internal-tool browser ...` through Bash instead of receiving this
+  as a provider tool call.
 handler: runtime:browser
 approval_policy: auto
 sandbox_policy: workspace-write

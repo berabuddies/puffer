@@ -39,6 +39,39 @@ fn workspace_builtin_tool_resources() -> LoadedResources {
     }
 }
 
+fn workspace_builtin_internal_tool_resources() -> LoadedResources {
+    let tools_dir =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/internal_tools");
+    let mut tool_paths = fs::read_dir(&tools_dir)
+        .expect("read builtin internal tool dir")
+        .map(|entry| entry.expect("directory entry").path())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("yaml"))
+        .collect::<Vec<_>>();
+    tool_paths.sort();
+
+    let internal_tools = tool_paths
+        .into_iter()
+        .map(|path| {
+            let spec = serde_yaml::from_str::<ToolSpec>(
+                &fs::read_to_string(&path).expect("read builtin internal tool resource"),
+            )
+            .expect("parse builtin internal tool resource");
+            LoadedItem {
+                value: spec,
+                source_info: SourceInfo {
+                    path,
+                    kind: SourceKind::Builtin,
+                },
+            }
+        })
+        .collect();
+
+    LoadedResources {
+        internal_tools,
+        ..LoadedResources::default()
+    }
+}
+
 fn browser_tool_spec() -> ToolSpec {
     ToolSpec {
         id: "Browser".to_string(),
@@ -62,7 +95,7 @@ fn puffer_no_browser_disables_builtin_browser_tool() {
     let _guard = ENV_LOCK.lock().unwrap();
     std::env::set_var("PUFFER_NO_BROWSER", "1");
     let resources = LoadedResources {
-        tools: vec![LoadedItem {
+        internal_tools: vec![LoadedItem {
             value: browser_tool_spec(),
             source_info: SourceInfo {
                 path: PathBuf::from("browser.yaml"),
@@ -76,17 +109,19 @@ fn puffer_no_browser_disables_builtin_browser_tool() {
 
     assert!(registry.tool("Browser").is_none());
     assert!(registry.tool("browser").is_none());
+    assert!(registry.internal_tool("Browser").is_none());
+    assert!(registry.internal_tool("browser").is_none());
     assert!(!registry
         .definitions()
         .any(|definition| definition.id == "Browser"));
 }
 
 #[test]
-fn puffer_browser_tool_stays_internal_even_when_browser_daemon_enabled() {
+fn puffer_browser_internal_tool_is_not_model_visible() {
     let _guard = ENV_LOCK.lock().unwrap();
     std::env::remove_var("PUFFER_NO_BROWSER");
     let resources = LoadedResources {
-        tools: vec![LoadedItem {
+        internal_tools: vec![LoadedItem {
             value: browser_tool_spec(),
             source_info: SourceInfo {
                 path: PathBuf::from("browser.yaml"),
@@ -97,8 +132,10 @@ fn puffer_browser_tool_stays_internal_even_when_browser_daemon_enabled() {
     };
     let registry = ToolRegistry::from_resources(&resources);
 
-    assert!(registry.tool("Browser").is_some());
-    assert!(registry.tool("browser").is_some());
+    assert!(registry.tool("Browser").is_none());
+    assert!(registry.tool("browser").is_none());
+    assert!(registry.internal_tool("Browser").is_some());
+    assert!(registry.internal_tool("browser").is_some());
     assert!(!registry
         .definitions()
         .any(|definition| definition.id == "Browser"));
@@ -115,7 +152,6 @@ fn workspace_builtin_tool_resources_are_registerable() {
         .iter()
         .filter_map(|item| definition_from_spec(&item.value))
         .map(|definition| definition.id)
-        .filter(|id| id != "Browser")
         .collect::<BTreeSet<_>>();
     let registered = registry
         .definitions()
@@ -132,4 +168,33 @@ fn workspace_builtin_tool_resources_are_registerable() {
     );
     assert!(registry.definition("Sleep").is_some());
     assert!(!registered.contains("Browser"));
+}
+
+#[test]
+fn workspace_builtin_internal_tool_resources_are_registerable() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    std::env::remove_var("PUFFER_NO_BROWSER");
+    let resources = workspace_builtin_internal_tool_resources();
+    let registry = ToolRegistry::from_resources(&resources);
+    let expected = resources
+        .internal_tools
+        .iter()
+        .filter_map(|item| definition_from_spec(&item.value))
+        .map(|definition| definition.id)
+        .collect::<BTreeSet<_>>();
+    let registered = registry
+        .internal_tools()
+        .map(|tool| tool.definition().id.clone())
+        .collect::<BTreeSet<_>>();
+    let missing = expected
+        .difference(&registered)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    assert!(
+        missing.is_empty(),
+        "builtin resources produced unsupported internal tool registrations: {missing:?}"
+    );
+    assert!(registry.internal_definition("Browser").is_some());
+    assert!(registry.definition("Browser").is_none());
 }

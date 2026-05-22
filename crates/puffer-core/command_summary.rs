@@ -87,7 +87,15 @@ pub(crate) fn render_status_summary(
     sections.push(String::from("Resource status"));
     sections.push(format!("Supported commands: {}", commands.len()));
     sections.push(format!("Executable tools: {}", registry.tools().count()));
+    sections.push(format!(
+        "Executable internal tools: {}",
+        registry.internal_tools().count()
+    ));
     sections.push(format!("Loaded tools: {}", resources.tools.len()));
+    sections.push(format!(
+        "Loaded internal tools: {}",
+        resources.internal_tools.len()
+    ));
     sections.push(format!("Prompts: {}", resources.prompts.len()));
     sections.push(format!("Skills: {}", resources.skills.len()));
     sections.push(format!("Plugins: {}", resources.plugins.len()));
@@ -343,6 +351,7 @@ fn runtime_summary_lines(
         format!("Providers with discovery: {providers_with_discovery}"),
         format!("Prompts: {}", resources.prompts.len()),
         format!("Tools: {}", resources.tools.len()),
+        format!("Internal tools: {}", resources.internal_tools.len()),
         format!("Skills: {}", resources.skills.len()),
         format!("Plugins: {}", resources.plugins.len()),
         format!("Hooks: {}", resources.hooks.len()),

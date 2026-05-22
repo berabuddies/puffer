@@ -22,9 +22,7 @@ use super::RequestToolFilter;
 use crate::permissions::acl::{
     append_allow_all_rule, append_allow_bash_rule, append_allow_browser_rule,
 };
-use crate::permissions::browser_action::{
-    attach_browser_permission_value, browser_permission_value_for_tool_call,
-};
+use crate::permissions::browser_action::browser_permission_value_for_tool_call;
 use crate::permissions::browser_grants::BrowserGrantScopeKind;
 use crate::permissions::browser_target::browser_permission_context_for_tool;
 use crate::permissions::{
@@ -219,7 +217,7 @@ fn successful_runtime_tool(tool_id: &str, stdout: String) -> ToolExecutionResult
 pub(super) fn is_parallel_safe_tool(tool_id: &str) -> bool {
     matches!(
         tool_id,
-        "Glob" | "Grep" | "WebFetch" | "WebSearch" | "ToolSearch" | "Skill" | "Bash"
+        "Glob" | "Grep" | "WebFetch" | "WebSearch" | "ToolSearch" | "Skill"
     )
 }
 
@@ -529,7 +527,7 @@ fn prepare_browser_permission_input(
     state: &AppState,
     cwd: &Path,
     definition: &puffer_tools::ToolDefinition,
-    mut input: Value,
+    input: Value,
 ) -> Result<Value> {
     if let Some(browser_input) = browser_permission_value_for_tool_call(&definition.id, &input) {
         let raw_action = browser_input
@@ -573,8 +571,6 @@ fn prepare_browser_permission_input(
         if canonical_tool_name(&definition.id) == "browser" {
             return Ok(enriched);
         }
-        let _ = attach_browser_permission_value(&mut input, enriched);
-        return Ok(input);
     }
     Ok(input)
 }
@@ -699,7 +695,16 @@ fn execute_legacy_builtin_alias(
             let Some(path) = input.get("path").and_then(Value::as_str) else {
                 return Err(anyhow!("read_file requires path"));
             };
-            mapped.insert("file_path".to_string(), Value::String(path.to_string()));
+            let requested = Path::new(path);
+            let file_path = if requested.is_absolute() {
+                requested.to_path_buf()
+            } else {
+                cwd.join(requested)
+            };
+            mapped.insert(
+                "file_path".to_string(),
+                Value::String(file_path.to_string_lossy().into_owned()),
+            );
             if let Some(offset) = input.get("offset") {
                 mapped.insert("offset".to_string(), offset.clone());
             }

@@ -2168,7 +2168,7 @@ fn browser_permission_payload_json(payload: &puffer_core::BrowserPermissionPromp
     json!({
         "source": match payload.source {
             BrowserPermissionPromptSource::BrowserTool => "browser_tool",
-            BrowserPermissionPromptSource::BrowserCliViaShell => "browser_cli_via_shell",
+            BrowserPermissionPromptSource::BrowserInternalTool => "browser_internal_tool",
         },
         "actionSet": match payload.action_set {
             BrowserPermissionPromptActionSet::Inspect => "inspect",

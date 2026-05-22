@@ -8,6 +8,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+use super::bash_internal_permissions::{InternalPermissionBroker, InternalPermissionHandler};
+use puffer_tools::internal_permissions::INTERNAL_PERMISSION_REQUIRED_ENV;
+
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
 
@@ -128,9 +131,22 @@ pub fn execute_from_value(
         &std::sync::Arc<std::sync::Mutex<crate::runtime::process_store::ProcessStore>>,
     >,
 ) -> Result<ClaudeBashExecution> {
+    execute_from_value_with_internal_permissions(cwd, session_id, input, process_store, None)
+}
+
+/// Parses JSON input and executes Bash with an internal tool permission callback.
+pub(crate) fn execute_from_value_with_internal_permissions(
+    cwd: &Path,
+    session_id: &Uuid,
+    input: Value,
+    process_store: Option<
+        &std::sync::Arc<std::sync::Mutex<crate::runtime::process_store::ProcessStore>>,
+    >,
+    internal_permissions: Option<&mut InternalPermissionHandler<'_>>,
+) -> Result<ClaudeBashExecution> {
     let typed: ClaudeBashInput =
         serde_json::from_value(input).context("invalid Bash tool input payload")?;
-    execute(cwd, session_id, typed, process_store)
+    execute_with_internal_permissions(cwd, session_id, typed, process_store, internal_permissions)
 }
 
 /// Executes a Claude-style `Bash` tool invocation in the provided working directory.
@@ -142,22 +158,36 @@ pub fn execute(
         &std::sync::Arc<std::sync::Mutex<crate::runtime::process_store::ProcessStore>>,
     >,
 ) -> Result<ClaudeBashExecution> {
+    execute_with_internal_permissions(cwd, session_id, input, process_store, None)
+}
+
+fn execute_with_internal_permissions(
+    cwd: &Path,
+    session_id: &Uuid,
+    input: ClaudeBashInput,
+    process_store: Option<
+        &std::sync::Arc<std::sync::Mutex<crate::runtime::process_store::ProcessStore>>,
+    >,
+    internal_permissions: Option<&mut InternalPermissionHandler<'_>>,
+) -> Result<ClaudeBashExecution> {
     if input.tty {
         if let Some(store) = process_store {
-            return execute_interactive(cwd, &input, store);
+            return execute_interactive(cwd, &input, store, internal_permissions);
         }
     }
     if input.run_in_background {
-        return execute_background(cwd, session_id, input);
+        return execute_background(cwd, session_id, input, internal_permissions.is_some());
     }
-    execute_foreground(cwd, input)
+    execute_foreground(cwd, input, internal_permissions)
 }
 
 fn execute_interactive(
     cwd: &Path,
     input: &ClaudeBashInput,
     store: &std::sync::Arc<std::sync::Mutex<crate::runtime::process_store::ProcessStore>>,
+    mut internal_permissions: Option<&mut InternalPermissionHandler<'_>>,
 ) -> Result<ClaudeBashExecution> {
+    let mut broker = InternalPermissionBroker::start(internal_permissions.is_some())?;
     let timeout_ms = input
         .timeout
         .unwrap_or_else(resolved_default_timeout_ms)
@@ -167,9 +197,14 @@ fn execute_interactive(
     let process_id = {
         let mut guard = store.lock().unwrap();
         let pid = guard.allocate_id();
-        let entry =
-            crate::runtime::process_store::spawn_tracked_process(&input.command, cwd, pid, true)
-                .with_context(|| format!("failed to spawn PTY process in {}", cwd.display()))?;
+        let entry = crate::runtime::process_store::spawn_tracked_process_with_env(
+            &input.command,
+            cwd,
+            pid,
+            true,
+            broker.envs(),
+        )
+        .with_context(|| format!("failed to spawn PTY process in {}", cwd.display()))?;
         guard.insert(entry);
         pid
     };
@@ -188,6 +223,7 @@ fn execute_interactive(
                 break;
             }
         }
+        broker.drain_pending(internal_permissions.as_deref_mut())?;
         if Instant::now() >= deadline {
             break;
         }
@@ -231,6 +267,7 @@ fn execute_background(
     cwd: &Path,
     session_id: &Uuid,
     input: ClaudeBashInput,
+    internal_permission_required: bool,
 ) -> Result<ClaudeBashExecution> {
     let output_dir = shell_output_dir(cwd)?;
     let pending_output_file =
@@ -244,20 +281,23 @@ fn execute_background(
     let stderr = stdout
         .try_clone()
         .with_context(|| format!("failed to clone {}", pending_output_file.display()))?;
-    let mut child = Command::new(puffer_tools::detected_shell())
+    let mut command = Command::new(puffer_tools::detected_shell());
+    command
         .arg("-lc")
         .arg(&input.command)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
-        .spawn()
-        .with_context(|| {
-            format!(
-                "failed to start background bash command in {}",
-                cwd.display()
-            )
-        })?;
+        .stderr(Stdio::from(stderr));
+    if internal_permission_required {
+        command.env(INTERNAL_PERMISSION_REQUIRED_ENV, "1");
+    }
+    let mut child = command.spawn().with_context(|| {
+        format!(
+            "failed to start background bash command in {}",
+            cwd.display()
+        )
+    })?;
     let pid = child.id();
     let task_id = format!("shell-{}", pid);
     let subject = tool_description(&input);
@@ -310,13 +350,17 @@ fn execute_background(
     })
 }
 
-fn execute_foreground(cwd: &Path, input: ClaudeBashInput) -> Result<ClaudeBashExecution> {
+fn execute_foreground(
+    cwd: &Path,
+    input: ClaudeBashInput,
+    internal_permissions: Option<&mut InternalPermissionHandler<'_>>,
+) -> Result<ClaudeBashExecution> {
     let timeout_ms = input
         .timeout
         .unwrap_or_else(resolved_default_timeout_ms)
         .clamp(1, resolved_max_timeout_ms());
     let command = input.command.clone();
-    let timed = run_bash_command(cwd, &command, timeout_ms)?;
+    let timed = run_bash_command(cwd, &command, timeout_ms, internal_permissions)?;
     let mut stderr = String::from_utf8_lossy(&timed.output.stderr).to_string();
     if timed.timed_out {
         if !stderr.trim().is_empty() {
@@ -378,17 +422,29 @@ fn shell_output_path(cwd: &Path, pid: u32) -> Result<std::path::PathBuf> {
     Ok(shell_output_dir(cwd)?.join(format!("shell-{pid}.log")))
 }
 
-fn run_bash_command(cwd: &Path, command: &str, timeout_ms: u64) -> Result<TimedCommandOutput> {
-    let mut child = Command::new(puffer_tools::detected_shell())
+fn run_bash_command(
+    cwd: &Path,
+    command: &str,
+    timeout_ms: u64,
+    mut internal_permissions: Option<&mut InternalPermissionHandler<'_>>,
+) -> Result<TimedCommandOutput> {
+    let mut broker = InternalPermissionBroker::start(internal_permissions.is_some())?;
+    let mut command_builder = Command::new(puffer_tools::detected_shell());
+    command_builder
         .arg("-lc")
         .arg(command)
         .current_dir(cwd)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in broker.envs() {
+        command_builder.env(key, value);
+    }
+    let mut child = command_builder
         .spawn()
         .with_context(|| format!("failed to execute bash command in {}", cwd.display()))?;
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     loop {
+        broker.drain_pending(internal_permissions.as_deref_mut())?;
         if child
             .try_wait()
             .with_context(|| format!("failed to poll bash command in {}", cwd.display()))?

@@ -23,9 +23,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-pub use self::browser_action::{
-    browser_action_set_for_action, browser_action_set_for_shell_command, BrowserActionSet,
-};
+pub use self::browser_action::{browser_action_set_for_action, BrowserActionSet};
 pub(crate) use self::execution::{DerivedPermissionPolicy, FilesystemPermissionPolicy};
 pub use profile::SessionPermissionState;
 pub(crate) use profile::{
@@ -281,15 +279,6 @@ impl RuntimePermissionContext {
             }
             return Some(tool_decision_from_acl(decision));
         }
-        if let Some(reason) = browser_action::ambiguous_browser_shell_command_reason_for_tool_call(
-            &definition.id,
-            input,
-        ) {
-            return Some(ToolPermissionDecision {
-                behavior: ToolPermissionBehavior::Ask,
-                reason: Some(reason.to_string()),
-            });
-        }
         if let Some(reason) = shell_sandbox_reason(input, &self.sandbox) {
             return Some(ToolPermissionDecision {
                 behavior: ToolPermissionBehavior::Ask,
@@ -442,12 +431,6 @@ impl RuntimePermissionContext {
     fn approval_reason(&self, definition: &ToolDefinition, input: &Value) -> Option<String> {
         if let Some(reason) = shell_sandbox_reason(input, &self.sandbox) {
             return Some(reason);
-        }
-        if let Some(reason) = browser_action::ambiguous_browser_shell_command_reason_for_tool_call(
-            &definition.id,
-            input,
-        ) {
-            return Some(reason.to_string());
         }
         if let Some(reason) = shell_command_reason(definition, input) {
             return Some(reason);

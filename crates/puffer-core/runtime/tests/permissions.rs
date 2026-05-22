@@ -57,11 +57,11 @@ fn browser_policy_is_loaded_from_permissions_file_browser_section() {
     let mut state = state();
     state.cwd = temp.path().to_path_buf();
     let resources = LoadedResources {
-        tools: vec![loaded_tool("Browser", "Browser", "runtime:browser")],
+        internal_tools: vec![loaded_tool("Browser", "Browser", "runtime:browser")],
         ..LoadedResources::default()
     };
     let registry = ToolRegistry::from_resources(&resources);
-    let definition = registry.definition("Browser").unwrap();
+    let definition = registry.internal_definition("Browser").unwrap();
     let permission_context =
         load_runtime_permission_context(&state.cwd, &resources, &state).unwrap();
 
@@ -317,7 +317,7 @@ fn destructive_shell_command_requires_approval_even_without_unsandboxed_override
 }
 
 #[test]
-fn shell_browser_commands_reuse_browser_permission_backend() {
+fn shell_browser_commands_use_shell_permission_backend() {
     let temp = tempfile::tempdir().unwrap();
     let paths = ConfigPaths::discover(temp.path());
     ensure_workspace_dirs(&paths).unwrap();
@@ -344,15 +344,14 @@ fn shell_browser_commands_reuse_browser_permission_backend() {
     );
 
     assert_eq!(decision.behavior, ToolPermissionBehavior::Ask);
-    let reason = decision.reason.unwrap_or_default();
-    assert!(
-        reason.contains("browser")
-            && (reason.contains("JavaScript") || reason.contains("page context"))
+    assert_eq!(
+        decision.reason.as_deref(),
+        Some("shell command `puffer` requires approval")
     );
 }
 
 #[test]
-fn shell_browser_commands_reuse_existing_browser_grants() {
+fn browser_grants_do_not_authorize_shell_browser_commands() {
     let temp = tempfile::tempdir().unwrap();
     let paths = ConfigPaths::discover(temp.path());
     ensure_workspace_dirs(&paths).unwrap();
@@ -362,16 +361,20 @@ fn shell_browser_commands_reuse_existing_browser_grants() {
     let mut bash_tool = loaded_tool("Bash", "Run shell", "runtime:claude_bash");
     bash_tool.value.approval_policy = Some("on-request".to_string());
     bash_tool.value.sandbox_policy = Some("workspace-write".to_string());
+    let browser_tool = loaded_tool("Browser", "Browser", "runtime:browser");
     let resources = LoadedResources {
         tools: vec![bash_tool],
+        internal_tools: vec![browser_tool],
         ..LoadedResources::default()
     };
     let registry = ToolRegistry::from_resources(&resources);
-    let definition = registry.definition("Bash").unwrap();
+    let bash_definition = registry.definition("Bash").unwrap();
+    let browser_definition = registry.internal_definition("Browser").unwrap();
     state.allow_browser_permission_for_tool_call(
-        definition,
+        browser_definition,
         &json!({
-            "command":"puffer browser evaluate --tab-id t7 document.title"
+            "action":"snapshot",
+            "tabId":"t7"
         }),
         crate::permissions::browser_grants::BrowserGrantScopeKind::AllowTabSession,
     );
@@ -385,17 +388,21 @@ fn shell_browser_commands_reuse_existing_browser_grants() {
         .contains_key("bash"));
 
     let decision = permission_context.decision_for_tool_call(
-        definition,
+        bash_definition,
         &json!({
             "command":"puffer browser snapshot --tab-id t7"
         }),
     );
 
-    assert_eq!(decision.behavior, ToolPermissionBehavior::Allow);
+    assert_eq!(decision.behavior, ToolPermissionBehavior::Ask);
+    assert_eq!(
+        decision.reason.as_deref(),
+        Some("shell command `puffer` requires approval")
+    );
 }
 
 #[test]
-fn browser_shell_commands_do_not_bypass_browser_evaluator_via_allow_all_tools() {
+fn allow_all_tools_still_allows_shell_browser_commands_as_bash() {
     let temp = tempfile::tempdir().unwrap();
     let paths = ConfigPaths::discover(temp.path());
     ensure_workspace_dirs(&paths).unwrap();
@@ -426,7 +433,7 @@ fn browser_shell_commands_do_not_bypass_browser_evaluator_via_allow_all_tools() 
 }
 
 #[test]
-fn ambiguous_browser_shell_commands_require_explicit_approval() {
+fn compound_shell_browser_commands_use_shell_control_operator_reason() {
     let temp = tempfile::tempdir().unwrap();
     let paths = ConfigPaths::discover(temp.path());
     ensure_workspace_dirs(&paths).unwrap();
@@ -455,7 +462,7 @@ fn ambiguous_browser_shell_commands_require_explicit_approval() {
     assert_eq!(decision.behavior, ToolPermissionBehavior::Ask);
     assert_eq!(
         decision.reason.as_deref(),
-        Some("ambiguous browser shell command requires explicit approval")
+        Some("shell command contains shell control or redirection operators")
     );
 }
 

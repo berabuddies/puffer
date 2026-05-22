@@ -364,6 +364,7 @@ pub(crate) fn load_settings_snapshot(
         resources: ResourceCountsDto {
             providers: resources.providers.len(),
             tools: resources.tools.len(),
+            internal_tools: resources.internal_tools.len(),
             agents: resources.agents.len(),
             prompts: resources.prompts.len(),
             hooks: resources.hooks.len(),

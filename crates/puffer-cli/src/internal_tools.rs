@@ -50,7 +50,7 @@ pub(crate) fn run_internal_tool_command(
 }
 
 fn run_browser(cwd: &Path, paths: &ConfigPaths, args: BrowserArgs) -> Result<()> {
-    browser::run_browser_command(cwd, paths, args)
+    browser::run_internal_browser_command(cwd, paths, args)
 }
 
 fn print_alias_setup() -> Result<()> {
