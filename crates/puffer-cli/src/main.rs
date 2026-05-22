@@ -4,6 +4,7 @@ mod authflow;
 mod benchmark_reflection;
 mod benchmark_run;
 mod browser;
+mod browser_args;
 mod cli_args;
 mod command_surface;
 mod connectors;
@@ -20,6 +21,7 @@ mod desktop_activity;
 mod desktop_api;
 mod desktop_api_types;
 mod heartbeat;
+mod internal_tools;
 mod non_interactive;
 mod resource_fs;
 mod runner_selection;
@@ -301,6 +303,9 @@ fn main() -> Result<()> {
             yolo,
         }),
         Some(Command::Browser(args)) => browser::run_browser_command(&cwd, &paths, args),
+        Some(Command::InternalTool { command }) => {
+            internal_tools::run_internal_tool_command(&cwd, &paths, command)
+        }
         Some(Command::BenchmarkRun {
             prompt,
             prompt_file,

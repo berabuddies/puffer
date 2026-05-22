@@ -163,7 +163,10 @@ impl ToolRegistry {
 
     /// Returns all model-facing tool definitions in stable id order.
     pub fn definitions(&self) -> impl Iterator<Item = &ToolDefinition> {
-        self.tools.values().map(RegisteredTool::definition)
+        self.tools
+            .values()
+            .map(RegisteredTool::definition)
+            .filter(|definition| tool_definition_is_model_visible(definition))
     }
 
     /// Looks up a registered tool by id.
@@ -263,6 +266,10 @@ fn definition_from_spec(spec: &ToolSpec) -> Option<ToolDefinition> {
         show_in_status: spec.display.show_in_status,
     };
     Some(definition)
+}
+
+fn tool_definition_is_model_visible(definition: &ToolDefinition) -> bool {
+    definition.handler != "runtime:browser"
 }
 
 fn puffer_builtin_browser_disabled() -> bool {
@@ -404,47 +411,14 @@ fn enabled_if_value_disables_tool(value: &str) -> bool {
 }
 
 #[cfg(test)]
+#[path = "registry_visibility_tests.rs"]
+mod registry_visibility_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use puffer_resources::{LoadedItem, SourceInfo, SourceKind};
-    use std::collections::BTreeSet;
-    use std::fs;
     use std::path::PathBuf;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    fn workspace_builtin_tool_resources() -> LoadedResources {
-        let tools_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/tools");
-        let mut tool_paths = fs::read_dir(&tools_dir)
-            .expect("read builtin tool dir")
-            .map(|entry| entry.expect("directory entry").path())
-            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("yaml"))
-            .collect::<Vec<_>>();
-        tool_paths.sort();
-
-        let tools = tool_paths
-            .into_iter()
-            .map(|path| {
-                let spec = serde_yaml::from_str::<ToolSpec>(
-                    &fs::read_to_string(&path).expect("read builtin tool resource"),
-                )
-                .expect("parse builtin tool resource");
-                LoadedItem {
-                    value: spec,
-                    source_info: SourceInfo {
-                        path,
-                        kind: SourceKind::Builtin,
-                    },
-                }
-            })
-            .collect();
-
-        LoadedResources {
-            tools,
-            ..LoadedResources::default()
-        }
-    }
 
     fn bash_tool_spec() -> ToolSpec {
         ToolSpec {
@@ -455,24 +429,6 @@ mod tests {
             aliases: Vec::new(),
             handler_args: Vec::new(),
             approval_policy: Some("on-request".to_string()),
-            sandbox_policy: Some("workspace-write".to_string()),
-            shared_lib: None,
-            enabled_if: None,
-            input_schema: None,
-            metadata: Default::default(),
-            display: Default::default(),
-        }
-    }
-
-    fn browser_tool_spec() -> ToolSpec {
-        ToolSpec {
-            id: "Browser".to_string(),
-            name: "Browser".to_string(),
-            description: "Control browser".to_string(),
-            handler: "runtime:browser".to_string(),
-            aliases: vec!["browser".to_string()],
-            handler_args: Vec::new(),
-            approval_policy: Some("auto".to_string()),
             sandbox_policy: Some("workspace-write".to_string()),
             shared_lib: None,
             enabled_if: None,
@@ -543,73 +499,6 @@ mod tests {
             definition.input_schema.as_json_schema()["required"],
             serde_json::json!(["duration_ms"])
         );
-    }
-
-    #[test]
-    fn puffer_no_browser_hides_builtin_browser_tool() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        std::env::set_var("PUFFER_NO_BROWSER", "1");
-        let resources = LoadedResources {
-            tools: vec![LoadedItem {
-                value: browser_tool_spec(),
-                source_info: SourceInfo {
-                    path: PathBuf::from("browser.yaml"),
-                    kind: SourceKind::Builtin,
-                },
-            }],
-            ..LoadedResources::default()
-        };
-        let registry = ToolRegistry::from_resources(&resources);
-        std::env::remove_var("PUFFER_NO_BROWSER");
-
-        assert!(registry.definition("Browser").is_none());
-        assert!(registry.definition("browser").is_none());
-    }
-
-    #[test]
-    fn puffer_browser_tool_registers_when_not_disabled() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("PUFFER_NO_BROWSER");
-        let resources = LoadedResources {
-            tools: vec![LoadedItem {
-                value: browser_tool_spec(),
-                source_info: SourceInfo {
-                    path: PathBuf::from("browser.yaml"),
-                    kind: SourceKind::Builtin,
-                },
-            }],
-            ..LoadedResources::default()
-        };
-        let registry = ToolRegistry::from_resources(&resources);
-
-        assert!(registry.definition("Browser").is_some());
-        assert!(registry.definition("browser").is_some());
-    }
-
-    #[test]
-    fn workspace_builtin_tool_resources_are_registerable() {
-        let resources = workspace_builtin_tool_resources();
-        let registry = ToolRegistry::from_resources(&resources);
-        let expected = resources
-            .tools
-            .iter()
-            .filter_map(|item| definition_from_spec(&item.value))
-            .map(|definition| definition.id)
-            .collect::<BTreeSet<_>>();
-        let registered = registry
-            .definitions()
-            .map(|definition| definition.id.clone())
-            .collect::<BTreeSet<_>>();
-        let missing = expected
-            .difference(&registered)
-            .cloned()
-            .collect::<Vec<_>>();
-
-        assert!(
-            missing.is_empty(),
-            "builtin resources produced unsupported tool registrations: {missing:?}"
-        );
-        assert!(registry.definition("Sleep").is_some());
     }
 
     #[test]

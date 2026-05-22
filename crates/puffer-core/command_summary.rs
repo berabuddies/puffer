@@ -379,7 +379,7 @@ fn session_status_lines(state: &AppState) -> Vec<String> {
         format!("Effort: {}", state.effort_level),
         format!("Fast mode: {}", state.fast_mode),
         format!("Plan mode: {}", state.plan_mode),
-        format!("Sandbox mode: {}", state.sandbox_mode),
+        "Permissions: project ACL".to_string(),
         format!("Vim mode: {}", state.vim_mode),
         format!("Status line enabled: {}", state.statusline_enabled),
     ];

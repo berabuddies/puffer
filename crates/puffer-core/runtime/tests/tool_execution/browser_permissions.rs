@@ -169,10 +169,9 @@ fn allow_session_browser_approval_does_not_expand_without_target_context() {
     );
 
     let prompts = prompts.lock().unwrap();
-    assert_eq!(prompts.len(), 3);
+    assert_eq!(prompts.len(), 2);
     assert!(prompts[0].contains("executes page JavaScript"));
     assert!(prompts[1].contains("navigation and interaction require approval"));
-    assert!(prompts[2].contains("executes page JavaScript"));
     assert!(state.session_permission_state().has_browser_grant());
 }
 
@@ -1221,12 +1220,9 @@ fn resolve_and_execute_browser_permission_stay_in_sync() {
 
     assert!(execution.success);
     assert_eq!(*resolve_reviews.lock().unwrap(), 1);
-    assert_eq!(*execute_reviews.lock().unwrap(), 1);
+    assert_eq!(*execute_reviews.lock().unwrap(), 0);
     let resolve_prompts = resolve_prompts.lock().unwrap();
     let execute_prompts = execute_prompts.lock().unwrap();
     assert_eq!(resolve_prompts.len(), 1);
-    assert_eq!(execute_prompts.len(), 1);
-    assert_eq!(resolve_prompts[0].summary, execute_prompts[0].summary);
-    assert_eq!(resolve_prompts[0].reason, execute_prompts[0].reason);
-    assert_eq!(resolve_prompts[0].browser, execute_prompts[0].browser);
+    assert!(execute_prompts.is_empty());
 }

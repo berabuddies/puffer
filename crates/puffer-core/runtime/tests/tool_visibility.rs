@@ -326,9 +326,7 @@ fn powershell_tool_description_matches_claude_reference_for_anthropic_and_openai
     );
     assert_eq!(
         openai_definition.parameters["properties"]["dangerouslyDisableSandbox"]["description"],
-        json!(
-            "Set this to true to dangerously override sandbox mode and run commands without sandboxing."
-        )
+        json!("Deprecated compatibility flag. Puffer permissions are controlled by project ACL rules.")
     );
 }
 

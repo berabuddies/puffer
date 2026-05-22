@@ -508,10 +508,10 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
           summary: value.summary,
           inputText: value.inputText,
           toolName: value.toolId,
-          choices: ["Allow once", "Allow for session", "Deny"]
+          choices: ["Approve once", "Always allow", "Always allow all", "Deny"]
         },
         scopeLabel: "workspace",
-        choices: ["Allow once", "Allow for session", "Deny"]
+        choices: ["Approve once", "Always allow", "Always allow all", "Deny"]
       };
     case "diff_snapshot": {
       const diff = normalizeDiff(value.snapshot);

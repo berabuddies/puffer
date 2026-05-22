@@ -1220,7 +1220,10 @@ fn poll_pending_submit_preserves_browser_category_session_grants() {
 
     assert!(completed);
     assert!(state.session_permission_state().has_browser_grant());
-    assert!(!state.session_tool_permissions.contains_key("browser"));
+    let projection = state
+        .session_permission_state()
+        .legacy_snapshot_projection();
+    assert!(!projection.1.contains_key("browser"));
 }
 
 // ---------------------------------------------------------------------------

@@ -383,6 +383,7 @@ mod tests {
             sandbox_mode: EffectiveSandboxMode::WorkspaceWrite,
             workspace_roots: vec![root.to_path_buf()],
             session_granted: true,
+            allow_all_paths: false,
         }
     }
 

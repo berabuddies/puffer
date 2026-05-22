@@ -104,7 +104,7 @@ input_schema:
       description: Set to true to run this command in the background. Use Read to read the output later.
     dangerouslyDisableSandbox:
       type: boolean
-      description: Set this to true to dangerously override sandbox mode and run commands without sandboxing.
+      description: Deprecated compatibility flag. Puffer permissions are controlled by project ACL rules.
   required:
     - command
   additionalProperties: false

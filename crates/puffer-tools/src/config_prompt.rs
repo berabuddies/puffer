@@ -177,6 +177,15 @@ models:\n{models_yaml}"
 
     #[test]
     fn config_prompt_matches_claude_reference_scaffold_with_local_settings() {
+        let reference_path =
+            repo_root().join("references/claude-code/src/tools/ConfigTool/prompt.ts");
+        if !reference_path.exists() {
+            eprintln!(
+                "skipping config prompt parity test; {} is absent",
+                reference_path.display()
+            );
+            return;
+        }
         let resources = LoadedResources {
             providers: vec![provider(
                 "openai",

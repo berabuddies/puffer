@@ -818,13 +818,14 @@ mod tests {
     }
 
     #[test]
-    fn bash_tool_uses_bash_shell() {
+    fn bash_tool_uses_detected_shell() {
         let temp = tempfile::tempdir().unwrap();
         let result = execute_bash_tool(
             "bash",
             temp.path(),
             BashToolInput {
-                command: "printf '%s' ${BASH_VERSION%%.*}".to_string(),
+                command: "printf '%s' \"${BASH_VERSION:-${ZSH_VERSION:-${KSH_VERSION:-shell}}}\""
+                    .to_string(),
                 timeout: None,
                 run_in_background: false,
                 dangerously_disable_sandbox: false,

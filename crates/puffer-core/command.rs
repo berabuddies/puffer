@@ -380,8 +380,8 @@ pub fn supported_commands() -> Vec<CommandSpec> {
         cmd(
             "sandbox",
             &[],
-            "Manage sandbox policies",
-            Some("exclude \"command pattern\""),
+            "Explain that sandbox mode has been removed",
+            None,
             CommandKind::Ui,
         ),
         cmd(

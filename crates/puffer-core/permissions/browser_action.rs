@@ -185,16 +185,8 @@ pub(crate) fn browser_permission_value_from_shell_command(command: &str) -> Opti
     if !is_simple_browser_shell_command(&tokens) {
         return None;
     }
-    let (root_command, mut args) = tokens.split_first()?;
-    if command_basename(root_command)? != "puffer" {
-        return None;
-    }
-    if normalized_token(args.first()?) != "browser" {
-        return None;
-    }
-    args = &args[1..];
-    let args = args.to_vec();
-    parse_browser_cli_tokens(args)
+    let args = browser_cli_args_from_tokens(&tokens)?;
+    parse_browser_cli_tokens(args.to_vec())
 }
 
 fn embedded_browser_permission_value(input: &Value) -> Option<Value> {
@@ -221,8 +213,18 @@ fn is_ambiguous_browser_shell_command(command: &str) -> bool {
 }
 
 fn contains_browser_shell_sequence(tokens: &[String]) -> bool {
+    if tokens
+        .iter()
+        .any(|token| command_basename(token) == Some("browser"))
+    {
+        return true;
+    }
     tokens.windows(2).any(|window| {
         command_basename(&window[0]) == Some("puffer") && normalized_token(&window[1]) == "browser"
+    }) || tokens.windows(3).any(|window| {
+        command_basename(&window[0]) == Some("puffer")
+            && normalized_token(&window[1]) == "internaltool"
+            && normalized_token(&window[2]) == "browser"
     })
 }
 
@@ -230,6 +232,21 @@ fn command_basename(command: &str) -> Option<&str> {
     Path::new(command)
         .file_name()
         .and_then(|value| value.to_str())
+}
+
+fn browser_cli_args_from_tokens(tokens: &[String]) -> Option<&[String]> {
+    let (root_command, args) = tokens.split_first()?;
+    match command_basename(root_command)? {
+        "browser" => Some(args),
+        "puffer" if normalized_token(args.first()?) == "browser" => Some(&args[1..]),
+        "puffer"
+            if normalized_token(args.first()?) == "internaltool"
+                && normalized_token(args.get(1)?) == "browser" =>
+        {
+            Some(&args[2..])
+        }
+        _ => None,
+    }
 }
 
 fn parse_browser_cli_tokens(mut args: Vec<String>) -> Option<Value> {
@@ -536,6 +553,16 @@ mod tests {
             Some(BrowserActionSet::Inspect)
         );
         assert_eq!(
+            browser_action_set_for_shell_command("browser screenshot --tab-id t1"),
+            Some(BrowserActionSet::Inspect)
+        );
+        assert_eq!(
+            browser_action_set_for_shell_command(
+                "puffer internal-tool browser screenshot --tab-id t1"
+            ),
+            Some(BrowserActionSet::Inspect)
+        );
+        assert_eq!(
             browser_action_set_for_shell_command("puffer browser upload @e1 file.txt"),
             Some(BrowserActionSet::Interact)
         );
@@ -559,6 +586,16 @@ mod tests {
                 "action": "focus",
                 "sessionId": "root-2",
                 "tabId": "t7"
+            }))
+        );
+        assert_eq!(
+            browser_permission_value_from_shell_command(
+                "puffer internal-tool browser navigate https://example.com --tab-id t3"
+            ),
+            Some(json!({
+                "action": "navigate",
+                "tabId": "t3",
+                "url": "https://example.com"
             }))
         );
         assert_eq!(

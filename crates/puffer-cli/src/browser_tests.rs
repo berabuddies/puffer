@@ -1,5 +1,8 @@
 use super::*;
-use crate::cli_args::{BrowserCommand, BrowserKeyboardCommand, BrowserTabCommand, Cli, Command};
+use crate::browser_args::{
+    BrowserCommand, BrowserKeyboardCommand, BrowserTabCommand, BrowserTargetArgs,
+};
+use crate::cli_args::{Cli, Command};
 use clap::Parser;
 use puffer_core::{browser_action_set_for_action, browser_action_set_for_shell_command};
 

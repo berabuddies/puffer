@@ -274,8 +274,7 @@ fn allow_once_external_file_access_executes_without_session_grant() {
         ..LoadedResources::default()
     };
     let registry = ToolRegistry::from_resources(&resources);
-    let mut providers = ProviderRegistry::new();
-    providers.register(openai_provider("http://127.0.0.1".to_string()));
+    let providers = empty_providers();
     let request_config = test_openai_request_config();
     let prompts = Arc::new(Mutex::new(0_usize));
     let prompt_count = prompts.clone();
@@ -390,6 +389,71 @@ fn allow_session_external_path_access_is_reused() {
             .path_prefix_grants,
         vec![outside.path().to_path_buf()]
     );
+}
+
+#[test]
+fn auto_reviewer_can_allow_external_path_without_human_prompt() {
+    use crate::runtime::auto_approval_review::{
+        with_auto_permission_review_test_handler, AutoPermissionReviewDecision,
+        AutoPermissionReviewResult,
+    };
+
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let outside = outside_workspace_tempdir(&cwd);
+    fs::write(outside.path().join("note.txt"), "hello").unwrap();
+    let resources = LoadedResources {
+        tools: vec![loaded_tool("Glob", "Find files", "runtime:claude_glob")],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let providers = empty_providers();
+    let mut auth_store = AuthStore::default();
+    let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let prompt_log = prompts.clone();
+    let reviews = Arc::new(Mutex::new(Vec::<String>::new()));
+    let review_log = reviews.clone();
+
+    with_auto_permission_review_test_handler(
+        move |request| {
+            review_log.lock().unwrap().push(request.summary.clone());
+            AutoPermissionReviewResult {
+                decision: AutoPermissionReviewDecision::AllowOnce,
+                risk: "low".to_string(),
+                rationale: "explicit path read".to_string(),
+            }
+        },
+        || {
+            with_permission_prompt_handler(
+                move |request| {
+                    prompt_log.lock().unwrap().push(request.summary);
+                    PermissionPromptAction::Deny
+                },
+                || {
+                    let outcome = resolve_tool_permission(
+                        &mut state,
+                        &resources,
+                        &providers,
+                        &mut auth_store,
+                        &registry,
+                        &cwd,
+                        "Glob",
+                        &json!({
+                            "pattern": "*.txt",
+                            "path": outside.path().display().to_string()
+                        }),
+                        None,
+                    )
+                    .unwrap();
+                    assert!(matches!(outcome, PermissionOutcome::Allowed(_)));
+                },
+            );
+        },
+    );
+
+    assert!(prompts.lock().unwrap().is_empty());
+    assert_eq!(reviews.lock().unwrap().len(), 1);
+    assert!(reviews.lock().unwrap()[0].starts_with("Allow Glob to access"));
 }
 
 #[test]
@@ -772,6 +836,11 @@ fn execute_tool_call_requires_prior_read_for_notebook_edit() {
 
 #[test]
 fn allow_session_persists_runtime_bash_approval_for_the_session() {
+    use crate::runtime::auto_approval_review::{
+        with_auto_permission_review_test_handler, AutoPermissionReviewDecision,
+        AutoPermissionReviewResult,
+    };
+
     let mut tool = loaded_tool("Bash", "Run shell", "runtime:claude_bash");
     tool.value.approval_policy = Some("ask".to_string());
     tool.value.sandbox_policy = Some("workspace-write".to_string());
@@ -788,65 +857,74 @@ fn allow_session_persists_runtime_bash_approval_for_the_session() {
     let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
     let prompt_log = prompts.clone();
 
-    with_permission_prompt_handler(
-        move |request| {
-            prompt_log.lock().unwrap().push(request.tool_id);
-            PermissionPromptAction::AllowSession
+    with_auto_permission_review_test_handler(
+        |_request| AutoPermissionReviewResult {
+            decision: AutoPermissionReviewDecision::Unavailable,
+            risk: "unknown".to_string(),
+            rationale: "test covers human prompt fallback".to_string(),
         },
         || {
-            let first = execute_tool_call(
-                &mut state,
-                &resources,
-                &providers,
-                &mut AuthStore::default(),
-                &registry,
-                "gpt-5",
-                &cwd,
-                ToolExecutionBackend::OpenAi {
-                    request_config: &request_config,
-                    structured_output: None,
+            with_permission_prompt_handler(
+                move |request| {
+                    prompt_log.lock().unwrap().push(request.tool_id);
+                    PermissionPromptAction::AllowSession
                 },
-                None,
-                "Bash",
-                json!({"command": "printf hi"}),
-            )
-            .unwrap();
-            assert!(first.success);
-            let reloaded_permission_context =
-                crate::permissions::load_runtime_permission_context_with_inputs(
-                    &cwd,
-                    &resources,
-                    &state,
-                    crate::permissions::RuntimePermissionInputs::default(),
-                )
-                .unwrap();
-            let reloaded_decision = reloaded_permission_context.decision_for_tool_call(
-                registry.definition("Bash").unwrap(),
-                &json!({"command": "printf hi-again"}),
-            );
-            assert_eq!(
-                reloaded_decision.behavior,
-                crate::permissions::ToolPermissionBehavior::Allow
-            );
+                || {
+                    let first = execute_tool_call(
+                        &mut state,
+                        &resources,
+                        &providers,
+                        &mut AuthStore::default(),
+                        &registry,
+                        "gpt-5",
+                        &cwd,
+                        ToolExecutionBackend::OpenAi {
+                            request_config: &request_config,
+                            structured_output: None,
+                        },
+                        None,
+                        "Bash",
+                        json!({"command": "cargo --version"}),
+                    )
+                    .unwrap();
+                    assert!(first.success);
+                    let reloaded_permission_context =
+                        crate::permissions::load_runtime_permission_context_with_inputs(
+                            &cwd,
+                            &resources,
+                            &state,
+                            crate::permissions::RuntimePermissionInputs::default(),
+                        )
+                        .unwrap();
+                    let reloaded_decision = reloaded_permission_context.decision_for_tool_call(
+                        registry.definition("Bash").unwrap(),
+                        &json!({"command": "cargo --help"}),
+                    );
+                    assert_eq!(
+                        reloaded_decision.behavior,
+                        crate::permissions::ToolPermissionBehavior::Allow
+                    );
 
-            let second = execute_tool_call(
-                &mut state,
-                &resources,
-                &providers,
-                &mut AuthStore::default(),
-                &registry,
-                "gpt-5",
-                &cwd,
-                ToolExecutionBackend::OpenAi {
-                    request_config: &request_config,
-                    structured_output: None,
+                    let second = execute_tool_call(
+                        &mut state,
+                        &resources,
+                        &providers,
+                        &mut AuthStore::default(),
+                        &registry,
+                        "gpt-5",
+                        &cwd,
+                        ToolExecutionBackend::OpenAi {
+                            request_config: &request_config,
+                            structured_output: None,
+                        },
+                        None,
+                        "Bash",
+                        json!({"command": "cargo --help"}),
+                    )
+                    .unwrap();
+                    assert!(second.success);
                 },
-                None,
-                "Bash",
-                json!({"command": "printf hi-again"}),
-            )
-            .unwrap();
-            assert!(second.success);
+            );
         },
     );
 
@@ -863,10 +941,76 @@ fn allow_session_persists_runtime_bash_approval_for_the_session() {
         permission_context
             .decision_for_tool_call(
                 registry.definition("Bash").unwrap(),
-                &json!({"command":"pwd"})
+                &json!({"command":"cargo --help"})
             )
             .behavior,
         crate::permissions::ToolPermissionBehavior::Allow
+    );
+}
+
+#[test]
+fn auto_reviewer_can_allow_tool_ask_without_human_prompt() {
+    use crate::runtime::auto_approval_review::{
+        with_auto_permission_review_test_handler, AutoPermissionReviewDecision,
+        AutoPermissionReviewResult,
+    };
+
+    let resources = LoadedResources {
+        tools: vec![loaded_tool(
+            "WebSearch",
+            "Search the web",
+            "runtime:claude_web_search",
+        )],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let providers = empty_providers();
+    let mut auth_store = AuthStore::default();
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let prompt_log = prompts.clone();
+    let reviews = Arc::new(Mutex::new(Vec::<String>::new()));
+    let review_log = reviews.clone();
+
+    with_auto_permission_review_test_handler(
+        move |request| {
+            review_log.lock().unwrap().push(request.tool_id.clone());
+            AutoPermissionReviewResult {
+                decision: AutoPermissionReviewDecision::AllowSession,
+                risk: "low".to_string(),
+                rationale: "explicit command".to_string(),
+            }
+        },
+        || {
+            with_permission_prompt_handler(
+                move |request| {
+                    prompt_log.lock().unwrap().push(request.tool_id);
+                    PermissionPromptAction::Deny
+                },
+                || {
+                    let outcome = resolve_tool_permission(
+                        &mut state,
+                        &resources,
+                        &providers,
+                        &mut auth_store,
+                        &registry,
+                        &cwd,
+                        "WebSearch",
+                        &json!({"query": "puffer"}),
+                        None,
+                    )
+                    .unwrap();
+                    assert!(matches!(outcome, PermissionOutcome::Allowed(_)));
+                },
+            );
+        },
+    );
+
+    assert!(prompts.lock().unwrap().is_empty());
+    assert_eq!(
+        reviews.lock().unwrap().as_slice(),
+        &["WebSearch".to_string()]
     );
 }
 

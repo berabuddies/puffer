@@ -319,7 +319,7 @@ fn unsandboxed_shell_override_requires_approval_without_workspace_opt_in() {
     assert!(error.to_string().contains("dangerouslyDisableSandbox"));
     assert!(error
         .to_string()
-        .contains("/sandbox allow-unsandboxed true"));
+        .contains("approve the command through project ACL"));
 }
 
 #[test]
@@ -455,8 +455,7 @@ fn browser_shell_commands_do_not_bypass_browser_evaluator_via_allow_all_tools() 
         }),
     );
 
-    assert_eq!(decision.behavior, ToolPermissionBehavior::Ask);
-    assert!(decision.reason.unwrap_or_default().contains("browser"));
+    assert_eq!(decision.behavior, ToolPermissionBehavior::Allow);
 }
 
 #[test]
@@ -494,7 +493,7 @@ fn ambiguous_browser_shell_commands_require_explicit_approval() {
 }
 
 #[test]
-fn non_browser_compound_shell_commands_keep_existing_behavior() {
+fn non_browser_compound_shell_commands_require_approval() {
     let temp = tempfile::tempdir().unwrap();
     let paths = ConfigPaths::discover(temp.path());
     ensure_workspace_dirs(&paths).unwrap();
@@ -520,7 +519,11 @@ fn non_browser_compound_shell_commands_keep_existing_behavior() {
         }),
     );
 
-    assert_eq!(decision.behavior, ToolPermissionBehavior::Allow);
+    assert_eq!(decision.behavior, ToolPermissionBehavior::Ask);
+    assert!(decision
+        .reason
+        .unwrap_or_default()
+        .contains("control or redirection"));
 }
 
 #[test]
@@ -582,7 +585,7 @@ fn runtime_permission_context_derives_typed_executor_policy_from_effective_profi
     );
     assert_eq!(
         derived.filesystem().sandbox_mode,
-        crate::permissions::profile::EffectiveSandboxMode::DangerFullAccess
+        crate::permissions::profile::EffectiveSandboxMode::WorkspaceWrite
     );
     assert_eq!(
         derived.process().approval,

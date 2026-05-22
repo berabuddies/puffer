@@ -980,6 +980,7 @@ mod tests {
             sandbox_mode: EffectiveSandboxMode::DangerFullAccess,
             workspace_roots: vec![cwd.clone()],
             session_granted: true,
+            allow_all_paths: true,
         };
         let bash_result = execute_parallel_tool(
             &bash_def,

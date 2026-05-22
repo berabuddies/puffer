@@ -1,6 +1,6 @@
 //! CLI command execution for `puffer browser`.
 
-use crate::cli_args::{
+use crate::browser_args::{
     BrowserArgs, BrowserCommand, BrowserKeyboardCommand, BrowserTabCommand, BrowserTargetArgs,
 };
 use crate::daemon::Handshake;

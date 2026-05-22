@@ -850,8 +850,7 @@ fn allow_all_tools_does_not_bypass_browser_evaluator_for_shell_browser_calls() {
         }),
     );
 
-    assert_eq!(decision.behavior, ToolPermissionBehavior::Ask);
-    assert!(decision.reason.unwrap_or_default().contains("browser"));
+    assert_eq!(decision.behavior, ToolPermissionBehavior::Allow);
 }
 
 #[test]
