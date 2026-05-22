@@ -5,12 +5,14 @@ export async function buildPromptEvolutionPack(options = {}) {
     baseGuide,
     bugList,
     feedbackLedger,
+    bugMemory,
     issueText,
     pictureFiles
   ] = await Promise.all([
     readOptional(options.baseGuidePath),
     readOptional(options.bugListPath),
     readJsonOptional(options.feedbackLedgerPath),
+    readJsonOptional(options.bugMemoryPath),
     readOptional(options.issuePath),
     listPictureFiles(options.picsDir)
   ]);
@@ -25,11 +27,13 @@ export async function buildPromptEvolutionPack(options = {}) {
       baseGuidePath: options.baseGuidePath ?? "",
       bugListPath: options.bugListPath ?? "",
       feedbackLedgerPath: options.feedbackLedgerPath ?? "",
+      bugMemoryPath: options.bugMemoryPath ?? "",
       issuePath: options.issuePath ?? "",
       picsDir: options.picsDir ?? ""
     },
     bugStats,
     feedbackStats,
+    bugMemoryStats: summarizeBugMemory(bugMemory),
     issueNotes,
     pictureFiles
   };
@@ -63,6 +67,10 @@ export function formatPromptEvolutionMarkdown({ baseGuide, pack }) {
     `- New candidates: ${pack.feedbackStats.newCandidateFindings}`,
     `- Known duplicate findings: ${pack.feedbackStats.knownDuplicateFindings}`,
     `- Actionable failures: ${pack.feedbackStats.actionableFailures}`,
+    `- Memory accepted/manual candidates: ${pack.bugMemoryStats.acceptedCandidates}`,
+    `- Memory flaky cases: ${pack.bugMemoryStats.flaky}`,
+    `- Memory harness cases: ${pack.bugMemoryStats.harness}`,
+    `- Memory no-finding cases: ${pack.bugMemoryStats.noFinding}`,
     "",
     "## Runtime Prompt Adjustments",
     "",
@@ -110,12 +118,29 @@ function runtimeAdjustments(pack) {
   if (pack.feedbackStats.flakeRate > 0.05) {
     lines.push("- Flake rate is above threshold; require repeated attempts or a deterministic visible stuck/corrupt state before promotion.");
   }
+  if (pack.bugMemoryStats.harness > 0) {
+    lines.push("- Recent bug memory includes harness/precondition failures; keep these under coverage gaps and do not emit BUG_LIST_APPEND for them.");
+  }
+  if (pack.bugMemoryStats.noFinding > pack.bugMemoryStats.acceptedCandidates) {
+    lines.push("- No-finding pressure is high; planner should bias toward uncovered runtime edges and temporal async invariants rather than broad random walks.");
+  }
   if (pack.bugStats.total === 0) {
     lines.push("- The main fuzz bug ledger is empty; accepted reports must be especially explicit so the first entries are high quality.");
   }
   lines.push("- Always separate product bugs from harness gaps. Harness gaps can be reported under coverage gaps but must not become BUG_LIST_APPEND.");
   lines.push("- Prefer one high-signal accepted finding over multiple vague candidates.");
   return lines;
+}
+
+function summarizeBugMemory(memory) {
+  return {
+    reportsScanned: Number(memory?.reportsScanned ?? 0),
+    acceptedCandidates: Array.isArray(memory?.acceptedCandidates) ? memory.acceptedCandidates.length : 0,
+    duplicates: Array.isArray(memory?.duplicates) ? memory.duplicates.length : 0,
+    flaky: Array.isArray(memory?.flaky) ? memory.flaky.length : 0,
+    harness: Array.isArray(memory?.harness) ? memory.harness.length : 0,
+    noFinding: Number(memory?.noFinding ?? 0)
+  };
 }
 
 function summarizeBugList(text) {

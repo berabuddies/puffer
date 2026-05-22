@@ -31,6 +31,7 @@ import {
   writeCorpus,
   writeCorpusMarkdown
 } from "../lib/corpus.mjs";
+import { buildBugMemory, formatBugMemoryMarkdown, writeBugMemory, writeBugMemoryMarkdown } from "../lib/bug-memory.mjs";
 import { buildPromptEvolutionPack } from "../lib/prompt-evolution.mjs";
 import { buildReplayTemplate, defaultReplaySpecPath, formatReplayMarkdown, selectCase } from "../lib/replay-template.mjs";
 import {
@@ -114,6 +115,7 @@ Commands:
   evolve-prompt --out apps/puffer-desktop/tests/fuzz/.runs/manual/prompt-evolution.md
   corpus --from-replay apps/puffer-desktop/tests/fuzz/.runs/<run>/bounded-replay-report.json --out apps/puffer-desktop/tests/fuzz/.runs/<run>/corpus.json
   corpus --input apps/puffer-desktop/tests/fuzz/.runs/<run>/corpus.json --run-out apps/puffer-desktop/tests/fuzz/.runs/<run>/corpus-run.json
+  bug-memory --runs-dir apps/puffer-desktop/tests/fuzz/.runs --out /tmp/puffer_bug_memory.json --report-out /tmp/puffer_bug_memory.md
   signature --finding finding.json
   replay --input run.json --case-id chat-turn-race-0001 --out /tmp/replay.spec.ts
   shrink --input run.json --case-id chat-turn-race-0001 --out /tmp/shrunk-run.json --report-out /tmp/shrink.md
@@ -409,6 +411,7 @@ async function main() {
       baseGuidePath: args["prompt-guide"] ?? defaultPromptEvolutionPath,
       bugListPath: args["bug-list"] ?? defaultBugListPath,
       feedbackLedgerPath: args["feedback-ledger"] ?? defaultFeedbackLedgerPath,
+      bugMemoryPath: args["bug-memory"],
       issuePath: args.issue ?? defaultIssuePath,
       picsDir: args["pics-dir"] ?? defaultPicsDir
     });
@@ -442,6 +445,17 @@ async function main() {
       await writeJson(args["run-out"], run);
     }
     process.stdout.write(markdown);
+    return;
+  }
+
+  if (command === "bug-memory") {
+    const memory = await buildBugMemory({
+      runsDir: args["runs-dir"] ?? path.join(fuzzRoot, ".runs"),
+      limit: args.limit
+    });
+    if (args.out) await writeBugMemory(args.out, memory);
+    if (args["report-out"]) await writeBugMemoryMarkdown(args["report-out"], memory);
+    process.stdout.write(formatBugMemoryMarkdown(memory));
     return;
   }
 
