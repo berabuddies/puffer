@@ -1414,6 +1414,37 @@ test("MCP settings keep added server when the initial list resolves late", async
   await expect(page.getByText("Added github")).toBeVisible();
 });
 
+test("MCP settings refresh reloads the visible server list", async ({ page }) => {
+  const daemon = new FakeDaemon({ mcpServers: [] });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "MCP Servers" }).click();
+  await daemon.waitForRequest("list_mcp_servers");
+  await expect(page.getByText("No MCP servers configured.")).toBeVisible();
+
+  daemon.setMcpServers([
+    {
+      id: "github",
+      displayName: "GitHub",
+      description: "Issue and PR tools",
+      transport: "stdio",
+      endpoint: "",
+      target: "npx @modelcontextprotocol/server-github",
+      sourceKind: "local",
+      sourcePath: "/tmp/puffer/.puffer/mcp_servers/github.json"
+    }
+  ]);
+
+  const beforeRefresh = daemon.requests.filter((request) => request.method === "list_mcp_servers").length;
+  await page.getByRole("button", { name: "Refresh MCP servers" }).click();
+  await expect.poll(() =>
+    daemon.requests.filter((request) => request.method === "list_mcp_servers").length
+  ).toBe(beforeRefresh + 1);
+  await expect(page.locator(".pf-mcp-card .title").filter({ hasText: "GitHub" })).toBeVisible();
+});
+
 test("MCP settings do not reload-loop when no servers are configured", async ({ page }) => {
   const daemon = new FakeDaemon({ mcpServers: [] });
   await daemon.install(page);

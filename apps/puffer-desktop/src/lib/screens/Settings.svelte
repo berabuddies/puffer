@@ -64,6 +64,9 @@
 
   function refreshIfIdle() {
     if (credentialBusy) return;
+    if (section === "mcp" && daemonReachable && !mcpLoading && !mcpSaving) {
+      void loadMcpServers();
+    }
     props.onRefresh();
   }
 
@@ -810,6 +813,18 @@
     {:else if section === "mcp"}
       <h2>MCP Servers</h2>
       <p class="lead">External tools Puffer can pull context from and take actions on.</p>
+      <div style="display: flex; justify-content: flex-end; margin-bottom: 10px;">
+        <button
+          type="button"
+          class="sc-btn"
+          data-variant="outline"
+          data-size="sm"
+          disabled={!daemonReachable || mcpLoading || mcpSaving}
+          onclick={refreshIfIdle}
+        >
+          <Icon name="refresh" size={13} />Refresh MCP servers
+        </button>
+      </div>
       {#if mcpError}
         <div class="pf-settings-note warn">{mcpError}</div>
       {/if}
