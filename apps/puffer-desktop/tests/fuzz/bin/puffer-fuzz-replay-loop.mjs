@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { aggregateTarpit, detectTarpit } from "../lib/tarpit.mjs";
+import { aggregateTemporal, buildIntentLedger, evaluateTemporalReplay } from "../lib/temporal-invariants.mjs";
 
 const fuzzRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = path.resolve(fuzzRoot, "..", "..", "..", "..");
@@ -210,6 +211,8 @@ async function main() {
       Object.assign(replay, classifyReplay(replay));
       replay.knownDuplicate = knownBugMatch(replay.failureSignature ?? "", knownBugSignatures);
       replay.runtimeCoverage = aggregateRuntimeCoverage(replay.attempts.map((attempt) => attempt.runtimeCoverage));
+      replay.intentLedger = buildIntentLedger(replay);
+      replay.temporalInvariants = evaluateTemporalReplay(replay);
       results.push(replay);
     }
   }
@@ -218,6 +221,7 @@ async function main() {
   const summary = summarize(results);
   const findings = collectFindings(results, knownBugSignatures);
   const runtimeCoverage = aggregateRuntimeCoverage(results.map((item) => item.runtimeCoverage));
+  const temporal = aggregateTemporal(results);
   const payload = {
     version: 1,
     startedAt,
@@ -238,6 +242,7 @@ async function main() {
     knownBugSignatures,
     summary,
     runtimeCoverage,
+    temporal,
     findings,
     results
   };
@@ -338,6 +343,7 @@ function summarize(results) {
     }
   }
   const runtimeCoverage = aggregateRuntimeCoverage(results.map((item) => item.runtimeCoverage));
+  const temporal = aggregateTemporal(results);
   return {
     total: results.length,
     passed,
@@ -351,6 +357,7 @@ function summarize(results) {
     nonPassingFailures,
     actionableFailures,
     byClassification,
+    temporal,
     runtimeCoverage: {
       states: runtimeCoverage.states.length,
       edges: runtimeCoverage.edges.length,
@@ -633,6 +640,8 @@ function formatMarkdown(payload) {
     `- Runtime route-control-state triples: ${payload.summary.runtimeCoverage?.routeControlStateTriples ?? 0}`,
     `- Tarpit cases: ${payload.summary.runtimeCoverage?.tarpitCount ?? 0}`,
     `- Escape suggested: ${payload.summary.runtimeCoverage?.escapeSuggestedCount ?? 0}`,
+    `- Temporal invariant observations: ${payload.summary.temporal?.observed ?? 0}`,
+    `- Temporal invariant failures: ${payload.summary.temporal?.failed ?? 0}`,
     "",
     "## Classification",
     ""
@@ -698,6 +707,8 @@ function formatMarkdown(payload) {
     lines.push(`- Runtime states: ${item.runtimeCoverage?.states?.length ?? 0}`);
     lines.push(`- Runtime edges: ${item.runtimeCoverage?.edges?.length ?? 0}`);
     lines.push(`- Tarpit: ${item.runtimeCoverage?.tarpit?.tarpit ? "yes" : "no"}${item.runtimeCoverage?.tarpit?.reasons?.length ? ` (${item.runtimeCoverage.tarpit.reasons.join(", ")})` : ""}`);
+    lines.push(`- Intents: ${(item.intentLedger?.intents ?? []).map((intent) => intent.intentId).join(", ") || "none"}`);
+    lines.push(`- Temporal invariants: observed=${item.temporalInvariants?.observed ?? 0}, failed=${item.temporalInvariants?.failed ?? 0}`);
     lines.push(`- Coverage: ${item.coverage.join(", ")}`);
     lines.push(`- Steps: ${item.steps.join(" -> ")}`);
     if (last.excerpt) {
