@@ -156,6 +156,7 @@ async function main() {
         diversityKey: item.diversityKey,
         coverage: item.coverage,
         steps: item.steps?.map((step) => step.action) ?? [],
+        stepDetails: item.steps ?? [],
         specPath,
         attempts: []
       };

@@ -22,6 +22,15 @@ import {
 } from "../lib/fuzz-core.mjs";
 import { buildFrontier, formatFrontierMarkdown } from "../lib/frontier.mjs";
 import { evaluateGate, formatGateMarkdown } from "../lib/gate.mjs";
+import {
+  addReplayReportToCorpus,
+  buildRunFromCorpus,
+  formatCorpusMarkdown,
+  loadCorpus,
+  summarizeCorpus,
+  writeCorpus,
+  writeCorpusMarkdown
+} from "../lib/corpus.mjs";
 import { buildPromptEvolutionPack } from "../lib/prompt-evolution.mjs";
 import { buildReplayTemplate, defaultReplaySpecPath, formatReplayMarkdown, selectCase } from "../lib/replay-template.mjs";
 import {
@@ -43,6 +52,7 @@ const defaultAdapterPath = path.join(fuzzRoot, "adapters", "playwright-actions.j
 const defaultLedgerPath = path.join(fuzzRoot, "coverage-ledger.json");
 const defaultFeedbackLedgerPath = path.join(fuzzRoot, "feedback-ledger.json");
 const defaultBugListPath = path.join(fuzzRoot, "BUGS.md");
+const defaultCorpusPath = path.join(fuzzRoot, "corpus", "puffer-corpus.json");
 const defaultPromptEvolutionPath = path.join(fuzzRoot, "prompt_evolution.md");
 const defaultIssuePath = "/tmp/puffer_issue.md";
 const defaultPicsDir = path.resolve(fuzzRoot, "..", "..", "..", "..", "bugs", "pics");
@@ -100,6 +110,8 @@ Commands:
   schedule --limit 4 --out apps/puffer-desktop/tests/fuzz/.runs/manual/schedule.md
   record-feedback --shard chat-composer-send --input apps/puffer-desktop/tests/fuzz/.runs/<run>/bounded-replay-report.json
   evolve-prompt --out apps/puffer-desktop/tests/fuzz/.runs/manual/prompt-evolution.md
+  corpus --from-replay apps/puffer-desktop/tests/fuzz/.runs/<run>/bounded-replay-report.json --out apps/puffer-desktop/tests/fuzz/.runs/<run>/corpus.json
+  corpus --input apps/puffer-desktop/tests/fuzz/.runs/<run>/corpus.json --run-out apps/puffer-desktop/tests/fuzz/.runs/<run>/corpus-run.json
   signature --finding finding.json
   replay --input run.json --case-id chat-turn-race-0001 --out /tmp/replay.spec.ts
   bug-list --append --title "..." --severity P1 --area chat --shard chat-composer-send --evidence apps/.../final.md
@@ -117,6 +129,7 @@ Options:
   --ledger <path>     Default: apps/puffer-desktop/tests/fuzz/coverage-ledger.json
   --no-coverage-ledger Do not update runtime coverage when recording feedback
   --feedback-ledger <path> Default: apps/puffer-desktop/tests/fuzz/feedback-ledger.json
+  --corpus <path>    Default: apps/puffer-desktop/tests/fuzz/corpus/puffer-corpus.json
   --bug-list <path> Default: apps/puffer-desktop/tests/fuzz/BUGS.md
   --prompt-guide <path> Default: apps/puffer-desktop/tests/fuzz/prompt_evolution.md
   --issue <path>      Default: /tmp/puffer_issue.md
@@ -396,6 +409,33 @@ async function main() {
     if (args.out) await writeText(args.out, result.markdown);
     if (args["json-out"]) await writeJson(args["json-out"], result.pack);
     process.stdout.write(result.markdown);
+    return;
+  }
+
+  if (command === "corpus") {
+    const corpusPath = args.input ?? args.corpus ?? defaultCorpusPath;
+    let corpus = await loadCorpus(corpusPath);
+    if (args["from-replay"]) {
+      const replayReport = await readJson(args["from-replay"]);
+      corpus = addReplayReportToCorpus(corpus, replayReport, {
+        shard: args.shard,
+        namespace: args.namespace
+      });
+      if (args.out) await writeCorpus(args.out, corpus);
+    }
+    const markdown = formatCorpusMarkdown(corpus);
+    if (args["report-out"]) await writeCorpusMarkdown(args["report-out"], corpus);
+    if (args["summary-out"]) await writeJson(args["summary-out"], summarizeCorpus(corpus));
+    if (args["run-out"]) {
+      const manifest = await readJson(args.manifest ?? defaultManifestPath);
+      const run = buildRunFromCorpus(manifest, corpus, {
+        limit: args.limit,
+        rngSeed: args["rng-seed"],
+        mutate: args["no-mutate"] ? false : true
+      });
+      await writeJson(args["run-out"], run);
+    }
+    process.stdout.write(markdown);
     return;
   }
 
