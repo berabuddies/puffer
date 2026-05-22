@@ -373,6 +373,29 @@ test("Terminal close ignores repeated clicks while close is in flight", async ({
   expect(daemon.requests.filter((request) => request.method === "pty_close")).toHaveLength(1);
 });
 
+test("Terminal input is ignored while the active PTY is closing", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: /Browser regression/ }).first().click();
+  await page.locator(".pf-agent-tabs").getByRole("button", { name: "Terminal", exact: true }).click();
+  await daemon.waitForRequest("pty_open", (request) => request.params.sessionId === "session-browser");
+  await expect(page.getByRole("tab", { name: /Terminal 1/ })).toBeVisible();
+
+  daemon.delayResponse("pty_close", () => true, 500);
+  await page.getByRole("button", { name: "Close Terminal 1" }).click();
+  await daemon.waitForRequest("pty_close", (request) => request.params.ptyId === "pty-1");
+
+  await page.locator(".pf-terminal-host").click();
+  await page.keyboard.type("x");
+  await page.waitForTimeout(80);
+
+  expect(
+    daemon.requests.filter((request) => request.method === "pty_write")
+  ).toHaveLength(0);
+});
+
 test("Terminal tab close controls include tab titles", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
