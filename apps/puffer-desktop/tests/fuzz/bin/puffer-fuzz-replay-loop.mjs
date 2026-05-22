@@ -67,6 +67,7 @@ async function main() {
   const shellTimeoutSeconds = Math.max(timeoutSeconds, Math.ceil(playwrightTimeoutMs / 1000) + 15);
   const rngNamespace = String(args["rng-seed"] ?? process.env.PUFFER_REPLAY_RNG_SEED ?? "bounded-replay");
   const namespace = sanitizeNamespace(String(args.namespace ?? process.env.PUFFER_REPLAY_NAMESPACE ?? `${rngNamespace}-${Date.now()}`));
+  const inputRunPath = args.input ? path.resolve(String(args.input)) : "";
   const port = Number(args.port ?? process.env.PUFFER_REPLAY_PORT ?? (15_000 + (hashString(namespace) % 1_000)));
   const tmpDir = path.resolve(String(args["tmp-dir"] ?? path.join(fuzzRoot, ".runs", namespace)));
   const out = path.resolve(String(args.out ?? path.join(tmpDir, "bounded-replay-report.md")));
@@ -101,20 +102,24 @@ async function main() {
     const topReportPath = path.join(tmpDir, `${seed}-top.md`);
     const rngSeed = `${rngNamespace}-${seed}`;
 
-    await runCommand("node", [
-      fuzzCli,
-      "run",
-      "--seed",
-      seed,
-      "--iterations",
-      String(defaults.iterations),
-      "--steps",
-      String(defaults.steps),
-      "--rng-seed",
-      rngSeed,
-      "--out",
-      runPath
-    ], { cwd: repoRoot, timeoutSeconds: 60 });
+    if (inputRunPath) {
+      await writeFile(runPath, await readFile(inputRunPath, "utf8"));
+    } else {
+      await runCommand("node", [
+        fuzzCli,
+        "run",
+        "--seed",
+        seed,
+        "--iterations",
+        String(defaults.iterations),
+        "--steps",
+        String(defaults.steps),
+        "--rng-seed",
+        rngSeed,
+        "--out",
+        runPath
+      ], { cwd: repoRoot, timeoutSeconds: 60 });
+    }
 
     await runCommand("node", [
       fuzzCli,

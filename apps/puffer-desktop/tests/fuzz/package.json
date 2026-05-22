@@ -16,6 +16,7 @@
     "gate": "node bin/puffer-fuzz.mjs gate",
     "replay": "node bin/puffer-fuzz.mjs replay",
     "bug-list": "node bin/puffer-fuzz.mjs bug-list",
+    "openrouter-explorer": "node bin/puffer-openrouter-explorer.mjs",
     "openrouter-aggregate": "node bin/puffer-openrouter-aggregate.mjs",
     "openrouter-triage": "node bin/puffer-openrouter-triage.mjs"
   }

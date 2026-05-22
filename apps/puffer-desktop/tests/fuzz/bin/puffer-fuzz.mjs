@@ -99,6 +99,9 @@ Commands:
   bug-list --append --title "..." --severity P1 --area chat --shard chat-composer-send --evidence apps/.../final.md
   bug-list --set-status --id PUF-FUZZ-0001 --status fixed --note "fixed by abc123"
 
+Related helper:
+  puffer-fuzz-replay-loop.mjs --input run.json --seeds chat-turn-race --shard chat-composer-send
+
 Options:
   --manifest <path>   Default: apps/puffer-desktop/tests/fuzz/manifests/puffer-ui.json
   --ui-tree <path>    Default: apps/puffer-desktop/tests/fuzz/manifests/puffer-ui-tree.json

@@ -194,12 +194,12 @@ agentflow run apps/puffer-desktop/tests/fuzz/agentflow_puffer_openrouter_campaig
 
 The OpenRouter campaign uses the same UI-tree scheduler and `BUG_LIST_APPEND`
 handoff. Claude Opus plans the shard boundaries and report expectations, the
-harness executes each assigned GUI trigger/replay workflow, and an
-OpenRouter-backed small-model triage step writes the shard finding report. It
-defaults to two shards and two-way concurrency. The triage step has a
-deterministic replay gate: it suppresses `BUG_LIST_APPEND` when bounded replay
-does not report a new candidate, product candidate, stable failure, or
-actionable failure. Increase
+OpenRouter-backed Explorer uses function tools to construct the assigned GUI
+trigger sequence, the harness replays that generated case, and an
+OpenRouter-backed triage step writes the shard finding report. It defaults to
+two shards and two-way concurrency. The triage step has a deterministic replay
+gate: it suppresses `BUG_LIST_APPEND` when bounded replay does not report a new
+candidate, product candidate, stable failure, or actionable failure. Increase
 `PUFFER_OPENROUTER_SHARD_LIMIT` and `PUFFER_OPENROUTER_CONCURRENCY` only after
 the small run shows acceptable instruction-following and false-positive rates.
 
@@ -264,6 +264,8 @@ For day-to-day use, treat the app as ready only when:
   fake daemon helpers.
 - `agentflow_puffer_openrouter_campaign.py`: small-model OpenRouter campaign
   for low-cost shard smoke tests.
+- `puffer-openrouter-explorer.mjs`: OpenRouter function-tool Explorer that
+  turns a shard into a generated replay case.
 
 ## Current Limitation
 
