@@ -341,10 +341,10 @@ const timeline: TimelineItem[] = [
       summary: "Setting: theme",
       inputText: "{\"setting\":\"theme\",\"value\":\"light\"}",
       toolName: "Config",
-      choices: ["Approve once", "Always allow", "Always allow all", "Deny"]
+      choices: ["Approve once", "Always allow", "Deny"]
     },
     scopeLabel: "workspace",
-    choices: ["Approve once", "Always allow", "Always allow all", "Deny"]
+    choices: ["Approve once", "Always allow", "Deny"]
   },
   {
     id: "diff-1",

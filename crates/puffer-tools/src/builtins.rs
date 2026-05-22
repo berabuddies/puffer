@@ -49,7 +49,6 @@ pub fn parse_builtin_input(kind: ToolKind, input: Value) -> Result<ToolInput> {
                 command: input.command,
                 timeout: input.timeout,
                 run_in_background: input.run_in_background,
-                dangerously_disable_sandbox: input.dangerously_disable_sandbox,
             })
         }
         ToolKind::ReadFile => {
@@ -156,7 +155,6 @@ pub fn execute_bash_tool(
                 "command": input.command,
                 "timeout_ms": input.timeout,
                 "run_in_background": input.run_in_background,
-                "dangerously_disable_sandbox": input.dangerously_disable_sandbox,
                 "timed_out": execution.timed_out,
             }),
         },
@@ -774,7 +772,6 @@ mod tests {
                 command: "printf hi".to_string(),
                 timeout: None,
                 run_in_background: false,
-                dangerously_disable_sandbox: false,
             },
         )
         .unwrap_err();
@@ -809,7 +806,6 @@ mod tests {
                 command: "sleep 1".to_string(),
                 timeout: Some(10),
                 run_in_background: false,
-                dangerously_disable_sandbox: false,
             },
         )
         .unwrap();
@@ -828,7 +824,6 @@ mod tests {
                     .to_string(),
                 timeout: None,
                 run_in_background: false,
-                dangerously_disable_sandbox: false,
             },
         )
         .unwrap();
@@ -846,7 +841,6 @@ mod tests {
                 command: "printf hi".to_string(),
                 timeout: None,
                 run_in_background: true,
-                dangerously_disable_sandbox: false,
             },
         )
         .unwrap_err();

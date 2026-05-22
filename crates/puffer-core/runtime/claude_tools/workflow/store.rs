@@ -356,8 +356,6 @@ pub(super) struct PowerShellInput {
     pub(super) description: Option<String>,
     #[serde(default)]
     pub(super) run_in_background: bool,
-    #[serde(default, rename = "dangerouslyDisableSandbox")]
-    pub(super) dangerously_disable_sandbox: bool,
 }
 
 #[derive(Debug, Deserialize)]

@@ -1617,10 +1617,10 @@
           summary: ev.summary,
           inputText: null,
           toolName: ev.toolId,
-          choices: ["Approve once", "Always allow", "Always allow all", "Deny"]
+          choices: ["Approve once", "Always allow", "Deny"]
         },
         scopeLabel: null,
-        choices: ["Approve once", "Always allow", "Always allow all", "Deny"]
+        choices: ["Approve once", "Always allow", "Deny"]
       }),
       turnPermissionLookup: {
         ...cached.turnPermissionLookup,
@@ -2438,7 +2438,6 @@
 
   function mapPermissionAction(choice: string): "allow_once" | "allow_session" | "allow_all_session" | "deny" {
     const n = choice.toLowerCase();
-    if (n.includes("all")) return "allow_all_session";
     if (n.includes("always")) return "allow_session";
     if (n.includes("session")) return "allow_session";
     if (n.includes("deny") || n.includes("never")) return "deny";
@@ -3046,7 +3045,7 @@
         const id = livePermissionId(ev.turnId, ev.requestId);
         const choices = ev.browser
           ? ["Approve once", "Always allow browser context", "Deny"]
-          : ["Approve once", "Always allow", "Always allow all", "Deny"];
+          : ["Approve once", "Always allow", "Deny"];
         appendLive({
           id,
           kind: "permission",

@@ -37,7 +37,7 @@ description: |-
     unless the User explicitly requests it.
   - Do not use unnecessary `sleep` commands. If you started a background task,
     do not poll it immediately.
-  - Commands are permission-gated by effective argv[0]. Safe inspection
+  - Commands are permission-gated by effective command name. Safe inspection
     commands such as `ls`, `cat`, `grep`, and `sed` can run by default;
     other commands require approval or a project ACL rule.
   - Commands that look destructively broad (for example `rm -rf /`) or that
@@ -84,9 +84,6 @@ input_schema:
     run_in_background:
       type: boolean
       description: Set to true to run this command in the background. Only use this when you do not need the result immediately and are okay being notified later.
-    dangerouslyDisableSandbox:
-      type: boolean
-      description: Deprecated compatibility flag. Puffer permissions are controlled by project ACL rules.
     tty:
       type: boolean
       description: |-

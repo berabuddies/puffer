@@ -284,7 +284,7 @@ fn render_permission_prompt_shows_codex_style_options() {
     assert!(rendered.contains("Would you like to grant these permissions?"));
     assert!(rendered.contains("Approve once"));
     assert!(rendered.contains("Always allow this request"));
-    assert!(rendered.contains("Always allow all project actions"));
+    assert!(!rendered.contains("Always allow all project actions"));
     assert!(rendered.contains("No, continue without permissions"));
 }
 

@@ -249,14 +249,6 @@ fn permissions_options(request: &PermissionPromptRequest) -> Vec<ApprovalOption>
             description: None,
         },
     ];
-    if request.browser.is_none() {
-        options.push(ApprovalOption {
-            label: "Always allow all project actions".to_string(),
-            action: PermissionPromptAction::AllowAllSession,
-            shortcuts: vec!['A'],
-            description: None,
-        });
-    }
     options.push(ApprovalOption {
         label: "No, continue without permissions".to_string(),
         action: PermissionPromptAction::Deny,

@@ -387,7 +387,7 @@ pub(crate) fn run_auto_mode_command(
                 "mode": "acl",
                 "allow_rules": [
                     "cwd read/write",
-                    "preapproved bash argv",
+                    "preapproved shell commands",
                     "project ACL allow rules"
                 ],
                 "deny_rules": [],
@@ -403,7 +403,7 @@ pub(crate) fn run_auto_mode_command(
                 paths.workspace_config_dir.join("permissions.acl").display()
             );
             let _ = writeln!(&mut text, "read_write_default=cwd");
-            let _ = writeln!(&mut text, "bash_default=preapproved argv only");
+            let _ = writeln!(&mut text, "bash_default=preapproved commands only");
             let _ = writeln!(&mut text, "browser_default=ask per domain/action");
             print!("{text}");
             Ok(())

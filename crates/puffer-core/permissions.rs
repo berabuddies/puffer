@@ -290,7 +290,7 @@ impl RuntimePermissionContext {
                 reason: Some(reason.to_string()),
             });
         }
-        if let Some(reason) = shell_sandbox_reason(definition, input, &self.sandbox) {
+        if let Some(reason) = shell_sandbox_reason(input, &self.sandbox) {
             return Some(ToolPermissionDecision {
                 behavior: ToolPermissionBehavior::Ask,
                 reason: Some(reason),
@@ -313,7 +313,7 @@ impl RuntimePermissionContext {
         let argv0 = acl::effective_bash_argv0(command).unwrap_or_else(|| "<unknown>".to_string());
         Some(ToolPermissionDecision {
             behavior: ToolPermissionBehavior::Ask,
-            reason: Some(format!("bash argv `{argv0}` requires approval")),
+            reason: Some(format!("shell command `{argv0}` requires approval")),
         })
     }
 
@@ -440,7 +440,7 @@ impl RuntimePermissionContext {
     }
 
     fn approval_reason(&self, definition: &ToolDefinition, input: &Value) -> Option<String> {
-        if let Some(reason) = shell_sandbox_reason(definition, input, &self.sandbox) {
+        if let Some(reason) = shell_sandbox_reason(input, &self.sandbox) {
             return Some(reason);
         }
         if let Some(reason) = browser_action::ambiguous_browser_shell_command_reason_for_tool_call(
@@ -801,19 +801,7 @@ fn tool_skips_permission_enforcement(definition: &ToolDefinition) -> bool {
     tool_matches_any_name(definition, &["SendUserMessage", "Brief"])
 }
 
-fn shell_requests_unsandboxed(definition: &ToolDefinition, input: &Value) -> bool {
-    tool_matches_any_name(definition, &["Bash", "PowerShell"])
-        && input
-            .get("dangerouslyDisableSandbox")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-}
-
-fn shell_sandbox_reason(
-    definition: &ToolDefinition,
-    input: &Value,
-    sandbox: &SandboxSettings,
-) -> Option<String> {
+fn shell_sandbox_reason(input: &Value, sandbox: &SandboxSettings) -> Option<String> {
     let command = input.get("command").and_then(Value::as_str)?;
     if let Some(pattern) = sandbox
         .excluded_commands
@@ -827,12 +815,6 @@ fn shell_sandbox_reason(
             "shell command matches project shell exclusion `{}`",
             pattern.trim()
         ));
-    }
-    if shell_requests_unsandboxed(definition, input) && !sandbox.allow_unsandboxed_fallback {
-        return Some(
-            "shell command requested deprecated dangerouslyDisableSandbox; approve the command through project ACL instead"
-                .to_string(),
-        );
     }
     None
 }

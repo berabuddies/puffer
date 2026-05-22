@@ -662,7 +662,7 @@ fn surface_enforcement(surface: PermissionSurface) -> SurfaceEnforcement {
     }
 }
 
-fn surface_notes(surface: PermissionSurface, sandbox: &SandboxSettings) -> Vec<String> {
+fn surface_notes(surface: PermissionSurface, _sandbox: &SandboxSettings) -> Vec<String> {
     match surface {
         PermissionSurface::Filesystem => vec![
             "Path access is bounded by workspace roots on the legacy Claude tool path.".to_string(),
@@ -670,17 +670,10 @@ fn surface_notes(surface: PermissionSurface, sandbox: &SandboxSettings) -> Vec<S
                 .to_string(),
         ],
         PermissionSurface::Process => {
-            let mut notes = vec![
+            vec![
                 "Shell approval and dangerous-command checks are policy-level in puffer-core.".to_string(),
                 "Process execution itself is not sandbox-enforced by the Bash tool implementation.".to_string(),
-            ];
-            if sandbox.allow_unsandboxed_fallback {
-                notes.push(
-                    "dangerouslyDisableSandbox requests can pass policy when unsandboxed fallback is enabled."
-                        .to_string(),
-                );
-            }
-            notes
+            ]
         }
         PermissionSurface::Network => vec![
             "WebSearch is approval-gated in policy.".to_string(),

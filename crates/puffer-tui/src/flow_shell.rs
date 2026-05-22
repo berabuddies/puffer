@@ -56,7 +56,6 @@ pub(crate) fn execute_shell_shortcut(
                     command: command.clone(),
                     timeout: None,
                     run_in_background: false,
-                    dangerously_disable_sandbox: false,
                 },
             ),
         );
@@ -131,7 +130,6 @@ pub(crate) fn execute_shell_shortcut_inline(
                 command: shell_command.to_string(),
                 timeout: None,
                 run_in_background: false,
-                dangerously_disable_sandbox: false,
             },
         ),
     );

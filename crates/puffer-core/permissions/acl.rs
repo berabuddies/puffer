@@ -142,7 +142,7 @@ impl ProjectPermissionAcl {
         }
         bash_argv_is_preapproved(&argv0).then(|| {
             AclDecision::Allow(format!(
-                "bash argv `{argv0}` is preapproved for this project"
+                "shell command `{argv0}` is preapproved for this project"
             ))
         })
     }
@@ -197,7 +197,7 @@ impl AclRule {
                 path.display()
             ),
             AclScope::BashArgv(argv0) => {
-                format!("project ACL bash argv `{argv0}` rule matches")
+                format!("project ACL shell command `{argv0}` rule matches")
             }
             AclScope::BrowserDomain(domain) => {
                 format!("project ACL browser domain `{domain}` rule matches")
@@ -240,7 +240,7 @@ pub(crate) fn append_allow_path_rule(
     )
 }
 
-/// Appends an always-allow shell argv ACL rule for the effective command.
+/// Appends an always-allow shell command ACL rule for the effective command.
 pub(crate) fn append_allow_bash_rule(cwd: &Path, command: &str) -> Result<()> {
     let Some(argv0) = effective_bash_argv0(command) else {
         return Ok(());
@@ -248,7 +248,7 @@ pub(crate) fn append_allow_bash_rule(cwd: &Path, command: &str) -> Result<()> {
     append_acl_line(
         cwd,
         &format!(
-            "{DEFAULT_ALLOW_PRIORITY} Allow bash argv {}",
+            "{DEFAULT_ALLOW_PRIORITY} Allow bash command {}",
             quote_acl_token(&argv0)
         ),
     )
@@ -751,7 +751,7 @@ mod tests {
     fn acl_rule_priority_and_later_tie_breaker_apply() {
         let acl = ProjectPermissionAcl::parse(
             Path::new("/repo"),
-            "[project workdir]\n100 Allow bash argv git\n100 Deny bash argv git\n",
+            "[project workdir]\n100 Allow bash command git\n100 Deny bash command git\n",
         );
         assert!(matches!(
             acl.decision_for_bash_command("git status"),

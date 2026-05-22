@@ -69,8 +69,6 @@ pub struct ClaudeBashInput {
     pub description: Option<String>,
     #[serde(default)]
     pub run_in_background: bool,
-    #[serde(default, rename = "dangerouslyDisableSandbox")]
-    pub dangerously_disable_sandbox: bool,
     #[serde(default)]
     pub tty: bool,
 }
@@ -92,11 +90,6 @@ pub struct ClaudeBashOutput {
         rename = "assistantAutoBackgrounded"
     )]
     pub assistant_auto_backgrounded: Option<bool>,
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        rename = "dangerouslyDisableSandbox"
-    )]
-    pub dangerously_disable_sandbox: Option<bool>,
     #[serde(
         skip_serializing_if = "Option::is_none",
         rename = "returnCodeInterpretation"
@@ -131,7 +124,9 @@ pub fn execute_from_value(
     cwd: &Path,
     session_id: &Uuid,
     input: Value,
-    process_store: Option<&std::sync::Arc<std::sync::Mutex<crate::runtime::process_store::ProcessStore>>>,
+    process_store: Option<
+        &std::sync::Arc<std::sync::Mutex<crate::runtime::process_store::ProcessStore>>,
+    >,
 ) -> Result<ClaudeBashExecution> {
     let typed: ClaudeBashInput =
         serde_json::from_value(input).context("invalid Bash tool input payload")?;
@@ -143,7 +138,9 @@ pub fn execute(
     cwd: &Path,
     session_id: &Uuid,
     input: ClaudeBashInput,
-    process_store: Option<&std::sync::Arc<std::sync::Mutex<crate::runtime::process_store::ProcessStore>>>,
+    process_store: Option<
+        &std::sync::Arc<std::sync::Mutex<crate::runtime::process_store::ProcessStore>>,
+    >,
 ) -> Result<ClaudeBashExecution> {
     if input.tty {
         if let Some(store) = process_store {
@@ -170,13 +167,9 @@ fn execute_interactive(
     let process_id = {
         let mut guard = store.lock().unwrap();
         let pid = guard.allocate_id();
-        let entry = crate::runtime::process_store::spawn_tracked_process(
-            &input.command,
-            cwd,
-            pid,
-            true,
-        )
-        .with_context(|| format!("failed to spawn PTY process in {}", cwd.display()))?;
+        let entry =
+            crate::runtime::process_store::spawn_tracked_process(&input.command, cwd, pid, true)
+                .with_context(|| format!("failed to spawn PTY process in {}", cwd.display()))?;
         guard.insert(entry);
         pid
     };
@@ -227,7 +220,6 @@ fn execute_interactive(
             output_file: None,
             backgrounded_by_user: None,
             assistant_auto_backgrounded: None,
-            dangerously_disable_sandbox: Some(input.dangerously_disable_sandbox),
             return_code_interpretation: None,
             no_output_expected: None,
             process_id: if exited { None } else { Some(process_id) },
@@ -311,7 +303,6 @@ fn execute_background(
             output_file: Some(output_file.display().to_string()),
             backgrounded_by_user: Some(false),
             assistant_auto_backgrounded: Some(false),
-            dangerously_disable_sandbox: Some(input.dangerously_disable_sandbox),
             return_code_interpretation: None,
             no_output_expected: Some(true),
             process_id: None,
@@ -346,7 +337,6 @@ fn execute_foreground(cwd: &Path, input: ClaudeBashInput) -> Result<ClaudeBashEx
             output_file: None,
             backgrounded_by_user: None,
             assistant_auto_backgrounded: None,
-            dangerously_disable_sandbox: Some(input.dangerously_disable_sandbox),
             return_code_interpretation: classify_return_code(timed.output.status.code()),
             no_output_expected: Some(no_output_expected),
             process_id: None,
@@ -555,7 +545,6 @@ mod tests {
             timeout: None,
             description: None,
             run_in_background: false,
-            dangerously_disable_sandbox: false,
             tty: false,
         };
         assert_eq!(tool_description(&input), "Run shell command");
@@ -568,7 +557,6 @@ mod tests {
             timeout: None,
             description: Some("Show greeting".to_string()),
             run_in_background: false,
-            dangerously_disable_sandbox: false,
             tty: false,
         };
         assert_eq!(tool_description(&input), "Show greeting");
@@ -586,7 +574,6 @@ mod tests {
                     timeout: Some(5_000),
                     description: None,
                     run_in_background: false,
-                    dangerously_disable_sandbox: false,
                     tty: false,
                 },
                 None,
@@ -595,7 +582,6 @@ mod tests {
             assert!(result.success, "command failed: {}", result.output.stderr);
             assert_eq!(result.output.stdout, "hello");
             assert!(!result.output.interrupted);
-            assert_eq!(result.output.dangerously_disable_sandbox, Some(false));
         });
     }
 
@@ -611,7 +597,6 @@ mod tests {
                     timeout: Some(20),
                     description: None,
                     run_in_background: false,
-                    dangerously_disable_sandbox: true,
                     tty: false,
                 },
                 None,
@@ -620,7 +605,6 @@ mod tests {
             assert!(!result.success);
             assert!(result.output.interrupted);
             assert!(result.output.stderr.contains("timed out after"));
-            assert_eq!(result.output.dangerously_disable_sandbox, Some(true));
         });
     }
 
@@ -636,7 +620,6 @@ mod tests {
                     timeout: Some(5_000),
                     description: None,
                     run_in_background: true,
-                    dangerously_disable_sandbox: false,
                     tty: false,
                 },
                 None,
@@ -661,7 +644,6 @@ mod tests {
                     timeout: Some(5_000),
                     description: Some("Sleep briefly".to_string()),
                     run_in_background: true,
-                    dangerously_disable_sandbox: false,
                     tty: false,
                 },
                 None,
@@ -711,13 +693,11 @@ mod tests {
                 "command": "printf ok",
             "timeout": 5000,
                 "description": "Print test token",
-                "run_in_background": false,
-                "dangerouslyDisableSandbox": true
+                "run_in_background": false
             });
             let result = execute_from_value(temp.path(), &test_session_id(), input, None).unwrap();
             assert!(result.success, "command failed: {}", result.output.stderr);
             assert_eq!(result.output.stdout, "ok");
-            assert_eq!(result.output.dangerously_disable_sandbox, Some(true));
         });
     }
 
@@ -728,7 +708,6 @@ mod tests {
             timeout: None,
             description: None,
             run_in_background: false,
-            dangerously_disable_sandbox: false,
             tty: false,
         };
         let error = summary_line(&input).unwrap_err();
@@ -796,7 +775,6 @@ mod tests {
                     timeout: Some(5_000),
                     description: None,
                     run_in_background: false,
-                    dangerously_disable_sandbox: false,
                     tty: false,
                 },
                 None,

@@ -660,7 +660,6 @@ fn run_tool_command(
                     command,
                     timeout: None,
                     run_in_background: false,
-                    dangerously_disable_sandbox: false,
                 },
             )?;
             println!("{}", serde_json::to_string_pretty(&result)?);
