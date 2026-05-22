@@ -25,6 +25,10 @@ const baseUrl = (process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v
 const apiKey = process.env.OPENROUTER_API_KEY;
 const maxSteps = Number(args.steps ?? 8);
 const caseCount = Math.max(1, Number(args.cases ?? process.env.PUFFER_OPENROUTER_CASES ?? 1));
+const requestTimeoutMs = Math.max(1000, Number(process.env.PUFFER_OPENROUTER_REQUEST_TIMEOUT_MS ?? 30000));
+const requestAttempts = Math.max(1, Number(process.env.PUFFER_OPENROUTER_REQUEST_ATTEMPTS ?? 3));
+const explorerTimeoutMs = Math.max(requestTimeoutMs, Number(process.env.PUFFER_OPENROUTER_EXPLORER_TIMEOUT_MS ?? 240000));
+const explorerStartedAt = Date.now();
 const runDir = path.resolve(fuzzRoot, ".runs", namespace);
 const plannerGuidance = readOptional(path.join(runDir, "planner.md"));
 const promptEvolutionGuidance =
@@ -105,6 +109,11 @@ async function generateSelectedActions(caseIndex) {
   ];
 
   for (let round = 0; round < maxSteps + 4; round += 1) {
+    if (Date.now() - explorerStartedAt > explorerTimeoutMs) {
+      fallbackReason = `fallback after explorer budget exceeded ${explorerTimeoutMs}ms`;
+      process.stderr.write(`OPENROUTER_EXPLORER_FALLBACK ${namespace} ${fallbackReason}\n`);
+      break;
+    }
     let response;
     try {
       response = await openRouterChat(messages);
@@ -158,10 +167,13 @@ async function generateSelectedActions(caseIndex) {
 }
 
 async function openRouterChat(messages) {
-  for (let attempt = 1; attempt <= 4; attempt += 1) {
+  for (let attempt = 1; attempt <= requestAttempts; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
     try {
       const response = await fetch(`${baseUrl}/chat/completions`, {
         method: "POST",
+        signal: controller.signal,
         headers: {
           "Authorization": `Bearer ${apiKey}`,
           "Content-Type": "application/json",
@@ -183,8 +195,10 @@ async function openRouterChat(messages) {
       }
       return JSON.parse(bodyText);
     } catch (error) {
-      if (attempt === 4) throw error;
+      if (attempt === requestAttempts) throw error;
       await sleep(750 * attempt);
+    } finally {
+      clearTimeout(timeout);
     }
   }
   throw new Error("OpenRouter explorer request failed");
