@@ -483,14 +483,9 @@ fn command_with_internal_tool_helpers(command: &str) -> Result<String> {
 fn internal_tool_shell_helpers() -> Result<String> {
     let current_exe = std::env::current_exe().context("resolve puffer executable")?;
     let current_exe = current_exe.to_string_lossy();
-    Ok(format!(
-        "browser() {{\n  {} internal-tool browser \"$@\"\n}}",
-        shell_word(&current_exe)
+    Ok(puffer_tools::internal_tools::internal_tool_shell_helpers(
+        &current_exe,
     ))
-}
-
-fn shell_word(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 const MAX_OUTPUT_CHARS: usize = 30_000;

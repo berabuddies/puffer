@@ -3,6 +3,7 @@ mod builtins;
 mod config_prompt;
 mod external;
 pub mod internal_permissions;
+pub mod internal_tools;
 pub mod mcp_qualify;
 mod model;
 #[cfg(test)]
