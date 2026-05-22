@@ -14,6 +14,9 @@ Use this guide when an agent is asked to find Puffer desktop interaction bugs.
 - Prefer fake daemon for race construction.
 - Re-check high-value failures with real daemon when the path exists there.
 - Convert confirmed failures into deterministic Playwright specs.
+- Do not edit `apps/puffer-desktop/tests/fuzz/BUGS.md` from a subagent. Report
+  a finding block in your shard report; the main agent appends or updates the
+  central bug list.
 
 ## Agent Loop
 
@@ -31,8 +34,10 @@ Use this guide when an agent is asked to find Puffer desktop interaction bugs.
 12. Decide whether it is a product bug.
 13. During fuzz-only campaigns, archive confirmed findings under
     `apps/puffer-desktop/tests/fuzz/.runs/<run>/findings.md`.
-14. Do not patch product code from a fuzz-only task.
-15. For a later product-fix task, add regression coverage and update or add a
+14. For each accepted finding, include a `BUG_LIST_APPEND` block in the shard
+    report so the main agent can append it to `BUGS.md`.
+15. Do not patch product code from a fuzz-only task.
+16. For a later product-fix task, add regression coverage and update or add a
     concise component spec.
 
 ## Shard Ownership
@@ -62,6 +67,60 @@ Reject the issue if it is only:
 - missing local dependency
 - screenshot-only polish that does not block interaction
 - expected disabled state with clear recovery
+
+## Bug List Handoff
+
+The central ledger is `apps/puffer-desktop/tests/fuzz/BUGS.md`. It is owned by
+the main agent to avoid concurrent edits and context drift. Subagents should
+append this block to their final report for every accepted bug:
+
+```text
+BUG_LIST_APPEND
+title: <short user-visible bug title>
+status: pending
+severity: P0|P1|P2
+area: <component or flow>
+shard: <shard id>
+source-run: <run namespace>
+evidence: apps/puffer-desktop/tests/fuzz/.runs/<run>/final.md
+stability: <for example 3/3>
+expected: <expected behavior>
+actual: <actual behavior>
+impact: <user impact>
+repro: <minimal steps>
+notes: <duplicate/out-of-shard/source pointers if relevant>
+END_BUG_LIST_APPEND
+```
+
+The main agent should append it with:
+
+```sh
+node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs bug-list \
+  --append \
+  --title "<title>" \
+  --status pending \
+  --severity P1 \
+  --area "<area>" \
+  --shard "<shard>" \
+  --source-run "<run>" \
+  --evidence "<evidence>" \
+  --stability "<stability>" \
+  --expected "<expected>" \
+  --actual "<actual>" \
+  --impact "<impact>" \
+  --repro "<repro>" \
+  --notes "<notes>"
+```
+
+When a product fix lands, update the entry with:
+
+```sh
+node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs bug-list \
+  --set-status \
+  --id PUF-FUZZ-0001 \
+  --status fixed \
+  --note "fixed by <commit> with <test file>"
+```
 
 ## How To Read Generated Cases
 

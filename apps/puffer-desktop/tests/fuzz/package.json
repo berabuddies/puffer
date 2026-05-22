@@ -14,6 +14,7 @@
     "schedule": "node bin/puffer-fuzz.mjs schedule",
     "record-feedback": "node bin/puffer-fuzz.mjs record-feedback",
     "gate": "node bin/puffer-fuzz.mjs gate",
-    "replay": "node bin/puffer-fuzz.mjs replay"
+    "replay": "node bin/puffer-fuzz.mjs replay",
+    "bug-list": "node bin/puffer-fuzz.mjs bug-list"
   }
 }

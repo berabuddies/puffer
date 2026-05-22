@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { mkdir, rmdir } from "node:fs/promises";
+import { mkdir, readFile, rmdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -40,6 +40,7 @@ const defaultShardDir = path.join(fuzzRoot, "shards");
 const defaultAdapterPath = path.join(fuzzRoot, "adapters", "playwright-actions.json");
 const defaultLedgerPath = path.join(fuzzRoot, "coverage-ledger.json");
 const defaultFeedbackLedgerPath = path.join(fuzzRoot, "feedback-ledger.json");
+const defaultBugListPath = path.join(fuzzRoot, "BUGS.md");
 const defaultFakeDaemonPath = path.resolve(fuzzRoot, "..", "support", "fakeDaemon.ts");
 
 function parseArgs(argv) {
@@ -95,6 +96,8 @@ Commands:
   record-feedback --shard chat-composer-send --input apps/puffer-desktop/tests/fuzz/.runs/<run>/bounded-replay-report.json
   signature --finding finding.json
   replay --input run.json --case-id chat-turn-race-0001 --out /tmp/replay.spec.ts
+  bug-list --append --title "..." --severity P1 --area chat --shard chat-composer-send --evidence apps/.../final.md
+  bug-list --set-status --id PUF-FUZZ-0001 --status fixed --note "fixed by abc123"
 
 Options:
   --manifest <path>   Default: apps/puffer-desktop/tests/fuzz/manifests/puffer-ui.json
@@ -104,6 +107,7 @@ Options:
   --adapter <path>    Default: apps/puffer-desktop/tests/fuzz/adapters/playwright-actions.json
   --ledger <path>     Default: apps/puffer-desktop/tests/fuzz/coverage-ledger.json
   --feedback-ledger <path> Default: apps/puffer-desktop/tests/fuzz/feedback-ledger.json
+  --bug-list <path> Default: apps/puffer-desktop/tests/fuzz/BUGS.md
   --seed <id>         Select one seed; omit to run all seeds
   --shards <ids>      Comma-separated shard ids for scheduler filtering
   --shard <id>        Single shard id for top-cases or feedback
@@ -387,7 +391,189 @@ async function main() {
     return;
   }
 
+  if (command === "bug-list") {
+    const bugListPath = args["bug-list"] ?? defaultBugListPath;
+    if (args.append) {
+      const text = await appendBugListEntry(bugListPath, args);
+      process.stdout.write(text);
+      return;
+    }
+    if (args["set-status"]) {
+      const text = await updateBugListStatus(bugListPath, args);
+      process.stdout.write(text);
+      return;
+    }
+    await ensureBugList(bugListPath);
+    process.stdout.write(`Bug list: ${bugListPath}\n`);
+    return;
+  }
+
   throw new Error(`Unknown command: ${command}`);
+}
+
+const bugListStatusValues = new Set(["pending", "fixed", "duplicate", "rejected", "out-of-scope"]);
+
+function bugListTemplate() {
+  return `# Puffer UI/UX Fuzz Bug List
+
+This file is the main-agent-owned ledger for confirmed or candidate UI/UX fuzz
+findings. Subagents should not edit this file directly. They should report a
+finding block in their final shard report, then the main agent appends it here
+with \`puffer-fuzz.mjs bug-list --append\`.
+
+## Status Values
+
+- \`pending\`: accepted as a real product candidate, not fixed yet.
+- \`fixed\`: fixed with regression coverage.
+- \`duplicate\`: same root cause as an existing ledger entry.
+- \`rejected\`: investigated and not a product bug.
+- \`out-of-scope\`: real evidence, but outside the shard or current campaign.
+
+## Ledger
+
+| ID | Status | Severity | Area | Shard | Title | Evidence | Updated |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+
+## Details
+
+`;
+}
+
+async function ensureBugList(filePath) {
+  try {
+    await readFile(filePath, "utf8");
+  } catch (error) {
+    if (!error || error.code !== "ENOENT") throw error;
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(filePath, bugListTemplate(), "utf8");
+  }
+}
+
+async function readBugList(filePath) {
+  await ensureBugList(filePath);
+  return readFile(filePath, "utf8");
+}
+
+async function writeBugList(filePath, text) {
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, text, "utf8");
+}
+
+async function appendBugListEntry(filePath, args) {
+  const title = requiredArg(args, "title");
+  const status = normalizeBugStatus(args.status ?? "pending");
+  const severity = args.severity ?? "P2";
+  const area = args.area ?? "unknown";
+  const shard = args.shard ?? "unknown";
+  const evidence = args.evidence ?? args.report ?? "";
+  const sourceRun = args["source-run"] ?? "";
+  const stability = args.stability ?? "";
+  const impact = args.impact ?? "";
+  const expected = args.expected ?? "";
+  const actual = args.actual ?? "";
+  const repro = args.repro ?? "";
+  const notes = args.notes ?? "";
+  const updated = new Date().toISOString();
+
+  return withFileLock(filePath, async () => {
+    const current = await readBugList(filePath);
+    const id = args.id ?? nextBugId(current);
+    if (current.includes(`| ${id} |`) || current.includes(`### ${id}:`)) {
+      throw new Error(`Bug id already exists in ${filePath}: ${id}`);
+    }
+    const row = `| ${escapeTable(id)} | ${escapeTable(status)} | ${escapeTable(severity)} | ${escapeTable(area)} | ${escapeTable(shard)} | ${escapeTable(title)} | ${escapeTable(evidence)} | ${escapeTable(updated)} |`;
+    const detail = [
+      `### ${id}: ${title}`,
+      "",
+      `- Status: ${status}`,
+      `- Severity: ${severity}`,
+      `- Area: ${area}`,
+      `- Shard: ${shard}`,
+      `- Source run: ${sourceRun || "n/a"}`,
+      `- Evidence: ${evidence || "n/a"}`,
+      `- Stability: ${stability || "n/a"}`,
+      `- Expected: ${expected || "n/a"}`,
+      `- Actual: ${actual || "n/a"}`,
+      `- Impact: ${impact || "n/a"}`,
+      `- Repro: ${repro || "n/a"}`,
+      `- Notes: ${notes || "n/a"}`,
+      `- Updated: ${updated}`,
+      ""
+    ].join("\n");
+    const next = insertBugListRow(current, row).trimEnd() + `\n\n${detail}`;
+    await writeBugList(filePath, next);
+    return `Appended ${id} to ${filePath}\n`;
+  });
+}
+
+async function updateBugListStatus(filePath, args) {
+  const id = requiredArg(args, "id");
+  const status = normalizeBugStatus(requiredArg(args, "status"));
+  const note = args.note ?? "";
+  const updated = new Date().toISOString();
+
+  return withFileLock(filePath, async () => {
+    const current = await readBugList(filePath);
+    if (!current.includes(`| ${id} |`) && !current.includes(`### ${id}:`)) {
+      throw new Error(`Bug id not found in ${filePath}: ${id}`);
+    }
+    const lines = current.split("\n").map((line) => {
+      if (!line.startsWith(`| ${id} |`)) return line;
+      const parts = line.split("|").map((item) => item.trim());
+      if (parts.length < 9) return line;
+      parts[2] = status;
+      parts[8] = updated;
+      return `| ${parts.slice(1, 9).join(" | ")} |`;
+    });
+    const statusPattern = new RegExp(`(### ${escapeRegExp(id)}:[\\s\\S]*?\\n- Status: )[^\\n]+`);
+    let next = lines.join("\n").replace(statusPattern, `$1${status}`);
+    const detailPattern = new RegExp(`(### ${escapeRegExp(id)}:[\\s\\S]*?)(?=\\n### PUF-FUZZ-|\\n*$)`);
+    next = next.replace(detailPattern, (match) => {
+      const lines = [`${match.trimEnd()}`, `- Status update: ${updated} ${status}${note ? ` - ${note}` : ""}`, ""];
+      return lines.join("\n");
+    });
+    await writeBugList(filePath, next);
+    return `Updated ${id} to ${status} in ${filePath}\n`;
+  });
+}
+
+function insertBugListRow(text, row) {
+  const marker = "## Details";
+  const index = text.indexOf(`\n${marker}`);
+  if (index === -1) return `${text.trimEnd()}\n${row}\n`;
+  const before = text.slice(0, index).trimEnd();
+  const after = text.slice(index);
+  return `${before}\n${row}\n${after}`;
+}
+
+function nextBugId(text) {
+  const matches = [...text.matchAll(/PUF-FUZZ-(\d{4})/g)];
+  const max = matches.reduce((value, match) => Math.max(value, Number(match[1])), 0);
+  return `PUF-FUZZ-${String(max + 1).padStart(4, "0")}`;
+}
+
+function normalizeBugStatus(value) {
+  const status = String(value).trim().toLowerCase();
+  if (!bugListStatusValues.has(status)) {
+    throw new Error(`Invalid status "${value}". Expected one of: ${[...bugListStatusValues].join(", ")}`);
+  }
+  return status;
+}
+
+function requiredArg(args, key) {
+  const value = args[key];
+  if (value === undefined || value === true || String(value).trim() === "") {
+    throw new Error(`--${key} is required`);
+  }
+  return String(value);
+}
+
+function escapeTable(value) {
+  return String(value ?? "").replaceAll("|", "\\|").replace(/\s+/g, " ").trim();
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function filterRunToShard(run, manifest, shard) {

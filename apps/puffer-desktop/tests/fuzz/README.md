@@ -51,6 +51,29 @@ node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs record-feedback \
   --input apps/puffer-desktop/tests/fuzz/.runs/manual-shards-chat-composer-send/bounded-replay-report.json
 ```
 
+Maintain the main bug list from the main-agent process only:
+
+```sh
+node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs bug-list
+node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs bug-list \
+  --append \
+  --title "Permission approval can be submitted twice during session reload" \
+  --severity P1 \
+  --area chat-permission-question \
+  --shard chat-permission-question \
+  --evidence apps/puffer-desktop/tests/fuzz/.runs/<run>/final.md \
+  --source-run <run> \
+  --stability "3/3" \
+  --expected "one approval request per visible intent" \
+  --actual "two resolve_permission requests are sent" \
+  --impact "duplicate tool execution or confusing approval state"
+node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs bug-list \
+  --set-status \
+  --id PUF-FUZZ-0001 \
+  --status fixed \
+  --note "fixed by <commit> with Playwright regression"
+```
+
 Generate deterministic fuzz cases for one area:
 
 ```sh
@@ -164,15 +187,20 @@ bounded replay results from a previous run.
    --fail-on-new-finding`, which keeps specs, logs, and Playwright output under
    `apps/puffer-desktop/tests/fuzz/.runs/<namespace>/`.
 7. Record replay feedback with `record-feedback --shard <id> --input <bounded-replay-report.json>`.
-8. If it reproduces a product bug, shrink the sequence to the smallest stable
+8. If it reproduces a product bug, ask the main agent to append the candidate
+   to `BUGS.md` with `bug-list --append`; subagents should not edit `BUGS.md`
+   directly.
+9. Shrink the sequence to the smallest stable
    reproducer.
-9. For fuzz-only campaigns, write the finding under
+10. For fuzz-only campaigns, write the finding under
    `apps/puffer-desktop/tests/fuzz/.runs/<namespace>/findings.md` and leave product fixes for a separate
    follow-up.
-10. When a separate product-fix task starts, add the deterministic Playwright
+11. When a separate product-fix task starts, add the deterministic Playwright
    regression and concise component spec there.
-11. Re-run the fuzz report and mark the covered tags as validated after the
+12. Re-run the fuzz report and mark the covered tags as validated after the
    regression exists.
+13. After a fix lands, update the corresponding `BUGS.md` entry to `fixed`
+   with `bug-list --set-status`.
 
 ## Ready Metrics
 
@@ -199,6 +227,7 @@ For day-to-day use, treat the app as ready only when:
 - `adapters/playwright-actions.json`: generated-action support map.
 - `coverage-ledger.json`: validated coverage and fixed finding ledger.
 - `feedback-ledger.json`: scheduler feedback from replay runs.
+- `BUGS.md`: main-agent-owned candidate/fixed bug ledger.
 - `bin/puffer-fuzz.mjs`: CLI entrypoint.
 - `lib/*.mjs`: deterministic generator, coverage summarizer, and formatters.
 - `playwright/pufferCoverage.ts`: reusable state, element, and trace helpers for Playwright replays.
