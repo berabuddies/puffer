@@ -35,11 +35,12 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from pathlib import Path
 
 from agentflow import Graph, fanout, shell
 
 
-REPO_ROOT = "/dsk/hdd/home/llmft/Riema/puffer"
+REPO_ROOT = os.environ.get("PUFFER_REPO_ROOT") or str(Path(__file__).resolve().parents[4])
 TASK_PATH = "apps/puffer-desktop/tests/fuzz/prompt.txt"
 MODEL = os.environ.get("PUFFER_OPENROUTER_MODEL", "inclusionai/ling-2.6-flash")
 NAMESPACE = os.environ.get("PUFFER_OPENROUTER_NAMESPACE", "openrouter-small")

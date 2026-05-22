@@ -21,11 +21,12 @@ Claude merge context.
 import json
 import os
 import subprocess
+from pathlib import Path
 
 from agentflow import Graph, claude, fanout, shell
 
 
-REPO_ROOT = "/dsk/hdd/home/llmft/Riema/puffer"
+REPO_ROOT = os.environ.get("PUFFER_REPO_ROOT") or str(Path(__file__).resolve().parents[4])
 TASK_PATH = "apps/puffer-desktop/tests/fuzz/prompt.txt"
 MODEL = "claude-opus-4-6"
 
@@ -230,10 +231,11 @@ to the worker shards and reducers.
 """
 
 
-SHARD_PROMPT = """\
+SHARD_PROMPT = f"""\
 You are a Puffer UI/UX fuzz shard running inside an AgentFlow campaign.
 
-Repo: /dsk/hdd/home/llmft/Riema/puffer
+Repo: {REPO_ROOT}
+""" + """\
 Task file: apps/puffer-desktop/tests/fuzz/prompt.txt
 Area: {{ item.name }}
 Seed: {{ item.seed }}

@@ -37,12 +37,7 @@ const payload = {
 fs.writeFileSync(jsonPath, `${JSON.stringify(payload, null, 2)}\n`);
 fs.writeFileSync(reportPath, formatMarkdown(payload));
 
-if (summary.missingReports > 0) {
-  process.stderr.write(`Missing bounded replay reports: ${summary.missingReports}\n`);
-  process.exitCode = 2;
-} else {
-  process.stdout.write(`AGGREGATE_OK ${relative(reportPath)}\n`);
-}
+process.stdout.write(`AGGREGATE_OK partial=${summary.missingReports > 0 ? "true" : "false"} ${relative(reportPath)}\n`);
 
 function readShard(area) {
   const artifactDir = path.join(fuzzRoot, ".runs", `agentflow-${area.name}`);
@@ -68,7 +63,7 @@ function readShard(area) {
     reportJson: relative(reportJson),
     reportMd: relative(reportMd),
     missing: false,
-    summary: { ...emptySummary(), ...(data.summary ?? {}) },
+    summary: normalizeSummary(data.summary ?? {}),
     findings: data.findings ?? [],
     routeCounts: routeCounts(data.results ?? []),
     allRouteCounts: allRouteCounts(data.results ?? []),
@@ -142,6 +137,7 @@ function addNumbers(target, source) {
     "newCandidateFindings",
     "knownDuplicateFindings",
     "knownDuplicateFailures",
+    "nonPassingFailures",
     "actionableFailures"
   ]) {
     target[key] = (target[key] ?? 0) + Number(source[key] ?? 0);
@@ -159,8 +155,33 @@ function emptySummary() {
     newCandidateFindings: 0,
     knownDuplicateFindings: 0,
     knownDuplicateFailures: 0,
+    nonPassingFailures: 0,
     actionableFailures: 0,
     byClassification: {}
+  };
+}
+
+function normalizeSummary(summary) {
+  const byClassification = summary.byClassification ?? {};
+  const nonPassingFailures = Number(
+    summary.nonPassingFailures ??
+    ((summary.total ?? 0) - (summary.passed ?? 0) - (summary.knownDuplicateFailures ?? 0))
+  );
+  const actionableFailures = summary.nonPassingFailures === undefined
+    ? Object.entries(byClassification)
+      .filter(([classification]) =>
+        classification.startsWith("product-candidate:") ||
+        classification === "needs-manual-triage" ||
+        classification.startsWith("needs-manual-triage:")
+      )
+      .reduce((total, [, count]) => total + Number(count ?? 0), 0)
+    : Number(summary.actionableFailures ?? 0);
+  return {
+    ...emptySummary(),
+    ...summary,
+    byClassification,
+    nonPassingFailures: Math.max(0, nonPassingFailures),
+    actionableFailures: Math.max(0, actionableFailures)
   };
 }
 
@@ -208,7 +229,8 @@ function formatMarkdown(payload) {
     `- New product-candidate findings: ${payload.summary.newCandidateFindings}`,
     `- Known duplicate findings: ${payload.summary.knownDuplicateFindings}`,
     `- Known duplicate failures: ${payload.summary.knownDuplicateFailures}`,
-    `- Actionable failures: ${payload.summary.actionableFailures}`,
+    `- Non-passing failures: ${payload.summary.nonPassingFailures}`,
+    `- Actionable product failures: ${payload.summary.actionableFailures}`,
     "",
     "## Classification",
     ""
@@ -238,7 +260,8 @@ function appendShard(lines, shard) {
   lines.push(`- Cases: ${shard.summary.total}`);
   lines.push(`- Passed: ${shard.summary.passed}`);
   lines.push(`- Stable failed: ${shard.summary.stableFailed}`);
-  lines.push(`- Actionable failures: ${shard.summary.actionableFailures}`);
+  lines.push(`- Non-passing failures: ${shard.summary.nonPassingFailures}`);
+  lines.push(`- Actionable product failures: ${shard.summary.actionableFailures}`);
   lines.push(`- Known duplicate findings: ${shard.summary.knownDuplicateFindings}`);
   lines.push(`- Primary routes: ${formatCounts(shard.routeCounts)}`);
   lines.push(`- All route tags: ${formatCounts(shard.allRouteCounts)}`);

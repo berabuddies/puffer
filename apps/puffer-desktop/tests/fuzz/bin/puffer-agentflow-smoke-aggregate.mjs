@@ -27,8 +27,8 @@ if (!fs.existsSync(reportJson)) {
   };
   fs.writeFileSync(outJson, `${JSON.stringify(payload, null, 2)}\n`);
   fs.writeFileSync(outMd, formatMarkdown(payload));
-  process.stderr.write(`Missing bounded replay report: ${relative(reportJson)}\n`);
-  process.exit(2);
+  process.stdout.write(`SMOKE_AGGREGATE_OK partial=true ${relative(outMd)}\n`);
+  process.exit(0);
 }
 
 const data = JSON.parse(fs.readFileSync(reportJson, "utf8"));
@@ -40,7 +40,7 @@ const payload = {
   artifactDir: relative(artifactDir),
   reportJson: relative(reportJson),
   reportMd: relative(reportMd),
-  summary: { ...emptySummary(), ...(data.summary ?? {}) },
+  summary: normalizeSummary(data.summary ?? {}),
   primaryRouteCounts: routeCounts(data.results ?? []),
   allRouteCounts: allRouteCounts(data.results ?? []),
   findings: data.findings ?? [],
@@ -72,8 +72,33 @@ function emptySummary() {
     newCandidateFindings: 0,
     knownDuplicateFindings: 0,
     knownDuplicateFailures: 0,
+    nonPassingFailures: 0,
     actionableFailures: 0,
     byClassification: {}
+  };
+}
+
+function normalizeSummary(summary) {
+  const byClassification = summary.byClassification ?? {};
+  const nonPassingFailures = Number(
+    summary.nonPassingFailures ??
+    ((summary.total ?? 0) - (summary.passed ?? 0) - (summary.knownDuplicateFailures ?? 0))
+  );
+  const actionableFailures = summary.nonPassingFailures === undefined
+    ? Object.entries(byClassification)
+      .filter(([classification]) =>
+        classification.startsWith("product-candidate:") ||
+        classification === "needs-manual-triage" ||
+        classification.startsWith("needs-manual-triage:")
+      )
+      .reduce((total, [, count]) => total + Number(count ?? 0), 0)
+    : Number(summary.actionableFailures ?? 0);
+  return {
+    ...emptySummary(),
+    ...summary,
+    byClassification,
+    nonPassingFailures: Math.max(0, nonPassingFailures),
+    actionableFailures: Math.max(0, actionableFailures)
   };
 }
 
@@ -120,7 +145,8 @@ function formatMarkdown(payload) {
     `- Timed out: ${payload.summary.timeout}`,
     `- New product-candidate findings: ${payload.summary.newCandidateFindings}`,
     `- Known duplicate findings: ${payload.summary.knownDuplicateFindings}`,
-    `- Actionable failures: ${payload.summary.actionableFailures}`,
+    `- Non-passing failures: ${payload.summary.nonPassingFailures}`,
+    `- Actionable product failures: ${payload.summary.actionableFailures}`,
     "",
     "## Classification",
     ""

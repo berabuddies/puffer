@@ -1,6 +1,7 @@
 You are testing Puffer desktop UI/UX with the local fuzz framework.
 
-Repo: /dsk/hdd/home/llmft/Riema/puffer
+Repo: current Puffer repository root. Run commands from the repo root unless a
+specific artifact path is requested.
 
 Rules:
 - Do not patch product code.

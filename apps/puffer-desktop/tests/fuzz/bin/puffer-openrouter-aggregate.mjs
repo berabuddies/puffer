@@ -97,7 +97,8 @@ function summarize(shards) {
     newCandidateFindings: 0,
     knownDuplicateFindings: 0,
     nonPassingFailures: 0,
-    actionableFailures: 0
+    actionableFailures: 0,
+    byClassification: {}
   };
   for (const shard of shards) {
     if (shard.missingReplay) {
@@ -112,6 +113,9 @@ function summarize(shards) {
     summary.knownDuplicateFindings += Number(shard.summary.knownDuplicateFindings ?? 0);
     summary.nonPassingFailures += Number(shard.summary.nonPassingFailures ?? shard.summary.actionableFailures ?? 0);
     summary.actionableFailures += Number(shard.summary.actionableFailures ?? 0);
+    for (const [classification, count] of Object.entries(shard.summary.byClassification ?? {})) {
+      summary.byClassification[classification] = (summary.byClassification[classification] ?? 0) + Number(count ?? 0);
+    }
   }
   return summary;
 }
@@ -153,9 +157,11 @@ function formatMarkdown(payload) {
     `- Non-passing failures: ${payload.summary.nonPassingFailures}`,
     `- Actionable product failures: ${payload.summary.actionableFailures}`,
     "",
-    "## Shards",
+    "## Classification",
     ""
   ];
+  appendCountLines(lines, payload.summary.byClassification);
+  lines.push("", "## Shards", "");
   if (payload.shards.length === 0) {
     lines.push("- No shard output directories found.");
   }
@@ -184,6 +190,15 @@ function formatMarkdown(payload) {
     }
   }
   return `${lines.join("\n")}\n`;
+}
+
+function appendCountLines(lines, counts) {
+  const entries = Object.entries(counts ?? {}).sort((left, right) => left[0].localeCompare(right[0]));
+  if (entries.length === 0) {
+    lines.push("- None");
+    return;
+  }
+  for (const [key, value] of entries) lines.push(`- ${key}: ${value}`);
 }
 
 function relative(filePath) {

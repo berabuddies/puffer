@@ -95,7 +95,7 @@ Commands:
   validate
   smoke
   frontier --out /tmp/puffer_fuzz_frontier.md
-  gate --out /tmp/puffer_uiux_ready.md
+  gate --gate-profile bootstrap --out /tmp/puffer_uiux_ready.md
   schedule --limit 4 --out apps/puffer-desktop/tests/fuzz/.runs/manual/schedule.md
   record-feedback --shard chat-composer-send --input apps/puffer-desktop/tests/fuzz/.runs/<run>/bounded-replay-report.json
   evolve-prompt --out apps/puffer-desktop/tests/fuzz/.runs/manual/prompt-evolution.md
@@ -123,6 +123,7 @@ Options:
   --shards <ids>      Comma-separated shard ids for scheduler filtering
   --shard <id>        Single shard id for top-cases or feedback
   --profile <name>    all, core, secondary, low-priority
+  --gate-profile <name> bootstrap, ready, release
   --iterations <n>    Generated cases per seed
   --steps <n>         Fuzz actions per case
   --rng-seed <text>   Deterministic RNG namespace
@@ -299,13 +300,15 @@ async function main() {
   }
 
   if (command === "gate") {
-    const { manifest } = await loadContext(args);
+    const manifest = await readJson(args.manifest ?? defaultManifestPath);
     const ledger = await loadLedger(args.ledger ?? defaultLedgerPath);
     const result = evaluateGate(manifest, ledger, {
+      profile: args["gate-profile"] ?? args.profile ?? "ready",
       highRiskCoverage: args["high-risk-coverage"],
       replaySuccessRate: args["replay-success-rate"],
       duplicateReportRate: args["duplicate-report-rate"],
-      flakeRate: args["flake-rate"]
+      flakeRate: args["flake-rate"],
+      minReplayCases: args["min-replay-cases"]
     });
     const markdown = formatGateMarkdown(result);
     if (args.out) await writeText(args.out, markdown);
