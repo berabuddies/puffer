@@ -11,5 +11,11 @@
     "sourceMap": true,
     "types": ["svelte"]
   },
-  "include": ["src/**/*.ts", "src/**/*.svelte", "vite.config.ts"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.svelte",
+    "src-v2/**/*.ts",
+    "src-v2/**/*.svelte",
+    "vite.config.ts"
+  ]
 }
