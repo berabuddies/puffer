@@ -491,6 +491,18 @@ pub(crate) fn spawn_tracked_process_with_env(
 mod tests {
     use super::*;
 
+    fn wait_for_output(entry: &ProcessEntry, expected: &str) -> String {
+        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let output = entry.collect_output();
+            let text = String::from_utf8_lossy(&output).to_string();
+            if text.contains(expected) || Instant::now() >= deadline {
+                return text;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
     #[test]
     fn head_tail_buffer_small_data() {
         let mut buf = HeadTailBuffer::default();
@@ -583,11 +595,7 @@ mod tests {
         assert_eq!(entry.process_id, 9999);
         assert!(entry.tty);
 
-        // Wait for process to finish and output to be collected
-        std::thread::sleep(std::time::Duration::from_millis(500));
-
-        let output = entry.collect_output();
-        let text = String::from_utf8_lossy(&output);
+        let text = wait_for_output(&entry, "pty-test-output");
         assert!(
             text.contains("pty-test-output"),
             "expected 'pty-test-output' in: {text}"
@@ -613,11 +621,7 @@ mod tests {
         assert_eq!(entry.process_id, 8888);
         assert!(!entry.tty);
 
-        // Wait for process to exit and output to be collected
-        std::thread::sleep(std::time::Duration::from_millis(500));
-
-        let output = entry.collect_output();
-        let text = String::from_utf8_lossy(&output);
+        let text = wait_for_output(&entry, "pipe-test");
         assert!(
             text.contains("pipe-test"),
             "expected 'pipe-test' in: {text}"
