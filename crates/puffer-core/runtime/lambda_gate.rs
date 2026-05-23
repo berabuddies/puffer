@@ -1,6 +1,14 @@
 use anyhow::{anyhow, Context, Result};
+use puffer_resources::{SkillSpec, SkillVerificationSpec};
 use serde::Deserialize;
 use std::collections::{BTreeSet, HashMap};
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+const LAMBDA_SKILL_COMPILER_ENV: &str = "PUFFER_LSKILLC";
+const LAMBDA_SKILL_GATE_ENV: &str = "PUFFER_LAMBDA_SKILL_GATE";
 
 /// One structured host fact tracked by the Lambda Skill call gate.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -180,6 +188,116 @@ impl LambdaGateState {
         }
         verdict
     }
+}
+
+/// Builds a runtime gate for a verified Lambda Skill when catalogue data is available.
+pub(crate) fn gate_for_verified_skill(skill: &SkillSpec) -> Result<Option<LambdaGateState>> {
+    let Some(verification) = skill.verification.as_ref() else {
+        return Ok(None);
+    };
+    if verification.system != "lambda-skill" {
+        return Ok(None);
+    }
+    let Some(raw) = host_catalogue_json_for_verification(verification)? else {
+        return Ok(None);
+    };
+    let host = LambdaHostEnv::from_json_str(&raw).context("failed to parse host catalogue")?;
+    Ok(Some(LambdaGateState::with_host_caps(host)))
+}
+
+fn host_catalogue_json_for_verification(
+    verification: &SkillVerificationSpec,
+) -> Result<Option<String>> {
+    if let Some(host_catalogue_path) = verification.host_catalogue_path.as_deref() {
+        return fs::read_to_string(host_catalogue_path)
+            .with_context(|| format!("failed to read {host_catalogue_path}"))
+            .map(Some);
+    }
+    if !lambda_skill_compiler_gate_enabled() {
+        return Ok(None);
+    }
+    let source_path = verification
+        .source_path
+        .as_deref()
+        .ok_or_else(|| anyhow!("Lambda Skill gate requested but formal source path is missing"))?;
+    export_host_catalogue_for_source(Path::new(source_path)).map(Some)
+}
+
+fn lambda_skill_compiler_gate_enabled() -> bool {
+    env::var(LAMBDA_SKILL_GATE_ENV)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on" | "compile" | "strict"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn export_host_catalogue_for_source(source_path: &Path) -> Result<String> {
+    let compiler = resolve_lskillc_for_source(source_path).ok_or_else(|| {
+        anyhow!(
+            "Lambda Skill gate requested but lskillc was not found; set {LAMBDA_SKILL_COMPILER_ENV}"
+        )
+    })?;
+    export_host_catalogue_with_compiler(source_path, &compiler)
+}
+
+fn export_host_catalogue_with_compiler(source_path: &Path, compiler: &Path) -> Result<String> {
+    let output = Command::new(compiler)
+        .arg("export-json")
+        .arg(source_path)
+        .output()
+        .with_context(|| format!("failed to run {}", compiler.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!(
+            "{} export-json {} failed: {}",
+            compiler.display(),
+            source_path.display(),
+            stderr.trim()
+        ));
+    }
+    String::from_utf8(output.stdout).with_context(|| {
+        format!(
+            "{} export-json {} returned non-UTF-8 output",
+            compiler.display(),
+            source_path.display()
+        )
+    })
+}
+
+fn resolve_lskillc_for_source(source_path: &Path) -> Option<PathBuf> {
+    if let Some(path) = env::var_os(LAMBDA_SKILL_COMPILER_ENV)
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+    {
+        return Some(path);
+    }
+    lskillc_workspace_candidates(source_path)
+        .into_iter()
+        .find(|path| path.is_file())
+        .or_else(|| find_lskillc_in_path())
+}
+
+fn lskillc_workspace_candidates(source_path: &Path) -> Vec<PathBuf> {
+    source_path
+        .ancestors()
+        .flat_map(|ancestor| {
+            [
+                ancestor.join("lean/LambdaW/.lake/build/bin/lskillc"),
+                ancestor.join(".lake/build/bin/lskillc"),
+            ]
+        })
+        .collect()
+}
+
+fn find_lskillc_in_path() -> Option<PathBuf> {
+    let paths = env::var_os("PATH")?;
+    env::split_paths(&paths)
+        .map(|dir| dir.join("lskillc"))
+        .find(|path| path.is_file())
 }
 
 /// Admission result for one Lambda Skill gate check.
@@ -373,5 +491,64 @@ mod tests {
         let mut gate = LambdaGateState::with_host_caps(host);
         gate.add_fact(LambdaFact::new("authed", Vec::new()));
         assert!(gate.admit_call("execute_swap").is_accept());
+    }
+
+    #[test]
+    fn gate_for_verified_skill_reads_catalogue_file() {
+        let root = tempfile::tempdir().unwrap();
+        let catalogue = root.path().join("host.json");
+        fs::write(&catalogue, SWAP_HOST_JSON).unwrap();
+        let mut skill = SkillSpec::default();
+        skill.verification = Some(SkillVerificationSpec {
+            system: "lambda-skill".to_string(),
+            source_path: None,
+            generated_path: None,
+            host_catalogue_path: Some(catalogue.display().to_string()),
+            tools: None,
+            actions: None,
+        });
+
+        let gate = gate_for_verified_skill(&skill)
+            .unwrap()
+            .expect("catalogue should create a gate");
+
+        assert!(gate.admit_call("get_quote").is_accept());
+    }
+
+    #[test]
+    fn workspace_candidates_include_ahl_popl_lake_binary() {
+        let source = Path::new("/repo/skills/vendor/example/skill.lskill");
+        let candidates = lskillc_workspace_candidates(source);
+
+        assert!(candidates.contains(&PathBuf::from(
+            "/repo/lean/LambdaW/.lake/build/bin/lskillc"
+        )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_json_uses_external_lskillc_binary() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("skill.lskill");
+        let compiler = root.path().join("lskillc");
+        fs::write(&source, "host {}\n").unwrap();
+        fs::write(
+            &compiler,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" != \"export-json\" ]; then exit 9; fi\nprintf '%s' '{}'\n",
+                SWAP_HOST_JSON.replace('\'', "'\\''")
+            ),
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&compiler).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&compiler, perms).unwrap();
+
+        let raw = export_host_catalogue_with_compiler(&source, &compiler).unwrap();
+        let host = LambdaHostEnv::from_json_str(&raw).unwrap();
+
+        assert!(host.lookup_tool("execute_swap").is_some());
     }
 }
