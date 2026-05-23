@@ -148,8 +148,33 @@ fn close_skills_overlay(session: &puffer_test_support::TmuxSession) {
 }
 
 fn submit_skills_command(session: &puffer_test_support::TmuxSession) {
-    send_tmux_keys(session, &["C-u"]).unwrap();
-    send_tmux_keys(session, &["/skills"]).unwrap();
+    for _ in 0..5 {
+        clear_prompt(session);
+        send_tmux_keys(session, &["/skills"]).unwrap();
+        std::thread::sleep(Duration::from_millis(250));
+        if capture_tmux_visible_pane(session)
+            .unwrap()
+            .contains("\u{276f} /skills")
+        {
+            send_tmux_keys(session, &["Enter"]).unwrap();
+            if wait_for_tmux_visible_text(session, "┌Skills", Duration::from_secs(2)).is_ok() {
+                return;
+            }
+            continue;
+        }
+        if wait_for_tmux_visible_text(session, "\u{276f} /skills", Duration::from_secs(2)).is_ok() {
+            send_tmux_keys(session, &["Enter"]).unwrap();
+            return;
+        }
+    }
     wait_for_tmux_visible_text(session, "\u{276f} /skills", TMUX_COMMAND_TIMEOUT).unwrap();
     send_tmux_keys(session, &["Enter"]).unwrap();
+}
+
+fn clear_prompt(session: &puffer_test_support::TmuxSession) {
+    send_tmux_keys(session, &["Escape", "Escape", "C-u"]).unwrap();
+    for _ in 0..20 {
+        send_tmux_keys(session, &["BSpace"]).unwrap();
+    }
+    std::thread::sleep(Duration::from_millis(100));
 }
