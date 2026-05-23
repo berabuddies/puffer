@@ -252,6 +252,8 @@ pub struct ToolInvocation {
     pub input: String,
     pub output: String,
     pub success: bool,
+    /// Structured tool metadata retained for traceability and session replay.
+    pub metadata: Value,
     /// When true, the agent_loop stops after the current batch finishes
     /// (and emits this invocation's tool result back to the model). Mirrors
     /// pi-mono's `AgentToolResult.terminate` (`pi-mono/packages/agent/src/types.ts:301`).

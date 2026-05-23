@@ -1412,6 +1412,7 @@ pub(crate) fn append_tool_messages(
                 input: invocation.input.clone(),
                 output: invocation.output.clone(),
                 success: invocation.success,
+                metadata: (!invocation.metadata.is_null()).then(|| invocation.metadata.clone()),
                 actor: Some(state.assistant_actor()),
                 subject: state.tool_subject_actor(&invocation.tool_id, &invocation.output),
             },

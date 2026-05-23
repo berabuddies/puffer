@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use puffer_resources::{SkillSpec, SkillVerificationSpec};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::fs;
@@ -30,6 +30,11 @@ impl LambdaFact {
     /// Returns the predicate symbol for this fact.
     pub(crate) fn pred(&self) -> &str {
         &self.pred
+    }
+
+    /// Returns the fact payload arguments.
+    pub(crate) fn args(&self) -> &[String] {
+        &self.args
     }
 }
 
@@ -189,6 +194,110 @@ impl LambdaGateState {
         }
         verdict
     }
+
+    /// Builds trace metadata for a committed host call.
+    pub(crate) fn committed_host_call_metadata(
+        &self,
+        host_tool: &str,
+        concrete_tool: Option<&str>,
+    ) -> Value {
+        let registered_facts = self
+            .host
+            .lookup_tool(host_tool)
+            .map(|sig| sig.registers.iter().map(lambda_fact_metadata).collect())
+            .unwrap_or_default();
+        lambda_skill_metadata(
+            "host_call_committed",
+            host_tool,
+            concrete_tool,
+            None,
+            registered_facts,
+        )
+    }
+}
+
+/// Builds trace metadata for an admitted bridged host call.
+pub(crate) fn admitted_host_call_metadata(
+    host_tool: &str,
+    concrete_tool: &str,
+    concrete_input: Value,
+) -> Value {
+    lambda_skill_metadata(
+        "host_call_admitted",
+        host_tool,
+        Some(concrete_tool),
+        Some(concrete_input),
+        Vec::new(),
+    )
+}
+
+/// Merges Lambda trace metadata into an existing tool metadata value.
+pub(crate) fn merge_tool_metadata(existing: &mut Value, addition: Value) {
+    if addition.is_null() {
+        return;
+    }
+    if existing.is_null() {
+        *existing = addition;
+        return;
+    }
+    match (existing, addition) {
+        (Value::Object(target), Value::Object(source)) => target.extend(source),
+        (target, Value::Object(source)) => {
+            let previous = std::mem::replace(target, Value::Null);
+            let mut merged = Map::new();
+            merged.insert("tool".to_string(), previous);
+            merged.extend(source);
+            *target = Value::Object(merged);
+        }
+        (target, source) => {
+            let previous = std::mem::replace(target, Value::Null);
+            let mut merged = Map::new();
+            merged.insert("tool".to_string(), previous);
+            merged.insert("lambda_skill".to_string(), source);
+            *target = Value::Object(merged);
+        }
+    }
+}
+
+fn lambda_skill_metadata(
+    event: &str,
+    host_tool: &str,
+    concrete_tool: Option<&str>,
+    concrete_input: Option<Value>,
+    registered_facts: Vec<Value>,
+) -> Value {
+    let mut inner = Map::new();
+    inner.insert("event".to_string(), Value::String(event.to_string()));
+    inner.insert(
+        "host_tool".to_string(),
+        Value::String(host_tool.to_string()),
+    );
+    if let Some(tool) = concrete_tool {
+        inner.insert("concrete_tool".to_string(), Value::String(tool.to_string()));
+    }
+    if let Some(input) = concrete_input {
+        inner.insert("concrete_input".to_string(), input);
+    }
+    if !registered_facts.is_empty() {
+        inner.insert(
+            "registered_facts".to_string(),
+            Value::Array(registered_facts),
+        );
+    }
+
+    let mut outer = Map::new();
+    outer.insert("lambda_skill".to_string(), Value::Object(inner));
+    Value::Object(outer)
+}
+
+fn lambda_fact_metadata(fact: &LambdaFact) -> Value {
+    let mut object = Map::new();
+    object.insert("pred".to_string(), Value::String(fact.pred().to_string()));
+    object.insert(
+        "args".to_string(),
+        Value::Array(fact.args().iter().cloned().map(Value::String).collect()),
+    );
+    Value::Object(object)
 }
 
 /// One admitted formal host call awaiting its concrete Puffer tool invocation.

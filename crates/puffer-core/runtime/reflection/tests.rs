@@ -1,6 +1,7 @@
 use super::*;
 use puffer_config::PufferConfig;
 use puffer_session_store::SessionMetadata;
+use serde_json::Value;
 use uuid::Uuid;
 
 fn bash_invocation(command: &str, output: &str, success: bool) -> ToolInvocation {
@@ -10,6 +11,7 @@ fn bash_invocation(command: &str, output: &str, success: bool) -> ToolInvocation
         input: format!(r#"{{"command":"{command}","description":"run verifier"}}"#),
         output: output.to_string(),
         success,
+        metadata: Value::Null,
         terminate: false,
     }
 }
@@ -21,6 +23,7 @@ fn write_invocation(path: &str, content: &str) -> ToolInvocation {
         input: format!(r#"{{"file_path":"{path}","content":{content:?}}}"#),
         output: String::new(),
         success: true,
+        metadata: Value::Null,
         terminate: false,
     }
 }

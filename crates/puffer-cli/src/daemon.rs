@@ -2884,6 +2884,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                             input: inv.input.clone(),
                             output: inv.output.clone(),
                             success: inv.success,
+                            metadata: (!inv.metadata.is_null()).then(|| inv.metadata.clone()),
                             actor: Some(stream_actor.clone()),
                             subject: app_state.tool_subject_actor(&inv.tool_id, &inv.output),
                         },

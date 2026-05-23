@@ -1013,6 +1013,7 @@ pub(super) fn execute_anthropic_tool_calls(
             input: call.input.clone(),
             output: output_text.clone(),
             success: execution.success,
+            metadata: execution.output.metadata,
             terminate: false,
         });
     }

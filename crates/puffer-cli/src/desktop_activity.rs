@@ -152,6 +152,7 @@ mod tests {
             input: r#"{"command":"cargo test"}"#.to_string(),
             output: "Permission required: command needs approval".to_string(),
             success: false,
+            metadata: None,
             actor: None,
             subject: None,
         }];

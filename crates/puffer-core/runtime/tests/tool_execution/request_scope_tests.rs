@@ -207,6 +207,18 @@ fn lambda_gate_commits_facts_after_accepted_tool_call() {
     .unwrap();
 
     assert!(result.success);
+    assert_eq!(
+        result.output.metadata["lambda_skill"]["event"],
+        json!("host_call_committed")
+    );
+    assert_eq!(
+        result.output.metadata["lambda_skill"]["host_tool"],
+        json!("ToolSearch")
+    );
+    assert_eq!(
+        result.output.metadata["lambda_skill"]["registered_facts"][0]["pred"],
+        json!("searched")
+    );
     let gate = state.lambda_gate.as_ref().expect("gate remains installed");
     assert!(gate
         .facts()
@@ -265,6 +277,18 @@ fn lambda_host_call_bridges_formal_tool_to_declared_concrete_tool() {
     .unwrap();
 
     assert!(admitted.success);
+    assert_eq!(
+        admitted.output.metadata["lambda_skill"]["event"],
+        json!("host_call_admitted")
+    );
+    assert_eq!(
+        admitted.output.metadata["lambda_skill"]["host_tool"],
+        json!("formal_search")
+    );
+    assert_eq!(
+        admitted.output.metadata["lambda_skill"]["concrete_tool"],
+        json!("ToolSearch")
+    );
     assert!(state.pending_lambda_host_call.is_some());
     let gate = state.lambda_gate.as_ref().expect("gate remains installed");
     assert!(!gate
@@ -290,6 +314,22 @@ fn lambda_host_call_bridges_formal_tool_to_declared_concrete_tool() {
     .unwrap();
 
     assert!(result.success);
+    assert_eq!(
+        result.output.metadata["lambda_skill"]["event"],
+        json!("host_call_committed")
+    );
+    assert_eq!(
+        result.output.metadata["lambda_skill"]["host_tool"],
+        json!("formal_search")
+    );
+    assert_eq!(
+        result.output.metadata["lambda_skill"]["concrete_tool"],
+        json!("ToolSearch")
+    );
+    assert_eq!(
+        result.output.metadata["lambda_skill"]["registered_facts"][0]["pred"],
+        json!("searched")
+    );
     assert!(state.pending_lambda_host_call.is_none());
     let gate = state.lambda_gate.as_ref().expect("gate remains installed");
     assert!(gate

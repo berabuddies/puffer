@@ -9,7 +9,9 @@ use super::browser_auto_review::{
 use super::claude_tools::{self, ProviderToolContext};
 use super::filesystem_access::{ensure_filesystem_path_access, runtime_filesystem_policy};
 use super::hook_support::{run_tool_end_hooks, run_tool_start_hooks};
-use super::lambda_gate::{LambdaGateVerdict, PendingLambdaHostCall};
+use super::lambda_gate::{
+    admitted_host_call_metadata, merge_tool_metadata, LambdaGateVerdict, PendingLambdaHostCall,
+};
 use super::local_tools::{
     enrich_browser_permission_input, read_current_tab_context, BrowserCurrentTabStatus,
 };
@@ -153,9 +155,10 @@ pub(super) fn execute_tool_call(
         Ok(policy) => policy,
         Err(denied) => return Ok(denied),
     };
-    if let Some(denied) = commit_lambda_skill_gate_call(state, tool_id) {
-        return Ok(denied);
-    }
+    let lambda_metadata = match commit_lambda_skill_gate_call(state, tool_id) {
+        Ok(metadata) => metadata,
+        Err(denied) => return Ok(denied),
+    };
     let provider_context = match backend {
         ToolExecutionBackend::Anthropic {
             request_config,
@@ -176,7 +179,7 @@ pub(super) fn execute_tool_call(
     };
     let hook_input = input.clone();
     run_tool_start_hooks(resources, cwd, tool_id, &hook_input);
-    let result = if definition.handler == "runtime:agent" {
+    let mut result = if definition.handler == "runtime:agent" {
         let output =
             execute_agent_tool(state, resources, providers, auth_store, cwd, input.clone())?;
         successful_runtime_tool(tool_id, output)
@@ -196,6 +199,9 @@ pub(super) fn execute_tool_call(
             provider_context,
         )?
     };
+    if let Some(metadata) = lambda_metadata {
+        merge_tool_metadata(&mut result.output.metadata, metadata);
+    }
     remember_browser_target(state, &definition, &input);
     run_tool_end_hooks(
         resources,
@@ -237,24 +243,31 @@ fn reject_lambda_skill_gate_preflight(
 fn commit_lambda_skill_gate_call(
     state: &mut AppState,
     tool_id: &str,
-) -> Option<ToolExecutionResult> {
+) -> std::result::Result<Option<Value>, ToolExecutionResult> {
     if state.pending_lambda_host_call.is_some() {
-        let pending = state.pending_lambda_host_call.take()?;
+        let Some(pending) = state.pending_lambda_host_call.take() else {
+            return Ok(None);
+        };
         let Some(gate) = state.lambda_gate.as_mut() else {
-            return Some(lambda_skill_gate_denial(
+            return Err(lambda_skill_gate_denial(
                 tool_id,
                 "pending formal host call has no active Lambda Skill gate".to_string(),
             ));
         };
+        let metadata =
+            gate.committed_host_call_metadata(pending.host_tool(), Some(pending.concrete_tool()));
         return match gate.step_call(pending.host_tool()) {
-            LambdaGateVerdict::Accept => None,
-            LambdaGateVerdict::Reject(reason) => Some(lambda_skill_gate_denial(tool_id, reason)),
+            LambdaGateVerdict::Accept => Ok(Some(metadata)),
+            LambdaGateVerdict::Reject(reason) => Err(lambda_skill_gate_denial(tool_id, reason)),
         };
     }
-    let gate = state.lambda_gate.as_mut()?;
+    let Some(gate) = state.lambda_gate.as_mut() else {
+        return Ok(None);
+    };
+    let metadata = gate.committed_host_call_metadata(tool_id, None);
     match gate.step_call(tool_id) {
-        LambdaGateVerdict::Accept => None,
-        LambdaGateVerdict::Reject(reason) => Some(lambda_skill_gate_denial(tool_id, reason)),
+        LambdaGateVerdict::Accept => Ok(Some(metadata)),
+        LambdaGateVerdict::Reject(reason) => Err(lambda_skill_gate_denial(tool_id, reason)),
     }
 }
 
@@ -341,16 +354,19 @@ fn prepare_lambda_host_call(
         LambdaGateVerdict::Accept => {
             let host_tool = parsed.host_tool.clone();
             let concrete_tool = parsed.tool.clone();
+            let metadata =
+                admitted_host_call_metadata(&host_tool, &concrete_tool, parsed.input.clone());
             state.pending_lambda_host_call = Some(PendingLambdaHostCall::new(
                 parsed.host_tool,
                 parsed.tool,
                 parsed.input,
             ));
-            successful_runtime_tool(
+            successful_runtime_tool_with_metadata(
                 tool_id,
                 format!(
                     "Lambda host call admitted: {host_tool}. Next call must be {concrete_tool} with the declared input."
                 ),
+                metadata,
             )
         }
         LambdaGateVerdict::Reject(reason) => lambda_skill_gate_denial(tool_id, reason),
@@ -358,13 +374,21 @@ fn prepare_lambda_host_call(
 }
 
 fn successful_runtime_tool(tool_id: &str, stdout: String) -> ToolExecutionResult {
+    successful_runtime_tool_with_metadata(tool_id, stdout, Value::Null)
+}
+
+fn successful_runtime_tool_with_metadata(
+    tool_id: &str,
+    stdout: String,
+    metadata: Value,
+) -> ToolExecutionResult {
     ToolExecutionResult {
         tool_id: tool_id.to_string(),
         success: true,
         output: ToolOutput {
             stdout,
             stderr: String::new(),
-            metadata: Value::Null,
+            metadata,
         },
     }
 }

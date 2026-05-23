@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
 /// Describes one append-only transcript rewrite operation.
@@ -99,6 +100,8 @@ pub enum TranscriptEvent {
         input: String,
         output: String,
         success: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         actor: Option<MessageActor>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -218,6 +221,7 @@ mod tests {
                 input: "{}".to_string(),
                 output: "ok".to_string(),
                 success: true,
+                metadata: None,
                 actor: None,
                 subject: None,
             }
@@ -269,12 +273,37 @@ mod tests {
             input: "{}".to_string(),
             output: "ok".to_string(),
             success: true,
+            metadata: None,
             actor: Some(actor),
             subject: None,
         };
 
         let encoded = serde_json::to_string(&event).unwrap();
         assert!(encoded.contains(r#""agentId":"agent-1""#));
+        let decoded: TranscriptEvent = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, event);
+    }
+
+    #[test]
+    fn tool_invocation_metadata_round_trips() {
+        let event = TranscriptEvent::ToolInvocation {
+            call_id: "call-1".to_string(),
+            tool_id: "ToolSearch".to_string(),
+            input: r#"{"query":"skills"}"#.to_string(),
+            output: "ok".to_string(),
+            success: true,
+            metadata: Some(serde_json::json!({
+                "lambda_skill": {
+                    "event": "host_call_committed",
+                    "host_tool": "formal_search"
+                }
+            })),
+            actor: None,
+            subject: None,
+        };
+
+        let encoded = serde_json::to_string(&event).unwrap();
+        assert!(encoded.contains(r#""metadata""#));
         let decoded: TranscriptEvent = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, event);
     }

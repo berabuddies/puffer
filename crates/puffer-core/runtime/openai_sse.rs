@@ -243,6 +243,7 @@ where
                                 input: input_payload,
                                 output: output_payload,
                                 success,
+                                metadata: Value::Null,
                                 terminate: false,
                             },
                         ]));

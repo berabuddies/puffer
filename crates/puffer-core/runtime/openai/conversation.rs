@@ -1697,6 +1697,7 @@ mod tests {
             input: r#"{"command":"ls"}"#.into(),
             output: "result".into(),
             success: true,
+            metadata: Value::Null,
             terminate: false,
         }];
         append_tool_results(&mut items, &invocations);
@@ -1716,6 +1717,7 @@ mod tests {
             input: r#"{"command":"bad"}"#.into(),
             output: "command not found".into(),
             success: false,
+            metadata: Value::Null,
             terminate: false,
         }];
         append_tool_results(&mut items, &invocations);

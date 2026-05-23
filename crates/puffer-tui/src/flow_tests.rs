@@ -1273,6 +1273,7 @@ fn poll_pending_submit_skips_empty_assistant_message_after_tool_only_turn() {
                     input: "true".to_string(),
                     output: "ok".to_string(),
                     success: true,
+                    metadata: serde_json::Value::Null,
                     terminate: true,
                 }],
                 reflection_traces: Vec::new(),

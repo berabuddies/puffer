@@ -1025,6 +1025,7 @@ fn timeline_items(record: &SessionRecord) -> Vec<TimelineItemDto> {
                 success,
                 actor,
                 subject,
+                ..
             } => {
                 let status = if *success { "ok" } else { "error" };
                 let summary = summarize_tool_input(tool_id, input);
@@ -1635,6 +1636,7 @@ mod tests {
                 input: r#"{"path":"Cargo.toml"}"#.to_string(),
                 output: "contents".to_string(),
                 success: true,
+                metadata: None,
                 actor: None,
                 subject: None,
             },
@@ -1657,6 +1659,7 @@ mod tests {
                 input: r#"{"path":"Cargo.toml"}"#.to_string(),
                 output: "contents".to_string(),
                 success: true,
+                metadata: None,
                 actor: None,
                 subject: None,
             },

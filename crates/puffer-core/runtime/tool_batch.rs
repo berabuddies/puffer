@@ -81,14 +81,14 @@ pub(super) fn execute_tool_batch(
     // `Arc<dyn ToolRunner>` is `Send + Sync` and clones cheaply.
     let runner = inputs.state.tool_runner.clone();
 
-    let mut results: Vec<Option<(String, bool, bool)>> = vec![None; tool_calls.len()];
+    let mut results: Vec<Option<(String, bool, bool, Value)>> = vec![None; tool_calls.len()];
 
     let observability_handle = inputs.observability.clone();
     let parent_ctx_owned = parent_span_ctx.cloned();
     std::thread::scope(|s| {
         let mut handles: Vec<(
             usize,
-            std::thread::ScopedJoinHandle<'_, (String, bool, bool)>,
+            std::thread::ScopedJoinHandle<'_, (String, bool, bool, Value)>,
         )> = Vec::new();
         for (i, tc) in tool_calls.iter().enumerate() {
             if !is_parallel_safe_tool(&tc.tool_id) {
@@ -99,6 +99,7 @@ pub(super) fn execute_tool_batch(
                     denied.output.stdout.clone(),
                     denied.success,
                     extract_terminate(&denied.output.metadata),
+                    denied.output.metadata.clone(),
                 ));
                 continue;
             }
@@ -109,7 +110,12 @@ pub(super) fn execute_tool_batch(
             let definition = match inputs.registry.definition(&tc.tool_id) {
                 Some(d) => d.clone(),
                 None => {
-                    results[i] = Some((format!("unknown tool {}", tc.tool_id), false, false));
+                    results[i] = Some((
+                        format!("unknown tool {}", tc.tool_id),
+                        false,
+                        false,
+                        Value::Null,
+                    ));
                     continue;
                 }
             };
@@ -174,9 +180,14 @@ pub(super) fn execute_tool_batch(
                             } else {
                                 format!("{}\n{}", exec.output.stdout, exec.output.stderr)
                             };
-                            (output, exec.success, terminate)
+                            (output, exec.success, terminate, exec.output.metadata)
                         }
-                        Err(error) => (format!("Tool execution failed: {error}"), false, false),
+                        Err(error) => (
+                            format!("Tool execution failed: {error}"),
+                            false,
+                            false,
+                            Value::Null,
+                        ),
                     };
                     if let Some((_, _, tool_id, _, _)) = span_meta.as_ref() {
                         tool_span.set_content(
@@ -197,11 +208,14 @@ pub(super) fn execute_tool_batch(
             ));
         }
         for (i, handle) in handles {
-            results[i] = Some(
-                handle
-                    .join()
-                    .unwrap_or_else(|_| ("Tool execution panicked".to_string(), false, false)),
-            );
+            results[i] = Some(handle.join().unwrap_or_else(|_| {
+                (
+                    "Tool execution panicked".to_string(),
+                    false,
+                    false,
+                    Value::Null,
+                )
+            }));
         }
     });
 
@@ -214,6 +228,7 @@ pub(super) fn execute_tool_batch(
                 denied.output.stdout.clone(),
                 denied.success,
                 extract_terminate(&denied.output.metadata),
+                denied.output.metadata.clone(),
             ));
             continue;
         }
@@ -262,9 +277,14 @@ pub(super) fn execute_tool_batch(
                 } else {
                     format!("{}\n{}", exec.output.stdout, exec.output.stderr)
                 };
-                (output, exec.success, terminate)
+                (output, exec.success, terminate, exec.output.metadata)
             }
-            Err(error) => (format!("Tool execution failed: {error}"), false, false),
+            Err(error) => (
+                format!("Tool execution failed: {error}"),
+                false,
+                false,
+                Value::Null,
+            ),
         };
         if inputs.observability.is_some() {
             tool_span.set_content(
@@ -285,9 +305,14 @@ pub(super) fn execute_tool_batch(
 
     let mut invocations = Vec::with_capacity(tool_calls.len());
     for (i, tc) in tool_calls.iter().enumerate() {
-        let (raw_output, success, terminate) = results[i]
-            .take()
-            .unwrap_or_else(|| ("Tool was not executed".to_string(), false, false));
+        let (raw_output, success, terminate, metadata) = results[i].take().unwrap_or_else(|| {
+            (
+                "Tool was not executed".to_string(),
+                false,
+                false,
+                Value::Null,
+            )
+        });
         let output_text =
             process_tool_result(&raw_output, MAX_TOOL_RESULT_CHARS, &inputs.state.session.id);
         invocations.push(ToolInvocation {
@@ -296,6 +321,7 @@ pub(super) fn execute_tool_batch(
             input: tc.input.clone(),
             output: output_text,
             success,
+            metadata,
             terminate,
         });
     }
@@ -373,6 +399,7 @@ fn execute_tool_batch_serial(
                     input: call.input.clone(),
                     output: output_text,
                     success: false,
+                    metadata: Value::Null,
                     terminate: false,
                 });
                 continue;
@@ -408,6 +435,7 @@ fn execute_tool_batch_serial(
             input: call.input.clone(),
             output: output_text,
             success: execution.success,
+            metadata: execution.output.metadata,
             terminate,
         });
     }
