@@ -69,6 +69,38 @@ impl LambdaToolSig {
     pub(crate) fn context_req(&self) -> Option<&LambdaFact> {
         self.context_req.as_ref()
     }
+
+    fn validate_args(&self, args: &Value) -> Option<String> {
+        let Some(object) = args.as_object() else {
+            return Some(format!(
+                "formal args for {} must be a JSON object",
+                self.name
+            ));
+        };
+        for param in &self.params {
+            let Some(value) = object.get(&param.name) else {
+                return Some(format!(
+                    "formal args for {} missing parameter {}",
+                    self.name, param.name
+                ));
+            };
+            if !lambda_arg_matches_type(value, &param.ty) {
+                return Some(format!(
+                    "formal arg {} for {} does not match {}",
+                    param.name, self.name, param.ty
+                ));
+            }
+        }
+        for key in object.keys() {
+            if !self.params.iter().any(|param| param.name == *key) {
+                return Some(format!(
+                    "formal args for {} include undeclared parameter {}",
+                    self.name, key
+                ));
+            }
+        }
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,6 +216,21 @@ impl LambdaGateState {
         LambdaGateVerdict::Accept
     }
 
+    /// Admits one proposed host tool call and validates its formal arguments.
+    pub(crate) fn admit_call_with_args(&self, tool: &str, args: &Value) -> LambdaGateVerdict {
+        let verdict = self.admit_call(tool);
+        if !verdict.is_accept() {
+            return verdict;
+        }
+        let Some(sig) = self.host.lookup_tool(tool) else {
+            return LambdaGateVerdict::reject(format!("unknown tool: {tool}"));
+        };
+        if let Some(reason) = sig.validate_args(args) {
+            return LambdaGateVerdict::reject(reason);
+        }
+        LambdaGateVerdict::Accept
+    }
+
     /// Gates one call and commits registered facts when accepted.
     pub(crate) fn step_call(&mut self, tool: &str) -> LambdaGateVerdict {
         let verdict = self.admit_call(tool);
@@ -201,6 +248,7 @@ impl LambdaGateState {
     pub(crate) fn committed_host_call_metadata(
         &self,
         host_tool: &str,
+        host_args: Option<&Value>,
         concrete_tool: Option<&str>,
     ) -> Value {
         let registered_facts = self
@@ -211,6 +259,7 @@ impl LambdaGateState {
         lambda_skill_metadata(
             "host_call_committed",
             host_tool,
+            host_args.cloned(),
             concrete_tool,
             None,
             registered_facts,
@@ -221,12 +270,14 @@ impl LambdaGateState {
 /// Builds trace metadata for an admitted bridged host call.
 pub(crate) fn admitted_host_call_metadata(
     host_tool: &str,
+    host_args: Value,
     concrete_tool: &str,
     concrete_input: Value,
 ) -> Value {
     lambda_skill_metadata(
         "host_call_admitted",
         host_tool,
+        Some(host_args),
         Some(concrete_tool),
         Some(concrete_input),
         Vec::new(),
@@ -264,6 +315,7 @@ pub(crate) fn merge_tool_metadata(existing: &mut Value, addition: Value) {
 fn lambda_skill_metadata(
     event: &str,
     host_tool: &str,
+    host_args: Option<Value>,
     concrete_tool: Option<&str>,
     concrete_input: Option<Value>,
     registered_facts: Vec<Value>,
@@ -274,6 +326,9 @@ fn lambda_skill_metadata(
         "host_tool".to_string(),
         Value::String(host_tool.to_string()),
     );
+    if let Some(args) = host_args {
+        inner.insert("host_args".to_string(), args);
+    }
     if let Some(tool) = concrete_tool {
         inner.insert("concrete_tool".to_string(), Value::String(tool.to_string()));
     }
@@ -302,10 +357,32 @@ fn lambda_fact_metadata(fact: &LambdaFact) -> Value {
     Value::Object(object)
 }
 
+fn lambda_arg_matches_type(value: &Value, ty: &str) -> bool {
+    let trimmed = ty.trim();
+    if trimmed.starts_with('[') {
+        return value.is_array();
+    }
+    let base = trimmed
+        .split_once('{')
+        .map(|(head, _)| head)
+        .unwrap_or(trimmed)
+        .trim()
+        .to_ascii_lowercase();
+    match base.as_str() {
+        "str" | "string" => value.is_string(),
+        "int" | "nat" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "real" | "float" | "number" => value.is_number(),
+        "bool" => value.is_boolean(),
+        "unit" => value.is_null() || value.as_object().is_some_and(Map::is_empty),
+        _ => true,
+    }
+}
+
 /// One admitted formal host call awaiting its concrete Puffer tool invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PendingLambdaHostCall {
     host_tool: String,
+    host_args: Value,
     concrete_tool: String,
     concrete_input: Value,
 }
@@ -314,11 +391,13 @@ impl PendingLambdaHostCall {
     /// Creates a pending bridge from one formal host tool to one concrete tool call.
     pub(crate) fn new(
         host_tool: impl Into<String>,
+        host_args: Value,
         concrete_tool: impl Into<String>,
         concrete_input: Value,
     ) -> Self {
         Self {
             host_tool: host_tool.into(),
+            host_args,
             concrete_tool: concrete_tool.into(),
             concrete_input,
         }
@@ -327,6 +406,11 @@ impl PendingLambdaHostCall {
     /// Returns the formal host tool name admitted by the Lambda gate.
     pub(crate) fn host_tool(&self) -> &str {
         &self.host_tool
+    }
+
+    /// Returns the formal host arguments admitted by the Lambda gate.
+    pub(crate) fn host_args(&self) -> &Value {
+        &self.host_args
     }
 
     /// Returns the concrete Puffer tool name this bridge permits next.
@@ -718,6 +802,47 @@ mod tests {
         let mut gate = LambdaGateState::with_host_caps(host);
         gate.add_fact(LambdaFact::new("authed", Vec::new()));
         assert!(gate.admit_call("execute_swap").is_accept());
+    }
+
+    #[test]
+    fn gate_validates_formal_host_arguments() {
+        let host = LambdaHostEnv::from_json_str(SWAP_HOST_JSON).unwrap();
+        let mut gate = LambdaGateState::with_host_caps(host);
+        gate.add_fact(LambdaFact::new("authed", Vec::new()));
+
+        assert!(gate
+            .admit_call_with_args(
+                "execute_swap",
+                &serde_json::json!({
+                    "from": "ETH",
+                    "to": "USDC",
+                    "amount": 10.5
+                })
+            )
+            .is_accept());
+        assert_eq!(
+            gate.admit_call_with_args(
+                "execute_swap",
+                &serde_json::json!({
+                    "from": "ETH",
+                    "to": "USDC",
+                    "amount": "ten"
+                })
+            )
+            .reason(),
+            Some("formal arg amount for execute_swap does not match real{a > 0}")
+        );
+        assert_eq!(
+            gate.admit_call_with_args(
+                "execute_swap",
+                &serde_json::json!({
+                    "from": "ETH",
+                    "amount": 10.5
+                })
+            )
+            .reason(),
+            Some("formal args for execute_swap missing parameter to")
+        );
     }
 
     #[test]

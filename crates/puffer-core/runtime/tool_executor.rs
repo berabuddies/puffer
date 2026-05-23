@@ -254,8 +254,11 @@ fn commit_lambda_skill_gate_call(
                 "pending formal host call has no active Lambda Skill gate".to_string(),
             ));
         };
-        let metadata =
-            gate.committed_host_call_metadata(pending.host_tool(), Some(pending.concrete_tool()));
+        let metadata = gate.committed_host_call_metadata(
+            pending.host_tool(),
+            Some(pending.host_args()),
+            Some(pending.concrete_tool()),
+        );
         return match gate.step_call(pending.host_tool()) {
             LambdaGateVerdict::Accept => Ok(Some(metadata)),
             LambdaGateVerdict::Reject(reason) => Err(lambda_skill_gate_denial(tool_id, reason)),
@@ -264,7 +267,7 @@ fn commit_lambda_skill_gate_call(
     let Some(gate) = state.lambda_gate.as_mut() else {
         return Ok(None);
     };
-    let metadata = gate.committed_host_call_metadata(tool_id, None);
+    let metadata = gate.committed_host_call_metadata(tool_id, None, None);
     match gate.step_call(tool_id) {
         LambdaGateVerdict::Accept => Ok(Some(metadata)),
         LambdaGateVerdict::Reject(reason) => Err(lambda_skill_gate_denial(tool_id, reason)),
@@ -282,6 +285,7 @@ fn lambda_skill_gate_denial(tool_id: &str, reason: String) -> ToolExecutionResul
 #[derive(Debug, Deserialize)]
 struct LambdaHostCallInput {
     host_tool: String,
+    args: Value,
     tool: String,
     input: Value,
 }
@@ -350,14 +354,20 @@ fn prepare_lambda_host_call(
             )),
         );
     }
-    match gate.admit_call(&parsed.host_tool) {
+    match gate.admit_call_with_args(&parsed.host_tool, &parsed.args) {
         LambdaGateVerdict::Accept => {
             let host_tool = parsed.host_tool.clone();
+            let host_args = parsed.args.clone();
             let concrete_tool = parsed.tool.clone();
-            let metadata =
-                admitted_host_call_metadata(&host_tool, &concrete_tool, parsed.input.clone());
+            let metadata = admitted_host_call_metadata(
+                &host_tool,
+                host_args.clone(),
+                &concrete_tool,
+                parsed.input.clone(),
+            );
             state.pending_lambda_host_call = Some(PendingLambdaHostCall::new(
                 parsed.host_tool,
+                parsed.args,
                 parsed.tool,
                 parsed.input,
             ));
