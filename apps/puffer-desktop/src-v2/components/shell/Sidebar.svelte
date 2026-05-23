@@ -1,0 +1,1032 @@
+<!--
+  Sidebar — left rail. Full implementation per DESIGN_SYSTEM.md.
+
+  Sections top → bottom:
+    1. Rail top      — drag/traffic-light spacer + sidebar toggle
+    2. Rail search   — search input pill (icon-only in collapsed mode)
+    3. Rail scroll   — nav rows + Spaces (Work / Life with sub-items)
+    4. Rail upgrade  — Credits pill (icon badge in collapsed mode)
+    5. Rail user     — avatar + name + chevron (avatar-only in collapsed mode)
+
+  macOS chrome:
+    The window is configured with titleBarStyle="Overlay" + hiddenTitle=true,
+    so the OS draws the native traffic-light buttons in the top-left at
+    ~(12, 14). We do NOT render our own dots; instead the .rail-top div is a
+    ~44px tall transparent spacer marked with data-tauri-drag-region so the
+    user can drag the window from that strip without colliding with the
+    native buttons. The collapse toggle is anchored to the right edge of
+    that strip so it never overlaps the traffic lights.
+
+  Collapsed mode:
+    `collapsed` (passed from Shell) toggles a CSS class. The rail width
+    smoothly animates from 248px → 56px (CSS transition). In collapsed
+    mode nav rows become 32px icon-only buttons (centered), the search
+    input is replaced by a search icon button, the credits pill becomes
+    a small badge, the user row collapses to just the avatar, and the
+    Spaces section is hidden (those entries are still reachable via the
+    Home → tasks list in product nav). Each collapsed icon shows a
+    native browser tooltip on hover (title attribute) — lightweight and
+    matches macOS expectations without bringing in a portal library.
+
+  Selection is derived from currentRoute.path. The toggle button calls
+  `onToggle()` so the parent (Shell) controls collapsed state.
+-->
+<script lang="ts">
+  import { tick } from "svelte";
+  import {
+    Home,
+    User,
+    Wallet,
+    LayoutGrid,
+    Search,
+    PanelLeftClose,
+    PanelLeftOpen,
+    Plus,
+    ChevronDown,
+    Sparkles,
+    CheckSquare
+  } from "lucide-svelte";
+
+  import { currentRoute, navigate } from "../../router.svelte";
+  import { currentUser } from "../../data/user";
+  import { contacts } from "../../data/contacts";
+  import { workTasks, lifeTasks } from "../../data/tasks";
+  import { apps } from "../../data/apps";
+  import { createSessionFromText } from "../../lib/chat.svelte";
+
+  // See IconBlock.svelte — lucide-svelte v1 ships legacy class typings; use
+  // a permissive alias so the nav table can mix any lucide icon.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  type IconComponent = any;
+
+  interface Props {
+    collapsed?: boolean;
+    onToggle?: () => void;
+  }
+
+  let { collapsed = false, onToggle }: Props = $props();
+
+  interface NavEntry {
+    label: string;
+    icon: IconComponent;
+    href: string;
+    /** Path prefixes that count as 'active' for this nav row. */
+    activePrefixes: string[];
+  }
+
+  const navEntries: NavEntry[] = [
+    { label: "Home", icon: Home, href: "/home", activePrefixes: ["/home"] },
+    { label: "Contact", icon: User, href: "/contact", activePrefixes: ["/contact"] },
+    { label: "Wallet", icon: Wallet, href: "/wallet", activePrefixes: ["/wallet"] },
+    { label: "Connected Apps", icon: LayoutGrid, href: "/apps", activePrefixes: ["/apps"] }
+  ];
+
+  interface SpaceItem {
+    slug: string;
+    label: string;
+  }
+
+  // Static space contents matching the mock. Per-page agents may later move
+  // these to data/ if Spaces become real persisted records.
+  const workItems: SpaceItem[] = [{ slug: "calendar", label: "Add google meeting" }];
+  const lifeItems: SpaceItem[] = [{ slug: "restaurant", label: "Book restaurant" }];
+
+  let workExpanded = $state(true);
+  let lifeExpanded = $state(true);
+
+  /* ───── Search dropdown ─────
+   * Substring search across contacts / tasks / apps. The dropdown is
+   * absolutely positioned beneath the .search-pill so it visually anchors
+   * to the input without affecting the rail's flex layout. The list shows
+   * at most MAX_RESULTS rows so the panel never grows unbounded inside
+   * the rail.
+   */
+  const MAX_RESULTS = 5;
+  const FOCUS_LOSS_DELAY_MS = 800;
+
+  type ResultKind = "Contact" | "Task" | "App";
+  type ResultIcon = "user" | "checkSquare" | "layoutGrid";
+
+  interface SearchResult {
+    id: string;
+    label: string;
+    kind: ResultKind;
+    icon: ResultIcon;
+    href: string;
+  }
+
+  let searchQuery = $state("");
+  let searchOpen = $state(false);
+  let searchInputEl = $state<HTMLInputElement | null>(null);
+  let blurTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Set by the collapsed-mode Search button so we re-focus once expanded. */
+  let pendingSearchFocus = $state(false);
+
+  function buildResults(query: string): SearchResult[] {
+    const q = query.trim().toLowerCase();
+    if (!q) return [];
+    const out: SearchResult[] = [];
+
+    for (const c of contacts) {
+      if (c.name.toLowerCase().includes(q) || (c.role ?? "").toLowerCase().includes(q)) {
+        out.push({
+          id: `contact-${c.id}`,
+          label: c.name,
+          kind: "Contact",
+          icon: "user",
+          href: `/contact/${c.id}`
+        });
+      }
+    }
+
+    for (const group of [workTasks, lifeTasks]) {
+      for (const t of group.tasks) {
+        if (t.title.toLowerCase().includes(q)) {
+          // Tasks navigate to a matching agent slug when their primary action
+          // includes one; otherwise just open the Agent route by id-as-slug.
+          const target = t.primaryAction?.navigateTo ?? `/agent/${t.id}`;
+          out.push({
+            id: `task-${t.id}`,
+            label: t.title,
+            kind: "Task",
+            icon: "checkSquare",
+            href: target
+          });
+        }
+      }
+    }
+
+    for (const a of apps) {
+      if (a.name.toLowerCase().includes(q)) {
+        out.push({
+          id: `app-${a.id}`,
+          label: a.name,
+          kind: "App",
+          icon: "layoutGrid",
+          href: "/apps"
+        });
+      }
+    }
+
+    return out.slice(0, MAX_RESULTS);
+  }
+
+  let searchResults = $derived(buildResults(searchQuery));
+  let dropdownVisible = $derived(searchOpen && searchResults.length > 0);
+
+  function onSearchInput(event: Event): void {
+    const target = event.target as HTMLInputElement;
+    searchQuery = target.value;
+    searchOpen = searchQuery.trim().length > 0;
+  }
+
+  function onSearchKeydown(event: KeyboardEvent): void {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeSearch();
+      searchInputEl?.blur();
+    }
+  }
+
+  function onSearchFocus(): void {
+    if (blurTimer) {
+      clearTimeout(blurTimer);
+      blurTimer = null;
+    }
+    if (searchQuery.trim().length > 0) {
+      searchOpen = true;
+    }
+  }
+
+  function onSearchBlur(): void {
+    if (blurTimer) clearTimeout(blurTimer);
+    blurTimer = setTimeout(() => {
+      searchOpen = false;
+      blurTimer = null;
+    }, FOCUS_LOSS_DELAY_MS);
+  }
+
+  function closeSearch(): void {
+    searchOpen = false;
+    searchQuery = "";
+    if (blurTimer) {
+      clearTimeout(blurTimer);
+      blurTimer = null;
+    }
+  }
+
+  function pickResult(r: SearchResult): void {
+    navigate(r.href);
+    closeSearch();
+  }
+
+  function onCollapsedSearchClick(): void {
+    // We can only request a toggle (Shell owns collapsed state) — that
+    // unconditionally expands here because the icon button only renders
+    // while collapsed === true. After the prop flips back to false the
+    // $effect below moves focus into the now-visible <input>.
+    pendingSearchFocus = true;
+    onToggle?.();
+  }
+
+  $effect(() => {
+    if (!collapsed && pendingSearchFocus) {
+      pendingSearchFocus = false;
+      tick().then(() => {
+        searchInputEl?.focus();
+      });
+    }
+  });
+
+  function isNavActive(entry: NavEntry): boolean {
+    return entry.activePrefixes.some((prefix) => {
+      if (currentRoute.path === prefix) return true;
+      return currentRoute.path.startsWith(`${prefix}/`);
+    });
+  }
+
+  function isAgentActive(slug: string): boolean {
+    return currentRoute.path === `/agent/${slug}`;
+  }
+
+  function go(path: string): void {
+    navigate(path);
+  }
+
+  /**
+   * Mint a fresh empty chat session and jump to it. Wired to the per-group
+   * "+" buttons next to Work / Life — the group is purely a UI label here
+   * (the chat store doesn't yet track which space a session belongs to)
+   * but matches the user's mental model of "+ in this section starts a
+   * new thread". We pass an empty string so the session is created with
+   * no seed user turn; the user types in the Composer to drive it.
+   */
+  function startNewChat(): void {
+    const sessionId = createSessionFromText("");
+    navigate(`/agent/${sessionId}`);
+  }
+</script>
+
+<aside
+  class="sidebar"
+  class:sidebar--collapsed={collapsed}
+  aria-label="Primary navigation"
+>
+  <!-- 1. Rail top: native traffic-light spacer + drag region + toggle.
+       The spacer carries data-tauri-drag-region so dragging this strip
+       moves the window (Tauri 2 honors this attribute on any element).
+
+       Two layouts:
+       - Expanded (248px wide): one row; the spacer fills the strip and
+         the toggle floats at the right edge — well clear of the OS
+         traffic lights on the left.
+       - Collapsed (56px wide): the rail is narrower than the OS traffic
+         light cluster (~78px). If we centered the toggle on a single
+         row, it would land directly on the red/yellow/green dots and
+         intercept their clicks. Instead we render the rail-top as two
+         stacked rows — first a pure drag spacer that lets the traffic
+         lights overlay it cleanly, then a second row below the OS
+         buttons that hosts the centered toggle. -->
+  <div class="rail-top" class:rail-top--stacked={collapsed}>
+    <div class="rail-top__drag" data-tauri-drag-region></div>
+    <div class="rail-top__row">
+      <button
+        class="rail-top__toggle"
+        type="button"
+        aria-label={collapsed ? "Show sidebar" : "Hide sidebar"}
+        title={collapsed ? "Show sidebar" : "Hide sidebar"}
+        onclick={() => onToggle?.()}
+      >
+        {#if collapsed}
+          <PanelLeftOpen size={18} strokeWidth={1.6} aria-hidden="true" />
+        {:else}
+          <PanelLeftClose size={18} strokeWidth={1.6} aria-hidden="true" />
+        {/if}
+      </button>
+    </div>
+  </div>
+
+  <!-- 2. Rail search -->
+  <div class="rail-search">
+    {#if collapsed}
+      <button
+        class="rail-icon-btn"
+        type="button"
+        aria-label="Search"
+        title="Search"
+        onclick={onCollapsedSearchClick}
+      >
+        <Search size={16} strokeWidth={1.75} aria-hidden="true" />
+      </button>
+    {:else}
+      <div class="search-pill">
+        <Search size={14} strokeWidth={1.75} aria-hidden="true" />
+        <input
+          bind:this={searchInputEl}
+          class="search-pill__input"
+          type="search"
+          placeholder="Search"
+          aria-label="Search"
+          value={searchQuery}
+          oninput={onSearchInput}
+          onkeydown={onSearchKeydown}
+          onfocus={onSearchFocus}
+          onblur={onSearchBlur}
+        />
+      </div>
+
+      {#if dropdownVisible}
+        <div class="search-dropdown" role="listbox" aria-label="Search results">
+          {#each searchResults as r (r.id)}
+            <button
+              type="button"
+              class="search-dropdown__row"
+              role="option"
+              aria-selected="false"
+              onmousedown={(e) => e.preventDefault()}
+              onclick={() => pickResult(r)}
+            >
+              <span class="search-dropdown__icon" aria-hidden="true">
+                {#if r.icon === "user"}
+                  <User size={14} strokeWidth={1.75} />
+                {:else if r.icon === "checkSquare"}
+                  <CheckSquare size={14} strokeWidth={1.75} />
+                {:else}
+                  <LayoutGrid size={14} strokeWidth={1.75} />
+                {/if}
+              </span>
+              <span class="search-dropdown__label">{r.label}</span>
+              <span class="search-dropdown__badge">{r.kind}</span>
+            </button>
+          {/each}
+        </div>
+      {/if}
+    {/if}
+  </div>
+
+  <!-- 3. Rail scroll: nav + spaces -->
+  <div class="rail-scroll">
+    <nav class="nav-stack" aria-label="App sections">
+      {#each navEntries as entry (entry.href)}
+        {@const active = isNavActive(entry)}
+        <button
+          class="nav-row"
+          class:nav-row--active={active}
+          class:nav-row--icon={collapsed}
+          type="button"
+          onclick={() => go(entry.href)}
+          aria-current={active ? "page" : undefined}
+          aria-label={collapsed ? entry.label : undefined}
+          title={collapsed ? entry.label : undefined}
+        >
+          <entry.icon size={16} strokeWidth={1.75} aria-hidden="true" />
+          {#if !collapsed}
+            <span class="nav-row__label">{entry.label}</span>
+          {/if}
+        </button>
+      {/each}
+    </nav>
+
+    {#if !collapsed}
+      <div class="spaces">
+        <p class="text-eyebrow spaces__eyebrow">Tasks</p>
+
+        <!-- Work group.
+             The header is two SIBLING buttons (not nested) — HTML forbids
+             button-in-button, and Svelte 5 + WebKit silently swallows the
+             inner click. The label button toggles expand; the trailing
+             "+" mints a fresh chat thread (createSessionFromText('')) and
+             navigates straight to /agent/<sessionId>. -->
+        <div class="space-group">
+          <div class="space-header-row">
+            <button
+              class="space-header"
+              type="button"
+              aria-expanded={workExpanded}
+              onclick={() => (workExpanded = !workExpanded)}
+            >
+              <span class="space-header__label">Work</span>
+            </button>
+            <button
+              class="space-header__add"
+              type="button"
+              aria-label="New chat in Work"
+              title="New chat in Work"
+              onclick={startNewChat}
+            >
+              <Plus size={14} strokeWidth={1.75} aria-hidden="true" />
+            </button>
+          </div>
+
+          {#if workExpanded}
+            <div class="space-items">
+              {#each workItems as item (item.slug)}
+                {@const active = isAgentActive(item.slug)}
+                <button
+                  class="nav-row nav-row--sub"
+                  class:nav-row--active={active}
+                  type="button"
+                  onclick={() => go(`/agent/${item.slug}`)}
+                  aria-current={active ? "page" : undefined}
+                >
+                  <span class="nav-row__label">{item.label}</span>
+                </button>
+              {:else}
+                <p class="space-items__add">+ Add</p>
+              {/each}
+              {#if workItems.length === 0}
+                <p class="space-items__add">+ Add</p>
+              {/if}
+            </div>
+          {/if}
+        </div>
+
+        <!-- Life group (mirror of Work — see Work header comment). -->
+        <div class="space-group">
+          <div class="space-header-row">
+            <button
+              class="space-header"
+              type="button"
+              aria-expanded={lifeExpanded}
+              onclick={() => (lifeExpanded = !lifeExpanded)}
+            >
+              <span class="space-header__label">Life</span>
+            </button>
+            <button
+              class="space-header__add"
+              type="button"
+              aria-label="New chat in Life"
+              title="New chat in Life"
+              onclick={startNewChat}
+            >
+              <Plus size={14} strokeWidth={1.75} aria-hidden="true" />
+            </button>
+          </div>
+
+          {#if lifeExpanded}
+            <div class="space-items">
+              {#each lifeItems as item (item.slug)}
+                {@const active = isAgentActive(item.slug)}
+                <button
+                  class="nav-row nav-row--sub"
+                  class:nav-row--active={active}
+                  type="button"
+                  onclick={() => go(`/agent/${item.slug}`)}
+                  aria-current={active ? "page" : undefined}
+                >
+                  <span class="nav-row__label">{item.label}</span>
+                </button>
+              {/each}
+              {#if lifeItems.length === 0}
+                <p class="space-items__add">+ Add</p>
+              {/if}
+            </div>
+          {/if}
+        </div>
+      </div>
+    {/if}
+  </div>
+
+  <!-- 4. Rail upgrade: credits -->
+  <div class="rail-upgrade">
+    {#if collapsed}
+      <span
+        class="credits-badge"
+        aria-label={`${currentUser.credits.toLocaleString()} credits`}
+        title={`${currentUser.credits.toLocaleString()} credits`}
+      >
+        <Sparkles size={14} strokeWidth={1.75} aria-hidden="true" />
+      </span>
+    {:else}
+      <div class="credits-pill" aria-label="Available credits">
+        <span class="credits-pill__label">Credits</span>
+        <span class="credits-pill__value">{currentUser.credits.toLocaleString()}</span>
+      </div>
+    {/if}
+  </div>
+
+  <!-- 5. Rail user -->
+  <div class="rail-user">
+    <button
+      class="user-row"
+      class:user-row--icon={collapsed}
+      type="button"
+      aria-label={`Account: ${currentUser.name}`}
+      title={collapsed ? currentUser.name : undefined}
+    >
+      <span class="user-row__avatar" aria-hidden="true">
+        <!-- A subtle initial keeps the rail readable while no avatar image is wired. -->
+        <span class="user-row__initial">{currentUser.avatarLabel}</span>
+      </span>
+      {#if !collapsed}
+        <span class="user-row__name">{currentUser.name}</span>
+        <ChevronDown size={18} strokeWidth={1.75} aria-hidden="true" />
+      {/if}
+    </button>
+  </div>
+</aside>
+
+<style>
+  .sidebar {
+    width: var(--shell-rail-width);
+    height: 100%;
+    flex-shrink: 0;
+    background: var(--color-surface-rail);
+    display: flex;
+    flex-direction: column;
+    color: var(--color-text-primary);
+    transition: width 180ms ease;
+    overflow: hidden;
+  }
+  .sidebar--collapsed {
+    width: var(--shell-rail-collapsed);
+  }
+
+  /* ───── 1. Rail top ─────
+   * Two layouts (see template comment):
+   *
+   *   Expanded:   single row, --shell-traffic-spacer tall, toggle pinned
+   *               to the right edge so the OS traffic lights (top-left)
+   *               never collide with it.
+   *
+   *   Collapsed:  stacked — a 28px drag spacer on top (lets the native
+   *               traffic lights overlay it without intercepting clicks),
+   *               then a row below where the toggle sits centered. The
+   *               wrapper is taller in this mode so the toggle clears
+   *               the OS controls.
+   *
+   * `data-tauri-drag-region` is now on the inner `.rail-top__drag` so
+   * the spacer continues to drag the window, but the row hosting the
+   * toggle button is non-drag (otherwise drag intercepts the click).
+   */
+  .rail-top {
+    height: var(--shell-traffic-spacer);
+    padding: 0 8px 0 0;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-shrink: 0;
+    position: relative;
+  }
+  .rail-top__drag {
+    /* Default (expanded): the drag region fills the row behind the toggle
+     * so users can grab the strip to move the window. */
+    position: absolute;
+    inset: 0;
+  }
+  .rail-top__row {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    width: 100%;
+    /* Stack above the drag layer so the toggle stays clickable. */
+    position: relative;
+    z-index: 1;
+  }
+
+  /* ── Collapsed: stacked layout ── */
+  .rail-top--stacked {
+    /* Tall enough for: 28px drag spacer (OS traffic lights are ~28px tall,
+     * anchored at y=14 → bottom edge ~42) + a 40px toggle row. */
+    height: 68px;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: flex-start;
+  }
+  .rail-top--stacked .rail-top__drag {
+    /* In stacked mode the drag spacer is its own row, not an overlay. */
+    position: static;
+    inset: auto;
+    height: 28px;
+    flex-shrink: 0;
+  }
+  .rail-top--stacked .rail-top__row {
+    flex: 1;
+    justify-content: center;
+  }
+  .sidebar--collapsed .rail-top {
+    /* Collapsed rail (56px) is narrower than the OS traffic-light cluster
+     * (~78px). The drag spacer absorbs the overlap so the lights can
+     * paint over it; the toggle lives one row down, well clear. */
+    padding-right: 0;
+  }
+
+  .rail-top__toggle {
+    width: 26px;
+    height: 26px;
+    border-radius: var(--radius-control);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--color-text-secondary);
+    transition: background-color 120ms ease;
+    /* Toggle is outside the drag spacer in both layouts, but keep the
+     * no-drag hint for safety (Tauri respects -webkit-app-region). */
+    -webkit-app-region: no-drag;
+  }
+  .rail-top__toggle:hover {
+    background: rgba(0, 0, 0, 0.04);
+  }
+
+  /* ───── 2. Rail search ───── */
+  .rail-search {
+    height: 52px;
+    padding: 0 10px;
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+    /* Anchor for the absolutely-positioned search dropdown. */
+    position: relative;
+  }
+  .sidebar--collapsed .rail-search {
+    padding: 0;
+    justify-content: center;
+  }
+  .search-pill {
+    width: 100%;
+    height: 32px;
+    background: var(--color-surface-input);
+    border: 1px solid var(--color-input-border);
+    border-radius: var(--radius-control);
+    padding: 0 10px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--color-text-muted);
+  }
+  .search-pill__input {
+    flex: 1;
+    height: 100%;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    font-family: var(--font-system);
+    font-size: var(--font-size-body);
+    color: var(--color-text-primary);
+  }
+  .search-pill__input::placeholder {
+    color: var(--color-text-muted);
+  }
+  /* Hide native clear/search button so the pill stays clean. */
+  .search-pill__input::-webkit-search-cancel-button {
+    display: none;
+  }
+
+  /* Generic 32×32 icon-only button used by collapsed-mode controls
+   * (search shortcut, etc.). Keeps the visual rhythm of nav rows. */
+  .rail-icon-btn {
+    width: 32px;
+    height: 32px;
+    border-radius: var(--radius-control);
+    background: transparent;
+    color: var(--color-text-secondary);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: background-color 120ms ease;
+  }
+  .rail-icon-btn:hover {
+    background: rgba(0, 0, 0, 0.04);
+  }
+
+  /* ───── 3. Rail scroll ───── */
+  .rail-scroll {
+    flex: 1;
+    min-height: 0;
+    padding: 0 12px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+  .sidebar--collapsed .rail-scroll {
+    padding: 0 12px;
+    align-items: center;
+  }
+
+  .nav-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    width: 100%;
+  }
+  .sidebar--collapsed .nav-stack {
+    align-items: center;
+  }
+
+  .nav-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    height: var(--height-nav-row);
+    padding: 7px 10px;
+    border-radius: var(--radius-control);
+    background: transparent;
+    color: var(--color-text-primary);
+    font-family: var(--font-system);
+    font-size: var(--font-size-body);
+    line-height: var(--line-height-body);
+    font-weight: var(--font-weight-medium);
+    text-align: left;
+    transition: background-color 120ms ease;
+  }
+  .nav-row:hover {
+    background: rgba(0, 0, 0, 0.03);
+  }
+  .nav-row--active {
+    background: var(--color-selected-fill);
+  }
+  /* Icon-only mode: square button, centered, no label. */
+  .nav-row--icon {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    justify-content: center;
+    gap: 0;
+  }
+  .nav-row--sub {
+    /* Sub-items align under the icon column of the parent nav rows. */
+    padding-left: 36px;
+  }
+  .nav-row__label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* ───── Spaces ───── */
+  .spaces {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+  .spaces__eyebrow {
+    padding: 0 10px;
+    margin-bottom: 2px;
+    text-transform: none; /* design shows "Tasks" mixed-case */
+    letter-spacing: 0;
+  }
+
+  .space-group {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  /* Header row holds the label-toggle button + the trailing "+" as two
+   * SIBLINGS (HTML disallows button-in-button; nested clicks were getting
+   * swallowed in WebKit/Tauri). The row paints the hover background so
+   * both buttons share one continuous hit target visually. */
+  .space-header-row {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    height: 34px;
+    padding: 0 10px;
+    border-radius: var(--radius-control);
+    transition: background-color 120ms ease;
+  }
+  .space-header-row:hover {
+    background: rgba(0, 0, 0, 0.03);
+  }
+  .space-header {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    height: 100%;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    font-family: var(--font-system);
+    font-size: var(--font-size-body);
+    font-weight: var(--font-weight-medium);
+    color: var(--color-text-primary);
+    text-align: left;
+    cursor: pointer;
+  }
+  .space-header__label {
+    flex: 1;
+    text-align: left;
+  }
+  .space-header__add {
+    display: inline-flex;
+    width: 22px;
+    height: 22px;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    margin-left: 4px;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    color: var(--color-text-muted);
+    border-radius: 4px;
+    opacity: 0.65;
+    cursor: pointer;
+    transition: background-color 120ms ease, opacity 120ms ease, color 120ms ease;
+  }
+  .space-header-row:hover .space-header__add {
+    opacity: 1;
+  }
+  .space-header__add:hover {
+    background: rgba(0, 0, 0, 0.06);
+    color: var(--color-text-primary);
+    opacity: 1;
+  }
+
+  .space-items {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .space-items__add {
+    padding: 7px 10px 7px 36px;
+    color: var(--color-text-muted);
+    font-size: var(--font-size-body);
+  }
+
+  /* ───── 4. Rail upgrade ───── */
+  .rail-upgrade {
+    height: 42px;
+    padding: 0 12px 6px;
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+  }
+  .sidebar--collapsed .rail-upgrade {
+    padding: 0 0 6px;
+    justify-content: center;
+  }
+  .credits-pill {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    height: 28px;
+    padding: 6px 12px;
+    border-radius: var(--radius-pill);
+    background: var(--color-surface-app);
+    border: 1px solid var(--color-input-border);
+    font-family: var(--font-system);
+    font-size: var(--font-size-button);
+    line-height: var(--line-height-button);
+  }
+  .credits-pill__label {
+    color: var(--color-text-muted);
+    font-weight: var(--font-weight-medium);
+  }
+  .credits-pill__value {
+    color: var(--color-text-primary);
+    font-weight: var(--font-weight-medium);
+  }
+  /* Compact badge form used when the rail is collapsed. Uses the cream
+   * accent so the credits affordance stays discoverable. */
+  .credits-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: var(--radius-pill);
+    background: var(--color-action-cream);
+    color: var(--color-action-cream-text);
+    border: 1px solid var(--color-action-cream-border);
+  }
+
+  /* ───── 5. Rail user ───── */
+  .rail-user {
+    height: 52px;
+    padding: 0 12px;
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+  }
+  .sidebar--collapsed .rail-user {
+    padding: 0;
+    justify-content: center;
+  }
+  .user-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    height: 40px;
+    padding: 4px 8px;
+    border-radius: var(--radius-control);
+    background: transparent;
+    color: var(--color-text-primary);
+    transition: background-color 120ms ease;
+  }
+  .user-row:hover {
+    background: var(--color-selected-fill);
+  }
+  .user-row--icon {
+    width: 40px;
+    padding: 0;
+    justify-content: center;
+    gap: 0;
+  }
+  .user-row__avatar {
+    width: 28px;
+    height: 28px;
+    border-radius: var(--radius-pill);
+    background: var(--color-surface-app);
+    border: 1px solid var(--color-input-border);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .user-row__initial {
+    font-family: var(--font-system);
+    font-size: var(--font-size-button);
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-secondary);
+  }
+  .user-row__name {
+    flex: 1;
+    font-family: var(--font-system);
+    font-size: var(--font-size-body);
+    font-weight: var(--font-weight-medium);
+    text-align: left;
+  }
+
+  /* ───── Search dropdown ─────
+   * Anchored just below the search pill (52px rail-search row, 10px side
+   * padding, 32px pill ⇒ ~46px top inside the row). Inset matches the pill
+   * so the dropdown reads as a panel attached to the input. */
+  .search-dropdown {
+    position: absolute;
+    top: 44px;
+    left: 10px;
+    right: 10px;
+    z-index: 20;
+    background: var(--color-surface-app);
+    border: 1px solid var(--color-card-border);
+    border-radius: var(--radius-control);
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.08);
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    max-height: 260px;
+    overflow-y: auto;
+  }
+
+  .search-dropdown__row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    height: 32px;
+    padding: 0 8px;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--color-text-primary);
+    font-family: var(--font-system);
+    font-size: var(--font-size-body);
+    line-height: var(--line-height-body);
+    text-align: left;
+    transition: background-color 120ms ease;
+  }
+  .search-dropdown__row:hover {
+    background: var(--color-selected-fill);
+  }
+
+  .search-dropdown__icon {
+    width: 18px;
+    height: 18px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--color-text-secondary);
+    flex-shrink: 0;
+  }
+
+  .search-dropdown__label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .search-dropdown__badge {
+    flex-shrink: 0;
+    font-family: var(--font-system);
+    font-size: 11px;
+    line-height: 14px;
+    font-weight: var(--font-weight-medium);
+    color: var(--color-text-muted);
+    padding: 2px 6px;
+    border-radius: var(--radius-pill);
+    background: var(--color-surface-rail);
+    border: 1px solid var(--color-card-border);
+  }
+</style>
