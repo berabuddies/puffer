@@ -209,8 +209,10 @@ pub(crate) fn execute_skill_command(
     let saved_model = state.current_model.clone();
     let saved_effort = state.effort_level.clone();
     let saved_lambda_gate = state.lambda_gate.clone();
+    let saved_pending_lambda_host_call = state.pending_lambda_host_call.clone();
     apply_skill_runtime_overrides(state, providers, &skill.value);
     state.lambda_gate = lambda_gate;
+    state.pending_lambda_host_call = None;
 
     let rendered =
         crate::skill_support::render_skill_prompt(skill, args, &state.session.id.to_string());
@@ -238,6 +240,7 @@ pub(crate) fn execute_skill_command(
     state.current_model = saved_model;
     state.effort_level = saved_effort;
     state.lambda_gate = saved_lambda_gate;
+    state.pending_lambda_host_call = saved_pending_lambda_host_call;
 
     match outcome {
         Ok(turn) => {

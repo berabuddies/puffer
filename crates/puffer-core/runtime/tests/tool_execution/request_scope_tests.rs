@@ -214,6 +214,218 @@ fn lambda_gate_commits_facts_after_accepted_tool_call() {
 }
 
 #[test]
+fn lambda_host_call_bridges_formal_tool_to_declared_concrete_tool() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let host = LambdaHostEnv::from_json_str(
+        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","effects":[],"registers":[{"pred":"searched","args":[]}]}]}"#,
+    )
+    .unwrap();
+    state.lambda_gate = Some(LambdaGateState::with_host_caps(host));
+    let resources = LoadedResources {
+        tools: vec![
+            loaded_tool(
+                "LambdaHostCall",
+                "Admit Lambda host call",
+                "runtime:lambda_host_call",
+            ),
+            loaded_tool(
+                "ToolSearch",
+                "Search available tools",
+                "runtime:tool_search",
+            ),
+        ],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let providers = empty_providers();
+    let request_config = test_openai_request_config();
+    let concrete_input = json!({"query": "ToolSearch"});
+
+    let admitted = execute_tool_call(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &registry,
+        "gpt-5",
+        &cwd,
+        ToolExecutionBackend::OpenAi {
+            request_config: &request_config,
+            structured_output: None,
+        },
+        None,
+        "LambdaHostCall",
+        json!({
+            "host_tool": "formal_search",
+            "tool": "ToolSearch",
+            "input": concrete_input,
+        }),
+    )
+    .unwrap();
+
+    assert!(admitted.success);
+    assert!(state.pending_lambda_host_call.is_some());
+    let gate = state.lambda_gate.as_ref().expect("gate remains installed");
+    assert!(!gate
+        .facts()
+        .contains(&LambdaFact::new("searched", Vec::new())));
+
+    let result = execute_tool_call(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &registry,
+        "gpt-5",
+        &cwd,
+        ToolExecutionBackend::OpenAi {
+            request_config: &request_config,
+            structured_output: None,
+        },
+        None,
+        "ToolSearch",
+        json!({"query": "ToolSearch"}),
+    )
+    .unwrap();
+
+    assert!(result.success);
+    assert!(state.pending_lambda_host_call.is_none());
+    let gate = state.lambda_gate.as_ref().expect("gate remains installed");
+    assert!(gate
+        .facts()
+        .contains(&LambdaFact::new("searched", Vec::new())));
+}
+
+#[test]
+fn lambda_host_call_rejects_mismatched_concrete_input() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let host = LambdaHostEnv::from_json_str(
+        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","effects":[]}]}"#,
+    )
+    .unwrap();
+    state.lambda_gate = Some(LambdaGateState::with_host_caps(host));
+    let resources = LoadedResources {
+        tools: vec![
+            loaded_tool(
+                "LambdaHostCall",
+                "Admit Lambda host call",
+                "runtime:lambda_host_call",
+            ),
+            loaded_tool(
+                "ToolSearch",
+                "Search available tools",
+                "runtime:tool_search",
+            ),
+        ],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let providers = empty_providers();
+    let request_config = test_openai_request_config();
+
+    let admitted = execute_tool_call(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &registry,
+        "gpt-5",
+        &cwd,
+        ToolExecutionBackend::OpenAi {
+            request_config: &request_config,
+            structured_output: None,
+        },
+        None,
+        "LambdaHostCall",
+        json!({
+            "host_tool": "formal_search",
+            "tool": "ToolSearch",
+            "input": {"query": "ToolSearch"},
+        }),
+    )
+    .unwrap();
+    assert!(admitted.success);
+
+    let rejected = execute_tool_call(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &registry,
+        "gpt-5",
+        &cwd,
+        ToolExecutionBackend::OpenAi {
+            request_config: &request_config,
+            structured_output: None,
+        },
+        None,
+        "ToolSearch",
+        json!({"query": "different"}),
+    )
+    .unwrap();
+
+    assert!(!rejected.success);
+    assert!(rejected
+        .output
+        .stdout
+        .contains("pending formal host call formal_search requires next concrete tool ToolSearch"));
+    assert!(state.pending_lambda_host_call.is_some());
+}
+
+#[test]
+fn lambda_host_call_rejects_unknown_concrete_tool() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let host = LambdaHostEnv::from_json_str(
+        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","effects":[]}]}"#,
+    )
+    .unwrap();
+    state.lambda_gate = Some(LambdaGateState::with_host_caps(host));
+    let resources = LoadedResources {
+        tools: vec![loaded_tool(
+            "LambdaHostCall",
+            "Admit Lambda host call",
+            "runtime:lambda_host_call",
+        )],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let providers = empty_providers();
+    let request_config = test_openai_request_config();
+
+    let rejected = execute_tool_call(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &registry,
+        "gpt-5",
+        &cwd,
+        ToolExecutionBackend::OpenAi {
+            request_config: &request_config,
+            structured_output: None,
+        },
+        None,
+        "LambdaHostCall",
+        json!({
+            "host_tool": "formal_search",
+            "tool": "MissingTool",
+            "input": {},
+        }),
+    )
+    .unwrap();
+
+    assert!(!rejected.success);
+    assert!(rejected
+        .output
+        .stdout
+        .contains("LambdaHostCall target tool MissingTool is not available"));
+    assert!(state.pending_lambda_host_call.is_none());
+}
+
+#[test]
 fn execute_openai_tool_calls_respect_request_tool_filter() {
     let resources = LoadedResources {
         tools: vec![loaded_tool("bash", "Run shell", "bash")],
