@@ -299,7 +299,11 @@ fn cross_backend_equivalence() {
             assert!(l.stdout.contains("cross-backend"));
             assert!(r.stdout.contains("cross-backend"));
         } else {
-            assert_eq!(l.stdout, r.stdout, "{tool}: stdout (post-normalization)");
+            assert_eq!(
+                comparable_stdout(&l.stdout),
+                comparable_stdout(&r.stdout),
+                "{tool}: stdout (post-normalization)"
+            );
         }
         assert_eq!(
             l.read_state_updates.len(),
@@ -911,6 +915,17 @@ fn normalize_workspace_paths(
             (*k, clone)
         })
         .collect()
+}
+
+fn comparable_stdout(stdout: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(stdout) else {
+        return stdout.to_string();
+    };
+    let Some(object) = value.as_object_mut() else {
+        return stdout.to_string();
+    };
+    object.remove("durationMs");
+    serde_json::to_string(&value).unwrap_or_else(|_| stdout.to_string())
 }
 
 /// Mirrors the backoff sequence baked into `select_tool_runner`. Kept

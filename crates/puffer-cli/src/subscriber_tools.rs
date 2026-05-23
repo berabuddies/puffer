@@ -1,6 +1,9 @@
-//! Internal CLI adapters for subscriber-backed Email and Telegram tools.
+//! Internal CLI adapters for subscriber-backed and connection-backed tools.
 
-use crate::subscriber_tool_args::{EmailArgs, EmailCommand, TelegramArgs, TelegramCommand};
+use crate::subscriber_tool_args::{
+    EmailArgs, EmailCommand, LarkArgs, LarkCommand, SlackArgs, SlackCommand, TelegramArgs,
+    TelegramCommand,
+};
 use anyhow::{bail, Context, Result};
 use puffer_tools::internal_permissions::{
     require_internal_tool_execution_from_env, InternalToolExecutionRequest,
@@ -37,6 +40,259 @@ pub(crate) fn run_email(args: EmailArgs) -> Result<()> {
         }
     };
     execute_parent_internal_tool("email", input)
+}
+
+/// Runs one `puffer internal-tool lark` command.
+pub(crate) fn run_lark(args: LarkArgs) -> Result<()> {
+    let default_connection = lark_default_connection(&args.command);
+    let connection_slug = args
+        .connection_slug
+        .unwrap_or_else(|| default_connection.to_string());
+    let mut input = match args.command {
+        LarkCommand::ConfigureApp {
+            app_id,
+            app_secret,
+            app_secret_stdin,
+            brand,
+        } => {
+            let app_secret = read_secret_arg(app_secret, app_secret_stdin, "Lark app secret")?;
+            json!({
+                "action": "configure_app",
+                "app_id": app_id,
+                "app_secret": app_secret,
+                "brand": brand.as_str(),
+            })
+        }
+        LarkCommand::ImportEnv { brand } => json!({
+            "action": "import_env",
+            "brand": brand.map(|brand| brand.as_str()),
+        }),
+        LarkCommand::LoginToken {
+            user_access_token,
+            user_access_token_stdin,
+            app_id,
+            brand,
+        } => {
+            let user_access_token = read_secret_arg(
+                user_access_token,
+                user_access_token_stdin,
+                "Lark user access token",
+            )?;
+            json!({
+                "action": "login_token",
+                "user_access_token": user_access_token,
+                "app_id": app_id,
+                "brand": brand.as_str(),
+            })
+        }
+        LarkCommand::ListChats {
+            page_size,
+            page_token,
+        } => json!({
+            "action": "list_chats",
+            "page_size": page_size,
+            "page_token": page_token,
+        }),
+        LarkCommand::SearchChats {
+            query,
+            search_types,
+            page_size,
+            page_token,
+        } => json!({
+            "action": "search_chats",
+            "query": query,
+            "search_types": search_types,
+            "page_size": page_size,
+            "page_token": page_token,
+        }),
+        LarkCommand::SearchUsers {
+            query,
+            user_ids,
+            has_chatted,
+            exclude_external_users,
+            page_size,
+        } => json!({
+            "action": "search_users",
+            "query": query,
+            "user_ids": user_ids,
+            "has_chatted": has_chatted,
+            "exclude_external_users": exclude_external_users,
+            "page_size": page_size,
+        }),
+        LarkCommand::ReadMessages {
+            chat_id,
+            thread_id,
+            page_size,
+            page_token,
+            sort,
+            start_time,
+            end_time,
+        } => json!({
+            "action": "read_messages",
+            "chat_id": chat_id,
+            "thread_id": thread_id,
+            "page_size": page_size,
+            "page_token": page_token,
+            "sort": sort,
+            "start_time": start_time,
+            "end_time": end_time,
+        }),
+        LarkCommand::SearchMessages {
+            query,
+            chat_ids,
+            sender_ids,
+            chat_type,
+            page_size,
+            page_token,
+        } => json!({
+            "action": "search_messages",
+            "query": query,
+            "chat_ids": chat_ids,
+            "sender_ids": sender_ids,
+            "chat_type": chat_type,
+            "page_size": page_size,
+            "page_token": page_token,
+        }),
+        LarkCommand::MgetMessages { message_ids } => json!({
+            "action": "mget_messages",
+            "message_ids": message_ids,
+        }),
+    };
+    if let Some(object) = input.as_object_mut() {
+        object.insert(
+            "connection_slug".to_string(),
+            Value::String(connection_slug),
+        );
+    }
+    execute_parent_internal_tool("lark", input)
+}
+
+/// Runs one `puffer internal-tool slack` command.
+pub(crate) fn run_slack(args: SlackArgs) -> Result<()> {
+    let default_connection = slack_default_connection(&args.command);
+    let connection_slug = args
+        .connection_slug
+        .unwrap_or_else(|| default_connection.to_string());
+    let mut input = match args.command {
+        SlackCommand::ConfigureApp {
+            bot_token,
+            bot_token_stdin,
+            app_token,
+            app_token_stdin,
+            workspace_name,
+        } => {
+            let bot_token = read_secret_arg(bot_token, bot_token_stdin, "Slack bot token")?;
+            let app_token = read_secret_arg(app_token, app_token_stdin, "Slack app token")?;
+            json!({
+                "action": "configure_app",
+                "bot_token": bot_token,
+                "app_token": app_token,
+                "workspace_name": workspace_name,
+            })
+        }
+        SlackCommand::LoginToken {
+            token,
+            token_stdin,
+            token_type,
+            workspace_name,
+        } => {
+            let token = read_secret_arg(token, token_stdin, "Slack OAuth token")?;
+            json!({
+                "action": "login_token",
+                "token": token,
+                "token_type": token_type,
+                "workspace_name": workspace_name,
+            })
+        }
+        SlackCommand::LoginBrowser {
+            workspace_url,
+            xoxd_token,
+            xoxd_stdin,
+            xoxc_token,
+            xoxc_stdin,
+            workspace_name,
+        } => {
+            let xoxd_token = read_secret_arg(xoxd_token, xoxd_stdin, "Slack xoxd token")?;
+            let xoxc_token = read_secret_arg(xoxc_token, xoxc_stdin, "Slack xoxc token")?;
+            json!({
+                "action": "login_browser",
+                "workspace_url": workspace_url,
+                "xoxd_token": xoxd_token,
+                "xoxc_token": xoxc_token,
+                "workspace_name": workspace_name,
+            })
+        }
+        SlackCommand::ImportLocal {
+            path,
+            workspace_url,
+        } => json!({
+            "action": "import_local",
+            "path": path,
+            "workspace_url": workspace_url,
+        }),
+        SlackCommand::ListConversations {
+            types,
+            limit,
+            cursor,
+            include_archived,
+        } => json!({
+            "action": "list_conversations",
+            "types": types,
+            "limit": limit,
+            "cursor": cursor,
+            "exclude_archived": !include_archived,
+        }),
+        SlackCommand::SearchConversations {
+            query,
+            types,
+            limit,
+        } => json!({
+            "action": "search_conversations",
+            "query": query,
+            "types": types,
+            "limit": limit,
+        }),
+        SlackCommand::SearchUsers { query, limit } => json!({
+            "action": "search_users",
+            "query": query,
+            "limit": limit,
+        }),
+        SlackCommand::ReadMessages {
+            channel,
+            thread_ts,
+            limit,
+            oldest,
+            latest,
+        } => json!({
+            "action": "read_messages",
+            "channel": channel,
+            "thread_ts": thread_ts,
+            "limit": limit,
+            "oldest": oldest,
+            "latest": latest,
+        }),
+        SlackCommand::SearchMessages {
+            query,
+            limit,
+            page,
+            sort,
+            sort_dir,
+        } => json!({
+            "action": "search_messages",
+            "query": query,
+            "limit": limit,
+            "page": page,
+            "sort": sort,
+            "sort_dir": sort_dir,
+        }),
+    };
+    if let Some(object) = input.as_object_mut() {
+        object.insert(
+            "connection_slug".to_string(),
+            Value::String(connection_slug),
+        );
+    }
+    execute_parent_internal_tool("slack", input)
 }
 
 /// Runs one `puffer internal-tool telegram` command.
@@ -135,6 +391,33 @@ pub(crate) fn run_telegram(args: TelegramArgs) -> Result<()> {
         );
     }
     execute_parent_internal_tool("telegram", input)
+}
+
+fn slack_default_connection(command: &SlackCommand) -> &'static str {
+    match command {
+        SlackCommand::ConfigureApp { .. } => "slack-app",
+        _ => "slack-login",
+    }
+}
+
+fn lark_default_connection(command: &LarkCommand) -> &'static str {
+    match command {
+        LarkCommand::ConfigureApp { .. } => "lark-app",
+        LarkCommand::ImportEnv { .. }
+            if env_nonempty("LARK_APP_ID").is_some()
+                && env_nonempty("LARK_APP_SECRET").is_some() =>
+        {
+            "lark-app"
+        }
+        _ => "lark-login",
+    }
+}
+
+fn env_nonempty(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn execute_parent_internal_tool(tool_id: &str, input: Value) -> Result<()> {

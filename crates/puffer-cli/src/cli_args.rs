@@ -1,6 +1,6 @@
 use crate::browser_args::BrowserArgs;
 use crate::non_interactive::NonInteractiveArgs;
-use crate::subscriber_tool_args::{EmailArgs, TelegramArgs};
+use crate::subscriber_tool_args::{EmailArgs, LarkArgs, SlackArgs, TelegramArgs};
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
@@ -253,6 +253,10 @@ pub(crate) enum InternalToolCommand {
     Browser(#[command(flatten)] BrowserArgs),
     /// Configure the email subscriber through the parent runtime.
     Email(#[command(flatten)] EmailArgs),
+    /// Log in to Lark or look up Lark chats/users through the parent runtime.
+    Lark(#[command(flatten)] LarkArgs),
+    /// Log in to Slack or look up Slack conversations through the parent runtime.
+    Slack(#[command(flatten)] SlackArgs),
     /// Log in to Telegram or look up Telegram peers through the parent runtime.
     Telegram(#[command(flatten)] TelegramArgs),
 }

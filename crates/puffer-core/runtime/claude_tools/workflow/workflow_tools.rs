@@ -4,14 +4,15 @@ use crate::runtime::subscription_manager;
 use crate::AppState;
 use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
+use puffer_subscriber_runtime::Manifest;
 use puffer_subscriptions::{
-    validate_action_spec, ActionSpec, FilterSpec, TaggedFilterSpec, WorkflowBindingRun,
-    WorkflowBindingSpec, WorkflowBindingStatus,
+    validate_action_spec, ActionSpec, ConnectionRecord, ConnectorTemplate, FilterSpec,
+    TaggedFilterSpec, WorkflowBindingRun, WorkflowBindingSpec, WorkflowBindingStatus,
 };
 use puffer_workflow::{WorkflowDefinition, WorkflowRun, WorkflowStore};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
 struct WorkflowToggleInput {
@@ -132,13 +133,22 @@ pub fn execute_workflow_create(_state: &mut AppState, cwd: &Path, input: Value) 
         .connection_store()
         .get(&parsed.connection_slug)
         .ok_or_else(|| anyhow::anyhow!("connection `{}` not found", parsed.connection_slug))?;
-    let should_start_telegram =
-        connection.connector_slug == "telegram-login" && parsed.enabled.unwrap_or(true);
+    let template = manager
+        .connector_store()
+        .get(&connection.connector_slug)
+        .ok_or_else(|| anyhow::anyhow!("connector `{}` not found", connection.connector_slug))?;
+    if !workflow_trigger_supported(cwd, &connection, &template) {
+        anyhow::bail!(
+            "connector `{}` cannot produce workflow trigger events",
+            connection.connector_slug
+        );
+    }
+    let should_start_subscriber = parsed.enabled.unwrap_or(true);
     let spec = WorkflowBindingSpec {
         slug: parsed.slug,
         description: parsed.description.unwrap_or_default(),
         connection_slug: parsed.connection_slug,
-        connector_slug: None,
+        connector_slug: Some(connection.connector_slug.clone()),
         status: workflow_status(parsed.enabled.unwrap_or(true)),
         filter,
         classify_prompt: parsed.classify_prompt,
@@ -149,8 +159,8 @@ pub fn execute_workflow_create(_state: &mut AppState, cwd: &Path, input: Value) 
     let created_slug = spec.slug.clone();
     manager.store().create(spec.clone())?;
     let setup_result = (|| -> Result<()> {
-        if should_start_telegram {
-            super::telegram_login::ensure_telegram_connection_subscriber(cwd, &connection.slug)?;
+        if should_start_subscriber {
+            ensure_workflow_subscriber_started(&manager, cwd, &connection)?;
         }
         manager.refresh_connection_consumers()?;
         Ok(())
@@ -237,6 +247,53 @@ pub fn execute_workflow_inspect(_state: &mut AppState, cwd: &Path, input: Value)
 fn workflow_store(cwd: &Path) -> WorkflowStore {
     let paths = ConfigPaths::discover(cwd);
     WorkflowStore::new(&paths.workspace_config_dir)
+}
+
+fn workflow_trigger_supported(
+    cwd: &Path,
+    connection: &ConnectionRecord,
+    template: &ConnectorTemplate,
+) -> bool {
+    connection.connector_slug == "telegram-login"
+        || connector_stream_supported(template)
+        || subscriber_manifest_dir(cwd, &connection.slug).is_some()
+        || subscriber_manifest_dir(cwd, &connection.connector_slug).is_some()
+}
+
+fn connector_stream_supported(template: &ConnectorTemplate) -> bool {
+    template.can_subscribe && template.command_argv().is_some()
+}
+
+fn ensure_workflow_subscriber_started(
+    manager: &puffer_subscriptions::SubscriptionManager,
+    cwd: &Path,
+    connection: &ConnectionRecord,
+) -> Result<()> {
+    if connection.connector_slug == "telegram-login" {
+        return super::telegram_login::ensure_telegram_connection_subscriber(cwd, &connection.slug);
+    }
+    for topic in [&connection.slug, &connection.connector_slug] {
+        if manager.subscriber_ids().iter().any(|id| id == topic) {
+            return Ok(());
+        }
+        if let Some(manifest_dir) = subscriber_manifest_dir(cwd, topic) {
+            let manifest = Manifest::load(&manifest_dir)?;
+            manager.start_subscriber(manifest)?;
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+fn subscriber_manifest_dir(cwd: &Path, topic: &str) -> Option<PathBuf> {
+    let paths = ConfigPaths::discover(cwd);
+    [
+        paths.workspace_config_dir.join("subscribers").join(topic),
+        paths.user_config_dir.join("subscribers").join(topic),
+        paths.builtin_resources_dir.join("subscribers").join(topic),
+    ]
+    .into_iter()
+    .find(|dir| dir.join("manifest.toml").exists())
 }
 
 fn workflow_summary(workflow: &WorkflowDefinition, runs: &[WorkflowRun]) -> Value {
@@ -390,5 +447,123 @@ fn create_filter(filter: Option<Value>, pattern: Option<String>) -> Result<Optio
             case_insensitive: true,
         }))),
         (None, None) => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{subscriber_manifest_dir, workflow_trigger_supported};
+    use puffer_subscriptions::{ConnectionRecord, ConnectorTemplate};
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn subscriber_manifest_dir_finds_workspace_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest_dir = temp.path().join(".puffer/subscribers/email");
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+        std::fs::write(manifest_dir.join("manifest.toml"), "").unwrap();
+
+        assert_eq!(
+            subscriber_manifest_dir(temp.path(), "email").unwrap(),
+            manifest_dir
+        );
+    }
+
+    #[test]
+    fn subscriber_manifest_dir_finds_builtin_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest_dir = temp.path().join("resources/subscribers/email");
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+        std::fs::write(manifest_dir.join("manifest.toml"), "").unwrap();
+
+        assert_eq!(
+            subscriber_manifest_dir(temp.path(), "email").unwrap(),
+            manifest_dir
+        );
+    }
+
+    #[test]
+    fn workflow_trigger_support_rejects_action_only_connectors() {
+        let temp = tempfile::tempdir().unwrap();
+        let connection = ConnectionRecord::authenticated("work-lark", "lark-login", "demo");
+        let template = connector_template("lark-login", false);
+
+        assert!(!workflow_trigger_supported(
+            temp.path(),
+            &connection,
+            &template
+        ));
+    }
+
+    #[test]
+    fn workflow_trigger_support_rejects_commandless_subscribe_templates() {
+        let temp = tempfile::tempdir().unwrap();
+        let connection = ConnectionRecord::authenticated("work-bot", "telegram-bot", "demo");
+        let template = connector_template("telegram-bot", true);
+
+        assert!(!workflow_trigger_supported(
+            temp.path(),
+            &connection,
+            &template
+        ));
+    }
+
+    #[test]
+    fn workflow_trigger_support_accepts_command_backed_subscribe_templates() {
+        let temp = tempfile::tempdir().unwrap();
+        let connection = ConnectionRecord::authenticated("custom", "custom-sub", "demo");
+        let mut template = connector_template("custom-sub", true);
+        template.command = vec!["custom-sub".into()];
+
+        assert!(workflow_trigger_supported(
+            temp.path(),
+            &connection,
+            &template
+        ));
+    }
+
+    #[test]
+    fn workflow_trigger_support_accepts_telegram_login_special_subscriber() {
+        let temp = tempfile::tempdir().unwrap();
+        let connection = ConnectionRecord::authenticated("personal-tg", "telegram-login", "demo");
+        let template = connector_template("telegram-login", true);
+
+        assert!(workflow_trigger_supported(
+            temp.path(),
+            &connection,
+            &template
+        ));
+    }
+
+    #[test]
+    fn workflow_trigger_support_accepts_legacy_manifest_topic() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest_dir = temp.path().join("resources/subscribers/email");
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+        std::fs::write(manifest_dir.join("manifest.toml"), "").unwrap();
+        let connection = ConnectionRecord::authenticated("work-email", "email", "demo");
+        let template = connector_template("email", false);
+
+        assert!(workflow_trigger_supported(
+            temp.path(),
+            &connection,
+            &template
+        ));
+    }
+
+    fn connector_template(slug: &str, can_subscribe: bool) -> ConnectorTemplate {
+        ConnectorTemplate {
+            slug: slug.to_string(),
+            description: String::new(),
+            skill: String::new(),
+            binary: String::new(),
+            command: Vec::new(),
+            requires_auth: true,
+            can_subscribe,
+            can_proxy_agent: false,
+            output_schema: json!({}),
+            actions: BTreeMap::new(),
+        }
     }
 }

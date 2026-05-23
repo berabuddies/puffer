@@ -30,6 +30,8 @@ puffer-runner-api = { path = "../puffer-runner-api" }
 puffer-runner-grpc = { path = "../puffer-runner-grpc" }
 puffer-runner-local = { path = "../puffer-runner-local" }
 puffer-session-store = { path = "../puffer-session-store" }
+puffer-lark = { path = "../puffer-lark" }
+puffer-slack = { path = "../puffer-slack" }
 puffer-subscriber-email = { path = "../puffer-subscriber-email" }
 puffer-subscriber-runtime = { path = "../puffer-subscriber-runtime" }
 puffer-subscriber-telegram-user = { path = "../puffer-subscriber-telegram-user" }

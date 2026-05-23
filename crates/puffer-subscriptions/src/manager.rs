@@ -32,6 +32,19 @@ use tokio::runtime::Handle;
 
 const CONNECTOR_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Host-provided auth checker for built-in connectors whose credentials are
+/// owned by the embedding process instead of a connector subprocess.
+pub trait ConnectionAuthChecker: Send + Sync {
+    /// Returns `Some(true)` when auth is healthy, `Some(false)` when auth is
+    /// known broken, and `None` when this checker does not handle the
+    /// connector.
+    fn check(
+        &self,
+        template: &crate::catalog::ConnectorTemplate,
+        connection_slug: &str,
+    ) -> Result<Option<bool>>;
+}
+
 /// Builder for [`SubscriptionManager`]. Lets callers swap in custom
 /// dispatcher / classifier implementations (e.g. a real LLM-backed
 /// classifier) before construction.
@@ -44,6 +57,7 @@ pub struct SubscriptionManagerBuilder {
     proxy_store_path: PathBuf,
     dispatcher: Arc<dyn ActionDispatcher>,
     classifier: Arc<dyn Classifier>,
+    auth_checker: Option<Arc<dyn ConnectionAuthChecker>>,
 }
 
 impl SubscriptionManagerBuilder {
@@ -76,6 +90,7 @@ impl SubscriptionManagerBuilder {
             proxy_store_path,
             dispatcher: Arc::new(BuiltinActionDispatcher::new()),
             classifier: Arc::new(NullClassifier),
+            auth_checker: None,
         }
     }
 
@@ -121,6 +136,12 @@ impl SubscriptionManagerBuilder {
         self
     }
 
+    /// Override the process-provided connection auth checker.
+    pub fn with_connection_auth_checker(mut self, checker: Arc<dyn ConnectionAuthChecker>) -> Self {
+        self.auth_checker = Some(checker);
+        self
+    }
+
     /// Loads the store and spawns the router on the supplied Tokio runtime.
     pub fn build(self, handle: Handle) -> Result<SubscriptionManager> {
         let store = Arc::new(SubscriptionStore::load(&self.store_path)?);
@@ -155,6 +176,7 @@ impl SubscriptionManagerBuilder {
             proxy_store,
             dispatcher,
             classifier,
+            auth_checker: self.auth_checker,
             router: Mutex::new(Some(router)),
             subscribers: Mutex::new(HashMap::new()),
             connector_streams: Mutex::new(HashMap::new()),
@@ -177,6 +199,7 @@ pub struct SubscriptionManager {
     proxy_store: Arc<AgentProxyStore>,
     dispatcher: Arc<dyn ActionDispatcher>,
     classifier: Arc<dyn Classifier>,
+    auth_checker: Option<Arc<dyn ConnectionAuthChecker>>,
     router: Mutex<Option<SubscriptionRouter>>,
     subscribers: Mutex<HashMap<String, SubscriberHandle>>,
     connector_streams: Mutex<HashMap<String, ConnectorStreamHandle>>,
@@ -378,7 +401,7 @@ impl SubscriptionManager {
                         connector = %connection.connector_slug,
                         "active connector requires auth but exposes no auth check"
                     );
-                    false
+                    continue;
                 }
                 Ok(None) => continue,
                 Err(error) => {
@@ -434,7 +457,13 @@ impl SubscriptionManager {
         if checked.is_some() {
             return Ok(checked);
         }
-        self.check_builtin_connection_auth(&template, &connection_slug)
+        if let Some(checked) = self.check_builtin_connection_auth(&template, &connection_slug)? {
+            return Ok(Some(checked));
+        }
+        if let Some(checker) = &self.auth_checker {
+            return checker.check(&template, &connection_slug);
+        }
+        Ok(None)
     }
 
     /// Runs a connector template's `act` command when one is available.
@@ -756,240 +785,5 @@ impl ManagerConnectorEventProcessor {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::connection::ConnectionRecord;
-    use puffer_subscriber_runtime::SubscriberCommand;
-    use serde_json::Value;
-    use tempfile::tempdir;
-
-    #[test]
-    fn agent_proxy_binding_counts_as_connection_consumer() {
-        let temp = tempdir().unwrap();
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .worker_threads(1)
-            .build()
-            .unwrap();
-        let manager = SubscriptionManagerBuilder::new(temp.path().join("subscriptions.json"))
-            .build(runtime.handle().clone())
-            .unwrap();
-        manager
-            .connection_store()
-            .create(ConnectionRecord::authenticated(
-                "my-bot",
-                "telegram-bot",
-                "demo",
-            ))
-            .unwrap();
-
-        let decision = manager
-            .handle_agent_proxy_event(
-                "telegram-bot",
-                "my-bot",
-                &serde_json::json!({"message":"/connect agent-1","from":{"id":123}}),
-            )
-            .unwrap();
-
-        assert!(matches!(decision, AgentProxyDecision::BindAgent { .. }));
-        let connection = manager.connection_store().get("my-bot").unwrap();
-        assert!(connection.has_consumer);
-        assert_eq!(connection.state, ConnectionState::Active);
-
-        let decision = manager
-            .handle_agent_proxy_event(
-                "telegram-bot",
-                "my-bot",
-                &serde_json::json!({"message":"status?","from":{"id":123}}),
-            )
-            .unwrap();
-        assert_eq!(
-            decision,
-            AgentProxyDecision::RouteToAgent {
-                target: "agent-1".into(),
-                message: "status?".into(),
-                binding: crate::proxy::AgentProxyBinding {
-                    connection_slug: "my-bot".into(),
-                    external_principal: "123".into(),
-                    reply_target: Some("123".into()),
-                    agent_target: "agent-1".into(),
-                    enabled: true,
-                },
-            }
-        );
-
-        manager.shutdown();
-    }
-
-    #[test]
-    fn start_subscriber_allows_immediate_control_command() {
-        let temp = tempdir().unwrap();
-        let subscriber_dir = temp.path().join("subscriber");
-        std::fs::create_dir_all(&subscriber_dir).unwrap();
-        std::fs::write(
-            subscriber_dir.join("manifest.toml"),
-            r#"manifest_version = 1
-id = "test-subscriber"
-kind = "subscriber"
-topic = "test-topic"
-
-[run]
-cmd = ["sh", "run.sh"]
-"#,
-        )
-        .unwrap();
-        std::fs::write(
-            subscriber_dir.join("run.sh"),
-            r#"IFS= read -r _line || exit 0
-printf '%s\n' '{"topic":"test-topic","kind":"message","text":"ready"}'
-"#,
-        )
-        .unwrap();
-
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .worker_threads(1)
-            .build()
-            .unwrap();
-        let manager = SubscriptionManagerBuilder::new(temp.path().join("subscriptions.json"))
-            .build(runtime.handle().clone())
-            .unwrap();
-        let mut rx = manager.bus().subscribe_topic("test-topic");
-        let manifest = Manifest::load(&subscriber_dir).unwrap();
-
-        manager.start_subscriber(manifest).unwrap();
-        manager
-            .send_command(
-                "test-subscriber",
-                &SubscriberCommand::Custom {
-                    op: "ping".into(),
-                    args: Value::Null,
-                },
-            )
-            .unwrap();
-
-        let envelope = runtime
-            .block_on(async {
-                tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await
-            })
-            .unwrap()
-            .unwrap();
-        assert_eq!(envelope.subscriber_id, "test-subscriber");
-        assert_eq!(envelope.event.text, "ready");
-
-        manager.shutdown();
-    }
-
-    #[test]
-    fn start_subscriber_passes_absolute_state_dir() {
-        let temp = tempdir().unwrap();
-        let subscriber_dir = temp.path().join("subscriber");
-        std::fs::create_dir_all(&subscriber_dir).unwrap();
-        std::fs::write(
-            subscriber_dir.join("manifest.toml"),
-            r#"manifest_version = 1
-id = "state-subscriber"
-kind = "subscriber"
-topic = "state-topic"
-
-[run]
-cmd = ["sh", "run.sh"]
-
-[state]
-dir = "state"
-"#,
-        )
-        .unwrap();
-        std::fs::write(
-            subscriber_dir.join("run.sh"),
-            r#"printf '{"topic":"state-topic","kind":"state","text":"%s"}\n' "$PUFFER_SKILL_STATE_DIR"
-"#,
-        )
-        .unwrap();
-
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .worker_threads(1)
-            .build()
-            .unwrap();
-        let manager = SubscriptionManagerBuilder::new(temp.path().join("subscriptions.json"))
-            .build(runtime.handle().clone())
-            .unwrap();
-        let mut rx = manager.bus().subscribe_topic("state-topic");
-        let original_cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(temp.path()).unwrap();
-        let manifest = Manifest::load("subscriber").unwrap();
-
-        manager.start_subscriber(manifest).unwrap();
-        std::env::set_current_dir(original_cwd).unwrap();
-
-        let envelope = runtime
-            .block_on(async {
-                tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await
-            })
-            .unwrap()
-            .unwrap();
-        assert!(
-            std::path::Path::new(&envelope.event.text).is_absolute(),
-            "state dir should be absolute, got {}",
-            envelope.event.text
-        );
-
-        manager.shutdown();
-    }
-
-    #[test]
-    fn send_command_and_wait_returns_terminal_event() {
-        let temp = tempdir().unwrap();
-        let subscriber_dir = temp.path().join("subscriber");
-        std::fs::create_dir_all(&subscriber_dir).unwrap();
-        std::fs::write(
-            subscriber_dir.join("manifest.toml"),
-            r#"manifest_version = 1
-id = "wait-subscriber"
-kind = "subscriber"
-topic = "wait-topic"
-
-[run]
-cmd = ["sh", "run.sh"]
-"#,
-        )
-        .unwrap();
-        std::fs::write(
-            subscriber_dir.join("run.sh"),
-            r#"IFS= read -r _line || exit 0
-printf '%s\n' '{"topic":"wait-topic","kind":"ignored","text":"first"}'
-printf '%s\n' '{"topic":"wait-topic","kind":"login_error","text":"terminal","payload":{"error":"boom"}}'
-"#,
-        )
-        .unwrap();
-
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .worker_threads(1)
-            .build()
-            .unwrap();
-        let manager = SubscriptionManagerBuilder::new(temp.path().join("subscriptions.json"))
-            .build(runtime.handle().clone())
-            .unwrap();
-        let manifest = Manifest::load(&subscriber_dir).unwrap();
-
-        manager.start_subscriber(manifest).unwrap();
-        let envelope = manager
-            .send_command_and_wait(
-                "wait-subscriber",
-                "wait-topic",
-                &SubscriberCommand::Custom {
-                    op: "ping".into(),
-                    args: Value::Null,
-                },
-                &["login_awaiting_code", "login_error"],
-                std::time::Duration::from_secs(2),
-            )
-            .unwrap();
-        assert_eq!(envelope.event.kind, "login_error");
-        assert_eq!(envelope.event.payload["error"], "boom");
-
-        manager.shutdown();
-    }
-}
+#[path = "manager_tests.rs"]
+mod tests;

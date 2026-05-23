@@ -755,12 +755,14 @@ pub fn execute_workflow_tool(
         "get_goal" => workflow::goal::execute_get_goal(state, cwd, input),
         "create_goal" => workflow::goal::execute_create_goal(state, cwd, input),
         "update_goal" => workflow::goal::execute_update_goal(state, cwd, input),
+        "Lark" => workflow::lark::execute_lark(state, cwd, input),
         "LSP" => workflow::lsp::execute_lsp(state, resources, cwd, input),
         "PowerShell" => workflow::powershell::execute_powershell(state, cwd, input),
         "SendMessage" => workflow::send_message::execute_send_message(state, cwd, input),
         "SendUserMessage" | "Brief" => {
             workflow::send_user_message::execute_send_user_message(state, cwd, input)
         }
+        "Slack" => workflow::slack::execute_slack(state, cwd, input),
         "StructuredOutput" => workflow::structured_output::execute_structured_output(
             state,
             cwd,

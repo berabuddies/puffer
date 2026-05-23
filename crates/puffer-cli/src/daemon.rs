@@ -3311,8 +3311,7 @@ mod tests {
         handle_list_permissions, handle_list_provider_models, handle_login_with_api_key,
         handle_logout_provider, handle_save_permissions, model_descriptor_dto,
         permission_review_payload_json, requires_explicit_subscription,
-        resolve_create_session_model_id, run_off_runtime,
-        DaemonState, TurnRequestOptions,
+        resolve_create_session_model_id, run_off_runtime, DaemonState, TurnRequestOptions,
     };
     use indexmap::IndexMap;
     use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
@@ -3403,8 +3402,7 @@ mod tests {
             for _ in 0..100 {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        let mut buf = [0_u8; 1024];
-                        let _ = std::io::Read::read(&mut stream, &mut buf);
+                        read_discovery_http_request(&mut stream).expect("read discovery request");
                         let body = r#"{"data":[{"id":"gpt-local-discovered","name":"GPT Local"}]}"#;
                         let response = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -3424,6 +3422,65 @@ mod tests {
             panic!("discovery server was not contacted");
         });
         (format!("http://{address}"), handle)
+    }
+
+    fn read_discovery_http_request(stream: &mut std::net::TcpStream) -> std::io::Result<Vec<u8>> {
+        stream.set_nonblocking(false)?;
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+        let mut buffer = Vec::new();
+        let mut chunk = [0_u8; 8192];
+        let mut body_offset = None;
+        let mut expected_len = None;
+        loop {
+            let bytes = match std::io::Read::read(stream, &mut chunk) {
+                Ok(bytes) => bytes,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) && !buffer.is_empty() =>
+                {
+                    break;
+                }
+                Err(error) => return Err(error),
+            };
+            if bytes == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&chunk[..bytes]);
+            if body_offset.is_none() {
+                if let Some(offset) = test_http_body_offset(&buffer) {
+                    body_offset = Some(offset);
+                    expected_len = test_content_length(&buffer[..offset]);
+                    if expected_len.is_none() {
+                        break;
+                    }
+                }
+            }
+            if let (Some(offset), Some(length)) = (body_offset, expected_len) {
+                if buffer.len() >= offset + length {
+                    break;
+                }
+            }
+        }
+        Ok(buffer)
+    }
+
+    fn test_http_body_offset(buffer: &[u8]) -> Option<usize> {
+        buffer
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|index| index + 4)
+    }
+
+    fn test_content_length(headers: &[u8]) -> Option<usize> {
+        let text = String::from_utf8_lossy(headers);
+        text.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse().ok())
+                .flatten()
+        })
     }
 
     #[test]

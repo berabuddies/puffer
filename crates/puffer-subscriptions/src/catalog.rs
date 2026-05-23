@@ -79,6 +79,10 @@ pub fn builtin_connector_templates() -> Vec<ConnectorTemplate> {
     vec![
         telegram_login_template(),
         telegram_bot_template(),
+        lark_app_template(),
+        lark_login_template(),
+        slack_app_template(),
+        slack_login_template(),
         slack_bot_template(),
         email_template(),
     ]
@@ -124,15 +128,76 @@ fn telegram_bot_template() -> ConnectorTemplate {
 fn slack_bot_template() -> ConnectorTemplate {
     ConnectorTemplate {
         slug: "slack-bot".to_string(),
-        description: "Slack bot connector for channel events and agent proxy".to_string(),
-        skill: "slack-bot".to_string(),
+        description: "Legacy Slack bot connector placeholder; use slack-app or slack-login actions"
+            .to_string(),
+        skill: "slack".to_string(),
         binary: "puffer connector slack-bot".to_string(),
         command: Vec::new(),
         requires_auth: true,
-        can_subscribe: true,
-        can_proxy_agent: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
         output_schema: message_output_schema(),
-        actions: send_message_actions(),
+        actions: BTreeMap::new(),
+    }
+}
+
+fn slack_app_template() -> ConnectorTemplate {
+    ConnectorTemplate {
+        slug: "slack-app".to_string(),
+        description: "Slack app connector for bot-token Web API actions".to_string(),
+        skill: "slack".to_string(),
+        binary: "puffer internal-tool slack".to_string(),
+        command: Vec::new(),
+        requires_auth: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        output_schema: message_output_schema(),
+        actions: slack_actions(),
+    }
+}
+
+fn slack_login_template() -> ConnectorTemplate {
+    ConnectorTemplate {
+        slug: "slack-login".to_string(),
+        description: "Slack workspace account over Web API or local app session".to_string(),
+        skill: "slack".to_string(),
+        binary: "puffer internal-tool slack".to_string(),
+        command: Vec::new(),
+        requires_auth: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        output_schema: message_output_schema(),
+        actions: slack_actions(),
+    }
+}
+
+fn lark_app_template() -> ConnectorTemplate {
+    ConnectorTemplate {
+        slug: "lark-app".to_string(),
+        description: "Lark custom app connector over OpenAPI".to_string(),
+        skill: "lark".to_string(),
+        binary: "puffer internal-tool lark".to_string(),
+        command: Vec::new(),
+        requires_auth: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        output_schema: message_output_schema(),
+        actions: lark_actions(),
+    }
+}
+
+fn lark_login_template() -> ConnectorTemplate {
+    ConnectorTemplate {
+        slug: "lark-login".to_string(),
+        description: "Lark user-token account connector over OpenAPI".to_string(),
+        skill: "lark".to_string(),
+        binary: "puffer internal-tool lark".to_string(),
+        command: Vec::new(),
+        requires_auth: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        output_schema: message_output_schema(),
+        actions: lark_actions(),
     }
 }
 
@@ -159,7 +224,15 @@ fn send_message_actions() -> BTreeMap<String, ConnectorActionDefinition> {
             "type": "object",
             "properties": {
                 "to": {"type": "string"},
+                "target": {"type": "string"},
+                "channel": {"type": "string"},
+                "chat_id": {"type": "string"},
+                "open_id": {"type": "string"},
+                "user": {"type": "string"},
+                "receive_id": {"type": "string"},
+                "receive_id_type": {"type": "string"},
                 "message": {"type": "string"},
+                "text": {"type": "string"},
                 "caption": {
                     "description": "Optional caption used as message text when sending media.",
                     "type": "string"
@@ -177,7 +250,7 @@ fn send_message_actions() -> BTreeMap<String, ConnectorActionDefinition> {
                                 "caption": {"type": "string"},
                                 "kind": {
                                     "type": "string",
-                                    "enum": ["auto", "photo", "image", "document", "doc", "file"]
+                                    "enum": ["auto", "photo", "image", "document", "doc", "file", "audio", "voice", "video", "media"]
                                 },
                                 "mime_type": {"type": "string"},
                                 "thumbnail": {"type": "string"}
@@ -211,7 +284,17 @@ fn send_message_actions() -> BTreeMap<String, ConnectorActionDefinition> {
                     ]
                 }
             },
-            "required": ["to"],
+            "anyOf": [
+                {"required": ["to"]},
+                {"required": ["target"]},
+                {"required": ["channel"]},
+                {"required": ["chat_id"]},
+                {"required": ["open_id"]},
+                {"required": ["user"]},
+                {"required": ["receive_id"]},
+                {"required": ["reply_to"]},
+                {"required": ["reply_to_message_id"]}
+            ],
             "additionalProperties": true
         }),
         output_schema: serde_json::json!({
@@ -237,6 +320,194 @@ fn telegram_login_actions() -> BTreeMap<String, ConnectorActionDefinition> {
         actions.insert(action.slug.clone(), action);
     }
     actions
+}
+
+fn slack_actions() -> BTreeMap<String, ConnectorActionDefinition> {
+    let mut actions = send_message_actions();
+    for action in slack_specific_actions() {
+        actions.insert(action.slug.clone(), action);
+    }
+    actions
+}
+
+fn slack_specific_actions() -> Vec<ConnectorActionDefinition> {
+    vec![
+        slack_action_definition(
+            "react",
+            "React to a Slack message",
+            "external_message_interaction",
+            "React to an external Slack message",
+            slack_message_action_schema(),
+        ),
+        slack_action_definition(
+            "send_reaction",
+            "Alias for reacting to a Slack message",
+            "external_message_interaction",
+            "React to an external Slack message",
+            slack_message_action_schema(),
+        ),
+        slack_action_definition(
+            "remove_reaction",
+            "Remove a reaction from a Slack message",
+            "external_message_interaction",
+            "Remove a reaction from an external Slack message",
+            slack_message_action_schema(),
+        ),
+    ]
+}
+
+fn slack_action_definition(
+    slug: &str,
+    description: &str,
+    category: &str,
+    summary: &str,
+    input_schema: Value,
+) -> ConnectorActionDefinition {
+    ConnectorActionDefinition {
+        slug: slug.to_string(),
+        description: description.to_string(),
+        input_schema,
+        output_schema: action_output_schema(),
+        permission: ConnectorPermissionDefinition {
+            category: category.to_string(),
+            summary: summary.to_string(),
+            external_side_effect: true,
+        },
+    }
+}
+
+fn slack_message_action_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": slack_common_properties(),
+        "additionalProperties": true
+    })
+}
+
+fn slack_common_properties() -> Value {
+    serde_json::json!({
+        "to": {"type": "string"},
+        "target": {"type": "string"},
+        "channel": {"type": "string"},
+        "user": {"type": "string"},
+        "message": {"type": "string"},
+        "text": {"type": "string"},
+        "caption": {"type": "string"},
+        "thread_ts": {"type": "string"},
+        "reply_to": {"oneOf": [{"type": "string"}, {"type": "object"}]},
+        "reply_to_message_id": {"type": "string"},
+        "ts": {"type": "string"},
+        "timestamp": {"type": "string"},
+        "message_ts": {"type": "string"},
+        "message_id": {"type": "string"},
+        "emoji": {"type": "string"},
+        "reaction": {"type": "string"},
+        "remove": {"type": "boolean"},
+        "path": {"type": "string"},
+        "file": {"oneOf": [{"type": "string"}, {"type": "object"}]},
+        "media": {"oneOf": [{"type": "string"}, {"type": "object"}, {"type": "array"}]},
+        "files": {"type": "array"}
+    })
+}
+
+fn lark_actions() -> BTreeMap<String, ConnectorActionDefinition> {
+    let mut actions = send_message_actions();
+    for action in lark_specific_actions() {
+        actions.insert(action.slug.clone(), action);
+    }
+    actions
+}
+
+fn lark_specific_actions() -> Vec<ConnectorActionDefinition> {
+    vec![
+        lark_action_definition(
+            "react",
+            "React to a Lark message",
+            "external_message_interaction",
+            "React to an external Lark message",
+            lark_message_action_schema(),
+        ),
+        lark_action_definition(
+            "send_reaction",
+            "Alias for reacting to a Lark message",
+            "external_message_interaction",
+            "React to an external Lark message",
+            lark_message_action_schema(),
+        ),
+        lark_action_definition(
+            "remove_reaction",
+            "Remove a reaction from a Lark message by reaction_id",
+            "external_message_interaction",
+            "Remove a reaction from an external Lark message",
+            lark_message_action_schema(),
+        ),
+    ]
+}
+
+fn lark_action_definition(
+    slug: &str,
+    description: &str,
+    category: &str,
+    summary: &str,
+    input_schema: Value,
+) -> ConnectorActionDefinition {
+    ConnectorActionDefinition {
+        slug: slug.to_string(),
+        description: description.to_string(),
+        input_schema,
+        output_schema: action_output_schema(),
+        permission: ConnectorPermissionDefinition {
+            category: category.to_string(),
+            summary: summary.to_string(),
+            external_side_effect: true,
+        },
+    }
+}
+
+fn lark_message_action_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": lark_common_properties(),
+        "additionalProperties": true
+    })
+}
+
+fn lark_common_properties() -> Value {
+    serde_json::json!({
+        "to": {"type": "string"},
+        "target": {"type": "string"},
+        "receive_id": {"type": "string"},
+        "receive_id_type": {"type": "string"},
+        "chat_id": {"type": "string"},
+        "chat": {"type": "string"},
+        "channel": {"type": "string"},
+        "open_id": {"type": "string"},
+        "user_id": {"type": "string"},
+        "user": {"type": "string"},
+        "message": {"type": "string"},
+        "text": {"type": "string"},
+        "caption": {"type": "string"},
+        "content": {"oneOf": [{"type": "string"}, {"type": "object"}]},
+        "msg_type": {"type": "string"},
+        "message_type": {"type": "string"},
+        "message_id": {"type": "string"},
+        "id": {"type": "string"},
+        "reply_to": {"oneOf": [{"type": "string"}, {"type": "object"}]},
+        "reply_to_message_id": {"type": "string"},
+        "reply_in_thread": {"type": "boolean"},
+        "emoji_type": {"type": "string"},
+        "emoji": {"type": "string"},
+        "reaction": {"type": "string"},
+        "reaction_id": {"type": "string"},
+        "remove": {"type": "boolean"},
+        "path": {"type": "string"},
+        "image": {"oneOf": [{"type": "string"}, {"type": "object"}]},
+        "file": {"oneOf": [{"type": "string"}, {"type": "object"}]},
+        "media": {"oneOf": [{"type": "string"}, {"type": "object"}, {"type": "array"}]},
+        "files": {"type": "array"},
+        "idempotency_key": {"type": "string"},
+        "uuid": {"type": "string"}
+    })
 }
 
 fn telegram_specific_actions() -> Vec<ConnectorActionDefinition> {
@@ -572,6 +843,10 @@ mod tests {
 
         assert!(slugs.contains(&"telegram-bot".to_string()));
         assert!(slugs.contains(&"telegram-login".to_string()));
+        assert!(slugs.contains(&"lark-app".to_string()));
+        assert!(slugs.contains(&"lark-login".to_string()));
+        assert!(slugs.contains(&"slack-app".to_string()));
+        assert!(slugs.contains(&"slack-login".to_string()));
         assert!(slugs.contains(&"slack-bot".to_string()));
         assert!(slugs.contains(&"email".to_string()));
     }
@@ -582,14 +857,49 @@ mod tests {
         let action = telegram.actions.get("send_message").unwrap();
         let vote = telegram.actions.get("vote_poll").unwrap();
         let update_group = telegram.actions.get("update_group_title").unwrap();
-        let slack = builtin_connector_template("slack-bot").unwrap();
+        let lark = builtin_connector_template("lark-login").unwrap();
+        let slack = builtin_connector_template("slack-login").unwrap();
 
         assert_eq!(action.permission.category, "external_message_send");
         assert!(action.permission.external_side_effect);
         assert_eq!(vote.permission.category, "external_message_interaction");
         assert!(vote.permission.external_side_effect);
         assert_eq!(update_group.permission.category, "external_chat_admin");
+        assert!(lark.actions.contains_key("send_message"));
+        assert_eq!(
+            lark.actions.get("react").unwrap().permission.category,
+            "external_message_interaction"
+        );
+        assert!(!lark.can_subscribe);
         assert!(slack.actions.contains_key("send_message"));
+        assert_eq!(
+            slack.actions.get("react").unwrap().permission.category,
+            "external_message_interaction"
+        );
+        assert!(
+            !builtin_connector_template("slack-app")
+                .unwrap()
+                .can_subscribe
+        );
+        assert!(
+            !builtin_connector_template("slack-app")
+                .unwrap()
+                .can_proxy_agent
+        );
+        assert!(
+            !builtin_connector_template("slack-bot")
+                .unwrap()
+                .can_subscribe
+        );
+        assert!(
+            !builtin_connector_template("slack-bot")
+                .unwrap()
+                .can_proxy_agent
+        );
+        assert!(builtin_connector_template("slack-bot")
+            .unwrap()
+            .actions
+            .is_empty());
         assert!(!slack.actions.contains_key("vote_poll"));
         assert!(!slack.actions.contains_key("update_group_title"));
     }

@@ -1,0 +1,117 @@
+id: Slack
+name: Slack
+aliases:
+  - slack
+description: |-
+  Internal CLI-only Slack app/login configuration and lookup surface.
+  Agents should use the `slack` skill and run `slack ...` through Bash
+  instead of receiving this as a provider tool call.
+
+  This tool stores Slack app credentials, OAuth/browser credentials, or
+  browser tokens imported from a local Slack app profile under a named
+  connection. It also lists/searches users, conversations, and messages so
+  agents can resolve stable Slack ids before invoking connector actions.
+  Message sends, file uploads, and reactions are connector actions on
+  `slack-app` or `slack-login`, not separate Slack runtime commands.
+handler: runtime:workflow:slack
+approval_policy: ask
+sandbox_policy: workspace-write
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - configure_app
+        - import_local
+        - list_conversations
+        - login_browser
+        - login_token
+        - read_messages
+        - search_conversations
+        - search_messages
+        - search_users
+      description: Slack action to perform.
+    connection_slug:
+      type: string
+      description: Optional authorized Slack connection slug. Defaults to slack-app for configure_app and slack-login otherwise.
+    account_slug:
+      type: string
+      description: Alias for connection_slug when selecting a Slack account connection.
+    account:
+      type: string
+      description: Alias for connection_slug when selecting a Slack account connection.
+    bot_token:
+      type: string
+      description: Slack bot token for configure_app, usually xoxb-...
+    app_token:
+      type: string
+      description: Slack app-level token for configure_app, usually xapp-...
+    token:
+      type: string
+      description: Slack OAuth token for login_token, usually xoxb-... or xoxp-...
+    token_type:
+      type: string
+      description: Optional token kind label for login_token.
+    workspace_url:
+      type: string
+      description: Slack workspace URL for browser auth or local import disambiguation.
+    workspace_name:
+      type: string
+      description: Optional workspace name to persist before auth.test fills it.
+    xoxd_token:
+      type: string
+      description: Slack browser d cookie for login_browser.
+    xoxc_token:
+      type: string
+      description: Slack browser API token for login_browser.
+    path:
+      type: string
+      description: Optional local Slack app data path to scan for import_local.
+    types:
+      type: string
+      description: Optional comma-separated Slack conversation types.
+    query:
+      type: string
+      description: Search query for search_conversations, search_users, or search_messages.
+    channel:
+      type: string
+      description: Slack channel/conversation id for read_messages.
+    thread_ts:
+      type: string
+      description: Optional Slack thread timestamp for read_messages.
+    limit:
+      type: integer
+      description: Optional maximum result count.
+    cursor:
+      type: string
+      description: Optional Slack pagination cursor for list_conversations.
+    exclude_archived:
+      type: boolean
+      description: Whether list_conversations excludes archived conversations.
+    oldest:
+      type: string
+      description: Optional oldest Slack timestamp for read_messages.
+    latest:
+      type: string
+      description: Optional latest Slack timestamp for read_messages.
+    page:
+      type: integer
+      description: Optional Slack search page for search_messages.
+    sort:
+      type: string
+      description: Optional Slack message search sort field.
+    sort_dir:
+      type: string
+      description: Optional Slack message search sort direction.
+  required:
+    - action
+  additionalProperties: false
+metadata:
+  may_spawn_processes: false
+  may_read_files: true
+  may_write_files: true
+display:
+  group: subscribers
+  title: Slack
+  show_in_status: true

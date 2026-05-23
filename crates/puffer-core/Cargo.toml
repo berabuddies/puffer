@@ -69,6 +69,8 @@ puffer-resources = { path = "../puffer-resources" }
 puffer-runner-api = { path = "../puffer-runner-api" }
 puffer-session-store = { path = "../puffer-session-store" }
 puffer-skill-evolution = { path = "../puffer-skill-evolution" }
+puffer-lark = { path = "../puffer-lark" }
+puffer-slack = { path = "../puffer-slack" }
 puffer-subscriber-runtime = { path = "../puffer-subscriber-runtime" }
 puffer-subscriptions = { path = "../puffer-subscriptions" }
 puffer-tools = { path = "../puffer-tools" }

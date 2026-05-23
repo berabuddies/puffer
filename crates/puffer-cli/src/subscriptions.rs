@@ -3,8 +3,13 @@
 //!
 //! The subscription manager owns the in-process event bus, the spec
 //! store on disk, the supervised subscriber children, and the router
-//! task. Workflow tools and internal tools (`SubscriptionCreate`, `Telegram`, …)
+//! task. Workflow tools and internal tools (`SubscriptionCreate`, `Telegram`, ...)
 //! reach into it through a `OnceLock` installed here.
+
+#[path = "lark_connector_actions.rs"]
+mod lark_connector_actions;
+#[path = "slack_connector_actions.rs"]
+mod slack_connector_actions;
 
 use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
@@ -24,6 +29,13 @@ use std::sync::{Arc, Weak};
 use std::thread;
 use std::time::Duration;
 use tokio::runtime::Runtime;
+
+use self::lark_connector_actions::{
+    is_lark_action, is_lark_connector, run_lark_action, LarkConnectionAuthChecker,
+};
+use self::slack_connector_actions::{
+    is_slack_action, is_slack_connector, run_slack_action, SlackConnectionAuthChecker,
+};
 
 const SUBSCRIBER_ACTION_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -94,6 +106,9 @@ pub(crate) fn install(
     if let Some(classifier) = build_anthropic_classifier(auth_store, anthropic_base_url) {
         builder = builder.with_classifier(classifier);
     }
+    builder = builder.with_connection_auth_checker(Arc::new(BuiltinConnectionAuthChecker {
+        paths: paths.clone(),
+    }));
     let manager = Arc::new(
         builder
             .build(handle)
@@ -198,7 +213,7 @@ const DEFAULT_CLASSIFY_MODEL: &str = "claude-haiku-4-5";
 
 /// Returns a classifier backed by Anthropic's `/v1/messages` endpoint
 /// using the API key already in the auth store. Returns `None` when no
-/// Anthropic API key is stored — the manager then falls back to the
+/// Anthropic API key is stored - the manager then falls back to the
 /// default `NullClassifier`, and subscriptions with `classify_prompt`
 /// will simply pass every event.
 fn build_anthropic_classifier(
@@ -322,6 +337,30 @@ struct ManagerConnectorActionExecutor {
     paths: ConfigPaths,
 }
 
+struct BuiltinConnectionAuthChecker {
+    paths: ConfigPaths,
+}
+
+impl puffer_subscriptions::ConnectionAuthChecker for BuiltinConnectionAuthChecker {
+    fn check(
+        &self,
+        template: &puffer_subscriptions::ConnectorTemplate,
+        connection_slug: &str,
+    ) -> Result<Option<bool>> {
+        let slack = SlackConnectionAuthChecker {
+            paths: self.paths.clone(),
+        }
+        .check(template, connection_slug)?;
+        if slack.is_some() {
+            return Ok(slack);
+        }
+        LarkConnectionAuthChecker {
+            paths: self.paths.clone(),
+        }
+        .check(template, connection_slug)
+    }
+}
+
 impl ConnectorActionExecutor for ManagerConnectorActionExecutor {
     fn run_connector_action(
         &self,
@@ -377,6 +416,20 @@ impl ConnectorActionExecutor for ManagerConnectorActionExecutor {
                 action_definition.permission.category,
                 response.retryable
             );
+        }
+        if is_slack_connector(connector_slug) && is_slack_action(action) {
+            let summary = run_slack_action(&self.paths, &connection, action, &input)?;
+            return Ok(format!(
+                "{} [{}]",
+                summary, action_definition.permission.category
+            ));
+        }
+        if is_lark_connector(connector_slug) && is_lark_action(action) {
+            let summary = run_lark_action(&self.paths, &connection, action, &input)?;
+            return Ok(format!(
+                "{} [{}]",
+                summary, action_definition.permission.category
+            ));
         }
         if action == "send_message" {
             let summary = send_message_via_subscriber(
@@ -642,6 +695,7 @@ fn parse_media_kind(kind: &str) -> Result<SendMediaKind> {
         "photo" | "image" => Ok(SendMediaKind::Photo),
         "document" | "doc" => Ok(SendMediaKind::Document),
         "file" => Ok(SendMediaKind::File),
+        "audio" | "voice" | "video" | "media" => Ok(SendMediaKind::Document),
         other => anyhow::bail!("unsupported media kind `{other}`"),
     }
 }
@@ -810,120 +864,11 @@ fn subscriptions_path(paths: &ConfigPaths) -> PathBuf {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::panic::{self, AssertUnwindSafe};
-
-    fn test_subscription_runtime() -> SubscriptionRuntime {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .worker_threads(1)
-            .thread_name("puffer-subscriptions-test")
-            .build()
-            .expect("subscription runtime");
-        let manager = Arc::new(
-            SubscriptionManagerBuilder::new(temp.path().join("subscriptions.json"))
-                .build(runtime.handle().clone())
-                .expect("subscription manager"),
-        );
-        SubscriptionRuntime {
-            runtime: Some(runtime),
-            manager,
-            auth_stop: Arc::new(AtomicBool::new(false)),
-            auth_thread: None,
-        }
-    }
-
-    #[test]
-    fn subscription_runtime_can_drop_inside_tokio_context() {
-        let outer = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("outer runtime");
-        let runtime = test_subscription_runtime();
-        let result = panic::catch_unwind(AssertUnwindSafe(|| {
-            outer.block_on(async { drop(runtime) });
-        }));
-        assert!(
-            result.is_ok(),
-            "dropping SubscriptionRuntime inside Tokio must not panic"
-        );
-    }
-
-    #[test]
-    fn parse_reply_to_accepts_supported_shapes() {
-        assert_eq!(
-            parse_reply_to(&serde_json::json!({"reply_to": 42})).unwrap(),
-            Some(42)
-        );
-        assert_eq!(
-            parse_reply_to(&serde_json::json!({"reply_to": "42"})).unwrap(),
-            Some(42)
-        );
-        assert_eq!(
-            parse_reply_to(&serde_json::json!({"reply_to": {"message_id": 42}})).unwrap(),
-            Some(42)
-        );
-        assert_eq!(parse_reply_to(&serde_json::json!({})).unwrap(), None);
-    }
-
-    #[test]
-    fn parse_reply_to_rejects_invalid_shape() {
-        let error = parse_reply_to(&serde_json::json!({"reply_to": {"peer": "x"}}))
-            .expect_err("missing message id should fail");
-        assert!(error.to_string().contains("reply_to"));
-    }
-
-    #[test]
-    fn parse_media_attachments_accepts_common_shapes() {
-        let media = parse_media_attachments(&serde_json::json!({
-            "media": [
-                "/tmp/a.jpg",
-                {
-                    "path": "/tmp/b.pdf",
-                    "caption": "report",
-                    "kind": "file",
-                    "mime_type": "application/pdf",
-                    "thumbnail": "/tmp/thumb.jpg"
-                }
-            ]
-        }))
-        .unwrap();
-
-        assert_eq!(media.len(), 2);
-        assert_eq!(media[0].path, "/tmp/a.jpg");
-        assert_eq!(media[1].caption.as_deref(), Some("report"));
-        assert_eq!(media[1].kind, Some(SendMediaKind::File));
-        assert_eq!(media[1].mime_type.as_deref(), Some("application/pdf"));
-        assert_eq!(media[1].thumbnail.as_deref(), Some("/tmp/thumb.jpg"));
-    }
-
-    #[test]
-    fn telegram_connector_actions_use_subscriber_fallback() {
-        assert!(is_telegram_connector("telegram-login"));
-        assert!(is_telegram_action("vote_poll"));
-        assert!(is_telegram_action("update_group_title"));
-        assert!(is_telegram_action("send_story"));
-        assert!(!is_telegram_action("send_message"));
-    }
-
-    #[test]
-    fn telegram_subscriber_id_tracks_connection_slug() {
-        assert_eq!(telegram_subscriber_id("telegram-login"), "telegram-user");
-        assert_eq!(telegram_subscriber_id("tg-alt"), "tg-alt");
-        assert!(validate_telegram_connection_slug("tg-alt").is_ok());
-        assert!(validate_telegram_connection_slug("TG Alt").is_err());
-    }
-}
+#[path = "subscriptions_tests.rs"]
+mod tests;
 
 fn autostart_subscribers(manager: &SubscriptionManager, paths: &ConfigPaths) {
-    let mut needed: Vec<String> = match manager.store().list() {
-        list => list.into_iter().map(|spec| spec.connection_slug).collect(),
-    };
-    needed.sort();
-    needed.dedup();
-    for topic in needed {
+    for topic in autostart_topics(manager, paths) {
         match find_subscriber_manifest(paths, &topic) {
             Some(dir) => match Manifest::load(&dir) {
                 Ok(manifest) => {
@@ -954,6 +899,63 @@ fn autostart_subscribers(manager: &SubscriptionManager, paths: &ConfigPaths) {
             }
         }
     }
+}
+
+fn autostart_topics(manager: &SubscriptionManager, paths: &ConfigPaths) -> Vec<String> {
+    let mut needed = std::collections::BTreeSet::new();
+    for binding in manager.store().list() {
+        if binding.status != puffer_subscriptions::WorkflowBindingStatus::Enabled {
+            continue;
+        }
+        needed.insert(resolve_autostart_topic(
+            manager,
+            paths,
+            &binding.connection_slug,
+            binding.connector_slug.as_deref(),
+        ));
+    }
+    for binding in manager.proxy_store().list() {
+        if !binding.enabled {
+            continue;
+        }
+        let connector_slug = manager
+            .connection_store()
+            .get(&binding.connection_slug)
+            .map(|connection| connection.connector_slug);
+        needed.insert(resolve_autostart_topic(
+            manager,
+            paths,
+            &binding.connection_slug,
+            connector_slug.as_deref(),
+        ));
+    }
+    needed.into_iter().collect()
+}
+
+fn resolve_autostart_topic(
+    manager: &SubscriptionManager,
+    paths: &ConfigPaths,
+    connection_slug: &str,
+    connector_slug: Option<&str>,
+) -> String {
+    if find_subscriber_manifest(paths, connection_slug).is_some()
+        || is_telegram_login_connection(manager, connection_slug)
+    {
+        return connection_slug.to_string();
+    }
+    if let Some(connector_slug) = connector_slug {
+        if find_subscriber_manifest(paths, connector_slug).is_some() {
+            return connector_slug.to_string();
+        }
+    }
+    connection_slug.to_string()
+}
+
+fn is_telegram_login_connection(manager: &SubscriptionManager, connection_slug: &str) -> bool {
+    manager
+        .connection_store()
+        .get(connection_slug)
+        .is_some_and(|connection| connection.connector_slug == "telegram-login")
 }
 
 fn find_subscriber_manifest(paths: &ConfigPaths, topic: &str) -> Option<PathBuf> {

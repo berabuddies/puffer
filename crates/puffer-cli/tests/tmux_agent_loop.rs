@@ -17,7 +17,7 @@ use puffer_test_support::{
 };
 use std::fs;
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -48,12 +48,16 @@ where
         while handled < expected_requests && Instant::now() < deadline {
             match listener.accept() {
                 Ok((mut stream, _)) => {
-                    let mut buffer = vec![0_u8; 65_536];
-                    let bytes = stream.read(&mut buffer).unwrap_or(0);
-                    if bytes == 0 {
+                    let request = match read_http_request(&mut stream) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            eprintln!("mock listener read failed: {error}");
+                            continue;
+                        }
+                    };
+                    if request.is_empty() {
                         continue;
                     }
-                    let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
                     log.lock().unwrap().push(request);
                     let body = response_body(handled);
                     let response = format!(
@@ -75,6 +79,61 @@ where
         }
     });
     (format!("http://{address}"), requests, server)
+}
+
+fn read_http_request(stream: &mut TcpStream) -> std::io::Result<String> {
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    let mut body_offset = None;
+    let mut expected_len = None;
+    loop {
+        let bytes = match stream.read(&mut chunk) {
+            Ok(bytes) => bytes,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) && !buffer.is_empty() =>
+            {
+                break;
+            }
+            Err(error) => return Err(error),
+        };
+        if bytes == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..bytes]);
+        if body_offset.is_none() {
+            if let Some(offset) = http_body_offset(&buffer) {
+                body_offset = Some(offset);
+                expected_len = content_length(&buffer[..offset]);
+            }
+        }
+        if let (Some(offset), Some(length)) = (body_offset, expected_len) {
+            if buffer.len() >= offset + length {
+                break;
+            }
+        }
+    }
+    Ok(String::from_utf8_lossy(&buffer).to_string())
+}
+
+fn http_body_offset(buffer: &[u8]) -> Option<usize> {
+    buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)
+}
+
+fn content_length(headers: &[u8]) -> Option<usize> {
+    let text = String::from_utf8_lossy(headers);
+    text.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("content-length")
+            .then(|| value.trim().parse().ok())
+            .flatten()
+    })
 }
 
 fn sse_text_response(text: &str) -> String {

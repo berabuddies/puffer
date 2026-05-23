@@ -207,7 +207,6 @@ pub trait AgentProxy: Send + Sync {
 pub fn builtin_agent_proxy(connector_slug: &str) -> Option<Box<dyn AgentProxy>> {
     match connector_slug {
         "telegram-bot" => Some(Box::new(TelegramBotAgentProxy)),
-        "slack-bot" => Some(Box::new(SlackBotAgentProxy)),
         _ => None,
     }
 }
@@ -260,30 +259,6 @@ impl AgentProxy for TelegramBotAgentProxy {
             .unwrap_or(&binding.external_principal);
         serde_json::json!({
             "to": target,
-            "message": agent_output,
-        })
-    }
-}
-
-/// Agent proxy implementation for Slack bot messages.
-pub struct SlackBotAgentProxy;
-
-impl AgentProxy for SlackBotAgentProxy {
-    fn connect_phase(&self, event: &Value) -> AgentProxyDecision {
-        command_decision(event, "slack-bot")
-    }
-
-    fn agent_phase(&self, event: &Value, binding: &AgentProxyBinding) -> AgentProxyDecision {
-        route_bound_message(event, binding)
-    }
-
-    fn render_agent_reply(&self, agent_output: &str, binding: &AgentProxyBinding) -> Value {
-        let target = binding
-            .reply_target
-            .as_deref()
-            .unwrap_or(&binding.external_principal);
-        serde_json::json!({
-            "channel": target,
             "message": agent_output,
         })
     }
@@ -521,27 +496,6 @@ mod tests {
     }
 
     #[test]
-    fn slack_proxy_routes_bound_message() {
-        let proxy = SlackBotAgentProxy;
-        let binding = AgentProxyBinding {
-            connection_slug: "slack-work".into(),
-            external_principal: "C123".into(),
-            reply_target: None,
-            agent_target: "agent-2".into(),
-            enabled: true,
-        };
-
-        assert_eq!(
-            proxy.agent_phase(&serde_json::json!({"text":"status?"}), &binding),
-            AgentProxyDecision::RouteToAgent {
-                target: "agent-2".into(),
-                message: "status?".into(),
-                binding,
-            }
-        );
-    }
-
-    #[test]
     fn proxy_store_roundtrips_binding() {
         let temp = tempfile::tempdir().unwrap();
         let store = AgentProxyStore::load(temp.path().join("agent_proxy_bindings.json")).unwrap();
@@ -602,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn proxy_routes_replies_to_chat_address_when_event_has_user_and_channel() {
+    fn slack_bot_is_not_a_subscription_proxy_without_a_typed_stream() {
         let temp = tempfile::tempdir().unwrap();
         let store = AgentProxyStore::load(temp.path().join("agent_proxy_bindings.json")).unwrap();
 
@@ -617,47 +571,8 @@ mod tests {
             &store,
         )
         .unwrap();
-        assert_eq!(
-            decision,
-            AgentProxyDecision::BindAgent {
-                binding: AgentProxyBinding {
-                    connection_slug: "slack-work".into(),
-                    external_principal: "U123".into(),
-                    reply_target: Some("C999".into()),
-                    agent_target: "agent-2".into(),
-                    enabled: true,
-                },
-                reply: Some(serde_json::json!({
-                    "to": "C999",
-                    "message": "Connected to agent-2.",
-                })),
-            }
-        );
 
-        let decision = handle_agent_proxy_event(
-            "slack-bot",
-            "slack-work",
-            &serde_json::json!({
-                "text": "status?",
-                "person": {"id": "U123"},
-                "channel": {"id": "C999"}
-            }),
-            &store,
-        )
-        .unwrap();
-        assert_eq!(
-            decision,
-            AgentProxyDecision::RouteToAgent {
-                target: "agent-2".into(),
-                message: "status?".into(),
-                binding: AgentProxyBinding {
-                    connection_slug: "slack-work".into(),
-                    external_principal: "U123".into(),
-                    reply_target: Some("C999".into()),
-                    agent_target: "agent-2".into(),
-                    enabled: true,
-                },
-            }
-        );
+        assert_eq!(decision, AgentProxyDecision::Ignore);
+        assert!(store.list().is_empty());
     }
 }

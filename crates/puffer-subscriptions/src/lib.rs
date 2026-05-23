@@ -49,15 +49,14 @@ pub use history::{
     now_ms, WorkflowActionLog, WorkflowBindingRun, WorkflowBindingRunStatus, WorkflowHistoryStore,
     WorkflowHistoryStoreError,
 };
-pub use manager::{SubscriptionManager, SubscriptionManagerBuilder};
+pub use manager::{ConnectionAuthChecker, SubscriptionManager, SubscriptionManagerBuilder};
 pub use protocol::{
     ConnectorActionRequest, ConnectorActionResponse, ConnectorSubscribeCommand,
     ConnectorSubscribeFrame,
 };
 pub use proxy::{
     builtin_agent_proxy, handle_agent_proxy_event, AgentProxy, AgentProxyBinding,
-    AgentProxyDecision, AgentProxyStore, AgentProxyStoreError, SlackBotAgentProxy,
-    TelegramBotAgentProxy,
+    AgentProxyDecision, AgentProxyStore, AgentProxyStoreError, TelegramBotAgentProxy,
 };
 pub use router::{
     prefilter_passes, process_envelope, process_envelope_result, EnvelopeProcessResult,

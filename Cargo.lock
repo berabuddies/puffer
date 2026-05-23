@@ -4306,6 +4306,7 @@ dependencies = [
  "puffer-connector-telegram",
  "puffer-connector-webhook",
  "puffer-core",
+ "puffer-lark",
  "puffer-mcp-oauth",
  "puffer-observability",
  "puffer-provider-openai",
@@ -4315,6 +4316,7 @@ dependencies = [
  "puffer-runner-grpc",
  "puffer-runner-local",
  "puffer-session-store",
+ "puffer-slack",
  "puffer-subscriber-email",
  "puffer-subscriber-runtime",
  "puffer-subscriber-telegram-user",
@@ -4505,6 +4507,7 @@ dependencies = [
  "notify",
  "psl",
  "puffer-config",
+ "puffer-lark",
  "puffer-mcp-oauth",
  "puffer-observability",
  "puffer-provider-openai",
@@ -4513,6 +4516,7 @@ dependencies = [
  "puffer-runner-api",
  "puffer-session-store",
  "puffer-skill-evolution",
+ "puffer-slack",
  "puffer-subscriber-runtime",
  "puffer-subscriptions",
  "puffer-tools",
@@ -4550,6 +4554,18 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "puffer-lark"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "url",
 ]
 
 [[package]]
@@ -4714,6 +4730,20 @@ dependencies = [
  "serde_yaml",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "puffer-slack"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "url",
 ]
 
 [[package]]
