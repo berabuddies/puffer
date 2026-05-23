@@ -1,4 +1,5 @@
 use super::*;
+use crate::runtime::lambda_gate::{LambdaFact, LambdaGateState, LambdaHostEnv};
 
 #[test]
 fn task_output_reads_runtime_background_agent_output_file() {
@@ -118,6 +119,98 @@ fn send_user_message_ignores_workspace_ask_permissions() {
 
     assert!(result.success);
     assert!(result.output.stdout.contains("\"message\": \"hi\""));
+}
+
+#[test]
+fn lambda_gate_rejects_tool_outside_active_skill_catalogue() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let host = LambdaHostEnv::from_json_str(
+        r#"{"effects":[],"domains":[],"tools":[{"name":"OtherTool","effects":[]}]}"#,
+    )
+    .unwrap();
+    state.lambda_gate = Some(LambdaGateState::with_host_caps(host));
+    let resources = LoadedResources {
+        tools: vec![loaded_tool(
+            "ToolSearch",
+            "Search available tools",
+            "runtime:tool_search",
+        )],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let providers = empty_providers();
+    let request_config = test_openai_request_config();
+
+    let result = execute_tool_call(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &registry,
+        "gpt-5",
+        &cwd,
+        ToolExecutionBackend::OpenAi {
+            request_config: &request_config,
+            structured_output: None,
+        },
+        None,
+        "ToolSearch",
+        json!({"query": "ToolSearch"}),
+    )
+    .unwrap();
+
+    assert!(!result.success);
+    assert!(result
+        .output
+        .stdout
+        .contains("Lambda Skill gate rejected call: unknown tool: ToolSearch"));
+}
+
+#[test]
+fn lambda_gate_commits_facts_after_accepted_tool_call() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let host = LambdaHostEnv::from_json_str(
+        r#"{"effects":[],"domains":[],"tools":[{"name":"ToolSearch","effects":[],"registers":[{"pred":"searched","args":[]}]}]}"#,
+    )
+    .unwrap();
+    state.lambda_gate = Some(LambdaGateState::with_host_caps(host));
+    let resources = LoadedResources {
+        tools: vec![loaded_tool(
+            "ToolSearch",
+            "Search available tools",
+            "runtime:tool_search",
+        )],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let providers = empty_providers();
+    let request_config = test_openai_request_config();
+
+    let result = execute_tool_call(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &registry,
+        "gpt-5",
+        &cwd,
+        ToolExecutionBackend::OpenAi {
+            request_config: &request_config,
+            structured_output: None,
+        },
+        None,
+        "ToolSearch",
+        json!({"query": "ToolSearch"}),
+    )
+    .unwrap();
+
+    assert!(result.success);
+    let gate = state.lambda_gate.as_ref().expect("gate remains installed");
+    assert!(gate
+        .facts()
+        .contains(&LambdaFact::new("searched", Vec::new())));
 }
 
 #[test]

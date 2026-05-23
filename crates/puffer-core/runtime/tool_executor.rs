@@ -9,6 +9,7 @@ use super::browser_auto_review::{
 use super::claude_tools::{self, ProviderToolContext};
 use super::filesystem_access::{ensure_filesystem_path_access, runtime_filesystem_policy};
 use super::hook_support::{run_tool_end_hooks, run_tool_start_hooks};
+use super::lambda_gate::LambdaGateVerdict;
 use super::local_tools::{
     enrich_browser_permission_input, read_current_tab_context, BrowserCurrentTabStatus,
 };
@@ -84,6 +85,9 @@ pub(super) fn execute_tool_call(
             .filter(|definition| definition.id == tool_id)
             .ok_or_else(|| anyhow!("unknown tool {tool_id}"))?,
     };
+    if let Some(denied) = reject_lambda_skill_gate_preflight(state, tool_id) {
+        return Ok(denied);
+    }
     let input = prepare_browser_permission_input(state, cwd, &definition, input)?;
     let permission_context = load_runtime_permission_context_with_inputs(
         cwd,
@@ -144,6 +148,9 @@ pub(super) fn execute_tool_call(
         Ok(policy) => policy,
         Err(denied) => return Ok(denied),
     };
+    if let Some(denied) = commit_lambda_skill_gate_call(state, tool_id) {
+        return Ok(denied);
+    }
     let provider_context = match backend {
         ToolExecutionBackend::Anthropic {
             request_config,
@@ -195,6 +202,36 @@ pub(super) fn execute_tool_call(
         &result.output.stderr,
     );
     Ok(result)
+}
+
+fn reject_lambda_skill_gate_preflight(
+    state: &AppState,
+    tool_id: &str,
+) -> Option<ToolExecutionResult> {
+    let gate = state.lambda_gate.as_ref()?;
+    match gate.admit_call(tool_id) {
+        LambdaGateVerdict::Accept => None,
+        LambdaGateVerdict::Reject(reason) => Some(lambda_skill_gate_denial(tool_id, reason)),
+    }
+}
+
+fn commit_lambda_skill_gate_call(
+    state: &mut AppState,
+    tool_id: &str,
+) -> Option<ToolExecutionResult> {
+    let gate = state.lambda_gate.as_mut()?;
+    match gate.step_call(tool_id) {
+        LambdaGateVerdict::Accept => None,
+        LambdaGateVerdict::Reject(reason) => Some(lambda_skill_gate_denial(tool_id, reason)),
+    }
+}
+
+fn lambda_skill_gate_denial(tool_id: &str, reason: String) -> ToolExecutionResult {
+    blocked_runtime_tool(
+        tool_id,
+        ToolPermissionBehavior::Deny,
+        Some(format!("Lambda Skill gate rejected call: {reason}")),
+    )
 }
 
 fn successful_runtime_tool(tool_id: &str, stdout: String) -> ToolExecutionResult {

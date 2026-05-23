@@ -31,6 +31,7 @@ pub mod goals;
 mod hook_support;
 mod http_support;
 pub(crate) mod internal_tool_permissions;
+pub(crate) mod lambda_gate;
 mod local_tools;
 pub mod mcp_discovery;
 mod microcompact;

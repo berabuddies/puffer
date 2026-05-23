@@ -1,10 +1,12 @@
 use super::{append_tool_invocations, append_trace_events};
+use crate::runtime::lambda_gate::{LambdaGateState, LambdaHostEnv};
 use crate::{AppState, MessageRole};
 use anyhow::{Context, Result};
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use puffer_resources::{skill_by_name, LoadedItem, LoadedResources, SkillSpec, SourceKind};
 use puffer_session_store::{GitDiffSnapshot, SessionStore, TranscriptEvent};
 use std::fmt::Write as _;
+use std::fs;
 use std::io::{self, IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -189,12 +191,27 @@ pub(crate) fn execute_skill_command(
             ),
         );
     }
+    let lambda_gate = match lambda_gate_for_skill(&skill.value) {
+        Ok(gate) => gate,
+        Err(error) => {
+            return emit_system(
+                state,
+                session_store,
+                format!(
+                    "Skill command /skill:{} failed to load Lambda Skill gate: {error:#}",
+                    skill.value.name
+                ),
+            )
+        }
+    };
 
     let _ = providers.discover_and_merge_all(auth_store);
     let saved_provider = state.current_provider.clone();
     let saved_model = state.current_model.clone();
     let saved_effort = state.effort_level.clone();
+    let saved_lambda_gate = state.lambda_gate.clone();
     apply_skill_runtime_overrides(state, providers, &skill.value);
+    state.lambda_gate = lambda_gate;
 
     let rendered =
         crate::skill_support::render_skill_prompt(skill, args, &state.session.id.to_string());
@@ -221,6 +238,7 @@ pub(crate) fn execute_skill_command(
     state.current_provider = saved_provider;
     state.current_model = saved_model;
     state.effort_level = saved_effort;
+    state.lambda_gate = saved_lambda_gate;
 
     match outcome {
         Ok(turn) => {
@@ -242,6 +260,20 @@ pub(crate) fn execute_skill_command(
             format!("Skill command /skill:{} failed: {error}", skill.value.name),
         ),
     }
+}
+
+fn lambda_gate_for_skill(skill: &SkillSpec) -> Result<Option<LambdaGateState>> {
+    let Some(verification) = skill.verification.as_ref() else {
+        return Ok(None);
+    };
+    let Some(host_catalogue_path) = verification.host_catalogue_path.as_deref() else {
+        return Ok(None);
+    };
+    let raw = fs::read_to_string(host_catalogue_path)
+        .with_context(|| format!("failed to read {host_catalogue_path}"))?;
+    let host = LambdaHostEnv::from_json_str(&raw)
+        .with_context(|| format!("failed to parse {host_catalogue_path}"))?;
+    Ok(Some(LambdaGateState::with_host_caps(host)))
 }
 
 fn apply_skill_runtime_overrides(

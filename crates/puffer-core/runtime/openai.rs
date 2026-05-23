@@ -436,6 +436,21 @@ pub(super) fn execute_openai_tool_calls(
     structured_output: Option<&StructuredOutputConfig>,
     tool_filter: Option<&super::RequestToolFilter>,
 ) -> Result<OpenAIToolResults> {
+    if state.lambda_gate.is_some() {
+        return execute_openai_tool_calls_serial(
+            state,
+            resources,
+            providers,
+            auth_store,
+            tool_calls,
+            registry,
+            cwd,
+            request_config,
+            model_id,
+            structured_output,
+            tool_filter,
+        );
+    }
     // Count how many parallel-safe tools we have.
     let parallel_count = tool_calls
         .iter()
