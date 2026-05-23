@@ -10,18 +10,19 @@
 mod lark_connector_actions;
 #[path = "slack_connector_actions.rs"]
 mod slack_connector_actions;
+#[path = "telegram_connector_actions.rs"]
+mod telegram_connector_actions;
 
 use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
 use puffer_core::install_subscription_manager;
 use puffer_provider_registry::{AuthStore, StoredCredential};
-use puffer_subscriber_runtime::{
-    Manifest, SendMediaAttachment, SendMediaKind, StateSpec, SubscriberCommand,
-};
+use puffer_subscriber_runtime::{Manifest, SendMediaAttachment, SendMediaKind, SubscriberCommand};
 use puffer_subscriptions::{
-    install_connector_action_executor, install_outbound, ClassifyDecision, ConnectorActionExecutor,
-    ConnectorActionRequest, Outbound, RemoteClassifier, SubscriptionManager,
-    SubscriptionManagerBuilder,
+    connection_subscriber_manifest, direct_subscriber_manifest, find_subscriber_manifest,
+    install_connector_action_executor, install_outbound, ClassifyDecision, ConnectionRecord,
+    ConnectorActionExecutor, ConnectorActionRequest, ConnectorTemplate, Outbound, RemoteClassifier,
+    SubscriberManifestRoots, SubscriptionManager, SubscriptionManagerBuilder,
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,6 +37,13 @@ use self::lark_connector_actions::{
 use self::slack_connector_actions::{
     is_slack_action, is_slack_connector, run_slack_action, SlackConnectionAuthChecker,
 };
+use self::telegram_connector_actions::{
+    is_telegram_action, is_telegram_connector, telegram_action_via_subscriber,
+    telegram_subscriber_for_action, telegram_subscriber_for_platform,
+    TelegramConnectionAuthChecker,
+};
+#[cfg(test)]
+use self::telegram_connector_actions::{telegram_subscriber_id, validate_telegram_connection_slug};
 
 const SUBSCRIBER_ACTION_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -178,12 +186,18 @@ fn run_auth_monitor_tick(manager: &SubscriptionManager, paths: &ConfigPaths) -> 
 
 fn ensure_auth_checkable_subscribers(manager: &SubscriptionManager, paths: &ConfigPaths) {
     for connection in manager.connection_store().list() {
-        if connection.connector_slug != "telegram-login" || !connection.has_consumer {
+        if !connection.has_consumer {
             continue;
         }
-        if let Err(error) = ensure_telegram_subscriber_running(manager, paths, &connection.slug) {
+        let Some(template) = manager.connector_store().get(&connection.connector_slug) else {
+            continue;
+        };
+        if template.subscriber.is_none() {
+            continue;
+        }
+        if let Err(error) = start_connection_subscriber(manager, paths, &connection, &template) {
             eprintln!(
-                "subscription: failed to start Telegram auth probe for `{}`: {error:#}",
+                "subscription: failed to start auth probe subscriber for `{}`: {error:#}",
                 connection.slug
             );
         }
@@ -344,20 +358,25 @@ struct BuiltinConnectionAuthChecker {
 impl puffer_subscriptions::ConnectionAuthChecker for BuiltinConnectionAuthChecker {
     fn check(
         &self,
+        manager: &SubscriptionManager,
         template: &puffer_subscriptions::ConnectorTemplate,
         connection_slug: &str,
     ) -> Result<Option<bool>> {
         let slack = SlackConnectionAuthChecker {
             paths: self.paths.clone(),
         }
-        .check(template, connection_slug)?;
+        .check(manager, template, connection_slug)?;
         if slack.is_some() {
             return Ok(slack);
         }
-        LarkConnectionAuthChecker {
+        let lark = LarkConnectionAuthChecker {
             paths: self.paths.clone(),
         }
-        .check(template, connection_slug)
+        .check(manager, template, connection_slug)?;
+        if lark.is_some() {
+            return Ok(lark);
+        }
+        TelegramConnectionAuthChecker.check(manager, template, connection_slug)
     }
 }
 
@@ -513,35 +532,6 @@ fn send_message_via_subscriber(
     )
 }
 
-fn telegram_action_via_subscriber(
-    manager: &SubscriptionManager,
-    paths: &ConfigPaths,
-    connector_slug: &str,
-    connection_slug: &str,
-    action: &str,
-    input: &serde_json::Value,
-) -> Result<String> {
-    let subscriber_id = subscriber_for_action(manager, paths, connector_slug, connection_slug)?
-        .ok_or_else(|| {
-            anyhow::anyhow!("no subscriber is configured for connector `{connector_slug}`")
-        })?;
-    let command = SubscriberCommand::Custom {
-        op: "telegram_act".to_string(),
-        args: serde_json::json!({
-            "action": action,
-            "input": input,
-        }),
-    };
-    let event = manager.send_command_and_wait(
-        &subscriber_id,
-        &subscriber_id,
-        &command,
-        &["telegram_act_complete", "telegram_act_error", "login_error"],
-        SUBSCRIBER_ACTION_TIMEOUT,
-    )?;
-    telegram_action_event_summary(&event, &subscriber_id, connector_slug, action)
-}
-
 fn send_event_summary(
     event: &puffer_subscriber_runtime::EventEnvelope,
     subscriber_id: &str,
@@ -558,34 +548,6 @@ fn send_event_summary(
             anyhow::bail!("send via {subscriber_id} failed: {}", event_error(event))
         }
         other => anyhow::bail!("send via {subscriber_id} returned unexpected event `{other}`"),
-    }
-}
-
-fn telegram_action_event_summary(
-    event: &puffer_subscriber_runtime::EventEnvelope,
-    subscriber_id: &str,
-    connector_slug: &str,
-    action: &str,
-) -> Result<String> {
-    match event.event.kind.as_str() {
-        "telegram_act_complete" => {
-            let summary = event
-                .event
-                .payload
-                .get("summary")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("completed");
-            Ok(format!(
-                "Telegram action `{action}` via {subscriber_id} -> {connector_slug}: {summary}"
-            ))
-        }
-        "telegram_act_error" | "login_error" => anyhow::bail!(
-            "Telegram action `{action}` via {subscriber_id} failed: {}",
-            event_error(event)
-        ),
-        other => {
-            anyhow::bail!("Telegram action `{action}` returned unexpected event `{other}`")
-        }
     }
 }
 
@@ -738,8 +700,10 @@ fn parse_reply_to(input: &serde_json::Value) -> Result<Option<i32>> {
 }
 
 fn subscriber_for_platform(platform: &str) -> Option<&'static str> {
+    if let Some(subscriber) = telegram_subscriber_for_platform(platform) {
+        return Some(subscriber);
+    }
     match platform {
-        "telegram" | "telegram-user" | "telegram-login" => Some("telegram-user"),
         "email" => Some("email"),
         _ => None,
     }
@@ -751,112 +715,12 @@ fn subscriber_for_action(
     connector_slug: &str,
     connection_slug: &str,
 ) -> Result<Option<String>> {
-    if is_telegram_connector(connector_slug) {
-        let subscriber_id = telegram_subscriber_id(connection_slug);
-        ensure_telegram_subscriber_running(manager, paths, &subscriber_id)?;
+    if let Some(subscriber_id) =
+        telegram_subscriber_for_action(manager, paths, connector_slug, connection_slug)?
+    {
         return Ok(Some(subscriber_id));
     }
     Ok(subscriber_for_platform(connector_slug).map(ToString::to_string))
-}
-
-fn telegram_subscriber_id(connection_slug: &str) -> String {
-    if connection_slug.trim().is_empty() || connection_slug == "telegram-login" {
-        return "telegram-user".to_string();
-    }
-    connection_slug.to_string()
-}
-
-fn ensure_telegram_subscriber_running(
-    manager: &SubscriptionManager,
-    paths: &ConfigPaths,
-    connection_slug: &str,
-) -> Result<()> {
-    validate_telegram_connection_slug(connection_slug)?;
-    if manager
-        .subscriber_ids()
-        .iter()
-        .any(|subscriber_id| subscriber_id == connection_slug)
-    {
-        return Ok(());
-    }
-    let manifest = telegram_connection_manifest(paths, connection_slug)?;
-    manager.start_subscriber(manifest)?;
-    Ok(())
-}
-
-fn telegram_connection_manifest(paths: &ConfigPaths, connection_slug: &str) -> Result<Manifest> {
-    let dir = find_subscriber_manifest(paths, "telegram-user")
-        .ok_or_else(|| anyhow::anyhow!("telegram-user subscriber manifest not found"))?;
-    let mut manifest = Manifest::load(&dir)?;
-    if connection_slug != "telegram-user" {
-        manifest.spec.id = connection_slug.to_string();
-        manifest.spec.topic = Some(connection_slug.to_string());
-        manifest.spec.display_name = Some(format!("Telegram ({connection_slug})"));
-        manifest.spec.state = Some(StateSpec {
-            dir: paths
-                .user_config_dir
-                .join("telegram-accounts")
-                .join(connection_slug)
-                .to_string_lossy()
-                .to_string(),
-        });
-    }
-    Ok(manifest)
-}
-
-fn validate_telegram_connection_slug(connection_slug: &str) -> Result<()> {
-    if connection_slug.is_empty()
-        || !connection_slug
-            .chars()
-            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
-    {
-        anyhow::bail!("Telegram connection slug must be non-empty kebab-case ASCII");
-    }
-    Ok(())
-}
-
-fn is_telegram_connector(connector_slug: &str) -> bool {
-    matches!(
-        connector_slug,
-        "telegram" | "telegram-user" | "telegram-login"
-    )
-}
-
-fn is_telegram_action(action: &str) -> bool {
-    matches!(
-        action,
-        "vote_poll"
-            | "edit_message"
-            | "delete_message"
-            | "delete_messages"
-            | "forward_message"
-            | "forward_messages"
-            | "pin_message"
-            | "unpin_message"
-            | "unpin_all_messages"
-            | "react"
-            | "send_reaction"
-            | "mark_read"
-            | "clear_mentions"
-            | "send_typing"
-            | "send_chat_action"
-            | "join_chat"
-            | "leave_chat"
-            | "kick_participant"
-            | "ban_participant"
-            | "unban_participant"
-            | "invite_users"
-            | "add_chat_users"
-            | "update_profile"
-            | "update_username"
-            | "update_avatar"
-            | "upload_avatar"
-            | "update_group_title"
-            | "update_group_name"
-            | "update_group_username"
-            | "update_group_photo"
-            | "send_story"
-    )
 }
 
 fn subscriptions_path(paths: &ConfigPaths) -> PathBuf {
@@ -869,36 +733,39 @@ mod tests;
 
 fn autostart_subscribers(manager: &SubscriptionManager, paths: &ConfigPaths) {
     for topic in autostart_topics(manager, paths) {
-        match find_subscriber_manifest(paths, &topic) {
-            Some(dir) => match Manifest::load(&dir) {
-                Ok(manifest) => {
-                    if let Err(error) = manager.start_subscriber(manifest) {
-                        eprintln!("subscription: failed to start subscriber `{topic}`: {error:#}");
-                    }
+        match autostart_manifest(manager, paths, &topic) {
+            Ok(Some(manifest)) => {
+                if let Err(error) = manager.start_subscriber(manifest) {
+                    eprintln!("subscription: failed to start subscriber `{topic}`: {error:#}");
                 }
-                Err(error) => {
-                    eprintln!("subscription: invalid manifest for `{topic}`: {error}");
-                }
-            },
-            None => {
-                if let Some(connection) = manager.connection_store().get(&topic) {
-                    if connection.connector_slug == "telegram-login" {
-                        if let Err(error) =
-                            ensure_telegram_subscriber_running(manager, paths, &topic)
-                        {
-                            eprintln!(
-                                "subscription: failed to start Telegram subscriber `{topic}`: {error:#}"
-                            );
-                        }
-                        continue;
-                    }
-                }
+            }
+            Ok(None) => {
                 eprintln!(
                     "subscription: no manifest installed for source `{topic}` referenced by an existing subscription; events will not flow until one is added"
                 );
             }
+            Err(error) => {
+                eprintln!("subscription: invalid manifest for `{topic}`: {error}");
+            }
         }
     }
+}
+
+fn autostart_manifest(
+    manager: &SubscriptionManager,
+    paths: &ConfigPaths,
+    topic: &str,
+) -> Result<Option<Manifest>> {
+    if let Some(connection) = manager.connection_store().get(topic) {
+        if let Some(template) = manager.connector_store().get(&connection.connector_slug) {
+            return connection_subscriber_manifest(
+                &subscriber_manifest_roots(paths),
+                &connection,
+                &template,
+            );
+        }
+    }
+    direct_subscriber_manifest(&subscriber_manifest_roots(paths), topic)
 }
 
 fn autostart_topics(manager: &SubscriptionManager, paths: &ConfigPaths) -> Vec<String> {
@@ -938,38 +805,54 @@ fn resolve_autostart_topic(
     connection_slug: &str,
     connector_slug: Option<&str>,
 ) -> String {
-    if find_subscriber_manifest(paths, connection_slug).is_some()
-        || is_telegram_login_connection(manager, connection_slug)
+    if find_subscriber_manifest(&subscriber_manifest_roots(paths), connection_slug).is_some()
+        || connection_has_instantiated_subscriber(manager, paths, connection_slug)
     {
         return connection_slug.to_string();
     }
     if let Some(connector_slug) = connector_slug {
-        if find_subscriber_manifest(paths, connector_slug).is_some() {
+        if find_subscriber_manifest(&subscriber_manifest_roots(paths), connector_slug).is_some() {
             return connector_slug.to_string();
         }
     }
     connection_slug.to_string()
 }
 
-fn is_telegram_login_connection(manager: &SubscriptionManager, connection_slug: &str) -> bool {
-    manager
-        .connection_store()
-        .get(connection_slug)
-        .is_some_and(|connection| connection.connector_slug == "telegram-login")
+fn connection_has_instantiated_subscriber(
+    manager: &SubscriptionManager,
+    paths: &ConfigPaths,
+    connection_slug: &str,
+) -> bool {
+    let Some(connection) = manager.connection_store().get(connection_slug) else {
+        return false;
+    };
+    let Some(template) = manager.connector_store().get(&connection.connector_slug) else {
+        return false;
+    };
+    let Some(subscriber) = &template.subscriber else {
+        return false;
+    };
+    find_subscriber_manifest(&subscriber_manifest_roots(paths), &subscriber.manifest_slug).is_some()
 }
 
-fn find_subscriber_manifest(paths: &ConfigPaths, topic: &str) -> Option<PathBuf> {
-    let workspace = paths.workspace_config_dir.join("subscribers").join(topic);
-    if workspace.join("manifest.toml").exists() {
-        return Some(workspace);
+fn start_connection_subscriber(
+    manager: &SubscriptionManager,
+    paths: &ConfigPaths,
+    connection: &ConnectionRecord,
+    template: &ConnectorTemplate,
+) -> Result<()> {
+    if let Some(manifest) =
+        connection_subscriber_manifest(&subscriber_manifest_roots(paths), connection, template)?
+    {
+        manager.start_subscriber(manifest)?;
     }
-    let user = paths.user_config_dir.join("subscribers").join(topic);
-    if user.join("manifest.toml").exists() {
-        return Some(user);
-    }
-    let bundled = paths.builtin_resources_dir.join("subscribers").join(topic);
-    if bundled.join("manifest.toml").exists() {
-        return Some(bundled);
-    }
-    None
+    Ok(())
+}
+
+fn subscriber_manifest_roots(paths: &ConfigPaths) -> SubscriberManifestRoots {
+    SubscriberManifestRoots::new(
+        paths.workspace_config_dir.clone(),
+        paths.user_config_dir.clone(),
+        paths.builtin_resources_dir.clone(),
+    )
 }

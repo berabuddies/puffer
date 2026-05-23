@@ -12,7 +12,12 @@ pub(crate) struct LarkConnectionAuthChecker {
 }
 
 impl ConnectionAuthChecker for LarkConnectionAuthChecker {
-    fn check(&self, template: &ConnectorTemplate, connection_slug: &str) -> Result<Option<bool>> {
+    fn check(
+        &self,
+        _manager: &puffer_subscriptions::SubscriptionManager,
+        template: &ConnectorTemplate,
+        connection_slug: &str,
+    ) -> Result<Option<bool>> {
         if !is_lark_credential_connector(&template.slug) {
             return Ok(None);
         }

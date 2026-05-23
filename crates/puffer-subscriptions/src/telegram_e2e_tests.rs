@@ -190,6 +190,7 @@ fn telegram_template(script: &Path) -> ConnectorTemplate {
         requires_auth: false,
         can_subscribe: true,
         can_proxy_agent: false,
+        subscriber: None,
         output_schema: Value::Null,
         actions: BTreeMap::from([(
             "send_message".into(),

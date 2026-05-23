@@ -7,11 +7,14 @@
 
 use crate::AppState;
 use anyhow::{Context, Result};
-use puffer_subscriber_runtime::Manifest;
-use puffer_subscriptions::{ActionSpec, FilterSpec, SubscriptionSpec, SubscriptionStatus};
+use puffer_config::ConfigPaths;
+use puffer_subscriptions::{
+    connection_subscriber_manifest, direct_subscriber_manifest, ActionSpec, ConnectorTemplate,
+    FilterSpec, SubscriberManifestRoots, SubscriptionSpec, SubscriptionStatus,
+};
 use serde::Deserialize;
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use time::OffsetDateTime;
 
 use super::subscription_globals;
@@ -77,13 +80,26 @@ fn ensure_subscriber_started(
     if manager.subscriber_ids().iter().any(|id| id == source_topic) {
         return Ok(());
     }
+    let roots = subscriber_manifest_roots(cwd);
     if let Some(connection) = manager.connection_store().get(source_topic) {
-        if connection.connector_slug == "telegram-login" {
-            return super::telegram_login::ensure_telegram_connection_subscriber(cwd, source_topic);
+        if let Some(template) = manager.connector_store().get(&connection.connector_slug) {
+            if connector_stream_supported(&template) {
+                return Ok(());
+            }
+            if let Some(manifest) = connection_subscriber_manifest(&roots, &connection, &template)?
+            {
+                if !manager
+                    .subscriber_ids()
+                    .iter()
+                    .any(|id| id == &manifest.spec.id)
+                {
+                    manager.start_subscriber(manifest)?;
+                }
+                return Ok(());
+            }
         }
     }
-    let manifest_dir = subscriber_manifest_dir(source_topic);
-    if !manifest_dir.join("manifest.toml").exists() {
+    let Some(manifest) = direct_subscriber_manifest(&roots, source_topic)? else {
         // No manifest installed for this topic; the agent created a spec
         // for a subscriber that has not been wired up. We surface this
         // softly (no events will arrive until a matching manifest exists).
@@ -91,21 +107,20 @@ fn ensure_subscriber_started(
             "subscription: no subscriber manifest found for topic `{source_topic}`; spec created but no events will fire"
         );
         return Ok(());
-    }
-    let manifest = Manifest::load(&manifest_dir)?;
+    };
     manager.start_subscriber(manifest)?;
     Ok(())
 }
 
-fn subscriber_manifest_dir(source_topic: &str) -> PathBuf {
-    if let Some(home) = std::env::var_os("HOME") {
-        let user = PathBuf::from(home)
-            .join(".puffer")
-            .join("subscribers")
-            .join(source_topic);
-        if user.join("manifest.toml").exists() {
-            return user;
-        }
-    }
-    PathBuf::from("resources/subscribers").join(source_topic)
+fn connector_stream_supported(template: &ConnectorTemplate) -> bool {
+    template.can_subscribe && template.command_argv().is_some()
+}
+
+fn subscriber_manifest_roots(cwd: &Path) -> SubscriberManifestRoots {
+    let paths = ConfigPaths::discover(cwd);
+    SubscriberManifestRoots::new(
+        paths.workspace_config_dir,
+        paths.user_config_dir,
+        paths.builtin_resources_dir,
+    )
 }

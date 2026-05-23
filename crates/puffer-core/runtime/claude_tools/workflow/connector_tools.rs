@@ -149,6 +149,7 @@ pub fn execute_connector_register(
         requires_auth: true,
         can_subscribe: true,
         can_proxy_agent: false,
+        subscriber: None,
         output_schema: json!({}),
         actions: Default::default(),
     });
@@ -354,6 +355,7 @@ fn starter_template(slug: &str) -> ConnectorTemplate {
         requires_auth: true,
         can_subscribe: true,
         can_proxy_agent: false,
+        subscriber: None,
         output_schema: json!({
             "type": "object",
             "properties": {"message": {"type": "string"}},

@@ -185,6 +185,7 @@ mod tests {
             requires_auth: true,
             can_subscribe: true,
             can_proxy_agent: false,
+            subscriber: None,
             output_schema: Value::Null,
             actions: BTreeMap::from([(
                 "send".into(),

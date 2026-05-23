@@ -35,6 +35,22 @@ pub struct ConnectorPermissionDefinition {
     pub external_side_effect: bool,
 }
 
+/// Subscriber manifest metadata used by connectors whose event stream is
+/// provided by a reusable subscriber binary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConnectorSubscriberTemplate {
+    /// Subscriber manifest slug to load when a connection has no dedicated
+    /// manifest directory of its own.
+    pub manifest_slug: String,
+    /// Optional user config subdirectory used for per-connection subscriber
+    /// state when instantiating a shared manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_root: Option<String>,
+    /// Optional display name prefix used for instantiated subscribers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+}
+
 /// Describes one connector implementation independently of any user auth state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConnectorTemplate {
@@ -59,6 +75,9 @@ pub struct ConnectorTemplate {
     /// Whether the connector can act as an agent proxy.
     #[serde(default)]
     pub can_proxy_agent: bool,
+    /// Optional reusable subscriber manifest for per-connection event streams.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscriber: Option<ConnectorSubscriberTemplate>,
     /// JSON shape emitted by `subscribe` events.
     #[serde(default)]
     pub output_schema: Value,
@@ -105,6 +124,11 @@ fn telegram_login_template() -> ConnectorTemplate {
         requires_auth: true,
         can_subscribe: true,
         can_proxy_agent: false,
+        subscriber: Some(ConnectorSubscriberTemplate {
+            manifest_slug: "telegram-user".to_string(),
+            state_root: Some("telegram-accounts".to_string()),
+            display_name: Some("Telegram".to_string()),
+        }),
         output_schema: message_output_schema(),
         actions: telegram_login_actions(),
     }
@@ -120,6 +144,7 @@ fn telegram_bot_template() -> ConnectorTemplate {
         requires_auth: true,
         can_subscribe: true,
         can_proxy_agent: true,
+        subscriber: None,
         output_schema: message_output_schema(),
         actions: send_message_actions(),
     }
@@ -136,6 +161,7 @@ fn slack_bot_template() -> ConnectorTemplate {
         requires_auth: true,
         can_subscribe: false,
         can_proxy_agent: false,
+        subscriber: None,
         output_schema: message_output_schema(),
         actions: BTreeMap::new(),
     }
@@ -151,6 +177,7 @@ fn slack_app_template() -> ConnectorTemplate {
         requires_auth: true,
         can_subscribe: false,
         can_proxy_agent: false,
+        subscriber: None,
         output_schema: message_output_schema(),
         actions: slack_actions(),
     }
@@ -166,6 +193,7 @@ fn slack_login_template() -> ConnectorTemplate {
         requires_auth: true,
         can_subscribe: false,
         can_proxy_agent: false,
+        subscriber: None,
         output_schema: message_output_schema(),
         actions: slack_actions(),
     }
@@ -181,6 +209,7 @@ fn lark_app_template() -> ConnectorTemplate {
         requires_auth: true,
         can_subscribe: false,
         can_proxy_agent: false,
+        subscriber: None,
         output_schema: message_output_schema(),
         actions: lark_actions(),
     }
@@ -196,6 +225,7 @@ fn lark_login_template() -> ConnectorTemplate {
         requires_auth: true,
         can_subscribe: false,
         can_proxy_agent: false,
+        subscriber: None,
         output_schema: message_output_schema(),
         actions: lark_actions(),
     }
@@ -211,6 +241,7 @@ fn email_template() -> ConnectorTemplate {
         requires_auth: true,
         can_subscribe: true,
         can_proxy_agent: false,
+        subscriber: None,
         output_schema: message_output_schema(),
         actions: send_message_actions(),
     }
@@ -862,6 +893,10 @@ mod tests {
 
         assert_eq!(action.permission.category, "external_message_send");
         assert!(action.permission.external_side_effect);
+        assert_eq!(
+            telegram.subscriber.as_ref().unwrap().manifest_slug,
+            "telegram-user"
+        );
         assert_eq!(vote.permission.category, "external_message_interaction");
         assert!(vote.permission.external_side_effect);
         assert_eq!(update_group.permission.category, "external_chat_admin");

@@ -28,6 +28,7 @@ mod proxy;
 mod router;
 mod spec;
 mod store;
+mod subscriber_manifest;
 
 #[cfg(test)]
 mod telegram_e2e_tests;
@@ -38,7 +39,7 @@ pub use action::{
 };
 pub use catalog::{
     builtin_connector_template, builtin_connector_templates, ConnectorActionDefinition,
-    ConnectorPermissionDefinition, ConnectorSlug, ConnectorTemplate,
+    ConnectorPermissionDefinition, ConnectorSlug, ConnectorSubscriberTemplate, ConnectorTemplate,
 };
 pub use catalog_store::{ConnectorCatalogStore, ConnectorCatalogStoreError};
 pub use classify::{Classifier, ClassifyDecision, NullClassifier, RemoteClassifier};
@@ -69,4 +70,8 @@ pub use spec::{
 };
 pub use store::{
     SubscriptionStore, SubscriptionStoreError, WorkflowBindingStore, WorkflowBindingStoreError,
+};
+pub use subscriber_manifest::{
+    connection_subscriber_manifest, connection_subscriber_manifest_exists,
+    direct_subscriber_manifest, find_subscriber_manifest, SubscriberManifestRoots,
 };

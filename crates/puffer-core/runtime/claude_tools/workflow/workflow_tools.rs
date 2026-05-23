@@ -4,15 +4,15 @@ use crate::runtime::subscription_manager;
 use crate::AppState;
 use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
-use puffer_subscriber_runtime::Manifest;
 use puffer_subscriptions::{
-    validate_action_spec, ActionSpec, ConnectionRecord, ConnectorTemplate, FilterSpec,
+    connection_subscriber_manifest, connection_subscriber_manifest_exists, validate_action_spec,
+    ActionSpec, ConnectionRecord, ConnectorTemplate, FilterSpec, SubscriberManifestRoots,
     TaggedFilterSpec, WorkflowBindingRun, WorkflowBindingSpec, WorkflowBindingStatus,
 };
 use puffer_workflow::{WorkflowDefinition, WorkflowRun, WorkflowStore};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Debug, Deserialize)]
 struct WorkflowToggleInput {
@@ -160,7 +160,7 @@ pub fn execute_workflow_create(_state: &mut AppState, cwd: &Path, input: Value) 
     manager.store().create(spec.clone())?;
     let setup_result = (|| -> Result<()> {
         if should_start_subscriber {
-            ensure_workflow_subscriber_started(&manager, cwd, &connection)?;
+            ensure_workflow_subscriber_started(&manager, cwd, &connection, &template)?;
         }
         manager.refresh_connection_consumers()?;
         Ok(())
@@ -254,10 +254,12 @@ fn workflow_trigger_supported(
     connection: &ConnectionRecord,
     template: &ConnectorTemplate,
 ) -> bool {
-    connection.connector_slug == "telegram-login"
-        || connector_stream_supported(template)
-        || subscriber_manifest_dir(cwd, &connection.slug).is_some()
-        || subscriber_manifest_dir(cwd, &connection.connector_slug).is_some()
+    connector_stream_supported(template)
+        || connection_subscriber_manifest_exists(
+            &subscriber_manifest_roots(cwd),
+            connection,
+            template,
+        )
 }
 
 fn connector_stream_supported(template: &ConnectorTemplate) -> bool {
@@ -268,32 +270,34 @@ fn ensure_workflow_subscriber_started(
     manager: &puffer_subscriptions::SubscriptionManager,
     cwd: &Path,
     connection: &ConnectionRecord,
+    template: &ConnectorTemplate,
 ) -> Result<()> {
-    if connection.connector_slug == "telegram-login" {
-        return super::telegram_login::ensure_telegram_connection_subscriber(cwd, &connection.slug);
+    if connector_stream_supported(template) {
+        return Ok(());
     }
-    for topic in [&connection.slug, &connection.connector_slug] {
-        if manager.subscriber_ids().iter().any(|id| id == topic) {
-            return Ok(());
-        }
-        if let Some(manifest_dir) = subscriber_manifest_dir(cwd, topic) {
-            let manifest = Manifest::load(&manifest_dir)?;
-            manager.start_subscriber(manifest)?;
-            return Ok(());
-        }
+    let Some(manifest) =
+        connection_subscriber_manifest(&subscriber_manifest_roots(cwd), connection, template)?
+    else {
+        return Ok(());
+    };
+    if manager
+        .subscriber_ids()
+        .iter()
+        .any(|subscriber_id| subscriber_id == &manifest.spec.id)
+    {
+        return Ok(());
     }
+    manager.start_subscriber(manifest)?;
     Ok(())
 }
 
-fn subscriber_manifest_dir(cwd: &Path, topic: &str) -> Option<PathBuf> {
+fn subscriber_manifest_roots(cwd: &Path) -> SubscriberManifestRoots {
     let paths = ConfigPaths::discover(cwd);
-    [
-        paths.workspace_config_dir.join("subscribers").join(topic),
-        paths.user_config_dir.join("subscribers").join(topic),
-        paths.builtin_resources_dir.join("subscribers").join(topic),
-    ]
-    .into_iter()
-    .find(|dir| dir.join("manifest.toml").exists())
+    SubscriberManifestRoots::new(
+        paths.workspace_config_dir,
+        paths.user_config_dir,
+        paths.builtin_resources_dir,
+    )
 }
 
 fn workflow_summary(workflow: &WorkflowDefinition, runs: &[WorkflowRun]) -> Value {
@@ -452,8 +456,10 @@ fn create_filter(filter: Option<Value>, pattern: Option<String>) -> Result<Optio
 
 #[cfg(test)]
 mod tests {
-    use super::{subscriber_manifest_dir, workflow_trigger_supported};
-    use puffer_subscriptions::{ConnectionRecord, ConnectorTemplate};
+    use super::{subscriber_manifest_roots, workflow_trigger_supported};
+    use puffer_subscriptions::{
+        find_subscriber_manifest, ConnectionRecord, ConnectorSubscriberTemplate, ConnectorTemplate,
+    };
     use serde_json::json;
     use std::collections::BTreeMap;
 
@@ -465,7 +471,7 @@ mod tests {
         std::fs::write(manifest_dir.join("manifest.toml"), "").unwrap();
 
         assert_eq!(
-            subscriber_manifest_dir(temp.path(), "email").unwrap(),
+            find_subscriber_manifest(&subscriber_manifest_roots(temp.path()), "email").unwrap(),
             manifest_dir
         );
     }
@@ -478,7 +484,7 @@ mod tests {
         std::fs::write(manifest_dir.join("manifest.toml"), "").unwrap();
 
         assert_eq!(
-            subscriber_manifest_dir(temp.path(), "email").unwrap(),
+            find_subscriber_manifest(&subscriber_manifest_roots(temp.path()), "email").unwrap(),
             manifest_dir
         );
     }
@@ -524,10 +530,18 @@ mod tests {
     }
 
     #[test]
-    fn workflow_trigger_support_accepts_telegram_login_special_subscriber() {
+    fn workflow_trigger_support_accepts_configured_shared_subscriber() {
         let temp = tempfile::tempdir().unwrap();
-        let connection = ConnectionRecord::authenticated("personal-tg", "telegram-login", "demo");
-        let template = connector_template("telegram-login", true);
+        let manifest_dir = temp.path().join("resources/subscribers/shared-login");
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+        std::fs::write(manifest_dir.join("manifest.toml"), "").unwrap();
+        let connection = ConnectionRecord::authenticated("personal", "shared", "demo");
+        let mut template = connector_template("shared", true);
+        template.subscriber = Some(ConnectorSubscriberTemplate {
+            manifest_slug: "shared-login".to_string(),
+            state_root: Some("shared-accounts".to_string()),
+            display_name: Some("Shared".to_string()),
+        });
 
         assert!(workflow_trigger_supported(
             temp.path(),
@@ -562,6 +576,7 @@ mod tests {
             requires_auth: true,
             can_subscribe,
             can_proxy_agent: false,
+            subscriber: None,
             output_schema: json!({}),
             actions: BTreeMap::new(),
         }

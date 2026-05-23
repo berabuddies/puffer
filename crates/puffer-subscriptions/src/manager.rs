@@ -40,6 +40,7 @@ pub trait ConnectionAuthChecker: Send + Sync {
     /// connector.
     fn check(
         &self,
+        manager: &SubscriptionManager,
         template: &crate::catalog::ConnectorTemplate,
         connection_slug: &str,
     ) -> Result<Option<bool>>;
@@ -457,11 +458,8 @@ impl SubscriptionManager {
         if checked.is_some() {
             return Ok(checked);
         }
-        if let Some(checked) = self.check_builtin_connection_auth(&template, &connection_slug)? {
-            return Ok(Some(checked));
-        }
         if let Some(checker) = &self.auth_checker {
-            return checker.check(&template, &connection_slug);
+            return checker.check(self, &template, &connection_slug);
         }
         Ok(None)
     }
@@ -590,40 +588,6 @@ impl SubscriptionManager {
             .entry(key)
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
-    }
-
-    fn check_builtin_connection_auth(
-        &self,
-        template: &crate::catalog::ConnectorTemplate,
-        connection_slug: &str,
-    ) -> Result<Option<bool>> {
-        match template.slug.as_str() {
-            "telegram-login" => self.check_telegram_login_auth(connection_slug),
-            _ => Ok(None),
-        }
-    }
-
-    fn check_telegram_login_auth(&self, connection_slug: &str) -> Result<Option<bool>> {
-        if !self
-            .subscriber_ids()
-            .iter()
-            .any(|subscriber_id| subscriber_id == connection_slug)
-        {
-            return Ok(None);
-        }
-        let command = SubscriberCommand::TelegramListPeers {
-            query: Some("__puffer_auth_probe__".to_string()),
-            peer_kind: None,
-            limit: Some(1),
-        };
-        let envelope = self.send_command_and_wait(
-            connection_slug,
-            connection_slug,
-            &command,
-            &["peer_list", "peer_list_error", "login_error"],
-            Duration::from_secs(15),
-        )?;
-        Ok(Some(envelope.event.kind == "peer_list"))
     }
 
     /// Shuts down router and every supervised subscriber. Best-effort.

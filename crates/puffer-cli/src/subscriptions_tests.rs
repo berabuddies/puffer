@@ -1,5 +1,10 @@
 use super::*;
-use puffer_subscriptions::{ActionSpec, WorkflowBindingSpec, WorkflowBindingStatus};
+use puffer_subscriptions::{
+    ActionSpec, ConnectorSubscriberTemplate, ConnectorTemplate, WorkflowBindingSpec,
+    WorkflowBindingStatus,
+};
+use serde_json::Value;
+use std::collections::BTreeMap;
 use std::panic::{self, AssertUnwindSafe};
 
 fn test_subscription_runtime() -> SubscriptionRuntime {
@@ -173,6 +178,47 @@ fn autostart_topics_use_manifest_connector_topic_for_legacy_subscribers() {
     runtime.shutdown();
 }
 
+#[test]
+fn autostart_topics_use_connection_topic_for_configured_subscribers() {
+    let runtime = test_subscription_runtime();
+    runtime
+        .manager()
+        .connection_store()
+        .create(puffer_subscriptions::ConnectionRecord::authenticated(
+            "personal", "shared", "Personal",
+        ))
+        .unwrap();
+    runtime
+        .manager()
+        .connector_store()
+        .upsert(configured_subscriber_template())
+        .unwrap();
+    runtime
+        .manager()
+        .store()
+        .create(workflow_binding(
+            "shared-workflow",
+            "personal",
+            Some("shared"),
+            WorkflowBindingStatus::Enabled,
+        ))
+        .unwrap();
+    let paths = temp_config_paths();
+    let manifest_dir = paths
+        .builtin_resources_dir
+        .join("subscribers")
+        .join("shared-login");
+    std::fs::create_dir_all(&manifest_dir).unwrap();
+    std::fs::write(manifest_dir.join("manifest.toml"), "").unwrap();
+
+    assert_eq!(
+        autostart_topics(&runtime.manager(), &paths),
+        vec!["personal"]
+    );
+
+    runtime.shutdown();
+}
+
 fn workflow_binding(
     slug: &str,
     connection_slug: &str,
@@ -192,6 +238,26 @@ fn workflow_binding(
             slug: "demo".to_string(),
         },
         created_at_ms: 0,
+    }
+}
+
+fn configured_subscriber_template() -> ConnectorTemplate {
+    ConnectorTemplate {
+        slug: "shared".to_string(),
+        description: "Shared connector".to_string(),
+        skill: "shared".to_string(),
+        binary: "shared".to_string(),
+        command: Vec::new(),
+        requires_auth: true,
+        can_subscribe: true,
+        can_proxy_agent: false,
+        subscriber: Some(ConnectorSubscriberTemplate {
+            manifest_slug: "shared-login".to_string(),
+            state_root: Some("shared-accounts".to_string()),
+            display_name: Some("Shared".to_string()),
+        }),
+        output_schema: Value::Null,
+        actions: BTreeMap::new(),
     }
 }
 
