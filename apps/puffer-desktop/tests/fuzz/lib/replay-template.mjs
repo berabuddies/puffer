@@ -1,4 +1,86 @@
 import path from "node:path";
+import { assertReplayRegistrySupported, buildReplayRegistryMetadata } from "./action-registry.mjs";
+
+export const REPLAY_ACTION_IDS = [
+  "open-workspace",
+  "open-settings-providers",
+  "type-search",
+  "clear-search",
+  "open-agent-card",
+  "pin-agent",
+  "open-connect-project",
+  "open-workspace-picker",
+  "assert-modal-initial-focus",
+  "assert-modal-focus-trap",
+  "emit-grouped-session-refresh",
+  "emit-active-agent-change",
+  "open-agent-detail",
+  "open-browser-pane",
+  "type-composer",
+  "send-prompt",
+  "rapid-send-prompt",
+  "stop-turn",
+  "complete-turn",
+  "settle-canceled-turn",
+  "switch-session",
+  "emit-old-session-stream",
+  "emit-permission",
+  "answer-permission",
+  "emit-question",
+  "answer-question",
+  "change-model",
+  "delayed-transcript-refresh",
+  "import-credential",
+  "refresh-credential",
+  "save-default-model",
+  "save-default-model-codex",
+  "save-default-model-anthropic",
+  "open-new-agent",
+  "switch-new-agent-provider",
+  "switch-new-agent-provider-codex",
+  "switch-new-agent-provider-anthropic",
+  "submit-new-agent",
+  "emit-auth-list-refresh",
+  "emit-auth-one-provider-refresh",
+  "emit-auth-none-refresh",
+  "delayed-model-list",
+  "type-url",
+  "press-address-enter",
+  "click-new-tab",
+  "close-active-tab",
+  "reload",
+  "history",
+  "switch-tab",
+  "open-file",
+  "edit-file",
+  "save-file",
+  "emit-file-restore",
+  "open-terminal",
+  "type-terminal",
+  "close-terminal",
+  "emit-late-pty-output",
+  "open-settings-mcp",
+  "add-mcp-server",
+  "emit-mcp-list-refresh",
+  "late-mcp-test-result",
+  "open-permissions",
+  "save-permissions",
+  "emit-permissions-refresh",
+  "open-pipelines",
+  "edit-pipeline-node",
+  "edit-pipeline-trigger",
+  "emit-pipeline-refresh",
+  "type-page-input",
+  "special-key",
+  "emit-state-for-old-tab",
+  "emit-empty-tab-list",
+  "emit-frame-burst",
+  "fail-next-browser-command",
+  "hold-next-browser-response",
+  "disconnect-reconnect",
+  "resize-narrow",
+  "resize-desktop"
+];
 
 export function selectCase(run, caseId) {
   const selected = (run.cases ?? []).find((item) => item.caseId === caseId);
@@ -13,10 +95,11 @@ export function buildReplayTemplate(testCase, options = {}) {
   const fakeDaemonImport = options.fakeDaemonImport ?? "./support/fakeDaemon";
   const daemonOptions = buildReplayDaemonOptions(testCase);
   const replayMetadata = buildReplayMetadata(testCase, daemonOptions);
+  assertReplayRegistrySupported(replayMetadata.registry);
   const lines = [
     "import { expect, test } from \"@playwright/test\";",
     `import { FakeDaemon } from "${fakeDaemonImport}";`,
-    `import { appendTraceEvent, collectPufferUiState, createTraceId, installRuntimeOracle, writeTraceJsonl } from "${relativeCoverageImport}";`,
+    `import { appendTraceEvent, collectPufferUiState, createPufferActionEdge, createTraceId, installRuntimeOracle, writeTraceJsonl } from "${relativeCoverageImport}";`,
     "",
     `const replayMetadata = ${JSON.stringify(replayMetadata, null, 2)} as const;`,
     "",
@@ -45,12 +128,14 @@ export function buildReplayTemplate(testCase, options = {}) {
   for (const action of testCase.steps ?? []) {
     if (action.phase === "assert") continue;
     lines.push(`  // Step ${step}: ${action.action}${action.params ? ` ${JSON.stringify(action.params)}` : ""}`);
+    lines.push(`  const beforeState${step} = await collectPufferUiState(page, { viewport: "desktop", browserOrShell: "chromium", fakeDaemon: true });`);
     lines.push("  {");
     for (const command of commandsForAction(action)) {
       lines.push(`    ${command}`);
     }
     lines.push("  }");
-    lines.push(`  appendTraceEvent(trace, { type: "action", traceId, step: ${step}, action: ${JSON.stringify(action)}, state: await collectPufferUiState(page, { viewport: "desktop", browserOrShell: "chromium", fakeDaemon: true }) });`);
+    lines.push(`  const afterState${step} = await collectPufferUiState(page, { viewport: "desktop", browserOrShell: "chromium", fakeDaemon: true });`);
+    lines.push(`  appendTraceEvent(trace, { type: "action", traceId, step: ${step}, action: ${JSON.stringify(action)}, beforeState: beforeState${step}, afterState: afterState${step}, edge: createPufferActionEdge(${JSON.stringify(action)}, beforeState${step}, afterState${step}, ${JSON.stringify(action.coverage ?? [])}) });`);
     lines.push("");
     step += 1;
   }
@@ -94,6 +179,7 @@ function buildReplayMetadata(testCase, daemonOptions = {}) {
     caseId: testCase.caseId,
     seedId: testCase.seedId,
     coverage,
+    registry: buildReplayRegistryMetadata(testCase, REPLAY_ACTION_IDS),
     initialSessionCount: Array.isArray(daemonOptions.sessions) ? daemonOptions.sessions.length : 1,
     typedUrls: steps
       .filter((step) => step.action === "type-url" && step.params?.url)
@@ -512,11 +598,10 @@ function commandsForAction(step) {
       return [
         "await openAgentTab(page, \"Files\");",
         "requestIndexBefore = daemon.requests.length;",
-        "await clickFirstVisible(page, [",
-        "  () => page.getByRole(\"button\", { name: /README|main\\.rs|lib\\.rs|file/i }).first(),",
-        "  () => page.locator(\".pf-files-pane button, .pf-file-tree button\").first()",
-        "], \"open file\").catch(() => undefined);",
-        "await waitForNewDaemonRequest(daemon, \"read_file\", requestIndexBefore, () => true, 750).catch(() => undefined);"
+        "await clickReplayFileTreeFile(page);",
+        "await waitForNewDaemonRequest(daemon, \"read_file\", requestIndexBefore, () => true, 2_000).catch(async () => {",
+        "  await expect(page.getByRole(\"textbox\", { name: \"Edit file contents\" })).toBeVisible({ timeout: 2_000 });",
+        "});"
       ];
     case "edit-file":
       return [
@@ -524,18 +609,19 @@ function commandsForAction(step) {
         "await clickFirstVisible(page, [",
         `  () => page.locator("textarea, [contenteditable='true']").last(),`,
         "  () => page.locator(\".pf-file-editor textarea, .cm-content\").first()",
-        `], "focus file editor").catch(() => undefined);`,
-        `await page.keyboard.type(${JSON.stringify(params.text ?? "temporary draft")}).catch(() => undefined);`
+        `], "focus file editor");`,
+        `await page.keyboard.type(${JSON.stringify(params.text ?? "temporary draft")});`
       ];
     case "save-file":
       return [
         "await openAgentTab(page, \"Files\");",
+        "await ensureReplayFileDirty(page);",
         "requestIndexBefore = daemon.requests.length;",
         "await clickFirstVisible(page, [",
         "  () => page.getByRole(\"button\", { name: /Save/i }).first(),",
         "  () => page.locator(\"button\").filter({ hasText: \"Save\" }).first()",
-        "], \"save file\").catch(() => undefined);",
-        "await waitForNewDaemonRequest(daemon, \"write_file\", requestIndexBefore, () => true, 750).catch(() => undefined);"
+        "], \"save file\");",
+        "await waitForNewDaemonRequest(daemon, \"write_file\", requestIndexBefore, () => true, 2_000);"
       ];
     case "emit-file-restore":
       return [
@@ -546,28 +632,35 @@ function commandsForAction(step) {
         "await openAgentTab(page, \"Terminal\");",
         "requestIndexBefore = daemon.requests.length;",
         "await clickFirstVisible(page, [",
-        "  () => page.getByRole(\"button\", { name: /New terminal|Open terminal|Terminal/i }).first(),",
-        "  () => page.locator(\".pf-terminal-pane button\").first()",
-        "], \"open terminal\").catch(() => undefined);",
-        "await waitForNewDaemonRequest(daemon, \"pty_open\", requestIndexBefore, () => true, 750).catch(() => undefined);"
+        "  () => page.getByRole(\"button\", { name: /^New terminal$/i }).first(),",
+        "  () => page.getByRole(\"button\", { name: /^Open terminal$/i }).first(),",
+        "  () => page.locator(\".pf-terminal-pane\").getByRole(\"button\", { name: /New terminal|Open terminal/i }).first()",
+        "], \"open terminal\");",
+        "await waitForNewDaemonRequest(daemon, \"pty_open\", requestIndexBefore, () => true, 2_000);"
       ];
     case "type-terminal":
       return [
         "await openAgentTab(page, \"Terminal\");",
+        "await ensureReplayTerminalOpen(page, daemon);",
+        "await focusReplayTerminalInput(page);",
         "requestIndexBefore = daemon.requests.length;",
-        "await page.keyboard.type(" + JSON.stringify(params.text ?? "pwd") + ").catch(() => undefined);",
-        "await page.keyboard.press(\"Enter\").catch(() => undefined);",
-        "await waitForNewDaemonRequest(daemon, \"pty_write\", requestIndexBefore, () => true, 750).catch(() => undefined);"
+        "await page.keyboard.type(" + JSON.stringify(params.text ?? "pwd") + ");",
+        "await page.keyboard.press(\"Enter\");",
+        "await waitForNewDaemonRequest(daemon, \"pty_write\", requestIndexBefore, () => true, 2_000);"
       ];
     case "close-terminal":
       return [
         "await openAgentTab(page, \"Terminal\");",
+        "await expect(page.locator(\".pf-terminal-pane\")).toBeVisible({ timeout: 5_000 });",
+        "const terminalCloseButton = page.locator(\".pf-terminal-pane\").getByRole(\"button\", { name: /^Close Terminal \\d+$/i }).last();",
+        "const terminalCloseFallback = page.locator(\".pf-terminal-pane .terminal-tab-close\").last();",
+        "if (!(await terminalCloseButton.isVisible({ timeout: 500 }).catch(() => false)) && !(await terminalCloseFallback.isVisible({ timeout: 500 }).catch(() => false))) return;",
         "requestIndexBefore = daemon.requests.length;",
         "await clickFirstVisible(page, [",
-        "  () => page.getByRole(\"button\", { name: /Close terminal|Close tab|Close/i }).first(),",
-        "  () => page.locator(\".pf-terminal-pane button\").filter({ hasText: /Close|\\u00d7/ }).first()",
-        "], \"close terminal\").catch(() => undefined);",
-        "await waitForNewDaemonRequest(daemon, \"pty_close\", requestIndexBefore, () => true, 750).catch(() => undefined);"
+        "  () => terminalCloseButton,",
+        "  () => terminalCloseFallback",
+        "], \"close terminal\");",
+        "await waitForNewDaemonRequest(daemon, \"pty_close\", requestIndexBefore, () => true, 2_000);"
       ];
     case "emit-late-pty-output":
       return [
@@ -580,11 +673,11 @@ function commandsForAction(step) {
     case "add-mcp-server":
       return [
         "await openSettingsPane(page, \"MCP Servers\", /MCP|Servers/i);",
-        `await page.getByLabel("ID").fill(${JSON.stringify(params.id ?? "tmp-server")}, { timeout: 1_000 }).catch(() => undefined);`,
-        `await page.getByLabel("Command").fill(${JSON.stringify(params.target ?? "npx @playwright/mcp")}, { timeout: 1_000 }).catch(() => undefined);`,
+        `await page.getByLabel("ID").fill(${JSON.stringify(params.id ?? "tmp-server")}, { timeout: 2_000 });`,
+        `await page.getByLabel("Command").fill(${JSON.stringify(params.target ?? "npx @playwright/mcp")}, { timeout: 2_000 });`,
         "requestIndexBefore = daemon.requests.length;",
-        "await page.getByRole(\"button\", { name: /Add server|Add/i }).click({ timeout: 1_000 }).catch(() => undefined);",
-        "await waitForNewDaemonRequest(daemon, \"add_mcp_server\", requestIndexBefore, () => true, 500).catch(() => undefined);"
+        "await page.getByRole(\"button\", { name: /Add server|Add/i }).click({ timeout: 2_000 });",
+        "await waitForNewDaemonRequest(daemon, \"add_mcp_server\", requestIndexBefore, () => true, 2_000);"
       ];
     case "emit-mcp-list-refresh":
     case "late-mcp-test-result":
@@ -599,9 +692,24 @@ function commandsForAction(step) {
     case "save-permissions":
       return [
         "await openSettingsPane(page, \"Permissions\", /Permissions/i);",
+        "const permissionPane = page.locator(\".pf-settings-pane\");",
+        "let permissionMode = permissionPane.locator(\"select\").first();",
+        "if ((await permissionMode.count().catch(() => 0)) === 0) {",
+        "  await permissionPane.getByRole(\"button\", { name: /Add rule/i }).click({ timeout: 2_000 });",
+        "  permissionMode = permissionPane.locator(\"select\").first();",
+        "}",
+        "await expect(permissionMode).toBeEnabled({ timeout: 2_000 });",
+        "const permissionValues = await permissionMode.locator(\"option\").evaluateAll((options) => options.map((option) => (option as HTMLOptionElement).value).filter(Boolean));",
+        "const currentPermissionValue = await permissionMode.inputValue().catch(() => \"\");",
+        "const nextPermissionValue = permissionValues.find((value) => value !== currentPermissionValue) ?? \"allow\";",
+        "if (!nextPermissionValue) throw new Error(\"No permission mode option is available\");",
+        "await permissionMode.selectOption(nextPermissionValue);",
+        "await expect(permissionMode).toHaveValue(nextPermissionValue, { timeout: 2_000 });",
+        "const savePermissionsButton = permissionPane.getByRole(\"button\", { name: \"Save\", exact: true });",
+        "await expect(savePermissionsButton).toBeEnabled({ timeout: 2_000 });",
         "requestIndexBefore = daemon.requests.length;",
-        "await page.getByRole(\"button\", { name: /Save/i }).click({ timeout: 1_000 }).catch(() => undefined);",
-        "await waitForNewDaemonRequest(daemon, \"save_permissions\", requestIndexBefore, () => true, 500).catch(() => undefined);"
+        "await savePermissionsButton.click({ timeout: 2_000 });",
+        "await waitForNewDaemonRequest(daemon, \"save_permissions\", requestIndexBefore, () => true, 2_000);"
       ];
     case "emit-permissions-refresh":
       return [
@@ -621,8 +729,8 @@ function commandsForAction(step) {
         "await clickFirstVisible(page, [",
         "  () => page.locator(\"input, textarea\").first(),",
         "  () => page.locator(\"[contenteditable='true']\").first()",
-        "], \"focus pipeline editor\").catch(() => undefined);",
-        `await page.keyboard.type(${JSON.stringify(params.field ?? "fuzz")}).catch(() => undefined);`
+        "], \"focus pipeline editor\");",
+        `await page.keyboard.type(${JSON.stringify(params.field ?? "fuzz")});`
       ];
     case "emit-pipeline-refresh":
       return [
@@ -631,23 +739,25 @@ function commandsForAction(step) {
       ];
     case "type-page-input":
       return [
+        "await ensureReplayBrowserPage(page, daemon);",
         "requestIndexBefore = daemon.requests.length;",
         "const browserCanvas = page.locator(\".pf-browser-canvas, canvas\").first();",
-        "await browserCanvas.click({ position: { x: 20, y: 20 }, timeout: 1_000 }).catch(() => undefined);",
+        "await browserCanvas.click({ position: { x: 20, y: 20 }, timeout: 2_000 });",
         `await page.keyboard.type(${JSON.stringify(params.text ?? "")});`,
-        "await waitForNewDaemonRequest(daemon, \"browser_input\", requestIndexBefore, () => true, 1_000).catch(() => undefined);"
+        "await waitForNewDaemonRequest(daemon, \"browser_input\", requestIndexBefore, () => true, 2_000);"
       ];
     case "special-key":
       return [
+        "await ensureReplayBrowserPage(page, daemon);",
         "requestIndexBefore = daemon.requests.length;",
         "const browserCanvas = page.locator(\".pf-browser-canvas, canvas\").first();",
-        "await browserCanvas.click({ position: { x: 20, y: 20 }, timeout: 1_000 }).catch(() => undefined);",
+        "await browserCanvas.click({ position: { x: 20, y: 20 }, timeout: 2_000 });",
         `await page.keyboard.press(${JSON.stringify(params.key ?? "Enter")});`,
-        "await waitForNewDaemonRequest(daemon, \"browser_input\", requestIndexBefore, () => true, 1_000).catch(() => undefined);"
+        "await waitForNewDaemonRequest(daemon, \"browser_input\", requestIndexBefore, () => true, 2_000);"
       ];
     case "emit-state-for-old-tab":
       return [
-        `daemon.emit("browser:session-browser:browser:tab-1:state", ${JSON.stringify({ url: params.url ?? "https://stale.example.test", title: "Stale page", loading: params.loading === true, width: 960, height: 720 })});`
+        `daemon.emit("browser:session-browser:browser:tab-1:state", ${JSON.stringify({ url: params.url ?? "https://stale.example.test", title: "Stale page", loading: params.loading === true, updatedAtMs: 1, width: 960, height: 720 })});`
       ];
     case "emit-empty-tab-list":
       return [
@@ -864,19 +974,19 @@ function replayHelperLines() {
     "}",
     "",
     "async function openAgentTab(page, name: string): Promise<void> {",
-    "  if ((await page.locator(\".pf-agent-tabs\").count().catch(() => 0)) === 0) {",
-    "    await clickFirstVisibleFast(page, [",
+    "  if (!(await page.locator(\".pf-agent-tabs\").first().isVisible({ timeout: 500 }).catch(() => false))) {",
+    "    await clickFirstVisible(page, [",
     "      () => page.locator(\".pf-sidebar-agents-list\").getByRole(\"button\", { name: /^Browser regression\\b/ }).first(),",
     "      () => page.getByRole(\"region\", { name: \"Session history\" }).getByRole(\"button\", { name: /^Browser regression\\b/ }).first(),",
     "      () => page.getByRole(\"button\", { name: /^Browser regression\\b/ }).first()",
-    "    ], \"open Browser regression agent\").catch(() => undefined);",
-    "    await page.locator(\".pf-agent-tabs\").waitFor({ state: \"visible\", timeout: 2_000 }).catch(() => undefined);",
+    "    ], \"open Browser regression agent\");",
+    "    await expect(page.locator(\".pf-agent-tabs\")).toBeVisible({ timeout: 5_000 });",
     "  }",
-    "  await clickFirstVisibleFast(page, [",
+    "  await clickFirstVisible(page, [",
     "    () => page.locator(\".pf-agent-tabs\").getByRole(\"button\", { name, exact: true }),",
     "    () => page.getByRole(\"button\", { name, exact: true }),",
     "    () => page.getByRole(\"tab\", { name, exact: true })",
-    "  ], `open ${name} tab`).catch(() => undefined);",
+    "  ], `open ${name} tab`);",
     "}",
     "",
     "async function openSettingsPane(page, label: string, fallbackText: RegExp): Promise<void> {",
@@ -892,6 +1002,83 @@ function replayHelperLines() {
     "    () => page.getByRole(\"tab\", { name: label, exact: true }),",
     "    () => page.locator(\".pf-settings-nav-item\").filter({ hasText: fallbackText })",
     "  ], `open ${label} settings`).catch(() => undefined);",
+    "}",
+    "",
+    "async function clickReplayFileTreeFile(page): Promise<void> {",
+    "  const tree = page.locator(\".pf-files-pane aside.tree\");",
+    "  await expect(tree).toBeVisible({ timeout: 5_000 });",
+    "  const fileRow = tree.locator(\"button.row\").filter({ hasText: /\\.(md|rs|json|toml|ts|tsx|js|svelte|txt)$/i }).first();",
+    "  if (await fileRow.isVisible({ timeout: 500 }).catch(() => false)) {",
+    "    await fileRow.click({ timeout: 2_000 });",
+    "    return;",
+    "  }",
+    "  const expandable = tree.locator(\"button.row[aria-expanded='false']\").first();",
+    "  if (await expandable.isVisible({ timeout: 1_000 }).catch(() => false)) {",
+    "    await expandable.click({ timeout: 2_000 });",
+    "  }",
+    "  await expect(fileRow).toBeVisible({ timeout: 3_000 });",
+    "  await fileRow.click({ timeout: 2_000 });",
+    "}",
+    "",
+    "async function ensureReplayFileDirty(page): Promise<void> {",
+    "  const saveButton = page.getByRole(\"button\", { name: /Save/i }).first();",
+    "  if (await saveButton.isVisible({ timeout: 500 }).catch(() => false)) return;",
+    "  await clickFirstVisible(page, [",
+    "    () => page.locator(\"textarea, [contenteditable='true']\").last(),",
+    "    () => page.locator(\".pf-file-editor textarea, .cm-content\").first()",
+    "  ], \"focus file editor before save\");",
+    "  await page.keyboard.type(\"\\n// fuzz save\");",
+    "  await expect(saveButton).toBeVisible({ timeout: 2_000 });",
+    "}",
+    "",
+    "async function ensureReplayBrowserPage(page, daemon): Promise<void> {",
+    "  const canvas = page.locator(\".pf-browser-canvas, canvas\").first();",
+    "  if (await canvas.isVisible({ timeout: 500 }).catch(() => false)) return;",
+    "  const addTab = page.locator(\".pf-browser-tab-add\").first();",
+    "  const fallbackAddTab = page.getByRole(\"button\", { name: /^New tab$/i }).last();",
+    "  if (!(await addTab.isVisible({ timeout: 500 }).catch(() => false)) && !(await fallbackAddTab.isVisible({ timeout: 500 }).catch(() => false))) return;",
+    "  const startIndex = daemon.requests.length;",
+    "  if (await addTab.isVisible({ timeout: 500 }).catch(() => false)) {",
+    "    await addTab.click({ timeout: 2_000 }).catch(() => undefined);",
+    "  } else {",
+    "    await fallbackAddTab.click({ timeout: 2_000 }).catch(() => undefined);",
+    "  }",
+    "  await waitForNewDaemonRequest(daemon, \"browser_agent\", startIndex, (request) => request.params.action === \"open\", 2_000).catch(() => undefined);",
+    "  await expect(canvas).toBeVisible({ timeout: 2_000 }).catch(() => undefined);",
+    "}",
+    "",
+    "async function ensureReplayTerminalOpen(page, daemon): Promise<void> {",
+    "  const pane = page.locator(\".pf-terminal-pane\");",
+    "  const terminal = pane.locator(\".xterm, .xterm-screen, .xterm-helper-textarea\").first();",
+    "  if (await terminal.isVisible({ timeout: 500 }).catch(() => false)) return;",
+    "  const startIndex = daemon.requests.length;",
+    "  await clickFirstVisible(page, [",
+    "    () => page.getByRole(\"button\", { name: /^New terminal$/i }).first(),",
+    "    () => page.getByRole(\"button\", { name: /^Open terminal$/i }).first(),",
+    "    () => pane.getByRole(\"button\", { name: /New terminal|Open terminal/i }).first()",
+    "  ], \"open terminal before input\").catch(() => undefined);",
+    "  await waitForNewDaemonRequest(daemon, \"pty_open\", startIndex, () => true, 2_000).catch(() => undefined);",
+    "  await expect(terminal).toBeVisible({ timeout: 2_000 }).catch(() => undefined);",
+    "}",
+    "",
+    "async function focusReplayTerminalInput(page): Promise<void> {",
+    "  const pane = page.locator(\".pf-terminal-pane\");",
+    "  await expect(pane).toBeVisible({ timeout: 5_000 });",
+    "  const input = pane.getByRole(\"textbox\", { name: \"Terminal input\" }).first();",
+    "  if ((await input.count().catch(() => 0)) > 0) {",
+    "    await input.focus({ timeout: 2_000 }).catch(() => undefined);",
+    "    const focused = await page.evaluate(() => {",
+    "      const active = document.activeElement as HTMLElement | null;",
+    "      return active?.getAttribute(\"aria-label\") === \"Terminal input\" || active?.classList.contains(\"xterm-helper-textarea\") === true;",
+    "    });",
+    "    if (focused) return;",
+    "  }",
+    "  await clickFirstVisible(page, [",
+    "    () => pane.locator(\".xterm-helper-textarea\").first(),",
+    "    () => pane.locator(\".xterm-screen\").first(),",
+    "    () => pane.locator(\".xterm\").first()",
+    "  ], \"focus terminal input\");",
+    "  await page.waitForTimeout(50);",
     "}",
     "",
     "async function closeReplayModalIfOpen(page): Promise<void> {",
@@ -1277,7 +1464,7 @@ function replayHelperLines() {
     "  }",
     "",
     "  if (metadata.hasDuplicateSubmit) {",
-    "    const excessNavigates = maxRequestCountAboveExpected(daemon.requests, \"browser_navigate\", (params) => String(params.url ?? \"\"), metadata.expectedNavigateCountsByUrl);",
+    "    const excessNavigates = maxRequestCountAboveExpected(daemon.requests, \"browser_navigate\", browserNavigateDuplicateKey, metadata.expectedNavigateCountsByUrl);",
     "    const excessTurns = maxRequestCountAboveExpected(daemon.requests, \"run_agent_turn\", (params) => String(params.message ?? \"\"), metadata.expectedTurnCountsByMessage);",
     "    expect(excessNavigates, \"one browser navigate request per URL submit intent\").toBeLessThanOrEqual(0);",
     "    expect(excessTurns, \"one chat turn request per prompt submit intent\").toBeLessThanOrEqual(0);",
@@ -1297,6 +1484,12 @@ function replayHelperLines() {
     "    maxExcess = Math.max(maxExcess, count - Number(expectedByKey[key] ?? 0));",
     "  }",
     "  return maxExcess;",
+    "}",
+    "",
+    "function browserNavigateDuplicateKey(params): string {",
+    "  const url = String(params.url ?? \"\").trim();",
+    "  if (!url || url === \"about:blank\") return \"\";",
+    "  return url;",
     "}",
     "",
     "function providerModelLooksCrossed(request): boolean {",

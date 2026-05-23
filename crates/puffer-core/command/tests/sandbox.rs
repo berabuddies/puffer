@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn sandbox_command_writes_workspace_sandbox_file() {
+fn sandbox_command_reports_removal_without_writing_config() {
     let tempdir = tempdir().unwrap();
     let paths = ConfigPaths::discover(tempdir.path());
     ensure_workspace_dirs(&paths).unwrap();
@@ -25,20 +25,11 @@ fn sandbox_command_writes_workspace_sandbox_file() {
         "/sandbox read-only",
     )
     .unwrap();
-    dispatch_command(
-        &mut state,
-        &supported_commands(),
-        &LoadedResources::default(),
-        &mut ProviderRegistry::new(),
-        &mut AuthStore::default(),
-        &session_store,
-        "/sandbox exclude \"rm -rf\"",
-    )
-    .unwrap();
 
     let sandbox_path = paths.workspace_config_dir.join("sandbox.toml");
-    let sandbox = std::fs::read_to_string(sandbox_path).unwrap();
-    assert!(sandbox.contains("mode = \"read-only\""));
-    assert!(sandbox.contains("excluded_commands = [\"rm -rf\"]"));
-    assert_eq!(state.sandbox_mode, "read-only");
+    assert!(!sandbox_path.exists());
+    assert!(state
+        .transcript
+        .last()
+        .is_some_and(|message| message.text.contains("Sandbox mode has been removed")));
 }

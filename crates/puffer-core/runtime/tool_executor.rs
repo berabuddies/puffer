@@ -1,18 +1,35 @@
 use super::agents::execute_agent_tool;
+use super::auto_approval_review::{
+    build_auto_permission_review_request, run_auto_permission_review, AutoPermissionReviewDecision,
+};
+use super::browser_auto_review::{
+    build_browser_auto_review_request, run_browser_auto_review, BrowserAutoReviewRuntimeResult,
+    BrowserAutoReviewSessionTargeting,
+};
 use super::claude_tools::{self, ProviderToolContext};
+use super::filesystem_access::{ensure_filesystem_path_access, runtime_filesystem_policy};
 use super::hook_support::{run_tool_end_hooks, run_tool_start_hooks};
+use super::local_tools::{
+    enrich_browser_permission_input, read_current_tab_context, BrowserCurrentTabStatus,
+};
 use super::permission_prompt::{
     build_permission_prompt_request, prompt_for_permission, PermissionPromptAction,
-    PermissionPromptRequest,
 };
 use super::structured_output_support::{
     requested_structured_output_definition_for_request, StructuredOutputConfig,
 };
 use super::RequestToolFilter;
+use crate::permissions::acl::{
+    append_allow_all_rule, append_allow_bash_rule, append_allow_browser_rule,
+};
+use crate::permissions::browser_action::browser_permission_value_for_tool_call;
+use crate::permissions::browser_grants::BrowserGrantScopeKind;
+use crate::permissions::browser_target::browser_permission_context_for_tool;
 use crate::permissions::{
     load_runtime_permission_context_with_inputs, FilesystemPermissionPolicy,
     RuntimePermissionInputs, ToolPermissionBehavior,
 };
+use crate::tool_names::canonical_tool_name;
 use crate::AppState;
 use anyhow::{anyhow, Result};
 use puffer_provider_openai::OpenAIRequestConfig;
@@ -22,7 +39,9 @@ use puffer_tools::{ToolExecutionResult, ToolOutput, ToolRegistry};
 use puffer_transport_anthropic::AnthropicRequestConfig;
 use serde_json::Value;
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
+
+const BROWSER_REVIEW_METADATA_KEY: &str = "__pufferBrowserReview";
 
 /// Identifies which provider loop is currently executing a tool call.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -65,6 +84,7 @@ pub(super) fn execute_tool_call(
             .filter(|definition| definition.id == tool_id)
             .ok_or_else(|| anyhow!("unknown tool {tool_id}"))?,
     };
+    let input = prepare_browser_permission_input(state, cwd, &definition, input)?;
     let permission_context = load_runtime_permission_context_with_inputs(
         cwd,
         resources,
@@ -85,19 +105,22 @@ pub(super) fn execute_tool_call(
             ));
         }
         ToolPermissionBehavior::Ask => {
-            match prompt_for_permission(build_permission_prompt_request(
+            match resolve_ask_behavior(
+                state,
+                resources,
+                providers,
+                auth_store,
+                cwd,
+                tool_filter,
                 &definition,
                 &input,
                 permission_decision.reason.as_deref(),
-            )) {
-                PermissionPromptAction::AllowOnce => {}
-                PermissionPromptAction::AllowSession => {
-                    state.allow_permission_for_tool_call(&definition, &input);
-                }
-                PermissionPromptAction::AllowAllSession => {
-                    state.set_session_allow_all();
-                }
-                PermissionPromptAction::Deny => {
+                &permission_context.effective_profile().current_session_id,
+                &permission_context.effective_profile().workspace_roots,
+            )? {
+                AskResolution::AllowOnce => {}
+                AskResolution::AllowSession => {}
+                AskResolution::Deny => {
                     return Ok(blocked_runtime_tool(
                         tool_id,
                         ToolPermissionBehavior::Deny,
@@ -110,6 +133,8 @@ pub(super) fn execute_tool_call(
     filesystem_policy = match ensure_filesystem_path_access(
         state,
         resources,
+        providers,
+        auth_store,
         cwd,
         &definition,
         &input,
@@ -140,7 +165,8 @@ pub(super) fn execute_tool_call(
     let hook_input = input.clone();
     run_tool_start_hooks(resources, cwd, tool_id, &hook_input);
     let result = if definition.handler == "runtime:agent" {
-        let output = execute_agent_tool(state, resources, providers, auth_store, cwd, input)?;
+        let output =
+            execute_agent_tool(state, resources, providers, auth_store, cwd, input.clone())?;
         successful_runtime_tool(tool_id, output)
     } else if let Some(result) =
         execute_legacy_builtin_alias(&definition, cwd, &filesystem_policy, &input)?
@@ -154,10 +180,11 @@ pub(super) fn execute_tool_call(
             &definition,
             cwd,
             &filesystem_policy,
-            input,
+            input.clone(),
             provider_context,
         )?
     };
+    remember_browser_target(state, &definition, &input);
     run_tool_end_hooks(
         resources,
         cwd,
@@ -217,6 +244,8 @@ pub(super) enum PermissionOutcome {
 pub(super) fn resolve_tool_permission(
     state: &mut AppState,
     resources: &LoadedResources,
+    providers: &ProviderRegistry,
+    auth_store: &mut AuthStore,
     registry: &ToolRegistry,
     cwd: &Path,
     tool_id: &str,
@@ -233,6 +262,7 @@ pub(super) fn resolve_tool_permission(
             )));
         }
     };
+    let input = prepare_browser_permission_input(state, cwd, &definition, input.clone())?;
     let permission_context = load_runtime_permission_context_with_inputs(
         cwd,
         resources,
@@ -241,7 +271,7 @@ pub(super) fn resolve_tool_permission(
             request_tool_filter: tool_filter.cloned(),
         },
     )?;
-    let permission_decision = permission_context.decision_for_tool_call(&definition, input);
+    let permission_decision = permission_context.decision_for_tool_call(&definition, &input);
     let base_policy = match permission_decision.behavior {
         ToolPermissionBehavior::Allow => permission_context.derived_policy().filesystem().clone(),
         ToolPermissionBehavior::Deny => {
@@ -252,23 +282,27 @@ pub(super) fn resolve_tool_permission(
             )));
         }
         ToolPermissionBehavior::Ask => {
-            match prompt_for_permission(build_permission_prompt_request(
+            match resolve_ask_behavior(
+                state,
+                resources,
+                providers,
+                auth_store,
+                cwd,
+                tool_filter,
                 &definition,
-                input,
+                &input,
                 permission_decision.reason.as_deref(),
-            )) {
-                PermissionPromptAction::AllowOnce => {
+                &permission_context.effective_profile().current_session_id,
+                &permission_context.effective_profile().workspace_roots,
+            )? {
+                AskResolution::AllowOnce => {
                     permission_context.derived_policy().filesystem().clone()
                 }
-                PermissionPromptAction::AllowSession => {
-                    state.allow_permission_for_tool_call(&definition, input);
+                AskResolution::AllowSession => {
+                    remember_browser_target(state, &definition, &input);
                     runtime_filesystem_policy(cwd, resources, state, tool_filter)?
                 }
-                PermissionPromptAction::AllowAllSession => {
-                    state.set_session_allow_all();
-                    runtime_filesystem_policy(cwd, resources, state, tool_filter)?
-                }
-                PermissionPromptAction::Deny => {
+                AskResolution::Deny => {
                     return Ok(PermissionOutcome::Denied(blocked_runtime_tool(
                         tool_id,
                         ToolPermissionBehavior::Deny,
@@ -281,9 +315,11 @@ pub(super) fn resolve_tool_permission(
     ensure_filesystem_path_access(
         state,
         resources,
+        providers,
+        auth_store,
         cwd,
         &definition,
-        input,
+        &input,
         tool_filter,
         base_policy,
     )
@@ -293,109 +329,365 @@ pub(super) fn resolve_tool_permission(
     })
 }
 
-/// Loads the effective filesystem policy for the current runtime permission state.
-fn runtime_filesystem_policy(
-    cwd: &Path,
-    resources: &LoadedResources,
-    state: &AppState,
-    tool_filter: Option<&RequestToolFilter>,
-) -> Result<FilesystemPermissionPolicy> {
-    let permission_context = load_runtime_permission_context_with_inputs(
-        cwd,
-        resources,
-        state,
-        RuntimePermissionInputs {
-            request_tool_filter: tool_filter.cloned(),
-        },
-    )?;
-    Ok(permission_context.derived_policy().filesystem().clone())
+enum AskResolution {
+    AllowOnce,
+    AllowSession,
+    Deny,
 }
 
-fn ensure_filesystem_path_access(
+fn resolve_ask_behavior(
     state: &mut AppState,
     resources: &LoadedResources,
+    providers: &ProviderRegistry,
+    auth_store: &mut AuthStore,
+    cwd: &Path,
+    _tool_filter: Option<&RequestToolFilter>,
+    definition: &puffer_tools::ToolDefinition,
+    input: &Value,
+    reason: Option<&str>,
+    current_session_id: &str,
+    workspace_roots: &[std::path::PathBuf],
+) -> Result<AskResolution> {
+    let carries_browser_permission =
+        browser_permission_value_for_tool_call(&definition.id, input).is_some();
+    let browser_session_grant = carries_browser_permission.then(|| {
+        browser_grant_scope_for_prompt_action(
+            definition,
+            input,
+            current_session_id,
+            workspace_roots,
+        )
+    });
+    let prompt_request = build_permission_prompt_request(
+        definition,
+        input,
+        reason,
+        current_session_id,
+        workspace_roots,
+    );
+    let auto_review_request = build_auto_permission_review_request(
+        state,
+        cwd,
+        &prompt_request,
+        input,
+        current_session_id,
+        workspace_roots,
+    );
+    match run_auto_permission_review(
+        state,
+        resources,
+        providers,
+        auth_store,
+        &auto_review_request,
+    )
+    .decision
+    {
+        AutoPermissionReviewDecision::AllowOnce => return Ok(AskResolution::AllowOnce),
+        AutoPermissionReviewDecision::AllowSession => {
+            if carries_browser_permission {
+                state.allow_browser_permission_for_tool_call(
+                    definition,
+                    input,
+                    browser_session_grant.unwrap_or(BrowserGrantScopeKind::AllowOnce),
+                );
+            } else {
+                state.allow_permission_for_tool_call(definition, input);
+            }
+            persist_acl_allow_for_tool_call(
+                cwd,
+                definition,
+                input,
+                current_session_id,
+                workspace_roots,
+            )?;
+            return Ok(AskResolution::AllowSession);
+        }
+        AutoPermissionReviewDecision::Deny => return Ok(AskResolution::Deny),
+        AutoPermissionReviewDecision::NeedsUser | AutoPermissionReviewDecision::Unavailable => {}
+    }
+    if let Some(browser) = prompt_request.browser.as_ref() {
+        let resolved_root_session_id = input
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && *value != "current")
+            .unwrap_or(current_session_id)
+            .to_string();
+        let session_targeting = if resolved_root_session_id == current_session_id {
+            BrowserAutoReviewSessionTargeting::CurrentSession
+        } else {
+            BrowserAutoReviewSessionTargeting::ExplicitSession
+        };
+        let review_request = build_browser_auto_review_request(
+            &definition.id,
+            input,
+            prompt_request.summary.clone(),
+            prompt_request.reason.clone(),
+            browser,
+            resolved_root_session_id,
+            session_targeting,
+            browser_session_grant.unwrap_or(BrowserGrantScopeKind::AllowOnce),
+        );
+        match run_browser_auto_review(state, resources, providers, auth_store, &review_request) {
+            BrowserAutoReviewRuntimeResult::AllowOnce => return Ok(AskResolution::AllowOnce),
+            BrowserAutoReviewRuntimeResult::AllowSession => {
+                state.allow_browser_permission_for_tool_call(
+                    definition,
+                    input,
+                    browser_session_grant.unwrap_or(BrowserGrantScopeKind::AllowOnce),
+                );
+                persist_acl_allow_for_tool_call(
+                    cwd,
+                    definition,
+                    input,
+                    current_session_id,
+                    workspace_roots,
+                )?;
+                return Ok(AskResolution::AllowSession);
+            }
+            BrowserAutoReviewRuntimeResult::Deny => return Ok(AskResolution::Deny),
+            BrowserAutoReviewRuntimeResult::NeedsUser
+            | BrowserAutoReviewRuntimeResult::Unavailable => {}
+        }
+    }
+    match prompt_for_permission(prompt_request) {
+        PermissionPromptAction::AllowOnce => Ok(AskResolution::AllowOnce),
+        PermissionPromptAction::AllowSession => {
+            if carries_browser_permission {
+                state.allow_browser_permission_for_tool_call(
+                    definition,
+                    input,
+                    browser_session_grant.unwrap_or(BrowserGrantScopeKind::AllowOnce),
+                );
+            } else {
+                state.allow_permission_for_tool_call(definition, input);
+            }
+            persist_acl_allow_for_tool_call(
+                cwd,
+                definition,
+                input,
+                current_session_id,
+                workspace_roots,
+            )?;
+            Ok(AskResolution::AllowSession)
+        }
+        PermissionPromptAction::AllowAllSession => {
+            if carries_browser_permission {
+                state.allow_browser_permission_for_tool_call(
+                    definition,
+                    input,
+                    browser_session_grant.unwrap_or(BrowserGrantScopeKind::AllowOnce),
+                );
+            } else {
+                state.grant_all_tools_for_session();
+            }
+            append_allow_all_rule(cwd)?;
+            Ok(AskResolution::AllowSession)
+        }
+        PermissionPromptAction::Deny => Ok(AskResolution::Deny),
+    }
+}
+
+fn persist_acl_allow_for_tool_call(
     cwd: &Path,
     definition: &puffer_tools::ToolDefinition,
     input: &Value,
-    tool_filter: Option<&RequestToolFilter>,
-    mut policy: FilesystemPermissionPolicy,
-) -> Result<std::result::Result<FilesystemPermissionPolicy, ToolExecutionResult>> {
-    let Some(request) = filesystem_path_request(cwd, &definition.id, input) else {
-        return Ok(Ok(policy));
-    };
-    if filesystem_policy_allows_path(cwd, &policy, &request.path) {
-        return Ok(Ok(policy));
-    }
-
-    match prompt_for_permission(PermissionPromptRequest {
-        tool_id: definition.id.clone(),
-        summary: format!(
-            "Allow {} to access {}",
-            definition.id,
-            request.grant_root.display()
-        ),
-        reason: Some(format!(
-            "Path {} is outside the current working directories. Approve access to {} for this tool call.",
-            request.path.display(),
-            request.grant_root.display()
-        )),
-    }) {
-        PermissionPromptAction::AllowOnce => {
-            policy.workspace_roots.push(request.grant_root);
-            Ok(Ok(policy))
-        }
-        PermissionPromptAction::AllowSession => {
-            state.allow_path_for_session(request.grant_root);
-            Ok(Ok(runtime_filesystem_policy(
-                cwd,
-                resources,
-                state,
-                tool_filter,
-            )?))
-        }
-        PermissionPromptAction::AllowAllSession => {
-            state.allow_path_for_session(request.grant_root);
-            state.set_session_allow_all();
-            Ok(Ok(runtime_filesystem_policy(
-                cwd,
-                resources,
-                state,
-                tool_filter,
-            )?))
-        }
-        PermissionPromptAction::Deny => Ok(Err(blocked_runtime_tool(
+    current_session_id: &str,
+    workspace_roots: &[PathBuf],
+) -> Result<()> {
+    if browser_permission_value_for_tool_call(&definition.id, input).is_some() {
+        let context = browser_permission_context_for_tool(
             &definition.id,
-            ToolPermissionBehavior::Deny,
-            Some("permission denied by user".to_string()),
-        ))),
+            input,
+            current_session_id,
+            workspace_roots,
+        );
+        return append_allow_browser_rule(cwd, &context);
     }
+    if matches!(
+        canonical_tool_name(&definition.id).as_str(),
+        "bash" | "powershell"
+    ) {
+        if let Some(command) = input.get("command").and_then(Value::as_str) {
+            append_allow_bash_rule(cwd, command)?;
+        }
+    }
+    Ok(())
 }
 
-struct FilesystemPathRequest {
-    path: PathBuf,
-    grant_root: PathBuf,
-}
-
-fn filesystem_path_request(
-    cwd: &Path,
-    tool_id: &str,
+fn browser_grant_scope_for_prompt_action(
+    definition: &puffer_tools::ToolDefinition,
     input: &Value,
-) -> Option<FilesystemPathRequest> {
-    let field = match tool_id {
-        "Read" | "Write" | "Edit" => "file_path",
-        "NotebookEdit" => "notebook_path",
-        "Glob" | "Grep" => "path",
-        "read_file" | "list_dir" | "search_text" => "path",
-        "Agent" => "cwd",
-        _ => return None,
-    };
-    let raw = input.get(field)?.as_str()?.trim();
-    if raw.is_empty() {
-        return None;
+    current_session_id: &str,
+    workspace_roots: &[std::path::PathBuf],
+) -> BrowserGrantScopeKind {
+    let context = browser_permission_context_for_tool(
+        &definition.id,
+        input,
+        current_session_id,
+        workspace_roots,
+    );
+    crate::permissions::browser_grants::suggested_browser_grant_scope(&context)
+}
+
+fn prepare_browser_permission_input(
+    state: &AppState,
+    cwd: &Path,
+    definition: &puffer_tools::ToolDefinition,
+    input: Value,
+) -> Result<Value> {
+    if let Some(browser_input) = browser_permission_value_for_tool_call(&definition.id, &input) {
+        let raw_action = browser_input
+            .get("action")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .map(str::to_ascii_lowercase);
+        let explicit_requested_url = browser_input
+            .get("url")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string);
+        let browser_session_id = state.browser_root_session_id();
+        let enriched = enrich_browser_permission_input(cwd, &browser_session_id, browser_input)?;
+        let current_session_id = browser_session_id.to_string();
+        let root_session_id = enriched
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && *value != "current")
+            .map(ToString::to_string)
+            .unwrap_or(current_session_id);
+        let enriched = apply_browser_url_fallback(state, cwd, &root_session_id, enriched)?;
+        let current_tab_url = if explicit_requested_url.is_some()
+            && matches!(raw_action.as_deref(), Some("open" | "new"))
+        {
+            read_current_tab_context(cwd, &root_session_id)
+                .ok()
+                .and_then(|context| context.url)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("about:blank"))
+        } else {
+            None
+        };
+        let enriched = attach_browser_review_metadata(
+            enriched,
+            explicit_requested_url.as_deref(),
+            current_tab_url.as_deref(),
+        );
+        if canonical_tool_name(&definition.id) == "browser" {
+            return Ok(enriched);
+        }
     }
-    let path = normalize_permission_path(cwd, raw);
-    let grant_root = grant_root_for_path(&path);
-    Some(FilesystemPathRequest { path, grant_root })
+    Ok(input)
+}
+
+fn attach_browser_review_metadata(
+    input: Value,
+    explicit_requested_url: Option<&str>,
+    current_tab_url: Option<&str>,
+) -> Value {
+    let Some(payload) = input.as_object() else {
+        return input;
+    };
+    let effective_url = payload
+        .get("url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let url_source = match (explicit_requested_url, effective_url.as_deref()) {
+        (Some(requested), Some(effective)) if requested.eq_ignore_ascii_case(effective) => {
+            "explicit"
+        }
+        (Some(_), Some(_)) => "current_tab",
+        (Some(_), None) => "none",
+        (None, Some(_)) => "current_tab",
+        (None, None) => "none",
+    };
+    let mut enriched = payload.clone();
+    enriched.insert(
+        BROWSER_REVIEW_METADATA_KEY.to_string(),
+        serde_json::json!({
+            "urlSource": url_source,
+            "requestedUrl": explicit_requested_url,
+            "currentTabUrl": current_tab_url,
+        }),
+    );
+    Value::Object(enriched)
+}
+
+fn apply_browser_url_fallback(
+    state: &AppState,
+    cwd: &Path,
+    current_session_id: &str,
+    input: Value,
+) -> Result<Value> {
+    let Some(payload) = input.as_object() else {
+        return Ok(input);
+    };
+    if payload
+        .get("url")
+        .and_then(Value::as_str)
+        .is_some_and(|url| !url.trim().is_empty() && !url.eq_ignore_ascii_case("about:blank"))
+    {
+        return Ok(input);
+    }
+
+    let root_session_id = payload
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "current")
+        .unwrap_or(current_session_id);
+    let tab_id = payload.get("tabId").and_then(Value::as_str).map(str::trim);
+    if let Ok(context) = read_current_tab_context(cwd, root_session_id) {
+        if matches!(context.status, BrowserCurrentTabStatus::Available) {
+            if let Some(url) = context.url.as_deref() {
+                if !url.trim().is_empty() && !url.eq_ignore_ascii_case("about:blank") {
+                    let mut enriched = payload.clone();
+                    enriched.insert("url".to_string(), Value::String(url.trim().to_string()));
+                    return Ok(Value::Object(enriched));
+                }
+            }
+        }
+    }
+    let remembered = tab_id
+        .and_then(|tab_id| state.remembered_browser_url(root_session_id, Some(tab_id)))
+        .or_else(|| state.remembered_browser_url(root_session_id, None));
+    let Some(url) = remembered else {
+        return Ok(input);
+    };
+
+    let mut enriched = payload.clone();
+    enriched.insert("url".to_string(), Value::String(url.to_string()));
+    Ok(Value::Object(enriched))
+}
+
+fn remember_browser_target(
+    state: &mut AppState,
+    definition: &puffer_tools::ToolDefinition,
+    input: &Value,
+) {
+    let Some(payload) = browser_permission_value_for_tool_call(&definition.id, input) else {
+        return;
+    };
+    let Some(payload) = payload.as_object() else {
+        return;
+    };
+    let Some(url) = payload.get("url").and_then(Value::as_str) else {
+        return;
+    };
+    let default_session_id = state.browser_root_session_id().to_string();
+    let root_session_id = payload
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "current")
+        .unwrap_or(default_session_id.as_str());
+    let tab_id = payload.get("tabId").and_then(Value::as_str).map(str::trim);
+    state.remember_browser_url(root_session_id, tab_id, url);
+    state.remember_browser_url(root_session_id, None, url);
 }
 
 fn execute_legacy_builtin_alias(
@@ -410,7 +702,16 @@ fn execute_legacy_builtin_alias(
             let Some(path) = input.get("path").and_then(Value::as_str) else {
                 return Err(anyhow!("read_file requires path"));
             };
-            mapped.insert("file_path".to_string(), Value::String(path.to_string()));
+            let requested = Path::new(path);
+            let file_path = if requested.is_absolute() {
+                requested.to_path_buf()
+            } else {
+                cwd.join(requested)
+            };
+            mapped.insert(
+                "file_path".to_string(),
+                Value::String(file_path.to_string_lossy().into_owned()),
+            );
             if let Some(offset) = input.get("offset") {
                 mapped.insert("offset".to_string(), offset.clone());
             }
@@ -482,61 +783,8 @@ fn execute_legacy_builtin_alias(
     }
 }
 
-fn filesystem_policy_allows_path(
-    cwd: &Path,
-    policy: &FilesystemPermissionPolicy,
-    path: &Path,
-) -> bool {
-    if policy.allow_all_paths() {
-        return true;
-    }
-    crate::workspace_paths::workspace_roots(cwd, &policy.workspace_roots)
-        .iter()
-        .any(|root| path.starts_with(root))
-}
-
-fn grant_root_for_path(path: &Path) -> PathBuf {
-    if path.is_dir() {
-        return path.to_path_buf();
-    }
-    path.parent().unwrap_or(path).to_path_buf()
-}
-
-fn normalize_permission_path(cwd: &Path, raw_path: &str) -> PathBuf {
-    let path = expand_tilde(raw_path).unwrap_or_else(|| PathBuf::from(raw_path));
-    let joined = if path.is_absolute() {
-        path
-    } else {
-        cwd.join(path)
-    };
-    normalize_components(joined)
-}
-
-fn expand_tilde(raw_path: &str) -> Option<PathBuf> {
-    if raw_path == "~" {
-        return std::env::var_os("HOME").map(PathBuf::from);
-    }
-    raw_path
-        .strip_prefix("~/")
-        .or_else(|| raw_path.strip_prefix("~\\"))
-        .and_then(|suffix| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(suffix)))
-}
-
-fn normalize_components(path: PathBuf) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            other => normalized.push(other.as_os_str()),
-        }
-    }
-    normalized
-}
-
-fn blocked_runtime_tool(
+/// Builds a failed tool result for a permission block.
+pub(super) fn blocked_runtime_tool(
     tool_id: &str,
     behavior: ToolPermissionBehavior,
     reason: Option<String>,

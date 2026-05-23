@@ -11,7 +11,7 @@
 //! a debounce, but from a background thread.
 //!
 //! Scope of what we watch:
-//! - `<paths.user_config_dir>/resources/{skills,mcp_servers,plugins,prompts,agents,tools,hooks,ides}/`
+//! - `<paths.user_config_dir>/resources/{skills,mcp_servers,plugins,prompts,agents,tools,internal_tools,hooks,ides}/`
 //! - `<paths.workspace_config_dir>/resources/{...}` (same set)
 //! - `<paths.builtin_resources_dir>/{...}` (developer convenience —
 //!   editing builtin yaml in-place during local development triggers a
@@ -53,6 +53,7 @@ const WATCHED_SUBDIRS: &[&str] = &[
     "prompts",
     "agents",
     "tools",
+    "internal_tools",
     "hooks",
     "ides",
     "mascots",
@@ -108,8 +109,8 @@ impl ResourceWatcher {
         let last_fired_clone = Arc::clone(&last_fired);
         let roots_clone: Vec<PathBuf> = roots.to_vec();
 
-        let mut watcher: RecommendedWatcher = notify::recommended_watcher(
-            move |result: notify::Result<Event>| {
+        let mut watcher: RecommendedWatcher =
+            notify::recommended_watcher(move |result: notify::Result<Event>| {
                 let Ok(event) = result else {
                     return;
                 };
@@ -133,9 +134,8 @@ impl ResourceWatcher {
                 }
                 *guard = Some(now);
                 signal_clone.store(true, Ordering::Release);
-            },
-        )
-        .context("construct filesystem watcher")?;
+            })
+            .context("construct filesystem watcher")?;
 
         let mut attached = Vec::new();
         for root in roots {

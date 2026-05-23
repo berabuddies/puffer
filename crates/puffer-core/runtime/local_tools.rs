@@ -17,6 +17,12 @@ use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+pub(crate) use browser::with_browser_daemon_test_handler;
+pub(crate) use browser::{
+    enrich_browser_permission_input, read_current_tab_context, BrowserCurrentTabStatus,
+};
+
 #[derive(Debug, Deserialize)]
 struct GlobInput {
     pattern: String,
@@ -377,6 +383,7 @@ mod tests {
             sandbox_mode: EffectiveSandboxMode::WorkspaceWrite,
             workspace_roots: vec![root.to_path_buf()],
             session_granted: true,
+            allow_all_paths: false,
         }
     }
 

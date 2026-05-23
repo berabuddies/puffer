@@ -255,6 +255,7 @@
     }
 
     inputDisposer = t.onData((str) => {
+      if (closingPtyIds.includes(ptyId)) return;
       const bytes = new TextEncoder().encode(str);
       let bin = "";
       for (const b of bytes) bin += String.fromCharCode(b);

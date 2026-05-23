@@ -53,7 +53,10 @@ pub async fn score_candidate<R: AgentRuntime + ?Sized>(
     let prompt = builder.build(candidate);
     let mut last_err = None;
     for _ in 0..2 {
-        let raw = runtime.invoke_agent(&prompt).await.context("judge invocation")?;
+        let raw = runtime
+            .invoke_agent(&prompt)
+            .await
+            .context("judge invocation")?;
         match parse_scores(&raw) {
             Ok(scores) => return Ok(scores),
             Err(error) => last_err = Some(error),

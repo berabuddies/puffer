@@ -60,6 +60,8 @@ pub(super) fn execute_tool_batch(
         permissions.push(resolve_tool_permission(
             inputs.state,
             inputs.resources,
+            inputs.providers,
+            inputs.auth_store,
             inputs.registry,
             cwd,
             &tc.tool_id,

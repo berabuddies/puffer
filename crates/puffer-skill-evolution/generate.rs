@@ -103,15 +103,10 @@ mod tests {
     async fn generate_returns_valid_candidates() {
         let valid = "---\nname: foo\ndescription: bar\n---\nbody";
         let runtime = ScriptedRuntime(Mutex::new(vec![valid.into(), valid.into(), valid.into()]));
-        let candidates = generate_candidates(
-            &runtime,
-            &DefaultGeneratePrompt,
-            &sample_trace(),
-            3,
-            15_000,
-        )
-        .await
-        .unwrap();
+        let candidates =
+            generate_candidates(&runtime, &DefaultGeneratePrompt, &sample_trace(), 3, 15_000)
+                .await
+                .unwrap();
         assert_eq!(candidates.len(), 3);
     }
 
@@ -123,15 +118,10 @@ mod tests {
             valid.into(),
             "also garbage".into(),
         ]));
-        let candidates = generate_candidates(
-            &runtime,
-            &DefaultGeneratePrompt,
-            &sample_trace(),
-            3,
-            15_000,
-        )
-        .await
-        .unwrap();
+        let candidates =
+            generate_candidates(&runtime, &DefaultGeneratePrompt, &sample_trace(), 3, 15_000)
+                .await
+                .unwrap();
         assert_eq!(candidates.len(), 1);
     }
 
@@ -142,14 +132,8 @@ mod tests {
             "garbage".into(),
             "garbage".into(),
         ]));
-        let result = generate_candidates(
-            &runtime,
-            &DefaultGeneratePrompt,
-            &sample_trace(),
-            3,
-            15_000,
-        )
-        .await;
+        let result =
+            generate_candidates(&runtime, &DefaultGeneratePrompt, &sample_trace(), 3, 15_000).await;
         assert!(result.is_err());
     }
 }

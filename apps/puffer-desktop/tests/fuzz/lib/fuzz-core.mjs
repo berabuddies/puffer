@@ -80,11 +80,12 @@ export async function loadLedger(filePath) {
 
 export function normalizeLedger(ledger) {
   return {
-    version: 1,
+    version: 2,
     validatedTags: [],
     replayedCases: [],
     fixedFindings: [],
     knownBugSignatures: [],
+    runtimeCoverage: emptyRuntimeCoverageLedger(),
     metrics: {
       replaySuccessRate: 0,
       duplicateReportRate: 0,
@@ -95,6 +96,8 @@ export function normalizeLedger(ledger) {
     },
     notes: [],
     ...(ledger ?? {}),
+    version: Number((ledger ?? {}).version ?? 2),
+    runtimeCoverage: normalizeRuntimeCoverageLedger((ledger ?? {}).runtimeCoverage),
     metrics: {
       replaySuccessRate: 0,
       duplicateReportRate: 0,
@@ -105,6 +108,122 @@ export function normalizeLedger(ledger) {
       ...((ledger ?? {}).metrics ?? {})
     }
   };
+}
+
+export function applyReplayCoverageToLedger(ledger, replayReport, options = {}) {
+  const next = normalizeLedger(ledger);
+  next.version = 2;
+  const namespace = String(options.namespace ?? replayReport.namespace ?? "");
+  const shard = String(options.shard ?? replayReport.shard ?? "");
+  const recordedAt = new Date().toISOString();
+  const runtimeCoverage = next.runtimeCoverage;
+  const replayedCases = new Set(next.replayedCases ?? []);
+
+  for (const result of replayReport.results ?? []) {
+    if (result.caseId) replayedCases.add(result.caseId);
+    const status = result.status ?? "unknown";
+    const classification = result.classification ?? "unknown";
+    const caseId = result.caseId ?? "";
+    const coverage = result.runtimeCoverage ?? {};
+    for (const state of coverage.states ?? []) {
+      if (!state?.stateHash) continue;
+      const previous = runtimeCoverage.states[state.stateHash] ?? {};
+      runtimeCoverage.states[state.stateHash] = {
+        ...previous,
+        ...state,
+        firstSeenAt: previous.firstSeenAt ?? recordedAt,
+        lastSeenAt: recordedAt,
+        seenCount: Number(previous.seenCount ?? 0) + 1,
+        namespaces: appendUnique(previous.namespaces, namespace),
+        shards: appendUnique(previous.shards, shard),
+        cases: appendUnique(previous.cases, caseId)
+      };
+    }
+    for (const edge of coverage.edges ?? []) {
+      if (!edge?.edgeId) continue;
+      const previous = runtimeCoverage.edges[edge.edgeId] ?? {};
+      runtimeCoverage.edges[edge.edgeId] = {
+        ...previous,
+        ...edge,
+        firstSeenAt: previous.firstSeenAt ?? recordedAt,
+        lastSeenAt: recordedAt,
+        seenCount: Number(previous.seenCount ?? 0) + 1,
+        namespaces: appendUnique(previous.namespaces, namespace),
+        shards: appendUnique(previous.shards, shard),
+        cases: appendUnique(previous.cases, caseId),
+        statuses: appendUnique(previous.statuses, status),
+        classifications: appendUnique(previous.classifications, classification)
+      };
+    }
+    addRuntimeSetValues(runtimeCoverage.asyncEdges, coverage.asyncEdges, { recordedAt, namespace, shard, caseId, status, classification });
+    addRuntimeSetValues(runtimeCoverage.asyncInvariantPairs, coverage.asyncInvariantPairs, { recordedAt, namespace, shard, caseId, status, classification });
+    addRuntimeSetValues(runtimeCoverage.routeControlStateTriples, coverage.routeControlStateTriples, { recordedAt, namespace, shard, caseId, status, classification });
+    addRuntimeSetValues(runtimeCoverage.invariantObservations, coverage.invariantObservations, { recordedAt, namespace, shard, caseId, status, classification });
+  }
+
+  if (shard) {
+    const previousShard = runtimeCoverage.shards[shard] ?? {};
+    runtimeCoverage.shards[shard] = {
+      ...previousShard,
+      lastRunAt: recordedAt,
+      namespaces: appendUnique(previousShard.namespaces, namespace),
+      replayedCases: [...new Set([...(previousShard.replayedCases ?? []), ...[...replayedCases]])].sort(),
+      stateCount: Object.values(runtimeCoverage.states).filter((item) => (item.shards ?? []).includes(shard)).length,
+      edgeCount: Object.values(runtimeCoverage.edges).filter((item) => (item.shards ?? []).includes(shard)).length
+    };
+  }
+
+  next.replayedCases = [...replayedCases].sort();
+  next.runtimeCoverage = runtimeCoverage;
+  return next;
+}
+
+function emptyRuntimeCoverageLedger() {
+  return {
+    states: {},
+    edges: {},
+    asyncEdges: {},
+    asyncInvariantPairs: {},
+    routeControlStateTriples: {},
+    invariantObservations: {},
+    shards: {}
+  };
+}
+
+function normalizeRuntimeCoverageLedger(value) {
+  return {
+    ...emptyRuntimeCoverageLedger(),
+    ...(value ?? {}),
+    states: { ...((value ?? {}).states ?? {}) },
+    edges: { ...((value ?? {}).edges ?? {}) },
+    asyncEdges: { ...((value ?? {}).asyncEdges ?? {}) },
+    asyncInvariantPairs: { ...((value ?? {}).asyncInvariantPairs ?? {}) },
+    routeControlStateTriples: { ...((value ?? {}).routeControlStateTriples ?? {}) },
+    invariantObservations: { ...((value ?? {}).invariantObservations ?? {}) },
+    shards: { ...((value ?? {}).shards ?? {}) }
+  };
+}
+
+function addRuntimeSetValues(target, values = [], context) {
+  for (const value of values ?? []) {
+    if (!value) continue;
+    const previous = target[value] ?? {};
+    target[value] = {
+      ...previous,
+      firstSeenAt: previous.firstSeenAt ?? context.recordedAt,
+      lastSeenAt: context.recordedAt,
+      seenCount: Number(previous.seenCount ?? 0) + 1,
+      namespaces: appendUnique(previous.namespaces, context.namespace),
+      shards: appendUnique(previous.shards, context.shard),
+      cases: appendUnique(previous.cases, context.caseId),
+      statuses: appendUnique(previous.statuses, context.status),
+      classifications: appendUnique(previous.classifications, context.classification)
+    };
+  }
+}
+
+function appendUnique(values = [], value) {
+  return [...new Set([...values, value].filter(Boolean))].sort();
 }
 
 export function indexCoverageTargets(manifest) {

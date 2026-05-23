@@ -28,7 +28,7 @@ pub(crate) struct ApprovalOverlay {
 impl ApprovalOverlay {
     /// Creates a permissions approval overlay with Codex-style options.
     pub(crate) fn new(request: PermissionPromptRequest) -> Self {
-        let options = permissions_options();
+        let options = permissions_options(&request);
         let list = ListSelectionView::new(
             options
                 .iter()
@@ -176,58 +176,86 @@ impl ApprovalOverlay {
                 Span::raw(self.request.summary.clone()),
             ]),
         ];
-        if let Some(reason) = &self.request.reason {
-            lines.push(Line::from(vec![
-                Span::styled("Reason: ", Style::default().add_modifier(Modifier::DIM)),
-                Span::raw(reason.clone()),
-            ]));
+        let is_browser_evaluate = self.request.browser.as_ref().is_some_and(|browser| {
+            matches!(
+                browser.action_set,
+                puffer_core::BrowserPermissionPromptActionSet::Evaluate
+            )
+        });
+        if is_browser_evaluate {
+            if let Some(reason) = &self.request.reason {
+                lines.push(Line::from(vec![
+                    Span::styled("Reason: ", Style::default().add_modifier(Modifier::DIM)),
+                    Span::raw(reason.clone()),
+                ]));
+            }
+        } else if self.request.browser.is_none() {
+            if let Some(reason) = &self.request.reason {
+                lines.push(Line::from(vec![
+                    Span::styled("Reason: ", Style::default().add_modifier(Modifier::DIM)),
+                    Span::raw(reason.clone()),
+                ]));
+            }
         }
         lines
     }
 
     fn footer_hint(&self) -> Line<'static> {
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled("y", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" allow  "),
+            Span::raw(" approve once  "),
             Span::styled("a", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" tool for session  "),
-            Span::styled("A", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" all for session  "),
-            Span::styled("n", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" deny  "),
-            Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" deny"),
-        ])
+        ];
+        if self.request.browser.is_some() {
+            spans.push(Span::raw(" always allow context  "));
+        } else {
+            spans.push(Span::raw(" always allow  "));
+            spans.push(Span::styled(
+                "A",
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::raw(" always allow all  "));
+        }
+        spans.push(Span::styled(
+            "n",
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw(" deny  "));
+        spans.push(Span::styled(
+            "Esc",
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw(" deny"));
+        Line::from(spans)
     }
 }
 
-fn permissions_options() -> Vec<ApprovalOption> {
-    vec![
+fn permissions_options(request: &PermissionPromptRequest) -> Vec<ApprovalOption> {
+    let mut options = vec![
         ApprovalOption {
-            label: "Yes, grant these permissions".to_string(),
+            label: "Approve once".to_string(),
             action: PermissionPromptAction::AllowOnce,
             shortcuts: vec!['y'],
             description: None,
         },
         ApprovalOption {
-            label: "Yes, grant these permissions for this session".to_string(),
+            label: if request.browser.is_some() {
+                "Always allow this browser context".to_string()
+            } else {
+                "Always allow this request".to_string()
+            },
             action: PermissionPromptAction::AllowSession,
             shortcuts: vec!['a'],
             description: None,
         },
-        ApprovalOption {
-            label: "Yes, allow ALL tools for this session".to_string(),
-            action: PermissionPromptAction::AllowAllSession,
-            shortcuts: vec!['A'],
-            description: None,
-        },
-        ApprovalOption {
-            label: "No, continue without permissions".to_string(),
-            action: PermissionPromptAction::Deny,
-            shortcuts: vec!['n'],
-            description: None,
-        },
-    ]
+    ];
+    options.push(ApprovalOption {
+        label: "No, continue without permissions".to_string(),
+        action: PermissionPromptAction::Deny,
+        shortcuts: vec!['n'],
+        description: None,
+    });
+    options
 }
 
 /// Renders the active permission overlay.

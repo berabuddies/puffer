@@ -35,10 +35,11 @@ use puffer_config::{
     ensure_workspace_dirs, load_config, save_user_config, ConfigPaths, PufferConfig,
 };
 use puffer_core::{
-    default_effort_level, execute_user_turn_streaming_with_permissions_and_cancel,
+    default_effort_level, enter_plan_mode, execute_user_turn_streaming_with_permissions_and_cancel,
     provider_preference_family, supported_effort_levels, with_user_question_prompt_handler,
-    AppState, CancelToken, MessageRole, ModelPreferenceFamily, PermissionPromptAction,
-    PermissionPromptRequest, TurnStreamEvent, UserQuestionPromptRequest,
+    AppState, BrowserPermissionPromptActionSet, BrowserPermissionPromptSource,
+    BrowserPermissionPromptTargetClass, CancelToken, MessageRole, ModelPreferenceFamily,
+    PermissionPromptAction, PermissionPromptRequest, TurnStreamEvent, UserQuestionPromptRequest,
     UserQuestionPromptResponse,
 };
 use puffer_provider_openai::{
@@ -59,7 +60,7 @@ use puffer_workflow::WorkflowStore;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufReader, Read};
 use std::net::SocketAddr;
 use std::path::Path;
@@ -505,6 +506,7 @@ fn event_payload_with_actor(mut payload: Value, actor: &MessageActor) -> Value {
 async fn handle_socket(socket: WebSocket, state: Arc<DaemonState>) {
     let (ws_tx, mut ws_rx) = socket.split();
     let tx = Arc::new(AsyncMutex::new(ws_tx));
+    let subscriptions = Arc::new(AsyncMutex::new(HashSet::<String>::new()));
 
     // Say hello.
     let _ = send_envelope(
@@ -539,8 +541,12 @@ async fn handle_socket(socket: WebSocket, state: Arc<DaemonState>) {
     // Fan out global events to this client.
     let mut events_rx = state.events.subscribe();
     let tx_events = tx.clone();
+    let event_subscriptions = subscriptions.clone();
     let event_forwarder = tokio::spawn(async move {
         while let Ok(env) = events_rx.recv().await {
+            if !should_forward_live_event(&env, &event_subscriptions).await {
+                continue;
+            }
             if send_envelope(&tx_events, &env).await.is_err() {
                 break;
             }
@@ -572,10 +578,27 @@ async fn handle_socket(socket: WebSocket, state: Arc<DaemonState>) {
                 continue;
             }
         };
-        dispatch_request(request, state.clone(), tx.clone()).await;
+        dispatch_request(request, state.clone(), tx.clone(), subscriptions.clone()).await;
     }
 
     event_forwarder.abort();
+}
+
+async fn should_forward_live_event(
+    env: &ServerEnvelope,
+    subscriptions: &Arc<AsyncMutex<HashSet<String>>>,
+) -> bool {
+    let ServerEnvelope::Event { event, .. } = env else {
+        return true;
+    };
+    if !requires_explicit_subscription(event) {
+        return true;
+    }
+    subscriptions.lock().await.contains(event)
+}
+
+fn requires_explicit_subscription(event: &str) -> bool {
+    event.starts_with("browser:") && (event.ends_with(":frame") || event.ends_with(":recording"))
 }
 
 async fn send_envelope(
@@ -610,6 +633,7 @@ async fn dispatch_request(
     request: ClientRequest,
     state: Arc<DaemonState>,
     tx: Arc<AsyncMutex<futures::stream::SplitSink<WebSocket, Message>>>,
+    subscriptions: Arc<AsyncMutex<HashSet<String>>>,
 ) {
     let id = request.id.clone().unwrap_or_default();
     let params = request.params;
@@ -651,6 +675,47 @@ async fn dispatch_request(
     }
 
     match request.method.as_str() {
+        "subscribe_event" => {
+            if let Some(event) = params.get("event").and_then(Value::as_str) {
+                subscriptions.lock().await.insert(event.to_string());
+                let _ = send_envelope(
+                    &tx,
+                    &ServerEnvelope::Response {
+                        id,
+                        result: Some(json!({"ok": true})),
+                        error: None,
+                    },
+                )
+                .await;
+            } else {
+                let _ = send_envelope(
+                    &tx,
+                    &ServerEnvelope::Response {
+                        id,
+                        result: None,
+                        error: Some(RpcError {
+                            code: "invalid-params".to_string(),
+                            message: "subscribe_event requires an event string".to_string(),
+                        }),
+                    },
+                )
+                .await;
+            }
+        }
+        "unsubscribe_event" => {
+            if let Some(event) = params.get("event").and_then(Value::as_str) {
+                subscriptions.lock().await.remove(event);
+            }
+            let _ = send_envelope(
+                &tx,
+                &ServerEnvelope::Response {
+                    id,
+                    result: Some(json!({"ok": true})),
+                    error: None,
+                },
+            )
+            .await;
+        }
         "ping" => {
             let _ = send_envelope(
                 &tx,
@@ -747,6 +812,9 @@ async fn dispatch_request(
         })),
         "browser_recording" => respond!(detached!(|s, p| {
             crate::daemon_browser::handle_browser_recording(&s, &p)
+        })),
+        "browser_current_tab" => respond!(detached!(|s, p| {
+            crate::daemon_browser::handle_browser_current_tab(&s, &p)
         })),
         "browser_agent" => respond!(detached!(|s, p| {
             crate::daemon_browser::handle_browser_agent(&s, &p)
@@ -1441,12 +1509,33 @@ fn effort_label(effort: &str) -> &'static str {
 }
 
 /// Workspace permissions are stored as a TOML map of `tool_id → policy`
-/// (e.g. `bash = "ask"`). We read the file directly so we don't have to
-/// plumb the `pub(crate)` type through puffer-core.
+/// (e.g. `bash = "ask"`) plus a `[browser]` policy section. We read the
+/// file directly so we don't have to plumb the `pub(crate)` type through
+/// puffer-core, while preserving browser policy fields on round-trip.
+#[derive(serde::Deserialize, serde::Serialize, Default)]
+struct BrowserPolicyFileDto {
+    #[serde(default)]
+    deny_target_classes: Vec<String>,
+    #[serde(default)]
+    deny_origins: Vec<String>,
+    #[serde(default)]
+    deny_domains: Vec<String>,
+    #[serde(default)]
+    deny_evaluate_target_classes: Vec<String>,
+    #[serde(default)]
+    allow_target_classes: Vec<String>,
+    #[serde(default)]
+    allow_origins: Vec<String>,
+    #[serde(default)]
+    allow_domains: Vec<String>,
+}
+
 #[derive(serde::Deserialize, serde::Serialize, Default)]
 struct PermissionsFileDto {
     #[serde(default)]
     tools: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    browser: BrowserPolicyFileDto,
 }
 
 fn permissions_file_path(state: &DaemonState) -> std::path::PathBuf {
@@ -1462,9 +1551,14 @@ fn handle_list_permissions(state: &DaemonState) -> Result<Value> {
     } else {
         PermissionsFileDto::default()
     };
+    let tools = loaded
+        .tools
+        .into_iter()
+        .filter(|(tool, _)| !puffer_core::is_browser_tool_selector(tool))
+        .collect::<std::collections::BTreeMap<_, _>>();
     Ok(json!({
         "path": path.display().to_string(),
-        "tools": loaded.tools,
+        "tools": tools,
     }))
 }
 
@@ -1480,14 +1574,29 @@ fn handle_save_permissions(state: &DaemonState, params: &Value) -> Result<Value>
         if t.is_empty() {
             continue;
         }
+        if puffer_core::is_browser_tool_selector(&t) {
+            continue;
+        }
         let p = policy.trim().to_ascii_lowercase();
         if !matches!(p.as_str(), "allow" | "ask" | "deny" | "disabled") {
             anyhow::bail!("invalid policy `{policy}` for `{t}` — expected allow|ask|deny|disabled");
         }
         normalized.insert(t, p);
     }
-    let dto = PermissionsFileDto { tools: normalized };
     let path = permissions_file_path(state);
+    let browser = if path.exists() {
+        let text =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        toml::from_str::<PermissionsFileDto>(&text)
+            .with_context(|| format!("parse {}", path.display()))?
+            .browser
+    } else {
+        BrowserPolicyFileDto::default()
+    };
+    let dto = PermissionsFileDto {
+        tools: normalized,
+        browser,
+    };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
@@ -2090,17 +2199,7 @@ fn handle_resolve_permission(state: &DaemonState, params: &Value) -> Result<Valu
         .or_else(|| params.get("request_id"))
         .and_then(|v| v.as_str())
         .context("missing requestId")?;
-    let action_str = params
-        .get("action")
-        .and_then(|v| v.as_str())
-        .context("missing action")?;
-    let action = match action_str {
-        "allow_once" => PermissionPromptAction::AllowOnce,
-        "allow_session" => PermissionPromptAction::AllowSession,
-        "allow_all_session" => PermissionPromptAction::AllowAllSession,
-        "deny" => PermissionPromptAction::Deny,
-        other => anyhow::bail!("unknown action `{other}`"),
-    };
+    let action = parse_permission_action(params)?;
     let responder = {
         let mut turns = state.turns.lock().unwrap();
         turns
@@ -2113,6 +2212,67 @@ fn handle_resolve_permission(state: &DaemonState, params: &Value) -> Result<Valu
         .send(action)
         .map_err(|_| anyhow::anyhow!("worker already released the permission channel"))?;
     Ok(json!({"ok": true}))
+}
+
+fn parse_permission_action(params: &Value) -> Result<PermissionPromptAction> {
+    let action_str = params
+        .get("action")
+        .and_then(|v| v.as_str())
+        .context("missing action")?;
+    Ok(match action_str {
+        "allow_once" => PermissionPromptAction::AllowOnce,
+        "allow_session" => PermissionPromptAction::AllowSession,
+        "allow_all_session" => PermissionPromptAction::AllowAllSession,
+        "deny" => PermissionPromptAction::Deny,
+        other => anyhow::bail!("unknown action `{other}`"),
+    })
+}
+
+fn browser_permission_payload_json(payload: &puffer_core::BrowserPermissionPromptPayload) -> Value {
+    json!({
+        "source": match payload.source {
+            BrowserPermissionPromptSource::BrowserTool => "browser_tool",
+            BrowserPermissionPromptSource::BrowserInternalTool => "browser_internal_tool",
+        },
+        "actionSet": match payload.action_set {
+            BrowserPermissionPromptActionSet::Inspect => "inspect",
+            BrowserPermissionPromptActionSet::Navigate => "navigate",
+            BrowserPermissionPromptActionSet::Interact => "interact",
+            BrowserPermissionPromptActionSet::Evaluate => "evaluate",
+        },
+        "url": payload.url,
+        "origin": payload.origin,
+        "host": payload.host,
+        "targetClass": match payload.target_class {
+            BrowserPermissionPromptTargetClass::LocalDev => "local_dev",
+            BrowserPermissionPromptTargetClass::WorkspaceFile => "workspace_file",
+            BrowserPermissionPromptTargetClass::NonWorkspaceFile => "non_workspace_file",
+            BrowserPermissionPromptTargetClass::DataUrl => "data_url",
+            BrowserPermissionPromptTargetClass::OpenWeb => "open_web",
+            BrowserPermissionPromptTargetClass::Unknown => "unknown",
+        },
+        "tabId": payload.tab_id,
+        "isCrossSession": payload.is_cross_session,
+    })
+}
+
+fn permission_review_payload_json(payload: &puffer_core::PermissionPromptReviewPayload) -> Value {
+    json!({
+        "decision": match payload.decision {
+            puffer_core::BrowserAutoReviewRuntimeResult::AllowOnce => "allow_once",
+            puffer_core::BrowserAutoReviewRuntimeResult::AllowSession => "allow_session",
+            puffer_core::BrowserAutoReviewRuntimeResult::Deny => "deny",
+            puffer_core::BrowserAutoReviewRuntimeResult::NeedsUser => "needs_user",
+            puffer_core::BrowserAutoReviewRuntimeResult::Unavailable => "unavailable",
+        },
+        "risk": payload.risk,
+        "rationale": payload.rationale,
+        "resolvedRootSessionId": payload.resolved_root_session_id,
+        "sessionTargeting": match payload.session_targeting {
+            puffer_core::BrowserAutoReviewSessionTargeting::CurrentSession => "current_session",
+            puffer_core::BrowserAutoReviewSessionTargeting::ExplicitSession => "explicit_session",
+        },
+    })
 }
 
 fn handle_resolve_user_question(state: &DaemonState, params: &Value) -> Result<Value> {
@@ -2243,6 +2403,32 @@ fn report_cancelled_turn(
 // and relays events onto the broadcast bus.
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentTurnMode {
+    Default,
+    Plan,
+}
+
+fn parse_agent_turn_mode(params: &Value) -> Result<AgentTurnMode> {
+    let Some(raw_mode) = params
+        .get("mode")
+        .or_else(|| params.get("turnMode"))
+        .or_else(|| params.get("turn_mode"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|mode| !mode.is_empty())
+    else {
+        return Ok(AgentTurnMode::Default);
+    };
+
+    let raw_mode = raw_mode.to_ascii_lowercase();
+    match raw_mode.as_str() {
+        "default" | "normal" => Ok(AgentTurnMode::Default),
+        "plan" | "plan-mode" | "plan_mode" => Ok(AgentTurnMode::Plan),
+        other => anyhow::bail!("unsupported turn mode `{other}`; expected default or plan"),
+    }
+}
+
 async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     let session_id = params
         .get("sessionId")
@@ -2256,6 +2442,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
         .context("missing message")?
         .to_string();
     let turn_options = TurnRequestOptions::from_params(&params);
+    let turn_mode = parse_agent_turn_mode(&params)?;
 
     // Parse cheap, non-tokio-touching things synchronously so we can fail
     // fast with a clean error. Anything that builds a runtime (i.e. the
@@ -2317,6 +2504,7 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
     let message_for_thread = message.clone();
     let session_id_for_thread = session_id.clone();
     let turn_options_for_thread = turn_options.clone();
+    let turn_mode_for_thread = turn_mode;
     std::thread::spawn(move || {
         setup_state.publish_event(ServerEnvelope::Event {
             event: channel_thread.clone(),
@@ -2499,6 +2687,24 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                 });
             }
         }
+        if turn_mode_for_thread == AgentTurnMode::Plan {
+            if let Err(err) = enter_plan_mode(&mut app_state) {
+                publish_turn_error_event(
+                    &setup_state,
+                    &channel_thread,
+                    &session_id_for_thread,
+                    &turn_id_thread,
+                    format!("plan mode: {err:#}"),
+                    None,
+                    None,
+                );
+                setup_state.turns.lock().unwrap().remove(&turn_id_thread);
+                return;
+            }
+            let _ = inputs
+                .session_store
+                .append_event(session_uuid, app_state.snapshot_event());
+        }
 
         // Persist the user message before the turn starts so a crash
         // doesn't silently drop it.
@@ -2546,6 +2752,18 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                         "output": i.output,
                         "success": i.success,
                     })).collect::<Vec<_>>(),
+                }),
+                TurnStreamEvent::PlanUpdated { file_path, content } => json!({
+                    "type": "plan-updated",
+                    "turnId": ev_turn,
+                    "filePath": file_path,
+                    "content": content,
+                }),
+                TurnStreamEvent::PlanCompleted { file_path, content } => json!({
+                    "type": "plan-completed",
+                    "turnId": ev_turn,
+                    "filePath": file_path,
+                    "content": content,
                 }),
                 TurnStreamEvent::Usage(r) => json!({
                     "type": "usage",
@@ -2602,6 +2820,8 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                         "toolId": req.tool_id,
                         "summary": req.summary,
                         "reason": req.reason,
+                        "browser": req.browser.as_ref().map(browser_permission_payload_json),
+                        "review": req.review.as_ref().map(permission_review_payload_json),
                     }),
                     &perm_actor,
                 ),
@@ -2691,6 +2911,9 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                         trace,
                     );
                 }
+                let _ = inputs
+                    .session_store
+                    .append_event(session_uuid, app_state.snapshot_event());
                 setup_state.publish_event(ServerEnvelope::Event {
                     event: channel_thread.clone(),
                     payload: event_payload_with_actor(
@@ -2713,6 +2936,9 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
             }
             Err(err) => {
                 eprintln!("turn {turn_id_thread} failed: {err:#}");
+                let _ = inputs
+                    .session_store
+                    .append_event(session_uuid, app_state.snapshot_event());
                 let (friendly, category) = classify_turn_error(&err);
                 if category == "cancelled" && cancel_reported_thread.load(Ordering::SeqCst) {
                     state_for_thread
@@ -3074,16 +3300,19 @@ fn apply_turn_permission_mode(app_state: &mut AppState, permission_mode: &str) {
 
 fn apply_daemon_yolo_mode(app_state: &mut AppState) {
     app_state.sandbox_mode = "danger-full-access".to_string();
-    app_state.set_session_allow_all();
+    app_state.grant_all_tools_for_session();
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         apply_daemon_yolo_mode, apply_turn_model_override, apply_turn_request_options,
-        handle_create_session, handle_import_external_credential, handle_list_provider_models,
-        handle_login_with_api_key, handle_logout_provider, model_descriptor_dto,
-        resolve_create_session_model_id, run_off_runtime, DaemonState, TurnRequestOptions,
+        browser_permission_payload_json, handle_create_session, handle_import_external_credential,
+        handle_list_permissions, handle_list_provider_models, handle_login_with_api_key,
+        handle_logout_provider, handle_save_permissions, model_descriptor_dto,
+        permission_review_payload_json, requires_explicit_subscription,
+        resolve_create_session_model_id, run_off_runtime,
+        DaemonState, TurnRequestOptions,
     };
     use indexmap::IndexMap;
     use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
@@ -3146,6 +3375,22 @@ mod tests {
             }
             let _ = std::fs::remove_file(&self.cache_path);
         }
+    }
+
+    #[test]
+    fn high_volume_browser_events_require_explicit_subscription() {
+        assert!(requires_explicit_subscription(
+            "browser:session:browser:tab-1:frame"
+        ));
+        assert!(requires_explicit_subscription("browser:session:recording"));
+        assert!(!requires_explicit_subscription(
+            "browser:session:browser:tab-1:state"
+        ));
+        assert!(!requires_explicit_subscription("browser:session:tabs"));
+        assert!(!requires_explicit_subscription("session:abc:events"));
+        assert!(!requires_explicit_subscription(
+            "workspace:sessions:changed"
+        ));
     }
 
     fn spawn_openai_discovery_server() -> (String, std::thread::JoinHandle<()>) {
@@ -3962,7 +4207,96 @@ mod tests {
         apply_daemon_yolo_mode(&mut state);
 
         assert_eq!(state.sandbox_mode, "danger-full-access");
-        assert!(state.session_allow_all);
+        assert!(state.session_permission_state().allow_all_tools());
+    }
+
+    #[test]
+    fn desktop_generic_permissions_preserve_browser_section() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        std::fs::write(
+            paths.workspace_config_dir.join("permissions.toml"),
+            "[tools]\nbrowser = \"allow\"\nbash = \"ask\"\n\n[browser]\ndeny_domains = [\"example.com\"]\n",
+        )
+        .expect("write permissions");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let listed = handle_list_permissions(&state).expect("list permissions");
+        assert_eq!(listed["tools"]["bash"], "ask");
+        assert!(listed["tools"].get("browser").is_none());
+
+        let saved = handle_save_permissions(
+            &state,
+            &json!({
+                "tools": {
+                    "browser": "deny",
+                    "bash": "allow"
+                }
+            }),
+        )
+        .expect("save permissions");
+        assert_eq!(saved["tools"]["bash"], "allow");
+        assert!(saved["tools"].get("browser").is_none());
+        let stored: toml::Value = toml::from_str(
+            &std::fs::read_to_string(state.paths.workspace_config_dir.join("permissions.toml"))
+                .expect("read saved permissions"),
+        )
+        .expect("parse saved permissions");
+        assert_eq!(
+            stored["browser"]["deny_domains"][0].as_str(),
+            Some("example.com")
+        );
+    }
+
+    #[test]
+    fn browser_permission_payload_json_exposes_context_only() {
+        let payload =
+            browser_permission_payload_json(&puffer_core::BrowserPermissionPromptPayload {
+                source: puffer_core::BrowserPermissionPromptSource::BrowserTool,
+                action_set: puffer_core::BrowserPermissionPromptActionSet::Navigate,
+                url: Some("https://docs.example.com/a".to_string()),
+                origin: Some("https://docs.example.com".to_string()),
+                host: Some("docs.example.com".to_string()),
+                target_class: puffer_core::BrowserPermissionPromptTargetClass::OpenWeb,
+                tab_id: Some("tab-1".to_string()),
+                is_cross_session: false,
+            });
+
+        assert_eq!(payload["source"], "browser_tool");
+        assert_eq!(payload["actionSet"], "navigate");
+        assert_eq!(payload["host"], "docs.example.com");
+        assert_eq!(payload["isCrossSession"], false);
+        assert!(payload.get("availableScopes").is_none());
+        assert!(payload.get("suggestedScope").is_none());
+    }
+
+    #[test]
+    fn permission_review_payload_json_exposes_reviewer_conclusion() {
+        let payload = permission_review_payload_json(&puffer_core::PermissionPromptReviewPayload {
+            decision: puffer_core::BrowserAutoReviewRuntimeResult::NeedsUser,
+            risk: "medium".to_string(),
+            rationale: "Session targeting is explicit but the destination is ambiguous."
+                .to_string(),
+            resolved_root_session_id: "root-1".to_string(),
+            session_targeting: puffer_core::BrowserAutoReviewSessionTargeting::ExplicitSession,
+        });
+
+        assert_eq!(payload["decision"], "needs_user");
+        assert_eq!(payload["risk"], "medium");
+        assert_eq!(
+            payload["rationale"],
+            "Session targeting is explicit but the destination is ambiguous."
+        );
+        assert_eq!(payload["resolvedRootSessionId"], "root-1");
+        assert_eq!(payload["sessionTargeting"], "explicit_session");
     }
 
     fn provider(id: &str, models: &[&str]) -> ProviderDescriptor {

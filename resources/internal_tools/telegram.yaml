@@ -1,0 +1,52 @@
+id: Telegram
+name: Telegram
+aliases:
+  - telegram
+description: |-
+  Internal CLI-only Telegram personal-account login surface. Agents should
+  use the `telegram` skill and run `telegram ...` through Bash instead of
+  receiving this as a provider tool call.
+
+  The internal CLI sends execution back to the parent Puffer runtime so the
+  same supervised `telegram-user` subscriber process keeps the in-flight
+  login token between `login-start`, `login-submit-code`, and
+  `login-submit-password`.
+handler: runtime:workflow:telegram
+approval_policy: ask
+sandbox_policy: workspace-write
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - login_start
+        - login_submit_code
+        - login_submit_password
+      description: Telegram login action to perform.
+    phone:
+      type: string
+      description: E.164 phone number with leading + for login_start.
+    api_id:
+      type: integer
+      description: Optional Telegram application API id for login_start.
+    api_hash:
+      type: string
+      description: Optional Telegram application API hash for login_start.
+    code:
+      type: string
+      description: Numeric code delivered by Telegram for login_submit_code.
+    password:
+      type: string
+      description: 2FA cloud password for login_submit_password.
+  required:
+    - action
+  additionalProperties: false
+metadata:
+  may_spawn_processes: true
+  may_read_files: false
+  may_write_files: true
+display:
+  group: subscribers
+  title: Telegram
+  show_in_status: true

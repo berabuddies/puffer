@@ -308,9 +308,22 @@ fn request_scoped_edit_path_filters_allow_only_the_selected_file() {
         ..LoadedResources::default()
     };
     let registry = ToolRegistry::from_resources(&resources);
-    let cwd = std::path::PathBuf::from("/tmp/work");
-    let allowed_path = cwd.join("allowed").join("file.txt");
-    let denied_path = cwd.join("other").join("file.txt");
+    let mut providers = ProviderRegistry::new();
+    providers.register(openai_provider("http://127.0.0.1".to_string()));
+    let request_config = test_openai_request_config();
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let allowed_dir = cwd.join("allowed");
+    let denied_dir = cwd.join("other");
+    fs::create_dir_all(&allowed_dir).unwrap();
+    fs::create_dir_all(&denied_dir).unwrap();
+    let allowed_path = allowed_dir.join("file.txt");
+    let denied_path = denied_dir.join("file.txt");
+    fs::write(&allowed_path, "alpha").unwrap();
+    fs::write(&denied_path, "alpha").unwrap();
+    mark_file_fully_read(&mut state, &allowed_path);
+    mark_file_fully_read(&mut state, &denied_path);
+
     let filter =
         super::super::build_request_tool_filter(&[format!("Edit({})", allowed_path.display())])
             .unwrap()
@@ -318,9 +331,9 @@ fn request_scoped_edit_path_filters_allow_only_the_selected_file() {
     let permission_context = crate::permissions::load_runtime_permission_context_with_inputs(
         &cwd,
         &resources,
-        &state(),
+        &state,
         crate::permissions::RuntimePermissionInputs {
-            request_tool_filter: Some(filter),
+            request_tool_filter: Some(filter.clone()),
         },
     )
     .unwrap();
@@ -331,14 +344,14 @@ fn request_scoped_edit_path_filters_allow_only_the_selected_file() {
         permission_context
             .decision_for_tool_call(
                 definition,
-                &json!({"file_path": allowed_path, "old_string": "a", "new_string": "b"})
+                &json!({"file_path": allowed_path, "old_string": "alpha", "new_string": "beta"})
             )
             .behavior,
         crate::permissions::ToolPermissionBehavior::Allow
     );
     let denied_decision = permission_context.decision_for_tool_call(
         definition,
-        &json!({"file_path": denied_path, "old_string": "a", "new_string": "b"}),
+        &json!({"file_path": denied_path, "old_string": "alpha", "new_string": "beta"}),
     );
     assert_eq!(
         denied_decision.behavior,
@@ -348,4 +361,28 @@ fn request_scoped_edit_path_filters_allow_only_the_selected_file() {
         denied_decision.reason.as_deref(),
         Some("slash command tool scope denied this tool call")
     );
+
+    let result = execute_tool_call(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &registry,
+        "gpt-5",
+        &cwd,
+        ToolExecutionBackend::OpenAi {
+            request_config: &request_config,
+            structured_output: None,
+        },
+        Some(&filter),
+        "Edit",
+        json!({"file_path": denied_path, "old_string": "alpha", "new_string": "beta"}),
+    )
+    .unwrap();
+
+    assert!(!result.success);
+    assert!(result
+        .output
+        .stdout
+        .contains("slash command tool scope denied this tool call"));
 }

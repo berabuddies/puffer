@@ -130,9 +130,13 @@ impl Default for ObservabilityConfig {
             include_tool_io: false,
             always_redact_tool_ids: vec![
                 "AuthSetApiKey".into(),
+                "Email".into(),
                 "EmailConfigure".into(),
                 "Login".into(),
                 "Logout".into(),
+                "Telegram".into(),
+                "TelegramLoginSubmitCode".into(),
+                "TelegramLoginSubmitPassword".into(),
             ],
             shutdown_timeout: Duration::from_secs(5),
         }

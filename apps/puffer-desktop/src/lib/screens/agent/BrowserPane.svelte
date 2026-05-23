@@ -120,11 +120,14 @@
   let tabStateVersion = 0;
   const handledBrowserShortcutCodes = new Set<string>();
   const pendingNavigationSessions = new Set<string>();
+  const recentlyOpenedTabIds = new Map<string, number>();
+  const recentlyClosedTabIds = new Map<string, number>();
   let pendingNavigationUrls = new Map<string, string>();
   let pendingFrame: BrowserFrameEvent | null = null;
   let frameDecodeInFlight = false;
   const NAVIGATION_IDLE_FALLBACK_MS = 1_200;
   const TAB_INFO_STALE_GRACE_MS = 250;
+  const LOCAL_TAB_TRANSITION_GRACE_MS = 5_000;
 
   let activeTab = $derived(tabs.find((tab) => tab.id === activeTabId) ?? tabs[0]);
   let browserCommandPending = $derived(
@@ -139,7 +142,7 @@
   );
   let browserControlsEnabled = $derived(Boolean(activeTab && connected && !browserCommandPending));
   let browserAddressEnabled = $derived(
-    Boolean(activeTab && (activeTab.connected || !activeTab.error) && !browserCommandPending)
+    Boolean(activeTab && !browserCommandPending)
   );
   let activeDevtools = $derived(activeTab?.devtools ?? []);
   let consoleEvents = $derived(activeDevtools.filter((item) => item.kind === "console"));
@@ -254,6 +257,7 @@
 
   function applyTabsState(state: BrowserTabsState, options: ApplyTabsOptions = {}) {
     if (!Array.isArray(state.tabs)) return;
+    pruneLocalTabTransitions();
     const hasLocalTransition =
       tabOpenPending || closingTabs.length > 0 || pendingBrowserCommands.length > 0;
     if (state.tabs.length === 0) {
@@ -283,12 +287,19 @@
       clearCanvas();
       return;
     }
-    tabStateVersion += 1;
     const previousActiveTabId = activeTabId;
-    const nextTabs = state.tabs.map(tabFromInfo);
+    const stateTabs = state.tabs.filter((tab) => !recentlyClosedTabIds.has(tab.tabId));
+    const nextTabsById = new Map(stateTabs.map((tab) => [tab.tabId, tabFromInfo(tab)]));
+    for (const [tabId] of recentlyOpenedTabIds) {
+      const existing = tabs.find((tab) => tab.id === tabId);
+      if (existing && !nextTabsById.has(tabId)) nextTabsById.set(tabId, existing);
+    }
+    const nextTabs = [...nextTabsById.values()];
+    if (nextTabs.length === 0) return;
     if (hasLocalTransition && nextTabs.length < tabs.length && !options.allowLocalTransitionShrink) return;
+    tabStateVersion += 1;
     const connectedTabId = nextTabs.find((tab) => tab.connected)?.id;
-    const activeEvent = state.tabs.find((tab) => tab.tabId === state.activeTabId);
+    const activeEvent = stateTabs.find((tab) => tab.tabId === state.activeTabId);
     const existingActive = activeEvent
       ? tabs.find((tab) => tab.id === activeEvent.tabId) ?? null
       : null;
@@ -303,6 +314,16 @@
     syncFromActiveTab();
     if (!connected || activeTabId !== previousActiveTabId) {
       resetPointer(activePointerId ?? undefined);
+    }
+  }
+
+  function pruneLocalTabTransitions() {
+    const cutoff = Date.now() - LOCAL_TAB_TRANSITION_GRACE_MS;
+    for (const [tabId, at] of recentlyOpenedTabIds) {
+      if (at < cutoff) recentlyOpenedTabIds.delete(tabId);
+    }
+    for (const [tabId, at] of recentlyClosedTabIds) {
+      if (at < cutoff) recentlyClosedTabIds.delete(tabId);
     }
   }
 
@@ -835,6 +856,7 @@
     if (disposed || activeRootSessionId !== rootSessionId || frame.rootSessionId !== rootSessionId) return;
     if (!frame.tabId) return;
     const existing = tabs.find((tab) => tab.id === frame.tabId);
+    if (!existing) return;
     const frameBackendSessionId = recordingBackendSessionId(frame);
     const nextFrame = frameFromRecording(frame);
     const nextUrl = frame.url || existing?.url || currentUrl || "about:blank";
@@ -851,12 +873,11 @@
       connected: true,
       favicon: faviconFor(nextUrl)
     };
-    const shouldActivate = frame.tabId === activeTabId || !existing;
+    const shouldActivate = frame.tabId === activeTabId;
     tabs = existing
       ? tabs.map((tab) => (tab.id === frame.tabId ? nextTab : tab))
       : [...tabs, nextTab];
     nextTabNumber = nextTabIndex(tabs);
-    if (!existing) tabStateVersion += 1;
     saveTabs(tabs);
     if (!shouldActivate) return;
     const switchedTabs = activeTabId !== frame.tabId;
@@ -900,6 +921,16 @@
   function applyState(next: BrowserState, tabId = activeTabId) {
     if (disposed || !tabId) return;
     const existing = tabs.find((tab) => tab.id === tabId);
+    const stateUpdatedAtMs =
+      typeof next.updatedAtMs === "number" && next.updatedAtMs > 0
+        ? next.updatedAtMs
+        : Date.now();
+    if (
+      existing &&
+      existing.updatedAtMs - stateUpdatedAtMs > TAB_INFO_STALE_GRACE_MS
+    ) {
+      return;
+    }
     clearNavigationPending(existing?.backendSessionId || backendSessionId(tabId));
     const nextUrl = next.url || existing?.url || "about:blank";
     const nextTitle = next.title ?? "";
@@ -913,7 +944,8 @@
       error: nextError,
       status: nextStatus,
       connected: nextConnected,
-      favicon: faviconFor(nextUrl)
+      favicon: faviconFor(nextUrl),
+      updatedAtMs: stateUpdatedAtMs
     });
     if (tabId !== activeTabId) return;
     currentUrl = nextUrl;
@@ -1046,7 +1078,6 @@
     const size = measureViewport() ?? lastResize;
     const tabId = `tab-${nextTabNumber}`;
     nextTabNumber += 1;
-    const requestedAtVersion = tabStateVersion;
     const requestedAtGeneration = sessionGeneration;
     const requestedSessionId = sessionId;
     tabOpenPending = true;
@@ -1061,10 +1092,11 @@
       });
       if (
         disposed ||
-        requestedAtVersion !== tabStateVersion ||
         requestedAtGeneration !== sessionGeneration
       ) return;
       const tab = tabFromInfo(info);
+      recentlyOpenedTabIds.set(tab.id, Date.now());
+      recentlyClosedTabIds.delete(tab.id);
       tabs = [...tabs.filter((item) => item.id !== tab.id), tab];
       activeTabId = tab.id;
       nextTabNumber = nextTabIndex(tabs);
@@ -1074,7 +1106,6 @@
     } catch (err) {
       if (
         disposed ||
-        requestedAtVersion !== tabStateVersion ||
         requestedAtGeneration !== sessionGeneration ||
         activeRootSessionId !== requestedSessionId
       ) return;
@@ -1127,6 +1158,8 @@
 
   function removeClosedTabLocally(tabId: string, index: number) {
     const nextTabs = tabs.filter((tab) => tab.id !== tabId);
+    recentlyClosedTabIds.set(tabId, Date.now());
+    recentlyOpenedTabIds.delete(tabId);
     tabStateVersion += 1;
     tabs = nextTabs;
     saveTabs(nextTabs);
@@ -1159,17 +1192,17 @@
     const requestedBackendSessionId = requestedTab?.backendSessionId || backendSessionId(tabId, requestedSessionId);
     const index = tabs.findIndex((tab) => tab.id === tabId);
     if (index === -1) return;
-    const requestedVersion = tabStateVersion;
     closingTabs = [...closingTabs, { sessionId: requestedSessionId, tabId }];
     try {
       const state = await browserTabClose(requestedSessionId, tabId);
       if (
         disposed ||
         requestedGeneration !== sessionGeneration ||
-        activeRootSessionId !== requestedSessionId ||
-        requestedVersion !== tabStateVersion
+        activeRootSessionId !== requestedSessionId
       ) return;
       error = null;
+      recentlyClosedTabIds.set(tabId, Date.now());
+      recentlyOpenedTabIds.delete(tabId);
       applyTabsState(state, { allowEmpty: true, allowLocalTransitionShrink: true });
     } catch (err) {
       if (shouldUseLegacyTabClose(err)) {
@@ -1188,8 +1221,7 @@
         if (
           disposed ||
           requestedGeneration !== sessionGeneration ||
-          activeRootSessionId !== requestedSessionId ||
-          requestedVersion !== tabStateVersion
+          activeRootSessionId !== requestedSessionId
         ) return;
         error = null;
         removeClosedTabLocally(tabId, index);
@@ -1428,6 +1460,7 @@
     if (!["r", "l", "w"].includes(key)) return false;
     event.preventDefault();
     handledBrowserShortcutCodes.add(event.code);
+    releaseBrowserShortcutModifier(event);
     if (key === "r") {
       reloadActiveTab();
     } else if (key === "l") {
@@ -1437,6 +1470,27 @@
       closeTab(activeTabId);
     }
     return true;
+  }
+
+  function releaseBrowserShortcutModifier(event: KeyboardEvent) {
+    if (event.ctrlKey) {
+      sendBrowserInput({
+        kind: "key",
+        eventType: "keyUp",
+        key: "Control",
+        code: "ControlLeft",
+        modifiers: (event.altKey ? 1 : 0) | (event.metaKey ? 4 : 0) | (event.shiftKey ? 8 : 0)
+      });
+    }
+    if (event.metaKey) {
+      sendBrowserInput({
+        kind: "key",
+        eventType: "keyUp",
+        key: "Meta",
+        code: "MetaLeft",
+        modifiers: (event.altKey ? 1 : 0) | (event.ctrlKey ? 2 : 0) | (event.shiftKey ? 8 : 0)
+      });
+    }
   }
 
   function keyDown(event: KeyboardEvent) {

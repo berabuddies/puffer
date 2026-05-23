@@ -7,14 +7,14 @@ mod common;
 mod config;
 mod doctor;
 mod ecosystem;
-mod goal;
 mod genskill;
+mod goal;
 mod model;
 mod pentest;
 mod plugins;
 pub(crate) mod prompt;
-mod reflect;
 mod recap;
+mod reflect;
 mod resume;
 mod session;
 mod tasks;
@@ -47,8 +47,8 @@ pub(crate) use ecosystem::{
     handle_ide_command, handle_mcp_command, reload_resources_from_disk, render_ide_actions,
     render_mcp_actions, render_mcp_summary,
 };
-pub(crate) use goal::handle_goal_command;
 pub(crate) use genskill::handle_genskill_command;
+pub(crate) use goal::handle_goal_command;
 pub(crate) use model::{
     apply_model_preferences, handle_effort_command, handle_fast_command, handle_model_command,
 };

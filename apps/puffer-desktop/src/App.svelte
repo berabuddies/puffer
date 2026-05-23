@@ -97,6 +97,8 @@
     replayTextByTurn: Record<string, string>;
     turnPermissionLookup: Record<string, { turnId: string; requestId: string }>;
     turnQuestionLookup: Record<string, { turnId: string; requestId: string }>;
+    resolvingPermissionIds: string[];
+    resolvingQuestionIds: string[];
     currentTurnId: string | null;
     cancelingTurnId: string | null;
     turnStartedAtMs: number | null;
@@ -203,6 +205,8 @@
   let desktopPinInFlightStates = $state<Record<string, boolean>>({});
   let desktopPinQueuedStates = $state<Record<string, boolean>>({});
   const submitMessageInFlightGuards = new Set<string>();
+  const PENDING_SUBMITTED_MESSAGE_PREFIX = "puffer-desktop:pending-submitted:";
+  const PENDING_SUBMITTED_MESSAGE_TTL_MS = 10 * 60_000;
 
   let settingsSnapshot = $state<SettingsSnapshot | null>(null);
   let settingsLoading = $state(false);
@@ -958,6 +962,9 @@
         ) {
           clearLiveSidebarAgentState(event.sessionId, null);
           clearCachedTurnRuntimeState(event.sessionId);
+          if (selectedSession?.id === event.sessionId) {
+            clearTurnRuntimeState(event.sessionId, currentTurnId);
+          }
         }
         void refreshGroups();
         if (
@@ -1132,11 +1139,12 @@
     if (importBusyKey || authBusyProviderId) return;
     importBusyKey = `${providerId}::${source}`;
     authError = null;
+    const wasOnboarding = onboarding;
     try {
       settingsSnapshot = await importExternalCredential(providerId, source);
       onboardingCompleted = hasAvailableAgentProvider(settingsSnapshot);
       onboarding = shouldShowOnboarding(settingsSnapshot);
-      if (!onboarding) {
+      if (wasOnboarding && !onboarding) {
         tweaks = { ...tweaks, screen: "workspace" };
       }
       statusMessage = `Imported ${source} credential into ${providerId}.`;
@@ -1170,11 +1178,12 @@
     if (authBusyProviderId || importBusyKey) return;
     authBusyProviderId = providerId;
     authError = null;
+    const wasOnboarding = onboarding;
     try {
       settingsSnapshot = await loginWithOauth(providerId, remoteConnection);
       onboardingCompleted = hasAvailableAgentProvider(settingsSnapshot);
       onboarding = shouldShowOnboarding(settingsSnapshot);
-      if (!onboarding) {
+      if (wasOnboarding && !onboarding) {
         tweaks = { ...tweaks, screen: "workspace" };
       }
       statusMessage = `Connected to ${providerId}.`;
@@ -1191,6 +1200,7 @@
     if (authBusyProviderId || importBusyKey) return;
     authBusyProviderId = providerId;
     authError = null;
+    const wasOnboarding = onboarding;
     try {
       // Prefer the daemon path; it reuses the workspace auth store and
       // lets remote daemons (SSH) pick up credentials server-side. Falls
@@ -1204,7 +1214,7 @@
       }
       onboardingCompleted = hasAvailableAgentProvider(settingsSnapshot);
       onboarding = shouldShowOnboarding(settingsSnapshot);
-      if (!onboarding) {
+      if (wasOnboarding && !onboarding) {
         tweaks = { ...tweaks, screen: "workspace" };
       }
       statusMessage = `Stored API key for ${providerId}.`;
@@ -1362,6 +1372,8 @@
       replayTextByTurn: { ...replayTextByTurn },
       turnPermissionLookup: { ...turnPermissionLookup },
       turnQuestionLookup: { ...turnQuestionLookup },
+      resolvingPermissionIds: [...resolvingPermissionIds],
+      resolvingQuestionIds: [...resolvingQuestionIds],
       currentTurnId,
       cancelingTurnId,
       turnStartedAtMs,
@@ -1378,6 +1390,8 @@
       replayTextByTurn: {},
       turnPermissionLookup: {},
       turnQuestionLookup: {},
+      resolvingPermissionIds: [],
+      resolvingQuestionIds: [],
       currentTurnId: null,
       cancelingTurnId: null,
       turnStartedAtMs: null,
@@ -1393,7 +1407,9 @@
       state.currentTurnId !== null ||
       state.turnStartedAtMs !== null ||
       Object.keys(state.turnPermissionLookup).length > 0 ||
-      Object.keys(state.turnQuestionLookup).length > 0
+      Object.keys(state.turnQuestionLookup).length > 0 ||
+      state.resolvingPermissionIds.length > 0 ||
+      state.resolvingQuestionIds.length > 0
     );
   }
 
@@ -1414,6 +1430,88 @@
   function saveCurrentTransientConversationState(sessionId: string | null | undefined) {
     if (!sessionId) return;
     setTransientConversationState(sessionId, captureTransientConversationState());
+  }
+
+  function pendingSubmittedMessageKey(sessionId: string): string {
+    return `${PENDING_SUBMITTED_MESSAGE_PREFIX}${sessionId}`;
+  }
+
+  function persistPendingSubmittedMessage(sessionId: string, item: TimelineItem) {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(
+        pendingSubmittedMessageKey(sessionId),
+        JSON.stringify({ item, expiresAtMs: Date.now() + PENDING_SUBMITTED_MESSAGE_TTL_MS })
+      );
+    } catch {
+      /* Best-effort recovery for reloads during turn start. */
+    }
+  }
+
+  function clearPendingSubmittedMessage(sessionId: string, itemId?: string) {
+    if (typeof window === "undefined") return;
+    try {
+      if (itemId) {
+        const raw = window.localStorage.getItem(pendingSubmittedMessageKey(sessionId));
+        const parsed = raw ? JSON.parse(raw) as { item?: { id?: string } } : null;
+        if (parsed?.item?.id !== itemId) return;
+      }
+      window.localStorage.removeItem(pendingSubmittedMessageKey(sessionId));
+    } catch {
+      window.localStorage.removeItem(pendingSubmittedMessageKey(sessionId));
+    }
+  }
+
+  function restorePendingSubmittedMessage(sessionId: string, timeline: TimelineItem[]): TimelineItem[] {
+    if (typeof window === "undefined") return [];
+    try {
+      const raw = window.localStorage.getItem(pendingSubmittedMessageKey(sessionId));
+      const parsed = raw ? JSON.parse(raw) as { item?: TimelineItem; expiresAtMs?: number } : null;
+      const item = parsed?.item;
+      if (!item || typeof parsed?.expiresAtMs !== "number" || parsed.expiresAtMs < Date.now()) {
+        clearPendingSubmittedMessage(sessionId);
+        return [];
+      }
+      const alreadyPersisted = timeline.some(
+        (candidate) =>
+          candidate.id === item.id ||
+          (candidate.kind === "user" && item.kind === "user" && candidate.body === item.body)
+      );
+      if (alreadyPersisted) {
+        clearPendingSubmittedMessage(sessionId, item.id);
+        return [];
+      }
+      return [item];
+    } catch {
+      clearPendingSubmittedMessage(sessionId);
+      return [];
+    }
+  }
+
+  function cacheHiddenTurnStartError(sessionId: string, localUserId: string, detail: string) {
+    clearPendingSubmittedMessage(sessionId, localUserId);
+    const cached = transientConversationStates[sessionId] ?? emptyTransientConversationState();
+    const baselineIds = { ...cached.submittedMessageBaselineIds };
+    delete baselineIds[localUserId];
+    setTransientConversationState(sessionId, {
+      ...cached,
+      submittedMessages: cached.submittedMessages.filter((item) => item.id !== localUserId),
+      submittedMessageBaselineIds: baselineIds,
+      liveStreamItems: appendCachedLiveItem(cached, {
+        id: `live-error-turn-start-${localUserId}`,
+        kind: "system",
+        title: "Agent start failed",
+        summary: detail,
+        body: detail,
+        meta: ["error", "turn-start-error"],
+        status: "error"
+      }),
+      currentTurnId: null,
+      cancelingTurnId: null,
+      turnStartedAtMs: null,
+      turnThinking: false,
+      turnStatusHint: null
+    });
   }
 
   function appendCachedLiveItem(
@@ -1617,10 +1715,10 @@
           summary: ev.summary,
           inputText: null,
           toolName: ev.toolId,
-          choices: ["Allow once", "Always allow", "Deny"]
+          choices: ["Approve once", "Always allow", "Deny"]
         },
         scopeLabel: null,
-        choices: ["Allow once", "Always allow", "Deny"]
+        choices: ["Approve once", "Always allow", "Deny"]
       }),
       turnPermissionLookup: {
         ...cached.turnPermissionLookup,
@@ -1684,6 +1782,8 @@
       replayTextByTurn,
       turnPermissionLookup: {},
       turnQuestionLookup: {},
+      resolvingPermissionIds: [],
+      resolvingQuestionIds: [],
       currentTurnId: null,
       cancelingTurnId: null,
       turnStartedAtMs: null,
@@ -1719,6 +1819,8 @@
       replayTextByTurn,
       turnPermissionLookup: {},
       turnQuestionLookup: {},
+      resolvingPermissionIds: [],
+      resolvingQuestionIds: [],
       currentTurnId: null,
       cancelingTurnId: null,
       turnStartedAtMs: null,
@@ -1778,6 +1880,8 @@
     replayTextByTurn = { ...cached.replayTextByTurn };
     turnPermissionLookup = { ...cached.turnPermissionLookup };
     turnQuestionLookup = { ...cached.turnQuestionLookup };
+    resolvingPermissionIds = [...cached.resolvingPermissionIds];
+    resolvingQuestionIds = [...cached.resolvingQuestionIds];
     currentTurnId = cached.currentTurnId;
     cancelingTurnId = cached.cancelingTurnId;
     turnStartedAtMs = cached.turnStartedAtMs;
@@ -1859,6 +1963,8 @@
       replayTextByTurn: {},
       turnPermissionLookup: {},
       turnQuestionLookup: {},
+      resolvingPermissionIds: [],
+      resolvingQuestionIds: [],
       currentTurnId: null,
       cancelingTurnId: null,
       turnStartedAtMs: null,
@@ -1890,6 +1996,9 @@
       ...cached,
       liveStreamItems: cached.liveStreamItems.filter((item) => item.id !== permissionId),
       turnPermissionLookup: nextLookup,
+      resolvingPermissionIds: cached.resolvingPermissionIds.filter(
+        (id) => id !== `${sessionId}::${permissionId}`
+      ),
       turnThinking: cached.currentTurnId === turnId ? false : cached.turnThinking,
       turnStatusHint: cached.currentTurnId === turnId ? "Running" : cached.turnStatusHint
     });
@@ -1908,6 +2017,9 @@
       ...cached,
       liveStreamItems: cached.liveStreamItems.filter((item) => item.id !== questionId),
       turnQuestionLookup: nextLookup,
+      resolvingQuestionIds: cached.resolvingQuestionIds.filter(
+        (id) => id !== `${sessionId}::${questionId}`
+      ),
       turnThinking: cached.currentTurnId === turnId ? false : cached.turnThinking,
       turnStatusHint: cached.currentTurnId === turnId ? "Running" : cached.turnStatusHint
     });
@@ -1979,7 +2091,13 @@
       } else {
         const remainingSubmittedMessages = submittedStillMissingFromPersisted(timeline, submittedMessages);
         const remainingLiveItems = stillMissingFromPersisted(timeline, liveStreamItems);
-        submittedMessages = remainingSubmittedMessages;
+        const restoredPendingMessages = restorePendingSubmittedMessage(detail.session.id, timeline);
+        submittedMessages = [
+          ...remainingSubmittedMessages,
+          ...restoredPendingMessages.filter(
+            (pending) => !remainingSubmittedMessages.some((item) => item.id === pending.id)
+          )
+        ];
         liveStreamItems = remainingLiveItems;
         clearCanceledLoadedTurnState(detail.session.id, detail.session.activityStatus);
         if (resetLiveState) {
@@ -2345,18 +2463,17 @@
         .map((item) => item.id)
         .filter((id) => id.length > 0)
     };
-    submittedMessages = [
-      ...submittedMessages,
-      {
-        id: localUserId,
-        kind: "user",
-        createdAtMs: now,
-        title: "User",
-        summary: message,
-        body: message,
-        meta: []
-      }
-    ];
+    const submittedMessage: TimelineItem = {
+      id: localUserId,
+      kind: "user",
+      createdAtMs: now,
+      title: "User",
+      summary: message,
+      body: message,
+      meta: []
+    };
+    submittedMessages = [...submittedMessages, submittedMessage];
+    persistPendingSubmittedMessage(submitSessionId, submittedMessage);
     turnStartedAtMs = now;
     turnThinking = true;
     turnStatusHint = "Thinking";
@@ -2374,6 +2491,7 @@
         return true;
       }
       if (settledBeforeRpcReturned) {
+        clearPendingSubmittedMessage(submitSessionId, localUserId);
         currentTurnId = null;
         cancelingTurnId = null;
         turnStartedAtMs = null;
@@ -2398,9 +2516,10 @@
       }
       clearLiveSidebarAgentState(submitSessionId, null);
       if (selectedSession?.id !== submitSessionId) {
-        removeCachedSubmittedMessage(submitSessionId, localUserId);
+        cacheHiddenTurnStartError(submitSessionId, localUserId, detail);
         return false;
       }
+      clearPendingSubmittedMessage(submitSessionId, localUserId);
       submittedMessages = submittedMessages.filter((item) => item.id !== localUserId);
       const { [localUserId]: _drop, ...restBaselineIds } = submittedMessageBaselineIds;
       submittedMessageBaselineIds = restBaselineIds;
@@ -2438,8 +2557,7 @@
 
   function mapPermissionAction(choice: string): "allow_once" | "allow_session" | "allow_all_session" | "deny" {
     const n = choice.toLowerCase();
-    if (n.includes("always") && n.includes("session")) return "allow_all_session";
-    if (n.includes("always")) return "allow_all_session";
+    if (n.includes("always")) return "allow_session";
     if (n.includes("session")) return "allow_session";
     if (n.includes("deny") || n.includes("never")) return "deny";
     return "allow_once";
@@ -3016,6 +3134,16 @@
           }
         }
         break;
+      case "plan-updated":
+        currentTurnId = ev.turnId;
+        turnThinking = false;
+        turnStatusHint = "Planning";
+        break;
+      case "plan-completed":
+        currentTurnId = ev.turnId;
+        turnThinking = false;
+        turnStatusHint = "Plan ready";
+        break;
       case "reflection-checkpoint":
         markTurnActive(sid, ev.turnId);
         turnThinking = true;
@@ -3034,6 +3162,9 @@
         turnThinking = false;
         turnStatusHint = "Awaiting approval";
         const id = livePermissionId(ev.turnId, ev.requestId);
+        const choices = ev.browser
+          ? ["Approve once", "Always allow browser context", "Deny"]
+          : ["Approve once", "Always allow", "Deny"];
         appendLive({
           id,
           kind: "permission",
@@ -3049,10 +3180,10 @@
             summary: ev.summary,
             inputText: null,
             toolName: ev.toolId,
-            choices: ["Allow once", "Always allow", "Deny"]
+            choices
           },
           scopeLabel: null,
-          choices: ["Allow once", "Always allow", "Deny"]
+          choices
         });
         turnPermissionLookup = {
           ...turnPermissionLookup,

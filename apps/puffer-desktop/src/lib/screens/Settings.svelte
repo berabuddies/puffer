@@ -64,6 +64,9 @@
 
   function refreshIfIdle() {
     if (credentialBusy) return;
+    if (section === "mcp" && daemonReachable && !mcpLoading && !mcpSaving) {
+      void loadMcpServers();
+    }
     props.onRefresh();
   }
 
@@ -87,6 +90,7 @@
   let permissionSnapshot = $state<PermissionsSnapshot | null>(null);
   let permissionRows = $state<{ tool: string; mode: string }[]>([]);
   let permissionLoading = $state(false);
+  let permissionLoaded = $state(false);
   let permissionLoadGeneration = 0;
   let permissionSaving = $state(false);
   let permissionError = $state<string | null>(null);
@@ -222,6 +226,7 @@
       }
     } finally {
       if (generation === permissionLoadGeneration) {
+        permissionLoaded = true;
         permissionLoading = false;
       }
     }
@@ -318,7 +323,7 @@
   }
 
   async function saveDefaultModel() {
-    if (!modelPickerProvider || !modelPickerModel || modelPickerLoading || modelSaving) return;
+    if (!modelPickerProvider || !modelPickerModel || modelPickerLoading || modelSaving || credentialBusy) return;
     modelSaving = true;
     modelError = null;
     try {
@@ -400,6 +405,7 @@
     permissionSnapshot = null;
     permissionRows = [];
     permissionLoading = false;
+    permissionLoaded = false;
     permissionError = null;
     permissionDirty = false;
 
@@ -439,7 +445,7 @@
     defaultRouteProviders.find((p) => providerIdsEquivalent(p.id, modelPickerProvider))
       ?.displayName ?? modelPickerProvider
   );
-  let modelPickerDisabled = $derived(!daemonReachable || modelSaving);
+  let modelPickerDisabled = $derived(!daemonReachable || modelSaving || credentialBusy);
   let canSaveDefaultModel = $derived(
     Boolean(
       daemonReachable &&
@@ -447,7 +453,8 @@
         modelPickerModel &&
         modelIdInList(modelPickerModel, providerModels[modelPickerProvider] ?? []) &&
         !modelPickerLoading &&
-        !modelSaving
+        !modelSaving &&
+        !credentialBusy
     )
   );
 
@@ -458,7 +465,7 @@
     if (section === "providers" && !modelPickerProvider && defaultRouteProviders.length > 0) {
       modelPickerProvider = defaultRouteProviderId();
     }
-    if (section === "permissions" && permissionSnapshot === null && !permissionLoading) {
+    if (section === "permissions" && permissionSnapshot === null && !permissionLoading && !permissionLoaded) {
       void loadPermissionSnapshot();
     }
     if (section === "mcp" && !mcpLoaded && !mcpLoading) {
@@ -718,7 +725,19 @@
         </div>
       {/if}
       {#if permissionError}
-        <div class="pf-settings-note warn">{permissionError}</div>
+        <div class="pf-settings-note warn">
+          <span>{permissionError}</span>
+          <button
+            type="button"
+            class="sc-btn"
+            data-variant="outline"
+            data-size="sm"
+            disabled={!daemonReachable || permissionLoading || permissionSaving}
+            onclick={() => void loadPermissionSnapshot()}
+          >
+            Retry
+          </button>
+        </div>
       {/if}
 
       <div class="pf-perm-table">
@@ -794,6 +813,18 @@
     {:else if section === "mcp"}
       <h2>MCP Servers</h2>
       <p class="lead">External tools Puffer can pull context from and take actions on.</p>
+      <div style="display: flex; justify-content: flex-end; margin-bottom: 10px;">
+        <button
+          type="button"
+          class="sc-btn"
+          data-variant="outline"
+          data-size="sm"
+          disabled={!daemonReachable || mcpLoading || mcpSaving}
+          onclick={refreshIfIdle}
+        >
+          <Icon name="refresh" size={13} />Refresh MCP servers
+        </button>
+      </div>
       {#if mcpError}
         <div class="pf-settings-note warn">{mcpError}</div>
       {/if}

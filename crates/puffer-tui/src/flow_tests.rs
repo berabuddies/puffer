@@ -685,19 +685,17 @@ fn queued_empty_model_command_opens_picker_after_turn_finishes() {
     );
 
     tui.pending_submit = None;
-    assert!(
-        submit_next_queued_prompt(
-            &mut state,
-            &mut resources,
-            &mut providers,
-            &mut auth_store,
-            &auth_path,
-            &session_store,
-            &mut tui,
-            true,
-        )
-        .unwrap()
-    );
+    assert!(submit_next_queued_prompt(
+        &mut state,
+        &mut resources,
+        &mut providers,
+        &mut auth_store,
+        &auth_path,
+        &session_store,
+        &mut tui,
+        true,
+    )
+    .unwrap());
 
     match tui.overlay {
         Some(OverlayState::ModelPicker {
@@ -710,12 +708,10 @@ fn queued_empty_model_command_opens_picker_after_turn_finishes() {
         }
         other => panic!("expected model picker, got {other:?}"),
     }
-    assert!(
-        !state
-            .transcript
-            .iter()
-            .any(|message| message.text.contains("Current model"))
-    );
+    assert!(!state
+        .transcript
+        .iter()
+        .any(|message| message.text.contains("Current model")));
 }
 
 #[test]
@@ -1224,7 +1220,10 @@ fn poll_pending_submit_preserves_browser_category_session_grants() {
 
     assert!(completed);
     assert!(state.session_permission_state().has_browser_grant());
-    assert!(!state.session_tool_permissions.contains_key("browser"));
+    let projection = state
+        .session_permission_state()
+        .legacy_snapshot_projection();
+    assert!(!projection.1.contains_key("browser"));
 }
 
 // ---------------------------------------------------------------------------

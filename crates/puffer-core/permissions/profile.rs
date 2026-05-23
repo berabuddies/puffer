@@ -1,4 +1,11 @@
 use super::{
+    browser_action::browser_permission_value_for_tool_call,
+    browser_grants::{
+        browser_context_matches_grants, browser_grant_categories, BrowserGrantCategory,
+    },
+    browser_target::{
+        browser_permission_context, browser_permission_context_for_tool, BrowserPermissionContext,
+    },
     canonical_tool_name, normalize_policy_value, normalize_tool_id, PermissionsSettings,
     SandboxSettings,
 };
@@ -83,30 +90,6 @@ pub(crate) struct EffectiveSurfaceProfile {
     pub(crate) notes: Vec<String>,
 }
 
-/// Groups Browser tool actions into stable permission categories.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum BrowserActionCategory {
-    Inspect,
-    Navigate,
-    Interact,
-    Evaluate,
-}
-
-/// Groups Browser tool grants into action-scoped and cross-session approvals.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum BrowserGrantCategory {
-    Action(BrowserActionCategory),
-    CrossSessionAccess,
-}
-
-/// Describes the normalized Browser permission scope for one tool call.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct BrowserPermissionScope {
-    pub(crate) action: Option<BrowserActionCategory>,
-    pub(crate) root_session_id: String,
-    pub(crate) is_cross_session: bool,
-}
-
 /// Groups workflow grants that need more detail than the tool id alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum WorkflowGrantCategory {
@@ -114,7 +97,7 @@ pub(crate) enum WorkflowGrantCategory {
 }
 
 /// Carries one category-level session grant derived from a tool approval.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum PermissionGrantCategory {
     Browser(BrowserGrantCategory),
     Workflow(WorkflowGrantCategory),
@@ -134,7 +117,10 @@ pub(crate) struct SessionPermissionGrants {
     granted: BTreeSet<SessionGrantTarget>,
 }
 
-/// Carries session-scoped permission state between worker and UI threads.
+/// Canonical in-memory session permission state for one runtime session.
+///
+/// This is the approval-bearing state used for current-turn permission
+/// evaluation and worker/UI round-trips.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SessionPermissionState {
     allow_all_tools: bool,
@@ -142,9 +128,13 @@ pub struct SessionPermissionState {
 }
 
 impl SessionPermissionGrants {
+    /// Rebuilds typed grants from the legacy whole-tool permission map.
     pub(crate) fn from_legacy_tool_permissions(tool_permissions: &HashMap<String, String>) -> Self {
         let mut grants = Self::default();
         for (tool, level) in tool_permissions {
+            if canonical_tool_name(tool) == "browser" {
+                continue;
+            }
             if EffectiveApprovalPolicy::from_legacy_value(level) == EffectiveApprovalPolicy::Allow {
                 grants
                     .granted
@@ -160,23 +150,54 @@ impl SessionPermissionGrants {
         input: &Value,
         current_session_id: &Uuid,
     ) {
+        let carries_browser_permission =
+            browser_permission_value_for_tool_call(&definition.id, input).is_some();
         let categories = grant_categories_for_tool_call(definition, input, current_session_id);
-        if canonical_tool_name(&definition.id) != "browser" || categories.is_empty() {
+        if canonical_tool_name(&definition.id) != "browser" && !carries_browser_permission {
             self.granted
                 .insert(SessionGrantTarget::Tool(normalize_tool_id(&definition.id)));
+            self.granted.insert(SessionGrantTarget::Surface(
+                classify_tool_permission_surface(&definition.id),
+            ));
         }
-        self.granted.insert(SessionGrantTarget::Surface(
-            classify_tool_permission_surface(&definition.id),
-        ));
         for category in categories {
             self.granted.insert(SessionGrantTarget::Category(category));
         }
     }
 
+    /// Inserts Browser grants for an approved Browser call using an explicit Browser scope.
+    pub(crate) fn grant_browser_tool_call(
+        &mut self,
+        definition: &ToolDefinition,
+        input: &Value,
+        current_session_id: &Uuid,
+        scope: super::browser_grants::BrowserGrantScopeKind,
+    ) {
+        if canonical_tool_name(&definition.id) != "browser" {
+            if browser_permission_value_for_tool_call(&definition.id, input).is_none() {
+                self.grant_tool_call(definition, input, current_session_id);
+                return;
+            }
+        }
+        let context = browser_permission_context_for_tool(
+            &definition.id,
+            input,
+            &current_session_id.to_string(),
+            &[],
+        );
+        for category in super::browser_grants::browser_grant_categories_for_scope(&context, scope) {
+            self.granted.insert(SessionGrantTarget::Category(
+                PermissionGrantCategory::Browser(category),
+            ));
+        }
+    }
+
+    /// Grants access to a filesystem path prefix for the current session.
     pub(crate) fn grant_path_prefix(&mut self, path: PathBuf) {
         self.granted.insert(SessionGrantTarget::PathPrefix(path));
     }
 
+    /// Returns legacy whole-tool allow entries for compatibility snapshots.
     pub(crate) fn legacy_tool_permissions(&self) -> HashMap<String, String> {
         self.granted
             .iter()
@@ -206,8 +227,8 @@ impl SessionPermissionGrants {
                     profile.surface_grants.insert(*surface);
                 }
                 SessionGrantTarget::Category(category) => {
-                    profile.category_grants.insert(*category);
-                    profile.surface_grants.insert(category_surface(*category));
+                    profile.category_grants.insert(category.clone());
+                    profile.surface_grants.insert(category_surface(category));
                 }
                 SessionGrantTarget::PathPrefix(path) => {
                     profile.path_prefix_grants.push(path.clone());
@@ -235,7 +256,8 @@ impl SessionPermissionGrants {
 }
 
 impl SessionPermissionState {
-    /// Builds a session permission state from explicit allow-all and grant values.
+    /// Builds a canonical session permission state from explicit allow-all and
+    /// grant values.
     pub(crate) fn new(allow_all_tools: bool, grants: SessionPermissionGrants) -> Self {
         Self {
             allow_all_tools,
@@ -243,8 +265,8 @@ impl SessionPermissionState {
         }
     }
 
-    /// Returns true when the session is in allow-all mode.
-    pub(crate) fn allow_all_tools(&self) -> bool {
+    /// Returns true when the canonical state is in allow-all mode.
+    pub fn allow_all_tools(&self) -> bool {
         self.allow_all_tools
     }
 
@@ -263,31 +285,36 @@ impl SessionPermissionState {
         &mut self.grants
     }
 
-    /// Returns true when this session currently carries any Browser-surface grant.
+    /// Returns true when this session currently carries any Browser typed grant.
     pub fn has_browser_grant(&self) -> bool {
         self.grants.touches_surface(PermissionSurface::Browser)
+    }
+
+    /// Builds a legacy-compatible projection that can round-trip through
+    /// durable snapshots and older resume semantics.
+    pub fn legacy_snapshot_projection(&self) -> (bool, HashMap<String, String>) {
+        (self.allow_all_tools, self.grants.legacy_tool_permissions())
+    }
+
+    /// Rebuilds typed session permission state from a legacy-compatible
+    /// snapshot projection.
+    pub fn from_legacy_snapshot_projection(
+        allow_all_tools: bool,
+        tool_permissions: &HashMap<String, String>,
+    ) -> Self {
+        Self::new(
+            allow_all_tools,
+            SessionPermissionGrants::from_legacy_tool_permissions(tool_permissions),
+        )
     }
 }
 
 impl SessionGrantProfile {
-    fn browser_scope_is_granted(&self, scope: &BrowserPermissionScope) -> bool {
-        let Some(action) = scope.action else {
-            return false;
-        };
-        if !self
-            .category_grants
-            .contains(&PermissionGrantCategory::Browser(
-                BrowserGrantCategory::Action(action),
-            ))
-        {
-            return false;
-        }
-        !scope.is_cross_session
-            || self
-                .category_grants
-                .contains(&PermissionGrantCategory::Browser(
-                    BrowserGrantCategory::CrossSessionAccess,
-                ))
+    fn browser_context_is_granted(&self, context: &BrowserPermissionContext) -> bool {
+        browser_context_matches_grants(context, |grant| {
+            self.category_grants
+                .contains(&PermissionGrantCategory::Browser(grant.clone()))
+        })
     }
 }
 
@@ -301,7 +328,7 @@ pub(crate) struct SessionGrantProfile {
     pub(crate) path_prefix_grants: Vec<PathBuf>,
 }
 
-/// Effective permission abstraction derived from legacy config and session state.
+/// Effective permission abstraction derived from config and session state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EffectivePermissionProfile {
     pub(crate) approval_default: EffectiveApprovalPolicy,
@@ -319,20 +346,21 @@ pub(crate) struct EffectivePermissionProfile {
 }
 
 impl EffectivePermissionProfile {
-    /// Builds the effective profile from the current legacy permission sources.
-    pub(crate) fn from_legacy_sources(
+    /// Builds the effective profile from the current runtime permission sources.
+    pub(crate) fn from_session_state(
         cwd: &Path,
         working_dirs: &[PathBuf],
         permissions: &PermissionsSettings,
         sandbox: &SandboxSettings,
         current_session_id: &Uuid,
-        session_allow_all: bool,
-        session_grants: &SessionPermissionGrants,
+        session_state: &SessionPermissionState,
         plan_mode: bool,
         active_plan_path: Option<PathBuf>,
         request_tool_filter: Option<RequestToolFilter>,
     ) -> Self {
-        let legacy_tool_policies = collect_legacy_tool_policies(permissions, session_grants);
+        let session_allow_all = session_state.allow_all_tools();
+        let session_grants = session_state.grants();
+        let legacy_tool_policies = collect_legacy_tool_policies(permissions);
         let approval_default = if session_allow_all {
             EffectiveApprovalPolicy::Allow
         } else {
@@ -350,6 +378,7 @@ impl EffectivePermissionProfile {
             workspace_roots: std::iter::once(cwd.to_path_buf())
                 .chain(working_dirs.iter().cloned())
                 .chain(grants.path_prefix_grants.iter().cloned())
+                .map(canonical_workspace_root)
                 .collect(),
             surfaces,
             grants,
@@ -386,19 +415,36 @@ impl EffectivePermissionProfile {
             .unwrap_or(Ok(true))
     }
 
-    /// Returns the normalized Browser permission scope for one tool call.
-    pub(crate) fn browser_scope(&self, input: &Value) -> BrowserPermissionScope {
-        browser_permission_scope(input, &self.current_session_id)
+    /// Returns the structured Browser permission context for one tool call.
+    pub(crate) fn browser_context(&self, input: &Value) -> BrowserPermissionContext {
+        browser_permission_context(input, &self.current_session_id, &self.workspace_roots)
+    }
+
+    /// Returns the structured Browser permission context for one permission-bearing tool call.
+    pub(crate) fn browser_context_for_tool(
+        &self,
+        tool_id: &str,
+        input: &Value,
+    ) -> BrowserPermissionContext {
+        browser_permission_context_for_tool(
+            tool_id,
+            input,
+            &self.current_session_id,
+            &self.workspace_roots,
+        )
+    }
+
+    /// Returns true when the accumulated session grants explicitly allow the Browser context.
+    pub(crate) fn browser_context_is_session_granted(
+        &self,
+        context: &BrowserPermissionContext,
+    ) -> bool {
+        self.grants.browser_context_is_granted(context)
     }
 
     /// Returns true when the accumulated session grants explicitly allow this Browser call.
     pub(crate) fn browser_session_grant_allows(&self, input: &Value) -> bool {
-        self.grants
-            .browser_scope_is_granted(&self.browser_scope(input))
-            || self
-                .grants
-                .tool_overrides
-                .contains_key(&normalize_tool_id("Browser"))
+        self.browser_context_is_session_granted(&self.browser_context(input))
     }
 }
 
@@ -523,25 +569,22 @@ pub(crate) fn classify_tool_permission_surface(tool_id: &str) -> PermissionSurfa
 
 fn collect_legacy_tool_policies(
     permissions: &PermissionsSettings,
-    session_grants: &SessionPermissionGrants,
 ) -> BTreeMap<String, EffectiveApprovalPolicy> {
-    let session_tool_permissions = session_grants.legacy_tool_permissions();
     permissions
         .tools
         .iter()
+        .filter(|(tool, _)| canonical_tool_name(tool) != "browser")
         .map(|(tool, level)| {
             (
                 normalize_tool_id(tool),
                 EffectiveApprovalPolicy::from_legacy_value(level),
             )
         })
-        .chain(session_tool_permissions.iter().map(|(tool, level)| {
-            (
-                normalize_tool_id(tool),
-                EffectiveApprovalPolicy::from_legacy_value(level),
-            )
-        }))
         .collect()
+}
+
+fn canonical_workspace_root(path: PathBuf) -> PathBuf {
+    std::fs::canonicalize(&path).unwrap_or(path)
 }
 
 fn build_surface_profiles(
@@ -550,7 +593,7 @@ fn build_surface_profiles(
     session_allow_all: bool,
     session_grants: &SessionPermissionGrants,
 ) -> BTreeMap<PermissionSurface, EffectiveSurfaceProfile> {
-    let policies = collect_legacy_tool_policies(permissions, session_grants);
+    let policies = collect_legacy_tool_policies(permissions);
     let mut surfaces = BTreeMap::new();
     for surface in [
         PermissionSurface::Filesystem,
@@ -563,7 +606,11 @@ fn build_surface_profiles(
     ] {
         let tool_keys = surface_tool_keys(surface);
         let default_approval = if session_allow_all {
-            EffectiveApprovalPolicy::Allow
+            if surface == PermissionSurface::Browser {
+                surface_default_policy(surface)
+            } else {
+                EffectiveApprovalPolicy::Allow
+            }
         } else {
             tool_keys
                 .iter()
@@ -571,7 +618,11 @@ fn build_surface_profiles(
                 .find(|policy| *policy != EffectiveApprovalPolicy::Allow)
                 .unwrap_or(surface_default_policy(surface))
         };
-        let session_granted = session_allow_all || session_grants.touches_surface(surface);
+        let session_granted = if surface == PermissionSurface::Browser {
+            session_grants.touches_surface(surface)
+        } else {
+            session_allow_all || session_grants.touches_surface(surface)
+        };
         surfaces.insert(
             surface,
             EffectiveSurfaceProfile {
@@ -591,7 +642,7 @@ fn surface_default_policy(surface: PermissionSurface) -> EffectiveApprovalPolicy
         PermissionSurface::Filesystem => EffectiveApprovalPolicy::OnRequest,
         PermissionSurface::Process => EffectiveApprovalPolicy::OnRequest,
         PermissionSurface::Network => EffectiveApprovalPolicy::Ask,
-        PermissionSurface::Browser => EffectiveApprovalPolicy::OnRequest,
+        PermissionSurface::Browser => EffectiveApprovalPolicy::Ask,
         PermissionSurface::Mcp => EffectiveApprovalPolicy::OnRequest,
         PermissionSurface::Workflow => EffectiveApprovalPolicy::Allow,
         PermissionSurface::Agent => EffectiveApprovalPolicy::Allow,
@@ -611,7 +662,7 @@ fn surface_enforcement(surface: PermissionSurface) -> SurfaceEnforcement {
     }
 }
 
-fn surface_notes(surface: PermissionSurface, sandbox: &SandboxSettings) -> Vec<String> {
+fn surface_notes(surface: PermissionSurface, _sandbox: &SandboxSettings) -> Vec<String> {
     match surface {
         PermissionSurface::Filesystem => vec![
             "Path access is bounded by workspace roots on the legacy Claude tool path.".to_string(),
@@ -619,17 +670,10 @@ fn surface_notes(surface: PermissionSurface, sandbox: &SandboxSettings) -> Vec<S
                 .to_string(),
         ],
         PermissionSurface::Process => {
-            let mut notes = vec![
+            vec![
                 "Shell approval and dangerous-command checks are policy-level in puffer-core.".to_string(),
                 "Process execution itself is not sandbox-enforced by the Bash tool implementation.".to_string(),
-            ];
-            if sandbox.allow_unsandboxed_fallback {
-                notes.push(
-                    "dangerouslyDisableSandbox requests can pass policy when unsandboxed fallback is enabled."
-                        .to_string(),
-                );
-            }
-            notes
+            ]
         }
         PermissionSurface::Network => vec![
             "WebSearch is approval-gated in policy.".to_string(),
@@ -637,7 +681,7 @@ fn surface_notes(surface: PermissionSurface, sandbox: &SandboxSettings) -> Vec<S
                 .to_string(),
         ],
         PermissionSurface::Browser => vec![
-            "Browser access is approval-classified here but executed via the daemon without in-process sandbox mediation."
+            "Browser access is evaluated by the `[browser]` section in permissions.toml and typed session grants."
                 .to_string(),
         ],
         PermissionSurface::Mcp => vec![
@@ -672,7 +716,7 @@ fn surface_tool_keys(surface: PermissionSurface) -> BTreeSet<String> {
         ][..],
         PermissionSurface::Process => &["Bash", "PowerShell"],
         PermissionSurface::Network => &["WebSearch", "WebFetch"],
-        PermissionSurface::Browser => &["Browser"],
+        PermissionSurface::Browser => &[],
         PermissionSurface::Mcp => &["ListMcpResourcesTool", "ReadMcpResourceTool"],
         PermissionSurface::Workflow => &["AskUserQuestion", "SendMessage", "TodoWrite"],
         PermissionSurface::Agent => &["Agent"],
@@ -718,28 +762,28 @@ fn grant_categories_for_tool_call(
     current_session_id: &Uuid,
 ) -> Vec<PermissionGrantCategory> {
     match canonical_tool_name(&definition.id).as_str() {
-        "browser" => browser_grant_categories(input, current_session_id)
-            .into_iter()
-            .map(PermissionGrantCategory::Browser)
-            .collect(),
+        "browser" | "bash" | "powershell" => {
+            browser_permission_value_for_tool_call(&definition.id, input)
+                .map(|_| {
+                    let context = browser_permission_context_for_tool(
+                        &definition.id,
+                        input,
+                        &current_session_id.to_string(),
+                        &[],
+                    );
+                    browser_grant_categories(&context)
+                        .into_iter()
+                        .map(PermissionGrantCategory::Browser)
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
         "sendmessage" => workflow_grant_categories(input)
             .into_iter()
             .map(PermissionGrantCategory::Workflow)
             .collect(),
         _ => Vec::new(),
     }
-}
-
-fn browser_grant_categories(input: &Value, current_session_id: &Uuid) -> Vec<BrowserGrantCategory> {
-    let mut categories = BTreeSet::new();
-    let scope = browser_permission_scope(input, &current_session_id.to_string());
-    if let Some(action) = scope.action {
-        categories.insert(BrowserGrantCategory::Action(action));
-    }
-    if scope.is_cross_session {
-        categories.insert(BrowserGrantCategory::CrossSessionAccess);
-    }
-    categories.into_iter().collect()
 }
 
 fn workflow_grant_categories(input: &Value) -> Vec<WorkflowGrantCategory> {
@@ -753,44 +797,7 @@ fn string_field<'a>(input: &'a Value, key: &str) -> Option<&'a str> {
     input.get(key).and_then(Value::as_str)
 }
 
-fn browser_permission_scope(input: &Value, current_session_id: &str) -> BrowserPermissionScope {
-    let root_session_id = browser_root_session_id(input, current_session_id);
-    BrowserPermissionScope {
-        action: string_field(input, "action")
-            .map(normalize_browser_action)
-            .and_then(|action| browser_action_category(action.as_str())),
-        is_cross_session: root_session_id != current_session_id,
-        root_session_id,
-    }
-}
-
-fn browser_root_session_id(input: &Value, current_session_id: &str) -> String {
-    string_field(input, "sessionId")
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .filter(|value| *value != "current")
-        .unwrap_or(current_session_id)
-        .to_string()
-}
-
-fn browser_action_category(action: &str) -> Option<BrowserActionCategory> {
-    match action {
-        "list" | "snapshot" | "screenshot" => Some(BrowserActionCategory::Inspect),
-        "open" | "new" | "focus" | "close" | "quit" | "exit" | "navigate" | "reload" | "back"
-        | "forward" => Some(BrowserActionCategory::Navigate),
-        "click" | "dblclick" | "hover" | "focusref" | "type" | "inserttext" | "fill" | "select"
-        | "upload" | "check" | "uncheck" | "press" | "keydown" | "keyup" | "scroll"
-        | "scrollintoview" => Some(BrowserActionCategory::Interact),
-        "evaluate" | "eval" => Some(BrowserActionCategory::Evaluate),
-        _ => None,
-    }
-}
-
-fn normalize_browser_action(action: &str) -> String {
-    action.trim().replace(['_', '-'], "").to_ascii_lowercase()
-}
-
-fn category_surface(category: PermissionGrantCategory) -> PermissionSurface {
+fn category_surface(category: &PermissionGrantCategory) -> PermissionSurface {
     match category {
         PermissionGrantCategory::Browser(_) => PermissionSurface::Browser,
         PermissionGrantCategory::Workflow(_) => PermissionSurface::Workflow,
@@ -801,7 +808,7 @@ fn grant_target_matches_surface(grant: &SessionGrantTarget, surface: PermissionS
     match grant {
         SessionGrantTarget::Tool(tool) => classify_tool_permission_surface(tool) == surface,
         SessionGrantTarget::Surface(candidate) => *candidate == surface,
-        SessionGrantTarget::Category(category) => category_surface(*category) == surface,
+        SessionGrantTarget::Category(category) => category_surface(category) == surface,
         SessionGrantTarget::PathPrefix(_) => surface == PermissionSurface::Filesystem,
     }
 }

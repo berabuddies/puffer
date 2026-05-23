@@ -271,6 +271,7 @@ pub(crate) struct SettingsConfigDto {
 pub(crate) struct ResourceCountsDto {
     pub(crate) providers: usize,
     pub(crate) tools: usize,
+    pub(crate) internal_tools: usize,
     pub(crate) agents: usize,
     pub(crate) prompts: usize,
     pub(crate) hooks: usize,

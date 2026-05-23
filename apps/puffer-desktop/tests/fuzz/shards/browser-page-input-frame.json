@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "browser-page-input-frame",
+  "title": "Browser page keyboard input and frame stream",
+  "priority": 10,
+  "seed": "browser-tab-race",
+  "startNode": "browser/page-input-frame",
+  "entrypoint": "browser.page-input",
+  "iterations": 16,
+  "steps": 16,
+  "replayLimit": 3,
+  "ownedNodes": ["browser/page-input-frame"],
+  "allowedSetupNodes": ["app", "workspace", "agent-detail", "browser"],
+  "ownedCoverage": ["control:browser.page-input", "state:browser.frame-streaming", "async:out-of-order-frame"],
+  "allowedAsyncEvents": ["out-of-order-frame", "stale-tab-event", "late-success", "late-failure", "reconnect"],
+  "invariants": ["app-no-crash", "active-tab-stable", "no-permanent-loading"]
+}

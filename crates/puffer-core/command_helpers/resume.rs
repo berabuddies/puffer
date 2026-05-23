@@ -207,7 +207,10 @@ fn resume_scope(path: &Path) -> ResumeScope {
 
 fn session_scope_matches(scope: &ResumeScope, session_cwd: &Path) -> bool {
     match scope {
-        ResumeScope::Repo(repo_root) => git_toplevel(session_cwd).as_ref() == Some(repo_root),
+        ResumeScope::Repo(repo_root) => {
+            let session_path = normalize_resume_path(session_cwd);
+            path_is_inside(&session_path, repo_root)
+        }
         ResumeScope::Directory(directory) => {
             let session_path = normalize_resume_path(session_cwd);
             session_path == *directory
@@ -215,6 +218,10 @@ fn session_scope_matches(scope: &ResumeScope, session_cwd: &Path) -> bool {
                 || directory.starts_with(&session_path)
         }
     }
+}
+
+fn path_is_inside(path: &Path, root: &Path) -> bool {
+    path == root || path.starts_with(root)
 }
 
 fn git_toplevel(path: &Path) -> Option<PathBuf> {
@@ -235,7 +242,27 @@ fn git_toplevel(path: &Path) -> Option<PathBuf> {
 }
 
 fn normalize_resume_path(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    if let Ok(normalized) = std::fs::canonicalize(path) {
+        return normalized;
+    }
+
+    let mut candidate = path;
+    let mut missing_suffix = PathBuf::new();
+    while let Some(name) = candidate.file_name() {
+        let mut next_suffix = PathBuf::from(name);
+        next_suffix.push(&missing_suffix);
+        missing_suffix = next_suffix;
+
+        let Some(parent) = candidate.parent().filter(|parent| *parent != candidate) else {
+            break;
+        };
+        candidate = parent;
+        if let Ok(normalized_parent) = std::fs::canonicalize(candidate) {
+            return normalized_parent.join(missing_suffix);
+        }
+    }
+
+    path.to_path_buf()
 }
 
 fn looks_like_session_id(query: &str) -> bool {
@@ -407,8 +434,8 @@ fn resume_into_session(
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_resume_launch, resume_into_session, resume_scope, search_sessions,
-        session_scope_matches, ResumeLaunchResolution,
+        normalize_resume_path, resolve_resume_launch, resume_into_session, resume_scope,
+        search_sessions, session_scope_matches, ResumeLaunchResolution, ResumeScope,
     };
     use crate::AppState;
     use puffer_config::PufferConfig;
@@ -514,6 +541,23 @@ mod tests {
         ));
         assert!(session_scope_matches(&scope, Path::new("/tmp/workspace")));
         assert!(!session_scope_matches(&scope, Path::new("/tmp/elsewhere")));
+    }
+
+    #[test]
+    fn repo_scope_matches_by_path_containment_without_session_git_probe() {
+        let tempdir = tempdir().unwrap();
+        let repo_root = tempdir.path().join("repo");
+        let child = repo_root.join("crates/puffer-core");
+        let deleted_child = repo_root.join("deleted/session/path");
+        let sibling_with_prefix = tempdir.path().join("repo-sibling");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::create_dir_all(&sibling_with_prefix).unwrap();
+        let scope = ResumeScope::Repo(normalize_resume_path(&repo_root));
+
+        assert!(session_scope_matches(&scope, &repo_root));
+        assert!(session_scope_matches(&scope, &child));
+        assert!(session_scope_matches(&scope, &deleted_child));
+        assert!(!session_scope_matches(&scope, &sibling_with_prefix));
     }
 
     #[test]

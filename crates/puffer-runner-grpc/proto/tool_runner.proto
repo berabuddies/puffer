@@ -64,16 +64,30 @@ message RunnerCapabilities {
   string version = 2;
   repeated string supported_tools = 3;
   bool mcp_supported = 4;
+  reserved 5;
+}
+
+enum FilesystemSandboxMode {
+  UNSPECIFIED = 0;
+  READ_ONLY = 1;
+  WORKSPACE_WRITE = 2;
+  DANGER_FULL_ACCESS = 3;
+  CUSTOM = 4;
+}
+
+message FilesystemExecutionPolicy {
+  FilesystemSandboxMode sandbox_mode = 1;
 }
 
 message ToolRequest {
   string tool_id = 1;
   string cwd = 2;
   repeated string working_dirs = 3;
-  bool allow_all_paths = 4;
+  reserved 4;
   // JSON-encoded tool input (matches the tool's input schema).
   string input_json = 5;
   optional string session_id = 6;
+  FilesystemExecutionPolicy filesystem = 7;
 }
 
 message StreamChunk {
@@ -369,4 +383,3 @@ message OAuthStatusResponse {
     OAuthStatusPresent present = 2;
   }
 }
-

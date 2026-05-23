@@ -14,8 +14,8 @@ pub fn parse_skill_md(text: &str) -> Result<SkillCandidate> {
         .or_else(|| trimmed.strip_prefix("---\r\n"))
         .ok_or_else(|| anyhow!("missing opening --- delimiter"))?;
     let (frontmatter_text, body) = split_frontmatter_body(rest)?;
-    let frontmatter: SkillFrontmatter = serde_yaml::from_str(frontmatter_text)
-        .context("parsing skill frontmatter as YAML")?;
+    let frontmatter: SkillFrontmatter =
+        serde_yaml::from_str(frontmatter_text).context("parsing skill frontmatter as YAML")?;
 
     validate_frontmatter(&frontmatter)?;
 
@@ -67,10 +67,7 @@ mod tests {
         let doc = "---\nname: my-skill\ndescription: Use when debugging X\n---\nBody text here.";
         let candidate = parse_skill_md(doc).unwrap();
         assert_eq!(candidate.frontmatter.name, "my-skill");
-        assert_eq!(
-            candidate.frontmatter.description,
-            "Use when debugging X"
-        );
+        assert_eq!(candidate.frontmatter.description, "Use when debugging X");
         assert_eq!(candidate.body, "Body text here.");
     }
 

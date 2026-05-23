@@ -400,7 +400,7 @@ mod tests {
     #[test]
     fn parses_tool_messages_with_permission_output() {
         let parsed = parse_tool_message(
-            "Tool Bash [error]\ninput: {\"command\":\"git push\"}\nPermission required: shell command matches sandbox exclusion `git push`",
+            "Tool Bash [error]\ninput: {\"command\":\"git push\"}\nPermission required: shell command matches project shell exclusion `git push`",
         )
         .unwrap();
         let dialog = permission_dialog(&parsed.output_text).unwrap();

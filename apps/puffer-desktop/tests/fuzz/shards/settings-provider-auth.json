@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "settings-provider-auth",
+  "title": "Settings provider credential import and refresh",
+  "priority": 9,
+  "seed": "provider-auth-model-race",
+  "startNode": "settings/provider-auth",
+  "entrypoint": "settings.provider-import",
+  "iterations": 16,
+  "steps": 16,
+  "replayLimit": 3,
+  "ownedNodes": ["settings/provider-auth"],
+  "allowedSetupNodes": ["app", "settings"],
+  "ownedCoverage": ["route:settings-providers", "control:settings.provider-import", "control:settings.provider-refresh", "state:auth.refreshing", "state:auth.multi-provider"],
+  "allowedAsyncEvents": ["duplicate-submit", "late-success", "late-failure", "server-push-update", "reconnect"],
+  "invariants": ["app-no-crash", "controls-disabled-while-pending", "draft-preserved-on-failure", "no-permanent-loading"]
+}

@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "terminal-pty-lifecycle",
+  "title": "Terminal pty open, input, close, and stale output",
+  "priority": 8,
+  "seed": "files-terminal-race",
+  "startNode": "terminal/pty-lifecycle",
+  "entrypoint": "terminal.input",
+  "iterations": 12,
+  "steps": 14,
+  "replayLimit": 2,
+  "ownedNodes": ["terminal/pty-lifecycle"],
+  "allowedSetupNodes": ["app", "workspace", "agent-detail", "terminal"],
+  "ownedCoverage": ["route:terminal-pane", "control:terminal.new-tab", "control:terminal.input", "control:terminal.close-tab", "state:terminal.active", "state:terminal.closing"],
+  "allowedAsyncEvents": ["late-success", "late-failure", "stale-session-event", "reconnect"],
+  "invariants": ["app-no-crash", "active-session-stable", "stale-error-scoped", "no-permanent-loading"]
+}

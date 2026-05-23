@@ -492,6 +492,7 @@ impl ProviderPack {
 pub struct LoadedResources {
     pub providers: Vec<LoadedItem<ProviderPack>>,
     pub tools: Vec<LoadedItem<ToolSpec>>,
+    pub internal_tools: Vec<LoadedItem<ToolSpec>>,
     pub agents: Vec<LoadedItem<AgentSpec>>,
     pub prompts: Vec<LoadedItem<PromptTemplate>>,
     pub hooks: Vec<LoadedItem<HookSpec>>,
@@ -537,7 +538,13 @@ mod tests {
         let yaml = include_str!("../../../resources/providers/openai.yaml");
         let pack: ProviderPack = serde_yaml::from_str(yaml).expect("openai.yaml parses");
         assert_eq!(pack.id, "openai");
-        assert_eq!(pack.discovery.as_ref().expect("discovery").max_output_tokens, 128_000);
+        assert_eq!(
+            pack.discovery
+                .as_ref()
+                .expect("discovery")
+                .max_output_tokens,
+            128_000
+        );
         let first = pack.models.first().expect("at least one fallback model");
         assert_eq!(first.id, "gpt-5.5");
         assert_eq!(first.max_output_tokens, 128_000);

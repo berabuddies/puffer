@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "chat-stop-cancel",
+  "title": "Chat running turn stop and cancel settle",
+  "priority": 9,
+  "seed": "chat-turn-race",
+  "startNode": "chat/stop-cancel",
+  "entrypoint": "chat.stop",
+  "iterations": 18,
+  "steps": 18,
+  "replayLimit": 3,
+  "ownedNodes": ["chat/stop-cancel"],
+  "allowedSetupNodes": ["app", "workspace", "agent-detail", "chat", "chat/composer-send"],
+  "ownedCoverage": ["control:chat.stop", "state:session.running", "state:session.idle", "async:late-failure"],
+  "allowedAsyncEvents": ["late-failure", "late-success", "dropped-response", "reconnect"],
+  "invariants": ["app-no-crash", "no-permanent-loading", "active-session-stable", "controls-disabled-while-pending"]
+}

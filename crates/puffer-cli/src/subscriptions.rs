@@ -3,7 +3,7 @@
 //!
 //! The subscription manager owns the in-process event bus, the spec
 //! store on disk, the supervised subscriber children, and the router
-//! task. Workflow tools (`SubscriptionCreate`, `TelegramLoginStart`, …)
+//! task. Workflow tools and internal tools (`SubscriptionCreate`, `Telegram`, …)
 //! reach into it through a `OnceLock` installed here.
 
 use anyhow::{Context, Result};

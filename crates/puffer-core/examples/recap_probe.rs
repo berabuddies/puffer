@@ -28,8 +28,7 @@ fn main() -> Result<()> {
     let config = load_config(&paths)?;
     let auth_path = paths.user_config_dir.join("auth.json");
     let mut auth_store = puffer_provider_registry::AuthStore::load(&auth_path)?;
-    let resources =
-        load_resources(&paths, &puffer_core::runner_adapter::LocalToolRunner::new())?;
+    let resources = load_resources(&paths, &puffer_core::runner_adapter::LocalToolRunner::new())?;
 
     let mut providers = ProviderRegistry::new();
     for provider in &resources.providers {
@@ -57,8 +56,12 @@ fn main() -> Result<()> {
     }
     let _ = providers.discover_and_merge_all(&auth_store);
 
-    let provider_id = std::env::var("PROBE_PROVIDER")
-        .unwrap_or_else(|_| config.default_provider.clone().unwrap_or_else(|| "hanbbq".to_string()));
+    let provider_id = std::env::var("PROBE_PROVIDER").unwrap_or_else(|_| {
+        config
+            .default_provider
+            .clone()
+            .unwrap_or_else(|| "hanbbq".to_string())
+    });
     let model = resolve_model(&providers, &provider_id)?;
 
     eprintln!("[probe] provider={provider_id} model={model}");
@@ -84,12 +87,18 @@ fn main() -> Result<()> {
     // Seed a small synthetic exchange so the recap has something concrete
     // to summarize. The model never persists past the recap turn, so
     // these don't pollute anything.
-    state.push_message(MessageRole::User, "Add a /recap command to puffer.".to_string());
+    state.push_message(
+        MessageRole::User,
+        "Add a /recap command to puffer.".to_string(),
+    );
     state.push_message(
         MessageRole::Assistant,
         "Added RecapConfig, recap.rs side-turn, slash command, and unit tests.".to_string(),
     );
-    state.push_message(MessageRole::User, "Now wire the TUI auto-trigger.".to_string());
+    state.push_message(
+        MessageRole::User,
+        "Now wire the TUI auto-trigger.".to_string(),
+    );
     state.push_message(
         MessageRole::Assistant,
         "Tracking last_user_input_at + enqueueing /recap when idle elapsed exceeds config.recap.idle_secs.".to_string(),
@@ -108,7 +117,10 @@ fn main() -> Result<()> {
         "/recap",
     )?;
 
-    eprintln!("[probe] transcript after dispatch: {} messages", state.transcript.len());
+    eprintln!(
+        "[probe] transcript after dispatch: {} messages",
+        state.transcript.len()
+    );
 
     let last = state
         .transcript

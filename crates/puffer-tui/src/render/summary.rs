@@ -46,11 +46,10 @@ pub(super) fn top_panel_compact_lines(
     };
     let context = if remote == "local" {
         format!(
-            "{} · {} msgs · {} wds · sandbox {}{}{}",
+            "{} · {} msgs · {} wds · permissions ACL{}{}",
             path_tail(&state.cwd),
             state.transcript.len(),
             state.working_dirs.len(),
-            state.sandbox_mode,
             ctx_pct,
             cache_label,
         )
@@ -125,11 +124,10 @@ pub(super) fn footer_status_line(state: &AppState, providers: &ProviderRegistry)
         _ => String::new(),
     };
     format!(
-        "{} · {}% left · {} · sandbox {}{}{}",
+        "{} · {}% left · {} · permissions ACL{}{}",
         current_model(state),
         remaining,
         footer_path(&state.cwd),
-        state.sandbox_mode,
         cache_label,
         bg_label,
     )

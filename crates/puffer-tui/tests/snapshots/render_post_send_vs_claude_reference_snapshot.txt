@@ -37,7 +37,7 @@ The working tree is clean.
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 ❯ Review changes, ask a question, or type /
-anthropic/claude-sonnet-4-5 · 99% left · /tmp/puffer · sandbox workspace-write
+anthropic/claude-sonnet-4-5 · 99% left · /tmp/puffer · permissions ACL
 
 Feature comparison:
 top_panel: claude=false puffer=true

@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "name": "puffer-uiux-intents",
+  "intents": [
+    {
+      "id": "turn-lifecycle",
+      "priority": 10,
+      "owner": "chat-composer-send",
+      "secondaryOwners": ["chat-stop-cancel", "chat-permission-question", "chat-session-switch-stale"],
+      "actions": ["type-composer", "send-prompt", "rapid-send-prompt", "stop-turn", "complete-turn"],
+      "asyncEvents": ["duplicate-submit", "late-success", "late-failure", "dropped-response", "reconnect"],
+      "invariants": ["one-request-per-intent", "draft-preserved-on-failure", "no-permanent-loading"]
+    },
+    {
+      "id": "session-switching",
+      "priority": 10,
+      "owner": "chat-session-switch-stale",
+      "secondaryOwners": ["workspace-agent-card-selection", "workspace-landing-search"],
+      "actions": ["open-agent-card", "switch-session", "emit-old-session-stream", "delayed-transcript-refresh"],
+      "asyncEvents": ["stale-session-event", "late-success", "late-failure", "delayed-list-refresh"],
+      "invariants": ["active-session-stable", "stale-error-scoped", "draft-preserved-on-failure"]
+    },
+    {
+      "id": "provider-model-scoping",
+      "priority": 9,
+      "owner": "new-agent-provider-model",
+      "secondaryOwners": ["settings-provider-auth", "settings-default-model", "chat-model-picker"],
+      "actions": ["import-credential", "refresh-credential", "save-default-model", "switch-new-agent-provider", "submit-new-agent", "change-model"],
+      "asyncEvents": ["delayed-list-refresh", "late-success", "late-failure", "reconnect"],
+      "invariants": ["no-cross-provider-model", "draft-preserved-on-failure"]
+    },
+    {
+      "id": "modal-focus-recovery",
+      "priority": 8,
+      "owner": "new-agent-base-create",
+      "secondaryOwners": ["workspace-connect-project-modal", "workspace-switch-workspace-modal"],
+      "actions": ["open-new-agent", "open-connect-project", "open-workspace-picker", "assert-modal-initial-focus", "assert-modal-focus-trap"],
+      "asyncEvents": ["delayed-list-refresh", "reconnect"],
+      "invariants": ["modal-initial-focus", "modal-focus-trapped"]
+    },
+    {
+      "id": "browser-tab-context",
+      "priority": 8,
+      "owner": "browser-tab-lifecycle",
+      "secondaryOwners": ["browser-address-navigation", "browser-page-input-frame"],
+      "actions": ["open-browser-pane", "type-url", "press-address-enter", "click-new-tab", "close-active-tab", "switch-tab", "type-page-input"],
+      "asyncEvents": ["stale-tab-event", "out-of-order-frame", "late-success", "late-failure"],
+      "invariants": ["active-tab-stable", "draft-preserved-on-failure", "no-permanent-loading"]
+    },
+    {
+      "id": "file-terminal-scoping",
+      "priority": 7,
+      "owner": "files-editor-save",
+      "secondaryOwners": ["terminal-pty-lifecycle"],
+      "actions": ["open-file", "edit-file", "save-file", "open-terminal", "type-terminal", "close-terminal"],
+      "asyncEvents": ["late-success", "late-failure", "stale-session-event", "reconnect"],
+      "invariants": ["draft-preserved-on-failure", "active-session-stable", "no-permanent-loading"]
+    }
+  ],
+  "races": [
+    {
+      "id": "race-duplicate-turn-submit",
+      "priority": 10,
+      "intent": "turn-lifecycle",
+      "owner": "chat-composer-send",
+      "asyncEvents": ["duplicate-submit"],
+      "invariants": ["one-request-per-intent"]
+    },
+    {
+      "id": "race-session-switch-late-stream",
+      "priority": 10,
+      "intent": "session-switching",
+      "owner": "chat-session-switch-stale",
+      "asyncEvents": ["stale-session-event", "late-success", "late-failure"],
+      "invariants": ["active-session-stable", "stale-error-scoped"]
+    },
+    {
+      "id": "race-provider-refresh-new-agent-submit",
+      "priority": 9,
+      "intent": "provider-model-scoping",
+      "owner": "new-agent-provider-model",
+      "asyncEvents": ["delayed-list-refresh", "late-success", "reconnect"],
+      "invariants": ["no-cross-provider-model"]
+    },
+    {
+      "id": "race-browser-stale-tab-event",
+      "priority": 8,
+      "intent": "browser-tab-context",
+      "owner": "browser-tab-lifecycle",
+      "asyncEvents": ["stale-tab-event", "out-of-order-frame"],
+      "invariants": ["active-tab-stable"]
+    }
+  ]
+}

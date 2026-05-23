@@ -1,17 +1,29 @@
 //! CLI command execution for `puffer browser`.
 
-use crate::cli_args::{
+use crate::browser_args::{
     BrowserArgs, BrowserCommand, BrowserKeyboardCommand, BrowserTabCommand, BrowserTargetArgs,
 };
-use crate::daemon::Handshake;
-use crate::daemon_browser::{
-    default_cli_session_id, ensure_daemon, send_daemon_request, BrowserTabInfo, BrowserTabsState,
+use crate::browser_output::{
+    normalize_agent_result, normalize_screenshot_result, print_execution_result,
+    redact_internal_fields, BrowserExecution, BrowserPrintKind, BrowserScreenshotOutput,
+    BrowserScreenshotWire,
 };
+#[cfg(test)]
+use crate::browser_output::{
+    ok_message, render_snapshot_body, BrowserSnapshotOutput, BrowserSnapshotRef,
+};
+use crate::daemon::Handshake;
+use crate::daemon_browser::{default_cli_session_id, ensure_daemon, send_daemon_request};
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+#[cfg(test)]
 use indexmap::IndexMap;
 use puffer_config::ConfigPaths;
-use serde::{Deserialize, Serialize};
+use puffer_tools::internal_permissions::{
+    request_internal_tool_permission_from_env, require_internal_tool_permission_from_env,
+    InternalToolPermissionRequest,
+};
+use serde::Serialize;
 use serde_json::{Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -23,9 +35,34 @@ pub(crate) fn run_browser_command(
     paths: &ConfigPaths,
     args: BrowserArgs,
 ) -> Result<()> {
+    run_browser_command_inner(cwd, paths, args, false)
+}
+
+/// Runs one `puffer internal-tool browser` command end to end.
+pub(crate) fn run_internal_browser_command(
+    cwd: &Path,
+    paths: &ConfigPaths,
+    args: BrowserArgs,
+) -> Result<()> {
+    run_browser_command_inner(cwd, paths, args, true)
+}
+
+fn run_browser_command_inner(
+    cwd: &Path,
+    paths: &ConfigPaths,
+    args: BrowserArgs,
+    internal_permission_required: bool,
+) -> Result<()> {
     let session_id = resolve_session_id(paths, args.session_id.as_deref())?;
     let handshake = ensure_daemon(paths)?;
-    let execution = execute_browser_command(cwd, paths, &handshake, &session_id, args.command)?;
+    let execution = execute_browser_command(
+        cwd,
+        paths,
+        &handshake,
+        &session_id,
+        args.command,
+        internal_permission_required,
+    )?;
 
     if args.json {
         println!(
@@ -49,6 +86,7 @@ fn execute_browser_command(
     handshake: &Handshake,
     session_id: &str,
     command: BrowserCommand,
+    internal_permission_required: bool,
 ) -> Result<BrowserExecution> {
     match command {
         BrowserCommand::List => execute_agent_action(
@@ -56,6 +94,7 @@ fn execute_browser_command(
             "list",
             base_payload("list", session_id),
             BrowserPrintKind::TabsState,
+            internal_permission_required,
         ),
         BrowserCommand::Open {
             url,
@@ -70,23 +109,47 @@ fn execute_browser_command(
             insert_optional_string(&mut payload, "label", label.as_deref());
             insert_optional_u32(&mut payload, "width", width);
             insert_optional_u32(&mut payload, "height", height);
-            execute_agent_action(handshake, "open", payload, BrowserPrintKind::TabInfo)
+            execute_agent_action(
+                handshake,
+                "open",
+                payload,
+                BrowserPrintKind::TabInfo,
+                internal_permission_required,
+            )
         }
         BrowserCommand::Navigate { url, target } => {
             let mut payload = base_payload("navigate", session_id);
             apply_target_args(&mut payload, &target);
             insert_optional_string(&mut payload, "url", Some(url.as_str()));
-            execute_agent_action(handshake, "navigate", payload, BrowserPrintKind::TabsState)
+            execute_agent_action(
+                handshake,
+                "navigate",
+                payload,
+                BrowserPrintKind::TabsState,
+                internal_permission_required,
+            )
         }
-        BrowserCommand::Back { target } => {
-            execute_targeted_ok_action(handshake, session_id, "back", target)
-        }
-        BrowserCommand::Forward { target } => {
-            execute_targeted_ok_action(handshake, session_id, "forward", target)
-        }
-        BrowserCommand::Reload { target } => {
-            execute_targeted_ok_action(handshake, session_id, "reload", target)
-        }
+        BrowserCommand::Back { target } => execute_targeted_ok_action(
+            handshake,
+            session_id,
+            "back",
+            target,
+            internal_permission_required,
+        ),
+        BrowserCommand::Forward { target } => execute_targeted_ok_action(
+            handshake,
+            session_id,
+            "forward",
+            target,
+            internal_permission_required,
+        ),
+        BrowserCommand::Reload { target } => execute_targeted_ok_action(
+            handshake,
+            session_id,
+            "reload",
+            target,
+            internal_permission_required,
+        ),
         BrowserCommand::Close { group, target } => {
             if group {
                 execute_agent_action(
@@ -94,11 +157,18 @@ fn execute_browser_command(
                     "quit",
                     base_payload("quit", session_id),
                     BrowserPrintKind::TabsState,
+                    internal_permission_required,
                 )
             } else {
                 let mut payload = base_payload("close", session_id);
                 apply_target_args(&mut payload, &target);
-                execute_agent_action(handshake, "close", payload, BrowserPrintKind::TabsState)
+                execute_agent_action(
+                    handshake,
+                    "close",
+                    payload,
+                    BrowserPrintKind::TabsState,
+                    internal_permission_required,
+                )
             }
         }
         BrowserCommand::Quit => execute_agent_action(
@@ -106,12 +176,21 @@ fn execute_browser_command(
             "quit",
             base_payload("quit", session_id),
             BrowserPrintKind::TabsState,
+            internal_permission_required,
         ),
-        BrowserCommand::Tab { command } => execute_tab_command(handshake, session_id, command),
+        BrowserCommand::Tab { command } => {
+            execute_tab_command(handshake, session_id, command, internal_permission_required)
+        }
         BrowserCommand::Snapshot { target } => {
             let mut payload = base_payload("snapshot", session_id);
             apply_target_args(&mut payload, &target);
-            execute_agent_action(handshake, "snapshot", payload, BrowserPrintKind::Snapshot)
+            execute_agent_action(
+                handshake,
+                "snapshot",
+                payload,
+                BrowserPrintKind::Snapshot,
+                internal_permission_required,
+            )
         }
         BrowserCommand::Screenshot {
             path,
@@ -131,30 +210,55 @@ fn execute_browser_command(
             screenshot_format,
             screenshot_quality,
             target,
+            internal_permission_required,
         ),
         BrowserCommand::Click { ref_id, target } => {
             let mut payload = base_payload("click", session_id);
             apply_target_args(&mut payload, &target);
             insert_optional_string(&mut payload, "ref", Some(ref_id.as_str()));
-            execute_agent_action(handshake, "click", payload, BrowserPrintKind::Ok)
+            execute_agent_action(
+                handshake,
+                "click",
+                payload,
+                BrowserPrintKind::Ok,
+                internal_permission_required,
+            )
         }
         BrowserCommand::Dblclick { ref_id, target } => {
             let mut payload = base_payload("dblclick", session_id);
             apply_target_args(&mut payload, &target);
             insert_optional_string(&mut payload, "ref", Some(ref_id.as_str()));
-            execute_agent_action(handshake, "dblclick", payload, BrowserPrintKind::Ok)
+            execute_agent_action(
+                handshake,
+                "dblclick",
+                payload,
+                BrowserPrintKind::Ok,
+                internal_permission_required,
+            )
         }
         BrowserCommand::Hover { ref_id, target } => {
             let mut payload = base_payload("hover", session_id);
             apply_target_args(&mut payload, &target);
             insert_optional_string(&mut payload, "ref", Some(ref_id.as_str()));
-            execute_agent_action(handshake, "hover", payload, BrowserPrintKind::Ok)
+            execute_agent_action(
+                handshake,
+                "hover",
+                payload,
+                BrowserPrintKind::Ok,
+                internal_permission_required,
+            )
         }
         BrowserCommand::Focus { ref_id, target } => {
             let mut payload = base_payload("focus_ref", session_id);
             apply_target_args(&mut payload, &target);
             insert_optional_string(&mut payload, "ref", Some(ref_id.as_str()));
-            execute_agent_action(handshake, "focus_ref", payload, BrowserPrintKind::Ok)
+            execute_agent_action(
+                handshake,
+                "focus_ref",
+                payload,
+                BrowserPrintKind::Ok,
+                internal_permission_required,
+            )
         }
         BrowserCommand::Fill {
             ref_id,
@@ -165,7 +269,13 @@ fn execute_browser_command(
             apply_target_args(&mut payload, &target);
             insert_optional_string(&mut payload, "ref", Some(ref_id.as_str()));
             insert_optional_string(&mut payload, "text", Some(text.as_str()));
-            execute_agent_action(handshake, "fill", payload, BrowserPrintKind::Ok)
+            execute_agent_action(
+                handshake,
+                "fill",
+                payload,
+                BrowserPrintKind::Ok,
+                internal_permission_required,
+            )
         }
         BrowserCommand::Select {
             ref_id,
@@ -176,7 +286,13 @@ fn execute_browser_command(
             apply_target_args(&mut payload, &target);
             insert_optional_string(&mut payload, "ref", Some(ref_id.as_str()));
             insert_optional_string(&mut payload, "value", Some(value.as_str()));
-            execute_agent_action(handshake, "select", payload, BrowserPrintKind::Ok)
+            execute_agent_action(
+                handshake,
+                "select",
+                payload,
+                BrowserPrintKind::Ok,
+                internal_permission_required,
+            )
         }
         BrowserCommand::Upload {
             ref_id,
@@ -191,19 +307,37 @@ fn execute_browser_command(
                 "files",
                 canonicalize_upload_files(cwd, &files)?,
             );
-            execute_agent_action(handshake, "upload", payload, BrowserPrintKind::Ok)
+            execute_agent_action(
+                handshake,
+                "upload",
+                payload,
+                BrowserPrintKind::Ok,
+                internal_permission_required,
+            )
         }
         BrowserCommand::Check { ref_id, target } => {
             let mut payload = base_payload("check", session_id);
             apply_target_args(&mut payload, &target);
             insert_optional_string(&mut payload, "ref", Some(ref_id.as_str()));
-            execute_agent_action(handshake, "check", payload, BrowserPrintKind::Ok)
+            execute_agent_action(
+                handshake,
+                "check",
+                payload,
+                BrowserPrintKind::Ok,
+                internal_permission_required,
+            )
         }
         BrowserCommand::Uncheck { ref_id, target } => {
             let mut payload = base_payload("uncheck", session_id);
             apply_target_args(&mut payload, &target);
             insert_optional_string(&mut payload, "ref", Some(ref_id.as_str()));
-            execute_agent_action(handshake, "uncheck", payload, BrowserPrintKind::Ok)
+            execute_agent_action(
+                handshake,
+                "uncheck",
+                payload,
+                BrowserPrintKind::Ok,
+                internal_permission_required,
+            )
         }
         BrowserCommand::Type {
             text,
@@ -214,28 +348,52 @@ fn execute_browser_command(
             apply_target_args(&mut payload, &target);
             insert_optional_string(&mut payload, "ref", ref_id.as_deref());
             insert_optional_string(&mut payload, "text", Some(text.as_str()));
-            execute_agent_action(handshake, "type", payload, BrowserPrintKind::Ok)
+            execute_agent_action(
+                handshake,
+                "type",
+                payload,
+                BrowserPrintKind::Ok,
+                internal_permission_required,
+            )
         }
         BrowserCommand::Press { key, target } => {
             let mut payload = base_payload("press", session_id);
             apply_target_args(&mut payload, &target);
             insert_optional_string(&mut payload, "key", Some(key.as_str()));
-            execute_agent_action(handshake, "press", payload, BrowserPrintKind::Ok)
+            execute_agent_action(
+                handshake,
+                "press",
+                payload,
+                BrowserPrintKind::Ok,
+                internal_permission_required,
+            )
         }
         BrowserCommand::Keydown { key, target } => {
             let mut payload = base_payload("keydown", session_id);
             apply_target_args(&mut payload, &target);
             insert_optional_string(&mut payload, "key", Some(key.as_str()));
-            execute_agent_action(handshake, "keydown", payload, BrowserPrintKind::Ok)
+            execute_agent_action(
+                handshake,
+                "keydown",
+                payload,
+                BrowserPrintKind::Ok,
+                internal_permission_required,
+            )
         }
         BrowserCommand::Keyup { key, target } => {
             let mut payload = base_payload("keyup", session_id);
             apply_target_args(&mut payload, &target);
             insert_optional_string(&mut payload, "key", Some(key.as_str()));
-            execute_agent_action(handshake, "keyup", payload, BrowserPrintKind::Ok)
+            execute_agent_action(
+                handshake,
+                "keyup",
+                payload,
+                BrowserPrintKind::Ok,
+                internal_permission_required,
+            )
         }
         BrowserCommand::Keyboard { command } => {
-            execute_keyboard_command(handshake, session_id, command)
+            execute_keyboard_command(handshake, session_id, command, internal_permission_required)
         }
         BrowserCommand::Scroll {
             direction,
@@ -246,19 +404,37 @@ fn execute_browser_command(
             apply_target_args(&mut payload, &target);
             insert_optional_string(&mut payload, "direction", Some(direction.as_str()));
             insert_optional_u32(&mut payload, "px", px);
-            execute_agent_action(handshake, "scroll", payload, BrowserPrintKind::Ok)
+            execute_agent_action(
+                handshake,
+                "scroll",
+                payload,
+                BrowserPrintKind::Ok,
+                internal_permission_required,
+            )
         }
         BrowserCommand::ScrollIntoView { ref_id, target } => {
             let mut payload = base_payload("scrollIntoView", session_id);
             apply_target_args(&mut payload, &target);
             insert_optional_string(&mut payload, "ref", Some(ref_id.as_str()));
-            execute_agent_action(handshake, "scrollIntoView", payload, BrowserPrintKind::Ok)
+            execute_agent_action(
+                handshake,
+                "scrollIntoView",
+                payload,
+                BrowserPrintKind::Ok,
+                internal_permission_required,
+            )
         }
         BrowserCommand::Eval { script, target } => {
             let mut payload = base_payload("eval", session_id);
             apply_target_args(&mut payload, &target);
             insert_optional_string(&mut payload, "script", Some(script.as_str()));
-            execute_agent_action(handshake, "eval", payload, BrowserPrintKind::Value)
+            execute_agent_action(
+                handshake,
+                "eval",
+                payload,
+                BrowserPrintKind::Value,
+                internal_permission_required,
+            )
         }
     }
 }
@@ -267,6 +443,7 @@ fn execute_tab_command(
     handshake: &Handshake,
     session_id: &str,
     command: BrowserTabCommand,
+    internal_permission_required: bool,
 ) -> Result<BrowserExecution> {
     match command {
         BrowserTabCommand::List => execute_agent_action(
@@ -274,6 +451,7 @@ fn execute_tab_command(
             "list",
             base_payload("list", session_id),
             BrowserPrintKind::TabsState,
+            internal_permission_required,
         ),
         BrowserTabCommand::New {
             url,
@@ -288,17 +466,35 @@ fn execute_tab_command(
             insert_optional_string(&mut payload, "label", label.as_deref());
             insert_optional_u32(&mut payload, "width", width);
             insert_optional_u32(&mut payload, "height", height);
-            execute_agent_action(handshake, "new", payload, BrowserPrintKind::TabInfo)
+            execute_agent_action(
+                handshake,
+                "new",
+                payload,
+                BrowserPrintKind::TabInfo,
+                internal_permission_required,
+            )
         }
         BrowserTabCommand::Close { tab_id } => {
             let mut payload = base_payload("close", session_id);
             insert_optional_string(&mut payload, "tabId", tab_id.as_deref());
-            execute_agent_action(handshake, "close", payload, BrowserPrintKind::TabsState)
+            execute_agent_action(
+                handshake,
+                "close",
+                payload,
+                BrowserPrintKind::TabsState,
+                internal_permission_required,
+            )
         }
         BrowserTabCommand::Focus { tab_id } => {
             let mut payload = base_payload("focus", session_id);
             insert_optional_string(&mut payload, "tabId", Some(tab_id.as_str()));
-            execute_agent_action(handshake, "focus", payload, BrowserPrintKind::TabInfo)
+            execute_agent_action(
+                handshake,
+                "focus",
+                payload,
+                BrowserPrintKind::TabInfo,
+                internal_permission_required,
+            )
         }
     }
 }
@@ -307,19 +503,32 @@ fn execute_keyboard_command(
     handshake: &Handshake,
     session_id: &str,
     command: BrowserKeyboardCommand,
+    internal_permission_required: bool,
 ) -> Result<BrowserExecution> {
     match command {
         BrowserKeyboardCommand::Type { text, target } => {
             let mut payload = base_payload("type", session_id);
             apply_target_args(&mut payload, &target);
             insert_optional_string(&mut payload, "text", Some(text.as_str()));
-            execute_agent_action(handshake, "type", payload, BrowserPrintKind::Ok)
+            execute_agent_action(
+                handshake,
+                "type",
+                payload,
+                BrowserPrintKind::Ok,
+                internal_permission_required,
+            )
         }
         BrowserKeyboardCommand::InsertText { text, target } => {
             let mut payload = base_payload("insertText", session_id);
             apply_target_args(&mut payload, &target);
             insert_optional_string(&mut payload, "text", Some(text.as_str()));
-            execute_agent_action(handshake, "insertText", payload, BrowserPrintKind::Ok)
+            execute_agent_action(
+                handshake,
+                "insertText",
+                payload,
+                BrowserPrintKind::Ok,
+                internal_permission_required,
+            )
         }
     }
 }
@@ -329,10 +538,17 @@ fn execute_targeted_ok_action(
     session_id: &str,
     action: &'static str,
     target: BrowserTargetArgs,
+    internal_permission_required: bool,
 ) -> Result<BrowserExecution> {
     let mut payload = base_payload(action, session_id);
     apply_target_args(&mut payload, &target);
-    execute_agent_action(handshake, action, payload, BrowserPrintKind::Ok)
+    execute_agent_action(
+        handshake,
+        action,
+        payload,
+        BrowserPrintKind::Ok,
+        internal_permission_required,
+    )
 }
 
 fn execute_screenshot_action(
@@ -346,6 +562,7 @@ fn execute_screenshot_action(
     screenshot_format: Option<String>,
     screenshot_quality: Option<u8>,
     target: BrowserTargetArgs,
+    internal_permission_required: bool,
 ) -> Result<BrowserExecution> {
     let mut payload = base_payload("screenshot", session_id);
     apply_target_args(&mut payload, &target);
@@ -360,6 +577,7 @@ fn execute_screenshot_action(
         "screenshotQuality",
         screenshot_quality.map(u32::from),
     );
+    ensure_internal_browser_permission(&payload, internal_permission_required)?;
     let result = send_daemon_request(handshake, "browser_agent", Value::Object(payload))?;
     let screenshot = persist_screenshot_result(cwd, paths, result, path, screenshot_dir)?;
     Ok(BrowserExecution {
@@ -452,7 +670,9 @@ fn execute_agent_action(
     action: &'static str,
     payload: Map<String, Value>,
     print_kind: BrowserPrintKind,
+    internal_permission_required: bool,
 ) -> Result<BrowserExecution> {
+    ensure_internal_browser_permission(&payload, internal_permission_required)?;
     let result = send_daemon_request(handshake, "browser_agent", Value::Object(payload))?;
     let result = normalize_agent_result(print_kind, result)?;
     Ok(BrowserExecution {
@@ -462,30 +682,31 @@ fn execute_agent_action(
     })
 }
 
-fn print_execution_result(session_id: &str, execution: &BrowserExecution) -> Result<()> {
-    match execution.print_kind {
-        BrowserPrintKind::TabsState => {
-            let tabs: BrowserTabsState =
-                serde_json::from_value(execution.result.clone()).context("decode browser tabs")?;
-            print_tabs_state(session_id, &tabs);
-        }
-        BrowserPrintKind::TabInfo => {
-            let tab: BrowserTabInfo =
-                serde_json::from_value(execution.result.clone()).context("decode browser tab")?;
-            print_tab_event(session_id, execution.action, &tab);
-        }
-        BrowserPrintKind::Snapshot => print_snapshot_result(session_id, &execution.result)?,
-        BrowserPrintKind::Screenshot => print_screenshot_result(session_id, &execution.result)?,
-        BrowserPrintKind::Value => {
-            if let Some(value) = execution.result.get("value") {
-                println!("{}", serde_json::to_string_pretty(value)?);
-            } else {
-                println!("{}", serde_json::to_string_pretty(&execution.result)?);
-            }
-        }
-        BrowserPrintKind::Ok => println!("{}", ok_message(execution.action)),
+fn ensure_internal_browser_permission(
+    payload: &Map<String, Value>,
+    internal_permission_required: bool,
+) -> Result<()> {
+    let request = InternalToolPermissionRequest {
+        tool_id: "browser".to_string(),
+        input: Value::Object(payload.clone()),
+    };
+    let response = if internal_permission_required {
+        Some(require_internal_tool_permission_from_env(request)?)
+    } else {
+        request_internal_tool_permission_from_env(request)?
+    };
+    let Some(response) = response else {
+        return Ok(());
+    };
+    if response.is_allowed() {
+        return Ok(());
     }
-    Ok(())
+    bail!(
+        "browser action denied: {}",
+        response
+            .reason
+            .unwrap_or_else(|| "permission denied".to_string())
+    )
 }
 
 fn resolve_session_id(paths: &ConfigPaths, explicit: Option<&str>) -> Result<String> {
@@ -552,333 +773,6 @@ fn canonicalize_upload_file(cwd: &Path, path: &Path) -> Result<String> {
         bail!("browser upload path is not a file: {}", absolute.display());
     }
     Ok(absolute.to_string_lossy().into_owned())
-}
-
-fn print_tabs_state(session_id: &str, tabs: &BrowserTabsState) {
-    println!("session: {session_id}");
-    let active = tabs.active_tab_id.as_deref().unwrap_or("<none>");
-    println!("active: {active}");
-    if tabs.tabs.is_empty() {
-        println!("tabs: none");
-        return;
-    }
-    for tab in &tabs.tabs {
-        println!();
-        print_tab_summary(tab);
-    }
-}
-
-fn print_tab_event(session_id: &str, action: &str, tab: &BrowserTabInfo) {
-    println!("session: {session_id}");
-    let label = match action {
-        "focus" => "focused",
-        _ => "opened",
-    };
-    println!("{label}: {}", tab.tab_id);
-    print_tab_summary(tab);
-}
-
-fn print_tab_summary(tab: &BrowserTabInfo) {
-    let status = if tab.active { "active" } else { "idle" };
-    let connectivity = if tab.connected {
-        "connected"
-    } else {
-        "disconnected"
-    };
-    println!("tab: {} ({status}, {connectivity})", tab.tab_id);
-    println!("label: {}", tab.label);
-    println!("title: {}", printable_text(&tab.title));
-    println!("url: {}", printable_text(&tab.url));
-}
-
-fn print_snapshot_result(session_id: &str, result: &Value) -> Result<()> {
-    let snapshot: BrowserSnapshotOutput =
-        serde_json::from_value(result.clone()).context("decode browser snapshot")?;
-    println!("session: {session_id}");
-    print!("{}", render_snapshot_body(&snapshot));
-    Ok(())
-}
-
-fn print_screenshot_result(session_id: &str, result: &Value) -> Result<()> {
-    let screenshot: BrowserScreenshotOutput =
-        serde_json::from_value(result.clone()).context("decode browser screenshot")?;
-    println!("session: {session_id}");
-    print!("{}", render_screenshot_body(&screenshot));
-    Ok(())
-}
-
-fn render_snapshot_body(snapshot: &BrowserSnapshotOutput) -> String {
-    let mut body = String::new();
-    body.push_str(&format!("title: {}\n", printable_text(&snapshot.title)));
-    body.push_str(&format!("origin: {}\n", printable_text(&snapshot.origin)));
-    body.push('\n');
-    body.push_str("snapshot:\n");
-    body.push_str(printable_text(&snapshot.snapshot));
-
-    append_refs_section(&mut body, &snapshot.refs);
-    append_instruction(&mut body, &snapshot.instruction);
-    body
-}
-
-fn render_screenshot_body(screenshot: &BrowserScreenshotOutput) -> String {
-    let mut body = String::new();
-    body.push_str(&format!("tab: {}\n", screenshot.tab_id));
-    body.push_str(&format!("saved: {}\n", screenshot.path));
-    body.push_str(&format!(
-        "format: {} ({}x{})\n",
-        screenshot.format, screenshot.width, screenshot.height
-    ));
-    body.push_str(&format!("title: {}\n", printable_text(&screenshot.title)));
-    body.push_str(&format!("origin: {}\n", printable_text(&screenshot.origin)));
-    if screenshot.annotated {
-        body.push_str("annotated: true\n");
-    }
-    append_refs_section(&mut body, &screenshot.refs);
-    append_instruction(&mut body, &screenshot.instruction);
-    body
-}
-
-fn append_refs_section(body: &mut String, refs: &IndexMap<String, BrowserSnapshotRef>) {
-    if refs.is_empty() {
-        return;
-    }
-    body.push('\n');
-    body.push_str("refs:\n");
-    for (ref_id, entry) in refs {
-        body.push_str("  ");
-        body.push_str(ref_id);
-        body.push(' ');
-        body.push_str(printable_text(&entry.role));
-        body.push(' ');
-        body.push_str(printable_text(&entry.tag));
-        if !entry.name.trim().is_empty() {
-            body.push(' ');
-            body.push('"');
-            body.push_str(&entry.name);
-            body.push('"');
-        }
-        if let Some(href) = entry
-            .href
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-        {
-            body.push(' ');
-            body.push('<');
-            body.push_str(href);
-            body.push('>');
-        }
-        body.push('\n');
-    }
-}
-
-fn append_instruction(body: &mut String, instruction: &str) {
-    if let Some(instruction) = (!instruction.trim().is_empty()).then_some(instruction) {
-        body.push('\n');
-        body.push_str(instruction);
-        body.push('\n');
-    } else {
-        body.push('\n');
-    }
-}
-fn ok_message(action: &str) -> &str {
-    match action {
-        "back" => "moved back",
-        "forward" => "moved forward",
-        "reload" => "reloaded",
-        "click" => "clicked",
-        "dblclick" => "double-clicked",
-        "hover" => "hovered",
-        "focus_ref" => "focused element",
-        "fill" => "filled",
-        "select" => "selected option",
-        "upload" => "uploaded files",
-        "check" => "checked",
-        "uncheck" => "unchecked",
-        "type" => "typed",
-        "insertText" => "inserted text",
-        "press" => "pressed key",
-        "keydown" => "held key down",
-        "keyup" => "released key",
-        "scroll" => "scrolled",
-        "scrollIntoView" => "scrolled into view",
-        other => other,
-    }
-}
-
-fn printable_text(value: &str) -> &str {
-    if value.trim().is_empty() {
-        "<empty>"
-    } else {
-        value
-    }
-}
-
-fn normalize_agent_result(print_kind: BrowserPrintKind, result: Value) -> Result<Value> {
-    match print_kind {
-        BrowserPrintKind::Snapshot => Ok(serde_json::to_value(normalize_snapshot_result(result)?)?),
-        _ => Ok(result),
-    }
-}
-
-fn normalize_snapshot_result(result: Value) -> Result<BrowserSnapshotOutput> {
-    let snapshot: BrowserSnapshotWire =
-        serde_json::from_value(result).context("decode browser snapshot")?;
-    let refs = normalize_snapshot_refs(snapshot.elements);
-    Ok(BrowserSnapshotOutput {
-        origin: snapshot.url,
-        title: snapshot.title,
-        snapshot: snapshot.text,
-        refs,
-        instruction: snapshot.instruction,
-    })
-}
-
-fn normalize_screenshot_result(
-    screenshot: BrowserScreenshotWire,
-    output_path: PathBuf,
-) -> BrowserScreenshotOutput {
-    BrowserScreenshotOutput {
-        tab_id: screenshot.tab_id,
-        path: output_path.display().to_string(),
-        format: screenshot.format,
-        origin: screenshot.url,
-        title: screenshot.title,
-        width: screenshot.width,
-        height: screenshot.height,
-        annotated: screenshot.annotated,
-        refs: normalize_snapshot_refs(screenshot.elements),
-        instruction: screenshot.instruction,
-    }
-}
-
-fn normalize_snapshot_refs(
-    elements: Vec<BrowserSnapshotWireElement>,
-) -> IndexMap<String, BrowserSnapshotRef> {
-    elements
-        .into_iter()
-        .map(|element| {
-            (
-                element.ref_id,
-                BrowserSnapshotRef {
-                    role: element.role,
-                    name: element.name,
-                    tag: element.tag,
-                    href: element.href,
-                },
-            )
-        })
-        .collect()
-}
-
-fn redact_internal_fields(value: Value) -> Value {
-    match value {
-        Value::Array(values) => {
-            Value::Array(values.into_iter().map(redact_internal_fields).collect())
-        }
-        Value::Object(mut map) => {
-            map.remove("backendSessionId");
-            map.remove("backend_session_id");
-            Value::Object(
-                map.into_iter()
-                    .map(|(key, value)| (key, redact_internal_fields(value)))
-                    .collect(),
-            )
-        }
-        other => other,
-    }
-}
-
-struct BrowserExecution {
-    action: &'static str,
-    result: Value,
-    print_kind: BrowserPrintKind,
-}
-
-#[derive(Clone, Copy)]
-enum BrowserPrintKind {
-    TabsState,
-    TabInfo,
-    Snapshot,
-    Screenshot,
-    Value,
-    Ok,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct BrowserSnapshotWire {
-    url: String,
-    title: String,
-    text: String,
-    elements: Vec<BrowserSnapshotWireElement>,
-    #[serde(default)]
-    instruction: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct BrowserSnapshotWireElement {
-    #[serde(rename = "ref")]
-    ref_id: String,
-    role: String,
-    name: String,
-    tag: String,
-    #[serde(default)]
-    href: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BrowserSnapshotOutput {
-    origin: String,
-    title: String,
-    snapshot: String,
-    refs: IndexMap<String, BrowserSnapshotRef>,
-    #[serde(default)]
-    instruction: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct BrowserSnapshotRef {
-    role: String,
-    name: String,
-    tag: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    href: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct BrowserScreenshotWire {
-    tab_id: String,
-    format: String,
-    data: String,
-    url: String,
-    title: String,
-    width: u32,
-    height: u32,
-    #[serde(default)]
-    annotated: bool,
-    #[serde(default)]
-    elements: Vec<BrowserSnapshotWireElement>,
-    #[serde(default)]
-    instruction: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BrowserScreenshotOutput {
-    tab_id: String,
-    path: String,
-    format: String,
-    origin: String,
-    title: String,
-    width: u32,
-    height: u32,
-    annotated: bool,
-    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
-    refs: IndexMap<String, BrowserSnapshotRef>,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    instruction: String,
 }
 
 #[derive(Debug, Serialize)]

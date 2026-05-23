@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "browser-tab-lifecycle",
+  "title": "Browser tab open, close, switch, and stale tab events",
+  "priority": 10,
+  "seed": "browser-tab-race",
+  "startNode": "browser/tab-lifecycle",
+  "entrypoint": "browser.tab",
+  "iterations": 16,
+  "steps": 16,
+  "replayLimit": 3,
+  "ownedNodes": ["browser/tab-lifecycle"],
+  "allowedSetupNodes": ["app", "workspace", "agent-detail", "browser"],
+  "ownedCoverage": ["route:browser-pane", "control:browser.new-tab", "control:browser.close-tab", "control:browser.tab", "state:browser.multi-tab", "async:stale-tab-event"],
+  "allowedAsyncEvents": ["stale-tab-event", "late-success", "late-failure", "server-push-update", "reconnect"],
+  "invariants": ["app-no-crash", "active-tab-stable", "stale-error-scoped", "no-permanent-loading"]
+}

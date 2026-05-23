@@ -112,12 +112,7 @@ tmux_golden_mode = true
     // the reload signal that the watcher raised. The "i" -> backspace
     // sequence is harmless: it just nudges the loop.
     send_tmux_keys(&session, &["i", "BSpace"]).unwrap();
-    wait_for_tmux_text(
-        &session,
-        "Reloaded plugin registry",
-        Duration::from_secs(5),
-    )
-    .unwrap();
+    wait_for_tmux_text(&session, "Reloaded plugin registry", Duration::from_secs(5)).unwrap();
 
     // Wait for the reload to have happened, then verify /skills sees it.
     // We try a few times because filesystem-watcher latency + main-loop

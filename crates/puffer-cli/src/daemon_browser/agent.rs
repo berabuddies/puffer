@@ -10,9 +10,13 @@ use std::time::Duration;
 use crate::daemon::{DaemonState, ServerEnvelope};
 
 use super::params::{optional_u32, required_string, required_string_array};
+use super::ref_resolution::{
+    click_expression, double_click_expression, fill_expression, focus_expression, hover_expression,
+    scroll_into_view_expression, select_expression, set_checkable_state_expression,
+    upload_input_handle_expression,
+};
 use super::screenshot::{parse_agent_screenshot_options, BrowserElementRef};
 use super::tabs::{backend_session_id, BrowserTabInfo, BrowserTabsState};
-use super::upload::upload_input_handle_expression;
 use super::{
     BrowserHistoryDirection, BrowserInputEvent, BrowserRegistry, DEFAULT_URL, INITIAL_HEIGHT,
     INITIAL_WIDTH,
@@ -372,48 +376,32 @@ impl BrowserRegistry {
     /// Clicks an element ref from the last agent snapshot.
     pub(crate) fn agent_click(&self, backend_session_id: &str, ref_id: &str) -> Result<()> {
         let target = self.lookup_ref(backend_session_id, ref_id)?;
-        let session = self.get(backend_session_id)?;
-        move_mouse(&session, target.x, target.y)?;
-        session.input(BrowserInputEvent::Mouse {
-            event_type: "mousePressed".to_string(),
-            x: target.x,
-            y: target.y,
-            button: "left".to_string(),
-            buttons: Some(1),
-            click_count: 1,
-        })?;
-        thread::sleep(Duration::from_millis(30));
-        session.input(BrowserInputEvent::Mouse {
-            event_type: "mouseReleased".to_string(),
-            x: target.x,
-            y: target.y,
-            button: "left".to_string(),
-            buttons: Some(0),
-            click_count: 1,
-        })
+        self.get(backend_session_id)?
+            .evaluate(click_expression(&target)?)?;
+        Ok(())
     }
 
     /// Double-clicks an element ref from the last agent snapshot.
     pub(crate) fn agent_double_click(&self, backend_session_id: &str, ref_id: &str) -> Result<()> {
         let target = self.lookup_ref(backend_session_id, ref_id)?;
-        let session = self.get(backend_session_id)?;
-        move_mouse(&session, target.x, target.y)?;
-        dispatch_click(&session, target.x, target.y, 1)?;
-        thread::sleep(Duration::from_millis(30));
-        dispatch_click(&session, target.x, target.y, 2)
+        self.get(backend_session_id)?
+            .evaluate(double_click_expression(&target)?)?;
+        Ok(())
     }
 
     /// Moves the pointer over an element ref from the last agent snapshot.
     pub(crate) fn agent_hover(&self, backend_session_id: &str, ref_id: &str) -> Result<()> {
         let target = self.lookup_ref(backend_session_id, ref_id)?;
-        move_mouse(&self.get(backend_session_id)?, target.x, target.y)
+        self.get(backend_session_id)?
+            .evaluate(hover_expression(&target)?)?;
+        Ok(())
     }
 
     /// Focuses an element ref from the last agent snapshot.
     pub(crate) fn agent_focus(&self, backend_session_id: &str, ref_id: &str) -> Result<()> {
         let target = self.lookup_ref(backend_session_id, ref_id)?;
-        let expression = focus_expression(target.x, target.y);
-        self.get(backend_session_id)?.evaluate(expression)?;
+        self.get(backend_session_id)?
+            .evaluate(focus_expression(&target)?)?;
         Ok(())
     }
 
@@ -425,8 +413,8 @@ impl BrowserRegistry {
         text: &str,
     ) -> Result<()> {
         let target = self.lookup_ref(backend_session_id, ref_id)?;
-        let expression = fill_expression(target.x, target.y, text)?;
-        self.get(backend_session_id)?.evaluate(expression)?;
+        self.get(backend_session_id)?
+            .evaluate(fill_expression(&target, text)?)?;
         Ok(())
     }
 
@@ -438,8 +426,8 @@ impl BrowserRegistry {
         value: &str,
     ) -> Result<()> {
         let target = self.lookup_ref(backend_session_id, ref_id)?;
-        let expression = select_expression(target.x, target.y, value)?;
-        self.get(backend_session_id)?.evaluate(expression)?;
+        self.get(backend_session_id)?
+            .evaluate(select_expression(&target, value)?)?;
         Ok(())
     }
 
@@ -451,18 +439,25 @@ impl BrowserRegistry {
         files: Vec<String>,
     ) -> Result<()> {
         let target = self.lookup_ref(backend_session_id, ref_id)?;
-        let expression = upload_input_handle_expression(target.x, target.y);
-        self.get(backend_session_id)?.upload(expression, files)
+        let session = self.get(backend_session_id)?;
+        let expression = upload_input_handle_expression(&target)?;
+        session.upload(expression, files)
     }
 
     /// Checks one checkbox-like ref from the last agent snapshot.
     pub(crate) fn agent_check(&self, backend_session_id: &str, ref_id: &str) -> Result<()> {
-        self.set_checkable_state(backend_session_id, ref_id, true)
+        let target = self.lookup_ref(backend_session_id, ref_id)?;
+        self.get(backend_session_id)?
+            .evaluate(set_checkable_state_expression(&target, true)?)?;
+        Ok(())
     }
 
     /// Unchecks one checkbox-like ref from the last agent snapshot.
     pub(crate) fn agent_uncheck(&self, backend_session_id: &str, ref_id: &str) -> Result<()> {
-        self.set_checkable_state(backend_session_id, ref_id, false)
+        let target = self.lookup_ref(backend_session_id, ref_id)?;
+        self.get(backend_session_id)?
+            .evaluate(set_checkable_state_expression(&target, false)?)?;
+        Ok(())
     }
 
     /// Presses one keyboard key in the target browser tab.
@@ -520,8 +515,8 @@ impl BrowserRegistry {
         ref_id: &str,
     ) -> Result<()> {
         let target = self.lookup_ref(backend_session_id, ref_id)?;
-        let expression = scroll_into_view_expression(target.x, target.y);
-        self.get(backend_session_id)?.evaluate(expression)?;
+        self.get(backend_session_id)?
+            .evaluate(scroll_into_view_expression(&target)?)?;
         Ok(())
     }
 
@@ -532,32 +527,6 @@ impl BrowserRegistry {
             .get(backend_session_id)
             .and_then(|refs| refs.iter().find(|item| item.ref_id == ref_id).cloned())
             .with_context(|| format!("no browser ref `{ref_id}`; run snapshot again"))
-    }
-
-    fn set_checkable_state(
-        &self,
-        backend_session_id: &str,
-        ref_id: &str,
-        checked: bool,
-    ) -> Result<()> {
-        let target = self.lookup_ref(backend_session_id, ref_id)?;
-        let session = self.get(backend_session_id)?;
-        let current = checkable_state_at_point(&session, target.x, target.y)?;
-        if current.checked == checked {
-            return Ok(());
-        }
-        if !checked && current.kind == "radio" {
-            bail!("radio buttons cannot be unchecked directly with the current browser ref model");
-        }
-        move_mouse(&session, target.x, target.y)?;
-        dispatch_click(&session, target.x, target.y, 1)?;
-        thread::sleep(Duration::from_millis(40));
-        let updated = checkable_state_at_point(&session, target.x, target.y)?;
-        if updated.checked != checked {
-            let status = if checked { "checked" } else { "unchecked" };
-            bail!("target did not become {status}");
-        }
-        Ok(())
     }
 }
 
@@ -668,210 +637,6 @@ fn optional_string(params: &Value, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
-}
-
-/// Builds the JavaScript used to fill one editable control at a viewport point.
-pub(super) fn fill_expression(x: f64, y: f64, text: &str) -> Result<String> {
-    let text = serde_json::to_string(text)?;
-    Ok(format!(
-        r#"(() => {{
-  const el = document.elementFromPoint({x}, {y});
-  if (!el) throw new Error('No element at target ref');
-  const editableSelector = 'input, textarea, [contenteditable="true"]';
-  const resolveEditable = (node) => {{
-    if (!node) return null;
-    const direct = node.closest(editableSelector);
-    if (direct) return direct;
-    const label = node.closest('label');
-    if (label) {{
-      if (label.control) return label.control;
-      const nested = label.querySelector(editableSelector);
-      if (nested) return nested;
-    }}
-    return node.querySelector?.(editableSelector) || null;
-  }};
-  const target = resolveEditable(el);
-  if (!target) throw new Error('Target is not editable');
-  target.focus();
-  if ('value' in target) {{
-    const prototype = target instanceof HTMLTextAreaElement
-      ? HTMLTextAreaElement.prototype
-      : HTMLInputElement.prototype;
-    const descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
-    if (descriptor && descriptor.set) {{
-      descriptor.set.call(target, {text});
-    }} else {{
-      target.value = {text};
-    }}
-    target.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }}));
-    target.dispatchEvent(new Event('change', {{ bubbles: true }}));
-  }} else if (target.isContentEditable) {{
-    target.textContent = {text};
-    target.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: {text} }}));
-  }} else {{
-    throw new Error('Target is not editable');
-  }}
-  return true;
-}})()"#
-    ))
-}
-
-/// Builds the JavaScript used to focus one element at a viewport point.
-pub(super) fn focus_expression(x: f64, y: f64) -> String {
-    format!(
-        r#"(() => {{
-  const el = document.elementFromPoint({x}, {y});
-  if (!el) throw new Error('No element at target ref');
-  const target = el.closest('input, textarea, select, button, a, [tabindex], [contenteditable="true"], [role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="switch"], [role="combobox"], [role="textbox"]') || el;
-  if (typeof target.focus !== 'function') throw new Error('Target is not focusable');
-  target.focus({{ preventScroll: false }});
-  return true;
-}})()"#
-    )
-}
-
-/// Builds the JavaScript used to scroll one target element into view.
-pub(super) fn scroll_into_view_expression(x: f64, y: f64) -> String {
-    format!(
-        r#"(() => {{
-  const el = document.elementFromPoint({x}, {y});
-  if (!el) throw new Error('No element at target ref');
-  const target = el.closest('a, button, input, textarea, select, label, [contenteditable="true"], [role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="switch"], [role="combobox"], [role="textbox"], [role="option"]') || el;
-  target.scrollIntoView({{ block: 'center', inline: 'center', behavior: 'instant' }});
-  return true;
-}})()"#
-    )
-}
-
-/// Builds the JavaScript used to select one native `<select>` option at a point.
-pub(super) fn select_expression(x: f64, y: f64, value: &str) -> Result<String> {
-    let value = serde_json::to_string(value)?;
-    Ok(format!(
-        r#"(() => {{
-  const el = document.elementFromPoint({x}, {y});
-  if (!el) throw new Error('No element at target ref');
-  const normalize = (value) => String(value ?? '').trim();
-  const requested = normalize({value});
-  const resolveSelect = (node) => {{
-    if (!node) return null;
-    const direct = node.closest('select');
-    if (direct) return direct;
-    const label = node.closest('label');
-    if (label) {{
-      if (label.control instanceof HTMLSelectElement) return label.control;
-      const nested = label.querySelector('select');
-      if (nested) return nested;
-    }}
-    return node.querySelector?.('select') || null;
-  }};
-  const target = resolveSelect(el);
-  if (!target) throw new Error('Target is not a native select control');
-  const options = Array.from(target.options || []);
-  const match = options.find((option) => {{
-    const optionValue = normalize(option.value);
-    const optionLabel = normalize(option.label || option.textContent || option.value);
-    return optionValue === requested || optionLabel === requested;
-  }});
-  if (!match) {{
-    const available = options
-      .slice(0, 12)
-      .map((option) => normalize(option.label || option.textContent || option.value))
-      .filter(Boolean)
-      .join(', ');
-    throw new Error(
-      available
-        ? `No option matched "${{requested}}". Match exact option value or label text. Available: ${{available}}`
-        : `No option matched "${{requested}}". Match exact option value or label text.`
-    );
-  }}
-  for (const option of options) option.selected = option === match;
-  target.value = match.value;
-  target.dispatchEvent(new Event('input', {{ bubbles: true }}));
-  target.dispatchEvent(new Event('change', {{ bubbles: true }}));
-  return {{ value: match.value, label: normalize(match.label || match.textContent || match.value) }};
-}})()"#
-    ))
-}
-
-/// Builds the JavaScript used to inspect one checkbox-like control at a point.
-pub(super) fn checkable_state_expression(x: f64, y: f64) -> String {
-    format!(
-        r#"(() => {{
-  const el = document.elementFromPoint({x}, {y});
-  if (!el) throw new Error('No element at target ref');
-  const selector = 'input[type="checkbox"], input[type="radio"], [role="checkbox"], [role="radio"]';
-  const resolveCheckable = (node) => {{
-    if (!node) return null;
-    if (node instanceof HTMLInputElement && (node.type === 'checkbox' || node.type === 'radio')) {{
-      return node;
-    }}
-    const direct = node.closest(selector);
-    if (direct) return direct;
-    const label = node.closest('label');
-    if (label) {{
-      if (label.control instanceof HTMLInputElement &&
-          (label.control.type === 'checkbox' || label.control.type === 'radio')) {{
-        return label.control;
-      }}
-      const nested = label.querySelector(selector);
-      if (nested) return nested;
-    }}
-    return node.querySelector?.(selector) || null;
-  }};
-  const target = resolveCheckable(el);
-  if (!target) throw new Error('Target is not a checkbox or radio control');
-  if (target instanceof HTMLInputElement) {{
-    return {{
-      kind: target.type === 'radio' ? 'radio' : 'checkbox',
-      checked: !!target.checked
-    }};
-  }}
-  return {{
-    kind: target.getAttribute('role') === 'radio' ? 'radio' : 'checkbox',
-    checked: target.getAttribute('aria-checked') === 'true'
-  }};
-}})()"#
-    )
-}
-
-fn checkable_state_at_point(
-    session: &super::BrowserSession,
-    x: f64,
-    y: f64,
-) -> Result<BrowserCheckableState> {
-    let value = session.evaluate(checkable_state_expression(x, y))?.value;
-    serde_json::from_value(value).context("decode browser checkable state")
-}
-
-fn move_mouse(session: &super::BrowserSession, x: f64, y: f64) -> Result<()> {
-    session.input(BrowserInputEvent::Mouse {
-        event_type: "mouseMoved".to_string(),
-        x,
-        y,
-        button: "none".to_string(),
-        buttons: Some(0),
-        click_count: 0,
-    })
-}
-
-fn dispatch_click(session: &super::BrowserSession, x: f64, y: f64, click_count: u32) -> Result<()> {
-    session.input(BrowserInputEvent::Mouse {
-        event_type: "mousePressed".to_string(),
-        x,
-        y,
-        button: "left".to_string(),
-        buttons: Some(1),
-        click_count,
-    })?;
-    thread::sleep(Duration::from_millis(30));
-    session.input(BrowserInputEvent::Mouse {
-        event_type: "mouseReleased".to_string(),
-        x,
-        y,
-        button: "left".to_string(),
-        buttons: Some(0),
-        click_count,
-    })
 }
 
 /// Returns the text payload for one synthesized key event when applicable.

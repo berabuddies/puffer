@@ -11,7 +11,14 @@
     "validate": "node bin/puffer-fuzz.mjs validate",
     "smoke": "node bin/puffer-fuzz.mjs smoke",
     "frontier": "node bin/puffer-fuzz.mjs frontier",
+    "schedule": "node bin/puffer-fuzz.mjs schedule",
+    "record-feedback": "node bin/puffer-fuzz.mjs record-feedback",
+    "evolve-prompt": "node bin/puffer-fuzz.mjs evolve-prompt",
     "gate": "node bin/puffer-fuzz.mjs gate",
-    "replay": "node bin/puffer-fuzz.mjs replay"
+    "replay": "node bin/puffer-fuzz.mjs replay",
+    "bug-list": "node bin/puffer-fuzz.mjs bug-list",
+    "openrouter-explorer": "node bin/puffer-openrouter-explorer.mjs",
+    "openrouter-aggregate": "node bin/puffer-openrouter-aggregate.mjs",
+    "openrouter-triage": "node bin/puffer-openrouter-triage.mjs"
   }
 }

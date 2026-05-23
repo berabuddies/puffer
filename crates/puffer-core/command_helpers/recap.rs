@@ -43,10 +43,6 @@ pub(crate) fn handle_recap_command(
             render_recap(state, &text);
             Ok(())
         }
-        Err(error) => emit_system(
-            state,
-            session_store,
-            format!("Recap failed: {error}"),
-        ),
+        Err(error) => emit_system(state, session_store, format!("Recap failed: {error}")),
     }
 }

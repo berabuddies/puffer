@@ -556,6 +556,7 @@ mod tests {
             sandbox_mode: EffectiveSandboxMode::DangerFullAccess,
             workspace_roots: vec![root.to_path_buf()],
             session_granted: true,
+            allow_all_paths: true,
         }
     }
 

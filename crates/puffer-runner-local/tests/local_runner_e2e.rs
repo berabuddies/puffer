@@ -290,9 +290,7 @@ fn dispatcher_rejects_edit_when_file_changed_after_read() {
 #[test]
 fn workspace_write_runner_request_rejects_filesystem_escape() {
     let temp = tempdir().unwrap();
-    let outside = tempdir().unwrap();
-    let escaped = outside.path().join("secret.txt");
-    fs::write(&escaped, "secret\n").unwrap();
+    let escaped = PathBuf::from("/__puffer_test_outside_writable_set__/secret.txt");
 
     let runner: Arc<dyn ToolRunner> = Arc::new(LocalToolRunner::new());
     let error = runner

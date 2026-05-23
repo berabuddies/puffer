@@ -166,7 +166,10 @@ fn reload_picks_up_modified_skill_description() {
 
     let (state, mut resources) = make_state_with_resources(&paths, paths.workspace_root.clone());
     assert_eq!(
-        skill_by_name(&resources, "reviewer").unwrap().value.description,
+        skill_by_name(&resources, "reviewer")
+            .unwrap()
+            .value
+            .description,
         "Original description"
     );
 
@@ -225,7 +228,10 @@ enabled: true\n",
         "the hot-loaded MCP server should be visible on the live runner, got {after:?}"
     );
     assert!(
-        resources.mcp_servers.iter().any(|s| s.value.id == "hotload"),
+        resources
+            .mcp_servers
+            .iter()
+            .any(|s| s.value.id == "hotload"),
         "resources.mcp_servers should also reflect the addition"
     );
 }
@@ -267,8 +273,7 @@ enabled: true\n",
 #[test]
 fn watcher_signal_participates_in_take_reload_request() {
     let (_temp, paths) = make_workspace();
-    let (mut state, _resources) =
-        make_state_with_resources(&paths, paths.workspace_root.clone());
+    let (mut state, _resources) = make_state_with_resources(&paths, paths.workspace_root.clone());
     assert!(!state.take_reload_request());
 
     // Manually flip the cross-thread signal as if a watcher event arrived.
@@ -398,8 +403,8 @@ fn end_to_end_watcher_drives_reload_and_runner_picks_up_new_mcp_server() {
     assert!(!initial.iter().any(|s| s.id == "e2e-hotload"));
 
     // Wire up the watcher exactly like `puffer-tui::run_app` does.
-    let _watcher = ResourceWatcher::start(&paths, state.reload_signal())
-        .expect("watcher should start");
+    let _watcher =
+        ResourceWatcher::start(&paths, state.reload_signal()).expect("watcher should start");
 
     // Give notify a moment to attach before we generate events on
     // platforms where attach is asynchronous.
@@ -430,13 +435,9 @@ enabled: true\n",
     // Now run the same reload the TUI runs in `maybe_apply_requested_reload`.
     let mut providers = ProviderRegistry::new();
     let auth_store = AuthStore::default();
-    let _ = puffer_core::reload_runtime_resources(
-        &state,
-        &mut resources,
-        &mut providers,
-        &auth_store,
-    )
-    .expect("reload should succeed");
+    let _ =
+        puffer_core::reload_runtime_resources(&state, &mut resources, &mut providers, &auth_store)
+            .expect("reload should succeed");
 
     let after = state.tool_runner.list_mcp_servers().expect("after list");
     assert!(
@@ -474,8 +475,8 @@ fn end_to_end_watcher_drives_reload_for_skill_removal() {
         make_state_with_resources(&paths, paths.workspace_root.clone());
     assert!(skill_by_name(&resources, "e2e-doomed").is_some());
 
-    let _watcher = ResourceWatcher::start(&paths, state.reload_signal())
-        .expect("watcher should start");
+    let _watcher =
+        ResourceWatcher::start(&paths, state.reload_signal()).expect("watcher should start");
     std::thread::sleep(Duration::from_millis(150));
 
     std::fs::remove_file(&skill_file).unwrap();
@@ -491,17 +492,12 @@ fn end_to_end_watcher_drives_reload_for_skill_removal() {
 
     let mut providers = ProviderRegistry::new();
     let auth_store = AuthStore::default();
-    let _ = puffer_core::reload_runtime_resources(
-        &state,
-        &mut resources,
-        &mut providers,
-        &auth_store,
-    )
-    .expect("reload should succeed");
+    let _ =
+        puffer_core::reload_runtime_resources(&state, &mut resources, &mut providers, &auth_store)
+            .expect("reload should succeed");
 
     assert!(
         skill_by_name(&resources, "e2e-doomed").is_none(),
         "deleted skill should be gone from resources after watcher-driven reload"
     );
 }
-

@@ -5,11 +5,11 @@ mod command_summary;
 mod config_settings;
 mod hooks;
 mod memory;
-pub mod recap;
 mod model_preferences;
 mod permissions;
 mod plan_mode;
 mod plans;
+pub mod recap;
 pub mod runner_adapter;
 pub mod runner_mcp;
 mod runtime;
@@ -46,19 +46,24 @@ pub use model_preferences::{
     default_effort_level, effort_level_is_supported, normalized_effort_level,
     provider_preference_family, supported_effort_levels, ModelPreferenceFamily,
 };
+pub use permissions::browser_action_set_for_action;
+pub use permissions::is_browser_tool_selector;
+pub use permissions::BrowserActionSet;
 pub use permissions::SessionPermissionState;
+pub use plan_mode::enter_plan_mode;
 pub use runtime::background_tasks;
 pub use runtime::claude_tools::execute_workflow_tool;
-pub use runtime::resource_watcher;
-pub use runtime::resource_watcher::ResourceWatcher;
 pub use runtime::execute_user_prompt as execute_user_turn;
 pub use runtime::install_subscription_manager;
 pub use runtime::mcp_discovery;
 pub use runtime::quota::{QuotaError, QuotaErrorKind, QUOTA_EXIT_CODE};
+pub use runtime::resource_watcher;
+pub use runtime::resource_watcher::ResourceWatcher;
 pub use runtime::subscription_manager;
 pub use runtime::teammate_loop;
 pub use runtime::{
-    execute_side_question, execute_user_prompt_streaming as execute_user_turn_streaming,
+    browser_auto_review_runtime_result_from_json, execute_side_question,
+    execute_user_prompt_streaming as execute_user_turn_streaming,
     execute_user_prompt_streaming_with_cancel as execute_user_turn_streaming_with_cancel,
     execute_user_prompt_streaming_with_permissions as execute_user_turn_streaming_with_permissions,
     execute_user_prompt_streaming_with_permissions_and_cancel as execute_user_turn_streaming_with_permissions_and_cancel,
@@ -67,11 +72,16 @@ pub use runtime::{
     execute_user_prompt_streaming_with_structured_output as execute_user_turn_streaming_with_structured_output,
     execute_user_prompt_with_structured_output as execute_user_turn_with_structured_output,
     runtime_work_active, shutdown_runtime_services, with_permission_prompt_handler,
-    with_user_question_prompt_handler, CancelToken, CodeJudgeConfig, LlmJudgeConfig,
-    LlmJudgeContextScope, LlmJudgeMode, LlmJudgePromptCacheMode, PermissionPromptAction,
-    PermissionPromptRequest, ReflectionConfig, ReflectionLanguage, ReflectionTraceEvent,
-    StructuredOutputConfig, ToolCallRequest, ToolInvocation, TurnExecution, TurnStreamEvent,
-    TurnUsageReport, UserQuestionPromptRequest, UserQuestionPromptResponse,
+    with_user_question_prompt_handler, BrowserAutoReviewActionSet, BrowserAutoReviewRawAction,
+    BrowserAutoReviewRequest, BrowserAutoReviewRuntimeResult, BrowserAutoReviewSessionTargeting,
+    BrowserAutoReviewSource, BrowserAutoReviewSuggestedGrantScope, BrowserAutoReviewTargetClass,
+    BrowserAutoReviewUrlSource, BrowserPermissionPromptActionSet, BrowserPermissionPromptPayload,
+    BrowserPermissionPromptSource, BrowserPermissionPromptTargetClass, CancelToken,
+    CodeJudgeConfig, LlmJudgeConfig, LlmJudgeContextScope, LlmJudgeMode, LlmJudgePromptCacheMode,
+    PermissionPromptAction, PermissionPromptRequest, PermissionPromptReviewPayload,
+    ReflectionConfig, ReflectionLanguage, ReflectionTraceEvent, StructuredOutputConfig,
+    ToolCallRequest, ToolInvocation, TurnExecution, TurnStreamEvent, TurnUsageReport,
+    UserQuestionPromptRequest, UserQuestionPromptResponse,
 };
 pub use runtime::{install_observability, observability_handle};
 pub use state::{AppState, MessageRole, RenderedMessage, TaskRecord, TaskStatus};
@@ -380,9 +390,7 @@ fn apply_mcp_roster_to_runner(state: &AppState, resources: &LoadedResources) {
 /// deduplicating by id (case-insensitive). Mirrors the merge done at
 /// startup in `puffer_runner_local::local_runner_from_resources` so a
 /// hot-reload yields the same effective roster as a fresh start.
-fn collect_runner_mcp_roster(
-    resources: &LoadedResources,
-) -> Vec<puffer_resources::McpServerSpec> {
+fn collect_runner_mcp_roster(resources: &LoadedResources) -> Vec<puffer_resources::McpServerSpec> {
     let mut servers: Vec<puffer_resources::McpServerSpec> = resources
         .mcp_servers
         .iter()

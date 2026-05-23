@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "workspace-switch-workspace-modal",
+  "title": "Switch workspace modal selection and keyboard recovery",
+  "priority": 9,
+  "seed": "modal-focus-race",
+  "startNode": "workspace/switch-workspace-modal",
+  "entrypoint": "workspace.switch-workspace",
+  "iterations": 10,
+  "steps": 4,
+  "replayLimit": 2,
+  "ownedNodes": ["workspace/switch-workspace-modal"],
+  "allowedSetupNodes": ["app", "workspace"],
+  "ownedCoverage": ["route:switch-workspace-modal", "control:workspace.switch-workspace", "control:modal.initial-focus", "control:modal.focus-trap"],
+  "allowedAsyncEvents": ["reconnect", "delayed-list-refresh"],
+  "invariants": ["app-no-crash", "modal-initial-focus", "modal-focus-trapped", "focus-restored"]
+}

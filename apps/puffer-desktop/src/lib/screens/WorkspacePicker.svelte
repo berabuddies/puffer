@@ -10,7 +10,7 @@
 
   import Icon from "../design/Icon.svelte";
   import { connectSshDaemon, restartLocalDaemon } from "../api/desktop";
-  import { canInvokeTauri, currentDaemonClient } from "../api/daemonClient";
+  import { canInvokeTauri, currentDaemonClient, switchDaemonClient } from "../api/daemonClient";
   import { focusTrap } from "../focusTrap";
 
   type Props = {
@@ -90,6 +90,7 @@
 
   async function submitRemote() {
     if (busy || !sshTarget.trim()) return;
+    const previousHandshake = currentDaemonClient()?.handshake ?? null;
     busy = true;
     error = null;
     status = `Connecting to ${sshTarget}…`;
@@ -102,6 +103,9 @@
       await onSwitched?.({ url: hs.url, workspaceRoot: hs.workspaceRoot });
       onClose();
     } catch (e) {
+      if (previousHandshake) {
+        await switchDaemonClient(previousHandshake).catch(() => undefined);
+      }
       error = e instanceof Error ? e.message : String(e);
     } finally {
       busy = false;

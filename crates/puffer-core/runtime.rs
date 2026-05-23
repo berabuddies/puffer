@@ -24,13 +24,17 @@ mod agent_support;
 mod agents;
 mod anthropic;
 mod anthropic_sse;
+mod auto_approval_review;
 pub mod background_tasks;
 mod blocking_loop;
+mod browser_auto_review;
 pub mod claude_tools;
 mod context_usage;
 pub mod errors;
+mod filesystem_access;
 pub mod goals;
 mod hook_support;
+pub(crate) mod internal_tool_permissions;
 mod local_tools;
 pub mod mcp_discovery;
 mod microcompact;
@@ -39,6 +43,8 @@ mod openai_sse;
 mod openai_ws;
 pub(crate) mod overflow;
 mod permission_prompt;
+mod plan_events;
+pub(crate) mod process_store;
 mod provider_adapter;
 pub mod quota;
 mod reflection;
@@ -110,6 +116,12 @@ impl Drop for RuntimeWorkGuard {
 
 #[cfg(test)]
 use self::anthropic::{anthropic_tool_schema, execute_anthropic_tool_calls};
+pub use self::browser_auto_review::{
+    browser_auto_review_runtime_result_from_json, BrowserAutoReviewActionSet,
+    BrowserAutoReviewRawAction, BrowserAutoReviewRequest, BrowserAutoReviewRuntimeResult,
+    BrowserAutoReviewSessionTargeting, BrowserAutoReviewSource,
+    BrowserAutoReviewSuggestedGrantScope, BrowserAutoReviewTargetClass, BrowserAutoReviewUrlSource,
+};
 pub(crate) use self::context_usage::render_context_usage_summary;
 pub(crate) use self::debug_context::render_debug_context;
 pub(crate) use self::hook_support::run_turn_hooks;
@@ -120,8 +132,11 @@ use self::openai::{
 };
 use self::openai::{is_event_stream, parse_openai_sse_response};
 pub use self::permission_prompt::{
-    with_permission_prompt_handler, with_user_question_prompt_handler, PermissionPromptAction,
-    PermissionPromptRequest, UserQuestionPromptRequest, UserQuestionPromptResponse,
+    with_permission_prompt_handler, with_user_question_prompt_handler,
+    BrowserPermissionPromptActionSet, BrowserPermissionPromptPayload,
+    BrowserPermissionPromptSource, BrowserPermissionPromptTargetClass, PermissionPromptAction,
+    PermissionPromptRequest, PermissionPromptReviewPayload, UserQuestionPromptRequest,
+    UserQuestionPromptResponse,
 };
 pub use self::reflection::{
     CodeJudgeConfig, LlmJudgeConfig, LlmJudgeContextScope, LlmJudgeMode, LlmJudgePromptCacheMode,
@@ -289,6 +304,16 @@ pub enum TurnStreamEvent {
     TextDelta(String),
     ToolCallsRequested(Vec<ToolCallRequest>),
     ToolInvocations(Vec<ToolInvocation>),
+    /// The active plan file changed during plan mode.
+    PlanUpdated {
+        file_path: String,
+        content: Option<String>,
+    },
+    /// The model exited plan mode and returned the completed plan.
+    PlanCompleted {
+        file_path: String,
+        content: Option<String>,
+    },
     ReflectionTrace(ReflectionTraceEvent),
     ReflectionCheckpoint(String),
     /// A transport-level retry is about to be attempted.
@@ -831,7 +856,8 @@ fn local_simple_turn_reply(input: &str) -> &'static str {
         _ => "Hi.",
     }
 }
-fn resolve_provider_and_model<'a>(
+/// Resolves the active provider descriptor and model id for a runtime turn.
+pub(super) fn resolve_provider_and_model<'a>(
     state: &AppState,
     providers: &'a ProviderRegistry,
 ) -> Result<(&'a ProviderDescriptor, String)> {

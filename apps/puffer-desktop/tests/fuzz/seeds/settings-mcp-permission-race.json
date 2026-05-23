@@ -21,7 +21,7 @@
       "kind": "ui",
       "target": "settings.mcp-add",
       "weight": 8,
-      "params": { "id": { "oneOf": ["playwright", "browser", "tmp-server"] }, "target": { "oneOf": ["npx @playwright/mcp", "http://127.0.0.1:9000/sse", ""] } },
+      "params": { "id": { "oneOf": ["playwright", "browser", "tmp-server"] }, "target": { "oneOf": ["npx @playwright/mcp", "http://127.0.0.1:9000/sse"] } },
       "expectedDaemon": "add_mcp_server",
       "coverage": ["control:settings.mcp-add", "state:settings.saving", "async:duplicate-submit"]
     },

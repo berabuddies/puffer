@@ -1,15 +1,20 @@
+use super::browser_grants::BrowserGrantCategory;
+use super::browser_policy::BrowserPolicySettings;
+use super::browser_target::{BrowserActionCategory, BrowserTargetClass};
 use super::profile::{
-    build_request_tool_filter, classify_tool_permission_surface, BrowserActionCategory,
-    BrowserGrantCategory, EffectiveApprovalPolicy, EffectivePermissionProfile,
-    EffectiveSandboxMode, PermissionGrantCategory, PermissionSurface, SessionPermissionGrants,
-    SurfaceEnforcement,
+    build_request_tool_filter, classify_tool_permission_surface, EffectiveApprovalPolicy,
+    EffectivePermissionProfile, EffectiveSandboxMode, PermissionGrantCategory, PermissionSurface,
+    SessionPermissionGrants, SessionPermissionState, SurfaceEnforcement,
 };
 use super::*;
 use puffer_resources::{LoadedItem, SourceInfo, SourceKind, ToolSpec};
-use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use tempfile::TempDir;
 use uuid::Uuid;
+
+mod browser;
 
 fn tool_definition(id: &str, approval_policy: &str) -> ToolDefinition {
     ToolDefinition {
@@ -48,8 +53,7 @@ fn runtime_context(
     active_plan_path: Option<PathBuf>,
     cwd: PathBuf,
     working_dirs: Vec<PathBuf>,
-    session_allow_all: bool,
-    session_tool_permissions: HashMap<String, String>,
+    session_state: SessionPermissionState,
 ) -> RuntimePermissionContext {
     runtime_context_with_inputs(
         permissions,
@@ -58,8 +62,7 @@ fn runtime_context(
         active_plan_path,
         cwd,
         working_dirs,
-        session_allow_all,
-        session_tool_permissions,
+        session_state,
         RuntimePermissionInputs::default(),
     )
 }
@@ -71,24 +74,24 @@ fn runtime_context_with_inputs(
     active_plan_path: Option<PathBuf>,
     cwd: PathBuf,
     working_dirs: Vec<PathBuf>,
-    session_allow_all: bool,
-    session_tool_permissions: HashMap<String, String>,
+    session_state: SessionPermissionState,
     inputs: RuntimePermissionInputs,
 ) -> RuntimePermissionContext {
     let session_id = Uuid::parse_str("2ba8b01d-5e7a-46b6-b747-7bfe5f6fa36a").unwrap();
-    let profile = EffectivePermissionProfile::from_legacy_sources(
+    let profile = EffectivePermissionProfile::from_session_state(
         &cwd,
         &working_dirs,
         &permissions,
         &sandbox,
         &session_id,
-        session_allow_all,
-        &SessionPermissionGrants::from_legacy_tool_permissions(&session_tool_permissions),
+        &session_state,
         plan_mode,
         active_plan_path.clone(),
         inputs.request_tool_filter,
     );
     RuntimePermissionContext {
+        browser_policy: BrowserPolicySettings::default(),
+        acl: acl::ProjectPermissionAcl::parse(&cwd, ""),
         derived_policy: profile.derived_policy(),
         profile,
         permissions,
@@ -108,24 +111,41 @@ fn runtime_context_with_session_grants(
     inputs: RuntimePermissionInputs,
 ) -> RuntimePermissionContext {
     let session_id = Uuid::parse_str("2ba8b01d-5e7a-46b6-b747-7bfe5f6fa36a").unwrap();
-    let profile = EffectivePermissionProfile::from_legacy_sources(
+    let profile = EffectivePermissionProfile::from_session_state(
         &cwd,
         &working_dirs,
         &permissions,
         &sandbox,
         &session_id,
-        session_allow_all,
-        &session_grants,
+        &SessionPermissionState::new(session_allow_all, session_grants),
         plan_mode,
         active_plan_path.clone(),
         inputs.request_tool_filter,
     );
     RuntimePermissionContext {
+        browser_policy: BrowserPolicySettings::default(),
+        acl: acl::ProjectPermissionAcl::parse(&cwd, ""),
         derived_policy: profile.derived_policy(),
         profile,
         permissions,
         sandbox,
     }
+}
+
+fn to_file_url(path: &Path) -> String {
+    url::Url::from_file_path(path)
+        .expect("file path should convert to url")
+        .to_string()
+}
+
+fn temp_workspace_with_context() -> (TempDir, PathBuf, PathBuf, PathBuf) {
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("workspace");
+    let nested = cwd.join("nested");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    (temp, cwd, nested, outside)
 }
 
 #[test]
@@ -155,6 +175,27 @@ fn default_permissions_contents_follow_declared_policy() {
             },
             LoadedItem {
                 value: ToolSpec {
+                    id: "Browser".to_string(),
+                    name: "Browser".to_string(),
+                    description: "Browser".to_string(),
+                    handler: "browser".to_string(),
+                    aliases: Vec::new(),
+                    handler_args: Vec::new(),
+                    approval_policy: Some("auto".to_string()),
+                    sandbox_policy: None,
+                    shared_lib: None,
+                    enabled_if: None,
+                    input_schema: None,
+                    metadata: Default::default(),
+                    display: Default::default(),
+                },
+                source_info: SourceInfo {
+                    path: "browser.yaml".into(),
+                    kind: SourceKind::Builtin,
+                },
+            },
+            LoadedItem {
+                value: ToolSpec {
                     id: "Read".to_string(),
                     name: "Read".to_string(),
                     description: "Read".to_string(),
@@ -179,6 +220,8 @@ fn default_permissions_contents_follow_declared_policy() {
     });
     assert!(contents.contains("bash = \"on-request\""));
     assert!(contents.contains("read = \"auto\""));
+    assert!(!contents.contains("browser = "));
+    assert!(contents.contains("[browser]"));
 }
 
 #[test]
@@ -190,8 +233,7 @@ fn plan_mode_marks_mutating_on_request_tools_as_ask() {
         None,
         PathBuf::from("/tmp"),
         Vec::new(),
-        false,
-        HashMap::new(),
+        SessionPermissionState::default(),
     );
     let decision =
         context.decision_for_tool_call(&tool_definition("Write", "on-request"), &Value::Null);
@@ -209,8 +251,7 @@ fn plan_mode_allows_writes_and_edits_for_the_active_plan_file() {
         Some(active_plan_path.clone()),
         PathBuf::from("/tmp"),
         Vec::new(),
-        false,
-        HashMap::new(),
+        SessionPermissionState::default(),
     );
     let write = context.decision_for_tool_call(
         &tool_definition("Write", "on-request"),
@@ -234,8 +275,7 @@ fn config_reads_allow_but_writes_ask() {
         None,
         PathBuf::from("/tmp"),
         Vec::new(),
-        false,
-        HashMap::new(),
+        SessionPermissionState::default(),
     );
     let config = tool_definition("Config", "auto");
     let read = context.decision_for_tool_call(&config, &serde_json::json!({"setting":"theme"}));
@@ -256,8 +296,7 @@ fn ask_user_question_runs_without_permission_gate() {
         None,
         PathBuf::from("/tmp"),
         Vec::new(),
-        false,
-        HashMap::new(),
+        SessionPermissionState::default(),
     );
     let question = tool_definition("AskUserQuestion", "auto");
     let decision = context.decision_for_tool_call(
@@ -276,8 +315,7 @@ fn web_search_requires_permission_by_default() {
         None,
         PathBuf::from("/tmp"),
         Vec::new(),
-        false,
-        HashMap::new(),
+        SessionPermissionState::default(),
     );
     let search = tool_definition("WebSearch", "auto");
     let decision =
@@ -294,8 +332,7 @@ fn send_message_allows_local_targets_but_asks_for_bridge_targets() {
         None,
         PathBuf::from("/tmp"),
         Vec::new(),
-        false,
-        HashMap::new(),
+        SessionPermissionState::default(),
     );
     let send = tool_definition("SendMessage", "auto");
     let local =
@@ -317,8 +354,7 @@ fn todo_write_and_agent_are_allowed_without_extra_gate() {
         None,
         PathBuf::from("/tmp"),
         Vec::new(),
-        false,
-        HashMap::new(),
+        SessionPermissionState::default(),
     );
     let todo = tool_definition("TodoWrite", "auto");
     let agent = tool_definition("Agent", "auto");
@@ -345,8 +381,7 @@ fn disabled_tool_is_hidden_from_model_pool() {
         None,
         PathBuf::from("/tmp"),
         Vec::new(),
-        false,
-        HashMap::new(),
+        SessionPermissionState::default(),
     );
     assert!(!context.tool_visible_to_model(&definition));
 }
@@ -365,8 +400,7 @@ fn send_user_message_ignores_workspace_ask_rules() {
         None,
         PathBuf::from("/tmp"),
         Vec::new(),
-        false,
-        HashMap::new(),
+        SessionPermissionState::default(),
     );
     let send_user_message = ToolDefinition {
         id: "SendUserMessage".to_string(),
@@ -418,8 +452,7 @@ fn legacy_provider_tool_keys_apply_to_claude_style_tool_ids() {
         None,
         PathBuf::from("/tmp"),
         Vec::new(),
-        false,
-        HashMap::new(),
+        SessionPermissionState::default(),
     );
     let read = tool_definition("Read", "auto");
     let edit = tool_definition("Edit", "auto");
@@ -467,8 +500,7 @@ fn dangerous_shell_commands_require_approval() {
         None,
         PathBuf::from("/tmp"),
         Vec::new(),
-        false,
-        HashMap::new(),
+        SessionPermissionState::default(),
     );
     let bash = tool_definition("Bash", "on-request");
     let decision = context.decision_for_tool_call(
@@ -492,8 +524,7 @@ fn downloaded_shell_pipelines_require_approval() {
         None,
         PathBuf::from("/tmp"),
         Vec::new(),
-        false,
-        HashMap::new(),
+        SessionPermissionState::default(),
     );
     let bash = tool_definition("Bash", "on-request");
     let decision = context.decision_for_tool_call(
@@ -510,8 +541,13 @@ fn downloaded_shell_pipelines_require_approval() {
 
 #[test]
 fn effective_profile_maps_legacy_settings_and_session_grants() {
-    let mut session_tool_permissions = HashMap::new();
-    session_tool_permissions.insert("bash".to_string(), "allow".to_string());
+    let mut session_grants = SessionPermissionGrants::default();
+    let session_id = Uuid::parse_str("2ba8b01d-5e7a-46b6-b747-7bfe5f6fa36a").unwrap();
+    session_grants.grant_tool_call(
+        &tool_definition("Bash", "on-request"),
+        &serde_json::json!({"command": "pwd"}),
+        &session_id,
+    );
     let mut sandbox = SandboxSettings::from_mode("danger-full-access");
     sandbox.allow_unsandboxed_fallback = true;
     sandbox.excluded_commands = vec!["sudo".to_string()];
@@ -519,7 +555,6 @@ fn effective_profile_maps_legacy_settings_and_session_grants() {
         PermissionsSettings {
             tools: BTreeMap::from([
                 ("read_file".to_string(), "deny".to_string()),
-                ("browser".to_string(), "ask".to_string()),
                 ("agent".to_string(), "allow".to_string()),
             ]),
         },
@@ -528,8 +563,7 @@ fn effective_profile_maps_legacy_settings_and_session_grants() {
         None,
         PathBuf::from("/repo"),
         vec![PathBuf::from("/repo/extra")],
-        false,
-        session_tool_permissions,
+        SessionPermissionState::new(false, session_grants),
     );
     let profile = context.effective_profile();
 
@@ -558,7 +592,7 @@ fn effective_profile_maps_legacy_settings_and_session_grants() {
 }
 
 #[test]
-fn derived_policy_keeps_approval_and_sandbox_axes_separate() {
+fn derived_policy_keeps_approval_and_runner_path_axes_separate() {
     let mut sandbox = SandboxSettings::from_mode("danger-full-access");
     sandbox.allow_unsandboxed_fallback = true;
     sandbox.excluded_commands = vec!["sudo".to_string(), "docker".to_string()];
@@ -575,15 +609,17 @@ fn derived_policy_keeps_approval_and_sandbox_axes_separate() {
         None,
         PathBuf::from("/repo"),
         vec![PathBuf::from("/repo/extra")],
-        false,
-        HashMap::new(),
+        SessionPermissionState::default(),
     );
 
     let derived = context.derived_policy();
-    let legacy = context.legacy_executor_bridge();
 
     assert_eq!(derived.filesystem().approval, EffectiveApprovalPolicy::Ask);
-    assert!(derived.filesystem().allow_all_paths());
+    assert_eq!(
+        derived.filesystem().sandbox_mode,
+        EffectiveSandboxMode::WorkspaceWrite
+    );
+    assert!(!derived.filesystem().allow_all_paths());
     assert_eq!(
         derived.filesystem().workspace_roots,
         vec![PathBuf::from("/repo"), PathBuf::from("/repo/extra")]
@@ -595,13 +631,6 @@ fn derived_policy_keeps_approval_and_sandbox_axes_separate() {
         vec!["sudo".to_string(), "docker".to_string()]
     );
     assert_eq!(derived.network().approval, EffectiveApprovalPolicy::Ask);
-    assert!(legacy.allow_all_paths);
-    assert_eq!(legacy.filesystem_sandbox_mode, "danger-full-access");
-    assert!(legacy.allow_unsandboxed_fallback);
-    assert_eq!(
-        legacy.excluded_commands,
-        vec!["sudo".to_string(), "docker".to_string()]
-    );
 }
 
 #[test]
@@ -635,14 +664,13 @@ fn effective_profile_tracks_surface_taxonomy_and_enforcement() {
         PermissionSurface::Agent
     );
 
-    let profile = EffectivePermissionProfile::from_legacy_sources(
+    let profile = EffectivePermissionProfile::from_session_state(
         PathBuf::from("/repo").as_path(),
         &[],
         &PermissionsSettings::default(),
         &SandboxSettings::from_mode("workspace-write"),
         &Uuid::nil(),
-        false,
-        &SessionPermissionGrants::default(),
+        &SessionPermissionState::default(),
         false,
         None,
         None,
@@ -683,8 +711,7 @@ fn request_scope_deny_is_part_of_profile_evaluation() {
         None,
         PathBuf::from("/tmp/work"),
         Vec::new(),
-        false,
-        HashMap::new(),
+        SessionPermissionState::default(),
         RuntimePermissionInputs {
             request_tool_filter: build_request_tool_filter(&["Read(/tmp/work/**)".to_string()])
                 .unwrap(),
@@ -803,6 +830,8 @@ fn request_tool_filter_matches_non_prefix_glob_patterns() {
 
 #[test]
 fn session_allow_all_bypasses_workspace_deny_in_profile_decision() {
+    let mut session_state = SessionPermissionState::default();
+    session_state.set_allow_all_tools(true);
     let context = runtime_context(
         PermissionsSettings {
             tools: BTreeMap::from([("bash".to_string(), "deny".to_string())]),
@@ -812,27 +841,13 @@ fn session_allow_all_bypasses_workspace_deny_in_profile_decision() {
         None,
         PathBuf::from("/tmp"),
         Vec::new(),
-        true,
-        HashMap::new(),
+        session_state,
     );
     let decision = context.decision_for_tool_call(
         &tool_definition("Bash", "on-request"),
         &serde_json::json!({"command": "pwd"}),
     );
     assert_eq!(decision.behavior, ToolPermissionBehavior::Allow);
-}
-
-#[test]
-fn session_grants_keep_legacy_tool_allow_projection() {
-    let mut grants = SessionPermissionGrants::default();
-    let session_id = uuid::Uuid::nil();
-    grants.grant_tool_call(
-        &tool_definition("Bash", "on-request"),
-        &serde_json::json!({"command": "pwd"}),
-        &session_id,
-    );
-    let legacy = grants.legacy_tool_permissions();
-    assert_eq!(legacy.get("bash").map(String::as_str), Some("allow"));
 }
 
 #[test]
@@ -844,253 +859,44 @@ fn session_grants_flow_into_derived_policies_without_flipping_sandbox() {
         &serde_json::json!({"file_path": "/repo/src/lib.rs"}),
         &session_id,
     );
-    let profile = EffectivePermissionProfile::from_legacy_sources(
+    let profile = EffectivePermissionProfile::from_session_state(
         PathBuf::from("/repo").as_path(),
         &[],
         &PermissionsSettings::default(),
         &SandboxSettings::from_mode("workspace-write"),
         &session_id,
-        false,
-        &grants,
+        &SessionPermissionState::new(false, grants),
         false,
         None,
         None,
     );
     let derived = profile.derived_policy();
-    let legacy = derived.legacy_bridge();
 
     assert!(derived.filesystem().session_granted);
-    assert!(!derived.filesystem().allow_all_paths());
-    assert!(!legacy.allow_all_paths);
-    assert_eq!(legacy.filesystem_sandbox_mode, "workspace-write");
+    assert_eq!(
+        derived.filesystem().sandbox_mode,
+        EffectiveSandboxMode::WorkspaceWrite
+    );
 }
 
 #[test]
-fn browser_and_bridge_session_grants_feed_profile_categories() {
-    let mut grants = SessionPermissionGrants::default();
-    let session_id = uuid::Uuid::parse_str("2ba8b01d-5e7a-46b6-b747-7bfe5f6fa36a").unwrap();
-    grants.grant_tool_call(
-        &tool_definition("Browser", "on-request"),
-        &serde_json::json!({
-            "action": "evaluate",
-            "sessionId": "b4f239fd-1493-4be7-a3a1-9e58fe612576",
-            "script": "1+1"
-        }),
-        &session_id,
-    );
-    grants.grant_tool_call(
-        &tool_definition("SendMessage", "auto"),
-        &serde_json::json!({"to":"bridge:session-123","message":"hi"}),
-        &session_id,
-    );
-    let profile = EffectivePermissionProfile::from_legacy_sources(
+fn yolo_session_grant_opens_the_derived_filesystem_policy() {
+    let profile = EffectivePermissionProfile::from_session_state(
         PathBuf::from("/repo").as_path(),
         &[],
         &PermissionsSettings::default(),
-        &SandboxSettings::from_mode("workspace-write"),
-        &session_id,
-        false,
-        &grants,
+        &SandboxSettings::from_mode("custom"),
+        &Uuid::nil(),
+        &SessionPermissionState::new(true, SessionPermissionGrants::default()),
         false,
         None,
         None,
     );
+    let derived = profile.derived_policy();
 
-    assert!(profile
-        .grants
-        .surface_grants
-        .contains(&PermissionSurface::Browser));
-    assert!(profile
-        .grants
-        .surface_grants
-        .contains(&PermissionSurface::Workflow));
-    assert!(!profile.grants.tool_overrides.contains_key("browser"));
     assert_eq!(
-        profile
-            .grants
-            .tool_overrides
-            .get("send_message")
-            .copied()
-            .or_else(|| profile.grants.tool_overrides.get("sendmessage").copied()),
-        Some(EffectiveApprovalPolicy::Allow)
+        derived.filesystem().sandbox_mode,
+        EffectiveSandboxMode::DangerFullAccess
     );
-    assert!(profile.grants.category_grants.iter().any(|grant| matches!(
-        grant,
-        PermissionGrantCategory::Browser(BrowserGrantCategory::Action(
-            BrowserActionCategory::Evaluate
-        ))
-    )));
-    assert!(profile.grants.category_grants.iter().any(|grant| matches!(
-        grant,
-        PermissionGrantCategory::Browser(BrowserGrantCategory::CrossSessionAccess)
-    )));
-    assert!(profile.grants.category_grants.iter().any(|grant| matches!(
-        grant,
-        PermissionGrantCategory::Workflow(
-            super::profile::WorkflowGrantCategory::CrossSessionBridge
-        )
-    )));
-}
-
-#[test]
-fn browser_scope_defaults_to_current_session_and_inspect() {
-    let context = runtime_context(
-        PermissionsSettings::default(),
-        SandboxSettings::from_mode("workspace-write"),
-        false,
-        None,
-        PathBuf::from("/tmp"),
-        Vec::new(),
-        false,
-        HashMap::new(),
-    );
-
-    let scope = context
-        .effective_profile()
-        .browser_scope(&serde_json::json!({"action":"snapshot"}));
-
-    assert_eq!(scope.action, Some(BrowserActionCategory::Inspect));
-    assert_eq!(
-        scope.root_session_id,
-        "2ba8b01d-5e7a-46b6-b747-7bfe5f6fa36a".to_string()
-    );
-    assert!(!scope.is_cross_session);
-}
-
-#[test]
-fn browser_inspect_is_allowed_but_navigation_and_evaluate_require_approval() {
-    let context = runtime_context(
-        PermissionsSettings::default(),
-        SandboxSettings::from_mode("workspace-write"),
-        false,
-        None,
-        PathBuf::from("/tmp"),
-        Vec::new(),
-        false,
-        HashMap::new(),
-    );
-
-    let inspect = context.decision_for_tool_call(
-        &tool_definition("Browser", "auto"),
-        &serde_json::json!({
-            "action":"snapshot"
-        }),
-    );
-    let navigate = context.decision_for_tool_call(
-        &tool_definition("Browser", "auto"),
-        &serde_json::json!({
-            "action":"navigate",
-            "url":"https://example.com"
-        }),
-    );
-    let evaluate = context.decision_for_tool_call(
-        &tool_definition("Browser", "auto"),
-        &serde_json::json!({
-            "action":"evaluate",
-            "script":"document.title"
-        }),
-    );
-
-    assert_eq!(inspect.behavior, ToolPermissionBehavior::Allow);
-    assert_eq!(navigate.behavior, ToolPermissionBehavior::Ask);
-    assert_eq!(evaluate.behavior, ToolPermissionBehavior::Ask);
-    assert!(evaluate
-        .reason
-        .unwrap_or_default()
-        .contains("executes page JavaScript"));
-}
-
-#[test]
-fn browser_cross_session_access_requires_explicit_approval() {
-    let context = runtime_context(
-        PermissionsSettings::default(),
-        SandboxSettings::from_mode("workspace-write"),
-        false,
-        None,
-        PathBuf::from("/tmp"),
-        Vec::new(),
-        false,
-        HashMap::new(),
-    );
-
-    let decision = context.decision_for_tool_call(
-        &tool_definition("Browser", "auto"),
-        &serde_json::json!({
-            "action":"snapshot",
-            "sessionId":"b4f239fd-1493-4be7-a3a1-9e58fe612576"
-        }),
-    );
-
-    assert_eq!(decision.behavior, ToolPermissionBehavior::Ask);
-    assert!(decision
-        .reason
-        .unwrap_or_default()
-        .contains("cross-session browser access"));
-}
-
-#[test]
-fn browser_session_grant_is_scoped_to_action_category_and_cross_session_flag() {
-    let session_id = Uuid::parse_str("2ba8b01d-5e7a-46b6-b747-7bfe5f6fa36a").unwrap();
-    let mut grants = SessionPermissionGrants::default();
-    grants.grant_tool_call(
-        &tool_definition("Browser", "auto"),
-        &serde_json::json!({
-            "action":"evaluate",
-            "script":"document.title"
-        }),
-        &session_id,
-    );
-    let profile = EffectivePermissionProfile::from_legacy_sources(
-        PathBuf::from("/repo").as_path(),
-        &[],
-        &PermissionsSettings::default(),
-        &SandboxSettings::from_mode("workspace-write"),
-        &session_id,
-        false,
-        &grants,
-        false,
-        None,
-        None,
-    );
-
-    assert!(profile.browser_session_grant_allows(&serde_json::json!({
-        "action":"evaluate",
-        "script":"window.location.href"
-    })));
-    assert!(!profile.browser_session_grant_allows(&serde_json::json!({
-        "action":"snapshot"
-    })));
-    assert!(!profile.browser_session_grant_allows(&serde_json::json!({
-        "action":"evaluate",
-        "sessionId":"b4f239fd-1493-4be7-a3a1-9e58fe612576",
-        "script":"window.location.href"
-    })));
-}
-
-#[test]
-fn browser_surface_only_session_grant_does_not_allow_evaluate() {
-    let mut grants = SessionPermissionGrants::default();
-    grants.grant_surface_for_test(PermissionSurface::Browser);
-
-    let context = runtime_context_with_session_grants(
-        PermissionsSettings::default(),
-        SandboxSettings::from_mode("workspace-write"),
-        false,
-        None,
-        PathBuf::from("/tmp"),
-        Vec::new(),
-        false,
-        grants,
-        RuntimePermissionInputs::default(),
-    );
-
-    let decision = context.decision_for_tool_call(
-        &tool_definition("Browser", "auto"),
-        &serde_json::json!({
-            "action":"evaluate",
-            "script":"document.title"
-        }),
-    );
-
-    assert_eq!(decision.behavior, ToolPermissionBehavior::Ask);
+    assert!(derived.filesystem().allow_all_paths());
 }

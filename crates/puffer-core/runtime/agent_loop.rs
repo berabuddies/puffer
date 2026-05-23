@@ -38,6 +38,7 @@ use super::openai::conversation::{
     compact_conversation_with, inject_post_compact_context, transcript_to_items, ConversationItem,
     ToolOutputPayload,
 };
+use super::plan_events::stream_events_for_tool_invocations;
 use super::reflection::{ReflectionConfig, ReflectionTraceEvent, ReflectionTracker};
 use super::request_tool_filter::RequestToolFilter;
 use super::tool_batch::execute_tool_batch;
@@ -666,6 +667,9 @@ pub(crate) fn run_streaming_loop(
 
         if !new_invocations.is_empty() {
             on_event(TurnStreamEvent::ToolInvocations(new_invocations.clone()));
+            for plan_event in stream_events_for_tool_invocations(inputs.state, &new_invocations) {
+                on_event(plan_event);
+            }
         }
 
         // Append FunctionCallOutput items.

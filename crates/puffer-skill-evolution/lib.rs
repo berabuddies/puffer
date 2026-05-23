@@ -6,12 +6,12 @@
 
 #![deny(missing_docs)]
 
-mod trace;
+mod generate;
+mod judge;
+mod mutate;
 mod pareto;
 mod parse;
-mod judge;
-mod generate;
-mod mutate;
+mod trace;
 
 pub use generate::{generate_candidates, DefaultGeneratePrompt, GeneratePromptBuilder};
 pub use judge::{score_candidate, DefaultJudgePrompt, JudgePromptBuilder};
@@ -329,12 +329,9 @@ mod tests {
                 valid.into(),
                 valid.into(),
                 valid.into(),
-                r#"{"novelty":0.9,"reproducibility":0.9,"structure":0.9,"conciseness":0.9}"#
-                    .into(),
-                r#"{"novelty":0.5,"reproducibility":0.5,"structure":0.5,"conciseness":0.5}"#
-                    .into(),
-                r#"{"novelty":0.4,"reproducibility":0.4,"structure":0.4,"conciseness":0.4}"#
-                    .into(),
+                r#"{"novelty":0.9,"reproducibility":0.9,"structure":0.9,"conciseness":0.9}"#.into(),
+                r#"{"novelty":0.5,"reproducibility":0.5,"structure":0.5,"conciseness":0.5}"#.into(),
+                r#"{"novelty":0.4,"reproducibility":0.4,"structure":0.4,"conciseness":0.4}"#.into(),
                 valid.into(),
                 r#"{"novelty":0.95,"reproducibility":0.95,"structure":0.95,"conciseness":0.95}"#
                     .into(),

@@ -9,8 +9,10 @@
 //! * `RemoteToolRunner` (planned, in `puffer-runner-grpc`) — forwards every
 //!   call to a remote `puffer-tool-runner` server over gRPC.
 //!
-//! All DTOs are owned (no borrowed references to runtime state) so the same
-//! types can cross a gRPC boundary unchanged.
+//! All DTOs are owned (no borrowed references to runtime state) so callers can
+//! serialize them across process boundaries without tying transport code to
+//! runtime lifetimes. The gRPC transport mirrors these DTOs directly and keeps
+//! filesystem policy typed end-to-end.
 //!
 //! Note: this is the Phase 0 trait extraction. Call-site refactors that make
 //! the runtime hold an `Arc<dyn ToolRunner>` instead of calling concrete
@@ -32,7 +34,7 @@ pub struct RunnerPing {
     pub uptime: Duration,
 }
 
-/// Coarse capability flags reported by a runner so the client can adapt.
+/// Coarse capability flags reported by a runner.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunnerCapabilities {
     /// Stable identifier for the implementation (e.g. `"local"`, `"grpc"`).
@@ -58,6 +60,7 @@ pub struct ToolRequest {
     #[serde(default)]
     pub working_dirs: Vec<PathBuf>,
     /// Filesystem execution policy for Claude-style path resolution.
+    /// Runner transports should preserve this typed shape end-to-end.
     pub filesystem: FilesystemExecutionPolicy,
     /// Tool input as a JSON value (matches the tool's input schema).
     pub input: serde_json::Value,
@@ -66,17 +69,16 @@ pub struct ToolRequest {
     pub session_id: Option<String>,
 }
 
-/// Filesystem execution policy sent across the runner boundary.
+/// Runner-facing typed filesystem execution policy.
 ///
-/// This keeps the transport model typed instead of flattening filesystem
-/// behavior into a single `allow_all_paths` boolean.
+/// Local callers and remote transports preserve this shape end-to-end.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FilesystemExecutionPolicy {
     /// Sandbox mode used for filesystem path resolution.
     pub sandbox_mode: FilesystemSandboxMode,
 }
 
-/// Filesystem sandbox modes understood by the runner boundary.
+/// Filesystem sandbox modes understood by the runner API.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum FilesystemSandboxMode {

@@ -207,7 +207,10 @@ fn model_picker_unmatched_query_does_not_apply_stale_selection() {
     )
     .unwrap();
 
-    assert!(matches!(tui.overlay, Some(OverlayState::ModelPicker { .. })));
+    assert!(matches!(
+        tui.overlay,
+        Some(OverlayState::ModelPicker { .. })
+    ));
     assert_eq!(state.current_model.as_deref(), None);
     assert_eq!(
         tui.status_hint.as_ref().map(|(hint, _)| hint.as_str()),

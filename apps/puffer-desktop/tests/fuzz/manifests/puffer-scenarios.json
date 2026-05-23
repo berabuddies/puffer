@@ -1,0 +1,105 @@
+{
+  "version": 1,
+  "name": "puffer-uiux-scenarios",
+  "scenarios": [
+    {
+      "id": "scenario-new-agent-chat",
+      "priority": 10,
+      "description": "Create or configure an agent, select provider/model, then send a chat turn.",
+      "shards": ["new-agent-base-create", "new-agent-provider-model", "chat-composer-send"],
+      "intents": ["create-agent", "select-model", "send-chat-turn"],
+      "invariants": ["no-cross-provider-model", "one-request-per-intent", "draft-preserved-on-failure"]
+    },
+    {
+      "id": "scenario-chat-browser-session-switch",
+      "priority": 9,
+      "description": "Send a browser-related chat turn, navigate the Browser pane, then switch sessions during late browser events.",
+      "shards": ["chat-composer-send", "browser-address-navigation", "browser-tab-lifecycle", "chat-session-switch-stale"],
+      "intents": ["send-chat-turn", "navigate-browser", "switch-session"],
+      "invariants": ["active-tab-stable", "active-session-stable", "stale-error-scoped"]
+    },
+    {
+      "id": "scenario-chat-files-reconnect-save",
+      "priority": 8,
+      "description": "Edit a file from an agent session, reconnect, and save while stale file/session events arrive.",
+      "shards": ["files-editor-save", "chat-session-switch-stale"],
+      "intents": ["save-file", "switch-session"],
+      "invariants": ["draft-preserved-on-failure", "active-session-stable", "no-permanent-loading"]
+    },
+    {
+      "id": "scenario-settings-permission-chat",
+      "priority": 8,
+      "description": "Change permissions or MCP settings, then trigger a chat permission/question flow.",
+      "shards": ["settings-permissions", "settings-mcp", "chat-permission-question"],
+      "intents": ["update-settings", "answer-permission", "answer-question"],
+      "invariants": ["active-session-stable", "controls-disabled-while-pending"]
+    }
+  ],
+  "personas": [
+    {
+      "id": "keyboard-only",
+      "priority": 9,
+      "env": {"input": "keyboard"},
+      "invariants": ["modal-initial-focus", "modal-focus-trapped"]
+    },
+    {
+      "id": "narrow-viewport",
+      "priority": 7,
+      "env": {"viewport": "narrow"},
+      "invariants": ["app-no-crash", "no-permanent-loading"]
+    },
+    {
+      "id": "slow-reconnect-heavy",
+      "priority": 9,
+      "env": {"daemon": "slow-reconnect-heavy"},
+      "invariants": ["one-request-per-intent", "draft-preserved-on-failure", "active-session-stable"]
+    },
+    {
+      "id": "auth-missing-or-expired",
+      "priority": 8,
+      "env": {"auth": "missing-or-expired"},
+      "invariants": ["no-cross-provider-model", "no-permanent-loading"]
+    }
+  ],
+  "metamorphicOracles": [
+    {
+      "id": "send-click-vs-enter",
+      "priority": 10,
+      "intent": "send-chat-turn",
+      "paths": ["click-send", "press-enter"],
+      "property": "Both paths create one visible user intent and at most one backend request."
+    },
+    {
+      "id": "modal-mouse-vs-keyboard",
+      "priority": 8,
+      "intent": "create-agent",
+      "paths": ["mouse-modal-flow", "keyboard-modal-flow"],
+      "property": "Both paths reach equivalent modal state and restore focus on close."
+    },
+    {
+      "id": "reconnect-vs-stable",
+      "priority": 9,
+      "intent": "send-chat-turn",
+      "paths": ["stable-daemon", "reconnect-during-pending"],
+      "property": "Reconnect does not duplicate completed actions or lose draft state."
+    }
+  ],
+  "multiClientScenarios": [
+    {
+      "id": "dual-client-session-stale-push",
+      "priority": 8,
+      "description": "Two windows share one fake daemon while one switches sessions and the other receives stale session push events.",
+      "clients": 2,
+      "shards": ["workspace-agent-card-selection", "chat-session-switch-stale"],
+      "invariants": ["active-session-stable", "stale-error-scoped"]
+    },
+    {
+      "id": "dual-client-provider-new-agent",
+      "priority": 7,
+      "description": "One window changes provider/model state while another opens New Agent and submits a chat turn.",
+      "clients": 2,
+      "shards": ["settings-provider-auth", "new-agent-provider-model", "chat-composer-send"],
+      "invariants": ["no-cross-provider-model", "one-request-per-intent"]
+    }
+  ]
+}

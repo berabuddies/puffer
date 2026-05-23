@@ -19,7 +19,9 @@ fn poll_pending_submit_opens_permission_prompt_overlay() {
     let request = PermissionPromptRequest {
         tool_id: "Bash".to_string(),
         summary: "git push origin master".to_string(),
-        reason: Some("shell command matches sandbox exclusion `git push`".to_string()),
+        reason: Some("shell command matches project shell exclusion `git push`".to_string()),
+        browser: None,
+        review: None,
     };
     let (event_tx, event_rx) = mpsc::channel();
     let (response_tx, _response_rx) = mpsc::channel();
@@ -72,6 +74,8 @@ fn permission_prompt_shortcuts_send_response() {
         tool_id: "Config".to_string(),
         summary: "Set theme to \"dark\"".to_string(),
         reason: Some("config writes require approval".to_string()),
+        browser: None,
+        review: None,
     };
     let (response_tx, response_rx) = mpsc::channel();
     let mut tui = TuiState {
@@ -100,6 +104,8 @@ fn permission_prompt_response_preserves_composer_draft() {
         tool_id: "Bash".to_string(),
         summary: "cat <<'EOF'".to_string(),
         reason: Some("pasted shell input requires approval".to_string()),
+        browser: None,
+        review: None,
     };
     let (response_tx, response_rx) = mpsc::channel();
     let draft = "next message [Pasted text #1 +2 lines]".to_string();
@@ -140,7 +146,9 @@ fn permission_prompt_ctrl_c_denies_and_closes_overlay() {
     let request = PermissionPromptRequest {
         tool_id: "Bash".to_string(),
         summary: "git push origin master".to_string(),
-        reason: Some("shell command matches sandbox exclusion `git push`".to_string()),
+        reason: Some("shell command matches project shell exclusion `git push`".to_string()),
+        browser: None,
+        review: None,
     };
     let (response_tx, response_rx) = mpsc::channel();
     let mut tui = TuiState {
@@ -185,7 +193,9 @@ fn permission_prompt_ctrl_c_interrupts_pending_turn() {
     let request = PermissionPromptRequest {
         tool_id: "Bash".to_string(),
         summary: "git push origin master".to_string(),
-        reason: Some("shell command matches sandbox exclusion `git push`".to_string()),
+        reason: Some("shell command matches project shell exclusion `git push`".to_string()),
+        browser: None,
+        review: None,
     };
     let (_event_tx, event_rx) = mpsc::channel();
     let (response_tx, response_rx) = mpsc::channel();
@@ -246,7 +256,9 @@ fn render_permission_prompt_shows_codex_style_options() {
         overlay: ApprovalOverlay::new(PermissionPromptRequest {
             tool_id: "Bash".to_string(),
             summary: "git push origin master".to_string(),
-            reason: Some("shell command matches sandbox exclusion `git push`".to_string()),
+            reason: Some("shell command matches project shell exclusion `git push`".to_string()),
+            browser: None,
+            review: None,
         }),
     };
 
@@ -270,8 +282,209 @@ fn render_permission_prompt_shows_codex_style_options() {
         .unwrap();
     let rendered = buffer_to_string(terminal.backend().buffer());
     assert!(rendered.contains("Would you like to grant these permissions?"));
-    assert!(rendered.contains("Yes, grant these permissions"));
-    assert!(rendered.contains("Yes, grant these permissions for this session"));
-    assert!(rendered.contains("Yes, allow ALL tools for this session"));
+    assert!(rendered.contains("Approve once"));
+    assert!(rendered.contains("Always allow this request"));
+    assert!(!rendered.contains("Always allow all project actions"));
     assert!(rendered.contains("No, continue without permissions"));
+}
+
+#[test]
+fn render_browser_permission_prompt_shows_context_with_generic_options() {
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let state = sample_state();
+    let resources = sample_resources();
+    let providers = sample_providers();
+    let auth_store = sample_auth_store();
+    let overlay = OverlayState::PermissionPrompt {
+        overlay: ApprovalOverlay::new(PermissionPromptRequest {
+            tool_id: "Browser".to_string(),
+            summary: "Open https://docs.example.com/a".to_string(),
+            reason: Some("browser navigation and interaction require approval".to_string()),
+            browser: Some(puffer_core::BrowserPermissionPromptPayload {
+                source: puffer_core::BrowserPermissionPromptSource::BrowserTool,
+                action_set: puffer_core::BrowserPermissionPromptActionSet::Navigate,
+                url: Some("https://docs.example.com/a".to_string()),
+                origin: Some("https://docs.example.com".to_string()),
+                host: Some("docs.example.com".to_string()),
+                target_class: puffer_core::BrowserPermissionPromptTargetClass::OpenWeb,
+                tab_id: Some("tab-1".to_string()),
+                is_cross_session: false,
+            }),
+            review: None,
+        }),
+    };
+
+    terminal
+        .draw(|frame| {
+            render::set_active_overlay(Some(overlay.clone()));
+            render::render(
+                frame,
+                &state,
+                &resources,
+                &providers,
+                &auth_store,
+                "",
+                0,
+                0,
+                0,
+                &supported_commands(),
+            );
+            render::set_active_overlay(None);
+        })
+        .unwrap();
+    let rendered = buffer_to_string(terminal.backend().buffer());
+    assert!(rendered.contains("Action: "));
+    assert!(rendered.contains("Open https://docs.example.com/a"));
+    assert!(rendered.contains("Approve once"));
+    assert!(rendered.contains("Always allow this browser context"));
+    assert!(!rendered.contains("Always allow all project actions"));
+    assert!(!rendered.contains("always allow all"));
+    assert!(rendered.contains("always allow context"));
+    assert!(!rendered.contains("Source: "));
+    assert!(!rendered.contains("Action Set: "));
+    assert!(!rendered.contains("Reason: "));
+}
+
+#[test]
+fn browser_permission_prompt_shortcuts_skip_allow_all_session() {
+    let request = PermissionPromptRequest {
+        tool_id: "Browser".to_string(),
+        summary: "Open https://docs.example.com/a".to_string(),
+        reason: Some("browser navigation and interaction require approval".to_string()),
+        browser: Some(puffer_core::BrowserPermissionPromptPayload {
+            source: puffer_core::BrowserPermissionPromptSource::BrowserTool,
+            action_set: puffer_core::BrowserPermissionPromptActionSet::Navigate,
+            url: Some("https://docs.example.com/a".to_string()),
+            origin: Some("https://docs.example.com".to_string()),
+            host: Some("docs.example.com".to_string()),
+            target_class: puffer_core::BrowserPermissionPromptTargetClass::OpenWeb,
+            tab_id: Some("tab-1".to_string()),
+            is_cross_session: false,
+        }),
+        review: None,
+    };
+    let mut overlay = ApprovalOverlay::new(request);
+
+    assert_eq!(
+        overlay.activate_shortcut('A'),
+        Some(PermissionPromptAction::AllowSession)
+    );
+}
+
+#[test]
+fn render_browser_evaluate_prompt_shows_reason_only_for_evaluate() {
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let state = sample_state();
+    let resources = sample_resources();
+    let providers = sample_providers();
+    let auth_store = sample_auth_store();
+    let overlay = OverlayState::PermissionPrompt {
+        overlay: ApprovalOverlay::new(PermissionPromptRequest {
+            tool_id: "Browser".to_string(),
+            summary: "Run JavaScript on https://docs.example.com".to_string(),
+            reason: Some(
+                "browser evaluation requires explicit approval because it executes page JavaScript"
+                    .to_string(),
+            ),
+            browser: Some(puffer_core::BrowserPermissionPromptPayload {
+                source: puffer_core::BrowserPermissionPromptSource::BrowserTool,
+                action_set: puffer_core::BrowserPermissionPromptActionSet::Evaluate,
+                url: Some("https://docs.example.com".to_string()),
+                origin: Some("https://docs.example.com".to_string()),
+                host: Some("docs.example.com".to_string()),
+                target_class: puffer_core::BrowserPermissionPromptTargetClass::OpenWeb,
+                tab_id: Some("tab-1".to_string()),
+                is_cross_session: false,
+            }),
+            review: None,
+        }),
+    };
+
+    terminal
+        .draw(|frame| {
+            render::set_active_overlay(Some(overlay.clone()));
+            render::render(
+                frame,
+                &state,
+                &resources,
+                &providers,
+                &auth_store,
+                "",
+                0,
+                0,
+                0,
+                &supported_commands(),
+            );
+            render::set_active_overlay(None);
+        })
+        .unwrap();
+    let rendered = buffer_to_string(terminal.backend().buffer());
+    assert!(rendered.contains("Run JavaScript on https://docs.example.com"));
+    assert!(rendered.contains("Reason: "));
+    assert!(rendered.contains("executes page JavaScript"));
+}
+
+#[test]
+fn render_browser_fallback_prompt_does_not_show_reviewer_payload() {
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let state = sample_state();
+    let resources = sample_resources();
+    let providers = sample_providers();
+    let auth_store = sample_auth_store();
+    let overlay = OverlayState::PermissionPrompt {
+        overlay: ApprovalOverlay::new(PermissionPromptRequest {
+            tool_id: "Browser".to_string(),
+            summary: "Open https://docs.example.com/a".to_string(),
+            reason: Some("browser navigation and interaction require approval".to_string()),
+            browser: Some(puffer_core::BrowserPermissionPromptPayload {
+                source: puffer_core::BrowserPermissionPromptSource::BrowserTool,
+                action_set: puffer_core::BrowserPermissionPromptActionSet::Navigate,
+                url: Some("https://docs.example.com/a".to_string()),
+                origin: Some("https://docs.example.com".to_string()),
+                host: Some("docs.example.com".to_string()),
+                target_class: puffer_core::BrowserPermissionPromptTargetClass::OpenWeb,
+                tab_id: Some("tab-1".to_string()),
+                is_cross_session: false,
+            }),
+            review: Some(puffer_core::PermissionPromptReviewPayload {
+                decision: puffer_core::BrowserAutoReviewRuntimeResult::NeedsUser,
+                risk: "medium".to_string(),
+                rationale: "Needs user confirmation.".to_string(),
+                resolved_root_session_id: "root-1".to_string(),
+                session_targeting: puffer_core::BrowserAutoReviewSessionTargeting::ExplicitSession,
+            }),
+        }),
+    };
+
+    terminal
+        .draw(|frame| {
+            render::set_active_overlay(Some(overlay.clone()));
+            render::render(
+                frame,
+                &state,
+                &resources,
+                &providers,
+                &auth_store,
+                "",
+                0,
+                0,
+                0,
+                &supported_commands(),
+            );
+            render::set_active_overlay(None);
+        })
+        .unwrap();
+    let rendered = buffer_to_string(terminal.backend().buffer());
+    assert!(rendered.contains("Action: "));
+    assert!(rendered.contains("Open https://docs.example.com/a"));
+    assert!(rendered.contains("Approve once"));
+    assert!(rendered.contains("Always allow this browser context"));
+    assert!(!rendered.contains("Reviewer Decision: "));
+    assert!(!rendered.contains("Reviewer Risk: "));
+    assert!(!rendered.contains("Reviewer Rationale: "));
+    assert!(!rendered.contains("Reviewer Context: "));
+    assert!(!rendered.contains("Needs user confirmation."));
 }

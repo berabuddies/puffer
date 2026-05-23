@@ -407,6 +407,8 @@ pub(crate) fn handle_prompt_submit(
                     TurnStreamEvent::ToolInvocations(invocations) => {
                         let _ = event_sender.send(PendingSubmitEvent::ToolInvocations(invocations));
                     }
+                    TurnStreamEvent::PlanUpdated { .. } | TurnStreamEvent::PlanCompleted { .. } => {
+                    }
                     TurnStreamEvent::ReflectionCheckpoint(summary) => {
                         let _ =
                             event_sender.send(PendingSubmitEvent::ReflectionCheckpoint(summary));
@@ -456,7 +458,7 @@ pub(crate) fn handle_prompt_submit(
             outcome,
             auth_store: worker_auth_store,
             session_permission_state: worker_state.session_permission_state().clone(),
-            session_allow_all: worker_state.session_allow_all,
+            session_allow_all: worker_state.session_permission_state().allow_all_tools(),
             project_memory_review_turns: worker_state.project_memory_review_turns,
         }));
     });
@@ -648,12 +650,9 @@ pub(crate) fn poll_pending_submit(
                 let rendered_tool_invocations = pending.rendered_tool_invocations;
                 let previous_auth_store = auth_store.clone();
                 *auth_store = result.auth_store;
-                // Sync the full typed session permission state from the worker
-                // clone so category grants survive the worker/UI round-trip.
-                // This also avoids depending on AppState's legacy rebuild path,
-                // where sync_session_permission_state() assumes
-                // session_allow_all was updated before reconstruction.
-                let _ = result.session_allow_all;
+                // Sync the full canonical typed session permission state from
+                // the worker clone so category grants survive the worker/UI
+                // round-trip exactly.
                 state.replace_session_permission_state(result.session_permission_state);
                 state.project_memory_review_turns = result.project_memory_review_turns;
                 match result.outcome {

@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "new-agent-provider-model",
+  "title": "New agent provider and model selection",
+  "priority": 10,
+  "seed": "provider-auth-model-race",
+  "startNode": "new-agent/provider-model",
+  "entrypoint": "new-agent.provider",
+  "iterations": 16,
+  "steps": 16,
+  "replayLimit": 3,
+  "ownedNodes": ["new-agent/provider-model"],
+  "allowedSetupNodes": ["app", "workspace", "agent-detail", "new-agent", "settings/provider-auth"],
+  "ownedCoverage": ["control:new-agent.provider", "state:auth.multi-provider", "state:auth.one-provider", "invariant:no-cross-provider-model"],
+  "allowedAsyncEvents": ["late-success", "late-failure", "delayed-list-refresh", "server-push-update", "reconnect"],
+  "invariants": ["app-no-crash", "no-cross-provider-model", "draft-preserved-on-failure", "no-permanent-loading"]
+}

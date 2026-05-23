@@ -25,6 +25,8 @@
 
   let apiKeys: Record<string, string> = {};
   let query = "";
+  let pendingApiKeyProvider: string | null = null;
+  let pendingApiKeyBusyObserved = false;
   type ProviderAuth = SettingsSnapshot["auth"][number];
 
   function updateApiKey(providerId: string, value: string) {
@@ -39,6 +41,8 @@
     if (credentialBusy) return;
     const apiKey = apiKeyValue(providerId).trim();
     if (!apiKey) return;
+    pendingApiKeyProvider = providerId;
+    pendingApiKeyBusyObserved = false;
     onLoginApiKey(providerId, apiKey);
   }
 
@@ -121,6 +125,22 @@
 
   $: authBusy = busyProviderId !== null;
   $: credentialBusy = authBusy || busyImportKey !== null;
+  $: if (pendingApiKeyProvider && busyProviderId === pendingApiKeyProvider) {
+    pendingApiKeyBusyObserved = true;
+  }
+  $: if (
+    pendingApiKeyProvider &&
+    pendingApiKeyBusyObserved &&
+    busyProviderId !== pendingApiKeyProvider
+  ) {
+    if (!errorMessage) {
+      const next = { ...apiKeys };
+      delete next[pendingApiKeyProvider];
+      apiKeys = next;
+    }
+    pendingApiKeyProvider = null;
+    pendingApiKeyBusyObserved = false;
+  }
 </script>
 
 <section class="login-page">

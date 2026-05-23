@@ -1,9 +1,9 @@
                 ██                ╭ Puffer Code ───────────────────────────────────────────────────╮
             ██████████    ██      │Account   anthropic via API key                                 │
-          ████████████████████    │Model     anthropic/claude-sonnet-4-5 · tools 51/59             │
+          ████████████████████    │Model     anthropic/claude-sonnet-4-5 · tools 55/63             │
       ████████████████████████    │Session   dockyard · <id>│
       ██████████████████████      │Mode      effort auto                                           │
-    ████████████████████████████  │Context   dockyard · 2 msgs · 0 wds · sandbox workspace-write...│
+    ████████████████████████████  │Context   dockyard · 2 msgs · 0 wds · permissions ACL · 99% left│
 ██████████████████████████████    ╰────────────────────────────────────────────────────────────────╯
   ████████████████████████████
       ████████████████████████
@@ -19,4 +19,4 @@ The working tree is clean.
   No pending changes are waiting for review.
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 ❯ Review changes, ask a question, or type /
-anthropic/claude-sonnet-4-5 · 99% left · ~/dockyard · sandbox workspace-write
+anthropic/claude-sonnet-4-5 · 99% left · ~/dockyard · permissions ACL

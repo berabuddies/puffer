@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "chat-composer-send",
+  "title": "Chat composer draft, send, and duplicate submit",
+  "priority": 10,
+  "seed": "chat-turn-race",
+  "startNode": "chat/composer-send",
+  "entrypoint": "chat.send",
+  "iterations": 20,
+  "steps": 16,
+  "replayLimit": 3,
+  "ownedNodes": ["chat/composer-send"],
+  "allowedSetupNodes": ["app", "workspace", "agent-detail", "chat"],
+  "ownedCoverage": ["route:chat-composer", "control:chat.composer", "control:chat.send", "state:session.running", "async:duplicate-submit"],
+  "allowedAsyncEvents": ["duplicate-submit", "late-success", "late-failure", "dropped-response", "reconnect"],
+  "invariants": ["app-no-crash", "one-request-per-intent", "draft-preserved-on-failure", "controls-disabled-while-pending", "no-permanent-loading"]
+}

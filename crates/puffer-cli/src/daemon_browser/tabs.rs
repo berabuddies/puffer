@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
+use url::Url;
 
 use super::BrowserState;
 
@@ -28,6 +29,29 @@ pub(crate) struct BrowserTabInfo {
 pub(crate) struct BrowserTabsState {
     pub(crate) active_tab_id: Option<String>,
     pub(crate) tabs: Vec<BrowserTabInfo>,
+}
+
+/// Snapshot of the current active tab for permission-context hydration.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserCurrentTabContext {
+    pub(crate) status: BrowserCurrentTabStatus,
+    pub(crate) tab_id: Option<String>,
+    pub(crate) url: Option<String>,
+    pub(crate) origin: Option<String>,
+    pub(crate) host: Option<String>,
+    pub(crate) port: Option<u16>,
+    pub(crate) title: Option<String>,
+}
+
+/// Describes how much active-tab URL context the daemon could resolve.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BrowserCurrentTabStatus {
+    NoActiveTab,
+    EmptyUrl,
+    AboutBlank,
+    Available,
 }
 
 #[derive(Default)]
@@ -65,6 +89,16 @@ impl BrowserTabRegistry {
             .tabs
             .iter()
             .find(|tab| tab.tab_id == tab_id)
+            .cloned()
+    }
+
+    /// Returns the recorded active tab for the given root browser session.
+    pub(crate) fn active_tab(&self, root_session_id: &str) -> Option<BrowserTabInfo> {
+        let set = self.sessions.get(root_session_id)?;
+        let active_tab_id = set.active_tab_id.as_deref()?;
+        set.tabs
+            .iter()
+            .find(|tab| tab.tab_id == active_tab_id)
             .cloned()
     }
 
@@ -251,6 +285,59 @@ impl BrowserTabInfo {
     }
 }
 
+impl BrowserCurrentTabContext {
+    /// Builds a no-active-tab snapshot for browser permission lookups.
+    pub(crate) fn no_active_tab() -> Self {
+        Self {
+            status: BrowserCurrentTabStatus::NoActiveTab,
+            tab_id: None,
+            url: None,
+            origin: None,
+            host: None,
+            port: None,
+            title: None,
+        }
+    }
+
+    /// Builds an active-tab snapshot from one managed browser tab record.
+    pub(crate) fn from_tab(tab: &BrowserTabInfo) -> Self {
+        let url = Some(tab.url.clone());
+        let title = Some(tab.title.clone());
+        if tab.url.trim().is_empty() {
+            return Self {
+                status: BrowserCurrentTabStatus::EmptyUrl,
+                tab_id: Some(tab.tab_id.clone()),
+                url,
+                origin: None,
+                host: None,
+                port: None,
+                title,
+            };
+        }
+        if tab.url.eq_ignore_ascii_case("about:blank") {
+            return Self {
+                status: BrowserCurrentTabStatus::AboutBlank,
+                tab_id: Some(tab.tab_id.clone()),
+                url,
+                origin: None,
+                host: None,
+                port: None,
+                title,
+            };
+        }
+        let (origin, host, port) = parse_tab_url_fields(&tab.url);
+        Self {
+            status: BrowserCurrentTabStatus::Available,
+            tab_id: Some(tab.tab_id.clone()),
+            url,
+            origin,
+            host,
+            port,
+            title,
+        }
+    }
+}
+
 pub(crate) fn backend_session_id(root_session_id: &str, tab_id: &str) -> String {
     format!("{root_session_id}:browser:{tab_id}")
 }
@@ -258,6 +345,17 @@ pub(crate) fn backend_session_id(root_session_id: &str, tab_id: &str) -> String 
 pub(crate) fn parse_backend_session_id(session_id: &str) -> Option<(&str, &str)> {
     let (root, tab_id) = session_id.split_once(":browser:")?;
     (!root.is_empty() && !tab_id.is_empty()).then_some((root, tab_id))
+}
+
+fn parse_tab_url_fields(raw_url: &str) -> (Option<String>, Option<String>, Option<u16>) {
+    let Ok(parsed) = Url::parse(raw_url) else {
+        return (None, None, None);
+    };
+    let origin =
+        matches!(parsed.scheme(), "http" | "https").then(|| parsed.origin().ascii_serialization());
+    let host = parsed.host_str().map(|value| value.to_ascii_lowercase());
+    let port = parsed.port_or_known_default();
+    (origin, host, port)
 }
 
 fn default_label(tab_id: &str) -> String {

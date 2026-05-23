@@ -29,8 +29,7 @@ fn main() -> Result<()> {
     let config = load_config(&paths)?;
     let auth_path = paths.user_config_dir.join("auth.json");
     let mut auth_store = puffer_provider_registry::AuthStore::load(&auth_path)?;
-    let resources =
-        load_resources(&paths, &puffer_core::runner_adapter::LocalToolRunner::new())?;
+    let resources = load_resources(&paths, &puffer_core::runner_adapter::LocalToolRunner::new())?;
 
     let mut providers = ProviderRegistry::new();
     for provider in &resources.providers {
@@ -58,8 +57,12 @@ fn main() -> Result<()> {
     }
     let _ = providers.discover_and_merge_all(&auth_store);
 
-    let provider_id = std::env::var("PROBE_PROVIDER")
-        .unwrap_or_else(|_| config.default_provider.clone().unwrap_or_else(|| "hanbbq".to_string()));
+    let provider_id = std::env::var("PROBE_PROVIDER").unwrap_or_else(|_| {
+        config
+            .default_provider
+            .clone()
+            .unwrap_or_else(|| "hanbbq".to_string())
+    });
     let model = resolve_model(&providers, &provider_id)?;
 
     eprintln!("[genskill-e2e] provider={provider_id} model={model}");
@@ -130,7 +133,10 @@ fn main() -> Result<()> {
         match &raw_result {
             Ok(turn) => {
                 eprintln!("  LLM returned {} chars", turn.assistant_text.len());
-                eprintln!("  first 300 chars: {}", &turn.assistant_text[..turn.assistant_text.len().min(300)]);
+                eprintln!(
+                    "  first 300 chars: {}",
+                    &turn.assistant_text[..turn.assistant_text.len().min(300)]
+                );
                 let parse_result = puffer_skill_evolution::parse_skill_md(&turn.assistant_text);
                 match parse_result {
                     Ok(candidate) => {
@@ -192,7 +198,11 @@ fn main() -> Result<()> {
 
     match &dispatch_result {
         Ok(()) => {
-            let last = state.transcript.last().map(|m| m.text.as_str()).unwrap_or("");
+            let last = state
+                .transcript
+                .last()
+                .map(|m| m.text.as_str())
+                .unwrap_or("");
             if last.contains("Skill written to") {
                 eprintln!("  PASS: dispatch returned skill path");
                 eprintln!("  output: {last}");
@@ -211,20 +221,23 @@ fn main() -> Result<()> {
 
     // ── Subject 2: SKILL.md file exists and has valid content ──
     eprintln!("\n[genskill-e2e] Subject 2: verify generated SKILL.md");
-    let skill_path = state
-        .transcript
-        .last()
-        .and_then(|m| {
-            m.text
-                .strip_prefix("Skill written to ")
-                .map(|p| PathBuf::from(p.trim()))
-        });
+    let skill_path = state.transcript.last().and_then(|m| {
+        m.text
+            .strip_prefix("Skill written to ")
+            .map(|p| PathBuf::from(p.trim()))
+    });
 
     match &skill_path {
         Some(path) if path.exists() => {
             let content = std::fs::read_to_string(path)?;
-            if content.starts_with("---\n") && content.contains("name:") && content.contains("description:") {
-                eprintln!("  PASS: SKILL.md exists with valid frontmatter ({} bytes)", content.len());
+            if content.starts_with("---\n")
+                && content.contains("name:")
+                && content.contains("description:")
+            {
+                eprintln!(
+                    "  PASS: SKILL.md exists with valid frontmatter ({} bytes)",
+                    content.len()
+                );
                 passed += 1;
             } else {
                 eprintln!("  FAIL: SKILL.md exists but frontmatter is invalid");
@@ -277,7 +290,10 @@ fn main() -> Result<()> {
 
     // ── Summary ──
     eprintln!("\n[genskill-e2e] ════════════════════════════════════");
-    eprintln!("[genskill-e2e] {passed} passed, {failed} failed out of {}", passed + failed);
+    eprintln!(
+        "[genskill-e2e] {passed} passed, {failed} failed out of {}",
+        passed + failed
+    );
     eprintln!("[genskill-e2e] ════════════════════════════════════");
 
     if failed > 0 {

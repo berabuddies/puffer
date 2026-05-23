@@ -189,8 +189,6 @@ pub struct BashToolInput {
     pub timeout: Option<u64>,
     #[serde(default)]
     pub run_in_background: bool,
-    #[serde(default, rename = "dangerouslyDisableSandbox")]
-    pub dangerously_disable_sandbox: bool,
 }
 
 /// Typed input for the built-in read-file tool.
@@ -260,8 +258,6 @@ pub enum ToolInput {
         timeout: Option<u64>,
         #[serde(default)]
         run_in_background: bool,
-        #[serde(default, rename = "dangerouslyDisableSandbox")]
-        dangerously_disable_sandbox: bool,
     },
     ReadFile {
         path: PathBuf,
@@ -319,14 +315,12 @@ impl ToolInput {
                 command,
                 timeout,
                 run_in_background,
-                dangerously_disable_sandbox,
             } => (
                 ToolKind::Bash,
                 TypedToolInput::Bash(BashToolInput {
                     command,
                     timeout,
                     run_in_background,
-                    dangerously_disable_sandbox,
                 }),
             ),
             Self::ReadFile {
@@ -471,14 +465,6 @@ pub fn builtin_tool_definition(kind: ToolKind) -> ToolDefinition {
                         ToolPropertySchema {
                             value_type: ToolSchemaType::Boolean,
                             description: "When true, request background execution.".to_string(),
-                            required: false,
-                        },
-                    ),
-                    (
-                        "dangerouslyDisableSandbox".to_string(),
-                        ToolPropertySchema {
-                            value_type: ToolSchemaType::Boolean,
-                            description: "When true, request unsandboxed execution.".to_string(),
                             required: false,
                         },
                     ),

@@ -231,30 +231,15 @@ fn try_open_overlay_builds_ide_picker_with_manifest_actions() {
 }
 
 #[test]
-fn try_open_overlay_builds_sandbox_picker_with_toggle_actions() {
+fn try_open_overlay_builds_sandbox_picker_with_permissions_redirect() {
     let (title, entries, selection) = open_command_picker_panel("/sandbox");
 
     assert_eq!(title, "Sandbox");
     assert_eq!(selection, 0);
     assert_eq!(
-        picker_entry(&entries, "/sandbox workspace-write").description,
-        "Sandbox mode: workspace-write (current)"
+        picker_entry(&entries, "/permissions").description,
+        "Sandbox mode has been removed; use project ACL permissions."
     );
-    assert_eq!(
-        picker_entry(&entries, "/sandbox read-only").description,
-        "Switch sandbox mode to read-only"
-    );
-    assert_eq!(
-        picker_entry(&entries, "/sandbox auto-allow true").description,
-        "Auto-allow tool prompts: off"
-    );
-    assert_eq!(
-        picker_entry(&entries, "/sandbox allow-unsandboxed true").description,
-        "Allow unsandboxed Bash fallback: off"
-    );
-    assert!(picker_entry(&entries, "/sandbox open")
-        .description
-        .contains("sandbox.toml"));
 }
 
 #[test]
@@ -575,7 +560,10 @@ fn pending_turn_queues_diff_instead_of_mutating_transcript() {
     .unwrap();
 
     assert!(tui.overlay.is_none());
-    assert_eq!(tui.queued_prompts.front().map(String::as_str), Some("/diff"));
+    assert_eq!(
+        tui.queued_prompts.front().map(String::as_str),
+        Some("/diff")
+    );
     assert_eq!(state.transcript.len(), transcript_len);
     assert_eq!(
         state.transcript.last().map(|message| message.text.as_str()),

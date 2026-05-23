@@ -1,8 +1,10 @@
 #!/usr/bin/env node
-import { lstat, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { aggregateTarpit, detectTarpit } from "../lib/tarpit.mjs";
+import { aggregateTemporal, buildIntentLedger, evaluateTemporalReplay } from "../lib/temporal-invariants.mjs";
 
 const fuzzRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = path.resolve(fuzzRoot, "..", "..", "..", "..");
@@ -57,6 +59,7 @@ async function main() {
     .map((item) => item.trim())
     .filter(Boolean);
   const topLimit = Number(args.limit ?? process.env.PUFFER_REPLAY_LIMIT ?? 1);
+  const shard = args.shard ?? process.env.PUFFER_REPLAY_SHARD ?? "";
   const attempts = Number(args.attempts ?? process.env.PUFFER_REPLAY_ATTEMPTS ?? 1);
   const timeoutSeconds = Number(args.timeout ?? process.env.PUFFER_REPLAY_TIMEOUT_SECONDS ?? 120);
   const playwrightTimeoutMs = Math.max(
@@ -66,6 +69,7 @@ async function main() {
   const shellTimeoutSeconds = Math.max(timeoutSeconds, Math.ceil(playwrightTimeoutMs / 1000) + 15);
   const rngNamespace = String(args["rng-seed"] ?? process.env.PUFFER_REPLAY_RNG_SEED ?? "bounded-replay");
   const namespace = sanitizeNamespace(String(args.namespace ?? process.env.PUFFER_REPLAY_NAMESPACE ?? `${rngNamespace}-${Date.now()}`));
+  const inputRunPath = args.input ? path.resolve(String(args.input)) : "";
   const port = Number(args.port ?? process.env.PUFFER_REPLAY_PORT ?? (15_000 + (hashString(namespace) % 1_000)));
   const tmpDir = path.resolve(String(args["tmp-dir"] ?? path.join(fuzzRoot, ".runs", namespace)));
   const out = path.resolve(String(args.out ?? path.join(tmpDir, "bounded-replay-report.md")));
@@ -74,6 +78,7 @@ async function main() {
   const specDir = path.join(tmpDir, "tests");
   const logDir = path.join(tmpDir, "logs");
   const playwrightOutputDir = path.join(tmpDir, "playwright-output");
+  const runtimeCoveragePath = path.join(tmpDir, "runtime-coverage.json");
   const reuseExistingServer = args["no-reuse-server"] ? false : true;
   const ledger = await readJsonIfExists(ledgerPath);
   const knownBugSignatures = ledger.knownBugSignatures ?? [];
@@ -100,20 +105,24 @@ async function main() {
     const topReportPath = path.join(tmpDir, `${seed}-top.md`);
     const rngSeed = `${rngNamespace}-${seed}`;
 
-    await runCommand("node", [
-      fuzzCli,
-      "run",
-      "--seed",
-      seed,
-      "--iterations",
-      String(defaults.iterations),
-      "--steps",
-      String(defaults.steps),
-      "--rng-seed",
-      rngSeed,
-      "--out",
-      runPath
-    ], { cwd: repoRoot, timeoutSeconds: 60 });
+    if (inputRunPath) {
+      await writeFile(runPath, await readFile(inputRunPath, "utf8"));
+    } else {
+      await runCommand("node", [
+        fuzzCli,
+        "run",
+        "--seed",
+        seed,
+        "--iterations",
+        String(defaults.iterations),
+        "--steps",
+        String(defaults.steps),
+        "--rng-seed",
+        rngSeed,
+        "--out",
+        runPath
+      ], { cwd: repoRoot, timeoutSeconds: 60 });
+    }
 
     await runCommand("node", [
       fuzzCli,
@@ -131,6 +140,7 @@ async function main() {
       runPath,
       "--limit",
       String(topLimit),
+      ...(shard ? ["--shard", shard] : []),
       "--out",
       topPath,
       "--report-out",
@@ -148,6 +158,7 @@ async function main() {
         diversityKey: item.diversityKey,
         coverage: item.coverage,
         steps: item.steps?.map((step) => step.action) ?? [],
+        stepDetails: item.steps ?? [],
         specPath,
         attempts: []
       };
@@ -156,7 +167,7 @@ async function main() {
         fuzzCli,
         "replay",
         "--input",
-        runPath,
+        shard ? topPath : runPath,
         "--case-id",
         item.caseId,
         "--out",
@@ -165,6 +176,7 @@ async function main() {
 
       for (let attempt = 1; attempt <= attempts; attempt += 1) {
         const logPath = path.join(logDir, `${item.caseId}-attempt-${attempt}.log`);
+        const attemptOutputDir = path.join(playwrightOutputDir, `${item.caseId}-attempt-${attempt}`);
         const result = await runCommand("timeout", [
           `${shellTimeoutSeconds}s`,
           "npx",
@@ -177,7 +189,7 @@ async function main() {
           "--reporter=list",
           "--timeout",
           String(playwrightTimeoutMs),
-          `--output=${path.join(playwrightOutputDir, `${item.caseId}-attempt-${attempt}`)}`
+          `--output=${attemptOutputDir}`
         ], {
           cwd: desktopRoot,
           timeoutSeconds: shellTimeoutSeconds + 20,
@@ -185,17 +197,22 @@ async function main() {
           allowFailure: true
         });
         await writeFile(logPath, result.output);
+        const runtimeCoverage = await collectRuntimeCoverage(attemptOutputDir);
         replay.attempts.push({
           attempt,
           status: result.exitCode === 0 ? "passed" : result.exitCode === 124 ? "timeout" : "failed",
           exitCode: result.exitCode,
           logPath,
           excerpt: excerptFailure(result.output),
-          failureSignature: failureSignature(result.output)
+          failureSignature: failureSignature(result.output),
+          runtimeCoverage
         });
       }
       Object.assign(replay, classifyReplay(replay));
       replay.knownDuplicate = knownBugMatch(replay.failureSignature ?? "", knownBugSignatures);
+      replay.runtimeCoverage = aggregateRuntimeCoverage(replay.attempts.map((attempt) => attempt.runtimeCoverage));
+      replay.intentLedger = buildIntentLedger(replay);
+      replay.temporalInvariants = evaluateTemporalReplay(replay);
       results.push(replay);
     }
   }
@@ -203,6 +220,8 @@ async function main() {
   const finishedAt = new Date().toISOString();
   const summary = summarize(results);
   const findings = collectFindings(results, knownBugSignatures);
+  const runtimeCoverage = aggregateRuntimeCoverage(results.map((item) => item.runtimeCoverage));
+  const temporal = aggregateTemporal(results);
   const payload = {
     version: 1,
     startedAt,
@@ -219,15 +238,19 @@ async function main() {
     artifactDir: tmpDir,
     playwrightConfigPath,
     ledgerPath,
+    runtimeCoveragePath,
     knownBugSignatures,
     summary,
+    runtimeCoverage,
+    temporal,
     findings,
     results
   };
+  await writeFile(runtimeCoveragePath, `${JSON.stringify(runtimeCoverage, null, 2)}\n`);
   await writeFile(jsonOut, `${JSON.stringify(payload, null, 2)}\n`);
   await writeFile(out, formatMarkdown(payload));
   process.stdout.write(`Report: ${out}\nJSON: ${jsonOut}\n`);
-  process.stdout.write(`Passed: ${summary.passed}, Stable failed: ${summary.stableFailed}, Flaky: ${summary.flaky}, Timeout: ${summary.timeout}, Actionable failures: ${summary.actionableFailures}\n`);
+  process.stdout.write(`Passed: ${summary.passed}, Stable failed: ${summary.stableFailed}, Flaky: ${summary.flaky}, Timeout: ${summary.timeout}, Non-passing failures: ${summary.nonPassingFailures}, Actionable product failures: ${summary.actionableFailures}\n`);
   if ((summary.stableFailed > 0 || summary.flaky > 0 || summary.timeout > 0) && args["fail-on-finding"]) process.exitCode = 2;
   if (summary.actionableFailures > 0 && args["fail-on-new-finding"]) process.exitCode = 2;
 }
@@ -299,6 +322,7 @@ function summarize(results) {
   let knownDuplicateFindings = 0;
   let newCandidateFindings = 0;
   let knownDuplicateFailures = 0;
+  let nonPassingFailures = 0;
   let actionableFailures = 0;
   const byClassification = {};
   for (const item of results) {
@@ -310,13 +334,16 @@ function summarize(results) {
     const classification = item.classification ?? "unknown";
     byClassification[classification] = (byClassification[classification] ?? 0) + 1;
     if (failed && item.knownDuplicate) knownDuplicateFailures += 1;
-    if (failed && !item.knownDuplicate) actionableFailures += 1;
+    if (failed && !item.knownDuplicate) nonPassingFailures += 1;
+    if (failed && !item.knownDuplicate && isActionableReplayFailure(item)) actionableFailures += 1;
     if (failed && classification.startsWith("product-candidate:")) {
       productCandidateFindings += 1;
       if (item.knownDuplicate) knownDuplicateFindings += 1;
       else newCandidateFindings += 1;
     }
   }
+  const runtimeCoverage = aggregateRuntimeCoverage(results.map((item) => item.runtimeCoverage));
+  const temporal = aggregateTemporal(results);
   return {
     total: results.length,
     passed,
@@ -327,9 +354,29 @@ function summarize(results) {
     newCandidateFindings,
     knownDuplicateFindings,
     knownDuplicateFailures,
+    nonPassingFailures,
     actionableFailures,
-    byClassification
+    byClassification,
+    temporal,
+    runtimeCoverage: {
+      states: runtimeCoverage.states.length,
+      edges: runtimeCoverage.edges.length,
+      asyncEdges: runtimeCoverage.asyncEdges.length,
+      asyncInvariantPairs: runtimeCoverage.asyncInvariantPairs.length,
+      routeControlStateTriples: runtimeCoverage.routeControlStateTriples.length,
+      invariantObservations: runtimeCoverage.invariantObservations.length,
+      tarpitCount: runtimeCoverage.tarpitSummary?.tarpitCount ?? 0,
+      escapeSuggestedCount: runtimeCoverage.tarpitSummary?.escapeSuggestedCount ?? 0
+    }
   };
+}
+
+function isActionableReplayFailure(item) {
+  const classification = item.classification ?? "";
+  if (classification.startsWith("product-candidate:")) return true;
+  if (classification === "needs-manual-triage") return true;
+  if (classification.startsWith("needs-manual-triage:")) return true;
+  return false;
 }
 
 function collectFindings(results, knownBugSignatures = []) {
@@ -363,6 +410,176 @@ function collectFindings(results, knownBugSignatures = []) {
     });
   }
   return findings;
+}
+
+async function collectRuntimeCoverage(rootDir) {
+  const traceFiles = await findTraceFiles(rootDir);
+  const states = new Map();
+  const edges = new Map();
+  const observedStateHashes = [];
+  let actionEventCount = 0;
+  const asyncEdges = new Set();
+  const asyncInvariantPairs = new Set();
+  const routeControlStateTriples = new Set();
+  const invariantObservations = new Set();
+  const traceArtifacts = [];
+
+  for (const traceFile of traceFiles) {
+    traceArtifacts.push(relativeRepoPath(traceFile));
+    const text = await readFile(traceFile, "utf8").catch(() => "");
+    for (const line of text.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      collectState(states, event.state);
+      collectState(states, event.beforeState);
+      collectState(states, event.afterState);
+      collectObservedState(observedStateHashes, event.state);
+      collectObservedState(observedStateHashes, event.beforeState);
+      collectObservedState(observedStateHashes, event.afterState);
+      if (event.type === "action") actionEventCount += 1;
+      if (event.edge?.edgeId) {
+        edges.set(event.edge.edgeId, {
+          ...event.edge,
+          trace: relativeRepoPath(traceFile),
+          step: event.step ?? null
+        });
+        for (const tag of event.edge.coverage ?? []) {
+          if (String(tag).startsWith("async:")) asyncEdges.add(`${event.edge.edgeId}|${tag}`);
+          if (String(tag).startsWith("invariant:")) invariantObservations.add(`${event.edge.afterStateHash}|${tag}`);
+        }
+        const route = firstCoverage(event.edge.coverage, "route") ?? event.edge.routePattern ?? "route:unknown";
+        const control = firstCoverage(event.edge.coverage, "control") ?? event.action?.target ?? event.action?.action ?? "control:unknown";
+        const state = firstCoverage(event.edge.coverage, "state") ?? event.edge.afterStateHash ?? "state:unknown";
+        routeControlStateTriples.add(`${route}|${control}|${state}`);
+      }
+      const coverage = event.edge?.coverage ?? event.action?.coverage ?? [];
+      const asyncTags = coverage.filter((tag) => String(tag).startsWith("async:"));
+      const invariantTags = coverage.filter((tag) => String(tag).startsWith("invariant:"));
+      for (const asyncTag of asyncTags) {
+        for (const invariantTag of invariantTags) asyncInvariantPairs.add(`${asyncTag}|${invariantTag}`);
+      }
+    }
+  }
+
+  const repeatedStateCount = observedStateHashes.filter((stateHash, index) => index > 0 && observedStateHashes[index - 1] === stateHash).length;
+  const result = {
+    traceArtifacts,
+    observedStateCount: observedStateHashes.length,
+    actionEventCount,
+    repeatedStateCount,
+    states: [...states.values()].sort((left, right) => left.stateHash.localeCompare(right.stateHash)),
+    edges: [...edges.values()].sort((left, right) => left.edgeId.localeCompare(right.edgeId)),
+    asyncEdges: [...asyncEdges].sort(),
+    asyncInvariantPairs: [...asyncInvariantPairs].sort(),
+    routeControlStateTriples: [...routeControlStateTriples].sort(),
+    invariantObservations: [...invariantObservations].sort()
+  };
+  return {
+    ...result,
+    tarpit: detectTarpit(result)
+  };
+}
+
+async function findTraceFiles(rootDir) {
+  const files = [];
+  async function visit(current) {
+    let entries;
+    try {
+      entries = await readdir(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const entryPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        await visit(entryPath);
+      } else if (entry.name.endsWith(".jsonl")) {
+        files.push(entryPath);
+      }
+    }
+  }
+  await visit(rootDir);
+  return files.sort();
+}
+
+function collectState(states, state) {
+  if (!state?.stateHash) return;
+  states.set(state.stateHash, {
+    stateHash: state.stateHash,
+    routePattern: state.routePattern ?? "",
+    appArea: state.appArea ?? "",
+    activePanel: state.activePanel ?? "",
+    activeTab: state.activeTab ?? "",
+    focusRegion: state.focusRegion ?? "",
+    daemonState: state.daemonState ?? "",
+    modalStack: state.modalStack ?? [],
+    normalizedTextSignature: state.normalizedTextSignature ?? "",
+    normalizedTreeSignature: state.normalizedTreeSignature ?? "",
+    a11y: state.a11y ?? {},
+    visual: state.visual ?? {}
+  });
+}
+
+function collectObservedState(observedStateHashes, state) {
+  if (state?.stateHash) observedStateHashes.push(state.stateHash);
+}
+
+function aggregateRuntimeCoverage(items = []) {
+  const states = new Map();
+  const edges = new Map();
+  const asyncEdges = new Set();
+  const asyncInvariantPairs = new Set();
+  const routeControlStateTriples = new Set();
+  const invariantObservations = new Set();
+  const traceArtifacts = new Set();
+  let observedStateCount = 0;
+  let actionEventCount = 0;
+  let repeatedStateCount = 0;
+  const tarpitItems = [];
+  for (const item of items) {
+    if (!item) continue;
+    observedStateCount += Number(item.observedStateCount ?? 0);
+    actionEventCount += Number(item.actionEventCount ?? 0);
+    repeatedStateCount += Number(item.repeatedStateCount ?? 0);
+    if (item.tarpit) tarpitItems.push(item);
+    for (const state of item.states ?? []) {
+      if (state?.stateHash) states.set(state.stateHash, state);
+    }
+    for (const edge of item.edges ?? []) {
+      if (edge?.edgeId) edges.set(edge.edgeId, edge);
+    }
+    for (const value of item.asyncEdges ?? []) asyncEdges.add(value);
+    for (const value of item.asyncInvariantPairs ?? []) asyncInvariantPairs.add(value);
+    for (const value of item.routeControlStateTriples ?? []) routeControlStateTriples.add(value);
+    for (const value of item.invariantObservations ?? []) invariantObservations.add(value);
+    for (const value of item.traceArtifacts ?? []) traceArtifacts.add(value);
+  }
+  const result = {
+    traceArtifacts: [...traceArtifacts].sort(),
+    observedStateCount,
+    actionEventCount,
+    repeatedStateCount,
+    states: [...states.values()].sort((left, right) => left.stateHash.localeCompare(right.stateHash)),
+    edges: [...edges.values()].sort((left, right) => left.edgeId.localeCompare(right.edgeId)),
+    asyncEdges: [...asyncEdges].sort(),
+    asyncInvariantPairs: [...asyncInvariantPairs].sort(),
+    routeControlStateTriples: [...routeControlStateTriples].sort(),
+    invariantObservations: [...invariantObservations].sort(),
+    tarpitSummary: aggregateTarpit(tarpitItems)
+  };
+  return {
+    ...result,
+    tarpit: detectTarpit(result)
+  };
+}
+
+function firstCoverage(coverage = [], dimension) {
+  return coverage.find((tag) => String(tag).startsWith(`${dimension}:`));
 }
 
 function knownBugMatch(signature, knownBugSignatures = []) {
@@ -403,6 +620,7 @@ function formatMarkdown(payload) {
     `Artifact dir: ${relativeRepoPath(payload.artifactDir)}`,
     `Playwright config: ${relativeRepoPath(payload.playwrightConfigPath)}`,
     `Known-signature ledger: ${relativeRepoPath(payload.ledgerPath)}`,
+    `Runtime coverage: ${relativeRepoPath(payload.runtimeCoveragePath)}`,
     "",
     "## Summary",
     "",
@@ -415,7 +633,17 @@ function formatMarkdown(payload) {
     `- New product-candidate findings: ${payload.summary.newCandidateFindings ?? 0}`,
     `- Known duplicate findings: ${payload.summary.knownDuplicateFindings ?? 0}`,
     `- Known duplicate failures: ${payload.summary.knownDuplicateFailures ?? 0}`,
-    `- Actionable failures: ${payload.summary.actionableFailures ?? 0}`,
+    `- Non-passing failures: ${payload.summary.nonPassingFailures ?? 0}`,
+    `- Actionable product failures: ${payload.summary.actionableFailures ?? 0}`,
+    `- Runtime states: ${payload.summary.runtimeCoverage?.states ?? 0}`,
+    `- Runtime edges: ${payload.summary.runtimeCoverage?.edges ?? 0}`,
+    `- Runtime async edges: ${payload.summary.runtimeCoverage?.asyncEdges ?? 0}`,
+    `- Runtime async-invariant pairs: ${payload.summary.runtimeCoverage?.asyncInvariantPairs ?? 0}`,
+    `- Runtime route-control-state triples: ${payload.summary.runtimeCoverage?.routeControlStateTriples ?? 0}`,
+    `- Tarpit cases: ${payload.summary.runtimeCoverage?.tarpitCount ?? 0}`,
+    `- Escape suggested: ${payload.summary.runtimeCoverage?.escapeSuggestedCount ?? 0}`,
+    `- Temporal invariant observations: ${payload.summary.temporal?.observed ?? 0}`,
+    `- Temporal invariant failures: ${payload.summary.temporal?.failed ?? 0}`,
     "",
     "## Classification",
     ""
@@ -478,6 +706,11 @@ function formatMarkdown(payload) {
     if (item.diversityKey) lines.push(`- Diversity key: ${item.diversityKey}`);
     lines.push(`- Spec path: ${relativeRepoPath(item.specPath)}`);
     lines.push(`- Log path: ${last.logPath}`);
+    lines.push(`- Runtime states: ${item.runtimeCoverage?.states?.length ?? 0}`);
+    lines.push(`- Runtime edges: ${item.runtimeCoverage?.edges?.length ?? 0}`);
+    lines.push(`- Tarpit: ${item.runtimeCoverage?.tarpit?.tarpit ? "yes" : "no"}${item.runtimeCoverage?.tarpit?.reasons?.length ? ` (${item.runtimeCoverage.tarpit.reasons.join(", ")})` : ""}`);
+    lines.push(`- Intents: ${(item.intentLedger?.intents ?? []).map((intent) => intent.intentId).join(", ") || "none"}`);
+    lines.push(`- Temporal invariants: observed=${item.temporalInvariants?.observed ?? 0}, failed=${item.temporalInvariants?.failed ?? 0}`);
     lines.push(`- Coverage: ${item.coverage.join(", ")}`);
     lines.push(`- Steps: ${item.steps.join(" -> ")}`);
     if (last.excerpt) {

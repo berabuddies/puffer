@@ -421,6 +421,10 @@ export class FakeDaemon {
     };
   }
 
+  setMcpServers(servers: JsonRecord[]): void {
+    this.mcpServers = servers.map((server) => ({ ...server }));
+  }
+
   seedFile(path: string, content: string): void {
     this.files.set(path, content);
   }

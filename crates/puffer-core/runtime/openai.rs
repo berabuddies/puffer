@@ -467,6 +467,8 @@ pub(super) fn execute_openai_tool_calls(
         permissions.push(resolve_tool_permission(
             state,
             resources,
+            providers,
+            auth_store,
             registry,
             cwd,
             &tc.name,

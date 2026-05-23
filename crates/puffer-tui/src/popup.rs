@@ -61,10 +61,7 @@ mod tests {
         ];
         let rows = popup_rows("/re", &commands);
         let names = rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>();
-        assert_eq!(
-            names,
-            ["reflect", "reload-plugins", "feature", "xreview"]
-        );
+        assert_eq!(names, ["reflect", "reload-plugins", "feature", "xreview"]);
     }
 
     #[test]

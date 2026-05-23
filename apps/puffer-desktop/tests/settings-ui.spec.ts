@@ -721,6 +721,33 @@ test("provider API key connect requires a non-empty key", async ({ page }) => {
   });
 });
 
+test("provider API key input clears after a successful update", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.delayResponse(
+    "login_with_api_key",
+    (request) => request.params.providerId === "anthropic",
+    120
+  );
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Providers" }).click();
+
+  const input = page.getByLabel("API key for Anthropic");
+  await input.fill("sk-should-not-remain-visible");
+  await page
+    .locator(".provider-card")
+    .filter({ hasText: "Anthropic" })
+    .getByRole("button", { name: "Update key" })
+    .click();
+
+  await daemon.waitForRequest("login_with_api_key");
+  await expect(input).toBeDisabled();
+  await expect(input).toBeEnabled();
+  await expect(input).toHaveValue("");
+});
+
 test("provider API key enter submit is ignored while login is already busy", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayResponse(
@@ -1071,6 +1098,26 @@ test("permissions settings save tool policies through the daemon", async ({ page
   });
 });
 
+test("permissions load errors do not auto-retry until the user retries", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  daemon.delayFailure("list_permissions", () => true, "permissions file is temporarily locked", 20);
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Permissions" }).click();
+
+  await expect(page.getByText("permissions file is temporarily locked")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry" })).toBeEnabled();
+  await page.waitForTimeout(160);
+  expect(daemon.requests.filter((request) => request.method === "list_permissions")).toHaveLength(1);
+
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect.poll(() =>
+    daemon.requests.filter((request) => request.method === "list_permissions").length
+  ).toBe(2);
+});
+
 test("permissions save is ignored while already saving", async ({ page }) => {
   const daemon = new FakeDaemon();
   daemon.delayResponse("save_permissions", () => true, 500);
@@ -1365,6 +1412,37 @@ test("MCP settings keep added server when the initial list resolves late", async
   await page.waitForTimeout(300);
   await expect(title).toBeVisible();
   await expect(page.getByText("Added github")).toBeVisible();
+});
+
+test("MCP settings refresh reloads the visible server list", async ({ page }) => {
+  const daemon = new FakeDaemon({ mcpServers: [] });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "MCP Servers" }).click();
+  await daemon.waitForRequest("list_mcp_servers");
+  await expect(page.getByText("No MCP servers configured.")).toBeVisible();
+
+  daemon.setMcpServers([
+    {
+      id: "github",
+      displayName: "GitHub",
+      description: "Issue and PR tools",
+      transport: "stdio",
+      endpoint: "",
+      target: "npx @modelcontextprotocol/server-github",
+      sourceKind: "local",
+      sourcePath: "/tmp/puffer/.puffer/mcp_servers/github.json"
+    }
+  ]);
+
+  const beforeRefresh = daemon.requests.filter((request) => request.method === "list_mcp_servers").length;
+  await page.getByRole("button", { name: "Refresh MCP servers" }).click();
+  await expect.poll(() =>
+    daemon.requests.filter((request) => request.method === "list_mcp_servers").length
+  ).toBe(beforeRefresh + 1);
+  await expect(page.locator(".pf-mcp-card .title").filter({ hasText: "GitHub" })).toBeVisible();
 });
 
 test("MCP settings do not reload-loop when no servers are configured", async ({ page }) => {

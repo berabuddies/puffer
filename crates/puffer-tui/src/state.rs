@@ -103,7 +103,9 @@ pub(crate) struct TuiState {
 pub(crate) struct PendingSubmitResult {
     pub(crate) outcome: std::result::Result<TurnExecution, String>,
     pub(crate) auth_store: AuthStore,
-    /// Session-level permission state accumulated on the worker clone.
+    /// Canonical session-level permission state accumulated on the worker
+    /// clone. The UI thread replaces its local state with this value directly
+    /// so category-scoped grants survive the round-trip.
     pub(crate) session_permission_state: SessionPermissionState,
     /// Whether the user chose "allow all" during this turn.
     pub(crate) session_allow_all: bool,

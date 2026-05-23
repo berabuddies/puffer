@@ -25,6 +25,7 @@ mod devtools;
 mod input;
 mod params;
 mod recording;
+mod ref_resolution;
 mod rpc;
 mod screenshot;
 mod selection;
@@ -45,7 +46,7 @@ pub(super) use session::parse_evaluation_response;
 pub(super) use session::send_cdp;
 use session::{BrowserRootSession, BrowserSession};
 use tabs::{backend_session_id, parse_backend_session_id, BrowserTabRegistry};
-pub(crate) use tabs::{BrowserTabInfo, BrowserTabsState};
+pub(crate) use tabs::{BrowserCurrentTabContext, BrowserTabInfo, BrowserTabsState};
 pub(crate) use types::{
     BrowserCopySelection, BrowserCursor, BrowserEvaluation, BrowserHistoryDirection,
     BrowserInputEvent, BrowserState,
@@ -208,6 +209,24 @@ impl BrowserRegistry {
             }
         }
         state
+    }
+
+    /// Returns the active-tab context snapshot for one browser root session.
+    pub(crate) fn current_tab_context(&self, root_session_id: &str) -> BrowserCurrentTabContext {
+        let Some(mut tab) = self.tabs.lock().unwrap().active_tab(root_session_id) else {
+            return BrowserCurrentTabContext::no_active_tab();
+        };
+        if let Some(session) = self.live_session(&tab.backend_session_id) {
+            let browser_state = session.state();
+            tab.url = browser_state.url;
+            tab.title = browser_state.title;
+            tab.loading = browser_state.loading;
+            tab.connected = true;
+        } else {
+            tab.connected = false;
+            tab.loading = false;
+        }
+        BrowserCurrentTabContext::from_tab(&tab)
     }
 
     /// Opens or reuses a tab inside the agent session browser set.

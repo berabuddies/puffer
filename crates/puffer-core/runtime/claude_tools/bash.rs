@@ -8,6 +8,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+use super::bash_internal_permissions::{InternalPermissionBroker, InternalPermissionHandler};
+use puffer_tools::internal_permissions::INTERNAL_PERMISSION_REQUIRED_ENV;
+
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
 
@@ -69,8 +72,8 @@ pub struct ClaudeBashInput {
     pub description: Option<String>,
     #[serde(default)]
     pub run_in_background: bool,
-    #[serde(default, rename = "dangerouslyDisableSandbox")]
-    pub dangerously_disable_sandbox: bool,
+    #[serde(default)]
+    pub tty: bool,
 }
 
 /// Claude-compatible output payload for the `Bash` tool.
@@ -92,16 +95,13 @@ pub struct ClaudeBashOutput {
     pub assistant_auto_backgrounded: Option<bool>,
     #[serde(
         skip_serializing_if = "Option::is_none",
-        rename = "dangerouslyDisableSandbox"
-    )]
-    pub dangerously_disable_sandbox: Option<bool>,
-    #[serde(
-        skip_serializing_if = "Option::is_none",
         rename = "returnCodeInterpretation"
     )]
     pub return_code_interpretation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "noOutputExpected")]
     pub no_output_expected: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "processId")]
+    pub process_id: Option<i32>,
 }
 
 /// Normalized result envelope for one Claude-style Bash execution.
@@ -127,10 +127,26 @@ pub fn execute_from_value(
     cwd: &Path,
     session_id: &Uuid,
     input: Value,
+    process_store: Option<
+        &std::sync::Arc<std::sync::Mutex<crate::runtime::process_store::ProcessStore>>,
+    >,
+) -> Result<ClaudeBashExecution> {
+    execute_from_value_with_internal_permissions(cwd, session_id, input, process_store, None)
+}
+
+/// Parses JSON input and executes Bash with an internal tool permission callback.
+pub(crate) fn execute_from_value_with_internal_permissions(
+    cwd: &Path,
+    session_id: &Uuid,
+    input: Value,
+    process_store: Option<
+        &std::sync::Arc<std::sync::Mutex<crate::runtime::process_store::ProcessStore>>,
+    >,
+    internal_permissions: Option<&mut InternalPermissionHandler<'_>>,
 ) -> Result<ClaudeBashExecution> {
     let typed: ClaudeBashInput =
         serde_json::from_value(input).context("invalid Bash tool input payload")?;
-    execute(cwd, session_id, typed)
+    execute_with_internal_permissions(cwd, session_id, typed, process_store, internal_permissions)
 }
 
 /// Executes a Claude-style `Bash` tool invocation in the provided working directory.
@@ -138,17 +154,120 @@ pub fn execute(
     cwd: &Path,
     session_id: &Uuid,
     input: ClaudeBashInput,
+    process_store: Option<
+        &std::sync::Arc<std::sync::Mutex<crate::runtime::process_store::ProcessStore>>,
+    >,
 ) -> Result<ClaudeBashExecution> {
-    if input.run_in_background {
-        return execute_background(cwd, session_id, input);
+    execute_with_internal_permissions(cwd, session_id, input, process_store, None)
+}
+
+fn execute_with_internal_permissions(
+    cwd: &Path,
+    session_id: &Uuid,
+    input: ClaudeBashInput,
+    process_store: Option<
+        &std::sync::Arc<std::sync::Mutex<crate::runtime::process_store::ProcessStore>>,
+    >,
+    internal_permissions: Option<&mut InternalPermissionHandler<'_>>,
+) -> Result<ClaudeBashExecution> {
+    if input.tty {
+        if let Some(store) = process_store {
+            return execute_interactive(cwd, &input, store, internal_permissions);
+        }
     }
-    execute_foreground(cwd, input)
+    if input.run_in_background {
+        return execute_background(cwd, session_id, input, internal_permissions.is_some());
+    }
+    execute_foreground(cwd, input, internal_permissions)
+}
+
+fn execute_interactive(
+    cwd: &Path,
+    input: &ClaudeBashInput,
+    store: &std::sync::Arc<std::sync::Mutex<crate::runtime::process_store::ProcessStore>>,
+    mut internal_permissions: Option<&mut InternalPermissionHandler<'_>>,
+) -> Result<ClaudeBashExecution> {
+    let mut broker = InternalPermissionBroker::start(internal_permissions.is_some())?;
+    let timeout_ms = input
+        .timeout
+        .unwrap_or_else(resolved_default_timeout_ms)
+        .clamp(1, resolved_max_timeout_ms());
+    let yield_ms = timeout_ms.min(5_000);
+
+    let process_id = {
+        let mut guard = store.lock().unwrap();
+        let pid = guard.allocate_id();
+        let entry = crate::runtime::process_store::spawn_tracked_process_with_env(
+            &input.command,
+            cwd,
+            pid,
+            true,
+            broker.envs(),
+        )
+        .with_context(|| format!("failed to spawn PTY process in {}", cwd.display()))?;
+        guard.insert(entry);
+        pid
+    };
+
+    // Collect initial output
+    thread::sleep(Duration::from_millis(yield_ms.min(500)));
+    let deadline = Instant::now() + Duration::from_millis(yield_ms);
+    loop {
+        {
+            let guard = store.lock().unwrap();
+            if let Some(e) = guard.peek(process_id) {
+                if e.total_output_bytes() > 0 || e.has_exited() {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        broker.drain_pending(internal_permissions.as_deref_mut())?;
+        if Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    let (stdout, exited, _exit_code) = {
+        let mut guard = store.lock().unwrap();
+        if let Some(e) = guard.get_mut(process_id) {
+            let output = e.collect_output();
+            let text = String::from_utf8_lossy(&output).to_string();
+            let exited = e.has_exited();
+            let code = e.exit_code();
+            if exited {
+                guard.remove(process_id);
+            }
+            (text, exited, code)
+        } else {
+            (String::new(), true, None)
+        }
+    };
+
+    Ok(ClaudeBashExecution {
+        success: true,
+        output: ClaudeBashOutput {
+            stdout,
+            stderr: String::new(),
+            interrupted: false,
+            background_task_id: None,
+            output_file: None,
+            backgrounded_by_user: None,
+            assistant_auto_backgrounded: None,
+            return_code_interpretation: None,
+            no_output_expected: None,
+            process_id: if exited { None } else { Some(process_id) },
+        },
+    })
 }
 
 fn execute_background(
     cwd: &Path,
     session_id: &Uuid,
     input: ClaudeBashInput,
+    internal_permission_required: bool,
 ) -> Result<ClaudeBashExecution> {
     let output_dir = shell_output_dir(cwd)?;
     let pending_output_file =
@@ -162,20 +281,23 @@ fn execute_background(
     let stderr = stdout
         .try_clone()
         .with_context(|| format!("failed to clone {}", pending_output_file.display()))?;
-    let mut child = Command::new(puffer_tools::detected_shell())
+    let mut command = Command::new(puffer_tools::detected_shell());
+    command
         .arg("-lc")
-        .arg(&input.command)
+        .arg(command_with_internal_tool_helpers(&input.command)?)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
-        .spawn()
-        .with_context(|| {
-            format!(
-                "failed to start background bash command in {}",
-                cwd.display()
-            )
-        })?;
+        .stderr(Stdio::from(stderr));
+    if internal_permission_required {
+        command.env(INTERNAL_PERMISSION_REQUIRED_ENV, "1");
+    }
+    let mut child = command.spawn().with_context(|| {
+        format!(
+            "failed to start background bash command in {}",
+            cwd.display()
+        )
+    })?;
     let pid = child.id();
     let task_id = format!("shell-{}", pid);
     let subject = tool_description(&input);
@@ -221,20 +343,25 @@ fn execute_background(
             output_file: Some(output_file.display().to_string()),
             backgrounded_by_user: Some(false),
             assistant_auto_backgrounded: Some(false),
-            dangerously_disable_sandbox: Some(input.dangerously_disable_sandbox),
             return_code_interpretation: None,
             no_output_expected: Some(true),
+            process_id: None,
         },
     })
 }
 
-fn execute_foreground(cwd: &Path, input: ClaudeBashInput) -> Result<ClaudeBashExecution> {
+fn execute_foreground(
+    cwd: &Path,
+    input: ClaudeBashInput,
+    internal_permissions: Option<&mut InternalPermissionHandler<'_>>,
+) -> Result<ClaudeBashExecution> {
     let timeout_ms = input
         .timeout
         .unwrap_or_else(resolved_default_timeout_ms)
         .clamp(1, resolved_max_timeout_ms());
     let command = input.command.clone();
-    let timed = run_bash_command(cwd, &command, timeout_ms)?;
+    let command = command_with_internal_tool_helpers(&command)?;
+    let timed = run_bash_command(cwd, &command, timeout_ms, internal_permissions)?;
     let mut stderr = String::from_utf8_lossy(&timed.output.stderr).to_string();
     if timed.timed_out {
         if !stderr.trim().is_empty() {
@@ -255,9 +382,9 @@ fn execute_foreground(cwd: &Path, input: ClaudeBashInput) -> Result<ClaudeBashEx
             output_file: None,
             backgrounded_by_user: None,
             assistant_auto_backgrounded: None,
-            dangerously_disable_sandbox: Some(input.dangerously_disable_sandbox),
             return_code_interpretation: classify_return_code(timed.output.status.code()),
             no_output_expected: Some(no_output_expected),
+            process_id: None,
         },
     })
 }
@@ -296,17 +423,29 @@ fn shell_output_path(cwd: &Path, pid: u32) -> Result<std::path::PathBuf> {
     Ok(shell_output_dir(cwd)?.join(format!("shell-{pid}.log")))
 }
 
-fn run_bash_command(cwd: &Path, command: &str, timeout_ms: u64) -> Result<TimedCommandOutput> {
-    let mut child = Command::new(puffer_tools::detected_shell())
+fn run_bash_command(
+    cwd: &Path,
+    command: &str,
+    timeout_ms: u64,
+    mut internal_permissions: Option<&mut InternalPermissionHandler<'_>>,
+) -> Result<TimedCommandOutput> {
+    let mut broker = InternalPermissionBroker::start(internal_permissions.is_some())?;
+    let mut command_builder = Command::new(puffer_tools::detected_shell());
+    command_builder
         .arg("-lc")
         .arg(command)
         .current_dir(cwd)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in broker.envs() {
+        command_builder.env(key, value);
+    }
+    let mut child = command_builder
         .spawn()
         .with_context(|| format!("failed to execute bash command in {}", cwd.display()))?;
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     loop {
+        broker.drain_pending(internal_permissions.as_deref_mut())?;
         if child
             .try_wait()
             .with_context(|| format!("failed to poll bash command in {}", cwd.display()))?
@@ -335,6 +474,18 @@ fn run_bash_command(cwd: &Path, command: &str, timeout_ms: u64) -> Result<TimedC
         }
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn command_with_internal_tool_helpers(command: &str) -> Result<String> {
+    Ok(format!("{}\n{command}", internal_tool_shell_helpers()?))
+}
+
+fn internal_tool_shell_helpers() -> Result<String> {
+    let current_exe = std::env::current_exe().context("resolve puffer executable")?;
+    let current_exe = current_exe.to_string_lossy();
+    Ok(puffer_tools::internal_tools::internal_tool_shell_helpers(
+        &current_exe,
+    ))
 }
 
 const MAX_OUTPUT_CHARS: usize = 30_000;
@@ -463,7 +614,7 @@ mod tests {
             timeout: None,
             description: None,
             run_in_background: false,
-            dangerously_disable_sandbox: false,
+            tty: false,
         };
         assert_eq!(tool_description(&input), "Run shell command");
     }
@@ -475,7 +626,7 @@ mod tests {
             timeout: None,
             description: Some("Show greeting".to_string()),
             run_in_background: false,
-            dangerously_disable_sandbox: false,
+            tty: false,
         };
         assert_eq!(tool_description(&input), "Show greeting");
     }
@@ -492,14 +643,36 @@ mod tests {
                     timeout: Some(5_000),
                     description: None,
                     run_in_background: false,
-                    dangerously_disable_sandbox: false,
+                    tty: false,
                 },
+                None,
             )
             .unwrap();
             assert!(result.success, "command failed: {}", result.output.stderr);
             assert_eq!(result.output.stdout, "hello");
             assert!(!result.output.interrupted);
-            assert_eq!(result.output.dangerously_disable_sandbox, Some(false));
+        });
+    }
+
+    #[test]
+    fn execute_foreground_exposes_browser_helper() {
+        with_bash_timeout_env(None, None, || {
+            let temp = tempfile::tempdir().unwrap();
+            let result = execute(
+                temp.path(),
+                &test_session_id(),
+                ClaudeBashInput {
+                    command: "type browser".to_string(),
+                    timeout: Some(5_000),
+                    description: None,
+                    run_in_background: false,
+                    tty: false,
+                },
+                None,
+            )
+            .unwrap();
+            assert!(result.success, "command failed: {}", result.output.stderr);
+            assert!(result.output.stdout.contains("browser"));
         });
     }
 
@@ -515,14 +688,14 @@ mod tests {
                     timeout: Some(20),
                     description: None,
                     run_in_background: false,
-                    dangerously_disable_sandbox: true,
+                    tty: false,
                 },
+                None,
             )
             .unwrap();
             assert!(!result.success);
             assert!(result.output.interrupted);
             assert!(result.output.stderr.contains("timed out after"));
-            assert_eq!(result.output.dangerously_disable_sandbox, Some(true));
         });
     }
 
@@ -538,8 +711,9 @@ mod tests {
                     timeout: Some(5_000),
                     description: None,
                     run_in_background: true,
-                    dangerously_disable_sandbox: false,
+                    tty: false,
                 },
+                None,
             )
             .unwrap();
             assert!(result.success);
@@ -561,8 +735,9 @@ mod tests {
                     timeout: Some(5_000),
                     description: Some("Sleep briefly".to_string()),
                     run_in_background: true,
-                    dangerously_disable_sandbox: false,
+                    tty: false,
                 },
+                None,
             )
             .unwrap();
 
@@ -609,13 +784,11 @@ mod tests {
                 "command": "printf ok",
             "timeout": 5000,
                 "description": "Print test token",
-                "run_in_background": false,
-                "dangerouslyDisableSandbox": true
+                "run_in_background": false
             });
-            let result = execute_from_value(temp.path(), &test_session_id(), input).unwrap();
+            let result = execute_from_value(temp.path(), &test_session_id(), input, None).unwrap();
             assert!(result.success, "command failed: {}", result.output.stderr);
             assert_eq!(result.output.stdout, "ok");
-            assert_eq!(result.output.dangerously_disable_sandbox, Some(true));
         });
     }
 
@@ -626,7 +799,7 @@ mod tests {
             timeout: None,
             description: None,
             run_in_background: false,
-            dangerously_disable_sandbox: false,
+            tty: false,
         };
         let error = summary_line(&input).unwrap_err();
         assert!(error.to_string().contains("cannot be empty"));
@@ -689,13 +862,13 @@ mod tests {
                 temp.path(),
                 &test_session_id(),
                 ClaudeBashInput {
-                    command: "printf '%0.sA' $(jot 20000); printf '%0.sZ' $(jot 20000)"
-                        .to_string(),
+                    command: "printf '%0.sA' $(jot 20000); printf '%0.sZ' $(jot 20000)".to_string(),
                     timeout: Some(5_000),
                     description: None,
                     run_in_background: false,
-                    dangerously_disable_sandbox: false,
+                    tty: false,
                 },
+                None,
             )
             .unwrap();
             assert!(result.success, "command failed: {}", result.output.stderr);

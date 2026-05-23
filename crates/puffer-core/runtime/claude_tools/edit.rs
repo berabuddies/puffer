@@ -415,8 +415,7 @@ mod tests {
         // Path outside cwd, /tmp, $TMPDIR, /add-dir. Codex-style default
         // writable set; this exercises the gate's reject branch.
         let temp = tempfile::tempdir().unwrap();
-        let file =
-            std::path::PathBuf::from("/__puffer_test_outside_writable_set__/sample.txt");
+        let file = std::path::PathBuf::from("/__puffer_test_outside_writable_set__/sample.txt");
         let input = json!({
             "file_path": file.display().to_string(),
             "old_string": "beta",

@@ -113,3 +113,14 @@ pub(crate) fn handle_browser_recording(state: &Arc<DaemonState>, params: &Value)
     let session_id = required_string(params, "sessionId")?;
     Ok(state.browsers.recording_frames(&session_id))
 }
+
+/// Handles `browser_current_tab`.
+pub(crate) fn handle_browser_current_tab(
+    state: &Arc<DaemonState>,
+    params: &Value,
+) -> Result<Value> {
+    let session_id = required_string(params, "sessionId")?;
+    Ok(serde_json::to_value(
+        state.browsers.current_tab_context(&session_id),
+    )?)
+}

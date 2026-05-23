@@ -1,6 +1,8 @@
 //! Conversions between the generated proto types and the
 //! [`puffer_runner_api`] DTOs. Kept here so the api crate stays free of
 //! tonic / prost dependencies.
+//! Filesystem policy is carried solely by the typed
+//! `proto::FilesystemExecutionPolicy` field.
 
 use std::path::PathBuf;
 
@@ -24,12 +26,9 @@ pub(crate) fn to_proto_tool_request(req: &ToolRequest) -> proto::ToolRequest {
             .iter()
             .map(|p| p.display().to_string())
             .collect(),
-        allow_all_paths: matches!(
-            req.filesystem.sandbox_mode,
-            FilesystemSandboxMode::DangerFullAccess
-        ),
         input_json: req.input.to_string(),
         session_id: req.session_id.clone(),
+        filesystem: Some(to_proto_filesystem_policy(&req.filesystem)),
     }
 }
 
@@ -44,16 +43,60 @@ pub(crate) fn from_proto_tool_request(req: proto::ToolRequest) -> Result<ToolReq
         tool_id: req.tool_id,
         cwd: PathBuf::from(req.cwd),
         working_dirs: req.working_dirs.into_iter().map(PathBuf::from).collect(),
-        filesystem: FilesystemExecutionPolicy {
-            sandbox_mode: if req.allow_all_paths {
-                FilesystemSandboxMode::DangerFullAccess
-            } else {
-                FilesystemSandboxMode::WorkspaceWrite
-            },
-        },
+        filesystem: req
+            .filesystem
+            .ok_or_else(|| RunnerError::InvalidArgument("filesystem: missing".into()))
+            .and_then(from_proto_filesystem_policy)?,
         input,
         session_id: req.session_id,
     })
+}
+
+fn to_proto_filesystem_policy(
+    filesystem: &FilesystemExecutionPolicy,
+) -> proto::FilesystemExecutionPolicy {
+    proto::FilesystemExecutionPolicy {
+        sandbox_mode: to_proto_filesystem_sandbox_mode(filesystem.sandbox_mode).into(),
+    }
+}
+
+fn from_proto_filesystem_policy(
+    filesystem: proto::FilesystemExecutionPolicy,
+) -> Result<FilesystemExecutionPolicy, RunnerError> {
+    let sandbox_mode =
+        proto::FilesystemSandboxMode::try_from(filesystem.sandbox_mode).map_err(|value| {
+            RunnerError::InvalidArgument(format!("filesystem.sandbox_mode: {value}"))
+        })?;
+    Ok(FilesystemExecutionPolicy {
+        sandbox_mode: from_proto_filesystem_sandbox_mode(sandbox_mode)?,
+    })
+}
+
+fn to_proto_filesystem_sandbox_mode(
+    sandbox_mode: FilesystemSandboxMode,
+) -> proto::FilesystemSandboxMode {
+    match sandbox_mode {
+        FilesystemSandboxMode::ReadOnly => proto::FilesystemSandboxMode::ReadOnly,
+        FilesystemSandboxMode::WorkspaceWrite => proto::FilesystemSandboxMode::WorkspaceWrite,
+        FilesystemSandboxMode::DangerFullAccess => proto::FilesystemSandboxMode::DangerFullAccess,
+        FilesystemSandboxMode::Custom => proto::FilesystemSandboxMode::Custom,
+    }
+}
+
+fn from_proto_filesystem_sandbox_mode(
+    sandbox_mode: proto::FilesystemSandboxMode,
+) -> Result<FilesystemSandboxMode, RunnerError> {
+    match sandbox_mode {
+        proto::FilesystemSandboxMode::Unspecified => Err(RunnerError::InvalidArgument(
+            "filesystem.sandbox_mode: unspecified".into(),
+        )),
+        proto::FilesystemSandboxMode::ReadOnly => Ok(FilesystemSandboxMode::ReadOnly),
+        proto::FilesystemSandboxMode::WorkspaceWrite => Ok(FilesystemSandboxMode::WorkspaceWrite),
+        proto::FilesystemSandboxMode::DangerFullAccess => {
+            Ok(FilesystemSandboxMode::DangerFullAccess)
+        }
+        proto::FilesystemSandboxMode::Custom => Ok(FilesystemSandboxMode::Custom),
+    }
 }
 
 // --- ToolResult --------------------------------------------------------
@@ -507,5 +550,65 @@ pub(crate) fn status_to_runner_error(status: tonic::Status) -> RunnerError {
         Code::InvalidArgument => RunnerError::InvalidArgument(msg),
         Code::Unavailable => RunnerError::Transport(msg),
         _ => RunnerError::Other(msg),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{from_proto_tool_request, to_proto_tool_request};
+    use crate::proto;
+    use puffer_runner_api::{FilesystemExecutionPolicy, FilesystemSandboxMode, ToolRequest};
+    use std::path::PathBuf;
+
+    /// Builds a tool request with the provided filesystem mode for transport tests.
+    fn request_with_mode(sandbox_mode: FilesystemSandboxMode) -> ToolRequest {
+        ToolRequest {
+            tool_id: "Read".into(),
+            cwd: PathBuf::from("/workspace"),
+            working_dirs: vec![PathBuf::from("/workspace"), PathBuf::from("/tmp/extra")],
+            filesystem: FilesystemExecutionPolicy { sandbox_mode },
+            input: serde_json::json!({"file_path":"/workspace/file.txt"}),
+            session_id: Some("session-1".into()),
+        }
+    }
+
+    /// Verifies the typed filesystem field preserves every runner-api variant.
+    #[test]
+    fn tool_request_proto_round_trip_preserves_typed_filesystem_modes() {
+        for sandbox_mode in [
+            FilesystemSandboxMode::ReadOnly,
+            FilesystemSandboxMode::WorkspaceWrite,
+            FilesystemSandboxMode::DangerFullAccess,
+            FilesystemSandboxMode::Custom,
+        ] {
+            let request = request_with_mode(sandbox_mode);
+            let proto = to_proto_tool_request(&request);
+            let decoded = from_proto_tool_request(proto).expect("round trip");
+            assert_eq!(decoded.filesystem.sandbox_mode, sandbox_mode);
+            assert_eq!(decoded.tool_id, request.tool_id);
+            assert_eq!(decoded.cwd, request.cwd);
+            assert_eq!(decoded.working_dirs, request.working_dirs);
+            assert_eq!(decoded.input, request.input);
+            assert_eq!(decoded.session_id, request.session_id);
+        }
+    }
+
+    #[test]
+    fn missing_filesystem_field_is_invalid_argument() {
+        let request = proto::ToolRequest {
+            tool_id: "Read".into(),
+            cwd: "/workspace".into(),
+            working_dirs: Vec::new(),
+            input_json: "{}".into(),
+            session_id: None,
+            filesystem: None,
+        };
+        let err = from_proto_tool_request(request).expect_err("missing filesystem should fail");
+        match err {
+            puffer_runner_api::RunnerError::InvalidArgument(message) => {
+                assert!(message.contains("filesystem: missing"));
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
     }
 }

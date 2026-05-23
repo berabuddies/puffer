@@ -186,19 +186,17 @@ pub fn run_app(
     // Held to keep the watcher alive for the lifetime of `run_app`. The
     // underscore-prefixed binding signals intent: nothing else reads from
     // it — the watcher dispatches into `state.reload_signal()` directly.
-    let _resource_watcher = match ResourceWatcher::start(
-        &ConfigPaths::discover(&state.cwd),
-        state.reload_signal(),
-    ) {
-        Ok(watcher) => Some(watcher),
-        Err(err) => {
-            tracing::warn!(
-                target = "puffer::tui",
-                "resource hot-reload watcher failed to start: {err}"
-            );
-            None
-        }
-    };
+    let _resource_watcher =
+        match ResourceWatcher::start(&ConfigPaths::discover(&state.cwd), state.reload_signal()) {
+            Ok(watcher) => Some(watcher),
+            Err(err) => {
+                tracing::warn!(
+                    target = "puffer::tui",
+                    "resource hot-reload watcher failed to start: {err}"
+                );
+                None
+            }
+        };
 
     let mut viewport_height = if use_content_viewport {
         let (width, height) = terminal_size()?;
@@ -284,7 +282,8 @@ pub fn run_app(
                 )
             {
                 tui.enqueue_prompt("/recap".to_string());
-                tui.last_recap_user_msg_count = Some(puffer_core::recap::count_user_messages(state));
+                tui.last_recap_user_msg_count =
+                    Some(puffer_core::recap::count_user_messages(state));
                 // Reset idle timer so we don't fire again immediately when the
                 // user keeps the terminal unfocused after the recap shows up.
                 tui.last_user_input_at = std::time::Instant::now();

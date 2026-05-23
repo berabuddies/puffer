@@ -790,7 +790,7 @@ fn render_shows_status_line_when_enabled() {
         .unwrap();
     let rendered = buffer_to_string(terminal.backend().buffer());
     assert!(rendered.contains("anthropic"));
-    assert!(rendered.contains("sandbox workspace-write"));
+    assert!(rendered.contains("permissions ACL"));
 }
 
 #[test]
@@ -826,7 +826,7 @@ fn render_hides_status_line_when_disabled() {
         .unwrap();
     let rendered = buffer_to_string(terminal.backend().buffer());
     assert!(!rendered.contains("custom tui status"));
-    assert!(!rendered.contains("sandbox workspace-write"));
+    assert!(!rendered.contains("permissions ACL"));
 }
 
 #[test]

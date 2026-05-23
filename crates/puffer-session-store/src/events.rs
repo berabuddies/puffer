@@ -120,6 +120,12 @@ pub enum TranscriptEvent {
         #[serde(flatten)]
         rewrite: TranscriptRewrite,
     },
+    /// Stores a persisted UI/runtime snapshot for session resume.
+    ///
+    /// This is not a full `AppState` dump. Session permissions are serialized
+    /// here only through a legacy-compatible projection so resume can restore
+    /// the subset of grants representable as session-wide allow-all plus
+    /// whole-tool approvals.
     StateSnapshot {
         current_model: Option<String>,
         current_provider: Option<String>,
@@ -154,6 +160,10 @@ pub enum TranscriptEvent {
         working_dirs: Vec<String>,
         #[serde(default)]
         claude_read_state: Vec<ClaudeReadSnapshotEvent>,
+        #[serde(default)]
+        session_allow_all: bool,
+        #[serde(default)]
+        session_tool_permissions: std::collections::HashMap<String, String>,
     },
 }
 

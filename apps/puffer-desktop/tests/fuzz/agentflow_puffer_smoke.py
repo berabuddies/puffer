@@ -6,10 +6,13 @@ Claude/Infer auth, AgentFlow templating, Playwright replay generation, and
 report handoff before launching the full campaign.
 """
 
+import os
+from pathlib import Path
+
 from agentflow import Graph, claude, fanout, shell
 
 
-REPO_ROOT = "/dsk/hdd/home/llmft/Riema/puffer"
+REPO_ROOT = os.environ.get("PUFFER_REPO_ROOT") or str(Path(__file__).resolve().parents[4])
 TASK_PATH = "apps/puffer-desktop/tests/fuzz/prompt.txt"
 MODEL = "claude-opus-4-6"
 CLAUDE_ENV = {
@@ -36,10 +39,11 @@ modal focus findings as a harness sanity check, and explain how to classify
 duplicates versus distinct findings. Do not modify files.
 """
 
-SHARD_PROMPT = """\
+SHARD_PROMPT = f"""\
 You are a Puffer UI/UX fuzz shard running inside an AgentFlow smoke campaign.
 
-Repo: /dsk/hdd/home/llmft/Riema/puffer
+Repo: {REPO_ROOT}
+""" + """\
 Area: {{ item.name }}
 Seed: {{ item.seed }}
 Priority target: {{ item.priority }}

@@ -295,6 +295,8 @@ fn resume_switches_to_matching_session_record() {
                 statusline_enabled: true,
                 working_dirs: vec![tempdir.path().join("secondary").display().to_string()],
                 claude_read_state: Vec::new(),
+                session_allow_all: false,
+                session_tool_permissions: std::collections::HashMap::new(),
             },
         )
         .unwrap();

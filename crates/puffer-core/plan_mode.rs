@@ -8,7 +8,7 @@ const TURNS_BETWEEN_ATTACHMENTS: usize = 5;
 const FULL_REMINDER_EVERY_N_ATTACHMENTS: usize = 5;
 
 /// Enters plan mode and resets the Claude-style reminder cadence.
-pub(crate) fn enter_plan_mode(state: &mut AppState) -> Result<()> {
+pub fn enter_plan_mode(state: &mut AppState) -> Result<()> {
     if state.plan_mode {
         return Ok(());
     }

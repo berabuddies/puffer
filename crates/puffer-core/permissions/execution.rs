@@ -11,28 +11,33 @@ pub(crate) struct FilesystemPermissionPolicy {
     pub(crate) sandbox_mode: EffectiveSandboxMode,
     pub(crate) workspace_roots: Vec<PathBuf>,
     pub(crate) session_granted: bool,
+    pub(crate) allow_all_paths: bool,
 }
 
 impl FilesystemPermissionPolicy {
-    /// Returns true when legacy Claude-style path guards should be bypassed.
+    /// Returns true when the permission policy grants access to all paths.
     pub(crate) fn allow_all_paths(&self) -> bool {
-        matches!(self.sandbox_mode, EffectiveSandboxMode::DangerFullAccess)
-    }
-
-    /// Returns the legacy sandbox label consumed by existing filesystem executors.
-    pub(crate) fn legacy_sandbox_mode(&self) -> &'static str {
-        self.sandbox_mode.legacy_mode_label()
+        self.allow_all_paths
     }
 
     /// Converts the policy into the runner transport DTO.
     pub(crate) fn runner_policy(&self) -> FilesystemExecutionPolicy {
         FilesystemExecutionPolicy {
-            sandbox_mode: match self.sandbox_mode {
+            sandbox_mode: match self.runner_sandbox_mode() {
                 EffectiveSandboxMode::ReadOnly => FilesystemSandboxMode::ReadOnly,
                 EffectiveSandboxMode::WorkspaceWrite => FilesystemSandboxMode::WorkspaceWrite,
                 EffectiveSandboxMode::DangerFullAccess => FilesystemSandboxMode::DangerFullAccess,
                 EffectiveSandboxMode::Custom => FilesystemSandboxMode::Custom,
             },
+        }
+    }
+
+    /// Returns the filesystem mode passed to legacy runner APIs.
+    pub(crate) fn runner_sandbox_mode(&self) -> EffectiveSandboxMode {
+        if self.allow_all_paths {
+            EffectiveSandboxMode::DangerFullAccess
+        } else {
+            EffectiveSandboxMode::WorkspaceWrite
         }
     }
 }
@@ -78,9 +83,14 @@ impl DerivedPermissionPolicy {
         Self {
             filesystem: FilesystemPermissionPolicy {
                 approval: filesystem_surface.default_approval,
-                sandbox_mode: profile.sandbox_mode,
+                sandbox_mode: if profile.grants.allow_all_tools {
+                    EffectiveSandboxMode::DangerFullAccess
+                } else {
+                    EffectiveSandboxMode::WorkspaceWrite
+                },
                 workspace_roots: profile.workspace_roots.clone(),
                 session_granted: filesystem_surface.session_granted,
+                allow_all_paths: profile.grants.allow_all_tools,
             },
             process: ProcessPermissionPolicy {
                 approval: process_surface.default_approval,
@@ -109,54 +119,6 @@ impl DerivedPermissionPolicy {
     /// Returns the derived network policy.
     pub(crate) fn network(&self) -> &NetworkPermissionPolicy {
         &self.network
-    }
-
-    /// Returns the compatibility bridge still consumed by legacy executors.
-    pub(crate) fn legacy_bridge(&self) -> LegacyExecutorPermissionBridge {
-        LegacyExecutorPermissionBridge {
-            allow_all_paths: self.filesystem.allow_all_paths(),
-            filesystem_sandbox_mode: self.filesystem.legacy_sandbox_mode(),
-            allow_unsandboxed_fallback: self.process.allow_unsandboxed_fallback,
-            excluded_commands: self.process.excluded_commands.clone(),
-        }
-    }
-}
-
-/// Carries the legacy execution bits still required by lower-level executors.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LegacyExecutorPermissionBridge {
-    pub(crate) allow_all_paths: bool,
-    pub(crate) filesystem_sandbox_mode: &'static str,
-    pub(crate) allow_unsandboxed_fallback: bool,
-    pub(crate) excluded_commands: Vec<String>,
-}
-
-impl LegacyExecutorPermissionBridge {
-    /// Rebuilds the legacy bridge from the runner DTO's flattened fields.
-    pub(crate) fn from_allow_all_paths(allow_all_paths: bool) -> Self {
-        let filesystem_sandbox_mode = if allow_all_paths {
-            "danger-full-access"
-        } else {
-            "workspace-write"
-        };
-        Self {
-            allow_all_paths,
-            filesystem_sandbox_mode,
-            allow_unsandboxed_fallback: false,
-            excluded_commands: Vec::new(),
-        }
-    }
-}
-
-impl EffectiveSandboxMode {
-    /// Returns the legacy sandbox mode label used by compatibility call sites.
-    pub(crate) fn legacy_mode_label(self) -> &'static str {
-        match self {
-            Self::ReadOnly => "read-only",
-            Self::WorkspaceWrite => "workspace-write",
-            Self::DangerFullAccess => "danger-full-access",
-            Self::Custom => "workspace-write",
-        }
     }
 }
 

@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "chat-model-picker",
+  "title": "Active chat model picker and model preservation",
+  "priority": 9,
+  "seed": "chat-turn-race",
+  "startNode": "chat/model-picker",
+  "entrypoint": "chat.model-picker",
+  "iterations": 14,
+  "steps": 14,
+  "replayLimit": 2,
+  "ownedNodes": ["chat/model-picker"],
+  "allowedSetupNodes": ["app", "workspace", "agent-detail", "chat"],
+  "ownedCoverage": ["control:chat.model-picker", "async:late-success", "invariant:no-cross-provider-model"],
+  "allowedAsyncEvents": ["late-success", "late-failure", "delayed-list-refresh", "reconnect"],
+  "invariants": ["app-no-crash", "no-cross-provider-model", "active-session-stable", "no-permanent-loading"]
+}

@@ -3,11 +3,19 @@
 use anyhow::{anyhow, bail, Context, Result};
 use puffer_config::ConfigPaths;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
+#[cfg(test)]
+use std::cell::RefCell;
 use std::path::Path;
 use tungstenite::{connect, Message};
 use url::Url;
 use uuid::Uuid;
+
+#[cfg(test)]
+thread_local! {
+    static TEST_DAEMON_HANDLER: RefCell<Option<Box<dyn FnMut(&str, &Value) -> Result<Value>>>> =
+        const { RefCell::new(None) };
+}
 
 /// Executes the model-facing Browser tool against the local Puffer daemon.
 pub(super) fn execute_browser_tool(
@@ -15,6 +23,7 @@ pub(super) fn execute_browser_tool(
     current_session_id: &Uuid,
     input: Value,
 ) -> Result<String> {
+    let input = enrich_browser_permission_input(cwd, current_session_id, input)?;
     let mut params: BrowserToolInput =
         serde_json::from_value(input).context("invalid Browser tool input")?;
     normalize_session_id(&mut params, current_session_id);
@@ -31,6 +40,38 @@ pub(super) fn execute_browser_tool(
         return Err(error);
     }
     bail!("Browser tool found no daemon handshakes")
+}
+
+/// Hydrates Browser permission input with daemon tab context when the action omits a URL.
+pub(crate) fn enrich_browser_permission_input(
+    cwd: &Path,
+    current_session_id: &Uuid,
+    input: Value,
+) -> Result<Value> {
+    let Some(payload) = input.as_object() else {
+        return Ok(input);
+    };
+    if browser_action_uses_explicit_url(payload) || browser_action_has_url(payload) {
+        return Ok(input);
+    }
+
+    let mut enriched = payload.clone();
+    let session_id = normalized_browser_session_id(payload, current_session_id);
+    let tab_context = read_current_tab_context(cwd, &session_id)?;
+    if let Some(tab_id) = tab_context.tab_id.as_deref() {
+        if !enriched.contains_key("tabId") {
+            enriched.insert("tabId".to_string(), Value::String(tab_id.to_string()));
+        }
+    }
+    if matches!(tab_context.status, BrowserCurrentTabStatus::Available) {
+        if let Some(url) = tab_context.url {
+            let trimmed = url.trim();
+            if !trimmed.is_empty() {
+                enriched.insert("url".to_string(), Value::String(trimmed.to_string()));
+            }
+        }
+    }
+    Ok(Value::Object(enriched))
 }
 
 fn normalize_session_id(params: &mut BrowserToolInput, current_session_id: &Uuid) {
@@ -100,6 +141,27 @@ struct DaemonResponse {
 #[derive(Debug, Deserialize)]
 struct DaemonError {
     message: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserCurrentTabContext {
+    pub(crate) status: BrowserCurrentTabStatus,
+    pub(crate) tab_id: Option<String>,
+    pub(crate) url: Option<String>,
+    pub(crate) origin: Option<String>,
+    pub(crate) host: Option<String>,
+    pub(crate) port: Option<u16>,
+    pub(crate) title: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BrowserCurrentTabStatus {
+    NoActiveTab,
+    EmptyUrl,
+    AboutBlank,
+    Available,
 }
 
 fn read_handshake_candidates(cwd: &Path) -> Result<Vec<DaemonHandshake>> {
@@ -200,6 +262,10 @@ fn canonical_workspace_root(path: &Path) -> std::path::PathBuf {
 }
 
 fn send_daemon_request(handshake: &DaemonHandshake, method: &str, params: Value) -> Result<Value> {
+    #[cfg(test)]
+    if let Some(result) = test_daemon_request(method, &params) {
+        return result;
+    }
     let request_id = Uuid::new_v4().to_string();
     let endpoint = endpoint_with_token(&handshake.url, &handshake.token)?;
     let (mut socket, _) = connect(endpoint.as_str()).context("connect to Puffer daemon")?;
@@ -234,6 +300,94 @@ fn endpoint_with_token(raw: &str, token: &str) -> Result<String> {
     let mut url = Url::parse(raw).context("parse daemon URL")?;
     url.query_pairs_mut().append_pair("token", token);
     Ok(url.to_string())
+}
+
+fn browser_action_uses_explicit_url(payload: &Map<String, Value>) -> bool {
+    payload
+        .get("action")
+        .and_then(Value::as_str)
+        .map(normalize_browser_action)
+        .is_some_and(|action| matches!(action.as_str(), "open" | "new" | "navigate"))
+}
+
+fn browser_action_has_url(payload: &Map<String, Value>) -> bool {
+    payload
+        .get("url")
+        .and_then(Value::as_str)
+        .is_some_and(|url| !url.trim().is_empty())
+}
+
+fn normalized_browser_session_id(
+    payload: &Map<String, Value>,
+    current_session_id: &Uuid,
+) -> String {
+    if let Some(session_id) = payload
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "current")
+    {
+        session_id.to_string()
+    } else {
+        current_session_id.to_string()
+    }
+}
+
+fn normalize_browser_action(action: &str) -> String {
+    action.trim().replace(['_', '-'], "").to_ascii_lowercase()
+}
+
+pub(crate) fn read_current_tab_context(
+    cwd: &Path,
+    session_id: &str,
+) -> Result<BrowserCurrentTabContext> {
+    #[cfg(test)]
+    if let Some(result) =
+        test_daemon_request("browser_current_tab", &json!({ "sessionId": session_id }))
+    {
+        let response = result?;
+        return serde_json::from_value(response).context("decode Browser current tab context");
+    }
+    let payload = json!({ "sessionId": session_id });
+    let handshakes = read_handshake_candidates(cwd)?;
+    let mut last_error = None;
+    for handshake in &handshakes {
+        match send_daemon_request(handshake, "browser_current_tab", payload.clone()) {
+            Ok(response) => {
+                return serde_json::from_value(response)
+                    .context("decode Browser current tab context");
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    if let Some(error) = last_error {
+        return Err(error);
+    }
+    bail!("Browser current-tab lookup found no daemon handshakes")
+}
+
+/// Runs a closure while Browser daemon requests are served by a test handler.
+#[cfg(test)]
+pub(crate) fn with_browser_daemon_test_handler<R>(
+    handler: impl FnMut(&str, &Value) -> Result<Value> + 'static,
+    run: impl FnOnce() -> R,
+) -> R {
+    TEST_DAEMON_HANDLER.with(|slot| {
+        let previous = slot.borrow_mut().take();
+        *slot.borrow_mut() = Some(Box::new(handler));
+        let result = run();
+        let _ = slot.borrow_mut().take();
+        *slot.borrow_mut() = previous;
+        result
+    })
+}
+
+#[cfg(test)]
+fn test_daemon_request(method: &str, params: &Value) -> Option<Result<Value>> {
+    TEST_DAEMON_HANDLER.with(|slot| {
+        let mut borrowed = slot.borrow_mut();
+        borrowed.as_mut().map(|handler| handler(method, params))
+    })
 }
 
 #[cfg(test)]

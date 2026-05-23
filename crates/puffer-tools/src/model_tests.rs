@@ -146,8 +146,12 @@ fn boolean_fields_in_builtin_schemas_use_boolean_type() {
         ToolSchemaType::Boolean
     );
     assert_eq!(
-        bash_schema.properties["dangerouslyDisableSandbox"].value_type,
-        ToolSchemaType::Boolean
+        bash_schema
+            .properties
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["command", "run_in_background", "timeout"]
     );
     assert_eq!(
         bash_schema.properties["timeout"].value_type,
@@ -203,13 +207,12 @@ fn serde_read_input_accepts_offset_and_limit() {
 }
 
 #[test]
-fn serde_bash_input_accepts_timeout_and_sandbox_fields() {
+fn serde_bash_input_accepts_timeout_and_background_fields() {
     let input: ToolInput = serde_json::from_value(serde_json::json!({
         "tool": "bash",
         "command": "printf hi",
         "timeout": 2500,
         "run_in_background": false,
-        "dangerouslyDisableSandbox": false,
     }))
     .unwrap();
     assert_eq!(
@@ -218,7 +221,6 @@ fn serde_bash_input_accepts_timeout_and_sandbox_fields() {
             command: "printf hi".to_string(),
             timeout: Some(2500),
             run_in_background: false,
-            dangerously_disable_sandbox: false,
         }
     );
 }
@@ -230,7 +232,6 @@ fn tool_input_reports_kind() {
             command: "printf hi".to_string(),
             timeout: None,
             run_in_background: false,
-            dangerously_disable_sandbox: false,
         }
         .kind(),
         ToolKind::Bash

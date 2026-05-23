@@ -4,6 +4,8 @@ mod authflow;
 mod benchmark_reflection;
 mod benchmark_run;
 mod browser;
+mod browser_args;
+mod browser_output;
 mod cli_args;
 mod command_surface;
 mod connectors;
@@ -20,9 +22,12 @@ mod desktop_activity;
 mod desktop_api;
 mod desktop_api_types;
 mod heartbeat;
+mod internal_tools;
 mod non_interactive;
 mod resource_fs;
 mod runner_selection;
+mod subscriber_tool_args;
+mod subscriber_tools;
 mod subscriptions;
 mod workflow_runtime;
 mod workflows;
@@ -264,6 +269,7 @@ fn main() -> Result<()> {
                 serde_json::to_string_pretty(&serde_json::json!({
                     "prompts": resources.prompts,
                     "tools": resources.tools,
+                    "internal_tools": resources.internal_tools,
                     "skills": resources.skills,
                     "plugins": resources.plugins,
                     "mcp_servers": resources.mcp_servers,
@@ -301,6 +307,9 @@ fn main() -> Result<()> {
             yolo,
         }),
         Some(Command::Browser(args)) => browser::run_browser_command(&cwd, &paths, args),
+        Some(Command::InternalTool { command }) => {
+            internal_tools::run_internal_tool_command(&cwd, &paths, command)
+        }
         Some(Command::BenchmarkRun {
             prompt,
             prompt_file,
@@ -655,7 +664,6 @@ fn run_tool_command(
                     command,
                     timeout: None,
                     run_in_background: false,
-                    dangerously_disable_sandbox: false,
                 },
             )?;
             println!("{}", serde_json::to_string_pretty(&result)?);

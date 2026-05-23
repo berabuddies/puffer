@@ -85,6 +85,11 @@ pub(crate) fn run_doctor_command(
         auth_store.provider_ids().count()
     );
     let _ = writeln!(&mut text, "tools={}", resources.tools.len());
+    let _ = writeln!(
+        &mut text,
+        "internal_tools={}",
+        resources.internal_tools.len()
+    );
     let _ = writeln!(&mut text, "prompts={}", resources.prompts.len());
     let _ = writeln!(&mut text, "skills={}", resources.skills.len());
     let _ = writeln!(&mut text, "plugins={}", resources.plugins.len());
@@ -373,45 +378,38 @@ pub(crate) fn run_auto_mode_command(
     match command.unwrap_or(AutoModeCommand::Config) {
         AutoModeCommand::Config => {
             let value = serde_json::json!({
-                "supported": false,
-                "mode": "manual",
-                "sandbox": load_sandbox_settings(paths)?,
-                "message": "Puffer does not implement Claude-style auto-mode classification yet."
+                "supported": true,
+                "mode": "acl",
+                "permissions_acl": paths.workspace_config_dir.join("permissions.acl"),
+                "message": "Auto mode uses the same project ACL evaluator as normal permission prompts."
             });
             println!("{}", serde_json::to_string_pretty(&value)?);
             Ok(())
         }
         AutoModeCommand::Defaults => {
             let value = serde_json::json!({
-                "supported": false,
-                "mode": "manual",
-                "sandbox": SandboxSettings::default(),
-                "allow_rules": [],
+                "supported": true,
+                "mode": "acl",
+                "allow_rules": [
+                    "cwd read/write",
+                    "preapproved shell commands",
+                    "project ACL allow rules"
+                ],
                 "deny_rules": [],
             });
             println!("{}", serde_json::to_string_pretty(&value)?);
             Ok(())
         }
         AutoModeCommand::Critique => {
-            let settings = load_sandbox_settings(paths)?;
-            let mut text =
-                String::from("Puffer does not support Claude-style auto-mode rule critique yet.\n");
-            let _ = writeln!(&mut text, "sandbox_mode={}", settings.mode);
-            let _ = writeln!(&mut text, "auto_allow={}", settings.auto_allow);
+            let mut text = String::from("Auto-mode permission critique:\n");
             let _ = writeln!(
                 &mut text,
-                "allow_unsandboxed_fallback={}",
-                settings.allow_unsandboxed_fallback
+                "permissions_acl={}",
+                paths.workspace_config_dir.join("permissions.acl").display()
             );
-            if settings.excluded_commands.is_empty() {
-                let _ = writeln!(&mut text, "excluded_commands=<none>");
-            } else {
-                let _ = writeln!(
-                    &mut text,
-                    "excluded_commands={}",
-                    settings.excluded_commands.join(", ")
-                );
-            }
+            let _ = writeln!(&mut text, "read_write_default=cwd");
+            let _ = writeln!(&mut text, "bash_default=preapproved commands only");
+            let _ = writeln!(&mut text, "browser_default=ask per domain/action");
             print!("{text}");
             Ok(())
         }
@@ -949,14 +947,6 @@ fn update_plugin(paths: &ConfigPaths, scope: ResourceScope, plugin_id: &str) -> 
     Ok(())
 }
 
-fn load_sandbox_settings(paths: &ConfigPaths) -> Result<SandboxSettings> {
-    let path = paths.workspace_config_dir.join("sandbox.toml");
-    if !path.exists() {
-        return Ok(SandboxSettings::default());
-    }
-    Ok(toml::from_str(&fs::read_to_string(path)?)?)
-}
-
 fn ensure_provider_supports_auth_mode(
     provider: &str,
     providers: &ProviderRegistry,
@@ -1110,18 +1100,6 @@ fn disabled_placeholder_for(plugin: &PluginSpec) -> PluginSpec {
     }
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
-struct SandboxSettings {
-    #[serde(default = "default_sandbox_mode")]
-    mode: String,
-    #[serde(default)]
-    auto_allow: bool,
-    #[serde(default)]
-    allow_unsandboxed_fallback: bool,
-    #[serde(default)]
-    excluded_commands: Vec<String>,
-}
-
 #[derive(Debug, Deserialize)]
 struct McpServerJsonInput {
     #[serde(default)]
@@ -1136,8 +1114,4 @@ struct McpServerJsonInput {
     description: Option<String>,
     #[serde(default)]
     headers: Option<std::collections::BTreeMap<String, String>>,
-}
-
-fn default_sandbox_mode() -> String {
-    "workspace-write".to_string()
 }

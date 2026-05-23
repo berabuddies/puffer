@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "pipelines-draft-graph",
+  "title": "Pipelines draft graph editing and stale refresh",
+  "priority": 6,
+  "seed": "pipelines-draft-race",
+  "startNode": "pipelines/draft-graph",
+  "entrypoint": "pipelines.node-editor",
+  "iterations": 10,
+  "steps": 12,
+  "replayLimit": 2,
+  "ownedNodes": ["pipelines/draft-graph"],
+  "allowedSetupNodes": ["app", "pipelines"],
+  "ownedCoverage": ["route:pipelines", "control:pipelines.node-editor", "control:pipelines.trigger-editor", "async:server-push-update", "invariant:draft-preserved-on-failure"],
+  "allowedAsyncEvents": ["late-success", "delayed-list-refresh", "server-push-update", "reconnect"],
+  "invariants": ["app-no-crash", "draft-preserved-on-failure", "no-data-loss", "stale-error-scoped", "no-permanent-loading"]
+}

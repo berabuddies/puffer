@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "settings-permissions",
+  "title": "Settings permission editor save and stale refresh",
+  "priority": 7,
+  "seed": "settings-mcp-permission-race",
+  "startNode": "settings/permissions",
+  "entrypoint": "settings.permissions-save",
+  "iterations": 12,
+  "steps": 14,
+  "replayLimit": 2,
+  "ownedNodes": ["settings/permissions"],
+  "allowedSetupNodes": ["app", "settings"],
+  "ownedCoverage": ["route:settings-permissions", "control:settings.permissions-save", "state:settings.saving", "async:late-failure"],
+  "allowedAsyncEvents": ["late-failure", "delayed-list-refresh", "server-push-update", "reconnect"],
+  "invariants": ["app-no-crash", "one-request-per-intent", "controls-disabled-while-pending", "draft-preserved-on-failure", "no-permanent-loading"]
+}

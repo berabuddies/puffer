@@ -508,10 +508,10 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
           summary: value.summary,
           inputText: value.inputText,
           toolName: value.toolId,
-          choices: ["Allow once", "Allow for session", "Deny"]
+          choices: ["Approve once", "Always allow", "Deny"]
         },
         scopeLabel: "workspace",
-        choices: ["Allow once", "Allow for session", "Deny"]
+        choices: ["Approve once", "Always allow", "Deny"]
       };
     case "diff_snapshot": {
       const diff = normalizeDiff(value.snapshot);
@@ -1102,12 +1102,14 @@ export type PermissionAction = "allow_once" | "allow_session" | "allow_all_sessi
 export type UserQuestionAnswers = Record<string, string | string[]>;
 export type UserQuestionAnnotations = Record<string, Record<string, string>>;
 export type AgentPermissionMode = "read-only" | "workspace-write" | "full-access";
+export type AgentTurnMode = "default" | "plan";
 export type AgentTurnOptions = {
   providerId?: string | null;
   modelId?: string | null;
   thinkingOptionId?: string | null;
   fastMode?: boolean;
   permissionMode?: AgentPermissionMode;
+  mode?: AgentTurnMode;
 };
 
 /** Starts a new agent turn on `sessionId` with `message`. Returns the turn id
@@ -1453,6 +1455,7 @@ export type BrowserState = {
   url: string;
   title: string;
   loading: boolean;
+  updatedAtMs?: number;
   width?: number;
   height?: number;
   popOut?: boolean;
