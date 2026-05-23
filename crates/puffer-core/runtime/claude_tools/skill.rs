@@ -64,6 +64,25 @@ pub fn execute_claude_skill_tool(resources: &LoadedResources, input: Value) -> R
             skill.value.allowed_tools.join(", ")
         );
     }
+    if let Some(verification) = skill.value.verification.as_ref() {
+        let _ = writeln!(&mut output, "verified-skill: {}", verification.system);
+        if let Some(source_path) = verification.source_path.as_deref() {
+            let _ = writeln!(&mut output, "formal-source: {source_path}");
+        }
+        if let Some(generated_path) = verification.generated_path.as_deref() {
+            let _ = writeln!(&mut output, "generated-descriptor: {generated_path}");
+        }
+        let mut stats = Vec::new();
+        if let Some(tools) = verification.tools {
+            stats.push(format!("tools={tools}"));
+        }
+        if let Some(actions) = verification.actions {
+            stats.push(format!("actions={actions}"));
+        }
+        if !stats.is_empty() {
+            let _ = writeln!(&mut output, "verified-stats: {}", stats.join(", "));
+        }
+    }
     let _ = writeln!(
         &mut output,
         "\n<skill name=\"{}\">\n{}\n</skill>",
@@ -76,7 +95,7 @@ pub fn execute_claude_skill_tool(resources: &LoadedResources, input: Value) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use puffer_resources::{LoadedItem, SkillSpec, SourceInfo, SourceKind};
+    use puffer_resources::{LoadedItem, SkillSpec, SkillVerificationSpec, SourceInfo, SourceKind};
     use serde_json::json;
 
     fn sample_resources() -> LoadedResources {
@@ -106,6 +125,28 @@ mod tests {
                     source_info: SourceInfo {
                         path: "skills/hidden/SKILL.md".into(),
                         kind: SourceKind::Builtin,
+                    },
+                },
+                LoadedItem {
+                    value: SkillSpec {
+                        name: "verified-ci".to_string(),
+                        description: "Fix verified CI failures".to_string(),
+                        content: "Verified prompt body".to_string(),
+                        verification: Some(SkillVerificationSpec {
+                            system: "lambda-skill".to_string(),
+                            source_path: Some("/tmp/skills/verified-ci/skill.lskill".to_string()),
+                            generated_path: Some(
+                                "/tmp/skills/verified-ci/out/GENERATED.SKILL.md".to_string(),
+                            ),
+                            host_catalogue_path: None,
+                            tools: Some(10),
+                            actions: Some(2),
+                        }),
+                        ..SkillSpec::default()
+                    },
+                    source_info: SourceInfo {
+                        path: "skills/verified-ci/skill.lskill".into(),
+                        kind: SourceKind::Workspace,
                     },
                 },
             ],
@@ -148,5 +189,18 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("disable-model-invocation"));
+    }
+
+    #[test]
+    fn executes_verified_skill_with_provenance_metadata() {
+        let output =
+            execute_claude_skill_tool(&sample_resources(), json!({"skill": "verified-ci"}))
+                .unwrap();
+        assert!(output.contains("verified-skill: lambda-skill"));
+        assert!(output.contains("formal-source: /tmp/skills/verified-ci/skill.lskill"));
+        assert!(
+            output.contains("generated-descriptor: /tmp/skills/verified-ci/out/GENERATED.SKILL.md")
+        );
+        assert!(output.contains("verified-stats: tools=10, actions=2"));
     }
 }

@@ -492,6 +492,7 @@ fn append_skill_group(text: &mut String, resources: &LoadedResources, kind: Sour
         if skill.value.disable_model_invocation {
             details.push("model invocation disabled".to_string());
         }
+        append_skill_verification_details(&mut details, &skill.value);
         if let Some(argument_hint) = skill.value.argument_hint.as_deref() {
             details.push(format!("args {argument_hint}"));
         }
@@ -505,6 +506,24 @@ fn append_skill_group(text: &mut String, resources: &LoadedResources, kind: Sour
             details.join(" · ")
         );
     }
+}
+
+fn append_skill_verification_details(details: &mut Vec<String>, skill: &SkillSpec) {
+    let Some(verification) = skill.verification.as_ref() else {
+        return;
+    };
+    let mut label = format!("verified {}", verification.system);
+    let mut counts = Vec::new();
+    if let Some(tools) = verification.tools {
+        counts.push(format!("{tools} tools"));
+    }
+    if let Some(actions) = verification.actions {
+        counts.push(format!("{actions} actions"));
+    }
+    if !counts.is_empty() {
+        label.push_str(&format!(" ({})", counts.join(", ")));
+    }
+    details.push(label);
 }
 
 fn skill_source_heading(kind: SourceKind) -> &'static str {
@@ -603,7 +622,9 @@ fn append_patch_section(text: &mut String, cwd: &PathBuf, title: &str, args: &[&
 #[cfg(test)]
 mod tests {
     use super::render_skills_panel;
-    use puffer_resources::{LoadedItem, LoadedResources, SkillSpec, SourceInfo, SourceKind};
+    use puffer_resources::{
+        LoadedItem, LoadedResources, SkillSpec, SkillVerificationSpec, SourceInfo, SourceKind,
+    };
     use std::path::PathBuf;
 
     fn loaded_skill(
@@ -697,6 +718,39 @@ mod tests {
         let rendered = render_skills_panel(&resources);
         assert!(rendered.contains(
             "- hidden-review · ~5 description tokens · hidden from slash-command invocation · model invocation disabled"
+        ));
+    }
+
+    #[test]
+    fn render_skills_panel_marks_verified_skills() {
+        let resources = LoadedResources {
+            skills: vec![LoadedItem {
+                value: SkillSpec {
+                    name: "verified-ci".to_string(),
+                    description: "Fix verified CI failures".to_string(),
+                    verification: Some(SkillVerificationSpec {
+                        system: "lambda-skill".to_string(),
+                        source_path: Some("/tmp/skills/verified-ci/skill.lskill".to_string()),
+                        generated_path: Some(
+                            "/tmp/skills/verified-ci/out/GENERATED.SKILL.md".to_string(),
+                        ),
+                        host_catalogue_path: None,
+                        tools: Some(10),
+                        actions: Some(2),
+                    }),
+                    ..SkillSpec::default()
+                },
+                source_info: SourceInfo {
+                    path: PathBuf::from("/tmp/skills/verified-ci/skill.lskill"),
+                    kind: SourceKind::Workspace,
+                },
+            }],
+            ..LoadedResources::default()
+        };
+
+        let rendered = render_skills_panel(&resources);
+        assert!(rendered.contains(
+            "- /verified-ci · ~6 description tokens · verified lambda-skill (10 tools, 2 actions)"
         ));
     }
 }

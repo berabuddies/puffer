@@ -1,6 +1,6 @@
 use crate::AppState;
 use anyhow::Result;
-use puffer_resources::{render_prompt_for, LoadedResources};
+use puffer_resources::{render_prompt_for, LoadedResources, SkillSpec};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::path::{Path, PathBuf};
@@ -235,7 +235,7 @@ fn build_session_guidance_section(
             .skills
             .iter()
             .filter(|skill| !skill.value.disable_model_invocation)
-            .map(|skill| format!("{}: {}", skill.value.name, skill.value.description.trim()))
+            .map(|skill| model_invocable_skill_summary(&skill.value))
             .collect::<Vec<_>>();
         model_invocable_skills.sort();
         if !model_invocable_skills.is_empty() {
@@ -256,6 +256,14 @@ fn build_session_guidance_section(
     let mut lines = vec!["# Session-specific guidance".to_string()];
     lines.extend(prepend_bullets(items));
     lines.join("\n")
+}
+
+fn model_invocable_skill_summary(skill: &SkillSpec) -> String {
+    let mut summary = format!("{}: {}", skill.name, skill.description.trim());
+    if let Some(verification) = skill.verification.as_ref() {
+        summary.push_str(&format!(" [verified {}]", verification.system));
+    }
+    summary
 }
 
 fn build_environment_section(state: &AppState, model_id: &str) -> Result<String> {
@@ -431,7 +439,8 @@ mod tests {
     use super::{load_memory_prompt, render_runtime_system_prompt};
     use crate::runtime::tests::state;
     use puffer_resources::{
-        LoadedItem, LoadedResources, PromptTemplate, SkillSpec, SourceInfo, SourceKind,
+        LoadedItem, LoadedResources, PromptTemplate, SkillSpec, SkillVerificationSpec, SourceInfo,
+        SourceKind,
     };
     use std::collections::BTreeSet;
     use std::path::PathBuf;
@@ -521,6 +530,18 @@ mod tests {
                         name: "agent-browser".to_string(),
                         description: "Use AgentEnv platform browsers".to_string(),
                         disable_model_invocation: false,
+                        verification: Some(SkillVerificationSpec {
+                            system: "lambda-skill".to_string(),
+                            source_path: Some(
+                                ".puffer/lambda/agent-browser/skill.lskill".to_string(),
+                            ),
+                            generated_path: Some(
+                                ".puffer/lambda/agent-browser/out/GENERATED.SKILL.md".to_string(),
+                            ),
+                            host_catalogue_path: None,
+                            tools: None,
+                            actions: None,
+                        }),
                         ..SkillSpec::default()
                     },
                     source_info: SourceInfo {
@@ -548,7 +569,8 @@ mod tests {
             render_runtime_system_prompt(&state, &resources, "gpt-5", &enabled_tools).unwrap();
 
         assert!(prompt.contains("Available model-invocable skills"));
-        assert!(prompt.contains("- agent-browser: Use AgentEnv platform browsers"));
+        assert!(prompt
+            .contains("- agent-browser: Use AgentEnv platform browsers [verified lambda-skill]"));
         assert!(!prompt.contains("Do not show this one"));
     }
 
