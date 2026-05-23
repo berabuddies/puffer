@@ -235,6 +235,8 @@ pub struct SkillSpec {
     pub context: Option<String>,
     #[serde(default)]
     pub disable_model_invocation: bool,
+    #[serde(default)]
+    pub verification: Option<SkillVerificationSpec>,
 }
 
 impl Default for SkillSpec {
@@ -251,12 +253,29 @@ impl Default for SkillSpec {
             effort: None,
             context: None,
             disable_model_invocation: false,
+            verification: None,
         }
     }
 }
 
 fn default_user_invocable() -> bool {
     true
+}
+
+/// Carries source-level verification metadata for a loaded skill.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SkillVerificationSpec {
+    pub system: String,
+    #[serde(default)]
+    pub source_path: Option<String>,
+    #[serde(default)]
+    pub generated_path: Option<String>,
+    #[serde(default)]
+    pub host_catalogue_path: Option<String>,
+    #[serde(default)]
+    pub tools: Option<usize>,
+    #[serde(default)]
+    pub actions: Option<usize>,
 }
 
 /// Declares a plugin command entry.
