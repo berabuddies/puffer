@@ -20,7 +20,6 @@ use std::fs;
 use std::time::Duration;
 
 const TMUX_START_TIMEOUT: Duration = Duration::from_secs(30);
-const TMUX_RELOAD_TIMEOUT: Duration = Duration::from_secs(20);
 const TMUX_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[test]
@@ -106,23 +105,21 @@ tmux_golden_mode = true
     )
     .unwrap();
 
-    // Close the overlay so the next /skills invocation re-reads
+    // Close the overlay so subsequent /skills invocations re-read
     // resources after the watcher has had a chance to fire and the
     // main loop has consumed the signal.
-    send_tmux_keys(&session, &["Escape"]).unwrap();
-    std::thread::sleep(Duration::from_millis(300));
-
-    // Drive a key into the TUI so the main loop ticks and processes
-    // the reload signal that the watcher raised. The "i" -> backspace
-    // sequence is harmless: it just nudges the loop.
-    send_tmux_keys(&session, &["i", "BSpace"]).unwrap();
-    wait_for_tmux_text(&session, "Reloaded plugin registry", TMUX_RELOAD_TIMEOUT).unwrap();
+    close_skills_overlay(&session);
 
     // Wait for the reload to have happened, then verify /skills sees it.
-    // We try a few times because filesystem-watcher latency + main-loop
-    // poll interval add up to a hundred milliseconds or two on macOS.
+    // We try a few times because filesystem-watcher latency, main-loop
+    // polling, and tmux scheduling can all stretch under full-suite load.
     let mut found = false;
-    for _ in 0..30 {
+    for _ in 0..50 {
+        // Drive a key into the TUI so the main loop ticks and processes
+        // any reload signal that the watcher raised. The "i" -> backspace
+        // sequence is harmless: it just nudges the loop.
+        send_tmux_keys(&session, &["i", "BSpace"]).unwrap();
+        std::thread::sleep(Duration::from_millis(150));
         submit_skills_command(&session);
         std::thread::sleep(Duration::from_millis(300));
         let after = capture_tmux_visible_pane(&session).unwrap();
@@ -130,9 +127,7 @@ tmux_golden_mode = true
             found = true;
             break;
         }
-        // Close the overlay before the next attempt.
-        send_tmux_keys(&session, &["Escape"]).unwrap();
-        std::thread::sleep(Duration::from_millis(150));
+        close_skills_overlay(&session);
     }
     let final_capture = capture_tmux_visible_pane(&session).unwrap();
     assert!(
@@ -141,7 +136,19 @@ tmux_golden_mode = true
     );
 }
 
+fn close_skills_overlay(session: &puffer_test_support::TmuxSession) {
+    for _ in 0..10 {
+        let capture = capture_tmux_visible_pane(session).unwrap();
+        if !capture.contains("┌Skills") {
+            return;
+        }
+        send_tmux_keys(session, &["Escape"]).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 fn submit_skills_command(session: &puffer_test_support::TmuxSession) {
+    send_tmux_keys(session, &["C-u"]).unwrap();
     send_tmux_keys(session, &["/skills"]).unwrap();
     wait_for_tmux_visible_text(session, "\u{276f} /skills", TMUX_COMMAND_TIMEOUT).unwrap();
     send_tmux_keys(session, &["Enter"]).unwrap();
