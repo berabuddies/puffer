@@ -7,6 +7,8 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
 
 pub(crate) const LAMBDA_SKILL_COMPILER_ENV: &str = "PUFFER_LSKILLC";
 pub(crate) const LAMBDA_SKILL_GATE_ENV: &str = "PUFFER_LAMBDA_SKILL_GATE";
@@ -368,7 +370,91 @@ fn host_catalogue_json_for_verification(
         .source_path
         .as_deref()
         .ok_or_else(|| anyhow!("Lambda Skill gate requested but formal source path is missing"))?;
-    export_host_catalogue_for_source(Path::new(source_path)).map(Some)
+    compiled_host_catalogue_json_for_source(Path::new(source_path)).map(Some)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct LambdaCompileCacheKey {
+    source_path: PathBuf,
+    compiler_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LambdaCompileCacheEntry {
+    source_stamp: Option<LambdaFileStamp>,
+    compiler_stamp: Option<LambdaFileStamp>,
+    raw: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LambdaFileStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+type LambdaCompileCache = Mutex<HashMap<LambdaCompileCacheKey, LambdaCompileCacheEntry>>;
+
+fn compiled_host_catalogue_json_for_source(source_path: &Path) -> Result<String> {
+    let compiler = resolve_lskillc_for_source(source_path).ok_or_else(|| {
+        anyhow!(
+            "Lambda Skill gate requested but lskillc was not found; set {LAMBDA_SKILL_COMPILER_ENV}"
+        )
+    })?;
+    let key = LambdaCompileCacheKey {
+        source_path: lambda_cache_path(source_path),
+        compiler_path: lambda_cache_path(&compiler),
+    };
+    let source_stamp = lambda_file_stamp(source_path);
+    let compiler_stamp = lambda_file_stamp(&compiler);
+    {
+        let cache = lambda_compile_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = cache.get(&key) {
+            if entry.source_stamp == source_stamp && entry.compiler_stamp == compiler_stamp {
+                return Ok(entry.raw.clone());
+            }
+        }
+    }
+
+    let raw = export_host_catalogue_with_compiler(source_path, &compiler)?;
+    let mut cache = lambda_compile_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.insert(
+        key,
+        LambdaCompileCacheEntry {
+            source_stamp,
+            compiler_stamp,
+            raw: raw.clone(),
+        },
+    );
+    Ok(raw)
+}
+
+fn lambda_compile_cache() -> &'static LambdaCompileCache {
+    static CACHE: OnceLock<LambdaCompileCache> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn lambda_cache_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn lambda_file_stamp(path: &Path) -> Option<LambdaFileStamp> {
+    let metadata = fs::metadata(path).ok()?;
+    Some(LambdaFileStamp {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
+}
+
+#[cfg(test)]
+fn clear_lambda_compile_cache() {
+    lambda_compile_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
 }
 
 /// Returns true when Lambda Skill host catalogues should be compiled on demand.
@@ -382,15 +468,6 @@ pub(crate) fn lambda_skill_compiler_gate_enabled() -> bool {
             )
         })
         .unwrap_or(false)
-}
-
-fn export_host_catalogue_for_source(source_path: &Path) -> Result<String> {
-    let compiler = resolve_lskillc_for_source(source_path).ok_or_else(|| {
-        anyhow!(
-            "Lambda Skill gate requested but lskillc was not found; set {LAMBDA_SKILL_COMPILER_ENV}"
-        )
-    })?;
-    export_host_catalogue_with_compiler(source_path, &compiler)
 }
 
 fn export_host_catalogue_with_compiler(source_path: &Path, compiler: &Path) -> Result<String> {
@@ -698,5 +775,65 @@ mod tests {
         let host = LambdaHostEnv::from_json_str(&raw).unwrap();
 
         assert!(host.lookup_tool("execute_swap").is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compile_gate_reuses_catalogue_until_source_changes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = crate::test_locks::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        clear_lambda_compile_cache();
+        let old_gate = std::env::var_os(LAMBDA_SKILL_GATE_ENV);
+        let old_compiler = std::env::var_os(LAMBDA_SKILL_COMPILER_ENV);
+
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("skill.lskill");
+        let compiler = root.path().join("lskillc");
+        let count = root.path().join("count");
+        fs::write(&source, "host {}\n").unwrap();
+        fs::write(
+            &compiler,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" != \"export-json\" ]; then exit 9; fi\ndir=$(dirname \"$0\")\ncount=\"$dir/count\"\nn=0\nif [ -f \"$count\" ]; then n=$(cat \"$count\"); fi\nn=$((n + 1))\nprintf '%s' \"$n\" > \"$count\"\nprintf '%s' '{}'\n",
+                SWAP_HOST_JSON.replace('\'', "'\\''")
+            ),
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&compiler).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&compiler, perms).unwrap();
+
+        std::env::set_var(LAMBDA_SKILL_GATE_ENV, "compile");
+        std::env::set_var(LAMBDA_SKILL_COMPILER_ENV, &compiler);
+        let mut skill = SkillSpec::default();
+        skill.verification = Some(SkillVerificationSpec {
+            system: "lambda-skill".to_string(),
+            source_path: Some(source.display().to_string()),
+            generated_path: None,
+            host_catalogue_path: None,
+            tools: None,
+            actions: None,
+        });
+
+        assert!(gate_for_verified_skill(&skill).unwrap().is_some());
+        assert!(gate_for_verified_skill(&skill).unwrap().is_some());
+        assert_eq!(fs::read_to_string(&count).unwrap(), "1");
+
+        fs::write(&source, "host { changed }\n").unwrap();
+        assert!(gate_for_verified_skill(&skill).unwrap().is_some());
+        assert_eq!(fs::read_to_string(&count).unwrap(), "2");
+
+        match old_gate {
+            Some(value) => std::env::set_var(LAMBDA_SKILL_GATE_ENV, value),
+            None => std::env::remove_var(LAMBDA_SKILL_GATE_ENV),
+        }
+        match old_compiler {
+            Some(value) => std::env::set_var(LAMBDA_SKILL_COMPILER_ENV, value),
+            None => std::env::remove_var(LAMBDA_SKILL_COMPILER_ENV),
+        }
+        clear_lambda_compile_cache();
     }
 }
