@@ -10,6 +10,7 @@ use std::io::{self, IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+const LAMBDA_HOST_CALL_TOOL_ID: &str = "LambdaHostCall";
 const SKILL_DESCRIPTION_CHARS_PER_TOKEN: usize = 4;
 
 /// Lists loaded skills in slash-command form.
@@ -216,7 +217,8 @@ pub(crate) fn execute_skill_command(
 
     let rendered =
         crate::skill_support::render_skill_prompt(skill, args, &state.session.id.to_string());
-    let tool_filter = crate::runtime::build_request_tool_filter(&skill.value.allowed_tools)?;
+    let allowed_tools = skill_allowed_tools_for_side_turn(&skill.value);
+    let tool_filter = crate::runtime::build_request_tool_filter(&allowed_tools)?;
 
     state.push_message(MessageRole::User, rendered.clone());
     session_store.append_event(
@@ -284,6 +286,22 @@ fn apply_skill_runtime_overrides(
     if let Some(effort) = skill.effort.as_deref() {
         state.effort_level = effort.to_string();
     }
+}
+
+fn skill_allowed_tools_for_side_turn(skill: &SkillSpec) -> Vec<String> {
+    let mut allowed_tools = skill.allowed_tools.clone();
+    if !allowed_tools.is_empty()
+        && skill
+            .verification
+            .as_ref()
+            .is_some_and(|verification| verification.system == "lambda-skill")
+        && !allowed_tools
+            .iter()
+            .any(|tool| tool.eq_ignore_ascii_case(LAMBDA_HOST_CALL_TOOL_ID))
+    {
+        allowed_tools.push(LAMBDA_HOST_CALL_TOOL_ID.to_string());
+    }
+    allowed_tools
 }
 
 /// Appends a system message to the in-memory transcript and session log.
@@ -641,7 +659,7 @@ fn append_patch_section(text: &mut String, cwd: &PathBuf, title: &str, args: &[&
 
 #[cfg(test)]
 mod tests {
-    use super::render_skills_panel;
+    use super::{render_skills_panel, skill_allowed_tools_for_side_turn};
     use puffer_resources::{
         LoadedItem, LoadedResources, SkillSpec, SkillVerificationSpec, SourceInfo, SourceKind,
     };
@@ -772,6 +790,50 @@ mod tests {
         assert!(rendered.contains(
             "- /verified-ci · ~6 description tokens · verified lambda-skill (10 tools, 2 actions)"
         ));
+    }
+
+    #[test]
+    fn lambda_skill_side_turn_includes_host_bridge_when_filtered() {
+        let skill = SkillSpec {
+            name: "verified-ci".to_string(),
+            allowed_tools: vec!["Read".to_string()],
+            verification: Some(SkillVerificationSpec {
+                system: "lambda-skill".to_string(),
+                source_path: Some("/tmp/skills/verified-ci/skill.lskill".to_string()),
+                generated_path: Some("/tmp/skills/verified-ci/out/GENERATED.SKILL.md".to_string()),
+                host_catalogue_path: None,
+                tools: Some(10),
+                actions: Some(2),
+            }),
+            ..SkillSpec::default()
+        };
+
+        let allowed = skill_allowed_tools_for_side_turn(&skill);
+
+        assert_eq!(
+            allowed,
+            vec!["Read".to_string(), "LambdaHostCall".to_string()]
+        );
+    }
+
+    #[test]
+    fn lambda_skill_side_turn_keeps_empty_filter_unrestricted() {
+        let skill = SkillSpec {
+            name: "verified-ci".to_string(),
+            verification: Some(SkillVerificationSpec {
+                system: "lambda-skill".to_string(),
+                source_path: Some("/tmp/skills/verified-ci/skill.lskill".to_string()),
+                generated_path: Some("/tmp/skills/verified-ci/out/GENERATED.SKILL.md".to_string()),
+                host_catalogue_path: None,
+                tools: Some(10),
+                actions: Some(2),
+            }),
+            ..SkillSpec::default()
+        };
+
+        let allowed = skill_allowed_tools_for_side_turn(&skill);
+
+        assert!(allowed.is_empty());
     }
 }
 
