@@ -8,8 +8,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const LAMBDA_SKILL_COMPILER_ENV: &str = "PUFFER_LSKILLC";
-const LAMBDA_SKILL_GATE_ENV: &str = "PUFFER_LAMBDA_SKILL_GATE";
+pub(crate) const LAMBDA_SKILL_COMPILER_ENV: &str = "PUFFER_LSKILLC";
+pub(crate) const LAMBDA_SKILL_GATE_ENV: &str = "PUFFER_LAMBDA_SKILL_GATE";
 
 /// One structured host fact tracked by the Lambda Skill call gate.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -371,7 +371,8 @@ fn host_catalogue_json_for_verification(
     export_host_catalogue_for_source(Path::new(source_path)).map(Some)
 }
 
-fn lambda_skill_compiler_gate_enabled() -> bool {
+/// Returns true when Lambda Skill host catalogues should be compiled on demand.
+pub(crate) fn lambda_skill_compiler_gate_enabled() -> bool {
     env::var(LAMBDA_SKILL_GATE_ENV)
         .ok()
         .map(|value| {
@@ -416,7 +417,8 @@ fn export_host_catalogue_with_compiler(source_path: &Path, compiler: &Path) -> R
     })
 }
 
-fn resolve_lskillc_for_source(source_path: &Path) -> Option<PathBuf> {
+/// Resolves the Lambda Skill compiler available for a formal skill source.
+pub(crate) fn resolve_lskillc_for_source(source_path: &Path) -> Option<PathBuf> {
     if let Some(path) = env::var_os(LAMBDA_SKILL_COMPILER_ENV)
         .map(PathBuf::from)
         .filter(|path| path.is_file())

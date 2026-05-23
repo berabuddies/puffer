@@ -10,6 +10,7 @@ mod doctor;
 mod ecosystem;
 mod genskill;
 mod goal;
+mod lambda_doctor;
 mod model;
 mod monitor;
 mod plugins;
@@ -52,6 +53,7 @@ pub(crate) use ecosystem::{
 };
 pub(crate) use genskill::handle_genskill_command;
 pub(crate) use goal::handle_goal_command;
+pub(crate) use lambda_doctor::{lambda_skill_doctor_warnings, render_lambda_skill_doctor_status};
 pub(crate) use model::{
     apply_model_preferences, handle_effort_command, handle_fast_command, handle_model_command,
 };

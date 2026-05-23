@@ -124,6 +124,19 @@ pub fn render_doctor_report(
     command_helpers::render_doctor_report(state, resources, providers, auth_store)
 }
 
+/// Renders Lambda Skill harness status lines used by doctor surfaces.
+pub fn render_lambda_skill_doctor_status(resources: &LoadedResources) -> String {
+    command_helpers::render_lambda_skill_doctor_status(resources)
+}
+
+/// Returns Lambda Skill harness warning summaries used by doctor surfaces.
+pub fn lambda_skill_doctor_warning_lines(resources: &LoadedResources) -> Vec<String> {
+    command_helpers::lambda_skill_doctor_warnings(resources)
+        .into_iter()
+        .map(|warning| format!("{}; {}", warning.summary, warning.detail))
+        .collect()
+}
+
 /// Renders the current `/context` summary used by interactive overlays.
 pub fn render_context_panel(
     state: &AppState,
