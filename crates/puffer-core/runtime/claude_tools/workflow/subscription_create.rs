@@ -8,7 +8,7 @@
 use crate::AppState;
 use anyhow::{Context, Result};
 use puffer_subscriber_runtime::Manifest;
-use puffer_subscriptions::{ActionSpec, PrefilterSpec, SubscriptionSpec, SubscriptionStatus};
+use puffer_subscriptions::{ActionSpec, FilterSpec, SubscriptionSpec, SubscriptionStatus};
 use serde::Deserialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -18,12 +18,17 @@ use super::subscription_globals;
 
 #[derive(Debug, Deserialize)]
 struct CreateInput {
-    id: String,
+    #[serde(alias = "id")]
+    slug: String,
     #[serde(default)]
     description: String,
-    source_topic: String,
+    #[serde(alias = "source_topic")]
+    connection_slug: String,
     #[serde(default)]
-    prefilter: Option<PrefilterSpec>,
+    connector_slug: Option<String>,
+    #[serde(default)]
+    #[serde(alias = "prefilter")]
+    filter: Option<FilterSpec>,
     #[serde(default)]
     classify_prompt: Option<String>,
     #[serde(default)]
@@ -36,18 +41,19 @@ struct CreateInput {
 /// at the conventional location.
 pub fn execute_subscription_create(
     _state: &mut AppState,
-    _cwd: &Path,
+    cwd: &Path,
     input: Value,
 ) -> Result<String> {
     let parsed: CreateInput =
         serde_json::from_value(input).context("invalid SubscriptionCreate input")?;
     let now_ms = OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000;
     let spec = SubscriptionSpec {
-        id: parsed.id.clone(),
+        slug: parsed.slug.clone(),
         description: parsed.description,
-        source_topic: parsed.source_topic.clone(),
+        connection_slug: parsed.connection_slug.clone(),
+        connector_slug: parsed.connector_slug,
         status: SubscriptionStatus::Enabled,
-        prefilter: parsed.prefilter,
+        filter: parsed.filter,
         classify_prompt: parsed.classify_prompt,
         classify_model: parsed.classify_model,
         action: parsed.action,
@@ -58,16 +64,23 @@ pub fn execute_subscription_create(
         .store()
         .create(spec.clone())
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    let _ = ensure_subscriber_started(&manager, &parsed.source_topic);
+    manager.refresh_connection_consumers()?;
+    let _ = ensure_subscriber_started(&manager, cwd, &parsed.connection_slug);
     Ok(serde_json::to_string_pretty(&spec)?)
 }
 
 fn ensure_subscriber_started(
     manager: &puffer_subscriptions::SubscriptionManager,
+    cwd: &Path,
     source_topic: &str,
 ) -> Result<()> {
     if manager.subscriber_ids().iter().any(|id| id == source_topic) {
         return Ok(());
+    }
+    if let Some(connection) = manager.connection_store().get(source_topic) {
+        if connection.connector_slug == "telegram-login" {
+            return super::telegram_login::ensure_telegram_connection_subscriber(cwd, source_topic);
+        }
     }
     let manifest_dir = subscriber_manifest_dir(source_topic);
     if !manifest_dir.join("manifest.toml").exists() {

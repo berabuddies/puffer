@@ -273,6 +273,14 @@ fn email_permission_summary(input: &Value) -> String {
 
 fn telegram_permission_summary(input: &Value) -> String {
     match input.get("action").and_then(Value::as_str) {
+        Some("import_desktop") => input
+            .get("path")
+            .and_then(Value::as_str)
+            .map(|path| format!("Import Telegram Desktop auth from {path}"))
+            .unwrap_or_else(|| "Import Telegram Desktop auth".to_string()),
+        Some("list_peers") => "List Telegram peers".to_string(),
+        Some("login_qr") => "Start Telegram QR login".to_string(),
+        Some("login_qr_wait") => "Wait for Telegram QR login approval".to_string(),
         Some("login_start") => input
             .get("phone")
             .and_then(Value::as_str)
@@ -280,6 +288,16 @@ fn telegram_permission_summary(input: &Value) -> String {
             .unwrap_or_else(|| "Start Telegram login".to_string()),
         Some("login_submit_code") => "Submit Telegram login code".to_string(),
         Some("login_submit_password") => "Submit Telegram 2FA password".to_string(),
+        Some("search_messages") => input
+            .get("query")
+            .and_then(Value::as_str)
+            .map(|query| format!("Search Telegram messages for {query}"))
+            .unwrap_or_else(|| "Search Telegram messages".to_string()),
+        Some("search_peers") => input
+            .get("query")
+            .and_then(Value::as_str)
+            .map(|query| format!("Search Telegram peers for {query}"))
+            .unwrap_or_else(|| "Search Telegram peers".to_string()),
         _ => "Use Telegram internal tool".to_string(),
     }
 }

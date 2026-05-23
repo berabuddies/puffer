@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod ask_user_question;
 pub mod config;
+pub mod connector_tools;
 pub mod cron_create;
 pub mod cron_delete;
 pub mod cron_list;
@@ -35,7 +36,7 @@ pub mod team_create;
 pub mod team_delete;
 pub mod telegram_login;
 pub mod todo_write;
-pub mod workflow_register;
+pub mod workflow_tools;
 
 pub(crate) mod store;
 mod support;

@@ -40,5 +40,6 @@ pub fn execute_subscription_pause(
         .store()
         .set_status(&parsed.id, status)
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    manager.refresh_connection_consumers()?;
     Ok(serde_json::to_string_pretty(&updated)?)
 }

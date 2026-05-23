@@ -48,6 +48,20 @@ pub enum TriggerSpec {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         classify_prompt: Option<String>,
     },
+    /// Connection trigger for the connector/workflow redesign.
+    Connection {
+        /// Authorized connection slug, such as `my-telegram`.
+        connection_slug: String,
+        /// Optional structured filter evaluated by Puffer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<Value>,
+        /// Optional shorthand regex against event text.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pattern: Option<String>,
+        /// Optional classifier prompt.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        classify_prompt: Option<String>,
+    },
 }
 
 /// Registration options supplied by CLI flags when importing raw pipelines.
@@ -228,6 +242,24 @@ pub fn validate_workflow(definition: &WorkflowDefinition) -> Result<()> {
             }
             if let Some(pattern) = pattern {
                 regex_like_check(pattern)?;
+            }
+        }
+        TriggerSpec::Connection {
+            connection_slug,
+            filter,
+            pattern,
+            ..
+        } => {
+            if connection_slug.trim().is_empty() {
+                return Err(anyhow!(
+                    "connection trigger connection_slug must not be empty"
+                ));
+            }
+            if let Some(pattern) = pattern {
+                regex_like_check(pattern)?;
+            }
+            if matches!(filter, Some(Value::Null)) {
+                return Err(anyhow!("connection trigger filter must not be null"));
             }
         }
     }
@@ -442,6 +474,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(definition.slug, "raw-flow");
+    }
+
+    #[test]
+    fn parses_connection_trigger() {
+        let definition = WorkflowDefinition::from_json(
+            json!({
+                "slug": "connection-flow",
+                "trigger": {
+                    "type": "connection",
+                    "connection_slug": "my-telegram",
+                    "filter": {"person": {"name": "TonyKe"}}
+                },
+                "pipeline": {"name":"Connection Flow","nodes":[{"id":"a","prompt":"go"}]}
+            }),
+            RegisterOptions::default(),
+        )
+        .unwrap();
+        assert!(matches!(definition.trigger, TriggerSpec::Connection { .. }));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use puffer_config::{ConfigPaths, PufferConfig};
-use puffer_core::{execute_user_turn, AppState};
+use puffer_core::{execute_tool_action_once, execute_user_turn, AppState};
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use puffer_resources::LoadedResources;
 use puffer_session_store::SessionStore;
@@ -100,6 +100,65 @@ impl WorkflowActionRunner for ProcessWorkflowRunner {
             "workflow `{slug}` run #{} {:?}",
             run.idx, run.status
         ))
+    }
+
+    fn run_tool_action(
+        &self,
+        tool_id: &str,
+        input: serde_json::Value,
+        _trigger: serde_json::Value,
+    ) -> Result<String> {
+        let _guard = self.lock.lock().unwrap();
+        let cwd = self.paths.workspace_root.clone();
+        let mut state = self.new_app_state(cwd.clone(), None)?;
+        let result = execute_tool_action_once(&mut state, &self.resources, &cwd, tool_id, input)?;
+        if result.success {
+            return Ok(result.output.stdout);
+        }
+        anyhow::bail!(
+            "tool `{}` failed: stdout={} stderr={}",
+            tool_id,
+            result.output.stdout,
+            result.output.stderr
+        )
+    }
+
+    fn triage_agent(
+        &self,
+        prompt: &str,
+        model: Option<&str>,
+        trigger: serde_json::Value,
+    ) -> Result<String> {
+        let _guard = self.lock.lock().unwrap();
+        let trigger = serde_json::to_string_pretty(&trigger)?;
+        let prompt = format!("{prompt}\n\nWorkflow trigger:\n```json\n{trigger}\n```");
+        self.run_agent_prompt(prompt, model)
+    }
+}
+
+impl ProcessWorkflowRunner {
+    fn new_app_state(&self, cwd: PathBuf, model: Option<&str>) -> Result<AppState> {
+        let session_store = SessionStore::from_paths(&self.paths)?;
+        let session = session_store.create_session(cwd.clone())?;
+        let mut state = AppState::new(self.config.clone(), cwd, session);
+        if let Some(model) = model {
+            state.current_model = Some(model.to_string());
+        }
+        Ok(state)
+    }
+
+    fn run_agent_prompt(&self, prompt: String, model: Option<&str>) -> Result<String> {
+        let cwd = self.paths.workspace_root.clone();
+        let mut state = self.new_app_state(cwd, model)?;
+        let mut auth_store = self.auth_store.clone();
+        let output = execute_user_turn(
+            &mut state,
+            &self.resources,
+            &self.providers,
+            &mut auth_store,
+            &prompt,
+        )?;
+        Ok(output.assistant_text)
     }
 }
 

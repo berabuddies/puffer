@@ -50,6 +50,80 @@ pub enum SubscriberCommand {
         /// The user's 2FA password.
         password: String,
     },
+    /// Start a Telegram QR login flow. The subscriber exports a short-lived
+    /// login token and emits `login_qr` with a `tg://login?...` URL that can
+    /// be opened or scanned from an already logged-in Telegram app.
+    TelegramQrLoginStart {
+        /// Optional Telegram `api_id` from my.telegram.org.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        api_id: Option<i32>,
+        /// Optional Telegram `api_hash` from my.telegram.org.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        api_hash: Option<String>,
+    },
+    /// Wait for approval of the active Telegram QR login token. On approval
+    /// the subscriber persists the authorized session and emits
+    /// `login_complete`; on expiration it may emit a refreshed `login_qr`.
+    TelegramQrLoginWait {
+        /// Optional wait timeout in seconds. Defaults to the subscriber's
+        /// standard QR wait window.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_seconds: Option<u64>,
+    },
+    /// Import an already-authenticated Telegram Desktop `tdata` account into
+    /// the subscriber's grammers session file. The subscriber should verify
+    /// the imported session by reconnecting and emitting `login_complete`.
+    TelegramImportTdata {
+        /// Optional path to a Telegram Desktop `tdata` directory. When absent,
+        /// the subscriber uses the platform default Telegram Desktop location.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        /// Optional Telegram Desktop local passcode. This is the local app
+        /// passcode, not the Telegram cloud 2FA password.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        passcode: Option<String>,
+        /// Optional zero-based Telegram Desktop account slot. Defaults to the
+        /// main account.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_index: Option<usize>,
+        /// Optional tdata key file name. Defaults to Telegram Desktop's
+        /// standard `data` key file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_file: Option<String>,
+    },
+    /// List or search Telegram dialogs so callers can obtain stable numeric
+    /// peer ids before sending messages or creating workflow filters.
+    TelegramListPeers {
+        /// Optional case-insensitive query matched against title, username,
+        /// alternate usernames, or numeric id.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        query: Option<String>,
+        /// Optional Telegram peer type filter.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        peer_kind: Option<TelegramPeerKind>,
+        /// Optional maximum result count. Subscribers should apply a
+        /// conservative default when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
+    /// Search message text within one Telegram peer and return nearby context
+    /// messages so callers can inspect the match safely before acting.
+    TelegramSearchMessages {
+        /// Peer reference: a `@username` or numeric chat id string returned by
+        /// `TelegramListPeers`.
+        peer: String,
+        /// Text query passed to Telegram message search.
+        query: String,
+        /// Optional maximum result count.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+        /// Optional number of surrounding messages before and after each hit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<usize>,
+        /// Return compact message and context payloads for LLM consumption.
+        #[serde(default, alias = "succint")]
+        succinct: bool,
+    },
     /// Configure the email subscriber. Sent by the agent after the user
     /// describes their IMAP/SMTP credentials. The subscriber persists the
     /// settings to its state directory and (re)starts polling on success;
@@ -77,7 +151,7 @@ pub enum SubscriberCommand {
         #[serde(default)]
         allowed_senders: Vec<String>,
     },
-    /// Send a text message to a peer through this subscriber's account.
+    /// Send a message to a peer through this subscriber's account.
     /// Subscribers that also act as message senders (e.g. the user-account
     /// Telegram driver) handle this; subscribers that don't should ignore
     /// the command and emit a `send_unsupported` event.
@@ -89,6 +163,14 @@ pub enum SubscriberCommand {
         /// Message body. Subscribers may truncate or split for transport
         /// limits.
         text: String,
+        /// Optional platform message id to reply to.
+        #[serde(default)]
+        reply_to: Option<i32>,
+        /// Optional file, photo, or document attachments. When present,
+        /// `text` is used as the primary caption unless an attachment supplies
+        /// its own caption.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        media: Vec<SendMediaAttachment>,
     },
     /// Opaque pass-through. Useful for subscriber-specific controls that
     /// don't warrant a first-class variant yet.
@@ -99,6 +181,54 @@ pub enum SubscriberCommand {
         #[serde(default)]
         args: Value,
     },
+}
+
+/// Telegram dialog kind used when listing or searching peers.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TelegramPeerKind {
+    /// A one-to-one user chat.
+    User,
+    /// A Telegram group or megagroup.
+    Group,
+    /// A broadcast channel.
+    Channel,
+}
+
+/// Transport hint for an outbound media attachment.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SendMediaKind {
+    /// Let the subscriber infer whether to send as a compressed photo or a
+    /// regular document from the path, URL, or MIME type.
+    #[default]
+    Auto,
+    /// Send the attachment as a Telegram photo.
+    Photo,
+    /// Send the attachment as a Telegram document.
+    Document,
+    /// Send the attachment as a forced file document.
+    File,
+}
+
+/// File, URL, or document attachment for [`SubscriberCommand::SendMessage`].
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+pub struct SendMediaAttachment {
+    /// Local filesystem path or HTTPS/HTTP URL to attach.
+    pub path: String,
+    /// Optional per-attachment caption. When absent, the message text becomes
+    /// the caption for the first attachment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption: Option<String>,
+    /// Optional transport hint. Defaults to automatic photo/document inference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<SendMediaKind>,
+    /// Optional MIME type override for document/file uploads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    /// Optional thumbnail path for document/file uploads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail: Option<String>,
 }
 
 /// Writer handle for sending [`SubscriberCommand`] to a specific

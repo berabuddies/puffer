@@ -1,17 +1,18 @@
-//! Subscription router — the loop that consumes events from the bus and
-//! invokes matching subscriptions.
+//! Workflow binding router — the loop that consumes connector events and
+//! invokes matching workflow bindings.
 
 use crate::action::{ActionDispatcher, BuiltinActionDispatcher};
 use crate::classify::{Classifier, ClassifyDecision, NullClassifier};
-use crate::spec::{PrefilterSpec, SubscriptionStatus};
-use crate::store::SubscriptionStore;
+use crate::history::{now_ms, WorkflowHistoryStore};
+use crate::spec::{filter_matches, FilterSpec, WorkflowBindingStatus};
+use crate::store::WorkflowBindingStore;
 use puffer_subscriber_runtime::{EventBus, EventEnvelope};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-/// Aggregate counters surfaced by `/subscriptions status`.
+/// Aggregate counters surfaced by workflow and connection status views.
 #[derive(Debug, Default)]
 pub struct RouterStats {
     /// Total events the router observed (regardless of match).
@@ -54,7 +55,8 @@ impl SubscriptionRouter {
     /// changes (create/pause/delete) take effect on the next event.
     pub fn spawn(
         bus: EventBus,
-        store: Arc<SubscriptionStore>,
+        store: Arc<WorkflowBindingStore>,
+        history_store: Option<Arc<WorkflowHistoryStore>>,
         dispatcher: Arc<dyn ActionDispatcher>,
         classifier: Arc<dyn Classifier>,
     ) -> Self {
@@ -65,6 +67,7 @@ impl SubscriptionRouter {
             run(
                 bus,
                 store,
+                history_store,
                 dispatcher,
                 classifier,
                 shutdown_rx,
@@ -81,10 +84,11 @@ impl SubscriptionRouter {
 
     /// Convenience constructor that uses [`BuiltinActionDispatcher`] and
     /// [`NullClassifier`].
-    pub fn spawn_default(bus: EventBus, store: Arc<SubscriptionStore>) -> Self {
+    pub fn spawn_default(bus: EventBus, store: Arc<WorkflowBindingStore>) -> Self {
         Self::spawn(
             bus,
             store,
+            None,
             Arc::new(BuiltinActionDispatcher::new()),
             Arc::new(NullClassifier),
         )
@@ -106,7 +110,8 @@ impl SubscriptionRouter {
 
 async fn run(
     bus: EventBus,
-    store: Arc<SubscriptionStore>,
+    store: Arc<WorkflowBindingStore>,
+    history_store: Option<Arc<WorkflowHistoryStore>>,
     dispatcher: Arc<dyn ActionDispatcher>,
     classifier: Arc<dyn Classifier>,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -118,9 +123,19 @@ async fn run(
             _ = shutdown_rx.changed() => break,
             maybe = rx.recv() => {
                 let Some(envelope) = maybe else { break; };
+                if envelope.event.control {
+                    continue;
+                }
                 stats.events_seen.fetch_add(1, Ordering::Relaxed);
-                let any_match = process(&envelope, &store, &dispatcher, &classifier, &stats);
-                if any_match {
+                let result = process_envelope_result(
+                    &envelope,
+                    &store,
+                    history_store.as_deref(),
+                    &dispatcher,
+                    &classifier,
+                    Some(&stats),
+                );
+                if result.matched {
                     stats.events_matched.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -128,25 +143,68 @@ async fn run(
     }
 }
 
-fn process(
+/// Summary of processing one event envelope against workflow bindings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EnvelopeProcessResult {
+    /// Whether at least one enabled binding matched the envelope.
+    pub matched: bool,
+    /// Number of matched actions that completed successfully.
+    pub acted: u64,
+    /// Number of matched actions that failed.
+    pub failed: u64,
+}
+
+/// Processes one event envelope against the current workflow bindings.
+pub fn process_envelope(
     envelope: &EventEnvelope,
-    store: &SubscriptionStore,
+    store: &WorkflowBindingStore,
+    history_store: Option<&WorkflowHistoryStore>,
     dispatcher: &Arc<dyn ActionDispatcher>,
     classifier: &Arc<dyn Classifier>,
-    stats: &RouterStats,
+    stats: Option<&RouterStats>,
 ) -> bool {
-    let mut any_match = false;
+    process_envelope_result(
+        envelope,
+        store,
+        history_store,
+        dispatcher,
+        classifier,
+        stats,
+    )
+    .matched
+}
+
+/// Processes one event envelope and returns match/action/failure counts.
+pub fn process_envelope_result(
+    envelope: &EventEnvelope,
+    store: &WorkflowBindingStore,
+    history_store: Option<&WorkflowHistoryStore>,
+    dispatcher: &Arc<dyn ActionDispatcher>,
+    classifier: &Arc<dyn Classifier>,
+    stats: Option<&RouterStats>,
+) -> EnvelopeProcessResult {
+    let mut result = EnvelopeProcessResult::default();
+    if envelope.event.control {
+        return result;
+    }
     for spec in store.list() {
-        if spec.status == SubscriptionStatus::Paused {
+        if spec.status == WorkflowBindingStatus::Paused {
             continue;
         }
-        if spec.source_topic != envelope.event.topic {
+        let topic_matches = spec.connection_slug == envelope.event.topic
+            || spec
+                .connector_slug
+                .as_deref()
+                .is_some_and(|connector_slug| connector_slug == envelope.event.topic);
+        if !topic_matches {
             continue;
         }
-        if let Some(filter) = &spec.prefilter {
-            if !regex_passes(filter, &envelope.event.text) {
-                continue;
-            }
+        if !filter_matches(
+            spec.filter.as_ref(),
+            &envelope.event.text,
+            &envelope.event.payload,
+        ) {
+            continue;
         }
         if spec.classify_prompt.is_some() {
             match classifier.classify(&spec, &envelope.event) {
@@ -154,68 +212,76 @@ fn process(
                 ClassifyDecision::Reject | ClassifyDecision::Inconclusive => continue,
             }
         }
-        any_match = true;
-        let result = dispatcher.dispatch(&spec.action, envelope);
-        if result.success {
-            stats.events_acted.fetch_add(1, Ordering::Relaxed);
-            tracing::info!(
-                subscription = %spec.id,
-                envelope = %envelope.envelope_id,
-                "{}",
-                result.summary
-            );
-        } else {
-            stats.events_failed.fetch_add(1, Ordering::Relaxed);
-            tracing::warn!(
-                subscription = %spec.id,
-                envelope = %envelope.envelope_id,
-                "{}",
-                result.summary
-            );
-        }
-    }
-    any_match
-}
-
-fn regex_passes(filter: &PrefilterSpec, text: &str) -> bool {
-    match filter {
-        PrefilterSpec::Regex {
-            pattern,
-            case_insensitive,
-        } => {
-            let mut builder = regex::RegexBuilder::new(pattern);
-            builder.case_insensitive(*case_insensitive);
-            match builder.build() {
-                Ok(re) => re.is_match(text),
-                Err(error) => {
-                    tracing::warn!(%error, "regex prefilter failed to compile; rejecting event");
-                    false
-                }
+        result.matched = true;
+        let started_at_ms = now_ms();
+        let action_result = dispatcher.dispatch(&spec.action, envelope);
+        let ended_at_ms = now_ms();
+        if let Some(history_store) = history_store {
+            if let Err(error) = history_store.append_action_result(
+                &spec,
+                envelope,
+                &spec.action,
+                &action_result,
+                started_at_ms,
+                ended_at_ms,
+            ) {
+                tracing::warn!(
+                    workflow_binding = %spec.slug,
+                    envelope = %envelope.envelope_id,
+                    %error,
+                    "failed to persist workflow binding run history"
+                );
             }
         }
+        if action_result.success {
+            result.acted += 1;
+            if let Some(stats) = stats {
+                stats.events_acted.fetch_add(1, Ordering::Relaxed);
+            }
+            tracing::info!(
+                workflow_binding = %spec.slug,
+                envelope = %envelope.envelope_id,
+                "{}",
+                action_result.summary
+            );
+        } else {
+            result.failed += 1;
+            if let Some(stats) = stats {
+                stats.events_failed.fetch_add(1, Ordering::Relaxed);
+            }
+            tracing::warn!(
+                workflow_binding = %spec.slug,
+                envelope = %envelope.envelope_id,
+                "{}",
+                action_result.summary
+            );
+        }
     }
+    result
 }
 
 /// Free-standing helper used by tests and by future explicit "test this
-/// subscription" tooling. Returns whether the spec's prefilter passes
-/// against `text`.
-pub fn prefilter_passes(filter: Option<&PrefilterSpec>, text: &str) -> bool {
-    match filter {
-        Some(filter) => regex_passes(filter, text),
-        None => true,
-    }
+/// workflow binding" tooling. Returns whether the filter passes.
+pub fn prefilter_passes(filter: Option<&FilterSpec>, text: &str) -> bool {
+    filter_matches(filter, text, &serde_json::Value::Null)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::action::BuiltinActionDispatcher;
+    use crate::classify::NullClassifier;
+    use crate::spec::{ActionSpec, TaggedFilterSpec, WorkflowBindingSpec};
+    use puffer_subscriber_runtime::{Event, EventEnvelope};
+    use std::sync::Arc;
+    use tempfile::tempdir;
 
     #[test]
     fn case_insensitive_regex_matches() {
-        let filter = PrefilterSpec::Regex {
+        let filter = FilterSpec::Tagged(TaggedFilterSpec::Regex {
             pattern: r"\bIoC\b".into(),
             case_insensitive: true,
-        };
+        });
         assert!(prefilter_passes(Some(&filter), "We saw an IOC today"));
         assert!(!prefilter_passes(
             Some(&filter),
@@ -226,5 +292,95 @@ mod tests {
     #[test]
     fn missing_filter_passes() {
         assert!(prefilter_passes(None, "anything"));
+    }
+
+    #[test]
+    fn control_events_do_not_match_workflows() {
+        let dir = tempdir().unwrap();
+        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        store
+            .create(WorkflowBindingSpec {
+                slug: "all-telegram".into(),
+                description: "all telegram".into(),
+                connection_slug: "telegram-user".into(),
+                connector_slug: None,
+                status: WorkflowBindingStatus::Enabled,
+                filter: None,
+                classify_prompt: None,
+                classify_model: None,
+                action: ActionSpec::RunWorkflow {
+                    slug: "downstream".into(),
+                },
+                created_at_ms: 0,
+            })
+            .unwrap();
+        let envelope = EventEnvelope {
+            envelope_id: "env-control".into(),
+            subscriber_id: "telegram-user".into(),
+            received_at_ms: 0,
+            event: Event {
+                topic: "telegram-user".into(),
+                kind: "send_complete".into(),
+                control: true,
+                dedup_key: None,
+                text: String::new(),
+                payload: serde_json::json!({"peer":"@alice"}),
+            },
+        };
+        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(BuiltinActionDispatcher::new());
+        let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
+
+        let result =
+            process_envelope_result(&envelope, &store, None, &dispatcher, &classifier, None);
+
+        assert!(!result.matched);
+        assert_eq!(result.acted, 0);
+        assert_eq!(result.failed, 0);
+    }
+
+    #[test]
+    fn process_result_reports_action_failures() {
+        let dir = tempdir().unwrap();
+        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        store
+            .create(WorkflowBindingSpec {
+                slug: "notify".into(),
+                description: "notify".into(),
+                connection_slug: "telegram-user".into(),
+                connector_slug: None,
+                status: WorkflowBindingStatus::Enabled,
+                filter: None,
+                classify_prompt: None,
+                classify_model: None,
+                action: ActionSpec::ForwardMessage {
+                    platform: "telegram".into(),
+                    target: "@alice".into(),
+                    template: None,
+                },
+                created_at_ms: 0,
+            })
+            .unwrap();
+        let envelope = EventEnvelope {
+            envelope_id: "env-1".into(),
+            subscriber_id: "telegram-user".into(),
+            received_at_ms: 0,
+            event: Event {
+                topic: "telegram-user".into(),
+                kind: "message".into(),
+                control: false,
+                dedup_key: None,
+                text: "hello".into(),
+                payload: serde_json::json!({"message":"hello"}),
+            },
+        };
+        let dispatcher: Arc<dyn ActionDispatcher> = Arc::new(BuiltinActionDispatcher::new());
+        let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
+
+        let result =
+            process_envelope_result(&envelope, &store, None, &dispatcher, &classifier, None);
+
+        assert!(result.matched);
+        assert_eq!(result.acted, 0);
+        assert_eq!(result.failed, 1);
     }
 }

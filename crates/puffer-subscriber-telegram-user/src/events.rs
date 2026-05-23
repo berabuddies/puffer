@@ -8,9 +8,12 @@
 use std::io::Write as _;
 
 use anyhow::Context as _;
-use grammers_client::types::{Chat, Message};
+use grammers_client::types::{Chat, Media, Message};
 use puffer_subscriber_runtime::Event;
 use serde_json::{json, Value};
+
+use crate::polls::{poll_payload, poll_text};
+use crate::reply::reply_header_payload;
 
 /// Writes one [`Event`] to stdout as a single JSON line and flushes.
 ///
@@ -33,6 +36,7 @@ pub fn emit_control(topic: &str, kind: &str, payload: Value) -> anyhow::Result<(
     let event = Event {
         topic: topic.to_string(),
         kind: kind.to_string(),
+        control: true,
         dedup_key: None,
         text: String::new(),
         payload,
@@ -89,10 +93,21 @@ pub fn build_message_event(topic: &str, message: &Message) -> Event {
     payload.insert("message_id".to_string(), json!(message_id));
     payload.insert("date_ms".to_string(), json!(date_ms));
     payload.insert("is_outgoing".to_string(), json!(is_outgoing));
+    if let Some(reply_to) = reply_header_payload(message.reply_header()) {
+        payload.insert("reply_to".to_string(), reply_to);
+    }
+    if let Some(reply_count) = message.reply_count() {
+        payload.insert("reply_count".to_string(), json!(reply_count));
+    }
+    if let Some(Media::Poll(poll)) = message.media() {
+        payload.insert("media".to_string(), json!(poll_text(&poll)));
+        payload.insert("poll".to_string(), poll_payload(&poll));
+    }
 
     Event {
         topic: topic.to_string(),
         kind: kind.to_string(),
+        control: false,
         dedup_key: Some(format!("{chat_id}:{message_id}")),
         text: message.text().to_string(),
         payload: Value::Object(payload),

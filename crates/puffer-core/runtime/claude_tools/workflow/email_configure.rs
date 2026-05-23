@@ -72,7 +72,7 @@ pub fn execute_email_configure(_state: &mut AppState, _cwd: &Path, input: Value)
     )?;
     Ok(json!({
         "status": "configured",
-        "next": "Email subscriber is now polling. Use SubscriptionCreate with source_topic=\"email\" to install a watcher."
+        "next": "Email connector is configured. Use ConnectionCreate with connector_slug=\"email\", then WorkflowCreate with that connection_slug."
     })
     .to_string())
 }

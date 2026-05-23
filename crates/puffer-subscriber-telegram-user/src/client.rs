@@ -10,9 +10,14 @@ use puffer_subscriber_runtime::SubscriberCommand;
 use serde_json::json;
 use tracing::{error, info, warn};
 
+use crate::actions::handle_telegram_act;
 use crate::commands::CommandStream;
 use crate::events::{build_message_event, emit, emit_control};
+use crate::import::{import_tdata, TdataImportOptions, TdataImportOutcome};
 use crate::login;
+use crate::outbound::handle_send_message;
+use crate::peers::{handle_list_peers, handle_search_messages};
+use crate::qr_login;
 use crate::state::{
     default_init_params, resolve_api_credentials, LoginState, PersistedCredentials, SkillEnv,
 };
@@ -48,6 +53,7 @@ pub async fn run() -> anyhow::Result<()> {
 
     let mut commands = CommandStream::new();
     let mut login_state = LoginState::new();
+    let mut qr_state = None;
 
     // Attempt to reuse a pre-authenticated session first. If the session file
     // holds a valid auth key we can go straight to the update loop without
@@ -82,6 +88,40 @@ pub async fn run() -> anyhow::Result<()> {
                 Some(c) => client = Some(c),
                 None => continue,
             },
+            SubscriberCommand::TelegramQrLoginStart { api_id, api_hash } => {
+                if let Some(qr_client) =
+                    qr_login::start(&env, &mut qr_state, api_id, api_hash).await?
+                {
+                    client = Some(qr_client);
+                }
+            }
+            SubscriberCommand::TelegramQrLoginWait { timeout_seconds } => {
+                if let Some(qr_client) =
+                    qr_login::wait(&env, &mut qr_state, timeout_seconds).await?
+                {
+                    client = Some(qr_client);
+                }
+            }
+            SubscriberCommand::TelegramImportTdata {
+                path,
+                passcode,
+                account_index,
+                key_file,
+            } => {
+                if let Some(imported) = import_and_connect(
+                    &env,
+                    TdataImportOptions {
+                        path,
+                        passcode,
+                        account_index,
+                        key_file,
+                    },
+                )
+                .await?
+                {
+                    client = Some(imported);
+                }
+            }
             SubscriberCommand::TelegramLoginSubmitCode { .. }
             | SubscriberCommand::TelegramLoginSubmitPassword { .. } => {
                 emit_control(
@@ -89,6 +129,27 @@ pub async fn run() -> anyhow::Result<()> {
                     "login_error",
                     json!({
                         "error": "login not started; send telegram_login_start first"
+                    }),
+                )?;
+            }
+            SubscriberCommand::TelegramListPeers { query, .. } => {
+                emit_control(
+                    &env.topic,
+                    "peer_list_error",
+                    json!({
+                        "error": "not authenticated yet; complete login before listing Telegram peers",
+                        "query": query,
+                    }),
+                )?;
+            }
+            SubscriberCommand::TelegramSearchMessages { peer, query, .. } => {
+                emit_control(
+                    &env.topic,
+                    "message_search_error",
+                    json!({
+                        "error": "not authenticated yet; complete login before searching Telegram messages",
+                        "peer": peer,
+                        "query": query,
                     }),
                 )?;
             }
@@ -109,15 +170,7 @@ pub async fn run() -> anyhow::Result<()> {
                     json!({"error": "telegram-user does not handle email configuration"}),
                 )?;
             }
-            SubscriberCommand::Custom { op, .. } => {
-                emit_control(
-                    &env.topic,
-                    "login_error",
-                    json!({
-                        "error": format!("command not understood: {op}")
-                    }),
-                )?;
-            }
+            SubscriberCommand::Custom { op, args } => handle_login_custom(&env, op, args)?,
         }
     }
 
@@ -134,7 +187,14 @@ pub async fn run() -> anyhow::Result<()> {
 
     loop {
         if authorized {
-            run_update_loop(&env, &mut commands, &mut client, &mut login_state).await?;
+            run_update_loop(
+                &env,
+                &mut commands,
+                &mut client,
+                &mut login_state,
+                &mut qr_state,
+            )
+            .await?;
             return Ok(());
         }
 
@@ -166,6 +226,64 @@ pub async fn run() -> anyhow::Result<()> {
                 // the same connection.
                 login::start(&env, &mut login_state, phone, api_id, api_hash).await?;
             }
+            SubscriberCommand::TelegramQrLoginStart { api_id, api_hash } => {
+                if let Some(qr_client) =
+                    qr_login::start(&env, &mut qr_state, api_id, api_hash).await?
+                {
+                    client = qr_client;
+                    authorized = true;
+                }
+            }
+            SubscriberCommand::TelegramQrLoginWait { timeout_seconds } => {
+                if let Some(qr_client) =
+                    qr_login::wait(&env, &mut qr_state, timeout_seconds).await?
+                {
+                    client = qr_client;
+                    authorized = true;
+                }
+            }
+            SubscriberCommand::TelegramImportTdata {
+                path,
+                passcode,
+                account_index,
+                key_file,
+            } => {
+                if let Some(imported) = import_and_connect(
+                    &env,
+                    TdataImportOptions {
+                        path,
+                        passcode,
+                        account_index,
+                        key_file,
+                    },
+                )
+                .await?
+                {
+                    client = imported;
+                    authorized = true;
+                }
+            }
+            SubscriberCommand::TelegramListPeers { query, .. } => {
+                emit_control(
+                    &env.topic,
+                    "peer_list_error",
+                    json!({
+                        "error": "complete login before listing Telegram peers",
+                        "query": query,
+                    }),
+                )?;
+            }
+            SubscriberCommand::TelegramSearchMessages { peer, query, .. } => {
+                emit_control(
+                    &env.topic,
+                    "message_search_error",
+                    json!({
+                        "error": "complete login before searching Telegram messages",
+                        "peer": peer,
+                        "query": query,
+                    }),
+                )?;
+            }
             SubscriberCommand::SendMessage { peer, .. } => {
                 emit_control(
                     &env.topic,
@@ -183,15 +301,7 @@ pub async fn run() -> anyhow::Result<()> {
                     json!({"error": "telegram-user does not handle email configuration"}),
                 )?;
             }
-            SubscriberCommand::Custom { op, .. } => {
-                emit_control(
-                    &env.topic,
-                    "login_error",
-                    json!({
-                        "error": format!("command not understood: {op}")
-                    }),
-                )?;
-            }
+            SubscriberCommand::Custom { op, args } => handle_login_custom(&env, op, args)?,
         }
     }
 }
@@ -249,6 +359,7 @@ async fn run_update_loop(
     commands: &mut CommandStream,
     client: &mut Client,
     login_state: &mut LoginState,
+    qr_state: &mut Option<qr_login::QrLoginState>,
 ) -> anyhow::Result<()> {
     emit_control(&env.topic, "ready", json!({}))?;
     info!("entering telegram update loop");
@@ -281,7 +392,7 @@ async fn run_update_loop(
                     info!("stdin closed; shutting down update loop");
                     return Ok(());
                 };
-                handle_runtime_command(env, client, login_state, cmd).await?;
+                handle_runtime_command(env, client, login_state, qr_state, cmd).await?;
             }
         }
     }
@@ -352,6 +463,7 @@ async fn handle_runtime_command(
     env: &SkillEnv,
     client: &mut Client,
     login_state: &mut LoginState,
+    qr_state: &mut Option<qr_login::QrLoginState>,
     cmd: SubscriberCommand,
 ) -> anyhow::Result<()> {
     match cmd {
@@ -403,8 +515,71 @@ async fn handle_runtime_command(
         SubscriberCommand::TelegramLoginSubmitPassword { password } => {
             login::submit_password(env, login_state, client, password).await?;
         }
-        SubscriberCommand::SendMessage { peer, text } => {
-            handle_send_message(env, client, peer, text).await?;
+        SubscriberCommand::TelegramQrLoginStart { api_id, api_hash } => {
+            match emit_already_authorized(env, client).await {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    warn!(%error, "authorized status probe failed; starting qr login");
+                }
+            }
+            if let Some(qr_client) = qr_login::start(env, qr_state, api_id, api_hash).await? {
+                *client = qr_client;
+            }
+        }
+        SubscriberCommand::TelegramQrLoginWait { timeout_seconds } => {
+            match emit_already_authorized(env, client).await {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    warn!(%error, "authorized status probe failed; waiting for qr login");
+                }
+            }
+            if let Some(qr_client) = qr_login::wait(env, qr_state, timeout_seconds).await? {
+                *client = qr_client;
+            }
+        }
+        SubscriberCommand::TelegramImportTdata {
+            path,
+            passcode,
+            account_index,
+            key_file,
+        } => {
+            if let Some(imported) = import_and_connect(
+                env,
+                TdataImportOptions {
+                    path,
+                    passcode,
+                    account_index,
+                    key_file,
+                },
+            )
+            .await?
+            {
+                *client = imported;
+            }
+        }
+        SubscriberCommand::TelegramListPeers {
+            query,
+            peer_kind,
+            limit,
+        } => {
+            handle_list_peers(env, client, query, peer_kind, limit).await?;
+        }
+        SubscriberCommand::TelegramSearchMessages {
+            peer,
+            query,
+            limit,
+            context,
+            succinct,
+        } => {
+            handle_search_messages(env, client, peer, query, limit, context, succinct).await?;
+        }
+        SubscriberCommand::SendMessage {
+            peer,
+            text,
+            reply_to,
+            media,
+        } => {
+            handle_send_message(env, client, peer, text, reply_to, media).await?;
         }
         SubscriberCommand::EmailConfigure { .. } => {
             emit_control(
@@ -413,15 +588,160 @@ async fn handle_runtime_command(
                 json!({"error": "telegram-user does not handle email configuration"}),
             )?;
         }
-        SubscriberCommand::Custom { op, .. } => {
-            emit_control(
-                &env.topic,
-                "login_error",
-                json!({ "error": format!("command not understood: {op}") }),
-            )?;
+        SubscriberCommand::Custom { op, args } => {
+            if op == "telegram_act" {
+                handle_telegram_act(env, client, args).await?;
+            } else {
+                emit_control(
+                    &env.topic,
+                    "login_error",
+                    json!({ "error": format!("command not understood: {op}") }),
+                )?;
+            }
         }
     }
     Ok(())
+}
+
+fn handle_login_custom(env: &SkillEnv, op: String, args: serde_json::Value) -> anyhow::Result<()> {
+    if op == "telegram_act" {
+        let action = args
+            .get("action")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let input = args.get("input").unwrap_or(&args);
+        emit_control(
+            &env.topic,
+            "telegram_act_error",
+            json!({
+                "action": action,
+                "peer": input
+                    .get("to")
+                    .or_else(|| input.get("target"))
+                    .or_else(|| input.get("channel"))
+                    .or_else(|| input.get("chat"))
+                    .or_else(|| input.get("peer"))
+                    .and_then(serde_json::Value::as_str),
+                "error": "complete login before running Telegram connector actions"
+            }),
+        )?;
+        return Ok(());
+    }
+    emit_control(
+        &env.topic,
+        "login_error",
+        json!({ "error": format!("command not understood: {op}") }),
+    )
+}
+
+async fn import_and_connect(
+    env: &SkillEnv,
+    options: TdataImportOptions,
+) -> anyhow::Result<Option<Client>> {
+    let mut outcome = match import_tdata(env, options) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            emit_control(
+                &env.topic,
+                "login_error",
+                json!({
+                    "error": format!("Telegram Desktop import failed: {error}"),
+                    "phase": "import_desktop"
+                }),
+            )?;
+            return Ok(None);
+        }
+    };
+    let Some(client) = verify_imported_session(env, &mut outcome).await? else {
+        emit_control(
+            &env.topic,
+            "login_error",
+            json!({
+                "error": "Telegram import wrote a session, but Telegram did not accept it",
+                "phase": "import_verify",
+                "import": import_payload(&outcome),
+            }),
+        )?;
+        return Ok(None);
+    };
+    emit_import_complete(env, &client, &mut outcome).await?;
+    Ok(Some(client))
+}
+
+async fn verify_imported_session(
+    env: &SkillEnv,
+    outcome: &mut TdataImportOutcome,
+) -> anyhow::Result<Option<Client>> {
+    if let Some(client) = try_resume_session(env).await? {
+        return Ok(Some(client));
+    }
+
+    let mut tried = vec![outcome.dc_id];
+    for dc_id in outcome.candidate_dc_ids.clone() {
+        if tried.contains(&dc_id) {
+            continue;
+        }
+        tried.push(dc_id);
+        rewrite_imported_session_dc(env, dc_id)?;
+        outcome.dc_id = dc_id;
+        if let Some(client) = try_resume_session(env).await? {
+            return Ok(Some(client));
+        }
+    }
+    Ok(None)
+}
+
+fn rewrite_imported_session_dc(env: &SkillEnv, dc_id: i32) -> anyhow::Result<()> {
+    let session = Session::load_file(&env.session_path)
+        .with_context(|| format!("load session file {}", env.session_path.display()))?;
+    let user = session.get_user();
+    session.set_user(
+        user.as_ref().map(|user| user.id).unwrap_or(0),
+        dc_id,
+        user.as_ref().map(|user| user.bot).unwrap_or(false),
+    );
+    session
+        .save_to_file(&env.session_path)
+        .with_context(|| format!("save session file {}", env.session_path.display()))
+}
+
+async fn emit_import_complete(
+    env: &SkillEnv,
+    client: &Client,
+    outcome: &mut TdataImportOutcome,
+) -> anyhow::Result<()> {
+    let user = client.get_me().await?;
+    outcome.user_id = Some(user.id());
+    client
+        .session()
+        .set_user(user.id(), outcome.dc_id, user.is_bot());
+    client
+        .session()
+        .save_to_file(&env.session_path)
+        .with_context(|| format!("save session file {}", env.session_path.display()))?;
+    emit_control(
+        &env.topic,
+        "login_complete",
+        json!({
+            "imported": true,
+            "user_id": user.id(),
+            "first_name": user.first_name(),
+            "import": import_payload(outcome),
+        }),
+    )?;
+    Ok(())
+}
+
+fn import_payload(outcome: &TdataImportOutcome) -> serde_json::Value {
+    json!({
+        "source_kind": outcome.source_kind.as_str(),
+        "source_path": outcome.source_path.display().to_string(),
+        "account_index": outcome.account_index,
+        "accounts_count": outcome.accounts_count,
+        "user_id": outcome.user_id,
+        "dc_id": outcome.dc_id,
+        "session_path": outcome.session_path.display().to_string(),
+    })
 }
 
 async fn emit_already_authorized(env: &SkillEnv, client: &Client) -> anyhow::Result<()> {
@@ -436,85 +756,4 @@ async fn emit_already_authorized(env: &SkillEnv, client: &Client) -> anyhow::Res
         }),
     )?;
     Ok(())
-}
-
-/// Resolves `peer` and sends `text` through the connected client.
-///
-/// Supported peer formats:
-/// * `@username` — resolved through `Client::resolve_username`.
-/// * Numeric chat id (e.g. `123456789` or `-100123456789`) — resolved by
-///   walking the cached dialog list, since `send_message` needs a fully
-///   packed chat (with access_hash) and grammers does not synthesize one
-///   from a bare id.
-///
-/// On success a `send_complete` control event is emitted with the
-/// resolved chat id and text byte count. On failure a `send_error` event
-/// carries the underlying message.
-async fn handle_send_message(
-    env: &SkillEnv,
-    client: &Client,
-    peer: String,
-    text: String,
-) -> anyhow::Result<()> {
-    let resolved = match resolve_peer(client, &peer).await {
-        Ok(chat) => chat,
-        Err(error) => {
-            emit_control(
-                &env.topic,
-                "send_error",
-                json!({ "peer": peer, "error": error.to_string() }),
-            )?;
-            return Ok(());
-        }
-    };
-    match client.send_message(resolved.clone(), text.as_str()).await {
-        Ok(_) => {
-            emit_control(
-                &env.topic,
-                "send_complete",
-                json!({
-                    "peer": peer,
-                    "chat_id": resolved.id(),
-                    "bytes": text.len(),
-                }),
-            )?;
-        }
-        Err(error) => {
-            emit_control(
-                &env.topic,
-                "send_error",
-                json!({ "peer": peer, "error": format!("{error}") }),
-            )?;
-        }
-    }
-    Ok(())
-}
-
-async fn resolve_peer(client: &Client, peer: &str) -> anyhow::Result<grammers_client::types::Chat> {
-    let trimmed = peer.trim();
-    if let Some(handle) = trimmed.strip_prefix('@') {
-        let chat = client
-            .resolve_username(handle)
-            .await
-            .with_context(|| format!("resolve_username `@{handle}` failed"))?;
-        return chat.ok_or_else(|| anyhow::anyhow!("no chat found for @{handle}"));
-    }
-    if let Ok(target_id) = trimmed.parse::<i64>() {
-        let mut iter = client.iter_dialogs();
-        while let Some(dialog) = iter
-            .next()
-            .await
-            .with_context(|| "iter_dialogs failed while resolving numeric peer")?
-        {
-            if dialog.chat().id() == target_id {
-                return Ok(dialog.chat().clone());
-            }
-        }
-        return Err(anyhow::anyhow!(
-            "numeric peer {target_id} not in cached dialogs; have the user open the chat in Telegram once and try again"
-        ));
-    }
-    Err(anyhow::anyhow!(
-        "peer `{peer}` is not a recognized format; use @username or a numeric chat id"
-    ))
 }

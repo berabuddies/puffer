@@ -253,7 +253,7 @@ pub(crate) enum InternalToolCommand {
     Browser(#[command(flatten)] BrowserArgs),
     /// Configure the email subscriber through the parent runtime.
     Email(#[command(flatten)] EmailArgs),
-    /// Log in the Telegram personal-account subscriber through the parent runtime.
+    /// Log in to Telegram or look up Telegram peers through the parent runtime.
     Telegram(#[command(flatten)] TelegramArgs),
 }
 
@@ -315,12 +315,16 @@ pub(crate) enum WorkflowCommand {
         /// Cron trigger for raw AgentFlow pipeline imports.
         #[arg(long = "cron", conflicts_with = "subscription_topic")]
         cron: Option<String>,
-        /// Subscription source topic for raw AgentFlow pipeline imports.
-        #[arg(long = "subscription-topic", conflicts_with = "cron")]
-        subscription_topic: Option<String>,
-        /// Optional subscription regex prefilter.
-        #[arg(long = "subscription-pattern")]
-        subscription_pattern: Option<String>,
+        /// Connection slug for raw AgentFlow pipeline imports.
+        #[arg(
+            long = "connection-slug",
+            alias = "subscription-topic",
+            conflicts_with = "cron"
+        )]
+        connection_slug: Option<String>,
+        /// Optional connection regex filter.
+        #[arg(long = "connection-pattern", alias = "subscription-pattern")]
+        connection_pattern: Option<String>,
         /// Optional subscription classifier prompt.
         #[arg(long = "classify-prompt")]
         classify_prompt: Option<String>,

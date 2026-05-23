@@ -23,6 +23,10 @@ pub struct Event {
     /// `"message"` when the subscriber omits it.
     #[serde(default = "default_kind")]
     pub kind: String,
+    /// True for command replies and lifecycle notices that should not be
+    /// treated as workflow trigger events.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub control: bool,
     /// Best-effort stable identity for de-duplication across restarts
     /// (e.g. Telegram `message_id@chat_id`). Optional.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -40,6 +44,10 @@ pub struct Event {
 
 fn default_kind() -> String {
     "message".to_string()
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// The envelope broadcast on the in-process bus. Wraps [`Event`] with

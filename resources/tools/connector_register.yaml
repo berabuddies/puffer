@@ -1,0 +1,31 @@
+id: ConnectorRegister
+name: ConnectorRegister
+description: |-
+  Register a user-defined connector template.
+
+  Prefer passing a full `template` object returned by ConnectorTemplate after
+  editing it. The shortcut fields are available for simple connectors.
+handler: runtime:workflow:connector_register
+approval_policy: ask
+sandbox_policy: workspace-write
+input_schema:
+  type: object
+  properties:
+    template:
+      type: object
+      description: Full connector template JSON.
+    connector_slug:
+      type: string
+    description:
+      type: string
+    skill:
+      type: string
+    binary:
+      type: string
+      description: Human-readable executable path or internal connector command name.
+    command:
+      type: array
+      description: Typed connector protocol argv; command[0] is the executable.
+      items:
+        type: string
+  additionalProperties: false

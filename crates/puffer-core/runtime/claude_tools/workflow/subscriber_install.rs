@@ -46,7 +46,7 @@ pub fn execute_subscriber_install(
         "id": id,
         "topic": topic,
         "dir": dir.display().to_string(),
-        "next": "Use SubscriptionCreate with this topic to install a watcher.",
+        "next": "Use ConnectionCreate and WorkflowCreate for new connector workflows; SubscriptionCreate remains compatibility-only.",
     })
     .to_string())
 }

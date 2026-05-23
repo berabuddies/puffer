@@ -1,0 +1,18 @@
+id: WorkflowInspect
+name: WorkflowInspect
+description: |-
+  Inspect workflow historical runs or one run's detailed action log.
+handler: runtime:workflow:workflow_inspect
+approval_policy: auto
+sandbox_policy: read-only
+input_schema:
+  type: object
+  properties:
+    slug:
+      type: string
+    run_id:
+      type: string
+    run_idx:
+      type: integer
+  required: [slug]
+  additionalProperties: false

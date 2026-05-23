@@ -2,7 +2,8 @@ use crate::cli_args::{WorkflowCommand, WorkflowRunsCommand};
 use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
 use puffer_subscriptions::{
-    ActionSpec, PrefilterSpec, SubscriptionSpec, SubscriptionStatus, SubscriptionStore,
+    ActionSpec, FilterSpec, SubscriptionSpec, SubscriptionStatus, SubscriptionStore,
+    TaggedFilterSpec,
 };
 use puffer_workflow::{
     AgentExecution, AgentExecutor, DagRunner, ExecutionContext, RegisterOptions, TriggerSpec,
@@ -19,16 +20,12 @@ pub(crate) fn run_workflow_command(command: WorkflowCommand, paths: &ConfigPaths
             json_path,
             slug,
             cron,
-            subscription_topic,
-            subscription_pattern,
+            connection_slug,
+            connection_pattern,
             classify_prompt,
         } => {
-            let trigger = trigger_from_flags(
-                cron,
-                subscription_topic,
-                subscription_pattern,
-                classify_prompt,
-            );
+            let trigger =
+                trigger_from_flags(cron, connection_slug, connection_pattern, classify_prompt);
             let value = read_json_file(&json_path)?;
             let store = WorkflowStore::new(&paths.workspace_config_dir);
             let definition = store.register_json(value, RegisterOptions { slug, trigger })?;
@@ -144,28 +141,57 @@ fn read_json_file(path: &str) -> Result<serde_json::Value> {
 
 fn trigger_from_flags(
     cron: Option<String>,
-    subscription_topic: Option<String>,
-    subscription_pattern: Option<String>,
+    connection_slug: Option<String>,
+    connection_pattern: Option<String>,
     classify_prompt: Option<String>,
 ) -> Option<TriggerSpec> {
     if let Some(cron) = cron {
         return Some(TriggerSpec::Cron { cron });
     }
-    subscription_topic.map(|source_topic| TriggerSpec::Subscription {
-        source_topic,
-        pattern: subscription_pattern,
+    connection_slug.map(|connection_slug| TriggerSpec::Connection {
+        connection_slug,
+        filter: None,
+        pattern: connection_pattern,
         classify_prompt,
     })
 }
 
 fn sync_subscription_trigger(paths: &ConfigPaths, definition: &WorkflowDefinition) -> Result<()> {
-    let TriggerSpec::Subscription {
-        source_topic,
-        pattern,
-        classify_prompt,
-    } = &definition.trigger
-    else {
-        return Ok(());
+    let (connection_slug, filter, classify_prompt) = match &definition.trigger {
+        TriggerSpec::Subscription {
+            source_topic,
+            pattern,
+            classify_prompt,
+        } => (
+            source_topic.clone(),
+            pattern.as_ref().map(|pattern| {
+                FilterSpec::Tagged(TaggedFilterSpec::Regex {
+                    pattern: pattern.clone(),
+                    case_insensitive: true,
+                })
+            }),
+            classify_prompt.clone(),
+        ),
+        TriggerSpec::Connection {
+            connection_slug,
+            filter,
+            pattern,
+            classify_prompt,
+        } => {
+            let filter = match (filter, pattern) {
+                (Some(filter), _) => Some(
+                    serde_json::from_value::<FilterSpec>(filter.clone())
+                        .context("invalid connection trigger filter")?,
+                ),
+                (None, Some(pattern)) => Some(FilterSpec::Tagged(TaggedFilterSpec::Regex {
+                    pattern: pattern.clone(),
+                    case_insensitive: true,
+                })),
+                (None, None) => None,
+            };
+            (connection_slug.clone(), filter, classify_prompt.clone())
+        }
+        TriggerSpec::Cron { .. } => return Ok(()),
     };
     let store = SubscriptionStore::load(paths.user_config_dir.join("subscriptions.json"))?;
     let id = format!("workflow-{}", definition.slug);
@@ -173,19 +199,17 @@ fn sync_subscription_trigger(paths: &ConfigPaths, definition: &WorkflowDefinitio
         store.delete(&id)?;
     }
     let spec = SubscriptionSpec {
-        id,
+        slug: id,
         description: format!("Run workflow `{}`", definition.slug),
-        source_topic: source_topic.clone(),
+        connection_slug,
+        connector_slug: None,
         status: if definition.enabled {
             SubscriptionStatus::Enabled
         } else {
             SubscriptionStatus::Paused
         },
-        prefilter: pattern.as_ref().map(|pattern| PrefilterSpec::Regex {
-            pattern: pattern.clone(),
-            case_insensitive: true,
-        }),
-        classify_prompt: classify_prompt.clone(),
+        filter,
+        classify_prompt,
         classify_model: None,
         action: ActionSpec::RunWorkflow {
             slug: definition.slug.clone(),
@@ -227,9 +251,10 @@ fn workflow_summaries<'a>(
 fn trigger_label(trigger: &TriggerSpec) -> String {
     match trigger {
         TriggerSpec::Cron { cron } => format!("cron {cron}"),
-        TriggerSpec::Subscription { source_topic, .. } => {
-            format!("subscription {source_topic}")
-        }
+        TriggerSpec::Subscription { source_topic, .. } => format!("connection {source_topic}"),
+        TriggerSpec::Connection {
+            connection_slug, ..
+        } => format!("connection {connection_slug}"),
     }
 }
 

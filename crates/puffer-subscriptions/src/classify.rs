@@ -83,11 +83,12 @@ mod tests {
 
     fn spec_with_prompt(prompt: &str) -> SubscriptionSpec {
         SubscriptionSpec {
-            id: "x".into(),
+            slug: "x".into(),
             description: String::new(),
-            source_topic: "telegram-user".into(),
+            connection_slug: "telegram-user".into(),
+            connector_slug: None,
             status: SubscriptionStatus::Enabled,
-            prefilter: None,
+            filter: None,
             classify_prompt: Some(prompt.into()),
             classify_model: Some("anthropic/claude-haiku-4-5".into()),
             action: ActionSpec::SqliteInsert {
@@ -102,6 +103,7 @@ mod tests {
         Event {
             topic: "telegram-user".into(),
             kind: "message".into(),
+            control: false,
             dedup_key: None,
             text: text.into(),
             payload: serde_json::Value::Null,

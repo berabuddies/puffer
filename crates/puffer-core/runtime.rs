@@ -2,9 +2,7 @@ use crate::AppState;
 use anyhow::{anyhow, bail, Context, Result};
 use puffer_provider_registry::{AuthStore, ProviderDescriptor, ProviderRegistry};
 use puffer_resources::LoadedResources;
-#[cfg(test)]
-#[allow(unused_imports)]
-use puffer_tools::ToolRegistry;
+use puffer_tools::{ToolExecutionResult, ToolRegistry};
 #[cfg(test)]
 #[allow(unused_imports)]
 use puffer_transport_anthropic::{AnthropicAuth, AnthropicRequestConfig};
@@ -380,6 +378,33 @@ pub fn execute_side_question(
     question: &str,
 ) -> Result<TurnExecution> {
     side_question::execute_side_question(state, resources, providers, auth_store, question)
+}
+
+/// Executes one concrete tool action from a workflow without involving a model turn.
+pub fn execute_tool_action_once(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    cwd: &std::path::Path,
+    tool_id: &str,
+    input: Value,
+) -> Result<ToolExecutionResult> {
+    let registry = ToolRegistry::from_resources(resources);
+    let definition = registry
+        .definition(tool_id)
+        .cloned()
+        .ok_or_else(|| anyhow!("unknown workflow action tool `{tool_id}`"))?;
+    let filesystem_policy =
+        filesystem_access::runtime_filesystem_policy(cwd, resources, state, None)?;
+    claude_tools::execute_tool(
+        state,
+        resources,
+        &registry,
+        &definition,
+        cwd,
+        &filesystem_policy,
+        input,
+        claude_tools::ProviderToolContext::None,
+    )
 }
 
 /// Shuts down long-lived runtime services such as cached LSP sessions.

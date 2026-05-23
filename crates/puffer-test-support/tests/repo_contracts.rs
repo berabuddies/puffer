@@ -40,7 +40,10 @@ const OVERSIZED_FILE_BASELINE: &[&str] = &[
 const MISSING_DOC_BASELINE: &[(&str, &str)] = &[
     ("crates/puffer-cli/src/daemon_fs_watch.rs", "new"),
     ("crates/puffer-connector-core/src/runtime.rs", "new"),
-    ("crates/puffer-connector-core/src/session_map.rs", "is_empty"),
+    (
+        "crates/puffer-connector-core/src/session_map.rs",
+        "is_empty",
+    ),
     ("crates/puffer-connector-core/src/traits.rs", "other"),
     ("crates/puffer-connector-discord/src/connector.rs", "config"),
     ("crates/puffer-connector-discord/src/connector.rs", "new"),
@@ -50,7 +53,10 @@ const MISSING_DOC_BASELINE: &[(&str, &str)] = &[
     ("crates/puffer-connector-matrix/src/connector.rs", "new"),
     ("crates/puffer-connector-slack/src/connector.rs", "config"),
     ("crates/puffer-connector-slack/src/connector.rs", "new"),
-    ("crates/puffer-connector-telegram/src/connector.rs", "config"),
+    (
+        "crates/puffer-connector-telegram/src/connector.rs",
+        "config",
+    ),
     ("crates/puffer-connector-telegram/src/connector.rs", "new"),
     ("crates/puffer-connector-webhook/src/connector.rs", "config"),
     ("crates/puffer-connector-webhook/src/connector.rs", "new"),
@@ -59,14 +65,23 @@ const MISSING_DOC_BASELINE: &[(&str, &str)] = &[
     ("crates/puffer-core/memory.rs", "load"),
     ("crates/puffer-core/memory.rs", "project_memory_path"),
     ("crates/puffer-core/memory.rs", "project_memory_status"),
-    ("crates/puffer-core/memory.rs", "project_memory_turn_completed"),
-    ("crates/puffer-core/memory.rs", "spawn_project_memory_review"),
+    (
+        "crates/puffer-core/memory.rs",
+        "project_memory_turn_completed",
+    ),
+    (
+        "crates/puffer-core/memory.rs",
+        "spawn_project_memory_review",
+    ),
     ("crates/puffer-core/runner_adapter.rs", "new"),
     ("crates/puffer-core/runner_adapter.rs", "with_sandbox_roots"),
     ("crates/puffer-core/runner_mcp/connection_manager.rs", "new"),
     ("crates/puffer-core/runner_mcp/host.rs", "get_prompt"),
     ("crates/puffer-core/runner_mcp/host.rs", "list_prompts"),
-    ("crates/puffer-core/runtime/claude_tools/mod.rs", "execute_workflow_tool"),
+    (
+        "crates/puffer-core/runtime/claude_tools/mod.rs",
+        "execute_workflow_tool",
+    ),
     (
         "crates/puffer-core/runtime/claude_tools/workflow/goal.rs",
         "execute_create_goal",
@@ -79,16 +94,40 @@ const MISSING_DOC_BASELINE: &[(&str, &str)] = &[
         "crates/puffer-core/runtime/claude_tools/workflow/goal.rs",
         "execute_update_goal",
     ),
-    ("crates/puffer-core/runtime/claude_tools/write_stdin.rs", "execute"),
-    ("crates/puffer-core/runtime/openai/conversation.rs", "assistant_message"),
+    (
+        "crates/puffer-core/runtime/claude_tools/write_stdin.rs",
+        "execute",
+    ),
+    (
+        "crates/puffer-core/runtime/openai/conversation.rs",
+        "assistant_message",
+    ),
     ("crates/puffer-core/runtime/openai/conversation.rs", "error"),
-    ("crates/puffer-core/runtime/openai/conversation.rs", "success"),
-    ("crates/puffer-core/runtime/openai/conversation.rs", "system_message"),
-    ("crates/puffer-core/runtime/openai/conversation.rs", "user_message"),
+    (
+        "crates/puffer-core/runtime/openai/conversation.rs",
+        "success",
+    ),
+    (
+        "crates/puffer-core/runtime/openai/conversation.rs",
+        "system_message",
+    ),
+    (
+        "crates/puffer-core/runtime/openai/conversation.rs",
+        "user_message",
+    ),
     ("crates/puffer-core/runtime/process_store.rs", "allocate_id"),
-    ("crates/puffer-core/runtime/process_store.rs", "collect_output"),
-    ("crates/puffer-core/runtime/process_store.rs", "collect_output_since"),
-    ("crates/puffer-core/runtime/process_store.rs", "drain_exited"),
+    (
+        "crates/puffer-core/runtime/process_store.rs",
+        "collect_output",
+    ),
+    (
+        "crates/puffer-core/runtime/process_store.rs",
+        "collect_output_since",
+    ),
+    (
+        "crates/puffer-core/runtime/process_store.rs",
+        "drain_exited",
+    ),
     ("crates/puffer-core/runtime/process_store.rs", "exit_code"),
     ("crates/puffer-core/runtime/process_store.rs", "get_mut"),
     ("crates/puffer-core/runtime/process_store.rs", "has_exited"),
@@ -96,23 +135,53 @@ const MISSING_DOC_BASELINE: &[(&str, &str)] = &[
     ("crates/puffer-core/runtime/process_store.rs", "peek"),
     ("crates/puffer-core/runtime/process_store.rs", "remove"),
     ("crates/puffer-core/runtime/process_store.rs", "terminate"),
-    ("crates/puffer-core/runtime/process_store.rs", "terminate_all"),
-    ("crates/puffer-core/runtime/process_store.rs", "total_output_bytes"),
+    (
+        "crates/puffer-core/runtime/process_store.rs",
+        "terminate_all",
+    ),
+    (
+        "crates/puffer-core/runtime/process_store.rs",
+        "total_output_bytes",
+    ),
     ("crates/puffer-core/runtime/process_store.rs", "write_stdin"),
     ("crates/puffer-core/state.rs", "is_active"),
     ("crates/puffer-core/state.rs", "memory_flush_enabled"),
     ("crates/puffer-core/state.rs", "memory_flush_min_turns"),
     ("crates/puffer-core/state.rs", "memory_review_enabled"),
-    ("crates/puffer-core/state.rs", "memory_review_nudge_interval"),
+    (
+        "crates/puffer-core/state.rs",
+        "memory_review_nudge_interval",
+    ),
     ("crates/puffer-core/state.rs", "refresh_project_memory"),
-    ("crates/puffer-core/tests/mcp_stub/stub_server.rs", "echo_schema"),
-    ("crates/puffer-core/tests/mcp_stub/stub_server.rs", "empty_object_schema"),
-    ("crates/puffer-core/tests/mcp_stub/stub_server.rs", "encode_base64"),
-    ("crates/puffer-core/tests/mcp_stub/stub_server.rs", "slow_echo_schema"),
+    (
+        "crates/puffer-core/tests/mcp_stub/stub_server.rs",
+        "echo_schema",
+    ),
+    (
+        "crates/puffer-core/tests/mcp_stub/stub_server.rs",
+        "empty_object_schema",
+    ),
+    (
+        "crates/puffer-core/tests/mcp_stub/stub_server.rs",
+        "encode_base64",
+    ),
+    (
+        "crates/puffer-core/tests/mcp_stub/stub_server.rs",
+        "slow_echo_schema",
+    ),
     ("crates/puffer-mcp-oauth/src/service.rs", "new"),
-    ("crates/puffer-mcp-oauth/tests/oauth_stub_server.rs", "metrics"),
-    ("crates/puffer-mcp-oauth/tests/oauth_stub_server.rs", "shutdown"),
-    ("crates/puffer-mcp-oauth/tests/oauth_stub_server.rs", "spawn_oauth_stub"),
+    (
+        "crates/puffer-mcp-oauth/tests/oauth_stub_server.rs",
+        "metrics",
+    ),
+    (
+        "crates/puffer-mcp-oauth/tests/oauth_stub_server.rs",
+        "shutdown",
+    ),
+    (
+        "crates/puffer-mcp-oauth/tests/oauth_stub_server.rs",
+        "spawn_oauth_stub",
+    ),
     ("crates/puffer-runner-api/src/lib.rs", "deserialize"),
     ("crates/puffer-runner-api/src/lib.rs", "execution"),
     ("crates/puffer-runner-api/src/lib.rs", "mcp"),
@@ -140,11 +209,7 @@ fn exported_functions_have_doc_comments() {
                 if missing_doc_is_baselined(&display_path, function_name) {
                     continue;
                 }
-                missing.push(format!(
-                    "{}:{} ({function_name})",
-                    display_path,
-                    index + 1
-                ));
+                missing.push(format!("{}:{} ({function_name})", display_path, index + 1));
             }
         }
     }

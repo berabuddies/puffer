@@ -1,0 +1,15 @@
+id: ConnectionDelete
+name: ConnectionDelete
+description: |-
+  Delete an authorized connection record. This disables future workflow and
+  proxy use of that connection.
+handler: runtime:workflow:connection_delete
+approval_policy: ask
+sandbox_policy: workspace-write
+input_schema:
+  type: object
+  properties:
+    slug:
+      type: string
+  required: [slug]
+  additionalProperties: false

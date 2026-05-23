@@ -723,6 +723,26 @@ pub fn execute_workflow_tool(
             workflow::ask_user_question::execute_ask_user_question(state, cwd, input)
         }
         "Config" => workflow::config::execute_config(state, cwd, input),
+        "ConnectionCreate" => {
+            workflow::connector_tools::execute_connection_create(state, cwd, input)
+        }
+        "ConnectionDelete" => {
+            workflow::connector_tools::execute_connection_delete(state, cwd, input)
+        }
+        "ConnectionList" => workflow::connector_tools::execute_connection_list(state, cwd, input),
+        "ConnectorAct" => workflow::connector_tools::execute_connector_act(state, cwd, input),
+        "ConnectorCreation" => {
+            workflow::connector_tools::execute_connector_creation(state, cwd, input)
+        }
+        "ConnectorDelete" => workflow::connector_tools::execute_connector_delete(state, cwd, input),
+        "ConnectorList" => workflow::connector_tools::execute_connector_list(state, cwd, input),
+        "ConnectorRegister" => {
+            workflow::connector_tools::execute_connector_register(state, cwd, input)
+        }
+        "ConnectorTemplate" => {
+            workflow::connector_tools::execute_connector_template(state, cwd, input)
+        }
+        "ConnectorUpdate" => workflow::connector_tools::execute_connector_update(state, cwd, input),
         "CronCreate" => workflow::cron_create::execute_cron_create(state, cwd, input),
         "CronDelete" => workflow::cron_delete::execute_cron_delete(state, cwd, input),
         "CronList" => workflow::cron_list::execute_cron_list(state, cwd, input),
@@ -766,8 +786,12 @@ pub fn execute_workflow_tool(
         "SubscriptionPause" => {
             workflow::subscription_pause::execute_subscription_pause(state, cwd, input)
         }
-        "WorkflowRegister" => {
-            workflow::workflow_register::execute_workflow_register(state, cwd, input)
+        "WorkflowInspect" => workflow::workflow_tools::execute_workflow_inspect(state, cwd, input),
+        "WorkflowList" => workflow::workflow_tools::execute_workflow_list(state, cwd, input),
+        "WorkflowToggle" => workflow::workflow_tools::execute_workflow_toggle(state, cwd, input),
+        "WorkflowCreate" => workflow::workflow_tools::execute_workflow_create(state, cwd, input),
+        "WorkflowValidate" => {
+            workflow::workflow_tools::execute_workflow_validate(state, cwd, input)
         }
         "TaskCreate" => workflow::task_create::execute_task_create(state, cwd, input),
         "TaskGet" => workflow::task_get::execute_task_get(state, cwd, input),
@@ -778,6 +802,13 @@ pub fn execute_workflow_tool(
         "TeamCreate" => workflow::team_create::execute_team_create(state, cwd, input),
         "TeamDelete" => workflow::team_delete::execute_team_delete(state, cwd, input),
         "Telegram" => workflow::telegram_login::execute_telegram(state, cwd, input),
+        "TelegramImportDesktop" => {
+            workflow::telegram_login::execute_telegram_import_desktop(state, cwd, input)
+        }
+        "TelegramLoginQr" => workflow::telegram_login::execute_telegram_login_qr(state, cwd, input),
+        "TelegramLoginQrWait" => {
+            workflow::telegram_login::execute_telegram_login_qr_wait(state, cwd, input)
+        }
         "TelegramLoginStart" => {
             workflow::telegram_login::execute_telegram_login_start(state, cwd, input)
         }

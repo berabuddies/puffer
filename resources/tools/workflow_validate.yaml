@@ -1,0 +1,18 @@
+id: WorkflowValidate
+name: WorkflowValidate
+description: |-
+  Validate a workflow action JSON object or YAML action graph before
+  registering it.
+handler: runtime:workflow:workflow_validate
+approval_policy: auto
+sandbox_policy: read-only
+input_schema:
+  type: object
+  properties:
+    action:
+      type: object
+      description: Workflow action JSON.
+    yaml_action:
+      type: string
+      description: Workflow action YAML.
+  additionalProperties: false

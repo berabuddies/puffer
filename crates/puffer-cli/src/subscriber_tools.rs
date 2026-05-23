@@ -41,7 +41,68 @@ pub(crate) fn run_email(args: EmailArgs) -> Result<()> {
 
 /// Runs one `puffer internal-tool telegram` command.
 pub(crate) fn run_telegram(args: TelegramArgs) -> Result<()> {
-    let input = match args.command {
+    let connection_slug = args.connection_slug;
+    let mut input = match args.command {
+        TelegramCommand::ImportDesktop {
+            path,
+            account_index,
+            passcode,
+            passcode_stdin,
+            key_file,
+        } => {
+            let passcode =
+                optional_secret_arg(passcode, passcode_stdin, "Telegram local passcode")?;
+            json!({
+                "action": "import_desktop",
+                "path": path,
+                "account_index": account_index,
+                "passcode": passcode,
+                "key_file": key_file,
+            })
+        }
+        TelegramCommand::ListPeers {
+            peer_kind,
+            query,
+            limit,
+        } => json!({
+            "action": "list_peers",
+            "peer_kind": peer_kind.map(|kind| kind.as_str()),
+            "query": query,
+            "limit": limit,
+        }),
+        TelegramCommand::SearchPeers {
+            query,
+            peer_kind,
+            limit,
+        } => json!({
+            "action": "search_peers",
+            "peer_kind": peer_kind.map(|kind| kind.as_str()),
+            "query": query,
+            "limit": limit,
+        }),
+        TelegramCommand::SearchMessages {
+            query,
+            peer,
+            limit,
+            context,
+            succinct,
+        } => json!({
+            "action": "search_messages",
+            "peer": peer,
+            "query": query,
+            "limit": limit,
+            "context": context,
+            "succinct": succinct,
+        }),
+        TelegramCommand::LoginQr { api_id, api_hash } => json!({
+            "action": "login_qr",
+            "api_id": api_id,
+            "api_hash": api_hash,
+        }),
+        TelegramCommand::LoginQrWait { timeout_seconds } => json!({
+            "action": "login_qr_wait",
+            "timeout_seconds": timeout_seconds,
+        }),
         TelegramCommand::LoginStart {
             phone,
             api_id,
@@ -67,6 +128,12 @@ pub(crate) fn run_telegram(args: TelegramArgs) -> Result<()> {
             })
         }
     };
+    if let Some(object) = input.as_object_mut() {
+        object.insert(
+            "connection_slug".to_string(),
+            Value::String(connection_slug),
+        );
+    }
     execute_parent_internal_tool("telegram", input)
 }
 
@@ -93,6 +160,21 @@ fn read_secret_arg(value: Option<String>, from_stdin: bool, label: &str) -> Resu
     if !from_stdin {
         return value.with_context(|| format!("{label} is required"));
     }
+    read_secret_from_stdin(label)
+}
+
+fn optional_secret_arg(
+    value: Option<String>,
+    from_stdin: bool,
+    label: &str,
+) -> Result<Option<String>> {
+    if !from_stdin {
+        return Ok(value);
+    }
+    read_secret_from_stdin(label).map(Some)
+}
+
+fn read_secret_from_stdin(label: &str) -> Result<String> {
     let mut secret = String::new();
     std::io::stdin()
         .read_to_string(&mut secret)

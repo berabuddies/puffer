@@ -1,0 +1,21 @@
+id: ConnectorUpdate
+name: ConnectorUpdate
+description: |-
+  Update an existing connector template or override a built-in connector with
+  a user-defined template.
+handler: runtime:workflow:connector_update
+approval_policy: ask
+sandbox_policy: workspace-write
+input_schema:
+  type: object
+  properties:
+    connector_slug:
+      type: string
+    new_skill:
+      type: string
+      description: Replacement skill text or skill name for the connector.
+    template:
+      type: object
+      description: Full replacement connector template JSON.
+  required: [connector_slug]
+  additionalProperties: false

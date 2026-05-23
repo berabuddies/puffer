@@ -26,5 +26,6 @@ pub fn execute_subscription_delete(
         .store()
         .delete(&parsed.id)
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    manager.refresh_connection_consumers()?;
     Ok(json!({"deleted": parsed.id}).to_string())
 }

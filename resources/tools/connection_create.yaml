@@ -1,0 +1,27 @@
+id: ConnectionCreate
+name: ConnectionCreate
+description: |-
+  Register an authorized connection after the connector skill has completed
+  authentication.
+
+  This does not perform the interactive login itself. It records the connection
+  so chat delivery and workflows can consume the stream.
+handler: runtime:workflow:connection_create
+approval_policy: ask
+sandbox_policy: workspace-write
+input_schema:
+  type: object
+  properties:
+    slug:
+      type: string
+      description: Stable kebab-case connection slug.
+    connector_slug:
+      type: string
+      description: Connector template slug.
+    description:
+      type: string
+    auth_ok:
+      type: boolean
+      description: Set false only when the connector auth check failed.
+  required: [slug, connector_slug]
+  additionalProperties: false

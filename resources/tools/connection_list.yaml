@@ -1,0 +1,12 @@
+id: ConnectionList
+name: ConnectionList
+description: |-
+  List authorized connections. A connection is a specific authenticated
+  instance of a connector, such as a Telegram login or Slack bot install.
+handler: runtime:workflow:connection_list
+approval_policy: auto
+sandbox_policy: read-only
+input_schema:
+  type: object
+  properties: {}
+  additionalProperties: false

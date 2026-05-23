@@ -1,0 +1,11 @@
+id: WorkflowList
+name: WorkflowList
+description: |-
+  List registered workflows with trigger metadata and latest run summaries.
+handler: runtime:workflow:workflow_list
+approval_policy: auto
+sandbox_policy: read-only
+input_schema:
+  type: object
+  properties: {}
+  additionalProperties: false

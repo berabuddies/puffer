@@ -55,9 +55,7 @@ pub fn execute(store: &Mutex<ProcessStore>, input: Value) -> Result<(bool, Strin
         if !args.input.is_empty() {
             entry
                 .write_stdin(args.input.as_bytes())
-                .with_context(|| {
-                    format!("failed to write stdin to process {}", args.process_id)
-                })?;
+                .with_context(|| format!("failed to write stdin to process {}", args.process_id))?;
         }
 
         output_baseline = entry.total_output_bytes();

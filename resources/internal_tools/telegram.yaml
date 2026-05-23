@@ -3,14 +3,21 @@ name: Telegram
 aliases:
   - telegram
 description: |-
-  Internal CLI-only Telegram personal-account login surface. Agents should
-  use the `telegram` skill and run `telegram ...` through Bash instead of
-  receiving this as a provider tool call.
+  Internal CLI-only Telegram personal-account login, Telegram Desktop
+  import, and peer lookup surface.
+  Agents should use the `telegram` skill and run `telegram ...` through Bash
+  instead of receiving this as a provider tool call.
 
   The internal CLI sends execution back to the parent Puffer runtime so the
-  same supervised `telegram-user` subscriber process keeps the in-flight
-  login token between `login-start`, `login-submit-code`, and
-  `login-submit-password`.
+  selected supervised subscriber process keeps the in-flight login token
+  between `login-start`, `login-submit-code`, and `login-submit-password`;
+  exports QR login URLs for approval from an already logged-in Telegram app;
+  or imports Telegram Desktop `tdata` into that connection's session file.
+  Pass `connection_slug` or `account_slug` to select the Telegram account
+  connection and run multiple local Telegram accounts in parallel.
+  Message sends, poll votes, group title/photo updates, account profile
+  updates, reactions, moderation, and stories are connector actions on the
+  `telegram-login` connector, not internal CLI actions.
 handler: runtime:workflow:telegram
 approval_policy: ask
 sandbox_policy: workspace-write
@@ -20,10 +27,62 @@ input_schema:
     action:
       type: string
       enum:
+        - import_desktop
+        - list_peers
+        - login_qr
+        - login_qr_wait
         - login_start
         - login_submit_code
         - login_submit_password
-      description: Telegram login action to perform.
+        - search_messages
+        - search_peers
+      description: Telegram action to perform.
+    connection_slug:
+      type: string
+      description: Optional authorized Telegram account connection slug. Defaults to telegram-user; use distinct kebab-case slugs for multiple local accounts.
+    account_slug:
+      type: string
+      description: Alias for connection_slug when selecting a Telegram account connection.
+    account:
+      type: string
+      description: Alias for connection_slug when selecting a Telegram account connection.
+    path:
+      type: string
+      description: Optional Telegram Desktop tdata path for import_desktop.
+    account_index:
+      type: integer
+      description: Optional zero-based Telegram Desktop account slot for import_desktop.
+    passcode:
+      type: string
+      description: Optional Telegram Desktop local passcode for import_desktop.
+    key_file:
+      type: string
+      description: Optional Telegram Desktop tdata key file name for import_desktop.
+    query:
+      type: string
+      description: Optional peer search query for list_peers; required for search_peers/search_messages.
+    peer:
+      type: string
+      description: Telegram peer id from search_peers, or a public @username, for search_messages.
+    peer_kind:
+      type: string
+      enum:
+        - user
+        - group
+        - channel
+      description: Optional Telegram peer type filter for list_peers/search_peers.
+    limit:
+      type: integer
+      description: Optional maximum result count for list_peers/search_peers/search_messages.
+    context:
+      type: integer
+      description: Optional surrounding message count before and after each match for search_messages.
+    succinct:
+      type: boolean
+      description: Optional plain-text message-search response for LLM use. Media appears as either a local file path or text for text-only media such as polls, with poll answer indexes included for voting. Reply relationships are preserved in message-search output.
+    succint:
+      type: boolean
+      description: Deprecated misspelling alias for succinct; accepted for CLI compatibility.
     phone:
       type: string
       description: E.164 phone number with leading + for login_start.
@@ -32,7 +91,10 @@ input_schema:
       description: Optional Telegram application API id for login_start.
     api_hash:
       type: string
-      description: Optional Telegram application API hash for login_start.
+      description: Optional Telegram application API hash for login_start/login_qr.
+    timeout_seconds:
+      type: integer
+      description: Optional wait timeout in seconds for login_qr_wait.
     code:
       type: string
       description: Numeric code delivered by Telegram for login_submit_code.
@@ -44,7 +106,7 @@ input_schema:
   additionalProperties: false
 metadata:
   may_spawn_processes: true
-  may_read_files: false
+  may_read_files: true
   may_write_files: true
 display:
   group: subscribers

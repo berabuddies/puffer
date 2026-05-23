@@ -23,7 +23,9 @@ mod supervisor;
 
 pub use bus::{EventBus, EventReceiver};
 pub use codec::{read_lines, write_line};
-pub use command::{CommandSender, SubscriberCommand};
+pub use command::{
+    CommandSender, SendMediaAttachment, SendMediaKind, SubscriberCommand, TelegramPeerKind,
+};
 pub use event::{Event, EventEnvelope};
-pub use manifest::{Manifest, ManifestError, ManifestKind};
+pub use manifest::{Manifest, ManifestError, ManifestKind, StateSpec};
 pub use supervisor::{SubscriberHandle, SubscriberSupervisor, SupervisorConfig};

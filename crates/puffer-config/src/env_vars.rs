@@ -722,6 +722,7 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
             "puffer-core/runtime/claude_tools/workflow/subscriber_scaffold.rs:99",
             "puffer-core/runtime/claude_tools/workflow/subscription_create.rs:88",
             "puffer-core/runtime/claude_tools/workflow/telegram_login.rs:236",
+            "puffer-subscriber-telegram-user/src/import.rs:90,103",
             "puffer-provider-registry/src/import.rs:58",
             "puffer-subscriptions/src/action.rs:278",
         ],
@@ -746,9 +747,13 @@ pub const ALL_ENV_VARS: &[EnvVar] = &[
     },
     EnvVar {
         name: "LOCALAPPDATA",
-        description: "Windows: candidate base path when looking for Chrome / Chromium installs.",
+        description: "Windows: candidate base path when looking for Chrome / Chromium installs \
+             and the default Telegram Desktop tdata directory.",
         default: None,
-        source_files: &["puffer-cli/src/daemon_browser/chrome.rs:160"],
+        source_files: &[
+            "puffer-cli/src/daemon_browser/chrome.rs:160",
+            "puffer-subscriber-telegram-user/src/import.rs:113",
+        ],
     },
     EnvVar {
         name: "PATH",

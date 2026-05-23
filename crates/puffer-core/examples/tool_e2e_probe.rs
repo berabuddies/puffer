@@ -37,8 +37,7 @@ fn main() -> Result<()> {
     let config = load_config(&paths)?;
     let auth_path = paths.user_config_dir.join("auth.json");
     let mut auth_store = puffer_provider_registry::AuthStore::load(&auth_path)?;
-    let resources =
-        load_resources(&paths, &puffer_core::runner_adapter::LocalToolRunner::new())?;
+    let resources = load_resources(&paths, &puffer_core::runner_adapter::LocalToolRunner::new())?;
 
     let mut providers = ProviderRegistry::new();
     for provider in &resources.providers {
@@ -66,8 +65,12 @@ fn main() -> Result<()> {
     }
     let _ = providers.discover_and_merge_all(&auth_store);
 
-    let provider_id = std::env::var("PROBE_PROVIDER")
-        .unwrap_or_else(|_| config.default_provider.clone().unwrap_or_else(|| "hanbbq".to_string()));
+    let provider_id = std::env::var("PROBE_PROVIDER").unwrap_or_else(|_| {
+        config
+            .default_provider
+            .clone()
+            .unwrap_or_else(|| "hanbbq".to_string())
+    });
     let model = resolve_model(&providers, &provider_id)?;
     eprintln!("[probe] provider={provider_id} model={model}");
     eprintln!("[probe] sandbox_mode=workspace-write (DEFAULT — no --yolo, gate active)");
@@ -89,7 +92,9 @@ fn main() -> Result<()> {
         )
     });
 
-    eprintln!("=== Subject 1: /tmp write via Write+Read tool (NOT Bash, exercises the path gate) ===");
+    eprintln!(
+        "=== Subject 1: /tmp write via Write+Read tool (NOT Bash, exercises the path gate) ==="
+    );
     eprintln!("[probe] target: {}", tmp_target.display());
     eprintln!("[probe] prompt: {prompt_tmp}");
     eprintln!();
@@ -117,7 +122,10 @@ fn main() -> Result<()> {
                 tmp_target.display(),
                 content.len()
             );
-            eprintln!("[probe]   content head: {:?}", &content[..content.len().min(80)]);
+            eprintln!(
+                "[probe]   content head: {:?}",
+                &content[..content.len().min(80)]
+            );
         }
         None => eprintln!("[probe] ✗ file did NOT land at {}", tmp_target.display()),
     }
@@ -215,7 +223,10 @@ fn run_one_turn(
     // explicit: DO NOT touch state.sandbox_mode; leave it at the default
     // "workspace-write" so the path gate is genuinely active.
     eprintln!("[probe] session: {}", state.session.id);
-    eprintln!("[probe] sandbox_mode={} working_dirs={:?}", state.sandbox_mode, state.working_dirs);
+    eprintln!(
+        "[probe] sandbox_mode={} working_dirs={:?}",
+        state.sandbox_mode, state.working_dirs
+    );
 
     let _turn = execute_user_turn(&mut state, resources, providers, auth_store, prompt)?;
     Ok(state)
