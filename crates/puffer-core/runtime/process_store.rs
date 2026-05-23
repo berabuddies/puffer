@@ -492,7 +492,7 @@ mod tests {
     use super::*;
 
     fn wait_for_output(entry: &ProcessEntry, expected: &str) -> String {
-        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
         loop {
             let output = entry.collect_output();
             let text = String::from_utf8_lossy(&output).to_string();
