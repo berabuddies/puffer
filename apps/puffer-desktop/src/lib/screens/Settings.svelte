@@ -17,6 +17,7 @@
     listMcpServers,
     listPermissions,
     listProviderModels,
+    removeLambdaSkillLibrary,
     saveLambdaSkillLibrary,
     savePermissions,
     setLambdaSkillEnabled,
@@ -74,7 +75,7 @@
     if (section === "mcp" && daemonReachable && !mcpLoading && !mcpSaving) {
       void loadMcpServers();
     }
-    if (section === "skills" && daemonReachable && !lambdaLoading && !lambdaSaving) {
+    if (section === "skills" && daemonReachable && !lambdaLoading && !lambdaSaving && lambdaRemovingLibrary === null) {
       void loadLambdaSkillLibraries();
     }
     props.onRefresh();
@@ -131,6 +132,7 @@
   let lambdaLoading = $state(false);
   let lambdaLoadGeneration = 0;
   let lambdaSaving = $state(false);
+  let lambdaRemovingLibrary = $state<string | null>(null);
   let lambdaTogglingSkill = $state<string | null>(null);
   let lambdaError = $state<string | null>(null);
   let lambdaSaved = $state<string | null>(null);
@@ -275,6 +277,25 @@
     return `${slugFromPath(path)}-${shortPathHash(path)}`;
   }
 
+  function normalizedFolderPath(path: string): string {
+    return path.replace(/\\/g, "/").replace(/\/+$/g, "");
+  }
+
+  function pathContains(parent: string, child: string): boolean {
+    const normalizedParent = normalizedFolderPath(parent);
+    const normalizedChild = normalizedFolderPath(child);
+    return normalizedChild === normalizedParent || normalizedChild.startsWith(`${normalizedParent}/`);
+  }
+
+  function coveringVerifiedSkillLibrary(path: string): LambdaSkillLibraryInfo | null {
+    const libraries = lambdaSnapshot?.libraries ?? [];
+    return libraries.find((library) => pathContains(library.root, path)) ?? null;
+  }
+
+  function lambdaLibraryKey(library: LambdaSkillLibraryInfo): string {
+    return `${library.sourceKind}:${library.id}`;
+  }
+
   function verifiedSkillStatus(library: LambdaSkillLibraryInfo): string {
     if (library.disableModelInvocation) return "Installed";
     if (library.allowedTools.length > 0 && library.hostCatalogueSubpath) {
@@ -335,6 +356,14 @@
       return;
     }
     if (!root) return;
+    const coveringLibrary = coveringVerifiedSkillLibrary(root);
+    if (coveringLibrary) {
+      lambdaError = null;
+      lambdaSaved = pathContains(root, coveringLibrary.root)
+        ? `${basenameFromPath(root)} is already added.`
+        : `${basenameFromPath(root)} is already covered by ${basenameFromPath(coveringLibrary.root)}.`;
+      return;
+    }
     lambdaLoadGeneration += 1;
     lambdaLoading = false;
     lambdaSaving = true;
@@ -359,6 +388,35 @@
       lambdaError = (e as Error).message ?? String(e);
     } finally {
       lambdaSaving = false;
+    }
+  }
+
+  async function removeVerifiedSkillsFolder(library: LambdaSkillLibraryInfo) {
+    if (lambdaRemovingLibrary || lambdaSaving) return;
+    if (library.sourceKind !== "workspace" && library.sourceKind !== "user") return;
+    const key = lambdaLibraryKey(library);
+    lambdaLoadGeneration += 1;
+    lambdaLoading = false;
+    lambdaRemovingLibrary = key;
+    lambdaError = null;
+    lambdaSaved = null;
+    try {
+      lambdaSnapshot = await withTimeout(
+        removeLambdaSkillLibrary({
+          libraryId: library.id,
+          sourceKind: library.sourceKind
+        }),
+        15000,
+        "Removing this Verified Skills folder is still running. Try Refresh again in a moment."
+      );
+      lambdaLoaded = true;
+      lambdaSaved = `Removed ${basenameFromPath(library.root)}`;
+      props.onRefresh();
+    } catch (e) {
+      lambdaError = (e as Error).message ?? String(e);
+      void loadLambdaSkillLibraries();
+    } finally {
+      lambdaRemovingLibrary = null;
     }
   }
 
@@ -629,8 +687,8 @@
     });
   });
   let mcpFormDisabled = $derived(!daemonReachable || mcpLoading || mcpSaving);
-  let lambdaRefreshDisabled = $derived(!daemonReachable || lambdaLoading || lambdaSaving);
-  let lambdaChooseDisabled = $derived(lambdaSaving || !canInvokeTauri());
+  let lambdaRefreshDisabled = $derived(!daemonReachable || lambdaLoading || lambdaSaving || lambdaRemovingLibrary !== null);
+  let lambdaChooseDisabled = $derived(lambdaSaving || lambdaRemovingLibrary !== null || !canInvokeTauri());
   let modelPickerLoading = $derived(
     Boolean(modelPickerProvider && modelLoadingByProvider[modelPickerProvider])
   );
@@ -1081,7 +1139,18 @@
             <span class:ready={verifiedSkillStatus(library) === "Ready for model use"} class="pf-status-pill">
               {verifiedSkillStatus(library)}
             </span>
-            <input type="checkbox" class="sc-switch" checked disabled />
+            <input
+              type="checkbox"
+              class="sc-switch"
+              checked={lambdaRemovingLibrary !== lambdaLibraryKey(library)}
+              disabled={lambdaRemovingLibrary === lambdaLibraryKey(library) || lambdaSaving || (library.sourceKind !== "workspace" && library.sourceKind !== "user")}
+              aria-label={`Remove ${basenameFromPath(library.root)} Verified Skills folder`}
+              onchange={(e) => {
+                if (!(e.currentTarget as HTMLInputElement).checked) {
+                  void removeVerifiedSkillsFolder(library);
+                }
+              }}
+            />
           </div>
         {/each}
         {#if !lambdaLoading && (lambdaSnapshot?.libraries.length ?? 0) === 0}

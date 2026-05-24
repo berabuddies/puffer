@@ -1832,6 +1832,11 @@ export type SetLambdaSkillEnabledInput = {
   enabled: boolean;
 };
 
+export type RemoveLambdaSkillLibraryInput = {
+  libraryId: string;
+  sourceKind: "workspace" | "user";
+};
+
 export type ConfigPatch = {
   defaultProvider?: string | null;
   defaultModel?: string | null;
@@ -1882,6 +1887,13 @@ export async function saveLambdaSkillLibrary(
 ): Promise<LambdaSkillLibrariesSnapshot> {
   const client = await ensureLocalDaemonClient();
   return client.request<LambdaSkillLibrariesSnapshot>("save_lambda_skill_library", input);
+}
+
+export async function removeLambdaSkillLibrary(
+  input: RemoveLambdaSkillLibraryInput
+): Promise<LambdaSkillLibrariesSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<LambdaSkillLibrariesSnapshot>("remove_lambda_skill_library", input);
 }
 
 export async function setLambdaSkillEnabled(
