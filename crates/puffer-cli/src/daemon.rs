@@ -36,8 +36,7 @@ use puffer_config::{
 };
 use puffer_core::{
     default_effort_level, enter_plan_mode, execute_user_turn_streaming_with_permissions_and_cancel,
-    lambda_skill_doctor_warning_lines, provider_preference_family,
-    render_lambda_skill_doctor_status, supported_effort_levels, with_user_question_prompt_handler,
+    provider_preference_family, supported_effort_levels, with_user_question_prompt_handler,
     AppState, BrowserPermissionPromptActionSet, BrowserPermissionPromptSource,
     BrowserPermissionPromptTargetClass, CancelToken, MessageRole, ModelPreferenceFamily,
     PermissionPromptAction, PermissionPromptRequest, TurnStreamEvent, UserQuestionPromptRequest,
@@ -293,14 +292,10 @@ impl DaemonState {
         &self.paths
     }
 
-    /// Returns Lambda Skill doctor output and loaded resources for desktop snapshots.
-    pub(crate) fn lambda_skill_resources_snapshot(
-        &self,
-    ) -> Result<(String, Vec<String>, LoadedResources)> {
+    /// Returns loaded resources for lightweight desktop Lambda Skill snapshots.
+    pub(crate) fn lambda_skill_loaded_resources_snapshot(&self) -> Result<LoadedResources> {
         let inputs = self.build_runtime_inputs_without_discovery()?;
-        let doctor = render_lambda_skill_doctor_status(&inputs.resources);
-        let warnings = lambda_skill_doctor_warning_lines(&inputs.resources);
-        Ok((doctor, warnings, inputs.resources))
+        Ok(inputs.resources)
     }
 }
 
@@ -4449,11 +4444,7 @@ mod tests {
         assert!(saved["doctor"]
             .as_str()
             .unwrap()
-            .contains("lambda_skills=1 strict_catalogues=1"));
-        assert!(saved["doctor"]
-            .as_str()
-            .unwrap()
-            .contains("model-invocable"));
+            .contains("lambda_skills=1 model_invocable=1 missing_gate_config=0"));
 
         let manifest_path = state
             .paths
@@ -4575,11 +4566,8 @@ mod tests {
             "---\nname: web-check\ndescription: Verified web check\n---\nUse generated prompt.\n",
         )
         .expect("generated skill");
-        std::fs::write(
-            &compiler,
-            "#!/bin/sh\nif [ \"$1\" = help ]; then echo help; exit 0; fi\nif [ \"$1\" != export-json ]; then exit 9; fi\ncat <<'JSON'\n{\"effects\":[\"net_r\",\"user_in\"],\"domains\":[],\"tools\":[{\"name\":\"fetch_page\",\"params\":[{\"name\":\"url\",\"ty\":\"str\"}],\"result\":\"str\",\"effects\":[\"net_r\"],\"registers\":[],\"contextReq\":null},{\"name\":\"ask_for_approval\",\"params\":[],\"result\":\"unit\",\"effects\":[\"user_in\"],\"registers\":[],\"contextReq\":null}]}\nJSON\n",
-        )
-        .expect("compiler");
+        std::fs::write(&compiler, "#!/bin/sh\necho should-not-run >&2\nexit 99\n")
+            .expect("compiler");
         let mut permissions = std::fs::metadata(&compiler).unwrap().permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&compiler, permissions).expect("chmod compiler");
@@ -4619,14 +4607,12 @@ mod tests {
             saved["libraries"][0]["hostToolBindings"]["ask_for_approval"][0],
             "AskUserQuestion"
         );
+        assert_eq!(saved["skills"][0]["gateSource"], "compiler");
+        assert_eq!(saved["skills"][0]["modelInvocable"], true);
         assert!(saved["doctor"]
             .as_str()
             .unwrap()
-            .contains("lambda_skills=1 strict_catalogues=0 manifest_compilers=1"));
-        assert!(saved["doctor"]
-            .as_str()
-            .unwrap()
-            .contains("model-invocable"));
+            .contains("lambda_skills=1 model_invocable=1 missing_gate_config=0"));
     }
 
     #[test]

@@ -1,7 +1,6 @@
 use crate::daemon::DaemonState;
 use anyhow::{Context, Result};
-use puffer_core::lambda_skill_statuses;
-use puffer_resources::{LoadedItem, LoadedResources, SkillSpec};
+use puffer_resources::{LoadedItem, LoadedResources, SkillSpec, SkillVerificationSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -192,7 +191,7 @@ pub(crate) fn handle_set_lambda_skill_enabled(
 }
 
 fn lambda_skill_libraries_snapshot(state: &DaemonState) -> Result<Value> {
-    let (doctor, warnings, resources) = state.lambda_skill_resources_snapshot()?;
+    let resources = state.lambda_skill_loaded_resources_snapshot()?;
     let paths = state.config_paths();
     let workspace_dir = paths
         .workspace_config_dir
@@ -205,6 +204,8 @@ fn lambda_skill_libraries_snapshot(state: &DaemonState) -> Result<Value> {
         .chain(lambda_skill_library_manifest_dtos(&user_dir, "user")?)
         .collect::<Vec<_>>();
     let skills = lambda_verified_skill_dtos(&resources, &libraries);
+    let doctor = lambda_desktop_doctor_summary(&skills);
+    let warnings = lambda_desktop_warning_lines(&skills);
     Ok(json!({
         "directories": {
             "workspace": workspace_dir.display().to_string(),
@@ -279,14 +280,10 @@ fn lambda_verified_skill_dtos(
     resources: &LoadedResources,
     libraries: &[LambdaSkillLibraryInfoDto],
 ) -> Vec<LambdaVerifiedSkillInfoDto> {
-    let status_by_name = lambda_skill_statuses(resources)
-        .into_iter()
-        .map(|status| (status.name.clone(), status))
-        .collect::<BTreeMap<_, _>>();
     let mut skills = resources
         .skills
         .iter()
-        .filter_map(|skill| lambda_verified_skill_dto(skill, &status_by_name, libraries))
+        .filter_map(|skill| lambda_verified_skill_dto(skill, libraries))
         .collect::<Vec<_>>();
     skills.sort_by(|left, right| {
         left.source_kind
@@ -299,7 +296,6 @@ fn lambda_verified_skill_dtos(
 
 fn lambda_verified_skill_dto(
     skill: &LoadedItem<SkillSpec>,
-    status_by_name: &BTreeMap<String, puffer_core::LambdaSkillStatus>,
     libraries: &[LambdaSkillLibraryInfoDto],
 ) -> Option<LambdaVerifiedSkillInfoDto> {
     let verification = skill
@@ -308,7 +304,7 @@ fn lambda_verified_skill_dto(
         .as_ref()
         .filter(|verification| verification.system == "lambda-skill")?;
     let library = lambda_skill_library_for_source(&skill.source_info.path, libraries);
-    let status = status_by_name.get(&skill.value.name);
+    let readiness = lambda_desktop_readiness(&skill.value, verification);
     Some(LambdaVerifiedSkillInfoDto {
         name: skill.value.name.clone(),
         description: skill.value.description.clone(),
@@ -317,15 +313,87 @@ fn lambda_verified_skill_dto(
         source_kind: library.map(|library| library.source_kind.clone()),
         source_path: verification.source_path.clone(),
         generated_path: verification.generated_path.clone(),
-        ready: status.is_some_and(|status| status.ready),
+        ready: readiness.failure_reason.is_none(),
         enabled: !skill.value.disable_model_invocation,
-        model_invocable: status.is_some_and(|status| status.model_invocable),
-        gate_source: status.and_then(|status| status.gate_source.clone()),
-        failure_reason: status.and_then(|status| status.failure_reason.clone()),
+        model_invocable: !skill.value.disable_model_invocation
+            && readiness.failure_reason.is_none(),
+        gate_source: readiness.gate_source,
+        failure_reason: readiness.failure_reason,
         allowed_tools: skill.value.allowed_tools.clone(),
         tools: verification.tools,
         actions: verification.actions,
     })
+}
+
+struct LambdaDesktopReadiness {
+    gate_source: Option<String>,
+    failure_reason: Option<String>,
+}
+
+fn lambda_desktop_readiness(
+    skill: &SkillSpec,
+    verification: &SkillVerificationSpec,
+) -> LambdaDesktopReadiness {
+    if skill.allowed_tools.is_empty() {
+        return lambda_desktop_not_ready("missing concrete tool scope");
+    }
+    if let Some(host_catalogue_path) = verification.host_catalogue_path.as_deref() {
+        if Path::new(host_catalogue_path).is_file() {
+            return lambda_desktop_ready("host catalogue");
+        }
+        return lambda_desktop_not_ready("host catalogue not found");
+    }
+    if let Some(compiler_path) = verification.compiler_path.as_deref() {
+        if !Path::new(compiler_path).is_file() {
+            return lambda_desktop_not_ready("compiler not found");
+        }
+        let Some(source_path) = verification.source_path.as_deref() else {
+            return lambda_desktop_not_ready("formal source missing");
+        };
+        if !Path::new(source_path).is_file() {
+            return lambda_desktop_not_ready("formal source not found");
+        }
+        return lambda_desktop_ready("compiler");
+    }
+    lambda_desktop_not_ready("missing host catalogue or compiler")
+}
+
+fn lambda_desktop_ready(source: &str) -> LambdaDesktopReadiness {
+    LambdaDesktopReadiness {
+        gate_source: Some(source.to_string()),
+        failure_reason: None,
+    }
+}
+
+fn lambda_desktop_not_ready(reason: impl Into<String>) -> LambdaDesktopReadiness {
+    LambdaDesktopReadiness {
+        gate_source: None,
+        failure_reason: Some(reason.into()),
+    }
+}
+
+fn lambda_desktop_doctor_summary(skills: &[LambdaVerifiedSkillInfoDto]) -> String {
+    let ready = skills.iter().filter(|skill| skill.ready).count();
+    let model_invocable = skills.iter().filter(|skill| skill.model_invocable).count();
+    let missing_gate_config = skills.len().saturating_sub(ready);
+    format!(
+        "lambda_skills={} model_invocable={} missing_gate_config={} desktop_preflight=lightweight",
+        skills.len(),
+        model_invocable,
+        missing_gate_config
+    )
+}
+
+fn lambda_desktop_warning_lines(skills: &[LambdaVerifiedSkillInfoDto]) -> Vec<String> {
+    skills
+        .iter()
+        .filter_map(|skill| {
+            skill
+                .failure_reason
+                .as_ref()
+                .map(|reason| format!("{}; {}", skill.name, reason))
+        })
+        .collect()
 }
 
 fn lambda_skill_library_for_source<'a>(

@@ -288,9 +288,9 @@
   }
 
   function verifiedSkillReadinessLabel(skill: LambdaVerifiedSkillInfo): string {
-    if (skill.modelInvocable) return "Model can use";
+    if (skill.modelInvocable) return "Enabled";
     if (!skill.enabled) return "Disabled";
-    if (skill.ready) return "Ready";
+    if (skill.ready) return "Configured";
     return "Needs attention";
   }
 
