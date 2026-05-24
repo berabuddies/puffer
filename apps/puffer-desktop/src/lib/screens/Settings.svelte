@@ -19,14 +19,16 @@
     listProviderModels,
     saveLambdaSkillLibrary,
     savePermissions,
+    setLambdaSkillEnabled,
     updateConfig,
     type LambdaSkillLibraryInfo,
     type LambdaSkillLibrariesSnapshot,
+    type LambdaVerifiedSkillInfo,
     type McpServerInfo,
     type ModelDescriptorInfo,
     type PermissionsSnapshot
   } from "../api/desktop";
-  import { canInvokeTauri } from "../api/daemonClient";
+  import { canInvokeTauri, currentDaemonClient } from "../api/daemonClient";
   import type {
     DesktopPreferences,
     ExternalCredential,
@@ -129,6 +131,7 @@
   let lambdaLoading = $state(false);
   let lambdaLoadGeneration = 0;
   let lambdaSaving = $state(false);
+  let lambdaTogglingSkill = $state<string | null>(null);
   let lambdaError = $state<string | null>(null);
   let lambdaSaved = $state<string | null>(null);
 
@@ -280,6 +283,26 @@
     return library.sourceKind === "user" ? "User" : "Workspace";
   }
 
+  function verifiedSkillKey(skill: LambdaVerifiedSkillInfo): string {
+    return `${skill.sourceKind ?? "unknown"}:${skill.libraryId ?? "none"}:${skill.name}`;
+  }
+
+  function verifiedSkillReadinessLabel(skill: LambdaVerifiedSkillInfo): string {
+    if (skill.modelInvocable) return "Model can use";
+    if (!skill.enabled) return "Disabled";
+    if (skill.ready) return "Ready";
+    return "Needs attention";
+  }
+
+  function verifiedSkillDetailLabel(skill: LambdaVerifiedSkillInfo): string {
+    const scope = skill.sourceKind === "user" ? "User" : "Workspace";
+    const counts = [
+      skill.tools != null ? `${skill.tools} tools` : null,
+      skill.actions != null ? `${skill.actions} actions` : null
+    ].filter(Boolean);
+    return counts.length > 0 ? `${scope} Verified Skill · ${counts.join(" · ")}` : `${scope} Verified Skill`;
+  }
+
   async function pickVerifiedSkillsFolder(): Promise<string | null> {
     if (!canInvokeTauri()) {
       throw new Error("Folder picker is only available in the desktop app.");
@@ -290,7 +313,7 @@
   }
 
   async function addVerifiedSkillsFolder() {
-    if (lambdaSaving || !daemonReachable) return;
+    if (lambdaSaving) return;
     let root: string | null = null;
     try {
       root = await pickVerifiedSkillsFolder();
@@ -319,6 +342,33 @@
       lambdaError = (e as Error).message ?? String(e);
     } finally {
       lambdaSaving = false;
+    }
+  }
+
+  async function toggleVerifiedSkill(skill: LambdaVerifiedSkillInfo, enabled: boolean) {
+    if (!skill.libraryId || (skill.sourceKind !== "workspace" && skill.sourceKind !== "user")) {
+      lambdaError = "This Verified Skill is not backed by an editable folder config.";
+      return;
+    }
+    const key = verifiedSkillKey(skill);
+    lambdaTogglingSkill = key;
+    lambdaError = null;
+    lambdaSaved = null;
+    try {
+      lambdaSnapshot = await setLambdaSkillEnabled({
+        libraryId: skill.libraryId,
+        sourceKind: skill.sourceKind,
+        skillName: skill.name,
+        enabled
+      });
+      lambdaLoaded = true;
+      lambdaSaved = `${enabled ? "Enabled" : "Disabled"} ${skill.name}`;
+      props.onRefresh();
+    } catch (e) {
+      lambdaError = (e as Error).message ?? String(e);
+      void loadLambdaSkillLibraries();
+    } finally {
+      lambdaTogglingSkill = null;
     }
   }
 
@@ -552,9 +602,18 @@
   // Skip RPC calls when the daemon isn't reachable — web previews render
   // static panes with a friendly "connect daemon" banner instead of a red
   // error. In Tauri the singleton connects on first `ensureLocalDaemonClient`.
-  let daemonReachable = isDaemonReachable();
+  let daemonReachable = $state(isDaemonReachable());
+  $effect(() => {
+    daemonReachable = isDaemonReachable();
+    const client = currentDaemonClient();
+    if (!client) return;
+    return client.onConnectionChange(() => {
+      daemonReachable = isDaemonReachable();
+    });
+  });
   let mcpFormDisabled = $derived(!daemonReachable || mcpLoading || mcpSaving);
-  let lambdaActionDisabled = $derived(!daemonReachable || lambdaLoading || lambdaSaving);
+  let lambdaRefreshDisabled = $derived(!daemonReachable || lambdaLoading || lambdaSaving);
+  let lambdaChooseDisabled = $derived(lambdaSaving || !canInvokeTauri());
   let modelPickerLoading = $derived(
     Boolean(modelPickerProvider && modelLoadingByProvider[modelPickerProvider])
   );
@@ -946,7 +1005,7 @@
           class="sc-btn"
           data-variant="outline"
           data-size="sm"
-          disabled={lambdaActionDisabled}
+          disabled={lambdaRefreshDisabled}
           onclick={refreshIfIdle}
         >
           <Icon name="refresh" size={13} />Refresh
@@ -984,13 +1043,14 @@
           class="sc-btn"
           data-variant="default"
           data-size="sm"
-          disabled={lambdaActionDisabled}
+          disabled={lambdaChooseDisabled}
           onclick={addVerifiedSkillsFolder}
         >
           <Icon name="folder" size={13} />{lambdaSaving ? "Adding…" : "Choose folder"}
         </button>
       </div>
 
+      <h3 class="pf-settings-subhead">Folders</h3>
       <div class="pf-mcp-list">
         {#each lambdaSnapshot?.libraries ?? [] as library (library.sourcePath)}
           <div class="pf-mcp-card">
@@ -1009,6 +1069,43 @@
         {/each}
         {#if !lambdaLoading && (lambdaSnapshot?.libraries.length ?? 0) === 0}
           <div class="pf-empty">No Verified Skills folders added.</div>
+        {/if}
+      </div>
+
+      <h3 class="pf-settings-subhead">Recognized Verified Skills</h3>
+      <div class="pf-mcp-list">
+        {#each lambdaSnapshot?.skills ?? [] as skill (verifiedSkillKey(skill))}
+          <div class="pf-mcp-card pf-skill-card">
+            <span class="ico"><Icon name="shield" size={16} /></span>
+            <div>
+              <div class="title">{skill.name}</div>
+              {#if skill.description}
+                <div class="desc">{skill.description}</div>
+              {/if}
+              <div class="desc">
+                {verifiedSkillDetailLabel(skill)}
+                {#if skill.failureReason && skill.enabled}
+                  · {skill.failureReason}
+                {/if}
+              </div>
+            </div>
+            <span
+              class:ready={skill.modelInvocable}
+              class="pf-status-pill"
+            >
+              {verifiedSkillReadinessLabel(skill)}
+            </span>
+            <input
+              type="checkbox"
+              class="sc-switch"
+              checked={skill.enabled}
+              disabled={lambdaTogglingSkill === verifiedSkillKey(skill) || !skill.libraryId || (skill.sourceKind !== "workspace" && skill.sourceKind !== "user")}
+              onchange={(e) => toggleVerifiedSkill(skill, (e.currentTarget as HTMLInputElement).checked)}
+            />
+          </div>
+        {/each}
+        {#if !lambdaLoading && (lambdaSnapshot?.skills.length ?? 0) === 0}
+          <div class="pf-empty">No Verified Skills recognized yet.</div>
         {/if}
       </div>
 

@@ -1777,8 +1777,27 @@ export type LambdaSkillLibraryInfo = {
   skillHostToolBindings: Record<string, Record<string, string[]>>;
   userInvocable: boolean;
   disableModelInvocation: boolean;
+  disabledSkills: string[];
   sourceKind: string;
   sourcePath: string;
+};
+
+export type LambdaVerifiedSkillInfo = {
+  name: string;
+  description: string;
+  libraryId?: string | null;
+  libraryRoot?: string | null;
+  sourceKind?: string | null;
+  sourcePath?: string | null;
+  generatedPath?: string | null;
+  ready: boolean;
+  enabled: boolean;
+  modelInvocable: boolean;
+  gateSource?: string | null;
+  failureReason?: string | null;
+  allowedTools: string[];
+  tools?: number | null;
+  actions?: number | null;
 };
 
 export type LambdaSkillLibrariesSnapshot = {
@@ -1787,6 +1806,7 @@ export type LambdaSkillLibrariesSnapshot = {
     user: string;
   };
   libraries: LambdaSkillLibraryInfo[];
+  skills: LambdaVerifiedSkillInfo[];
   doctor: string;
   warnings: string[];
 };
@@ -1803,6 +1823,13 @@ export type SaveLambdaSkillLibraryInput = {
   userInvocable?: boolean;
   disableModelInvocation?: boolean;
   scope?: "workspace" | "user";
+};
+
+export type SetLambdaSkillEnabledInput = {
+  libraryId: string;
+  sourceKind: "workspace" | "user";
+  skillName: string;
+  enabled: boolean;
 };
 
 export type ConfigPatch = {
@@ -1855,6 +1882,13 @@ export async function saveLambdaSkillLibrary(
 ): Promise<LambdaSkillLibrariesSnapshot> {
   const client = await ensureLocalDaemonClient();
   return client.request<LambdaSkillLibrariesSnapshot>("save_lambda_skill_library", input);
+}
+
+export async function setLambdaSkillEnabled(
+  input: SetLambdaSkillEnabledInput
+): Promise<LambdaSkillLibrariesSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<LambdaSkillLibrariesSnapshot>("set_lambda_skill_enabled", input);
 }
 
 /** Patch the user config file and return the fresh settings snapshot. The

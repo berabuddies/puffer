@@ -50,6 +50,7 @@
 }
 .pf-settings-row .meta .label { font-weight: 500; font-size: 14px; }
 .pf-settings-row .meta .desc { color: var(--muted-foreground); font-size: 12.5px; margin-top: 2px; line-height: 1.5; max-width: 480px; }
+.pf-settings-subhead { margin: 20px 0 8px; }
 
 .pf-perm-table {
   border: 1px solid var(--border);
@@ -98,6 +99,7 @@
 }
 .pf-mcp-card .title { font-weight: 500; }
 .pf-mcp-card .desc { font-size: 12px; color: var(--muted-foreground); margin-top: 2px; }
+.pf-skill-card .desc { max-width: 560px; line-height: 1.45; }
 .pf-mcp-card .conn {
   font-family: var(--font-sans); font-size: 11px;
   display: inline-flex; align-items: center; gap: 5px;
