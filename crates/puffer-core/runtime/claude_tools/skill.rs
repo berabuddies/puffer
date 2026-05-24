@@ -43,6 +43,13 @@ pub fn execute_claude_skill_tool(resources: &LoadedResources, input: Value) -> R
             skill.value.name
         );
     }
+    if is_lambda_verified_skill(&skill.value) {
+        bail!(
+            "verified Lambda Skill `{}` must be invoked as /skill:{} so Puffer can install the Lambda Skill gate",
+            skill.value.name,
+            skill.value.name
+        );
+    }
 
     let rendered = crate::skill_support::render_skill_prompt(
         skill,
@@ -92,6 +99,13 @@ pub fn execute_claude_skill_tool(resources: &LoadedResources, input: Value) -> R
     Ok(output.trim().to_string())
 }
 
+fn is_lambda_verified_skill(skill: &puffer_resources::SkillSpec) -> bool {
+    skill
+        .verification
+        .as_ref()
+        .is_some_and(|verification| verification.system == "lambda-skill")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,9 +148,9 @@ mod tests {
                         content: "Verified prompt body".to_string(),
                         verification: Some(SkillVerificationSpec {
                             system: "lambda-skill".to_string(),
-                            source_path: Some("/tmp/skills/verified-ci/skill.lskill".to_string()),
+                            source_path: Some("fixtures/skills/verified-ci/skill.lskill".to_string()),
                             generated_path: Some(
-                                "/tmp/skills/verified-ci/out/GENERATED.SKILL.md".to_string(),
+                                "fixtures/skills/verified-ci/out/GENERATED.SKILL.md".to_string(),
                             ),
                             host_catalogue_path: None,
                             compiler_path: None,
@@ -193,15 +207,10 @@ mod tests {
     }
 
     #[test]
-    fn executes_verified_skill_with_provenance_metadata() {
-        let output =
-            execute_claude_skill_tool(&sample_resources(), json!({"skill": "verified-ci"}))
-                .unwrap();
-        assert!(output.contains("verified-skill: lambda-skill"));
-        assert!(output.contains("formal-source: /tmp/skills/verified-ci/skill.lskill"));
-        assert!(
-            output.contains("generated-descriptor: /tmp/skills/verified-ci/out/GENERATED.SKILL.md")
-        );
-        assert!(output.contains("verified-stats: tools=10, actions=2"));
+    fn rejects_verified_lambda_skill_model_invocation() {
+        let error = execute_claude_skill_tool(&sample_resources(), json!({"skill": "verified-ci"}))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("must be invoked as /skill:verified-ci"));
     }
 }

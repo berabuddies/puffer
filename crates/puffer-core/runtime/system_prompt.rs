@@ -234,7 +234,7 @@ fn build_session_guidance_section(
         let mut model_invocable_skills = resources
             .skills
             .iter()
-            .filter(|skill| !skill.value.disable_model_invocation)
+            .filter(|skill| is_model_invocable_skill(&skill.value))
             .map(|skill| model_invocable_skill_summary(&skill.value))
             .collect::<Vec<_>>();
         model_invocable_skills.sort();
@@ -264,6 +264,17 @@ fn model_invocable_skill_summary(skill: &SkillSpec) -> String {
         summary.push_str(&format!(" [verified {}]", verification.system));
     }
     summary
+}
+
+fn is_model_invocable_skill(skill: &SkillSpec) -> bool {
+    !skill.disable_model_invocation && !is_lambda_verified_skill(skill)
+}
+
+fn is_lambda_verified_skill(skill: &SkillSpec) -> bool {
+    skill
+        .verification
+        .as_ref()
+        .is_some_and(|verification| verification.system == "lambda-skill")
 }
 
 fn build_environment_section(state: &AppState, model_id: &str) -> Result<String> {
@@ -552,6 +563,18 @@ mod tests {
                 },
                 LoadedItem {
                     value: SkillSpec {
+                        name: "reviewer".to_string(),
+                        description: "Review source changes".to_string(),
+                        disable_model_invocation: false,
+                        ..SkillSpec::default()
+                    },
+                    source_info: SourceInfo {
+                        path: PathBuf::from(".puffer/resources/skills/reviewer/SKILL.md"),
+                        kind: SourceKind::Workspace,
+                    },
+                },
+                LoadedItem {
+                    value: SkillSpec {
                         name: "hidden".to_string(),
                         description: "Do not show this one".to_string(),
                         disable_model_invocation: true,
@@ -570,8 +593,8 @@ mod tests {
             render_runtime_system_prompt(&state, &resources, "gpt-5", &enabled_tools).unwrap();
 
         assert!(prompt.contains("Available model-invocable skills"));
-        assert!(prompt
-            .contains("- agent-browser: Use AgentEnv platform browsers [verified lambda-skill]"));
+        assert!(prompt.contains("- reviewer: Review source changes"));
+        assert!(!prompt.contains("agent-browser"));
         assert!(!prompt.contains("Do not show this one"));
     }
 
