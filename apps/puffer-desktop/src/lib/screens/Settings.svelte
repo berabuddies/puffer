@@ -20,11 +20,13 @@
     saveLambdaSkillLibrary,
     savePermissions,
     updateConfig,
+    type LambdaSkillLibraryInfo,
     type LambdaSkillLibrariesSnapshot,
     type McpServerInfo,
     type ModelDescriptorInfo,
     type PermissionsSnapshot
   } from "../api/desktop";
+  import { canInvokeTauri } from "../api/daemonClient";
   import type {
     DesktopPreferences,
     ExternalCredential,
@@ -83,7 +85,7 @@
     { id: "general",     label: "General",    icon: "settings" },
     { id: "providers",   label: "Providers",  icon: "plug" },
     { id: "permissions", label: "Permissions", icon: "bolt" },
-    { id: "skills",      label: "Skills",      icon: "layers" },
+    { id: "skills",      label: "Verified Skills", icon: "shield" },
     { id: "mcp",         label: "MCP Servers", icon: "plug" },
     { id: "git",         label: "Git & PRs",  icon: "git" },
     { id: "appearance",  label: "Appearance", icon: "layers" },
@@ -129,21 +131,6 @@
   let lambdaSaving = $state(false);
   let lambdaError = $state<string | null>(null);
   let lambdaSaved = $state<string | null>(null);
-  let lambdaForm = $state({
-    id: "",
-    root: "",
-    compilerPath: "",
-    generatedSubpath: "out/GENERATED.SKILL.md",
-    hostCatalogueSubpath: "",
-    allowedTools: "",
-    hostToolBindings: "{}",
-    skillHostToolBindings: "{}",
-    scope: "workspace" as "workspace" | "user",
-    userInvocable: true,
-    disableModelInvocation: true
-  });
-  const lambdaHostToolBindingsPlaceholder = '{"formal_search":["Bash"]}';
-  const lambdaSkillHostToolBindingsPlaceholder = '{"gh-fix-ci":{"gh_pr_view":["Bash"]}}';
 
   // Per-provider model listings cached by providerId. Populated on demand
   // when the user expands the Providers pane.
@@ -256,63 +243,77 @@
     }
   }
 
-  function commaList(value: string): string[] {
-    return value
-      .split(",")
-      .map((part) => part.trim())
-      .filter(Boolean);
+  function basenameFromPath(path: string): string {
+    return path.split(/[\\/]/).filter(Boolean).at(-1) ?? "Verified Skills";
   }
 
-  function optionalText(value: string): string | null {
-    const trimmed = value.trim();
-    return trimmed ? trimmed : null;
+  function slugFromPath(path: string): string {
+    const slug = basenameFromPath(path)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    return slug || "verified-skills";
   }
 
-  function parseBindingObject<T>(label: string, raw: string, fallback: T): T {
-    const trimmed = raw.trim();
-    if (!trimmed) return fallback;
-    try {
-      return JSON.parse(trimmed) as T;
-    } catch (e) {
-      throw new Error(`${label} must be valid JSON: ${(e as Error).message ?? String(e)}`);
+  function shortPathHash(path: string): string {
+    let hash = 2166136261;
+    for (let i = 0; i < path.length; i += 1) {
+      hash ^= path.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
     }
+    return (hash >>> 0).toString(36).slice(0, 6);
   }
 
-  async function saveLambdaSkillLibraryConfig() {
-    const id = lambdaForm.id.trim();
-    const root = lambdaForm.root.trim();
-    if (lambdaSaving || !id || !root) return;
+  function verifiedSkillIdFromPath(path: string): string {
+    return `${slugFromPath(path)}-${shortPathHash(path)}`;
+  }
+
+  function verifiedSkillStatus(library: LambdaSkillLibraryInfo): string {
+    if (library.disableModelInvocation) return "Installed";
+    if (library.allowedTools.length > 0 && (library.hostCatalogueSubpath || library.compilerPath)) {
+      return "Ready for model use";
+    }
+    return "Needs verification output";
+  }
+
+  function verifiedSkillScopeLabel(library: LambdaSkillLibraryInfo): string {
+    return library.sourceKind === "user" ? "User" : "Workspace";
+  }
+
+  async function pickVerifiedSkillsFolder(): Promise<string | null> {
+    if (!canInvokeTauri()) {
+      throw new Error("Folder picker is only available in the desktop app.");
+    }
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const picked = await open({ directory: true, multiple: false });
+    return typeof picked === "string" && picked.length > 0 ? picked : null;
+  }
+
+  async function addVerifiedSkillsFolder() {
+    if (lambdaSaving || !daemonReachable) return;
+    let root: string | null = null;
+    try {
+      root = await pickVerifiedSkillsFolder();
+    } catch (e) {
+      lambdaError = (e as Error).message ?? String(e);
+      return;
+    }
+    if (!root) return;
     lambdaLoadGeneration += 1;
     lambdaLoading = false;
     lambdaSaving = true;
     lambdaError = null;
     lambdaSaved = null;
     try {
-      const hostToolBindings = parseBindingObject<Record<string, string[]>>(
-        "Host tool bindings",
-        lambdaForm.hostToolBindings,
-        {}
-      );
-      const skillHostToolBindings = parseBindingObject<Record<string, Record<string, string[]>>>(
-        "Per-skill host tool bindings",
-        lambdaForm.skillHostToolBindings,
-        {}
-      );
       lambdaSnapshot = await saveLambdaSkillLibrary({
-        id,
+        id: verifiedSkillIdFromPath(root),
         root,
-        compilerPath: optionalText(lambdaForm.compilerPath),
-        generatedSubpath: optionalText(lambdaForm.generatedSubpath),
-        hostCatalogueSubpath: optionalText(lambdaForm.hostCatalogueSubpath),
-        allowedTools: commaList(lambdaForm.allowedTools),
-        hostToolBindings,
-        skillHostToolBindings,
-        scope: lambdaForm.scope,
-        userInvocable: lambdaForm.userInvocable,
-        disableModelInvocation: lambdaForm.disableModelInvocation
+        scope: "workspace",
+        userInvocable: true,
+        disableModelInvocation: false
       });
       lambdaLoaded = true;
-      lambdaSaved = `Saved ${id}`;
+      lambdaSaved = `Added ${basenameFromPath(root)}`;
       props.onRefresh();
     } catch (e) {
       lambdaError = (e as Error).message ?? String(e);
@@ -553,7 +554,7 @@
   // error. In Tauri the singleton connects on first `ensureLocalDaemonClient`.
   let daemonReachable = isDaemonReachable();
   let mcpFormDisabled = $derived(!daemonReachable || mcpLoading || mcpSaving);
-  let lambdaFormDisabled = $derived(!daemonReachable || lambdaLoading || lambdaSaving);
+  let lambdaActionDisabled = $derived(!daemonReachable || lambdaLoading || lambdaSaving);
   let modelPickerLoading = $derived(
     Boolean(modelPickerProvider && modelLoadingByProvider[modelPickerProvider])
   );
@@ -937,18 +938,18 @@
       </div>
 
     {:else if section === "skills"}
-      <h2>Skills</h2>
-      <p class="lead">External Lambda Skill libraries loaded from declarative resource manifests.</p>
+      <h2>Verified Skills</h2>
+      <p class="lead">Add folders that contain verified skill libraries. Puffer keeps the files outside the app and loads them from config.</p>
       <div style="display: flex; justify-content: flex-end; margin-bottom: 10px;">
         <button
           type="button"
           class="sc-btn"
           data-variant="outline"
           data-size="sm"
-          disabled={!daemonReachable || lambdaLoading || lambdaSaving}
+          disabled={lambdaActionDisabled}
           onclick={refreshIfIdle}
         >
-          <Icon name="refresh" size={13} />Refresh skills
+          <Icon name="refresh" size={13} />Refresh
         </button>
       </div>
       {#if lambdaError}
@@ -959,198 +960,55 @@
       {/if}
       <div class="pf-settings-note">
         {#if !daemonReachable}
-          Preview mode — launch Puffer in the desktop app to edit Lambda Skill libraries.
+          Launch Puffer in the desktop app to add Verified Skills folders.
         {:else if lambdaLoading}
-          Loading Lambda Skill library config…
-        {:else if lambdaSnapshot}
-          Manifests live in <code>{lambdaSnapshot.directories.workspace}</code> or <code>{lambdaSnapshot.directories.user}</code>.
+          Loading Verified Skills folders…
         {:else}
-          Lambda Skill library config will appear after loading.
+          Choose a folder once. Puffer will keep using it from this workspace.
         {/if}
       </div>
 
       {#if lambdaSnapshot?.warnings.length}
         <div class="pf-settings-note warn">
-          {lambdaSnapshot.warnings.join(" · ")}
+          Some Verified Skills need generated verification output before the model can use them.
         </div>
       {/if}
 
-      {#if lambdaSnapshot}
-        <div class="pf-settings-row" style="align-items: start;">
-          <div class="meta">
-            <div class="label">Readiness</div>
-            <div class="desc">Same gate-readiness source as /doctor.</div>
-          </div>
-          <pre class="pf-code-block">{lambdaSnapshot.doctor}</pre>
-        </div>
-      {/if}
-
-      <div class="pf-settings-row" style="align-items: start;">
+      <div class="pf-settings-row">
         <div class="meta">
-          <div class="label">Add library</div>
-          <div class="desc">Write one config-only manifest; the library stays outside Puffer.</div>
+          <div class="label">Add folder</div>
+          <div class="desc">Choose the folder that contains your Verified Skills. Puffer will infer the generated verification files when they are present.</div>
         </div>
-        <div class="pf-mcp-form">
-          <div class="pf-mcp-form-grid">
-            <label>
-              ID
-              <input
-                class="sc-input"
-                placeholder="verified-skills"
-                value={lambdaForm.id}
-                disabled={lambdaFormDisabled}
-                oninput={(e) => (lambdaForm.id = (e.currentTarget as HTMLInputElement).value)}
-              />
-            </label>
-            <label>
-              Scope
-              <select
-                class="sc-input"
-                value={lambdaForm.scope}
-                disabled={lambdaFormDisabled}
-                onchange={(e) =>
-                  (lambdaForm.scope = (e.currentTarget as HTMLSelectElement).value as "workspace" | "user")}
-              >
-                <option value="workspace">workspace</option>
-                <option value="user">user</option>
-              </select>
-            </label>
-          </div>
-          <label>
-            Library root
-            <input
-              class="sc-input"
-              placeholder="/absolute/path/to/lambda-skill-library"
-              value={lambdaForm.root}
-              disabled={lambdaFormDisabled}
-              oninput={(e) => (lambdaForm.root = (e.currentTarget as HTMLInputElement).value)}
-            />
-          </label>
-          <div class="pf-mcp-form-grid">
-            <label>
-              Compiler path
-              <input
-                class="sc-input"
-                placeholder="/absolute/path/to/lskillc"
-                value={lambdaForm.compilerPath}
-                disabled={lambdaFormDisabled}
-                oninput={(e) => (lambdaForm.compilerPath = (e.currentTarget as HTMLInputElement).value)}
-              />
-            </label>
-            <label>
-              Host catalogue subpath
-              <input
-                class="sc-input"
-                placeholder="out/host.json"
-                value={lambdaForm.hostCatalogueSubpath}
-                disabled={lambdaFormDisabled}
-                oninput={(e) => (lambdaForm.hostCatalogueSubpath = (e.currentTarget as HTMLInputElement).value)}
-              />
-            </label>
-          </div>
-          <div class="pf-mcp-form-grid">
-            <label>
-              Generated descriptor
-              <input
-                class="sc-input"
-                value={lambdaForm.generatedSubpath}
-                disabled={lambdaFormDisabled}
-                oninput={(e) => (lambdaForm.generatedSubpath = (e.currentTarget as HTMLInputElement).value)}
-              />
-            </label>
-            <label>
-              Allowed tools
-              <input
-                class="sc-input"
-                placeholder="Bash, Read"
-                value={lambdaForm.allowedTools}
-                disabled={lambdaFormDisabled}
-                oninput={(e) => (lambdaForm.allowedTools = (e.currentTarget as HTMLInputElement).value)}
-              />
-            </label>
-          </div>
-          <label>
-            Host tool bindings JSON
-            <textarea
-              class="sc-input"
-              rows="4"
-              placeholder={lambdaHostToolBindingsPlaceholder}
-              value={lambdaForm.hostToolBindings}
-              disabled={lambdaFormDisabled}
-              oninput={(e) => (lambdaForm.hostToolBindings = (e.currentTarget as HTMLTextAreaElement).value)}
-            ></textarea>
-          </label>
-          <label>
-            Per-skill host tool bindings JSON
-            <textarea
-              class="sc-input"
-              rows="5"
-              placeholder={lambdaSkillHostToolBindingsPlaceholder}
-              value={lambdaForm.skillHostToolBindings}
-              disabled={lambdaFormDisabled}
-              oninput={(e) => (lambdaForm.skillHostToolBindings = (e.currentTarget as HTMLTextAreaElement).value)}
-            ></textarea>
-          </label>
-          <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
-            <label style="display: flex; gap: 6px; align-items: center; font-size: 12px;">
-              <input
-                type="checkbox"
-                class="sc-switch"
-                checked={lambdaForm.userInvocable}
-                disabled={lambdaFormDisabled}
-                onchange={(e) => (lambdaForm.userInvocable = (e.currentTarget as HTMLInputElement).checked)}
-              />
-              User-invocable
-            </label>
-            <label style="display: flex; gap: 6px; align-items: center; font-size: 12px;">
-              <input
-                type="checkbox"
-                class="sc-switch"
-                checked={lambdaForm.disableModelInvocation}
-                disabled={lambdaFormDisabled}
-                onchange={(e) => (lambdaForm.disableModelInvocation = (e.currentTarget as HTMLInputElement).checked)}
-              />
-              Disable model invocation
-            </label>
-          </div>
-          <div style="display: flex; justify-content: flex-end;">
-            <button
-              type="button"
-              class="sc-btn"
-              data-variant="default"
-              data-size="sm"
-              disabled={lambdaFormDisabled || !lambdaForm.id.trim() || !lambdaForm.root.trim()}
-              onclick={saveLambdaSkillLibraryConfig}
-            >
-              <Icon name="plus" size={12} />{lambdaSaving ? "Saving…" : "Save library"}
-            </button>
-          </div>
-        </div>
+        <button
+          type="button"
+          class="sc-btn"
+          data-variant="default"
+          data-size="sm"
+          disabled={lambdaActionDisabled}
+          onclick={addVerifiedSkillsFolder}
+        >
+          <Icon name="folder" size={13} />{lambdaSaving ? "Adding…" : "Choose folder"}
+        </button>
       </div>
 
       <div class="pf-mcp-list">
         {#each lambdaSnapshot?.libraries ?? [] as library (library.sourcePath)}
           <div class="pf-mcp-card">
-            <span class="ico"><Icon name="layers" size={16} /></span>
+            <span class="ico"><Icon name="shield" size={16} /></span>
             <div>
-              <div class="title">{library.id}
-                <span style="color: var(--muted-foreground); font-family: var(--font-mono); font-size: 11px; margin-left: 6px;">{library.sourceKind}</span>
-              </div>
+              <div class="title">{basenameFromPath(library.root)}</div>
               <div class="desc">
-                {library.root}
-                {#if library.compilerPath}· compiler {library.compilerPath}{/if}
-                {#if library.hostCatalogueSubpath}· host {library.hostCatalogueSubpath}{/if}
-                {#if library.allowedTools.length}· allowed {library.allowedTools.join(", ")}{/if}
+                {verifiedSkillScopeLabel(library)} Verified Skills folder
               </div>
             </div>
-            <div style="color: var(--muted-foreground); font-family: var(--font-sans); font-size: 11px;" title={library.sourcePath}>
-              manifest
-            </div>
+            <span class:ready={verifiedSkillStatus(library) === "Ready for model use"} class="pf-status-pill">
+              {verifiedSkillStatus(library)}
+            </span>
             <input type="checkbox" class="sc-switch" checked disabled />
           </div>
         {/each}
         {#if !lambdaLoading && (lambdaSnapshot?.libraries.length ?? 0) === 0}
-          <div class="pf-empty">No Lambda Skill libraries configured.</div>
+          <div class="pf-empty">No Verified Skills folders added.</div>
         {/if}
       </div>
 
