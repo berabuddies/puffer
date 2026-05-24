@@ -1,6 +1,5 @@
 use crate::daemon::DaemonState;
 use anyhow::{Context, Result};
-use puffer_resources::{LoadedItem, LoadedResources, SkillSpec, SkillVerificationSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -104,6 +103,20 @@ struct LambdaVerifiedSkillInfoDto {
     actions: Option<usize>,
 }
 
+#[derive(Default, Deserialize)]
+struct GeneratedSkillFrontmatter {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+struct LambdaSkillStatsDto {
+    tools: Option<usize>,
+    actions: Option<usize>,
+}
+
 fn default_lambda_skill_user_invocable() -> bool {
     true
 }
@@ -191,7 +204,6 @@ pub(crate) fn handle_set_lambda_skill_enabled(
 }
 
 fn lambda_skill_libraries_snapshot(state: &DaemonState) -> Result<Value> {
-    let resources = state.lambda_skill_loaded_resources_snapshot()?;
     let paths = state.config_paths();
     let workspace_dir = paths
         .workspace_config_dir
@@ -203,7 +215,7 @@ fn lambda_skill_libraries_snapshot(state: &DaemonState) -> Result<Value> {
         .into_iter()
         .chain(lambda_skill_library_manifest_dtos(&user_dir, "user")?)
         .collect::<Vec<_>>();
-    let skills = lambda_verified_skill_dtos(&resources, &libraries);
+    let skills = lambda_verified_skill_dtos(&libraries);
     let doctor = lambda_desktop_doctor_summary(&skills);
     let warnings = lambda_desktop_warning_lines(&skills);
     Ok(json!({
@@ -277,13 +289,11 @@ fn lambda_skill_library_manifest_dtos(
 }
 
 fn lambda_verified_skill_dtos(
-    resources: &LoadedResources,
     libraries: &[LambdaSkillLibraryInfoDto],
 ) -> Vec<LambdaVerifiedSkillInfoDto> {
-    let mut skills = resources
-        .skills
+    let mut skills = libraries
         .iter()
-        .filter_map(|skill| lambda_verified_skill_dto(skill, libraries))
+        .flat_map(lambda_verified_skill_dtos_for_library)
         .collect::<Vec<_>>();
     skills.sort_by(|left, right| {
         left.source_kind
@@ -294,34 +304,81 @@ fn lambda_verified_skill_dtos(
     skills
 }
 
-fn lambda_verified_skill_dto(
-    skill: &LoadedItem<SkillSpec>,
-    libraries: &[LambdaSkillLibraryInfoDto],
+fn lambda_verified_skill_dtos_for_library(
+    library: &LambdaSkillLibraryInfoDto,
+) -> Vec<LambdaVerifiedSkillInfoDto> {
+    let root = resolved_lambda_skill_library_root(library);
+    let mut skill_dirs = Vec::new();
+    collect_lambda_skill_dirs_for_snapshot(&root, &mut skill_dirs);
+    skill_dirs.sort();
+    skill_dirs
+        .into_iter()
+        .filter_map(|skill_dir| lambda_verified_skill_dto_for_dir(library, &skill_dir))
+        .collect()
+}
+
+fn lambda_verified_skill_dto_for_dir(
+    library: &LambdaSkillLibraryInfoDto,
+    skill_dir: &Path,
 ) -> Option<LambdaVerifiedSkillInfoDto> {
-    let verification = skill
-        .value
-        .verification
-        .as_ref()
-        .filter(|verification| verification.system == "lambda-skill")?;
-    let library = lambda_skill_library_for_source(&skill.source_info.path, libraries);
-    let readiness = lambda_desktop_readiness(&skill.value, verification);
+    let source_path = lambda_skill_source_path_for_snapshot(skill_dir)?;
+    let generated_path = skill_dir.join(
+        library
+            .generated_subpath
+            .as_deref()
+            .unwrap_or("out/GENERATED.SKILL.md"),
+    );
+    let raw = std::fs::read_to_string(&generated_path).ok()?;
+    let (frontmatter, body) = parse_generated_skill_descriptor(&raw).ok()?;
+    let raw_name = frontmatter.name.unwrap_or_else(|| {
+        skill_dir
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "lambda-skill".to_string())
+    });
+    let mut name = normalize_lambda_skill_name(&raw_name);
+    if name.is_empty() {
+        name = "skill".to_string();
+    }
+    let description = frontmatter
+        .description
+        .unwrap_or_else(|| first_descriptive_line(body).to_string());
+    let stats = load_lambda_skill_stats_for_snapshot(&skill_dir.join("out/stats.json"));
+    let host_catalogue_path = library
+        .host_catalogue_subpath
+        .as_deref()
+        .map(|subpath| skill_dir.join(subpath));
+    let compiler_path = library
+        .compiler_path
+        .as_deref()
+        .map(|path| resolve_lambda_path_for_manifest(path, &library.source_path));
+    let readiness = lambda_desktop_readiness(
+        &library.allowed_tools,
+        &source_path,
+        host_catalogue_path.as_deref(),
+        compiler_path.as_deref(),
+    );
+    let enabled = !library.disable_model_invocation
+        && !library
+            .disabled_skills
+            .iter()
+            .any(|disabled| disabled == &name);
     Some(LambdaVerifiedSkillInfoDto {
-        name: skill.value.name.clone(),
-        description: skill.value.description.clone(),
-        library_id: library.map(|library| library.id.clone()),
-        library_root: library.map(|library| library.root.clone()),
-        source_kind: library.map(|library| library.source_kind.clone()),
-        source_path: verification.source_path.clone(),
-        generated_path: verification.generated_path.clone(),
+        name,
+        description,
+        library_id: Some(library.id.clone()),
+        library_root: Some(library.root.clone()),
+        source_kind: Some(library.source_kind.clone()),
+        source_path: Some(source_path.display().to_string()),
+        generated_path: Some(generated_path.display().to_string()),
         ready: readiness.failure_reason.is_none(),
-        enabled: !skill.value.disable_model_invocation,
-        model_invocable: !skill.value.disable_model_invocation
-            && readiness.failure_reason.is_none(),
+        enabled,
+        model_invocable: enabled && readiness.failure_reason.is_none(),
         gate_source: readiness.gate_source,
         failure_reason: readiness.failure_reason,
-        allowed_tools: skill.value.allowed_tools.clone(),
-        tools: verification.tools,
-        actions: verification.actions,
+        allowed_tools: library.allowed_tools.clone(),
+        tools: stats.as_ref().and_then(|stats| stats.tools),
+        actions: stats.as_ref().and_then(|stats| stats.actions),
     })
 }
 
@@ -331,26 +388,25 @@ struct LambdaDesktopReadiness {
 }
 
 fn lambda_desktop_readiness(
-    skill: &SkillSpec,
-    verification: &SkillVerificationSpec,
+    allowed_tools: &[String],
+    source_path: &Path,
+    host_catalogue_path: Option<&Path>,
+    compiler_path: Option<&Path>,
 ) -> LambdaDesktopReadiness {
-    if skill.allowed_tools.is_empty() {
+    if allowed_tools.is_empty() {
         return lambda_desktop_not_ready("missing concrete tool scope");
     }
-    if let Some(host_catalogue_path) = verification.host_catalogue_path.as_deref() {
-        if Path::new(host_catalogue_path).is_file() {
+    if let Some(host_catalogue_path) = host_catalogue_path {
+        if host_catalogue_path.is_file() {
             return lambda_desktop_ready("host catalogue");
         }
         return lambda_desktop_not_ready("host catalogue not found");
     }
-    if let Some(compiler_path) = verification.compiler_path.as_deref() {
-        if !Path::new(compiler_path).is_file() {
+    if let Some(compiler_path) = compiler_path {
+        if !compiler_path.is_file() {
             return lambda_desktop_not_ready("compiler not found");
         }
-        let Some(source_path) = verification.source_path.as_deref() else {
-            return lambda_desktop_not_ready("formal source missing");
-        };
-        if !Path::new(source_path).is_file() {
+        if !source_path.is_file() {
             return lambda_desktop_not_ready("formal source not found");
         }
         return lambda_desktop_ready("compiler");
@@ -396,28 +452,6 @@ fn lambda_desktop_warning_lines(skills: &[LambdaVerifiedSkillInfoDto]) -> Vec<St
         .collect()
 }
 
-fn lambda_skill_library_for_source<'a>(
-    source_path: &Path,
-    libraries: &'a [LambdaSkillLibraryInfoDto],
-) -> Option<&'a LambdaSkillLibraryInfoDto> {
-    libraries
-        .iter()
-        .filter(|library| lambda_skill_source_belongs_to_library(source_path, library))
-        .max_by_key(|library| library.root.len())
-}
-
-fn lambda_skill_source_belongs_to_library(
-    source_path: &Path,
-    library: &LambdaSkillLibraryInfoDto,
-) -> bool {
-    let root = resolved_lambda_skill_library_root(library);
-    let canonical_root = root.canonicalize().unwrap_or(root);
-    let canonical_source = source_path
-        .canonicalize()
-        .unwrap_or_else(|_| source_path.to_path_buf());
-    canonical_source.starts_with(canonical_root)
-}
-
 fn resolved_lambda_skill_library_root(library: &LambdaSkillLibraryInfoDto) -> PathBuf {
     let root = PathBuf::from(&library.root);
     if root.is_absolute() {
@@ -427,6 +461,72 @@ fn resolved_lambda_skill_library_root(library: &LambdaSkillLibraryInfoDto) -> Pa
         .parent()
         .unwrap_or_else(|| Path::new(""))
         .join(root)
+}
+
+fn resolve_lambda_path_for_manifest(raw: &str, manifest_path: &str) -> PathBuf {
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        return path;
+    }
+    Path::new(manifest_path)
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join(path)
+}
+
+fn collect_lambda_skill_dirs_for_snapshot(dir: &Path, out: &mut Vec<PathBuf>) {
+    if is_ignored_library_dir(dir) {
+        return;
+    }
+    if lambda_skill_source_path_for_snapshot(dir).is_some() {
+        out.push(dir.to_path_buf());
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_lambda_skill_dirs_for_snapshot(&path, out);
+        }
+    }
+}
+
+fn lambda_skill_source_path_for_snapshot(dir: &Path) -> Option<PathBuf> {
+    let skill_source = dir.join("skill.lskill");
+    if skill_source.is_file() {
+        return Some(skill_source);
+    }
+    let main_source = dir.join("main.lskill");
+    main_source.is_file().then_some(main_source)
+}
+
+fn parse_generated_skill_descriptor(raw: &str) -> Result<(GeneratedSkillFrontmatter, &str)> {
+    let Some(rest) = raw.strip_prefix("---") else {
+        return Ok((GeneratedSkillFrontmatter::default(), raw));
+    };
+    let rest = rest.strip_prefix('\n').unwrap_or(rest);
+    let Some(end) = rest.find("\n---") else {
+        return Ok((GeneratedSkillFrontmatter::default(), raw));
+    };
+    let frontmatter = serde_yaml::from_str(&rest[..end]).unwrap_or_default();
+    let body = rest[end + "\n---".len()..]
+        .strip_prefix('\n')
+        .unwrap_or(&rest[end + "\n---".len()..]);
+    Ok((frontmatter, body))
+}
+
+fn first_descriptive_line(body: &str) -> &str {
+    body.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .unwrap_or("")
+}
+
+fn load_lambda_skill_stats_for_snapshot(path: &Path) -> Option<LambdaSkillStatsDto> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
 }
 
 fn validate_lambda_skill_library_id(id: &str) -> Result<()> {

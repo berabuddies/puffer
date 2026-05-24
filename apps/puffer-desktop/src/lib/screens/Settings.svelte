@@ -231,7 +231,11 @@
     lambdaLoading = true;
     lambdaError = null;
     try {
-      const snap = await listLambdaSkillLibraries();
+      const snap = await withTimeout(
+        listLambdaSkillLibraries(),
+        15000,
+        "Verified Skills are still loading. Try Refresh again in a moment."
+      );
       if (generation !== lambdaLoadGeneration) return;
       lambdaSnapshot = snap;
     } catch (e) {
@@ -303,6 +307,15 @@
     return counts.length > 0 ? `${scope} Verified Skill · ${counts.join(" · ")}` : `${scope} Verified Skill`;
   }
 
+  function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+    return Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        setTimeout(() => reject(new Error(message)), ms);
+      })
+    ]);
+  }
+
   async function pickVerifiedSkillsFolder(): Promise<string | null> {
     if (!canInvokeTauri()) {
       throw new Error("Folder picker is only available in the desktop app.");
@@ -328,13 +341,17 @@
     lambdaError = null;
     lambdaSaved = null;
     try {
-      lambdaSnapshot = await saveLambdaSkillLibrary({
-        id: verifiedSkillIdFromPath(root),
-        root,
-        scope: "workspace",
-        userInvocable: true,
-        disableModelInvocation: false
-      });
+      lambdaSnapshot = await withTimeout(
+        saveLambdaSkillLibrary({
+          id: verifiedSkillIdFromPath(root),
+          root,
+          scope: "workspace",
+          userInvocable: true,
+          disableModelInvocation: false
+        }),
+        15000,
+        "Adding this Verified Skills folder is still running. Try Refresh again in a moment."
+      );
       lambdaLoaded = true;
       lambdaSaved = `Added ${basenameFromPath(root)}`;
       props.onRefresh();

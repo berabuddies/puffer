@@ -291,12 +291,6 @@ impl DaemonState {
     pub(crate) fn config_paths(&self) -> &ConfigPaths {
         &self.paths
     }
-
-    /// Returns loaded resources for lightweight desktop Lambda Skill snapshots.
-    pub(crate) fn lambda_skill_loaded_resources_snapshot(&self) -> Result<LoadedResources> {
-        let inputs = self.build_runtime_inputs_without_discovery()?;
-        Ok(inputs.resources)
-    }
 }
 
 #[derive(Clone)]
