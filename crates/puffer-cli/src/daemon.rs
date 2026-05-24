@@ -4382,6 +4382,10 @@ mod tests {
 
         assert_eq!(saved["libraries"][0]["id"], "verified");
         assert_eq!(saved["libraries"][0]["allowedTools"][0], "Bash");
+        assert!(saved["libraries"][0]["hostToolBindings"]
+            .as_object()
+            .unwrap()
+            .is_empty());
         let manifest_path = state
             .paths
             .workspace_config_dir
@@ -4470,6 +4474,123 @@ mod tests {
         assert!(manifest.contains("host_catalogue_subpath: out/host.json"));
         assert!(manifest.contains("- Bash"));
         assert!(manifest.contains("- Read"));
+    }
+
+    #[test]
+    fn desktop_lambda_skill_library_snapshot_infers_legacy_manifest_defaults() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let lambda_root = temp.path().join("lambda-skills");
+        let skill_dir = lambda_root.join("ci/gh-fix-ci");
+        std::fs::create_dir_all(skill_dir.join("out")).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {}\nskill gh_fix_ci {}\n",
+        )
+        .expect("skill source");
+        std::fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: gh-fix-ci\ndescription: Verified CI repair\n---\nUse generated prompt.\n",
+        )
+        .expect("generated skill");
+        std::fs::write(
+            skill_dir.join("out/host.json"),
+            r#"{
+              "effects": ["net_r"],
+              "domains": [],
+              "tools": [
+                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash"], "registers": [], "contextReq": null}
+              ]
+            }"#,
+        )
+        .expect("host catalogue");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let manifest_dir = paths
+            .workspace_config_dir
+            .join("resources/lambda_skill_libraries");
+        std::fs::create_dir_all(&manifest_dir).expect("manifest dir");
+        std::fs::write(
+            manifest_dir.join("legacy.yaml"),
+            format!(
+                "id: legacy\nroot: {}\ncompiler_path: /tmp/lskillc\nhost_tool_bindings:\n  gh_pr_view:\n  - Bash\n",
+                lambda_root.display()
+            ),
+        )
+        .expect("legacy manifest");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let listed = handle_list_lambda_skill_libraries(&state).expect("list libraries");
+
+        assert_eq!(
+            listed["libraries"][0]["hostCatalogueSubpath"],
+            "out/host.json"
+        );
+        assert_eq!(listed["libraries"][0]["allowedTools"][0], "Bash");
+        assert!(listed["libraries"][0]["hostToolBindings"]
+            .as_object()
+            .unwrap()
+            .is_empty());
+        assert_eq!(listed["skills"][0]["modelInvocable"], true);
+    }
+
+    #[test]
+    fn desktop_lambda_skill_library_snapshot_deduplicates_same_config_dir() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let config_dir = temp.path().join("shared").join(".puffer");
+        let lambda_root = temp.path().join("lambda-skills");
+        let skill_dir = lambda_root.join("ci/gh-fix-ci");
+        std::fs::create_dir_all(skill_dir.join("out")).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {}\nskill gh_fix_ci {}\n",
+        )
+        .expect("skill source");
+        std::fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: gh-fix-ci\ndescription: Verified CI repair\n---\nUse generated prompt.\n",
+        )
+        .expect("generated skill");
+        std::fs::write(
+            skill_dir.join("out/host.json"),
+            r#"{
+              "effects": ["net_r"],
+              "domains": [],
+              "tools": [
+                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash"], "registers": [], "contextReq": null}
+              ]
+            }"#,
+        )
+        .expect("host catalogue");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: config_dir.clone(),
+            user_config_dir: config_dir,
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let saved = handle_save_lambda_skill_library(
+            &state,
+            &json!({
+                "id": "verified",
+                "root": lambda_root.display().to_string()
+            }),
+        )
+        .expect("save lambda skill library");
+
+        assert_eq!(saved["libraries"].as_array().unwrap().len(), 1);
+        assert_eq!(saved["skills"].as_array().unwrap().len(), 1);
+        assert_eq!(saved["skills"][0]["sourceKind"], "workspace");
     }
 
     #[test]

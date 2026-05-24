@@ -210,10 +210,14 @@ fn lambda_skill_libraries_snapshot(state: &DaemonState) -> Result<Value> {
     let user_dir = paths
         .user_config_dir
         .join("resources/lambda_skill_libraries");
-    let libraries = lambda_skill_library_manifest_dtos(&workspace_dir, "workspace")?
-        .into_iter()
-        .chain(lambda_skill_library_manifest_dtos(&user_dir, "user")?)
-        .collect::<Vec<_>>();
+    let libraries = if workspace_dir == user_dir {
+        lambda_skill_library_manifest_dtos(&workspace_dir, "workspace")?
+    } else {
+        lambda_skill_library_manifest_dtos(&workspace_dir, "workspace")?
+            .into_iter()
+            .chain(lambda_skill_library_manifest_dtos(&user_dir, "user")?)
+            .collect::<Vec<_>>()
+    };
     let skills = lambda_verified_skill_dtos(&libraries);
     let doctor = lambda_desktop_doctor_summary(&skills);
     let warnings = lambda_desktop_warning_lines(&skills);
@@ -261,8 +265,9 @@ fn lambda_skill_library_manifest_dtos(
         }
         let text =
             std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        let manifest: LambdaSkillLibraryManifestDto =
+        let mut manifest: LambdaSkillLibraryManifestDto =
             serde_yaml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+        infer_missing_lambda_skill_manifest_fields(&mut manifest);
         items.push(LambdaSkillLibraryInfoDto {
             id: manifest.id,
             root: manifest.root,
@@ -270,8 +275,8 @@ fn lambda_skill_library_manifest_dtos(
             host_catalogue_subpath: manifest.host_catalogue_subpath,
             compiler_path: manifest.compiler_path,
             allowed_tools: manifest.allowed_tools,
-            host_tool_bindings: manifest.host_tool_bindings,
-            skill_host_tool_bindings: manifest.skill_host_tool_bindings,
+            host_tool_bindings: BTreeMap::new(),
+            skill_host_tool_bindings: BTreeMap::new(),
             user_invocable: manifest.user_invocable,
             disable_model_invocation: manifest.disable_model_invocation,
             disabled_skills: normalize_lambda_skill_names(manifest.disabled_skills),
