@@ -13,6 +13,8 @@ mod agent_team_e2e;
 mod browser_permissions;
 #[path = "tool_execution/legacy_alias_permissions.rs"]
 mod legacy_alias_permissions;
+#[path = "tool_execution/lambda_gate_scope.rs"]
+mod lambda_gate_scope;
 #[path = "tool_execution/multi_agent_e2e.rs"]
 mod multi_agent_e2e;
 #[path = "tool_execution/request_scope_tests.rs"]
