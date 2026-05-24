@@ -4328,6 +4328,29 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace_root = temp.path().join("workspace");
         let lambda_root = temp.path().join("lambda-skills");
+        let skill_dir = lambda_root.join("ci/gh-fix-ci");
+        std::fs::create_dir_all(skill_dir.join("out")).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {}\nskill gh_fix_ci {}\n",
+        )
+        .expect("skill source");
+        std::fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: gh-fix-ci\ndescription: Verified CI repair\n---\nUse generated prompt.\n",
+        )
+        .expect("generated skill");
+        std::fs::write(
+            skill_dir.join("out/host.json"),
+            r#"{
+              "effects": ["net_r"],
+              "domains": [],
+              "tools": [
+                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash", "Read"], "registers": [], "contextReq": null}
+              ]
+            }"#,
+        )
+        .expect("host catalogue");
         let paths = ConfigPaths {
             workspace_root: workspace_root.clone(),
             workspace_config_dir: workspace_root.join(".puffer"),
@@ -4373,7 +4396,7 @@ mod tests {
         assert!(listed["doctor"]
             .as_str()
             .unwrap()
-            .contains("lambda_skills=0"));
+            .contains("lambda_skills=1"));
     }
 
     #[test]
@@ -4537,15 +4560,13 @@ mod tests {
     }
 
     #[test]
-    fn desktop_lambda_skill_library_save_requires_precompiled_host_catalogue() {
+    fn desktop_lambda_skill_library_save_rejects_missing_host_catalogue() {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace_root = temp.path().join("workspace");
         let external_project = temp.path().join("external-project");
         let lambda_root = external_project.join("skills");
-        let compiler = external_project.join("lean/LambdaW/.lake/build/bin/lskillc");
         let skill_dir = lambda_root.join("vendor/web-check");
         std::fs::create_dir_all(skill_dir.join("out")).expect("skill dir");
-        std::fs::create_dir_all(compiler.parent().unwrap()).expect("compiler dir");
         std::fs::write(
             skill_dir.join("skill.lskill"),
             "host {\n  tool fetch_page(url: Str) -> Str {\n    effects: [net_r]\n  }\n  tool ask_for_approval() -> Unit {\n    effects: [user_in]\n  }\n}\nskill web_check {}\n",
@@ -4556,7 +4577,6 @@ mod tests {
             "---\nname: web-check\ndescription: Verified web check\n---\nUse generated prompt.\n",
         )
         .expect("generated skill");
-        std::fs::write(&compiler, "unused compiler").expect("compiler");
         let paths = ConfigPaths {
             workspace_root: workspace_root.clone(),
             workspace_config_dir: workspace_root.join(".puffer"),
@@ -4567,26 +4587,73 @@ mod tests {
         let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
             .expect("daemon state");
 
-        let saved = handle_save_lambda_skill_library(
+        let error = handle_save_lambda_skill_library(
             &state,
             &json!({
                 "id": "verified",
                 "root": lambda_root.display().to_string()
             }),
         )
-        .expect("save lambda skill library");
+        .expect_err("missing host catalogue should reject import");
 
-        assert!(saved["libraries"][0]["compilerPath"].is_null());
-        assert_eq!(saved["skills"][0]["gateSource"], serde_json::Value::Null);
-        assert_eq!(saved["skills"][0]["modelInvocable"], false);
-        assert_eq!(
-            saved["skills"][0]["failureReason"],
-            "missing precompiled host catalogue"
-        );
-        assert!(saved["doctor"]
-            .as_str()
-            .unwrap()
-            .contains("lambda_skills=1 model_invocable=0 missing_gate_config=1"));
+        assert!(error
+            .to_string()
+            .contains("missing precompiled host catalogues"));
+        assert!(!state
+            .paths
+            .workspace_config_dir
+            .join("resources/lambda_skill_libraries/verified.yaml")
+            .exists());
+    }
+
+    #[test]
+    fn desktop_lambda_skill_library_save_rejects_host_without_concrete_tools() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let lambda_root = temp.path().join("lambda-skills");
+        let skill_dir = lambda_root.join("vendor/web-check");
+        std::fs::create_dir_all(skill_dir.join("out")).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {\n  tool fetch_page(url: Str) -> Str {\n    effects: [net_r]\n  }\n}\nskill web_check {}\n",
+        )
+        .expect("skill source");
+        std::fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: web-check\ndescription: Verified web check\n---\nUse generated prompt.\n",
+        )
+        .expect("generated skill");
+        std::fs::write(
+            skill_dir.join("out/host.json"),
+            r#"{
+              "effects": ["net_r"],
+              "domains": [],
+              "tools": [
+                {"name": "fetch_page", "params": [{"name": "url", "ty": "str"}], "result": "str", "effects": ["net_r"], "registers": [], "contextReq": null}
+              ]
+            }"#,
+        )
+        .expect("raw host catalogue");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let error = handle_save_lambda_skill_library(
+            &state,
+            &json!({
+                "id": "verified",
+                "root": lambda_root.display().to_string()
+            }),
+        )
+        .expect_err("raw host catalogue should reject import");
+
+        assert!(error.to_string().contains("lack concreteTools bindings"));
     }
 
     #[test]

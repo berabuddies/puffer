@@ -1015,7 +1015,7 @@
 
     {:else if section === "skills"}
       <h2>Verified Skills</h2>
-      <p class="lead">Add folders that contain verified skill libraries. Puffer keeps the files outside the app and loads them from config.</p>
+      <p class="lead">Add folders that contain Verified Skills with generated host catalogues. Puffer keeps the files outside the app and loads them from config.</p>
       <div style="display: flex; justify-content: flex-end; margin-bottom: 10px;">
         <button
           type="button"
@@ -1053,7 +1053,7 @@
       <div class="pf-settings-row">
         <div class="meta">
           <div class="label">Add folder</div>
-          <div class="desc">Choose the folder that contains your Verified Skills. Puffer will infer the generated verification files when they are present.</div>
+          <div class="desc">Choose the folder that contains your Verified Skills. It must already include generated verification files and host catalogues.</div>
         </div>
         <button
           type="button"

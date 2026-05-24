@@ -152,6 +152,7 @@ pub(crate) fn handle_save_lambda_skill_library(
         disabled_skills: normalize_lambda_skill_names(params.disabled_skills),
     };
     infer_missing_lambda_skill_manifest_fields(&mut manifest);
+    validate_lambda_skill_library_import(&manifest)?;
     let paths = state.config_paths();
     let dir = match params.scope.as_deref().unwrap_or("workspace") {
         "user" => paths
@@ -598,21 +599,149 @@ struct HostCatalogueForInference {
 
 #[derive(Deserialize)]
 struct HostToolForInference {
+    #[serde(default)]
+    name: Option<String>,
     #[serde(default, rename = "concreteTools", alias = "concrete_tools")]
     concrete_tools: Vec<String>,
 }
 
 fn infer_missing_lambda_skill_manifest_fields(manifest: &mut LambdaSkillLibraryManifestDto) {
     let root = PathBuf::from(&manifest.root);
-    if manifest.host_catalogue_subpath.is_none() && manifest.allowed_tools.is_empty() {
+    if manifest.host_catalogue_subpath.is_none() {
         if let Some(allowed_tools) = infer_allowed_tools_from_default_host_catalogues(&root) {
-            if !allowed_tools.is_empty() {
-                manifest.host_catalogue_subpath = Some("out/host.json".to_string());
+            manifest.host_catalogue_subpath = Some("out/host.json".to_string());
+            if manifest.allowed_tools.is_empty() && !allowed_tools.is_empty() {
                 manifest.allowed_tools = allowed_tools;
-                return;
             }
         }
     }
+}
+
+fn validate_lambda_skill_library_import(manifest: &LambdaSkillLibraryManifestDto) -> Result<()> {
+    let root = PathBuf::from(&manifest.root);
+    if !root.is_dir() {
+        anyhow::bail!(
+            "Verified Skills folder does not exist or is not a directory: {}",
+            root.display()
+        );
+    }
+
+    let mut skill_dirs = Vec::new();
+    collect_lambda_skill_dirs_for_snapshot(&root, &mut skill_dirs);
+    skill_dirs.sort();
+    if skill_dirs.is_empty() {
+        anyhow::bail!(
+            "No Verified Skills found in {}; choose a folder containing skill.lskill or main.lskill files",
+            root.display()
+        );
+    }
+
+    let generated_subpath = manifest
+        .generated_subpath
+        .as_deref()
+        .unwrap_or("out/GENERATED.SKILL.md");
+    let host_catalogue_subpath = manifest
+        .host_catalogue_subpath
+        .as_deref()
+        .unwrap_or("out/host.json");
+    let mut missing_generated = Vec::new();
+    let mut missing_host = Vec::new();
+    let mut invalid_host = Vec::new();
+    let mut missing_concrete = Vec::new();
+
+    for skill_dir in &skill_dirs {
+        let generated_path = skill_dir.join(generated_subpath);
+        if !generated_path.is_file() {
+            missing_generated.push(display_relative_to(&root, &generated_path));
+        }
+
+        let host_path = skill_dir.join(host_catalogue_subpath);
+        if !host_path.is_file() {
+            missing_host.push(display_relative_to(&root, &host_path));
+            continue;
+        }
+        match host_catalogue_missing_concrete_tools(&host_path) {
+            Ok(missing) => {
+                missing_concrete.extend(
+                    missing
+                        .into_iter()
+                        .map(|tool| format!("{}:{tool}", display_relative_to(&root, &host_path))),
+                );
+            }
+            Err(error) => invalid_host.push(format!(
+                "{} ({error})",
+                display_relative_to(&root, &host_path)
+            )),
+        }
+    }
+
+    if !missing_generated.is_empty() {
+        anyhow::bail!(
+            "Verified Skills import is incomplete: missing generated skill descriptors at {}",
+            format_examples(&missing_generated)
+        );
+    }
+    if !missing_host.is_empty() {
+        anyhow::bail!(
+            "Verified Skills import is incomplete: missing precompiled host catalogues at {}. Run `lskillc export-json <skill.lskill> -o <skill>/out/host.json` before importing.",
+            format_examples(&missing_host)
+        );
+    }
+    if !invalid_host.is_empty() {
+        anyhow::bail!(
+            "Verified Skills import is incomplete: invalid host catalogues at {}",
+            format_examples(&invalid_host)
+        );
+    }
+    if !missing_concrete.is_empty() {
+        anyhow::bail!(
+            "Verified Skills import is incomplete: host catalogues lack concreteTools bindings at {}",
+            format_examples(&missing_concrete)
+        );
+    }
+    if manifest.host_catalogue_subpath.is_none() {
+        anyhow::bail!(
+            "Verified Skills import is incomplete: set host_catalogue_subpath or provide default out/host.json catalogues"
+        );
+    }
+    if manifest.allowed_tools.is_empty() {
+        anyhow::bail!(
+            "Verified Skills import is incomplete: allowed_tools could not be inferred from concreteTools bindings"
+        );
+    }
+    Ok(())
+}
+
+fn host_catalogue_missing_concrete_tools(path: &Path) -> Result<Vec<String>> {
+    let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let parsed: HostCatalogueForInference =
+        serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
+    let mut missing = Vec::new();
+    for (index, tool) in parsed.tools.into_iter().enumerate() {
+        if tool
+            .concrete_tools
+            .iter()
+            .all(|concrete| concrete.trim().is_empty())
+        {
+            missing.push(tool.name.unwrap_or_else(|| format!("tool#{index}")));
+        }
+    }
+    Ok(missing)
+}
+
+fn display_relative_to(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+fn format_examples(values: &[String]) -> String {
+    let mut examples = values.iter().take(5).cloned().collect::<Vec<_>>();
+    if values.len() > examples.len() {
+        examples.push(format!("and {} more", values.len() - examples.len()));
+    }
+    examples.join(", ")
 }
 
 fn infer_allowed_tools_from_default_host_catalogues(root: &Path) -> Option<Vec<String>> {
