@@ -1,3 +1,4 @@
+use super::lambda_skill_status::{LambdaSkillStatus, lambda_skill_statuses};
 use anyhow::Result;
 use puffer_resources::LoadedResources;
 use std::fmt::Write as _;
@@ -46,6 +47,9 @@ pub(crate) fn append_lambda_skill_section(
     if let Some(source) = summary.first_compile_source.as_ref() {
         writeln!(text, "  first_compile_source={}", source.display())?;
     }
+    for status in lambda_skill_statuses(resources) {
+        writeln!(text, "  - {}", render_lambda_skill_status_line(&status))?;
+    }
     Ok(())
 }
 
@@ -78,6 +82,13 @@ pub(crate) fn render_lambda_skill_doctor_status(resources: &LoadedResources) -> 
             source.display()
         );
     }
+    for status in lambda_skill_statuses(resources) {
+        let _ = writeln!(
+            &mut text,
+            "lambda_skill {}",
+            render_lambda_skill_status_line(&status)
+        );
+    }
     text.trim_end().to_string()
 }
 
@@ -88,6 +99,19 @@ pub(crate) fn lambda_skill_doctor_warnings(
     let Some(summary) = collect_lambda_skill_summary(resources) else {
         return Vec::new();
     };
+    let status_warnings = lambda_skill_statuses(resources)
+        .into_iter()
+        .filter(|status| !status.ready)
+        .map(|status| LambdaSkillDoctorWarning {
+            summary: format!("Lambda Skill `{}` is not gate-ready", status.name),
+            detail: status
+                .failure_reason
+                .unwrap_or_else(|| "missing Lambda Skill gate config".to_string()),
+        })
+        .collect::<Vec<_>>();
+    if !status_warnings.is_empty() {
+        return status_warnings;
+    }
     if summary.missing_gate_config > 0 {
         return vec![LambdaSkillDoctorWarning {
             summary: format!(
@@ -107,6 +131,16 @@ pub(crate) fn lambda_skill_doctor_warnings(
         }];
     }
     Vec::new()
+}
+
+fn render_lambda_skill_status_line(status: &LambdaSkillStatus) -> String {
+    format!(
+        "{}: {}; {}; {}",
+        status.name,
+        status.readiness_label(),
+        status.model_invocation_label(),
+        status.allowed_tools_label()
+    )
 }
 
 fn display_compiler(summary: &LambdaSkillDoctorSummary) -> String {
@@ -189,6 +223,7 @@ mod tests {
             skills: vec![LoadedItem {
                 value: SkillSpec {
                     name: "verified-demo".to_string(),
+                    allowed_tools: vec!["Read".to_string()],
                     verification: Some(SkillVerificationSpec {
                         system: "lambda-skill".to_string(),
                         source_path: Some(source_path.display().to_string()),
@@ -220,9 +255,61 @@ mod tests {
             "lambda_skills=1 strict_catalogues=0 manifest_compilers=0 missing_gate_config=1 stats_known=1 tools=2 actions=3"
         ));
         assert!(status.contains("lambda_skill_configured_compiler=<missing>"));
+        assert!(status.contains(
+            "lambda_skill verified-demo: not gate-ready: missing host_catalogue_subpath or compiler_path; model invocation blocked; allowed tools Read"
+        ));
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0]
-            .summary
-            .contains("lack host catalogue or compiler"));
+        assert!(warnings[0].summary.contains("verified-demo"));
+        assert!(
+            warnings[0]
+                .detail
+                .contains("missing host_catalogue_subpath or compiler_path")
+        );
+    }
+
+    #[test]
+    fn render_lambda_status_lists_gate_ready_skill_details() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_path = temp.path().join("skill.lskill");
+        let host_path = temp.path().join("host.json");
+        std::fs::write(&source_path, "skill source").unwrap();
+        std::fs::write(&host_path, r#"{"effects":[],"domains":[],"tools":[]}"#).unwrap();
+        let resources = LoadedResources {
+            skills: vec![LoadedItem {
+                value: SkillSpec {
+                    name: "verified-ready".to_string(),
+                    allowed_tools: vec!["Read".to_string(), "ToolSearch".to_string()],
+                    verification: Some(SkillVerificationSpec {
+                        system: "lambda-skill".to_string(),
+                        source_path: Some(source_path.display().to_string()),
+                        generated_path: Some(
+                            temp.path()
+                                .join("out/GENERATED.SKILL.md")
+                                .display()
+                                .to_string(),
+                        ),
+                        host_catalogue_path: Some(host_path.display().to_string()),
+                        compiler_path: None,
+                        tools: Some(2),
+                        actions: Some(1),
+                    }),
+                    ..SkillSpec::default()
+                },
+                source_info: SourceInfo {
+                    path: source_path,
+                    kind: SourceKind::Workspace,
+                },
+            }],
+            ..LoadedResources::default()
+        };
+
+        let status = render_lambda_skill_doctor_status(&resources);
+        let warnings = lambda_skill_doctor_warnings(&resources);
+
+        assert!(status.contains("lambda_skills=1 strict_catalogues=1"));
+        assert!(status.contains(
+            "lambda_skill verified-ready: gate-ready via host catalogue; model-invocable; allowed tools Read, ToolSearch"
+        ));
+        assert!(warnings.is_empty());
     }
 }

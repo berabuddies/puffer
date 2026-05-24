@@ -1,3 +1,4 @@
+use super::lambda_skill_status::lambda_skill_status;
 use super::{append_tool_invocations, append_trace_events};
 use crate::runtime::lambda_gate::LambdaGateState;
 use crate::runtime::lambda_skill_activation::{
@@ -556,6 +557,17 @@ fn append_skill_verification_details(details: &mut Vec<String>, skill: &SkillSpe
     let Some(verification) = skill.verification.as_ref() else {
         return;
     };
+    if let Some(status) = lambda_skill_status(skill) {
+        details.push(lambda_verified_label(verification));
+        details.push(status.readiness_label());
+        details.push(status.model_invocation_label().to_string());
+        details.push(status.allowed_tools_label());
+        return;
+    }
+    details.push(lambda_verified_label(verification));
+}
+
+fn lambda_verified_label(verification: &puffer_resources::SkillVerificationSpec) -> String {
     let mut label = format!("verified {}", verification.system);
     let mut counts = Vec::new();
     if let Some(tools) = verification.tools {
@@ -567,7 +579,7 @@ fn append_skill_verification_details(details: &mut Vec<String>, skill: &SkillSpe
     if !counts.is_empty() {
         label.push_str(&format!(" ({})", counts.join(", ")));
     }
-    details.push(label);
+    label
 }
 
 fn skill_source_heading(kind: SourceKind) -> &'static str {
@@ -769,18 +781,22 @@ mod tests {
 
     #[test]
     fn render_skills_panel_marks_verified_skills() {
+        let temp = tempfile::tempdir().unwrap();
+        let host_path = temp.path().join("host.json");
+        std::fs::write(&host_path, r#"{"effects":[],"domains":[],"tools":[]}"#).unwrap();
         let resources = LoadedResources {
             skills: vec![LoadedItem {
                 value: SkillSpec {
                     name: "verified-ci".to_string(),
                     description: "Fix verified CI failures".to_string(),
+                    allowed_tools: vec!["Read".to_string()],
                     verification: Some(SkillVerificationSpec {
                         system: "lambda-skill".to_string(),
                         source_path: Some("fixtures/skills/verified-ci/skill.lskill".to_string()),
                         generated_path: Some(
                             "fixtures/skills/verified-ci/out/GENERATED.SKILL.md".to_string(),
                         ),
-                        host_catalogue_path: None,
+                        host_catalogue_path: Some(host_path.display().to_string()),
                         compiler_path: None,
                         tools: Some(10),
                         actions: Some(2),
@@ -797,7 +813,7 @@ mod tests {
 
         let rendered = render_skills_panel(&resources);
         assert!(rendered.contains(
-            "- /verified-ci · ~6 description tokens · verified lambda-skill (10 tools, 2 actions)"
+            "- /verified-ci · ~6 description tokens · verified lambda-skill (10 tools, 2 actions) · gate-ready via host catalogue · model-invocable · allowed tools Read"
         ));
     }
 

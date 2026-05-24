@@ -11,6 +11,7 @@ mod ecosystem;
 mod genskill;
 mod goal;
 mod lambda_doctor;
+mod lambda_skill_status;
 mod model;
 mod monitor;
 mod plugins;
