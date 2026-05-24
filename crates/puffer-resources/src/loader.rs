@@ -1341,11 +1341,8 @@ mod tests {
         let temp = tempdir().unwrap();
         let root = temp.path().join("workspace");
         let external_root = temp.path().join("lambda-library");
-        let compiler = temp.path().join("bin/lskillc");
         let skill_dir = external_root.join("source-pack/gh-fix-ci");
         fs::create_dir_all(skill_dir.join("out")).unwrap();
-        fs::create_dir_all(compiler.parent().unwrap()).unwrap();
-        fs::write(&compiler, "").unwrap();
         fs::write(
             skill_dir.join("skill.lskill"),
             "host {}\nskill gh_fix_ci {}\n",
@@ -1361,15 +1358,19 @@ mod tests {
             "{\n  \"slug\": \"gh_fix_ci\",\n  \"tools\": 10,\n  \"actions\": 2\n}\n",
         )
         .unwrap();
+        fs::write(
+            skill_dir.join("out/host.json"),
+            r#"{"effects":[],"domains":[],"tools":[{"name":"gh_auth_status","effects":[],"concreteTools":["Bash"]}]}"#,
+        )
+        .unwrap();
 
         let manifest_dir = root.join(".puffer/resources/lambda_skill_libraries");
         fs::create_dir_all(&manifest_dir).unwrap();
         fs::write(
             manifest_dir.join("verified.yaml"),
             format!(
-                "id: verified\nroot: '{}'\ncompiler_path: '{}'\nallowed_tools:\n  - Bash\n  - Read\nhost_tool_bindings:\n  gh_auth_status:\n    - Bash\nskill_host_tool_bindings:\n  gh-fix-ci:\n    gh_pr_view:\n      - Bash\n",
-                external_root.display(),
-                compiler.display()
+                "id: verified\nroot: '{}'\nhost_catalogue_subpath: out/host.json\nallowed_tools:\n  - Bash\n  - Read\nhost_tool_bindings:\n  gh_auth_status:\n    - Bash\nskill_host_tool_bindings:\n  gh-fix-ci:\n    gh_pr_view:\n      - Bash\n",
+                external_root.display()
             ),
         )
         .unwrap();
@@ -1402,9 +1403,10 @@ mod tests {
             verification.source_path,
             Some(skill_dir.join("skill.lskill").display().to_string())
         );
+        assert_eq!(verification.compiler_path, None);
         assert_eq!(
-            verification.compiler_path,
-            Some(compiler.display().to_string())
+            verification.host_catalogue_path,
+            Some(skill_dir.join("out/host.json").display().to_string())
         );
         assert_eq!(
             verification.host_tool_bindings.get("gh_auth_status"),

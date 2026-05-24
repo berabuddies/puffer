@@ -238,6 +238,6 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(error.contains("requires an active host catalogue"));
+        assert!(error.contains("requires a precompiled host catalogue"));
     }
 }

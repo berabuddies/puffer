@@ -2,19 +2,15 @@ use super::lambda_skill_status::{lambda_skill_statuses, LambdaSkillStatus};
 use anyhow::Result;
 use puffer_resources::LoadedResources;
 use std::fmt::Write as _;
-use std::path::PathBuf;
 
 #[derive(Debug)]
 struct LambdaSkillDoctorSummary {
     total: usize,
     host_catalogues: usize,
-    compile_sources: usize,
     missing_gate_config: usize,
     stats_known: usize,
     tools: usize,
     actions: usize,
-    compiler: Option<PathBuf>,
-    first_compile_source: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -34,19 +30,14 @@ pub(crate) fn append_lambda_skill_section(
     };
     writeln!(
         text,
-        "- lambda_skills={} strict_catalogues={} manifest_compilers={} missing_gate_config={} stats_known={} tools={} actions={}",
+        "- lambda_skills={} precompiled_catalogues={} missing_gate_config={} stats_known={} tools={} actions={}",
         summary.total,
         summary.host_catalogues,
-        summary.compile_sources,
         summary.missing_gate_config,
         summary.stats_known,
         summary.tools,
         summary.actions
     )?;
-    writeln!(text, "  configured_compiler={}", display_compiler(&summary))?;
-    if let Some(source) = summary.first_compile_source.as_ref() {
-        writeln!(text, "  first_compile_source={}", source.display())?;
-    }
     for status in lambda_skill_statuses(resources) {
         writeln!(text, "  - {}", render_lambda_skill_status_line(&status))?;
     }
@@ -61,27 +52,14 @@ pub(crate) fn render_lambda_skill_doctor_status(resources: &LoadedResources) -> 
     let mut text = String::new();
     let _ = writeln!(
         &mut text,
-        "lambda_skills={} strict_catalogues={} manifest_compilers={} missing_gate_config={} stats_known={} tools={} actions={}",
+        "lambda_skills={} precompiled_catalogues={} missing_gate_config={} stats_known={} tools={} actions={}",
         summary.total,
         summary.host_catalogues,
-        summary.compile_sources,
         summary.missing_gate_config,
         summary.stats_known,
         summary.tools,
         summary.actions
     );
-    let _ = writeln!(
-        &mut text,
-        "lambda_skill_configured_compiler={}",
-        display_compiler(&summary)
-    );
-    if let Some(source) = summary.first_compile_source.as_ref() {
-        let _ = writeln!(
-            &mut text,
-            "lambda_skill_first_compile_source={}",
-            source.display()
-        );
-    }
     for status in lambda_skill_statuses(resources) {
         let _ = writeln!(
             &mut text,
@@ -115,18 +93,10 @@ pub(crate) fn lambda_skill_doctor_warnings(
     if summary.missing_gate_config > 0 {
         return vec![LambdaSkillDoctorWarning {
             summary: format!(
-                "{} Lambda Skill(s) lack host catalogue or compiler config for strict gating",
+                "{} Lambda Skill(s) lack precompiled host catalogue config for strict gating",
                 summary.missing_gate_config
             ),
-            detail:
-                "Set host_catalogue_subpath or compiler_path in the lambda_skill_libraries manifest."
-                    .to_string(),
-        }];
-    }
-    if summary.compile_sources > 0 && summary.compiler.is_none() {
-        return vec![LambdaSkillDoctorWarning {
-            summary: "Configured Lambda Skill compiler was not found".to_string(),
-            detail: "Set compiler_path in the lambda_skill_libraries manifest to an existing lskillc binary."
+            detail: "Set host_catalogue_subpath in the lambda_skill_libraries manifest."
                 .to_string(),
         }];
     }
@@ -143,24 +113,13 @@ fn render_lambda_skill_status_line(status: &LambdaSkillStatus) -> String {
     )
 }
 
-fn display_compiler(summary: &LambdaSkillDoctorSummary) -> String {
-    summary
-        .compiler
-        .as_ref()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "<missing>".to_string())
-}
-
 fn collect_lambda_skill_summary(resources: &LoadedResources) -> Option<LambdaSkillDoctorSummary> {
     let mut total = 0;
     let mut host_catalogues = 0;
-    let mut compile_sources = 0;
     let mut missing_gate_config = 0;
     let mut stats_known = 0;
     let mut tools = 0;
     let mut actions = 0;
-    let mut first_compile_source = None;
-    let mut first_compile_verification = None;
 
     for skill in &resources.skills {
         let Some(verification) = skill.value.verification.as_ref() else {
@@ -172,12 +131,6 @@ fn collect_lambda_skill_summary(resources: &LoadedResources) -> Option<LambdaSki
         total += 1;
         if verification.host_catalogue_path.is_some() {
             host_catalogues += 1;
-        } else if verification.compiler_path.is_some() {
-            compile_sources += 1;
-            if let Some(source_path) = verification.source_path.as_ref() {
-                first_compile_source.get_or_insert_with(|| PathBuf::from(source_path));
-            }
-            first_compile_verification.get_or_insert_with(|| verification.clone());
         } else {
             missing_gate_config += 1;
         }
@@ -192,21 +145,13 @@ fn collect_lambda_skill_summary(resources: &LoadedResources) -> Option<LambdaSki
         return None;
     }
 
-    let compiler = first_compile_verification
-        .as_ref()
-        .and_then(|verification| {
-            crate::runtime::lambda_gate::resolve_lskillc_for_verification(verification).ok()
-        });
     Some(LambdaSkillDoctorSummary {
         total,
         host_catalogues,
-        compile_sources,
         missing_gate_config,
         stats_known,
         tools,
         actions,
-        compiler,
-        first_compile_source,
     })
 }
 
@@ -253,17 +198,16 @@ mod tests {
         let warnings = lambda_skill_doctor_warnings(&resources);
 
         assert!(status.contains(
-            "lambda_skills=1 strict_catalogues=0 manifest_compilers=0 missing_gate_config=1 stats_known=1 tools=2 actions=3"
+            "lambda_skills=1 precompiled_catalogues=0 missing_gate_config=1 stats_known=1 tools=2 actions=3"
         ));
-        assert!(status.contains("lambda_skill_configured_compiler=<missing>"));
         assert!(status.contains(
-            "lambda_skill verified-demo: not gate-ready: verified Lambda Skill requires an active host catalogue; set host_catalogue_subpath or compiler_path in the lambda_skill_libraries manifest; model invocation blocked; allowed tools Read"
+            "lambda_skill verified-demo: not gate-ready: verified Lambda Skill requires a precompiled host catalogue; set host_catalogue_subpath in the lambda_skill_libraries manifest; model invocation blocked; allowed tools Read"
         ));
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].summary.contains("verified-demo"));
         assert!(warnings[0]
             .detail
-            .contains("requires an active host catalogue"));
+            .contains("requires a precompiled host catalogue"));
     }
 
     #[test]
@@ -306,7 +250,7 @@ mod tests {
         let status = render_lambda_skill_doctor_status(&resources);
         let warnings = lambda_skill_doctor_warnings(&resources);
 
-        assert!(status.contains("lambda_skills=1 strict_catalogues=1"));
+        assert!(status.contains("lambda_skills=1 precompiled_catalogues=1"));
         assert!(status.contains(
             "lambda_skill verified-ready: gate-ready via host catalogue; model-invocable; allowed tools Read, ToolSearch"
         ));

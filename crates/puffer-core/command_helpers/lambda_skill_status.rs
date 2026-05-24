@@ -94,10 +94,10 @@ fn lambda_skill_readiness(
                 .as_ref()
                 .and_then(|verification| verification.host_catalogue_path.as_ref())
                 .map(|_| "host catalogue")
-                .unwrap_or("compiler");
+                .unwrap_or("host catalogue");
             ready(gate_source)
         }
-        Ok(None) => not_ready("missing host_catalogue_subpath or compiler_path"),
+        Ok(None) => not_ready("missing precompiled host catalogue"),
         Err(error) => not_ready(format!("{error:#}")),
     }
 }

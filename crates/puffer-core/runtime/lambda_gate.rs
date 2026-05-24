@@ -5,10 +5,6 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::{Mutex, OnceLock};
-use std::time::SystemTime;
 
 mod type_check;
 
@@ -113,7 +109,7 @@ struct LambdaParam {
     ty: String,
 }
 
-/// Parsed Lambda Skill host catalogue emitted by `lskillc export-json`.
+/// Parsed precompiled Lambda Skill host catalogue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LambdaHostEnv {
     effects: BTreeSet<String>,
@@ -122,7 +118,7 @@ pub(crate) struct LambdaHostEnv {
 }
 
 impl LambdaHostEnv {
-    /// Parses the JSON shape emitted by `lskillc export-json`.
+    /// Parses the precompiled host catalogue JSON shape.
     pub(crate) fn from_json_str(raw: &str) -> Result<Self> {
         let parsed: HostEnvJson =
             serde_json::from_str(raw).context("failed to parse Lambda Skill host catalogue")?;
@@ -496,139 +492,7 @@ fn host_catalogue_json_for_verification(
             .with_context(|| format!("failed to read {host_catalogue_path}"))
             .map(Some);
     }
-    if verification.compiler_path.is_none() {
-        return Ok(None);
-    }
-    let source_path = verification.source_path.as_deref().ok_or_else(|| {
-        anyhow!("Lambda Skill compiler_path is configured but formal source path is missing")
-    })?;
-    compiled_host_catalogue_json_for_verification(verification, Path::new(source_path)).map(Some)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct LambdaCompileCacheKey {
-    source_path: PathBuf,
-    compiler_path: PathBuf,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct LambdaCompileCacheEntry {
-    source_stamp: Option<LambdaFileStamp>,
-    compiler_stamp: Option<LambdaFileStamp>,
-    raw: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct LambdaFileStamp {
-    len: u64,
-    modified: Option<SystemTime>,
-}
-
-type LambdaCompileCache = Mutex<HashMap<LambdaCompileCacheKey, LambdaCompileCacheEntry>>;
-
-fn compiled_host_catalogue_json_for_verification(
-    verification: &SkillVerificationSpec,
-    source_path: &Path,
-) -> Result<String> {
-    let compiler = resolve_lskillc_for_verification(verification)?;
-    let key = LambdaCompileCacheKey {
-        source_path: lambda_cache_path(source_path),
-        compiler_path: lambda_cache_path(&compiler),
-    };
-    let source_stamp = lambda_file_stamp(source_path);
-    let compiler_stamp = lambda_file_stamp(&compiler);
-    {
-        let cache = lambda_compile_cache()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(entry) = cache.get(&key) {
-            if entry.source_stamp == source_stamp && entry.compiler_stamp == compiler_stamp {
-                return Ok(entry.raw.clone());
-            }
-        }
-    }
-
-    let raw = export_host_catalogue_with_compiler(source_path, &compiler)?;
-    let mut cache = lambda_compile_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    cache.insert(
-        key,
-        LambdaCompileCacheEntry {
-            source_stamp,
-            compiler_stamp,
-            raw: raw.clone(),
-        },
-    );
-    Ok(raw)
-}
-
-fn lambda_compile_cache() -> &'static LambdaCompileCache {
-    static CACHE: OnceLock<LambdaCompileCache> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn lambda_cache_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-}
-
-fn lambda_file_stamp(path: &Path) -> Option<LambdaFileStamp> {
-    let metadata = fs::metadata(path).ok()?;
-    Some(LambdaFileStamp {
-        len: metadata.len(),
-        modified: metadata.modified().ok(),
-    })
-}
-
-#[cfg(test)]
-fn clear_lambda_compile_cache() {
-    lambda_compile_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clear();
-}
-
-fn export_host_catalogue_with_compiler(source_path: &Path, compiler: &Path) -> Result<String> {
-    let output = Command::new(compiler)
-        .arg("export-json")
-        .arg(source_path)
-        .output()
-        .with_context(|| format!("failed to run {}", compiler.display()))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!(
-            "{} export-json {} failed: {}",
-            compiler.display(),
-            source_path.display(),
-            stderr.trim()
-        ));
-    }
-    String::from_utf8(output.stdout).with_context(|| {
-        format!(
-            "{} export-json {} returned non-UTF-8 output",
-            compiler.display(),
-            source_path.display()
-        )
-    })
-}
-
-/// Resolves the Lambda Skill compiler from explicit configuration.
-pub(crate) fn resolve_lskillc_for_verification(
-    verification: &SkillVerificationSpec,
-) -> Result<PathBuf> {
-    if let Some(path) = verification.compiler_path.as_deref() {
-        let path = PathBuf::from(path);
-        if path.is_file() {
-            return Ok(path);
-        }
-        return Err(anyhow!(
-            "configured Lambda Skill compiler was not found at {}",
-            path.display()
-        ));
-    }
-    Err(anyhow!(
-        "Lambda Skill compiler_path is not configured in the lambda_skill_libraries manifest"
-    ))
+    Ok(None)
 }
 
 /// Admission result for one Lambda Skill gate check.
@@ -744,7 +608,7 @@ mod tests {
     }"#;
 
     #[test]
-    fn parses_lskillc_host_catalogue_shape() {
+    fn parses_precompiled_host_catalogue_shape() {
         let host = LambdaHostEnv::from_json_str(SWAP_HOST_JSON).unwrap();
         assert!(host.effects().contains("net_w"));
         assert_eq!(host.domains(), &["TokenAddr".to_string()]);
@@ -874,88 +738,14 @@ mod tests {
     }
 
     #[test]
-    fn compiler_resolution_requires_manifest_compiler_path() {
+    fn gate_for_verified_skill_ignores_compiler_path_without_host_catalogue() {
         let root = tempfile::tempdir().unwrap();
-        let compiler = root.path().join("unconfigured-compiler/bin/lskillc");
-        fs::create_dir_all(compiler.parent().unwrap()).unwrap();
+        let compiler = root.path().join("lskillc");
         fs::write(&compiler, "").unwrap();
-        let verification = SkillVerificationSpec {
-            system: "lambda-skill".to_string(),
-            source_path: Some(
-                root.path()
-                    .join("skills/vendor/example/skill.lskill")
-                    .display()
-                    .to_string(),
-            ),
-            generated_path: None,
-            host_catalogue_path: None,
-            compiler_path: None,
-            host_tool_bindings: Default::default(),
-            tools: None,
-            actions: None,
-        };
-
-        let error = resolve_lskillc_for_verification(&verification)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("compiler_path is not configured"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn export_json_uses_external_lskillc_binary() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let root = tempfile::tempdir().unwrap();
-        let source = root.path().join("skill.lskill");
-        let compiler = root.path().join("lskillc");
-        fs::write(&source, "host {}\n").unwrap();
-        fs::write(
-            &compiler,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" != \"export-json\" ]; then exit 9; fi\nprintf '%s' '{}'\n",
-                SWAP_HOST_JSON.replace('\'', "'\\''")
-            ),
-        )
-        .unwrap();
-        let mut perms = fs::metadata(&compiler).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&compiler, perms).unwrap();
-
-        let raw = export_host_catalogue_with_compiler(&source, &compiler).unwrap();
-        let host = LambdaHostEnv::from_json_str(&raw).unwrap();
-
-        assert!(host.lookup_tool("execute_swap").is_some());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn compile_gate_reuses_catalogue_until_source_changes() {
-        use std::os::unix::fs::PermissionsExt;
-
-        clear_lambda_compile_cache();
-
-        let root = tempfile::tempdir().unwrap();
-        let source = root.path().join("skill.lskill");
-        let compiler = root.path().join("lskillc");
-        let count = root.path().join("count");
-        fs::write(&source, "host {}\n").unwrap();
-        fs::write(
-            &compiler,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" != \"export-json\" ]; then exit 9; fi\ndir=$(dirname \"$0\")\ncount=\"$dir/count\"\nn=0\nif [ -f \"$count\" ]; then n=$(cat \"$count\"); fi\nn=$((n + 1))\nprintf '%s' \"$n\" > \"$count\"\nprintf '%s' '{}'\n",
-                SWAP_HOST_JSON.replace('\'', "'\\''")
-            ),
-        )
-        .unwrap();
-        let mut perms = fs::metadata(&compiler).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&compiler, perms).unwrap();
-
         let mut skill = SkillSpec::default();
         skill.verification = Some(SkillVerificationSpec {
             system: "lambda-skill".to_string(),
-            source_path: Some(source.display().to_string()),
+            source_path: Some(root.path().join("skill.lskill").display().to_string()),
             generated_path: None,
             host_catalogue_path: None,
             compiler_path: Some(compiler.display().to_string()),
@@ -964,14 +754,6 @@ mod tests {
             actions: None,
         });
 
-        assert!(gate_for_verified_skill(&skill).unwrap().is_some());
-        assert!(gate_for_verified_skill(&skill).unwrap().is_some());
-        assert_eq!(fs::read_to_string(&count).unwrap(), "1");
-
-        fs::write(&source, "host { changed }\n").unwrap();
-        assert!(gate_for_verified_skill(&skill).unwrap().is_some());
-        assert_eq!(fs::read_to_string(&count).unwrap(), "2");
-
-        clear_lambda_compile_cache();
+        assert!(gate_for_verified_skill(&skill).unwrap().is_none());
     }
 }

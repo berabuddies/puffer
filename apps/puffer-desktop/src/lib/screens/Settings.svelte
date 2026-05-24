@@ -277,7 +277,7 @@
 
   function verifiedSkillStatus(library: LambdaSkillLibraryInfo): string {
     if (library.disableModelInvocation) return "Installed";
-    if (library.allowedTools.length > 0 && (library.hostCatalogueSubpath || library.compilerPath)) {
+    if (library.allowedTools.length > 0 && library.hostCatalogueSubpath) {
       return "Ready for model use";
     }
     return "Needs verification output";

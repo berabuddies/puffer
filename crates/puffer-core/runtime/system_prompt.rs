@@ -675,24 +675,18 @@ mod tests {
         assert!(!prompt.contains("Do not show this one"));
     }
 
-    #[cfg(unix)]
     #[test]
-    fn runtime_system_prompt_hides_compiler_backed_lambda_skill_when_export_fails() {
-        use std::os::unix::fs::PermissionsExt;
-
+    fn runtime_system_prompt_hides_compiler_path_only_lambda_skill() {
         let temp = tempfile::tempdir().unwrap();
         let source_path = temp.path().join("skill.lskill");
         let compiler_path = temp.path().join("lskillc");
         std::fs::write(&source_path, "host {}\n").unwrap();
-        std::fs::write(&compiler_path, "#!/bin/sh\nprintf '%s' 'not-json'\n").unwrap();
-        let mut permissions = std::fs::metadata(&compiler_path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&compiler_path, permissions).unwrap();
+        std::fs::write(&compiler_path, "unused").unwrap();
         let resources = LoadedResources {
             skills: vec![LoadedItem {
                 value: SkillSpec {
-                    name: "compiler-backed".to_string(),
-                    description: "Compiler-backed verified skill".to_string(),
+                    name: "compiler-path-only".to_string(),
+                    description: "Compiler path only verified skill".to_string(),
                     allowed_tools: vec!["ToolSearch".to_string()],
                     disable_model_invocation: false,
                     verification: Some(SkillVerificationSpec {
@@ -725,7 +719,7 @@ mod tests {
         let prompt =
             render_runtime_system_prompt(&state, &resources, "gpt-5", &enabled_tools).unwrap();
 
-        assert!(!prompt.contains("compiler-backed"));
+        assert!(!prompt.contains("compiler-path-only"));
     }
 
     #[test]

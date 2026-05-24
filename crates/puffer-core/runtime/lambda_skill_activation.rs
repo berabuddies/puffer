@@ -23,7 +23,7 @@ pub(crate) fn gate_for_verified_skill_activation(
     }
     let Some(active_gate) = gate.as_mut() else {
         bail!(
-            "verified Lambda Skill requires an active host catalogue; set host_catalogue_subpath or compiler_path in the lambda_skill_libraries manifest"
+            "verified Lambda Skill requires a precompiled host catalogue; set host_catalogue_subpath in the lambda_skill_libraries manifest"
         );
     };
     active_gate.set_request_tool_filter(request_tool_filter_for_verified_skill(skill)?);

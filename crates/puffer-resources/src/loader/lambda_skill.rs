@@ -19,8 +19,6 @@ pub(super) struct LambdaSkillLibrarySpec {
     #[serde(default)]
     host_catalogue_subpath: Option<String>,
     #[serde(default)]
-    compiler_path: Option<String>,
-    #[serde(default)]
     allowed_tools: Vec<String>,
     #[serde(default, alias = "tool_bindings")]
     host_tool_bindings: BTreeMap<String, Vec<String>>,
@@ -196,10 +194,6 @@ fn load_lambda_skill_dir(
         .host_catalogue_subpath
         .as_deref()
         .map(|subpath| skill_dir.join(subpath));
-    let compiler_path = spec
-        .compiler_path
-        .as_deref()
-        .map(|path| resolve_lambda_skill_root(path, &source_info.path));
 
     let host_tool_bindings = host_tool_bindings_for_skill(spec, &name);
     let disable_model_invocation =
@@ -223,7 +217,7 @@ fn load_lambda_skill_dir(
                 source_path: Some(lambda_source_path.display().to_string()),
                 generated_path: Some(generated_path.display().to_string()),
                 host_catalogue_path: host_catalogue_path.map(|path| path.display().to_string()),
-                compiler_path: compiler_path.map(|path| path.display().to_string()),
+                compiler_path: None,
                 host_tool_bindings,
                 tools: stats.as_ref().and_then(|stats| stats.tools),
                 actions: stats.as_ref().and_then(|stats| stats.actions),

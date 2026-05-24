@@ -80,7 +80,7 @@ pub fn render_skills_config_panel(cwd: &Path) -> String {
         .user_config_dir
         .join("resources/lambda_skill_libraries");
     format!(
-        "Lambda Skill library config\n\nManifest directories:\n- workspace: {}\n- user: {}\n\nCreate one YAML file per external library, for example:\n\n```yaml\nid: my-lambda-skills\nroot: /absolute/path/to/lambda-skill-library\ncompiler_path: /absolute/path/to/lskillc\nallowed_tools:\n  - Bash\n  - Read\nhost_tool_bindings:\n  formal_search:\n    - Bash\nskill_host_tool_bindings:\n  gh-fix-ci:\n    gh_pr_view:\n      - Bash\n```\n\nAfter saving, run /reload-plugins or restart the session. Use /skills or /doctor to verify gate readiness.",
+        "Lambda Skill library config\n\nManifest directories:\n- workspace: {}\n- user: {}\n\nCreate one YAML file per external library, for example:\n\n```yaml\nid: my-lambda-skills\nroot: /absolute/path/to/lambda-skill-library\nhost_catalogue_subpath: out/host.json\nallowed_tools:\n  - Bash\n  - Read\n```\n\nPuffer expects each Verified Skill folder to include precompiled verification output such as out/GENERATED.SKILL.md and out/host.json. After saving, run /reload-plugins or restart the session. Use /skills or /doctor to verify gate readiness.",
         workspace_dir.display(),
         user_dir.display()
     )
@@ -784,8 +784,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let rendered = render_skills_config_panel(temp.path());
         assert!(rendered.contains("resources/lambda_skill_libraries"));
-        assert!(rendered.contains("compiler_path: /absolute/path/to/lskillc"));
-        assert!(rendered.contains("skill_host_tool_bindings:"));
+        assert!(rendered.contains("host_catalogue_subpath: out/host.json"));
+        assert!(rendered.contains("precompiled verification output"));
     }
 
     #[test]
@@ -930,7 +930,7 @@ mod tests {
         let error = lambda_gate_for_skill_command(&skill)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("verified Lambda Skill requires an active host catalogue"));
+        assert!(error.contains("verified Lambda Skill requires a precompiled host catalogue"));
     }
 }
 

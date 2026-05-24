@@ -4328,7 +4328,6 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace_root = temp.path().join("workspace");
         let lambda_root = temp.path().join("lambda-skills");
-        let compiler = temp.path().join("lskillc");
         let paths = ConfigPaths {
             workspace_root: workspace_root.clone(),
             workspace_config_dir: workspace_root.join(".puffer"),
@@ -4344,7 +4343,7 @@ mod tests {
             &json!({
                 "id": "verified",
                 "root": lambda_root.display().to_string(),
-                "compilerPath": compiler.display().to_string(),
+                "hostCatalogueSubpath": "out/host.json",
                 "allowedTools": [" Bash ", "Read"],
                 "hostToolBindings": {
                     " formal_search ": [" Bash "]
@@ -4365,7 +4364,7 @@ mod tests {
             .workspace_config_dir
             .join("resources/lambda_skill_libraries/verified.yaml");
         let manifest = std::fs::read_to_string(&manifest_path).expect("read manifest");
-        assert!(manifest.contains("compiler_path:"));
+        assert!(manifest.contains("host_catalogue_subpath: out/host.json"));
         assert!(manifest.contains("host_tool_bindings:"));
         assert!(manifest.contains("skill_host_tool_bindings:"));
 
@@ -4537,11 +4536,8 @@ mod tests {
         assert_eq!(enabled["skills"][0]["modelInvocable"], true);
     }
 
-    #[cfg(unix)]
     #[test]
-    fn desktop_lambda_skill_library_save_infers_compiler_and_source_bindings() {
-        use std::os::unix::fs::PermissionsExt;
-
+    fn desktop_lambda_skill_library_save_requires_precompiled_host_catalogue() {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace_root = temp.path().join("workspace");
         let external_project = temp.path().join("external-project");
@@ -4560,11 +4556,7 @@ mod tests {
             "---\nname: web-check\ndescription: Verified web check\n---\nUse generated prompt.\n",
         )
         .expect("generated skill");
-        std::fs::write(&compiler, "#!/bin/sh\necho should-not-run >&2\nexit 99\n")
-            .expect("compiler");
-        let mut permissions = std::fs::metadata(&compiler).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&compiler, permissions).expect("chmod compiler");
+        std::fs::write(&compiler, "unused compiler").expect("compiler");
         let paths = ConfigPaths {
             workspace_root: workspace_root.clone(),
             workspace_config_dir: workspace_root.join(".puffer"),
@@ -4584,29 +4576,17 @@ mod tests {
         )
         .expect("save lambda skill library");
 
+        assert!(saved["libraries"][0]["compilerPath"].is_null());
+        assert_eq!(saved["skills"][0]["gateSource"], serde_json::Value::Null);
+        assert_eq!(saved["skills"][0]["modelInvocable"], false);
         assert_eq!(
-            saved["libraries"][0]["compilerPath"],
-            compiler.display().to_string()
+            saved["skills"][0]["failureReason"],
+            "missing precompiled host catalogue"
         );
-        assert!(saved["libraries"][0]["allowedTools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|tool| tool == "Bash"));
-        assert_eq!(
-            saved["libraries"][0]["hostToolBindings"]["fetch_page"][0],
-            "Bash"
-        );
-        assert_eq!(
-            saved["libraries"][0]["hostToolBindings"]["ask_for_approval"][0],
-            "AskUserQuestion"
-        );
-        assert_eq!(saved["skills"][0]["gateSource"], "compiler");
-        assert_eq!(saved["skills"][0]["modelInvocable"], true);
         assert!(saved["doctor"]
             .as_str()
             .unwrap()
-            .contains("lambda_skills=1 model_invocable=1 missing_gate_config=0"));
+            .contains("lambda_skills=1 model_invocable=0 missing_gate_config=1"));
     }
 
     #[test]
