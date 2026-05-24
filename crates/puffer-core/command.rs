@@ -500,7 +500,7 @@ fn execute_local_command(
         "files" => describe_files_in_context(state, session_store),
         "doctor" => run_doctor(state, resources, providers, auth_store, session_store),
         "buddy" => emit_system(state, session_store, render_buddy_summary(state, resources)),
-        "skills" => list_skills(state, resources, session_store),
+        "skills" => list_skills(state, resources, session_store, args),
         "plugin" => handle_plugin_command(state, resources, session_store, args),
         "reload-plugins" => {
             state.reload_resources_requested = true;

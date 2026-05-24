@@ -21,7 +21,11 @@ pub(crate) fn list_skills(
     state: &mut AppState,
     resources: &LoadedResources,
     session_store: &SessionStore,
+    args: &str,
 ) -> Result<()> {
+    if args.trim().eq_ignore_ascii_case("config") {
+        return emit_system(state, session_store, render_skills_config_panel(&state.cwd));
+    }
     emit_system(state, session_store, render_skills_panel(resources))
 }
 
@@ -36,6 +40,7 @@ pub fn render_skills_panel(resources: &LoadedResources) -> String {
             "- .puffer/resources/skills/",
             "",
             "Use /skill:<name> as a compatibility alias after adding a user-invocable skill.",
+            "Use /skills config to show Lambda Skill library manifest locations and a config template.",
         ]
         .join("\n");
     }
@@ -57,8 +62,28 @@ pub fn render_skills_panel(resources: &LoadedResources) -> String {
         &mut text,
         "Use /skill:<name> as a compatibility alias for any user-invocable skill."
     );
+    let _ = writeln!(
+        &mut text,
+        "Use /skills config to show Lambda Skill library manifest locations and a config template."
+    );
 
     text.trim_end().to_string()
+}
+
+/// Renders install/config guidance for external Lambda Skill libraries.
+pub fn render_skills_config_panel(cwd: &Path) -> String {
+    let paths = puffer_config::ConfigPaths::discover(cwd);
+    let workspace_dir = paths
+        .workspace_config_dir
+        .join("resources/lambda_skill_libraries");
+    let user_dir = paths
+        .user_config_dir
+        .join("resources/lambda_skill_libraries");
+    format!(
+        "Lambda Skill library config\n\nManifest directories:\n- workspace: {}\n- user: {}\n\nCreate one YAML file per external library, for example:\n\n```yaml\nid: my-lambda-skills\nroot: /absolute/path/to/lambda-skill-library\ncompiler_path: /absolute/path/to/lskillc\nallowed_tools:\n  - Bash\n  - Read\nhost_tool_bindings:\n  formal_search:\n    - Bash\nskill_host_tool_bindings:\n  gh-fix-ci:\n    gh_pr_view:\n      - Bash\n```\n\nAfter saving, run /reload-plugins or restart the session. Use /skills or /doctor to verify gate readiness.",
+        workspace_dir.display(),
+        user_dir.display()
+    )
 }
 
 /// Prints a compact summary of transcript and loaded-resource context.
@@ -678,7 +703,8 @@ fn append_patch_section(text: &mut String, cwd: &PathBuf, title: &str, args: &[&
 #[cfg(test)]
 mod tests {
     use super::{
-        lambda_gate_for_skill_command, render_skills_panel, skill_allowed_tools_for_side_turn,
+        lambda_gate_for_skill_command, render_skills_config_panel, render_skills_panel,
+        skill_allowed_tools_for_side_turn,
     };
     use puffer_resources::{
         LoadedItem, LoadedResources, SkillSpec, SkillVerificationSpec, SourceInfo, SourceKind,
@@ -750,6 +776,16 @@ mod tests {
         assert!(rendered.contains("No skills found."));
         assert!(rendered.contains("~/.puffer/resources/skills/"));
         assert!(rendered.contains("/skill:<name>"));
+        assert!(rendered.contains("/skills config"));
+    }
+
+    #[test]
+    fn render_skills_config_panel_shows_lambda_manifest_template() {
+        let temp = tempfile::tempdir().unwrap();
+        let rendered = render_skills_config_panel(temp.path());
+        assert!(rendered.contains("resources/lambda_skill_libraries"));
+        assert!(rendered.contains("compiler_path: /absolute/path/to/lskillc"));
+        assert!(rendered.contains("skill_host_tool_bindings:"));
     }
 
     #[test]
