@@ -114,7 +114,7 @@ pub(crate) fn lambda_skill_doctor_warnings(
         return vec![LambdaSkillDoctorWarning {
             summary: "Lambda Skill compile gate is enabled but lskillc was not found".to_string(),
             detail: format!(
-                "Set {} to the Lambda Skill compiler path.",
+                "Set compiler_path in the lambda_skill_libraries manifest, set {}, or install lskillc on PATH.",
                 crate::runtime::lambda_gate::LAMBDA_SKILL_COMPILER_ENV
             ),
         }];
@@ -146,6 +146,7 @@ fn collect_lambda_skill_summary(resources: &LoadedResources) -> Option<LambdaSki
     let mut tools = 0;
     let mut actions = 0;
     let mut first_compile_source = None;
+    let mut first_compile_verification = None;
 
     for skill in &resources.skills {
         let Some(verification) = skill.value.verification.as_ref() else {
@@ -160,6 +161,7 @@ fn collect_lambda_skill_summary(resources: &LoadedResources) -> Option<LambdaSki
         } else if let Some(source_path) = verification.source_path.as_ref() {
             compile_sources += 1;
             first_compile_source.get_or_insert_with(|| PathBuf::from(source_path));
+            first_compile_verification.get_or_insert_with(|| verification.clone());
         }
         if verification.tools.is_some() || verification.actions.is_some() {
             stats_known += 1;
@@ -172,9 +174,11 @@ fn collect_lambda_skill_summary(resources: &LoadedResources) -> Option<LambdaSki
         return None;
     }
 
-    let compiler = first_compile_source
+    let compiler = first_compile_verification
         .as_ref()
-        .and_then(|source| crate::runtime::lambda_gate::resolve_lskillc_for_source(source));
+        .and_then(|verification| {
+            crate::runtime::lambda_gate::resolve_lskillc_for_verification(verification).ok()
+        });
     Some(LambdaSkillDoctorSummary {
         total,
         host_catalogues,
@@ -220,6 +224,7 @@ mod tests {
                                 .to_string(),
                         ),
                         host_catalogue_path: None,
+                        compiler_path: None,
                         tools: Some(2),
                         actions: Some(3),
                     }),

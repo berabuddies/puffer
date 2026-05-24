@@ -273,6 +273,8 @@ pub struct SkillVerificationSpec {
     #[serde(default)]
     pub host_catalogue_path: Option<String>,
     #[serde(default)]
+    pub compiler_path: Option<String>,
+    #[serde(default)]
     pub tools: Option<usize>,
     #[serde(default)]
     pub actions: Option<usize>,

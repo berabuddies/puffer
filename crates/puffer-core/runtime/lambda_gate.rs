@@ -454,7 +454,7 @@ fn host_catalogue_json_for_verification(
         .source_path
         .as_deref()
         .ok_or_else(|| anyhow!("Lambda Skill gate requested but formal source path is missing"))?;
-    compiled_host_catalogue_json_for_source(Path::new(source_path)).map(Some)
+    compiled_host_catalogue_json_for_verification(verification, Path::new(source_path)).map(Some)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -478,12 +478,11 @@ struct LambdaFileStamp {
 
 type LambdaCompileCache = Mutex<HashMap<LambdaCompileCacheKey, LambdaCompileCacheEntry>>;
 
-fn compiled_host_catalogue_json_for_source(source_path: &Path) -> Result<String> {
-    let compiler = resolve_lskillc_for_source(source_path).ok_or_else(|| {
-        anyhow!(
-            "Lambda Skill gate requested but lskillc was not found; set {LAMBDA_SKILL_COMPILER_ENV}"
-        )
-    })?;
+fn compiled_host_catalogue_json_for_verification(
+    verification: &SkillVerificationSpec,
+    source_path: &Path,
+) -> Result<String> {
+    let compiler = resolve_lskillc_for_verification(verification)?;
     let key = LambdaCompileCacheKey {
         source_path: lambda_cache_path(source_path),
         compiler_path: lambda_cache_path(&compiler),
@@ -578,30 +577,31 @@ fn export_host_catalogue_with_compiler(source_path: &Path, compiler: &Path) -> R
     })
 }
 
-/// Resolves the Lambda Skill compiler available for a formal skill source.
-pub(crate) fn resolve_lskillc_for_source(source_path: &Path) -> Option<PathBuf> {
+/// Resolves the Lambda Skill compiler from explicit configuration.
+pub(crate) fn resolve_lskillc_for_verification(
+    verification: &SkillVerificationSpec,
+) -> Result<PathBuf> {
+    if let Some(path) = verification.compiler_path.as_deref() {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Ok(path);
+        }
+        return Err(anyhow!(
+            "configured Lambda Skill compiler was not found at {}",
+            path.display()
+        ));
+    }
     if let Some(path) = env::var_os(LAMBDA_SKILL_COMPILER_ENV)
         .map(PathBuf::from)
         .filter(|path| path.is_file())
     {
-        return Some(path);
+        return Ok(path);
     }
-    lskillc_workspace_candidates(source_path)
-        .into_iter()
-        .find(|path| path.is_file())
-        .or_else(|| find_lskillc_in_path())
-}
-
-fn lskillc_workspace_candidates(source_path: &Path) -> Vec<PathBuf> {
-    source_path
-        .ancestors()
-        .flat_map(|ancestor| {
-            [
-                ancestor.join("lean/LambdaW/.lake/build/bin/lskillc"),
-                ancestor.join(".lake/build/bin/lskillc"),
-            ]
-        })
-        .collect()
+    find_lskillc_in_path().ok_or_else(|| {
+        anyhow!(
+            "Lambda Skill gate requested but lskillc was not found; set compiler_path, {LAMBDA_SKILL_COMPILER_ENV}, or install lskillc on PATH"
+        )
+    })
 }
 
 fn find_lskillc_in_path() -> Option<PathBuf> {
@@ -856,6 +856,7 @@ mod tests {
             source_path: None,
             generated_path: None,
             host_catalogue_path: Some(catalogue.display().to_string()),
+            compiler_path: None,
             tools: None,
             actions: None,
         });
@@ -868,11 +869,43 @@ mod tests {
     }
 
     #[test]
-    fn workspace_candidates_include_ahl_popl_lake_binary() {
-        let source = Path::new("/repo/skills/vendor/example/skill.lskill");
-        let candidates = lskillc_workspace_candidates(source);
+    fn compiler_resolution_does_not_probe_source_ancestors() {
+        let _guard = crate::test_locks::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let old_compiler = std::env::var_os(LAMBDA_SKILL_COMPILER_ENV);
+        let old_path = std::env::var_os("PATH");
+        let root = tempfile::tempdir().unwrap();
+        let compiler = root.path().join("lean/LambdaW/.lake/build/bin/lskillc");
+        fs::create_dir_all(compiler.parent().unwrap()).unwrap();
+        fs::write(&compiler, "").unwrap();
+        std::env::remove_var(LAMBDA_SKILL_COMPILER_ENV);
+        std::env::set_var("PATH", root.path().join("empty-path"));
+        let verification = SkillVerificationSpec {
+            system: "lambda-skill".to_string(),
+            source_path: Some(
+                root.path()
+                    .join("skills/vendor/example/skill.lskill")
+                    .display()
+                    .to_string(),
+            ),
+            generated_path: None,
+            host_catalogue_path: None,
+            compiler_path: None,
+            tools: None,
+            actions: None,
+        };
 
-        assert!(candidates.contains(&PathBuf::from("/repo/lean/LambdaW/.lake/build/bin/lskillc")));
+        assert!(resolve_lskillc_for_verification(&verification).is_err());
+
+        match old_compiler {
+            Some(value) => std::env::set_var(LAMBDA_SKILL_COMPILER_ENV, value),
+            None => std::env::remove_var(LAMBDA_SKILL_COMPILER_ENV),
+        }
+        match old_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
     }
 
     #[cfg(unix)]
@@ -932,13 +965,14 @@ mod tests {
         fs::set_permissions(&compiler, perms).unwrap();
 
         std::env::set_var(LAMBDA_SKILL_GATE_ENV, "compile");
-        std::env::set_var(LAMBDA_SKILL_COMPILER_ENV, &compiler);
+        std::env::remove_var(LAMBDA_SKILL_COMPILER_ENV);
         let mut skill = SkillSpec::default();
         skill.verification = Some(SkillVerificationSpec {
             system: "lambda-skill".to_string(),
             source_path: Some(source.display().to_string()),
             generated_path: None,
             host_catalogue_path: None,
+            compiler_path: Some(compiler.display().to_string()),
             tools: None,
             actions: None,
         });

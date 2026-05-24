@@ -139,6 +139,7 @@ mod tests {
                                 "/tmp/skills/verified-ci/out/GENERATED.SKILL.md".to_string(),
                             ),
                             host_catalogue_path: None,
+                            compiler_path: None,
                             tools: Some(10),
                             actions: Some(2),
                         }),

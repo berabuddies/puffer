@@ -1351,8 +1351,11 @@ mod tests {
         let temp = tempdir().unwrap();
         let root = temp.path().join("workspace");
         let external_root = temp.path().join("lambda-library");
+        let compiler = temp.path().join("bin/lskillc");
         let skill_dir = external_root.join("source-pack/gh-fix-ci");
         fs::create_dir_all(skill_dir.join("out")).unwrap();
+        fs::create_dir_all(compiler.parent().unwrap()).unwrap();
+        fs::write(&compiler, "").unwrap();
         fs::write(
             skill_dir.join("skill.lskill"),
             "host {}\nskill gh_fix_ci {}\n",
@@ -1374,8 +1377,9 @@ mod tests {
         fs::write(
             manifest_dir.join("verified.yaml"),
             format!(
-                "id: verified\nroot: '{}'\nallowed_tools:\n  - Bash\n  - Read\ndisable_model_invocation: false\n",
-                external_root.display()
+                "id: verified\nroot: '{}'\ncompiler_path: '{}'\nallowed_tools:\n  - Bash\n  - Read\ndisable_model_invocation: false\n",
+                external_root.display(),
+                compiler.display()
             ),
         )
         .unwrap();
@@ -1407,6 +1411,10 @@ mod tests {
         assert_eq!(
             verification.source_path,
             Some(skill_dir.join("skill.lskill").display().to_string())
+        );
+        assert_eq!(
+            verification.compiler_path,
+            Some(compiler.display().to_string())
         );
     }
 

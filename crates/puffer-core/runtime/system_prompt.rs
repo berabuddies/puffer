@@ -539,6 +539,7 @@ mod tests {
                                 ".puffer/lambda/agent-browser/out/GENERATED.SKILL.md".to_string(),
                             ),
                             host_catalogue_path: None,
+                            compiler_path: None,
                             tools: None,
                             actions: None,
                         }),
