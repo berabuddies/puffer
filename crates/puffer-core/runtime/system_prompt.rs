@@ -267,7 +267,13 @@ fn model_invocable_skill_summary(skill: &SkillSpec) -> String {
 }
 
 fn is_model_invocable_skill(skill: &SkillSpec) -> bool {
-    !skill.disable_model_invocation && !is_lambda_verified_skill(skill)
+    if skill.disable_model_invocation {
+        return false;
+    }
+    if is_lambda_verified_skill(skill) {
+        return lambda_skill_is_gate_ready_for_model(skill);
+    }
+    true
 }
 
 fn is_lambda_verified_skill(skill: &SkillSpec) -> bool {
@@ -275,6 +281,27 @@ fn is_lambda_verified_skill(skill: &SkillSpec) -> bool {
         .verification
         .as_ref()
         .is_some_and(|verification| verification.system == "lambda-skill")
+}
+
+fn lambda_skill_is_gate_ready_for_model(skill: &SkillSpec) -> bool {
+    let Some(verification) = skill.verification.as_ref() else {
+        return false;
+    };
+    if skill.allowed_tools.is_empty() {
+        return false;
+    }
+    verification
+        .host_catalogue_path
+        .as_deref()
+        .is_some_and(|path| !path.trim().is_empty())
+        || (verification
+            .compiler_path
+            .as_deref()
+            .is_some_and(|path| !path.trim().is_empty())
+            && verification
+                .source_path
+                .as_deref()
+                .is_some_and(|path| !path.trim().is_empty()))
 }
 
 fn build_environment_section(state: &AppState, model_id: &str) -> Result<String> {
@@ -540,6 +567,7 @@ mod tests {
                     value: SkillSpec {
                         name: "agent-browser".to_string(),
                         description: "Use AgentEnv platform browsers".to_string(),
+                        allowed_tools: vec!["ToolSearch".to_string()],
                         disable_model_invocation: false,
                         verification: Some(SkillVerificationSpec {
                             system: "lambda-skill".to_string(),
@@ -549,7 +577,9 @@ mod tests {
                             generated_path: Some(
                                 ".puffer/lambda/agent-browser/out/GENERATED.SKILL.md".to_string(),
                             ),
-                            host_catalogue_path: None,
+                            host_catalogue_path: Some(
+                                ".puffer/lambda/agent-browser/out/host.json".to_string(),
+                            ),
                             compiler_path: None,
                             tools: None,
                             actions: None,
@@ -558,6 +588,32 @@ mod tests {
                     },
                     source_info: SourceInfo {
                         path: PathBuf::from(".puffer/resources/skills/agent-browser/SKILL.md"),
+                        kind: SourceKind::Workspace,
+                    },
+                },
+                LoadedItem {
+                    value: SkillSpec {
+                        name: "prompt-only-verified".to_string(),
+                        description: "Verified but not gate ready".to_string(),
+                        allowed_tools: vec!["ToolSearch".to_string()],
+                        disable_model_invocation: false,
+                        verification: Some(SkillVerificationSpec {
+                            system: "lambda-skill".to_string(),
+                            source_path: Some(
+                                ".puffer/lambda/prompt-only/skill.lskill".to_string(),
+                            ),
+                            generated_path: Some(
+                                ".puffer/lambda/prompt-only/out/GENERATED.SKILL.md".to_string(),
+                            ),
+                            host_catalogue_path: None,
+                            compiler_path: None,
+                            tools: None,
+                            actions: None,
+                        }),
+                        ..SkillSpec::default()
+                    },
+                    source_info: SourceInfo {
+                        path: PathBuf::from(".puffer/resources/skills/prompt-only/SKILL.md"),
                         kind: SourceKind::Workspace,
                     },
                 },
@@ -593,8 +649,10 @@ mod tests {
             render_runtime_system_prompt(&state, &resources, "gpt-5", &enabled_tools).unwrap();
 
         assert!(prompt.contains("Available model-invocable skills"));
+        assert!(prompt
+            .contains("- agent-browser: Use AgentEnv platform browsers [verified lambda-skill]"));
         assert!(prompt.contains("- reviewer: Review source changes"));
-        assert!(!prompt.contains("agent-browser"));
+        assert!(!prompt.contains("prompt-only-verified"));
         assert!(!prompt.contains("Do not show this one"));
     }
 
