@@ -354,11 +354,63 @@ mod tests {
         let warnings = lambda_skill_doctor_warnings(&resources);
 
         assert!(status.contains(
-            "lambda_skill verified-broken: not gate-ready: failed to parse host catalogue; model invocation blocked; allowed tools Read"
+            "lambda_skill verified-broken: not gate-ready: failed to parse host catalogue"
         ));
+        assert!(status.contains("model invocation blocked; allowed tools Read"));
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0]
             .detail
             .contains("failed to parse host catalogue"));
+    }
+
+    #[test]
+    fn render_lambda_status_reports_missing_host_tool_binding_detail() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_path = temp.path().join("skill.lskill");
+        let host_path = temp.path().join("host.json");
+        std::fs::write(&source_path, "skill source").unwrap();
+        std::fs::write(
+            &host_path,
+            r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","effects":[]}]}"#,
+        )
+        .unwrap();
+        let resources = LoadedResources {
+            skills: vec![LoadedItem {
+                value: SkillSpec {
+                    name: "verified-unbound".to_string(),
+                    allowed_tools: vec!["Read".to_string()],
+                    verification: Some(SkillVerificationSpec {
+                        system: "lambda-skill".to_string(),
+                        source_path: Some(source_path.display().to_string()),
+                        generated_path: Some(
+                            temp.path()
+                                .join("out/GENERATED.SKILL.md")
+                                .display()
+                                .to_string(),
+                        ),
+                        host_catalogue_path: Some(host_path.display().to_string()),
+                        compiler_path: None,
+                        host_tool_bindings: Default::default(),
+                        tools: Some(1),
+                        actions: Some(1),
+                    }),
+                    ..SkillSpec::default()
+                },
+                source_info: SourceInfo {
+                    path: source_path,
+                    kind: SourceKind::Workspace,
+                },
+            }],
+            ..LoadedResources::default()
+        };
+
+        let status = render_lambda_skill_doctor_status(&resources);
+        let warnings = lambda_skill_doctor_warnings(&resources);
+
+        assert!(status.contains("Lambda Skill host tool formal_search lacks"));
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0]
+            .detail
+            .contains("Lambda Skill host tool formal_search lacks"));
     }
 }

@@ -98,7 +98,7 @@ fn lambda_skill_readiness(
             ready(gate_source)
         }
         Ok(None) => not_ready("missing host_catalogue_subpath or compiler_path"),
-        Err(error) => not_ready(error.to_string()),
+        Err(error) => not_ready(format!("{error:#}")),
     }
 }
 

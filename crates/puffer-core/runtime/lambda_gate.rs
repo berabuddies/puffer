@@ -10,6 +10,8 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
+mod type_check;
+
 /// One structured host fact tracked by the Lambda Skill call gate.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct LambdaFact {
@@ -82,7 +84,7 @@ impl LambdaToolSig {
                     self.name, param.name
                 ));
             };
-            if !lambda_arg_matches_type(value, &param.ty) {
+            if !type_check::lambda_arg_matches_type(value, &param.name, object, &param.ty) {
                 return Some(format!(
                     "formal arg {} for {} does not match {}",
                     param.name, self.name, param.ty
@@ -418,27 +420,6 @@ fn lambda_fact_metadata(fact: &LambdaFact) -> Value {
         Value::Array(fact.args().iter().cloned().map(Value::String).collect()),
     );
     Value::Object(object)
-}
-
-fn lambda_arg_matches_type(value: &Value, ty: &str) -> bool {
-    let trimmed = ty.trim();
-    if trimmed.starts_with('[') {
-        return value.is_array();
-    }
-    let base = trimmed
-        .split_once('{')
-        .map(|(head, _)| head)
-        .unwrap_or(trimmed)
-        .trim()
-        .to_ascii_lowercase();
-    match base.as_str() {
-        "str" | "string" => value.is_string(),
-        "int" | "nat" => value.as_i64().is_some() || value.as_u64().is_some(),
-        "real" | "float" | "number" => value.is_number(),
-        "bool" => value.is_boolean(),
-        "unit" => value.is_null() || value.as_object().is_some_and(Map::is_empty),
-        _ => true,
-    }
 }
 
 /// One admitted formal host call awaiting its concrete Puffer tool invocation.
