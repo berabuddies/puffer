@@ -2,8 +2,8 @@ use crate::daemon::DaemonState;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -92,7 +92,7 @@ pub(crate) fn handle_save_lambda_skill_library(
     if root.is_empty() {
         anyhow::bail!("Lambda Skill library root is required");
     }
-    let manifest = LambdaSkillLibraryManifestDto {
+    let mut manifest = LambdaSkillLibraryManifestDto {
         id: id.to_string(),
         root: root.to_string(),
         generated_subpath: trimmed_optional(params.generated_subpath),
@@ -104,6 +104,7 @@ pub(crate) fn handle_save_lambda_skill_library(
         user_invocable: params.user_invocable,
         disable_model_invocation: params.disable_model_invocation,
     };
+    infer_missing_lambda_skill_manifest_fields(&mut manifest);
     let paths = state.config_paths();
     let dir = match params.scope.as_deref().unwrap_or("workspace") {
         "user" => paths
@@ -252,4 +253,76 @@ fn is_yaml_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| matches!(extension, "yaml" | "yml"))
+}
+
+#[derive(Deserialize)]
+struct HostCatalogueForInference {
+    #[serde(default)]
+    tools: Vec<HostToolForInference>,
+}
+
+#[derive(Deserialize)]
+struct HostToolForInference {
+    #[serde(default, rename = "concreteTools", alias = "concrete_tools")]
+    concrete_tools: Vec<String>,
+}
+
+fn infer_missing_lambda_skill_manifest_fields(manifest: &mut LambdaSkillLibraryManifestDto) {
+    if manifest.host_catalogue_subpath.is_some() || !manifest.allowed_tools.is_empty() {
+        return;
+    }
+    let root = PathBuf::from(&manifest.root);
+    let Some(allowed_tools) = infer_allowed_tools_from_default_host_catalogues(&root) else {
+        return;
+    };
+    if allowed_tools.is_empty() {
+        return;
+    }
+    manifest.host_catalogue_subpath = Some("out/host.json".to_string());
+    manifest.allowed_tools = allowed_tools;
+}
+
+fn infer_allowed_tools_from_default_host_catalogues(root: &Path) -> Option<Vec<String>> {
+    let mut catalogues = Vec::new();
+    collect_default_host_catalogues(root, &mut catalogues);
+    if catalogues.is_empty() {
+        return None;
+    }
+    let mut tools = BTreeSet::new();
+    for catalogue in catalogues {
+        let raw = std::fs::read_to_string(catalogue).ok()?;
+        let parsed: HostCatalogueForInference = serde_json::from_str(&raw).ok()?;
+        for tool in parsed.tools {
+            for concrete in tool.concrete_tools {
+                let concrete = concrete.trim();
+                if !concrete.is_empty() {
+                    tools.insert(concrete.to_string());
+                }
+            }
+        }
+    }
+    Some(tools.into_iter().collect())
+}
+
+fn collect_default_host_catalogues(dir: &Path, out: &mut Vec<PathBuf>) {
+    if dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with('.') || matches!(name, "node_modules" | "target"))
+    {
+        return;
+    }
+    let host_path = dir.join("out/host.json");
+    if host_path.is_file() {
+        out.push(host_path);
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_default_host_catalogues(&path, out);
+        }
+    }
 }

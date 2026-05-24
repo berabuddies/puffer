@@ -4384,6 +4384,79 @@ mod tests {
     }
 
     #[test]
+    fn desktop_lambda_skill_library_save_infers_folder_defaults() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let lambda_root = temp.path().join("lambda-skills");
+        let skill_dir = lambda_root.join("ci/gh-fix-ci");
+        std::fs::create_dir_all(skill_dir.join("out")).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {}\nskill gh_fix_ci {}\n",
+        )
+        .expect("skill source");
+        std::fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: gh-fix-ci\ndescription: Verified CI repair\n---\nUse generated prompt.\n",
+        )
+        .expect("generated skill");
+        std::fs::write(
+            skill_dir.join("out/host.json"),
+            r#"{
+              "effects": ["net_r"],
+              "domains": [],
+              "tools": [
+                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash", "Read"], "registers": [], "contextReq": null}
+              ]
+            }"#,
+        )
+        .expect("host catalogue");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let saved = handle_save_lambda_skill_library(
+            &state,
+            &json!({
+                "id": "verified",
+                "root": lambda_root.display().to_string()
+            }),
+        )
+        .expect("save lambda skill library");
+
+        assert_eq!(
+            saved["libraries"][0]["hostCatalogueSubpath"],
+            "out/host.json"
+        );
+        assert_eq!(saved["libraries"][0]["allowedTools"][0], "Bash");
+        assert_eq!(saved["libraries"][0]["allowedTools"][1], "Read");
+        assert!(saved["warnings"].as_array().unwrap().is_empty());
+        assert!(saved["doctor"]
+            .as_str()
+            .unwrap()
+            .contains("lambda_skills=1 strict_catalogues=1"));
+        assert!(saved["doctor"]
+            .as_str()
+            .unwrap()
+            .contains("model-invocable"));
+
+        let manifest_path = state
+            .paths
+            .workspace_config_dir
+            .join("resources/lambda_skill_libraries/verified.yaml");
+        let manifest = std::fs::read_to_string(&manifest_path).expect("read manifest");
+        assert!(manifest.contains("host_catalogue_subpath: out/host.json"));
+        assert!(manifest.contains("- Bash"));
+        assert!(manifest.contains("- Read"));
+    }
+
+    #[test]
     fn browser_permission_payload_json_exposes_context_only() {
         let payload =
             browser_permission_payload_json(&puffer_core::BrowserPermissionPromptPayload {
