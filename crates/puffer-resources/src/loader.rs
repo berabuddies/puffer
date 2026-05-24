@@ -17,9 +17,7 @@ use std::path::{Path, PathBuf};
 
 mod lambda_skill;
 
-use self::lambda_skill::{
-    load_lambda_skill_env_libraries, load_lambda_skill_libraries, LambdaSkillLibrarySpec,
-};
+use self::lambda_skill::{load_lambda_skill_libraries, LambdaSkillLibrarySpec};
 
 /// Built-in `<repo>/resources/` baked into the binary at compile time.
 /// Same pattern as codex's `include_str!("../templates/foo.md")` (used at
@@ -152,14 +150,6 @@ pub fn load_resources(paths: &ConfigPaths, runner: &dyn ToolRunner) -> Result<Lo
             &mut loaded.diagnostics,
         );
     }
-    let env_lambda_skills = load_lambda_skill_env_libraries(runner, &mut loaded.diagnostics)?;
-    merge_by_id(
-        &mut loaded.skills,
-        env_lambda_skills,
-        |item| MergeKey::simple(item.value.name.clone()),
-        "skill",
-        &mut loaded.diagnostics,
-    );
     apply_runtime_resource_filters(&mut loaded);
     Ok(loaded)
 }

@@ -3,15 +3,11 @@ use puffer_resources::{SkillSpec, SkillVerificationSpec};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::collections::{BTreeSet, HashMap};
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
-
-pub(crate) const LAMBDA_SKILL_COMPILER_ENV: &str = "PUFFER_LSKILLC";
-pub(crate) const LAMBDA_SKILL_GATE_ENV: &str = "PUFFER_LAMBDA_SKILL_GATE";
 
 /// One structured host fact tracked by the Lambda Skill call gate.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -447,13 +443,12 @@ fn host_catalogue_json_for_verification(
             .with_context(|| format!("failed to read {host_catalogue_path}"))
             .map(Some);
     }
-    if !lambda_skill_compiler_gate_enabled() {
+    if verification.compiler_path.is_none() {
         return Ok(None);
     }
-    let source_path = verification
-        .source_path
-        .as_deref()
-        .ok_or_else(|| anyhow!("Lambda Skill gate requested but formal source path is missing"))?;
+    let source_path = verification.source_path.as_deref().ok_or_else(|| {
+        anyhow!("Lambda Skill compiler_path is configured but formal source path is missing")
+    })?;
     compiled_host_catalogue_json_for_verification(verification, Path::new(source_path)).map(Some)
 }
 
@@ -540,19 +535,6 @@ fn clear_lambda_compile_cache() {
         .clear();
 }
 
-/// Returns true when Lambda Skill host catalogues should be compiled on demand.
-pub(crate) fn lambda_skill_compiler_gate_enabled() -> bool {
-    env::var(LAMBDA_SKILL_GATE_ENV)
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on" | "compile" | "strict"
-            )
-        })
-        .unwrap_or(false)
-}
-
 fn export_host_catalogue_with_compiler(source_path: &Path, compiler: &Path) -> Result<String> {
     let output = Command::new(compiler)
         .arg("export-json")
@@ -591,24 +573,9 @@ pub(crate) fn resolve_lskillc_for_verification(
             path.display()
         ));
     }
-    if let Some(path) = env::var_os(LAMBDA_SKILL_COMPILER_ENV)
-        .map(PathBuf::from)
-        .filter(|path| path.is_file())
-    {
-        return Ok(path);
-    }
-    find_lskillc_in_path().ok_or_else(|| {
-        anyhow!(
-            "Lambda Skill gate requested but lskillc was not found; set compiler_path, {LAMBDA_SKILL_COMPILER_ENV}, or install lskillc on PATH"
-        )
-    })
-}
-
-fn find_lskillc_in_path() -> Option<PathBuf> {
-    let paths = env::var_os("PATH")?;
-    env::split_paths(&paths)
-        .map(|dir| dir.join("lskillc"))
-        .find(|path| path.is_file())
+    Err(anyhow!(
+        "Lambda Skill compiler_path is not configured in the lambda_skill_libraries manifest"
+    ))
 }
 
 /// Admission result for one Lambda Skill gate check.
@@ -869,18 +836,11 @@ mod tests {
     }
 
     #[test]
-    fn compiler_resolution_ignores_unconfigured_neighboring_compilers() {
-        let _guard = crate::test_locks::env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let old_compiler = std::env::var_os(LAMBDA_SKILL_COMPILER_ENV);
-        let old_path = std::env::var_os("PATH");
+    fn compiler_resolution_requires_manifest_compiler_path() {
         let root = tempfile::tempdir().unwrap();
         let compiler = root.path().join("unconfigured-compiler/bin/lskillc");
         fs::create_dir_all(compiler.parent().unwrap()).unwrap();
         fs::write(&compiler, "").unwrap();
-        std::env::remove_var(LAMBDA_SKILL_COMPILER_ENV);
-        std::env::set_var("PATH", root.path().join("empty-path"));
         let verification = SkillVerificationSpec {
             system: "lambda-skill".to_string(),
             source_path: Some(
@@ -896,16 +856,10 @@ mod tests {
             actions: None,
         };
 
-        assert!(resolve_lskillc_for_verification(&verification).is_err());
-
-        match old_compiler {
-            Some(value) => std::env::set_var(LAMBDA_SKILL_COMPILER_ENV, value),
-            None => std::env::remove_var(LAMBDA_SKILL_COMPILER_ENV),
-        }
-        match old_path {
-            Some(value) => std::env::set_var("PATH", value),
-            None => std::env::remove_var("PATH"),
-        }
+        let error = resolve_lskillc_for_verification(&verification)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("compiler_path is not configured"));
     }
 
     #[cfg(unix)]
@@ -940,12 +894,7 @@ mod tests {
     fn compile_gate_reuses_catalogue_until_source_changes() {
         use std::os::unix::fs::PermissionsExt;
 
-        let _guard = crate::test_locks::env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         clear_lambda_compile_cache();
-        let old_gate = std::env::var_os(LAMBDA_SKILL_GATE_ENV);
-        let old_compiler = std::env::var_os(LAMBDA_SKILL_COMPILER_ENV);
 
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("skill.lskill");
@@ -964,8 +913,6 @@ mod tests {
         perms.set_mode(0o755);
         fs::set_permissions(&compiler, perms).unwrap();
 
-        std::env::set_var(LAMBDA_SKILL_GATE_ENV, "compile");
-        std::env::remove_var(LAMBDA_SKILL_COMPILER_ENV);
         let mut skill = SkillSpec::default();
         skill.verification = Some(SkillVerificationSpec {
             system: "lambda-skill".to_string(),
@@ -985,14 +932,6 @@ mod tests {
         assert!(gate_for_verified_skill(&skill).unwrap().is_some());
         assert_eq!(fs::read_to_string(&count).unwrap(), "2");
 
-        match old_gate {
-            Some(value) => std::env::set_var(LAMBDA_SKILL_GATE_ENV, value),
-            None => std::env::remove_var(LAMBDA_SKILL_GATE_ENV),
-        }
-        match old_compiler {
-            Some(value) => std::env::set_var(LAMBDA_SKILL_COMPILER_ENV, value),
-            None => std::env::remove_var(LAMBDA_SKILL_COMPILER_ENV),
-        }
         clear_lambda_compile_cache();
     }
 }

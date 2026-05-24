@@ -305,7 +305,7 @@ fn lambda_gate_for_skill_command(skill: &SkillSpec) -> Result<Option<LambdaGateS
     let gate = gate_for_verified_skill(skill)?;
     if is_lambda_verified_skill(skill) && gate.is_none() {
         bail!(
-            "verified Lambda Skill requires an active host catalogue; set host_catalogue_path, enable PUFFER_LAMBDA_SKILL_GATE=compile with compiler_path, set PUFFER_LSKILLC, or install lskillc on PATH"
+            "verified Lambda Skill requires an active host catalogue; set host_catalogue_subpath or compiler_path in the lambda_skill_libraries manifest"
         );
     }
     Ok(gate)
@@ -861,14 +861,6 @@ mod tests {
 
     #[test]
     fn lambda_skill_command_rejects_prompt_only_verified_skill() {
-        let _guard = crate::test_locks::env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let old_gate = std::env::var_os(crate::runtime::lambda_gate::LAMBDA_SKILL_GATE_ENV);
-        let old_compiler = std::env::var_os(crate::runtime::lambda_gate::LAMBDA_SKILL_COMPILER_ENV);
-        std::env::remove_var(crate::runtime::lambda_gate::LAMBDA_SKILL_GATE_ENV);
-        std::env::remove_var(crate::runtime::lambda_gate::LAMBDA_SKILL_COMPILER_ENV);
-
         let skill = SkillSpec {
             name: "verified-ci".to_string(),
             verification: Some(SkillVerificationSpec {
@@ -889,20 +881,6 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("verified Lambda Skill requires an active host catalogue"));
-
-        match old_gate {
-            Some(value) => {
-                std::env::set_var(crate::runtime::lambda_gate::LAMBDA_SKILL_GATE_ENV, value)
-            }
-            None => std::env::remove_var(crate::runtime::lambda_gate::LAMBDA_SKILL_GATE_ENV),
-        }
-        match old_compiler {
-            Some(value) => std::env::set_var(
-                crate::runtime::lambda_gate::LAMBDA_SKILL_COMPILER_ENV,
-                value,
-            ),
-            None => std::env::remove_var(crate::runtime::lambda_gate::LAMBDA_SKILL_COMPILER_ENV),
-        }
     }
 }
 

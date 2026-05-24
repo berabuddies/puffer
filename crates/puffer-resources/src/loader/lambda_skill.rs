@@ -2,13 +2,11 @@ use super::{
     first_descriptive_line, frontmatter_string, normalize_skill_name, runner_path_exists,
     split_frontmatter,
 };
-use crate::model::{LoadedItem, SkillSpec, SkillVerificationSpec, SourceInfo, SourceKind};
+use crate::model::{LoadedItem, SkillSpec, SkillVerificationSpec, SourceInfo};
 use anyhow::{anyhow, Context, Result};
 use puffer_runner_api::{RunnerError, ToolRunner};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
-
-const LAMBDA_SKILL_ROOTS_ENV: &str = "PUFFER_LAMBDA_SKILL_ROOTS";
 
 /// Declares an external Lambda Skill library resource.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -62,39 +60,6 @@ pub(super) fn load_lambda_skill_libraries(
             runner,
             &library.value,
             &library.source_info,
-            &root,
-            diagnostics,
-        )?);
-    }
-    Ok(items)
-}
-
-/// Loads Lambda Skills from `PUFFER_LAMBDA_SKILL_ROOTS`.
-pub(super) fn load_lambda_skill_env_libraries(
-    runner: &dyn ToolRunner,
-    diagnostics: &mut Vec<String>,
-) -> Result<Vec<LoadedItem<SkillSpec>>> {
-    let Some(raw_roots) = std::env::var_os(LAMBDA_SKILL_ROOTS_ENV) else {
-        return Ok(Vec::new());
-    };
-    let mut items = Vec::new();
-    for (index, root) in std::env::split_paths(&raw_roots).enumerate() {
-        if root.as_os_str().is_empty() {
-            continue;
-        }
-        let spec = LambdaSkillLibrarySpec {
-            id: format!("env-{index}"),
-            root: root.display().to_string(),
-            ..LambdaSkillLibrarySpec::default()
-        };
-        let source_info = SourceInfo {
-            path: PathBuf::from(format!("<env:{LAMBDA_SKILL_ROOTS_ENV}>")),
-            kind: SourceKind::User,
-        };
-        items.extend(load_lambda_skill_library(
-            runner,
-            &spec,
-            &source_info,
             &root,
             diagnostics,
         )?);

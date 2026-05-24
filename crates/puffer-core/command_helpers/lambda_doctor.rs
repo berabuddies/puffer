@@ -8,6 +8,7 @@ struct LambdaSkillDoctorSummary {
     total: usize,
     host_catalogues: usize,
     compile_sources: usize,
+    missing_gate_config: usize,
     stats_known: usize,
     tools: usize,
     actions: usize,
@@ -32,21 +33,16 @@ pub(crate) fn append_lambda_skill_section(
     };
     writeln!(
         text,
-        "- lambda_skills={} strict_catalogues={} compile_sources={} stats_known={} tools={} actions={}",
+        "- lambda_skills={} strict_catalogues={} manifest_compilers={} missing_gate_config={} stats_known={} tools={} actions={}",
         summary.total,
         summary.host_catalogues,
         summary.compile_sources,
+        summary.missing_gate_config,
         summary.stats_known,
         summary.tools,
         summary.actions
     )?;
-    writeln!(
-        text,
-        "  compile_gate={} {}={}",
-        lambda_compile_gate_label(),
-        crate::runtime::lambda_gate::LAMBDA_SKILL_COMPILER_ENV,
-        display_compiler(&summary)
-    )?;
+    writeln!(text, "  configured_compiler={}", display_compiler(&summary))?;
     if let Some(source) = summary.first_compile_source.as_ref() {
         writeln!(text, "  first_compile_source={}", source.display())?;
     }
@@ -61,22 +57,18 @@ pub(crate) fn render_lambda_skill_doctor_status(resources: &LoadedResources) -> 
     let mut text = String::new();
     let _ = writeln!(
         &mut text,
-        "lambda_skills={} strict_catalogues={} compile_sources={} stats_known={} tools={} actions={}",
+        "lambda_skills={} strict_catalogues={} manifest_compilers={} missing_gate_config={} stats_known={} tools={} actions={}",
         summary.total,
         summary.host_catalogues,
         summary.compile_sources,
+        summary.missing_gate_config,
         summary.stats_known,
         summary.tools,
         summary.actions
     );
     let _ = writeln!(
         &mut text,
-        "lambda_skill_compile_gate={}",
-        lambda_compile_gate_label()
-    );
-    let _ = writeln!(
-        &mut text,
-        "lambda_skill_lskillc={}",
+        "lambda_skill_configured_compiler={}",
         display_compiler(&summary)
     );
     if let Some(source) = summary.first_compile_source.as_ref() {
@@ -96,38 +88,25 @@ pub(crate) fn lambda_skill_doctor_warnings(
     let Some(summary) = collect_lambda_skill_summary(resources) else {
         return Vec::new();
     };
-    if summary.compile_sources > 0
-        && !crate::runtime::lambda_gate::lambda_skill_compiler_gate_enabled()
-    {
+    if summary.missing_gate_config > 0 {
         return vec![LambdaSkillDoctorWarning {
             summary: format!(
-                "{} Lambda Skill(s) require compile-on-demand host catalogues for strict gating",
-                summary.compile_sources
+                "{} Lambda Skill(s) lack host catalogue or compiler config for strict gating",
+                summary.missing_gate_config
             ),
-            detail: format!(
-                "Set {}=compile to enforce host catalogues without vendoring generated files.",
-                crate::runtime::lambda_gate::LAMBDA_SKILL_GATE_ENV
-            ),
+            detail:
+                "Set host_catalogue_subpath or compiler_path in the lambda_skill_libraries manifest."
+                    .to_string(),
         }];
     }
     if summary.compile_sources > 0 && summary.compiler.is_none() {
         return vec![LambdaSkillDoctorWarning {
-            summary: "Lambda Skill compile gate is enabled but lskillc was not found".to_string(),
-            detail: format!(
-                "Set compiler_path in the lambda_skill_libraries manifest, set {}, or install lskillc on PATH.",
-                crate::runtime::lambda_gate::LAMBDA_SKILL_COMPILER_ENV
-            ),
+            summary: "Configured Lambda Skill compiler was not found".to_string(),
+            detail: "Set compiler_path in the lambda_skill_libraries manifest to an existing lskillc binary."
+                .to_string(),
         }];
     }
     Vec::new()
-}
-
-fn lambda_compile_gate_label() -> &'static str {
-    if crate::runtime::lambda_gate::lambda_skill_compiler_gate_enabled() {
-        "enabled"
-    } else {
-        "disabled"
-    }
 }
 
 fn display_compiler(summary: &LambdaSkillDoctorSummary) -> String {
@@ -142,6 +121,7 @@ fn collect_lambda_skill_summary(resources: &LoadedResources) -> Option<LambdaSki
     let mut total = 0;
     let mut host_catalogues = 0;
     let mut compile_sources = 0;
+    let mut missing_gate_config = 0;
     let mut stats_known = 0;
     let mut tools = 0;
     let mut actions = 0;
@@ -158,10 +138,14 @@ fn collect_lambda_skill_summary(resources: &LoadedResources) -> Option<LambdaSki
         total += 1;
         if verification.host_catalogue_path.is_some() {
             host_catalogues += 1;
-        } else if let Some(source_path) = verification.source_path.as_ref() {
+        } else if verification.compiler_path.is_some() {
             compile_sources += 1;
-            first_compile_source.get_or_insert_with(|| PathBuf::from(source_path));
+            if let Some(source_path) = verification.source_path.as_ref() {
+                first_compile_source.get_or_insert_with(|| PathBuf::from(source_path));
+            }
             first_compile_verification.get_or_insert_with(|| verification.clone());
+        } else {
+            missing_gate_config += 1;
         }
         if verification.tools.is_some() || verification.actions.is_some() {
             stats_known += 1;
@@ -183,6 +167,7 @@ fn collect_lambda_skill_summary(resources: &LoadedResources) -> Option<LambdaSki
         total,
         host_catalogues,
         compile_sources,
+        missing_gate_config,
         stats_known,
         tools,
         actions,
@@ -197,18 +182,8 @@ mod tests {
     use puffer_resources::{LoadedItem, SkillSpec, SkillVerificationSpec, SourceInfo, SourceKind};
 
     #[test]
-    fn render_lambda_status_reports_prompt_only_compile_sources() {
-        let _guard = crate::test_locks::env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let old_gate = std::env::var_os(crate::runtime::lambda_gate::LAMBDA_SKILL_GATE_ENV);
-        let old_compiler = std::env::var_os(crate::runtime::lambda_gate::LAMBDA_SKILL_COMPILER_ENV);
-        let old_path = std::env::var_os("PATH");
-        std::env::remove_var(crate::runtime::lambda_gate::LAMBDA_SKILL_GATE_ENV);
-        std::env::remove_var(crate::runtime::lambda_gate::LAMBDA_SKILL_COMPILER_ENV);
-
+    fn render_lambda_status_reports_missing_gate_config() {
         let temp = tempfile::tempdir().unwrap();
-        std::env::set_var("PATH", temp.path());
         let source_path = temp.path().join("skill.lskill");
         let resources = LoadedResources {
             skills: vec![LoadedItem {
@@ -242,29 +217,12 @@ mod tests {
         let warnings = lambda_skill_doctor_warnings(&resources);
 
         assert!(status.contains(
-            "lambda_skills=1 strict_catalogues=0 compile_sources=1 stats_known=1 tools=2 actions=3"
+            "lambda_skills=1 strict_catalogues=0 manifest_compilers=0 missing_gate_config=1 stats_known=1 tools=2 actions=3"
         ));
-        assert!(status.contains("lambda_skill_compile_gate=disabled"));
-        assert!(status.contains("lambda_skill_lskillc=<missing>"));
+        assert!(status.contains("lambda_skill_configured_compiler=<missing>"));
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].summary.contains("1 Lambda Skill(s) require"));
-
-        match old_gate {
-            Some(value) => {
-                std::env::set_var(crate::runtime::lambda_gate::LAMBDA_SKILL_GATE_ENV, value)
-            }
-            None => std::env::remove_var(crate::runtime::lambda_gate::LAMBDA_SKILL_GATE_ENV),
-        }
-        match old_compiler {
-            Some(value) => std::env::set_var(
-                crate::runtime::lambda_gate::LAMBDA_SKILL_COMPILER_ENV,
-                value,
-            ),
-            None => std::env::remove_var(crate::runtime::lambda_gate::LAMBDA_SKILL_COMPILER_ENV),
-        }
-        match old_path {
-            Some(value) => std::env::set_var("PATH", value),
-            None => std::env::remove_var("PATH"),
-        }
+        assert!(warnings[0]
+            .summary
+            .contains("lack host catalogue or compiler"));
     }
 }
