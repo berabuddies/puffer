@@ -21,6 +21,9 @@ export default defineConfig({
     host,
     port: 1420,
     strictPort: true,
+    watch: {
+      ignored: ["**/tests/fuzz/.runs/**"]
+    },
     hmr: host !== "127.0.0.1"
       ? {
           protocol: "ws",
