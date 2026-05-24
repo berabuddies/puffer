@@ -189,17 +189,15 @@ At startup it clears the selected `apps/puffer-desktop/tests/fuzz/.runs/agentflo
 and the aggregate output directory so reports cannot accidentally reuse stale
 bounded replay results from a previous run.
 
-Run a small Claude-planned, OpenRouter-backed campaign when testing cheaper
+Run a small Codex-planned, OpenRouter-backed campaign when testing cheaper
 worker models before scaling out:
 
 ```sh
 export OPENROUTER_API_KEY="<key>"
-export ANTHROPIC_BASE_URL="https://api-infer.agentsey.ai"
-export ANTHROPIC_AUTH_TOKEN="<infer-key>"
-export ANTHROPIC_API_KEY=""
 PUFFER_OPENROUTER_SHARD_LIMIT=2 \
 PUFFER_OPENROUTER_CONCURRENCY=2 \
-PUFFER_OPENROUTER_PLANNER_MODEL=claude-opus-4-6 \
+PUFFER_OPENROUTER_PLANNER_MODEL=gpt-5.4 \
+PUFFER_OPENROUTER_PLANNER_EFFORT=high \
 PUFFER_OPENROUTER_MODEL=inclusionai/ling-2.6-flash \
 agentflow run apps/puffer-desktop/tests/fuzz/agentflow_puffer_openrouter_campaign.py \
   --runs-dir apps/puffer-desktop/tests/fuzz/.runs/openrouter-local-runs \
@@ -207,7 +205,7 @@ agentflow run apps/puffer-desktop/tests/fuzz/agentflow_puffer_openrouter_campaig
 ```
 
 The OpenRouter campaign uses the same UI-tree scheduler and `BUG_LIST_APPEND`
-handoff. Claude Opus plans the shard boundaries and report expectations, the
+handoff. Codex plans the shard boundaries and report expectations, the
 OpenRouter-backed Explorer uses function tools to construct the assigned GUI
 trigger sequence, the harness replays that generated case, and an
 OpenRouter-backed triage step writes the shard finding report. It defaults to

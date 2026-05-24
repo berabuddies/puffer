@@ -1,19 +1,17 @@
-"""Claude-planned OpenRouter small-model campaign for Puffer UI/UX fuzzing.
+"""Codex-planned OpenRouter small-model campaign for Puffer UI/UX fuzzing.
 
 This campaign is intentionally separate from the full Claude/Infer campaign.
-Claude Opus acts as the main planner, and cheaper OpenAI-compatible workers
+Codex acts as the main planner, and cheaper OpenAI-compatible workers
 only execute bounded UI-tree shards and report trigger evidence.
 
 Required environment:
 
   export OPENROUTER_API_KEY="<key>"
-  export ANTHROPIC_BASE_URL="https://api-infer.agentsey.ai"
-  export ANTHROPIC_AUTH_TOKEN="<infer-key>"
-  export ANTHROPIC_API_KEY=""
 
 Optional controls:
 
-  export PUFFER_OPENROUTER_PLANNER_MODEL="claude-opus-4-6"
+  export PUFFER_OPENROUTER_PLANNER_MODEL="gpt-5.4"
+  export PUFFER_OPENROUTER_PLANNER_EFFORT="high"
   export PUFFER_OPENROUTER_MODEL="inclusionai/ling-2.6-flash"
   export PUFFER_OPENROUTER_CONCURRENCY=2
   export PUFFER_OPENROUTER_SHARD_LIMIT=2
@@ -46,12 +44,8 @@ MODEL = os.environ.get("PUFFER_OPENROUTER_MODEL", "inclusionai/ling-2.6-flash")
 NAMESPACE = os.environ.get("PUFFER_OPENROUTER_NAMESPACE", "openrouter-small")
 SHARD_LIMIT = os.environ.get("PUFFER_OPENROUTER_SHARD_LIMIT", "2")
 CONCURRENCY = int(os.environ.get("PUFFER_OPENROUTER_CONCURRENCY", "2"))
-PLANNER_MODEL = os.environ.get("PUFFER_OPENROUTER_PLANNER_MODEL", "claude-opus-4-6")
-
-CLAUDE_PLANNER_ENV = {
-    "ANTHROPIC_API_KEY": "",
-    "ANTHROPIC_MODEL": PLANNER_MODEL,
-}
+PLANNER_MODEL = os.environ.get("PUFFER_OPENROUTER_PLANNER_MODEL", "gpt-5.4")
+PLANNER_EFFORT = os.environ.get("PUFFER_OPENROUTER_PLANNER_EFFORT", "high")
 
 
 def scheduled_areas():
@@ -118,7 +112,7 @@ CLEAN_SELECTED_ARTIFACTS = "".join(
 
 
 PLANNER_PROMPT = f"""\
-You are the Claude Opus main planner for a small-model Puffer UI/UX fuzz smoke
+You are the Codex main planner for a small-model Puffer UI/UX fuzz smoke
 campaign.
 
 Repo: {REPO_ROOT}
@@ -149,7 +143,7 @@ Do not modify files.
 FALLBACK_PLANNER_TEXT = f"""\
 # OpenRouter Small-Model UI/UX Fuzz Fallback Plan
 
-Claude Opus planner guidance was unavailable for this round. Continue with this
+Codex planner guidance was unavailable for this round. Continue with this
 deterministic fallback instead of skipping shard execution.
 
 ## Scope Boundaries
@@ -207,6 +201,7 @@ mkdir -p "$preflight_dir"
 prompt_file="$preflight_dir/planner-prompt.txt"
 fallback_file="$preflight_dir/fallback-plan.md"
 output_file="$preflight_dir/planner-output.md"
+transcript_file="$preflight_dir/planner-transcript.log"
 error_file="$preflight_dir/planner-error.log"
 cat > "$prompt_file" <<'PLANNER_PROMPT_EOF'
 {PLANNER_PROMPT}
@@ -214,22 +209,23 @@ PLANNER_PROMPT_EOF
 cat > "$fallback_file" <<'FALLBACK_PLAN_EOF'
 {FALLBACK_PLANNER_TEXT}
 FALLBACK_PLAN_EOF
-planner_timeout="${{PUFFER_OPENROUTER_CLAUDE_PLAN_TIMEOUT_SECONDS:-120}}"
-if timeout "$planner_timeout" claude \
-  --model "${{PUFFER_OPENROUTER_PLANNER_MODEL:-claude-opus-4-6}}" \
-  --print \
-  --permission-mode plan \
-  --tools Read \
+planner_timeout="${{PUFFER_OPENROUTER_CODEX_PLAN_TIMEOUT_SECONDS:-180}}"
+if timeout "$planner_timeout" codex exec \
+  --model "${{PUFFER_OPENROUTER_PLANNER_MODEL:-gpt-5.4}}" \
+  --sandbox read-only \
+  -c model_reasoning_effort="${{PUFFER_OPENROUTER_PLANNER_EFFORT:-high}}" \
+  --output-last-message "$output_file" \
+  - \
   < "$prompt_file" \
-  > "$output_file" 2> "$error_file" && [[ -s "$output_file" ]]; then
+  > "$transcript_file" 2> "$error_file" && [[ -s "$output_file" ]]; then
   cat "$output_file"
   echo
-  echo "OPENROUTER_PLAN_OK claude"
+  echo "OPENROUTER_PLAN_OK codex"
 else
   echo "OPENROUTER_PLAN_FALLBACK"
   if [[ -s "$error_file" ]]; then
     echo
-    echo "Claude planner error excerpt:"
+    echo "Codex planner error excerpt:"
     tail -n 20 "$error_file"
     echo
   fi
@@ -275,21 +271,12 @@ with Graph(
         "capture": "final",
         "retries": 0,
     },
-    agent_defaults={
-        "claude": {
-            "model": PLANNER_MODEL,
-            "env": CLAUDE_PLANNER_ENV,
-            "timeout_seconds": int(os.environ.get("PUFFER_OPENROUTER_PLANNER_TIMEOUT_SECONDS", "900")),
-        },
-    },
 ) as dag:
     preflight = shell(
         task_id="preflight",
         script=(
             "set -euo pipefail\n"
             "test -n \"${OPENROUTER_API_KEY:-}\"\n"
-            "test -n \"${ANTHROPIC_BASE_URL:-}\"\n"
-            "test -n \"${ANTHROPIC_AUTH_TOKEN:-}\"\n"
             "rm -rf apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight apps/puffer-desktop/tests/fuzz/.runs/openrouter-campaign\n"
             + CLEAN_SELECTED_ARTIFACTS
             + "mkdir -p apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight\n"
