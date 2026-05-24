@@ -217,6 +217,7 @@ fn trigger_info(binding: &WorkflowBindingSpec, envelope: &EventEnvelope) -> Valu
 fn action_kind(action: &ActionSpec) -> &'static str {
     match action {
         ActionSpec::SqliteInsert { .. } => "sqlite_insert",
+        ActionSpec::FileAppend { .. } => "file_append",
         ActionSpec::ForwardMessage { .. } => "forward_message",
         ActionSpec::RunWorkflow { .. } => "run_workflow",
         ActionSpec::ConnectorAct { .. } => "connector_act",

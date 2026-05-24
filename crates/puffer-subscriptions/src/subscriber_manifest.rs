@@ -85,7 +85,7 @@ fn connection_subscriber_source(
     connection: &ConnectionRecord,
     template: &ConnectorTemplate,
 ) -> Option<SubscriberManifestSource> {
-    if let Some(dir) = find_subscriber_manifest(roots, &connection.slug) {
+    if let Some(dir) = find_user_subscriber_manifest(roots, &connection.slug) {
         return Some(SubscriberManifestSource {
             dir,
             instantiate: false,
@@ -99,12 +99,35 @@ fn connection_subscriber_source(
             });
         }
     }
+    if let Some(dir) = find_builtin_subscriber_manifest(roots, &connection.slug) {
+        return Some(SubscriberManifestSource {
+            dir,
+            instantiate: false,
+        });
+    }
     find_subscriber_manifest(roots, &connection.connector_slug).map(|dir| {
         SubscriberManifestSource {
             dir,
             instantiate: false,
         }
     })
+}
+
+fn find_user_subscriber_manifest(roots: &SubscriberManifestRoots, topic: &str) -> Option<PathBuf> {
+    [
+        roots.workspace_config_dir.join("subscribers").join(topic),
+        roots.user_config_dir.join("subscribers").join(topic),
+    ]
+    .into_iter()
+    .find(|dir| dir.join("manifest.toml").exists())
+}
+
+fn find_builtin_subscriber_manifest(
+    roots: &SubscriberManifestRoots,
+    topic: &str,
+) -> Option<PathBuf> {
+    let dir = roots.builtin_resources_dir.join("subscribers").join(topic);
+    dir.join("manifest.toml").exists().then_some(dir)
 }
 
 fn instantiate_manifest(
@@ -202,6 +225,43 @@ mod tests {
             roots
                 .user_config_dir
                 .join("accounts/personal")
+                .to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn instantiates_shared_manifest_when_connection_slug_matches_builtin_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(temp.path());
+        let manifest_dir = roots
+            .builtin_resources_dir
+            .join("subscribers/telegram-user");
+        write_manifest(
+            &manifest_dir,
+            "telegram-user",
+            "telegram-user",
+            Some("Telegram"),
+        );
+        let connection =
+            ConnectionRecord::authenticated("telegram-user", "telegram-login", "Telegram");
+        let mut template = template("telegram-login");
+        template.subscriber = Some(ConnectorSubscriberTemplate {
+            manifest_slug: "telegram-user".to_string(),
+            state_root: Some("telegram-accounts".to_string()),
+            display_name: Some("Telegram".to_string()),
+        });
+
+        let manifest = connection_subscriber_manifest(&roots, &connection, &template)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(manifest.spec.id, "telegram-user");
+        assert_eq!(manifest.topic(), "telegram-user");
+        assert_eq!(
+            manifest.spec.state.unwrap().dir,
+            roots
+                .user_config_dir
+                .join("telegram-accounts/telegram-user")
                 .to_string_lossy()
         );
     }

@@ -20,6 +20,7 @@
 mod actions;
 mod client;
 mod commands;
+mod delivery;
 mod events;
 mod import;
 mod login;

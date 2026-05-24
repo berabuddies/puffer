@@ -55,6 +55,11 @@ impl SkillEnv {
     pub fn credentials_path(&self) -> PathBuf {
         self.state_dir.join("credentials.json")
     }
+
+    /// Returns the path used to persist the last emitted Telegram message per chat.
+    pub fn delivery_cursor_path(&self) -> PathBuf {
+        self.state_dir.join("delivery-cursor.json")
+    }
 }
 
 /// Persisted Telegram API credentials + last-used phone, written after a

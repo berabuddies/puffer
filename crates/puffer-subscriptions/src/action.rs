@@ -1,11 +1,13 @@
 //! Action dispatchers — what happens to an event after it passes the
 //! prefilter and classifier.
 
-use crate::spec::{render_template, render_value_templates, ActionSpec};
+use crate::spec::{render_template, render_value_templates, ActionSpec, FileAppendFormat};
 use anyhow::{Context, Result};
 use puffer_subscriber_runtime::EventEnvelope;
 use rusqlite::{params, Connection};
 use serde_json::json;
+use std::fs::OpenOptions;
+use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -264,6 +266,44 @@ impl BuiltinActionDispatcher {
         })
     }
 
+    fn file_append(
+        &self,
+        path: &str,
+        format: FileAppendFormat,
+        envelope: &EventEnvelope,
+    ) -> Result<ActionResult> {
+        let absolute = resolve_file_append_path(&self.storage_root, path)?;
+        if let Some(parent) = absolute.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create file_append parent {}", parent.display()))?;
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&absolute)
+            .with_context(|| format!("open append file {}", absolute.display()))?;
+        match format {
+            FileAppendFormat::Text => {
+                file.write_all(envelope.event.text.as_bytes())
+                    .with_context(|| format!("append text to {}", absolute.display()))?;
+                file.write_all(b"\n")
+                    .with_context(|| format!("append newline to {}", absolute.display()))?;
+            }
+            FileAppendFormat::Jsonl => {
+                let line = serde_json::to_vec(&trigger_payload(envelope))
+                    .context("serialize file_append jsonl event")?;
+                file.write_all(&line)
+                    .with_context(|| format!("append jsonl to {}", absolute.display()))?;
+                file.write_all(b"\n")
+                    .with_context(|| format!("append newline to {}", absolute.display()))?;
+            }
+        }
+        Ok(ActionResult {
+            success: true,
+            summary: format!("appended to {}", absolute.display()),
+        })
+    }
+
     fn forward_message(
         &self,
         platform: &str,
@@ -456,6 +496,15 @@ impl ActionDispatcher for BuiltinActionDispatcher {
                     },
                 }
             }
+            ActionSpec::FileAppend { path, format } => {
+                match self.file_append(path, *format, envelope) {
+                    Ok(result) => result,
+                    Err(error) => ActionResult {
+                        success: false,
+                        summary: format!("file_append failed: {error:#}"),
+                    },
+                }
+            }
             ActionSpec::ForwardMessage {
                 platform,
                 target,
@@ -507,13 +556,27 @@ fn resolve_sqlite_path(storage_root: &Path, path: &str) -> Result<PathBuf> {
     Ok(storage_root.join(candidate))
 }
 
+fn resolve_file_append_path(storage_root: &Path, path: &str) -> Result<PathBuf> {
+    let raw = path.trim();
+    if raw.starts_with("~/") {
+        anyhow::bail!("file_append.path must be relative or under /tmp");
+    }
+    let candidate = Path::new(raw);
+    if candidate.is_absolute() {
+        if candidate.starts_with("/tmp") && !has_parent_component(candidate) {
+            return Ok(candidate.to_path_buf());
+        }
+        anyhow::bail!("file_append.path absolute paths must be under /tmp");
+    }
+    if has_parent_component(candidate) {
+        anyhow::bail!("file_append.path must not contain parent traversal");
+    }
+    Ok(storage_root.join(candidate))
+}
+
 fn has_parent_component(path: &Path) -> bool {
-    path.components().any(|component| {
-        matches!(
-            component,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
-    })
+    path.components()
+        .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
 }
 
 #[cfg(test)]
@@ -575,6 +638,78 @@ mod tests {
             let result = dispatcher.dispatch(&action, &envelope("hello", json!({})));
             assert!(!result.success, "{path} should be rejected");
         }
+    }
+
+    #[test]
+    fn file_append_text_preserves_shell_sensitive_message_text() {
+        let dir = tempdir().unwrap();
+        let dispatcher = BuiltinActionDispatcher::with_storage_root(dir.path());
+        let action = ActionSpec::FileAppend {
+            path: "msgs".to_string(),
+            format: FileAppendFormat::Text,
+        };
+        let result = dispatcher.dispatch(
+            &action,
+            &envelope("McDonald's && $(rm -rf /)", json!({"chat":"@x"})),
+        );
+
+        assert!(result.success, "{}", result.summary);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("msgs")).unwrap(),
+            "McDonald's && $(rm -rf /)\n"
+        );
+    }
+
+    #[test]
+    fn file_append_jsonl_records_event_payload() {
+        let dir = tempdir().unwrap();
+        let dispatcher = BuiltinActionDispatcher::with_storage_root(dir.path());
+        let action = ActionSpec::FileAppend {
+            path: "msgs.jsonl".to_string(),
+            format: FileAppendFormat::Jsonl,
+        };
+        let result = dispatcher.dispatch(
+            &action,
+            &envelope("hello", json!({"chat_id": 42, "is_outgoing": false})),
+        );
+
+        assert!(result.success, "{}", result.summary);
+        let line = std::fs::read_to_string(dir.path().join("msgs.jsonl")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(parsed["text"], "hello");
+        assert_eq!(parsed["payload"]["chat_id"], 42);
+        assert_eq!(parsed["payload"]["is_outgoing"], false);
+    }
+
+    #[test]
+    fn file_append_accepts_absolute_tmp_path_at_runtime() {
+        let dir = tempdir().unwrap();
+        let dispatcher = BuiltinActionDispatcher::with_storage_root(dir.path());
+        let path = format!("/tmp/puffer-file-append-test-{}", std::process::id());
+        let _ = std::fs::remove_file(&path);
+        let action = ActionSpec::FileAppend {
+            path: path.clone(),
+            format: FileAppendFormat::Text,
+        };
+        let result = dispatcher.dispatch(&action, &envelope("hello", json!({})));
+
+        assert!(result.success, "{}", result.summary);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello\n");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn file_append_rejects_absolute_paths_outside_tmp() {
+        let dir = tempdir().unwrap();
+        let dispatcher = BuiltinActionDispatcher::with_storage_root(dir.path());
+        let action = ActionSpec::FileAppend {
+            path: "/etc/puffer-msgs".to_string(),
+            format: FileAppendFormat::Text,
+        };
+        let result = dispatcher.dispatch(&action, &envelope("hello", json!({})));
+
+        assert!(!result.success);
+        assert!(result.summary.contains("under /tmp"));
     }
 
     struct RecordingOutbound {

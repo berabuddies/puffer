@@ -6,7 +6,7 @@ use crate::classify::{Classifier, ClassifyDecision, NullClassifier};
 use crate::history::{now_ms, WorkflowHistoryStore};
 use crate::spec::{filter_matches, FilterSpec, WorkflowBindingStatus};
 use crate::store::WorkflowBindingStore;
-use puffer_subscriber_runtime::{EventBus, EventEnvelope};
+use puffer_subscriber_runtime::{EventBus, EventEnvelope, EventReceiver};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -63,9 +63,10 @@ impl SubscriptionRouter {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let stats = Arc::new(RouterStats::default());
         let stats_for_task = stats.clone();
+        let rx = bus.subscribe();
         let join = tokio::spawn(async move {
             run(
-                bus,
+                rx,
                 store,
                 history_store,
                 dispatcher,
@@ -109,7 +110,7 @@ impl SubscriptionRouter {
 }
 
 async fn run(
-    bus: EventBus,
+    mut rx: EventReceiver,
     store: Arc<WorkflowBindingStore>,
     history_store: Option<Arc<WorkflowHistoryStore>>,
     dispatcher: Arc<dyn ActionDispatcher>,
@@ -117,7 +118,6 @@ async fn run(
     mut shutdown_rx: watch::Receiver<bool>,
     stats: Arc<RouterStats>,
 ) {
-    let mut rx = bus.subscribe();
     loop {
         tokio::select! {
             _ = shutdown_rx.changed() => break,
@@ -271,8 +271,8 @@ mod tests {
     use super::*;
     use crate::action::BuiltinActionDispatcher;
     use crate::classify::NullClassifier;
-    use crate::spec::{ActionSpec, TaggedFilterSpec, WorkflowBindingSpec};
-    use puffer_subscriber_runtime::{Event, EventEnvelope};
+    use crate::spec::{ActionSpec, FileAppendFormat, TaggedFilterSpec, WorkflowBindingSpec};
+    use puffer_subscriber_runtime::{Event, EventBus, EventEnvelope};
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -382,5 +382,59 @@ mod tests {
         assert!(result.matched);
         assert_eq!(result.acted, 0);
         assert_eq!(result.failed, 1);
+    }
+
+    #[tokio::test]
+    async fn router_receives_event_published_immediately_after_spawn() {
+        let dir = tempdir().unwrap();
+        let store = WorkflowBindingStore::load(dir.path().join("bindings.json")).unwrap();
+        store
+            .create(WorkflowBindingSpec {
+                slug: "append".into(),
+                description: "append".into(),
+                connection_slug: "telegram-user".into(),
+                connector_slug: None,
+                status: WorkflowBindingStatus::Enabled,
+                filter: None,
+                classify_prompt: None,
+                classify_model: None,
+                action: ActionSpec::FileAppend {
+                    path: "out.jsonl".into(),
+                    format: FileAppendFormat::Jsonl,
+                },
+                created_at_ms: 0,
+            })
+            .unwrap();
+        let bus = EventBus::new();
+        let dispatcher: Arc<dyn ActionDispatcher> =
+            Arc::new(BuiltinActionDispatcher::with_storage_root(dir.path()));
+        let classifier: Arc<dyn Classifier> = Arc::new(NullClassifier);
+        let router =
+            SubscriptionRouter::spawn(bus.clone(), Arc::new(store), None, dispatcher, classifier);
+
+        bus.publish(EventEnvelope {
+            envelope_id: "env-race".into(),
+            subscriber_id: "telegram-user".into(),
+            received_at_ms: 0,
+            event: Event {
+                topic: "telegram-user".into(),
+                kind: "message".into(),
+                control: false,
+                dedup_key: None,
+                text: "hello".into(),
+                payload: serde_json::json!({"message":"hello"}),
+            },
+        });
+
+        let path = dir.path().join("out.jsonl");
+        for _ in 0..50 {
+            if path.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("hello"));
+        router.shutdown().await;
     }
 }

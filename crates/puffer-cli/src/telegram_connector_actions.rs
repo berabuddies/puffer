@@ -32,19 +32,23 @@ impl ConnectionAuthChecker for TelegramConnectionAuthChecker {
         {
             return Ok(None);
         }
-        let command = SubscriberCommand::TelegramListPeers {
-            query: Some("__puffer_auth_probe__".to_string()),
-            peer_kind: None,
-            limit: Some(1),
-        };
+        let command = SubscriberCommand::TelegramAuthOk;
         let envelope = manager.send_command_and_wait(
             connection_slug,
             connection_slug,
             &command,
-            &["peer_list", "peer_list_error", "login_error"],
+            &["auth_ok", "login_error"],
             TELEGRAM_AUTH_TIMEOUT,
         )?;
-        Ok(Some(envelope.event.kind == "peer_list"))
+        Ok(Some(
+            envelope.event.kind == "auth_ok"
+                && envelope
+                    .event
+                    .payload
+                    .get("ok")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+        ))
     }
 }
 
@@ -181,19 +185,17 @@ fn telegram_connection_manifest(paths: &ConfigPaths, connection_slug: &str) -> R
     let dir = find_subscriber_manifest(&roots, TELEGRAM_SUBSCRIBER_TOPIC)
         .ok_or_else(|| anyhow::anyhow!("telegram-user subscriber manifest not found"))?;
     let mut manifest = Manifest::load(&dir)?;
-    if connection_slug != TELEGRAM_SUBSCRIBER_TOPIC {
-        manifest.spec.id = connection_slug.to_string();
-        manifest.spec.topic = Some(connection_slug.to_string());
-        manifest.spec.display_name = Some(format!("Telegram ({connection_slug})"));
-        manifest.spec.state = Some(StateSpec {
-            dir: paths
-                .user_config_dir
-                .join("telegram-accounts")
-                .join(connection_slug)
-                .to_string_lossy()
-                .to_string(),
-        });
-    }
+    manifest.spec.id = connection_slug.to_string();
+    manifest.spec.topic = Some(connection_slug.to_string());
+    manifest.spec.display_name = Some(format!("Telegram ({connection_slug})"));
+    manifest.spec.state = Some(StateSpec {
+        dir: paths
+            .user_config_dir
+            .join("telegram-accounts")
+            .join(connection_slug)
+            .to_string_lossy()
+            .to_string(),
+    });
     Ok(manifest)
 }
 
@@ -248,4 +250,41 @@ fn subscriber_manifest_roots(paths: &ConfigPaths) -> SubscriberManifestRoots {
         paths.user_config_dir.clone(),
         paths.builtin_resources_dir.clone(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_connection_manifest_uses_account_state_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths {
+            workspace_root: temp.path().join("workspace"),
+            workspace_config_dir: temp.path().join("workspace/.puffer"),
+            user_config_dir: temp.path().join("home/.puffer"),
+            builtin_resources_dir: temp.path().join("resources"),
+        };
+        let manifest_dir = paths
+            .builtin_resources_dir
+            .join("subscribers/telegram-user");
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+        std::fs::write(
+            manifest_dir.join("manifest.toml"),
+            "manifest_version = 1\nid = \"telegram-user\"\nkind = \"subscriber\"\ntopic = \"telegram-user\"\n[run]\ncmd = [\"puffer\", \"__subscriber\", \"telegram-user\"]\n[state]\ndir = \"state\"\n",
+        )
+        .unwrap();
+
+        let manifest = telegram_connection_manifest(&paths, "telegram-user").unwrap();
+
+        assert_eq!(manifest.spec.id, "telegram-user");
+        assert_eq!(manifest.topic(), "telegram-user");
+        assert_eq!(
+            manifest.spec.state.unwrap().dir,
+            paths
+                .user_config_dir
+                .join("telegram-accounts/telegram-user")
+                .to_string_lossy()
+        );
+    }
 }

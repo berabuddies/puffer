@@ -12,7 +12,8 @@ use tracing::{error, info, warn};
 
 use crate::actions::handle_telegram_act;
 use crate::commands::CommandStream;
-use crate::events::{build_message_event, emit, emit_control};
+use crate::delivery::{catch_up_recent_messages, emit_message_if_new, DeliveryCursor};
+use crate::events::emit_control;
 use crate::import::{import_tdata, TdataImportOptions, TdataImportOutcome};
 use crate::login;
 use crate::outbound::handle_send_message;
@@ -132,6 +133,16 @@ pub async fn run() -> anyhow::Result<()> {
                     }),
                 )?;
             }
+            SubscriberCommand::TelegramAuthOk => {
+                emit_control(
+                    &env.topic,
+                    "auth_ok",
+                    json!({
+                        "ok": false,
+                        "authenticated": false,
+                    }),
+                )?;
+            }
             SubscriberCommand::TelegramListPeers { query, .. } => {
                 emit_control(
                     &env.topic,
@@ -175,6 +186,7 @@ pub async fn run() -> anyhow::Result<()> {
     }
 
     let mut client = client.expect("client set after login phase");
+    let mut delivery_cursor = DeliveryCursor::load(&env)?;
 
     // Drive the remaining login steps (code + optional 2FA) if needed, then
     // enter the update loop. `client` may already be authorized when we
@@ -193,6 +205,7 @@ pub async fn run() -> anyhow::Result<()> {
                 &mut client,
                 &mut login_state,
                 &mut qr_state,
+                &mut delivery_cursor,
             )
             .await?;
             return Ok(());
@@ -262,6 +275,9 @@ pub async fn run() -> anyhow::Result<()> {
                     client = imported;
                     authorized = true;
                 }
+            }
+            SubscriberCommand::TelegramAuthOk => {
+                emit_auth_ok(&env, &client).await?;
             }
             SubscriberCommand::TelegramListPeers { query, .. } => {
                 emit_control(
@@ -360,17 +376,26 @@ async fn run_update_loop(
     client: &mut Client,
     login_state: &mut LoginState,
     qr_state: &mut Option<qr_login::QrLoginState>,
+    delivery_cursor: &mut DeliveryCursor,
 ) -> anyhow::Result<()> {
     emit_control(&env.topic, "ready", json!({}))?;
+    catch_up_recent_messages(env, client, delivery_cursor).await?;
     info!("entering telegram update loop");
 
     loop {
         tokio::select! {
+            biased;
+            cmd = commands.next() => {
+                let Some(cmd) = cmd? else {
+                    info!("stdin closed; shutting down update loop");
+                    return Ok(());
+                };
+                handle_runtime_command(env, client, login_state, qr_state, cmd).await?;
+            }
             update = client.next_update() => {
                 match update {
                     Ok(Update::NewMessage(msg)) => {
-                        let event = build_message_event(&env.topic, &msg);
-                        if let Err(err) = emit(&event) {
+                        if let Err(err) = emit_message_if_new(env, delivery_cursor, &msg) {
                             error!(error = %err, "failed to emit message event");
                         }
                     }
@@ -386,13 +411,6 @@ async fn run_update_loop(
                         return Err(anyhow::anyhow!("next_update: {err}"));
                     }
                 }
-            }
-            cmd = commands.next() => {
-                let Some(cmd) = cmd? else {
-                    info!("stdin closed; shutting down update loop");
-                    return Ok(());
-                };
-                handle_runtime_command(env, client, login_state, qr_state, cmd).await?;
             }
         }
     }
@@ -557,6 +575,9 @@ async fn handle_runtime_command(
                 *client = imported;
             }
         }
+        SubscriberCommand::TelegramAuthOk => {
+            emit_auth_ok(env, client).await?;
+        }
         SubscriberCommand::TelegramListPeers {
             query,
             peer_kind,
@@ -601,6 +622,28 @@ async fn handle_runtime_command(
         }
     }
     Ok(())
+}
+
+async fn emit_auth_ok(env: &SkillEnv, client: &Client) -> anyhow::Result<()> {
+    match client.is_authorized().await {
+        Ok(ok) => emit_control(
+            &env.topic,
+            "auth_ok",
+            json!({
+                "ok": ok,
+                "authenticated": ok,
+            }),
+        ),
+        Err(error) => emit_control(
+            &env.topic,
+            "auth_ok",
+            json!({
+                "ok": false,
+                "authenticated": false,
+                "error": error.to_string(),
+            }),
+        ),
+    }
 }
 
 fn handle_login_custom(env: &SkillEnv, op: String, args: serde_json::Value) -> anyhow::Result<()> {

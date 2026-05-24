@@ -118,6 +118,15 @@ pub enum ActionSpec {
         /// Target table. Created with a default schema if missing.
         table: String,
     },
+    /// Append one record per matched event to a file.
+    FileAppend {
+        /// Output file path. Relative paths are rooted in subscription storage;
+        /// absolute paths are limited to `/tmp`.
+        path: String,
+        /// Output format. Defaults to plain message text.
+        #[serde(default = "default_file_append_format")]
+        format: FileAppendFormat,
+    },
     /// Legacy alias for `connector_act` with action `send_message`.
     ForwardMessage {
         /// Destination connector or legacy platform id.
@@ -168,6 +177,20 @@ pub enum ActionSpec {
     /// Catch-all for future variants.
     #[serde(other)]
     Unknown,
+}
+
+/// File format used by [`ActionSpec::FileAppend`].
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FileAppendFormat {
+    /// Append only the message text plus a trailing newline.
+    Text,
+    /// Append one JSON object per event, including text and payload.
+    Jsonl,
+}
+
+fn default_file_append_format() -> FileAppendFormat {
+    FileAppendFormat::Text
 }
 
 /// One node in a workflow action graph.
@@ -252,6 +275,16 @@ fn validate_action(action: &ActionSpec) -> Result<(), String> {
                 return Err(format!(
                     "sqlite_insert.table `{table}` is not a valid SQL identifier"
                 ));
+            }
+        }
+        ActionSpec::FileAppend { path, .. } => {
+            if path.trim().is_empty() {
+                return Err("file_append.path must not be empty".into());
+            }
+            if !is_safe_file_append_path(path) {
+                return Err(
+                    "file_append.path must be a safe relative path or an absolute /tmp path".into(),
+                );
             }
         }
         ActionSpec::ForwardMessage {
@@ -506,6 +539,19 @@ fn is_safe_relative_path(path: &str) -> bool {
         })
 }
 
+fn is_safe_file_append_path(path: &str) -> bool {
+    let trimmed = path.trim();
+    if is_safe_relative_path(trimmed) {
+        return true;
+    }
+    let path = Path::new(trimmed);
+    path.is_absolute()
+        && path.starts_with("/tmp")
+        && !path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+}
+
 /// Render `template` against the matched event payload.
 pub fn render_template(template: &str, text: &str, payload: &Value) -> String {
     let mut out = String::with_capacity(template.len());
@@ -637,6 +683,49 @@ mod tests {
             created_at_ms: 0,
         };
         assert!(validate_workflow_binding(&spec).is_err());
+    }
+
+    #[test]
+    fn file_append_accepts_tmp_path_and_rejects_other_absolute_paths() {
+        let mut spec = WorkflowBindingSpec {
+            slug: "x".into(),
+            description: String::new(),
+            connection_slug: "telegram-user".into(),
+            connector_slug: None,
+            status: WorkflowBindingStatus::Enabled,
+            filter: None,
+            classify_prompt: None,
+            classify_model: None,
+            action: ActionSpec::FileAppend {
+                path: "/tmp/msgs".into(),
+                format: FileAppendFormat::Jsonl,
+            },
+            created_at_ms: 0,
+        };
+        validate_workflow_binding(&spec).unwrap();
+
+        spec.action = ActionSpec::FileAppend {
+            path: "/etc/msgs".into(),
+            format: FileAppendFormat::Text,
+        };
+        assert!(validate_workflow_binding(&spec).is_err());
+    }
+
+    #[test]
+    fn file_append_defaults_to_text_format() {
+        let action: ActionSpec = serde_json::from_value(json!({
+            "type": "file_append",
+            "path": "/tmp/msgs"
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            action,
+            ActionSpec::FileAppend {
+                format: FileAppendFormat::Text,
+                ..
+            }
+        ));
     }
 
     #[test]

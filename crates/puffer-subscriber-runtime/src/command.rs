@@ -91,6 +91,9 @@ pub enum SubscriberCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         key_file: Option<String>,
     },
+    /// Probe whether the Telegram session is currently authorized without
+    /// touching dialogs, peers, or update state.
+    TelegramAuthOk,
     /// List or search Telegram dialogs so callers can obtain stable numeric
     /// peer ids before sending messages or creating workflow filters.
     TelegramListPeers {
@@ -273,5 +276,16 @@ impl CommandSender {
             ));
         };
         crate::codec::write_line(stdin, command).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn telegram_auth_ok_serializes_as_stable_kind() {
+        let value = serde_json::to_value(SubscriberCommand::TelegramAuthOk).unwrap();
+        assert_eq!(value, serde_json::json!({"kind": "telegram_auth_ok"}));
     }
 }

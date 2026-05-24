@@ -143,6 +143,7 @@ pub async fn run() -> anyhow::Result<()> {
             | SubscriberCommand::TelegramQrLoginStart { .. }
             | SubscriberCommand::TelegramQrLoginWait { .. }
             | SubscriberCommand::TelegramImportTdata { .. }
+            | SubscriberCommand::TelegramAuthOk
             | SubscriberCommand::TelegramListPeers { .. }
             | SubscriberCommand::TelegramSearchMessages { .. } => {
                 emit_control(
@@ -310,6 +311,7 @@ async fn handle_command(
         | SubscriberCommand::TelegramQrLoginStart { .. }
         | SubscriberCommand::TelegramQrLoginWait { .. }
         | SubscriberCommand::TelegramImportTdata { .. }
+        | SubscriberCommand::TelegramAuthOk
         | SubscriberCommand::TelegramListPeers { .. }
         | SubscriberCommand::TelegramSearchMessages { .. } => {
             emit_control(
