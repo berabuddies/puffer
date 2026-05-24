@@ -293,15 +293,20 @@ fn lambda_skill_is_gate_ready_for_model(skill: &SkillSpec) -> bool {
     verification
         .host_catalogue_path
         .as_deref()
-        .is_some_and(|path| !path.trim().is_empty())
+        .is_some_and(existing_regular_file_path)
         || (verification
             .compiler_path
             .as_deref()
-            .is_some_and(|path| !path.trim().is_empty())
+            .is_some_and(existing_regular_file_path)
             && verification
                 .source_path
                 .as_deref()
-                .is_some_and(|path| !path.trim().is_empty()))
+                .is_some_and(existing_regular_file_path))
+}
+
+fn existing_regular_file_path(path: &str) -> bool {
+    let trimmed = path.trim();
+    !trimmed.is_empty() && Path::new(trimmed).is_file()
 }
 
 fn build_environment_section(state: &AppState, model_id: &str) -> Result<String> {
@@ -559,6 +564,9 @@ mod tests {
 
     #[test]
     fn runtime_system_prompt_lists_model_invocable_skills() {
+        let temp = tempfile::tempdir().unwrap();
+        let host_path = temp.path().join("host.json");
+        std::fs::write(&host_path, r#"{"effects":[],"domains":[],"tools":[]}"#).unwrap();
         let state = state();
         let enabled_tools = BTreeSet::from(["Skill".to_string()]);
         let resources = LoadedResources {
@@ -577,9 +585,7 @@ mod tests {
                             generated_path: Some(
                                 ".puffer/lambda/agent-browser/out/GENERATED.SKILL.md".to_string(),
                             ),
-                            host_catalogue_path: Some(
-                                ".puffer/lambda/agent-browser/out/host.json".to_string(),
-                            ),
+                            host_catalogue_path: Some(host_path.display().to_string()),
                             compiler_path: None,
                             tools: None,
                             actions: None,
