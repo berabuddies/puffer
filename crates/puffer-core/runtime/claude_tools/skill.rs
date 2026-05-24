@@ -53,6 +53,12 @@ pub fn execute_claude_skill_tool(
             skill.value.name
         );
     }
+    if state.lambda_gate.is_some() && !is_lambda_verified_skill(&skill.value) {
+        bail!(
+            "active Lambda Skill gate cannot switch to unverified skill `{}`",
+            skill.value.name
+        );
+    }
     if is_lambda_verified_skill(&skill.value) {
         state.lambda_gate = gate_for_verified_skill_activation(&skill.value)?;
         state.pending_lambda_host_call = None;
@@ -157,6 +163,7 @@ mod tests {
                             ),
                             host_catalogue_path: None,
                             compiler_path: None,
+                            host_tool_bindings: Default::default(),
                             tools: Some(10),
                             actions: Some(2),
                         }),

@@ -11,8 +11,8 @@ use super::filesystem_access::{ensure_filesystem_path_access, runtime_filesystem
 use super::hook_support::{run_tool_end_hooks, run_tool_start_hooks};
 use super::lambda_gate::merge_tool_metadata;
 use super::lambda_tool::{
-    commit_lambda_skill_gate_call, prepare_lambda_host_call, reject_lambda_skill_gate_preflight,
-    LAMBDA_HOST_CALL_TOOL_ID,
+    commit_successful_lambda_skill_gate_call, prepare_lambda_host_call,
+    reject_lambda_skill_gate_preflight, LAMBDA_HOST_CALL_TOOL_ID,
 };
 use super::local_tools::{
     enrich_browser_permission_input, read_current_tab_context, BrowserCurrentTabStatus,
@@ -162,10 +162,6 @@ pub(super) fn execute_tool_call(
         Ok(policy) => policy,
         Err(denied) => return Ok(denied),
     };
-    let lambda_metadata = match commit_lambda_skill_gate_call(state, tool_id) {
-        Ok(metadata) => metadata,
-        Err(denied) => return Ok(denied),
-    };
     let provider_context = match backend {
         ToolExecutionBackend::Anthropic {
             request_config,
@@ -206,8 +202,14 @@ pub(super) fn execute_tool_call(
             provider_context,
         )?
     };
-    if let Some(metadata) = lambda_metadata {
-        merge_tool_metadata(&mut result.output.metadata, metadata);
+    if result.success {
+        let lambda_metadata = match commit_successful_lambda_skill_gate_call(state, tool_id) {
+            Ok(metadata) => metadata,
+            Err(denied) => return Ok(denied),
+        };
+        if let Some(metadata) = lambda_metadata {
+            merge_tool_metadata(&mut result.output.metadata, metadata);
+        }
     }
     remember_browser_target(state, &definition, &input);
     run_tool_end_hooks(

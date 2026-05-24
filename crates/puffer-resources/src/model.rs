@@ -4,6 +4,7 @@ use puffer_provider_registry::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Identifies which layer produced a resource.
@@ -274,6 +275,8 @@ pub struct SkillVerificationSpec {
     pub host_catalogue_path: Option<String>,
     #[serde(default)]
     pub compiler_path: Option<String>,
+    #[serde(default)]
+    pub host_tool_bindings: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub tools: Option<usize>,
     #[serde(default)]

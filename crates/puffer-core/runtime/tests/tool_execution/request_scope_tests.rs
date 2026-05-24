@@ -239,7 +239,7 @@ fn lambda_host_call_bridges_formal_tool_to_declared_concrete_tool() {
     let mut state = temp_state();
     let cwd = state.cwd.clone();
     let host = LambdaHostEnv::from_json_str(
-        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","params":[{"name":"query","ty":"str"},{"name":"limit","ty":"int"}],"effects":[],"registers":[{"pred":"searched","args":[]}]}]}"#,
+        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","concreteTools":["ToolSearch"],"params":[{"name":"query","ty":"str"},{"name":"limit","ty":"int"}],"effects":[],"registers":[{"pred":"searched","args":[]}]}]}"#,
     )
     .unwrap();
     state.lambda_gate = Some(LambdaGateState::with_host_caps(host));
@@ -360,7 +360,7 @@ fn lambda_host_call_rejects_mismatched_concrete_input() {
     let mut state = temp_state();
     let cwd = state.cwd.clone();
     let host = LambdaHostEnv::from_json_str(
-        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","effects":[]}]}"#,
+        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","concreteTools":["ToolSearch"],"effects":[]}]}"#,
     )
     .unwrap();
     state.lambda_gate = Some(LambdaGateState::with_host_caps(host));
@@ -454,7 +454,7 @@ fn lambda_host_call_rejects_bad_formal_args() {
     let mut state = temp_state();
     let cwd = state.cwd.clone();
     let host = LambdaHostEnv::from_json_str(
-        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","params":[{"name":"query","ty":"str"},{"name":"limit","ty":"int"}],"effects":[]}]}"#,
+        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","concreteTools":["ToolSearch"],"params":[{"name":"query","ty":"str"},{"name":"limit","ty":"int"}],"effects":[]}]}"#,
     )
     .unwrap();
     state.lambda_gate = Some(LambdaGateState::with_host_caps(host));
@@ -513,7 +513,7 @@ fn lambda_host_call_rejects_unknown_concrete_tool() {
     let mut state = temp_state();
     let cwd = state.cwd.clone();
     let host = LambdaHostEnv::from_json_str(
-        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","effects":[]}]}"#,
+        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","concreteTools":["ToolSearch"],"effects":[]}]}"#,
     )
     .unwrap();
     state.lambda_gate = Some(LambdaGateState::with_host_caps(host));
@@ -567,7 +567,7 @@ fn model_invoked_verified_lambda_skill_installs_gate_and_tool_scope() {
     let host_path = cwd.join("verified-host.json");
     fs::write(
         &host_path,
-        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","params":[{"name":"query","ty":"str"}],"effects":[],"registers":[{"pred":"searched","args":[]}]}]}"#,
+        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","concreteTools":["ToolSearch"],"params":[{"name":"query","ty":"str"}],"effects":[],"registers":[{"pred":"searched","args":[]}]}]}"#,
     )
     .unwrap();
     let mut skill_tool = loaded_tool("Skill", "Load a skill", "runtime:skill");
@@ -601,6 +601,7 @@ fn model_invoked_verified_lambda_skill_installs_gate_and_tool_scope() {
                     generated_path: Some("skills/issue-triage/out/GENERATED.SKILL.md".to_string()),
                     host_catalogue_path: Some(host_path.display().to_string()),
                     compiler_path: None,
+                    host_tool_bindings: Default::default(),
                     tools: Some(1),
                     actions: Some(1),
                 }),

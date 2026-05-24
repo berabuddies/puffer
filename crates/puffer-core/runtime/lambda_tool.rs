@@ -17,9 +17,6 @@ pub(super) fn reject_lambda_skill_gate_preflight(
     tool_id: &str,
     input: &Value,
 ) -> Option<ToolExecutionResult> {
-    if tool_id == SKILL_TOOL_ID {
-        return None;
-    }
     if let Some(pending) = state.pending_lambda_host_call.as_ref() {
         if pending.permits_concrete_call(tool_id, input) {
             return None;
@@ -34,6 +31,9 @@ pub(super) fn reject_lambda_skill_gate_preflight(
             ),
         ));
     }
+    if tool_id == SKILL_TOOL_ID {
+        return None;
+    }
     if state.lambda_gate.is_some() {
         return Some(lambda_skill_bridge_required_denial(
             tool_id,
@@ -43,15 +43,12 @@ pub(super) fn reject_lambda_skill_gate_preflight(
     None
 }
 
-/// Commits the Lambda Skill gate transition after the concrete tool succeeds permission checks.
-pub(super) fn commit_lambda_skill_gate_call(
+/// Commits the Lambda Skill gate transition after the concrete tool succeeds.
+pub(super) fn commit_successful_lambda_skill_gate_call(
     state: &mut AppState,
     tool_id: &str,
 ) -> std::result::Result<Option<Value>, ToolExecutionResult> {
-    if state.pending_lambda_host_call.is_some() {
-        let Some(pending) = state.pending_lambda_host_call.take() else {
-            return Ok(None);
-        };
+    if let Some(pending) = state.pending_lambda_host_call.as_ref().cloned() {
         let Some(gate) = state.lambda_gate.as_mut() else {
             return Err(lambda_skill_bridge_required_denial(
                 tool_id,
@@ -64,20 +61,14 @@ pub(super) fn commit_lambda_skill_gate_call(
             Some(pending.concrete_tool()),
         );
         return match gate.step_call(pending.host_tool()) {
-            LambdaGateVerdict::Accept => Ok(Some(metadata)),
+            LambdaGateVerdict::Accept => {
+                state.pending_lambda_host_call = None;
+                Ok(Some(metadata))
+            }
             LambdaGateVerdict::Reject(reason) => Err(lambda_skill_gate_denial(tool_id, reason)),
         };
     }
-    if state.lambda_gate.is_none() {
-        return Ok(None);
-    }
-    if tool_id == SKILL_TOOL_ID {
-        return Ok(None);
-    }
-    Err(lambda_skill_bridge_required_denial(
-        tool_id,
-        "active Lambda Skill requires LambdaHostCall before concrete tool calls".to_string(),
-    ))
+    Ok(None)
 }
 
 /// Prepares a verified formal host-call bridge for the next concrete tool call.
@@ -137,6 +128,13 @@ pub(super) fn prepare_lambda_host_call(
             Some("LambdaHostCall cannot target itself".to_string()),
         );
     }
+    if parsed.tool == SKILL_TOOL_ID {
+        return blocked_runtime_tool(
+            tool_id,
+            ToolPermissionBehavior::Deny,
+            Some("LambdaHostCall cannot target the Skill loader".to_string()),
+        );
+    }
     let Some(definition) = registry.definition(&parsed.tool) else {
         return blocked_runtime_tool(
             tool_id,
@@ -174,6 +172,11 @@ pub(super) fn prepare_lambda_host_call(
     }
     match gate.admit_call_with_args(&parsed.host_tool, &parsed.args) {
         LambdaGateVerdict::Accept => {
+            if let LambdaGateVerdict::Reject(reason) =
+                gate.admit_concrete_tool_binding(&parsed.host_tool, &parsed.tool)
+            {
+                return lambda_skill_gate_denial(tool_id, reason);
+            }
             let host_tool = parsed.host_tool.clone();
             let host_args = parsed.args.clone();
             let concrete_tool = parsed.tool.clone();

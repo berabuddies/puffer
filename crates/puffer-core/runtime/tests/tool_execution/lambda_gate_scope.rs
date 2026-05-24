@@ -1,17 +1,17 @@
 use super::*;
 use crate::runtime::lambda_gate::{LambdaGateState, LambdaHostEnv};
-use crate::runtime::{PermissionPromptAction, with_permission_prompt_handler};
+use crate::runtime::{with_permission_prompt_handler, PermissionPromptAction};
 use puffer_resources::{LoadedItem, SkillSpec, SkillVerificationSpec, SourceInfo, SourceKind};
 use std::sync::{Arc, Mutex};
 
 #[test]
-fn model_invoked_plain_skill_clears_active_lambda_gate() {
+fn model_invoked_plain_skill_cannot_escape_active_lambda_gate() {
     let mut state = temp_state();
     let cwd = state.cwd.clone();
     let host_path = cwd.join("verified-host.json");
     fs::write(
         &host_path,
-        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","params":[{"name":"query","ty":"str"}],"effects":[]}]}"#,
+        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","concreteTools":["ToolSearch"],"params":[{"name":"query","ty":"str"}],"effects":[]}]}"#,
     )
     .unwrap();
     let mut skill_tool = loaded_tool("Skill", "Load a skill", "runtime:skill");
@@ -35,6 +35,7 @@ fn model_invoked_plain_skill_clears_active_lambda_gate() {
                         ),
                         host_catalogue_path: Some(host_path.display().to_string()),
                         compiler_path: None,
+                        host_tool_bindings: Default::default(),
                         tools: Some(1),
                         actions: Some(1),
                     }),
@@ -85,7 +86,7 @@ fn model_invoked_plain_skill_clears_active_lambda_gate() {
     assert!(loaded_lambda.success);
     assert!(state.lambda_gate.is_some());
 
-    let loaded_plain = execute_tool_call(
+    let error = execute_tool_call(
         &mut state,
         &resources,
         &providers,
@@ -101,16 +102,11 @@ fn model_invoked_plain_skill_clears_active_lambda_gate() {
         "Skill",
         json!({"skill": "reviewer"}),
     )
-    .unwrap();
+    .unwrap_err()
+    .to_string();
 
-    assert!(loaded_plain.success);
-    assert!(
-        loaded_plain
-            .output
-            .stdout
-            .contains("<command-name>reviewer</command-name>")
-    );
-    assert!(state.lambda_gate.is_none());
+    assert!(error.contains("active Lambda Skill gate cannot switch to unverified skill `reviewer`"));
+    assert!(state.lambda_gate.is_some());
     assert!(state.pending_lambda_host_call.is_none());
 }
 
@@ -119,7 +115,7 @@ fn lambda_bridge_preserves_concrete_tool_approval_prompt() {
     let mut state = temp_state();
     let cwd = state.cwd.clone();
     let host = LambdaHostEnv::from_json_str(
-        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","params":[{"name":"query","ty":"str"}],"effects":[]}]}"#,
+        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","concreteTools":["ToolSearch"],"params":[{"name":"query","ty":"str"}],"effects":[]}]}"#,
     )
     .unwrap();
     state.lambda_gate = Some(LambdaGateState::with_host_caps(host));
@@ -203,4 +199,149 @@ fn lambda_bridge_preserves_concrete_tool_approval_prompt() {
     assert!(executed.success);
     assert_eq!(*prompts.lock().unwrap(), vec!["ToolSearch".to_string()]);
     assert!(state.pending_lambda_host_call.is_none());
+}
+
+#[test]
+fn lambda_host_call_rejects_unbound_concrete_tool() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let host = LambdaHostEnv::from_json_str(
+        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","concreteTools":["ToolSearch"],"params":[{"name":"query","ty":"str"}],"effects":[]}]}"#,
+    )
+    .unwrap();
+    state.lambda_gate = Some(LambdaGateState::with_host_caps(host));
+
+    let resources = LoadedResources {
+        tools: vec![
+            loaded_tool(
+                "LambdaHostCall",
+                "Admit Lambda host call",
+                "runtime:lambda_host_call",
+            ),
+            loaded_tool(
+                "ToolSearch",
+                "Search available tools",
+                "runtime:tool_search",
+            ),
+            loaded_tool("Bash", "Run shell", "runtime:claude_bash"),
+        ],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let providers = empty_providers();
+    let request_config = test_openai_request_config();
+
+    let rejected = execute_tool_call(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &registry,
+        "gpt-5",
+        &cwd,
+        ToolExecutionBackend::OpenAi {
+            request_config: &request_config,
+            structured_output: None,
+        },
+        None,
+        "LambdaHostCall",
+        json!({
+            "host_tool": "formal_search",
+            "args": {"query": "ToolSearch"},
+            "tool": "Bash",
+            "input": {"command": "printf hi"},
+        }),
+    )
+    .unwrap();
+
+    assert!(!rejected.success);
+    assert!(rejected
+        .output
+        .stdout
+        .contains("host tool formal_search is not bound to concrete tool Bash"));
+    assert!(state.pending_lambda_host_call.is_none());
+}
+
+#[test]
+fn lambda_gate_commits_facts_only_after_successful_concrete_tool() {
+    let mut state = temp_state();
+    state.grant_all_tools_for_session();
+    let cwd = state.cwd.clone();
+    let host = LambdaHostEnv::from_json_str(
+        r#"{"effects":["proc"],"domains":[],"tools":[{"name":"formal_run","concreteTools":["Bash"],"effects":["proc"],"registers":[{"pred":"ran","args":[]}]}]}"#,
+    )
+    .unwrap();
+    state.lambda_gate = Some(LambdaGateState::with_host_caps(host));
+
+    let mut bash = loaded_tool("Bash", "Run shell", "runtime:claude_bash");
+    bash.value.approval_policy = Some("auto".to_string());
+    bash.value.sandbox_policy = Some("workspace-write".to_string());
+    let resources = LoadedResources {
+        tools: vec![
+            loaded_tool(
+                "LambdaHostCall",
+                "Admit Lambda host call",
+                "runtime:lambda_host_call",
+            ),
+            bash,
+        ],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let providers = empty_providers();
+    let request_config = test_openai_request_config();
+    let concrete_input = json!({"command": "false"});
+
+    let admitted = execute_tool_call(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &registry,
+        "gpt-5",
+        &cwd,
+        ToolExecutionBackend::OpenAi {
+            request_config: &request_config,
+            structured_output: None,
+        },
+        None,
+        "LambdaHostCall",
+        json!({
+            "host_tool": "formal_run",
+            "args": {},
+            "tool": "Bash",
+            "input": concrete_input,
+        }),
+    )
+    .unwrap();
+    assert!(admitted.success);
+
+    let failed = execute_tool_call(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &registry,
+        "gpt-5",
+        &cwd,
+        ToolExecutionBackend::OpenAi {
+            request_config: &request_config,
+            structured_output: None,
+        },
+        None,
+        "Bash",
+        json!({"command": "false"}),
+    )
+    .unwrap();
+
+    assert!(!failed.success);
+    assert!(state.pending_lambda_host_call.is_some());
+    let gate = state.lambda_gate.as_ref().expect("gate remains installed");
+    assert!(!gate
+        .facts()
+        .contains(&crate::runtime::lambda_gate::LambdaFact::new(
+            "ran",
+            Vec::new(),
+        )));
+    assert!(failed.output.metadata.get("lambda_skill").is_none());
 }

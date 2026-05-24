@@ -6,6 +6,7 @@ use crate::model::{LoadedItem, SkillSpec, SkillVerificationSpec, SourceInfo};
 use anyhow::{anyhow, Context, Result};
 use puffer_runner_api::{RunnerError, ToolRunner};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Declares an external Lambda Skill library resource.
@@ -21,6 +22,8 @@ pub(super) struct LambdaSkillLibrarySpec {
     compiler_path: Option<String>,
     #[serde(default)]
     allowed_tools: Vec<String>,
+    #[serde(default, alias = "tool_bindings")]
+    host_tool_bindings: BTreeMap<String, Vec<String>>,
     #[serde(default = "default_lambda_skill_user_invocable")]
     user_invocable: bool,
     #[serde(default = "default_lambda_skill_disable_model_invocation")]
@@ -209,6 +212,7 @@ fn load_lambda_skill_dir(
                 generated_path: Some(generated_path.display().to_string()),
                 host_catalogue_path: host_catalogue_path.map(|path| path.display().to_string()),
                 compiler_path: compiler_path.map(|path| path.display().to_string()),
+                host_tool_bindings: spec.host_tool_bindings.clone(),
                 tools: stats.as_ref().and_then(|stats| stats.tools),
                 actions: stats.as_ref().and_then(|stats| stats.actions),
             }),

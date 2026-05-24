@@ -3,7 +3,7 @@ use anyhow::{anyhow, Context, Result};
 use puffer_resources::{SkillSpec, SkillVerificationSpec};
 use serde::Deserialize;
 use serde_json::{Map, Value};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -46,6 +46,7 @@ pub(crate) struct LambdaToolSig {
     effects: BTreeSet<String>,
     registers: Vec<LambdaFact>,
     context_req: Option<LambdaFact>,
+    concrete_tools: BTreeSet<String>,
 }
 
 impl LambdaToolSig {
@@ -98,6 +99,10 @@ impl LambdaToolSig {
         }
         None
     }
+
+    fn allows_concrete_tool(&self, concrete_tool: &str) -> bool {
+        self.concrete_tools.contains(concrete_tool)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,6 +153,37 @@ impl LambdaHostEnv {
     /// Looks up a tool signature by host tool name.
     pub(crate) fn lookup_tool(&self, tool: &str) -> Option<&LambdaToolSig> {
         self.tools.get(tool)
+    }
+
+    fn apply_concrete_tool_bindings(
+        mut self,
+        bindings: &BTreeMap<String, Vec<String>>,
+    ) -> Result<Self> {
+        for (host_tool, concrete_tools) in bindings {
+            let Some(sig) = self.tools.get_mut(host_tool) else {
+                return Err(anyhow!(
+                    "host_tool_bindings references unknown Lambda Skill host tool {host_tool}"
+                ));
+            };
+            sig.concrete_tools
+                .extend(concrete_tools.iter().filter_map(|tool| {
+                    let trimmed = tool.trim();
+                    (!trimmed.is_empty()).then(|| trimmed.to_string())
+                }));
+        }
+        Ok(self)
+    }
+
+    fn validate_concrete_tool_bindings(&self) -> Result<()> {
+        for sig in self.tools.values() {
+            if sig.concrete_tools.is_empty() {
+                return Err(anyhow!(
+                    "Lambda Skill host tool {} lacks a concrete tool binding; add concreteTools to the host catalogue or host_tool_bindings to the lambda_skill_libraries manifest",
+                    sig.name
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -239,6 +275,23 @@ impl LambdaGateState {
             return LambdaGateVerdict::reject(reason);
         }
         LambdaGateVerdict::Accept
+    }
+
+    /// Admits or rejects the concrete Puffer tool bound to a host tool.
+    pub(crate) fn admit_concrete_tool_binding(
+        &self,
+        host_tool: &str,
+        concrete_tool: &str,
+    ) -> LambdaGateVerdict {
+        let Some(sig) = self.host.lookup_tool(host_tool) else {
+            return LambdaGateVerdict::reject(format!("unknown tool: {host_tool}"));
+        };
+        if sig.allows_concrete_tool(concrete_tool) {
+            return LambdaGateVerdict::Accept;
+        }
+        LambdaGateVerdict::reject(format!(
+            "host tool {host_tool} is not bound to concrete tool {concrete_tool}"
+        ))
     }
 
     /// Gates one call and commits registered facts when accepted.
@@ -445,7 +498,12 @@ pub(crate) fn gate_for_verified_skill(skill: &SkillSpec) -> Result<Option<Lambda
     let Some(raw) = host_catalogue_json_for_verification(verification)? else {
         return Ok(None);
     };
-    let host = LambdaHostEnv::from_json_str(&raw).context("failed to parse host catalogue")?;
+    let host = LambdaHostEnv::from_json_str(&raw)
+        .context("failed to parse host catalogue")?
+        .apply_concrete_tool_bindings(&verification.host_tool_bindings)
+        .context("failed to apply host tool bindings")?;
+    host.validate_concrete_tool_bindings()
+        .context("failed to validate host tool bindings")?;
     Ok(Some(LambdaGateState::with_host_caps(host)))
 }
 
@@ -643,6 +701,8 @@ struct ToolSigJson {
     registers: Vec<FactJson>,
     #[serde(rename = "contextReq", default)]
     context_req: Option<FactJson>,
+    #[serde(default, rename = "concreteTools", alias = "concrete_tools")]
+    concrete_tools: Vec<String>,
 }
 
 impl ToolSigJson {
@@ -665,6 +725,7 @@ impl ToolSigJson {
                 .map(FactJson::into_fact)
                 .collect(),
             context_req: self.context_req.map(FactJson::into_fact),
+            concrete_tools: self.concrete_tools.into_iter().collect(),
         })
     }
 }
@@ -693,40 +754,11 @@ mod tests {
     use super::*;
 
     const SWAP_HOST_JSON: &str = r#"{
-      "effects": ["net_r", "net_w", "sign"],
-      "domains": ["TokenAddr"],
+      "effects": ["net_r", "net_w", "sign"], "domains": ["TokenAddr"],
       "tools": [
-        {
-          "name": "get_quote",
-          "params": [
-            {"name": "from", "ty": "TokenAddr"},
-            {"name": "to", "ty": "TokenAddr"}
-          ],
-          "result": "real{p > 0}",
-          "effects": ["net_r"],
-          "registers": [],
-          "contextReq": null
-        },
-        {
-          "name": "authenticate",
-          "params": [],
-          "result": "unit",
-          "effects": [],
-          "registers": [{"pred": "authed", "args": []}],
-          "contextReq": null
-        },
-        {
-          "name": "execute_swap",
-          "params": [
-            {"name": "from", "ty": "TokenAddr"},
-            {"name": "to", "ty": "TokenAddr"},
-            {"name": "amount", "ty": "real{a > 0}"}
-          ],
-          "result": "Result<Receipt, SwapErr>",
-          "effects": ["net_w", "sign"],
-          "registers": [],
-          "contextReq": {"pred": "authed", "args": []}
-        }
+        {"name": "get_quote", "params": [{"name": "from", "ty": "TokenAddr"}, {"name": "to", "ty": "TokenAddr"}], "result": "real{p > 0}", "effects": ["net_r"], "concreteTools": ["ToolSearch"], "registers": [], "contextReq": null},
+        {"name": "authenticate", "params": [], "result": "unit", "effects": [], "concreteTools": ["ToolSearch"], "registers": [{"pred": "authed", "args": []}], "contextReq": null},
+        {"name": "execute_swap", "params": [{"name": "from", "ty": "TokenAddr"}, {"name": "to", "ty": "TokenAddr"}, {"name": "amount", "ty": "real{a > 0}"}], "result": "Result<Receipt, SwapErr>", "effects": ["net_w", "sign"], "concreteTools": ["Bash"], "registers": [], "contextReq": {"pred": "authed", "args": []}}
       ]
     }"#;
 
@@ -830,7 +862,11 @@ mod tests {
     fn gate_for_verified_skill_reads_catalogue_file() {
         let root = tempfile::tempdir().unwrap();
         let catalogue = root.path().join("host.json");
-        fs::write(&catalogue, SWAP_HOST_JSON).unwrap();
+        fs::write(
+            &catalogue,
+            r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","effects":[]}]}"#,
+        )
+        .unwrap();
         let mut skill = SkillSpec::default();
         skill.verification = Some(SkillVerificationSpec {
             system: "lambda-skill".to_string(),
@@ -838,6 +874,10 @@ mod tests {
             generated_path: None,
             host_catalogue_path: Some(catalogue.display().to_string()),
             compiler_path: None,
+            host_tool_bindings: std::collections::BTreeMap::from([(
+                "formal_search".to_string(),
+                vec!["ToolSearch".to_string()],
+            )]),
             tools: None,
             actions: None,
         });
@@ -846,7 +886,10 @@ mod tests {
             .unwrap()
             .expect("catalogue should create a gate");
 
-        assert!(gate.admit_call("get_quote").is_accept());
+        assert!(gate.admit_call("formal_search").is_accept());
+        assert!(gate
+            .admit_concrete_tool_binding("formal_search", "ToolSearch")
+            .is_accept());
     }
 
     #[test]
@@ -866,6 +909,7 @@ mod tests {
             generated_path: None,
             host_catalogue_path: None,
             compiler_path: None,
+            host_tool_bindings: Default::default(),
             tools: None,
             actions: None,
         };
@@ -934,6 +978,7 @@ mod tests {
             generated_path: None,
             host_catalogue_path: None,
             compiler_path: Some(compiler.display().to_string()),
+            host_tool_bindings: Default::default(),
             tools: None,
             actions: None,
         });

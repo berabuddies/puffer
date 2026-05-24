@@ -106,7 +106,7 @@ fn openai_responses_model_selected_lambda_skill_scope_is_turn_local() {
     let host_path = temp.path().join("verified-host.json");
     std::fs::write(
         &host_path,
-        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","effects":[]}]}"#,
+        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","concreteTools":["ToolSearch"],"effects":[]}]}"#,
     )
     .unwrap();
     let (base_url, server) = spawn_server("application/json", 2, |index| {
@@ -149,6 +149,7 @@ fn openai_responses_model_selected_lambda_skill_scope_is_turn_local() {
                     generated_path: Some("skills/issue-triage/out/GENERATED.SKILL.md".to_string()),
                     host_catalogue_path: Some(host_path.display().to_string()),
                     compiler_path: None,
+                    host_tool_bindings: Default::default(),
                     tools: Some(1),
                     actions: Some(1),
                 }),

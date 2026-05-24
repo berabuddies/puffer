@@ -1367,7 +1367,7 @@ mod tests {
         fs::write(
             manifest_dir.join("verified.yaml"),
             format!(
-                "id: verified\nroot: '{}'\ncompiler_path: '{}'\nallowed_tools:\n  - Bash\n  - Read\n",
+                "id: verified\nroot: '{}'\ncompiler_path: '{}'\nallowed_tools:\n  - Bash\n  - Read\nhost_tool_bindings:\n  gh_auth_status:\n    - Bash\n",
                 external_root.display(),
                 compiler.display()
             ),
@@ -1405,6 +1405,10 @@ mod tests {
         assert_eq!(
             verification.compiler_path,
             Some(compiler.display().to_string())
+        );
+        assert_eq!(
+            verification.host_tool_bindings.get("gh_auth_status"),
+            Some(&vec!["Bash".to_string()])
         );
     }
 

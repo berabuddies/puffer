@@ -8,7 +8,7 @@ fn openai_skill_batch_serializes_before_parallel_safe_concrete_tools() {
     let host_path = cwd.join("verified-host.json");
     fs::write(
         &host_path,
-        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","params":[{"name":"query","ty":"str"}],"effects":[]}]}"#,
+        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","concreteTools":["ToolSearch"],"params":[{"name":"query","ty":"str"}],"effects":[]}]}"#,
     )
     .unwrap();
     let mut skill_tool = loaded_tool("Skill", "Load a skill", "runtime:skill");
@@ -36,6 +36,7 @@ fn openai_skill_batch_serializes_before_parallel_safe_concrete_tools() {
                     generated_path: Some("skills/issue-triage/out/GENERATED.SKILL.md".to_string()),
                     host_catalogue_path: Some(host_path.display().to_string()),
                     compiler_path: None,
+                    host_tool_bindings: Default::default(),
                     tools: Some(1),
                     actions: Some(1),
                 }),
