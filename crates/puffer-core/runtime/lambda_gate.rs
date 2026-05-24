@@ -869,14 +869,14 @@ mod tests {
     }
 
     #[test]
-    fn compiler_resolution_does_not_probe_source_ancestors() {
+    fn compiler_resolution_ignores_unconfigured_neighboring_compilers() {
         let _guard = crate::test_locks::env_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let old_compiler = std::env::var_os(LAMBDA_SKILL_COMPILER_ENV);
         let old_path = std::env::var_os("PATH");
         let root = tempfile::tempdir().unwrap();
-        let compiler = root.path().join("lean/LambdaW/.lake/build/bin/lskillc");
+        let compiler = root.path().join("unconfigured-compiler/bin/lskillc");
         fs::create_dir_all(compiler.parent().unwrap()).unwrap();
         fs::write(&compiler, "").unwrap();
         std::env::remove_var(LAMBDA_SKILL_COMPILER_ENV);
