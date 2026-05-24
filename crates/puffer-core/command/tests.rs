@@ -795,7 +795,10 @@ fn skill_command_rejects_model_only_skills_for_direct_invocation() {
 
 #[test]
 fn hidden_telegram_skill_does_not_activate_direct_telegram_command() {
+    let _lock = lock_puffer_home();
     let tempdir = tempdir().unwrap();
+    let home = tempdir.path().join("home");
+    let _home = ScopedPufferHome::set(&home);
     let paths = ConfigPaths::discover(tempdir.path());
     ensure_workspace_dirs(&paths).unwrap();
     let session_store = SessionStore::from_paths(&paths).unwrap();
@@ -942,8 +945,8 @@ fn session_command_can_update_note_and_slug() {
 
 #[test]
 fn session_command_lists_saved_sessions() {
-    let tempdir = tempdir().unwrap();
     let _lock = lock_puffer_home();
+    let tempdir = tempdir().unwrap();
     let home = tempdir.path().join("home");
     let workspace = tempdir.path().join("workspace");
     std::fs::create_dir_all(&home).unwrap();
