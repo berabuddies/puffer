@@ -5,7 +5,7 @@ use crate::permissions::ToolPermissionBehavior;
 use crate::AppState;
 use puffer_tools::{ToolExecutionResult, ToolOutput, ToolRegistry};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::path::Path;
 
 pub(super) const LAMBDA_HOST_CALL_TOOL_ID: &str = "LambdaHostCall";
@@ -24,8 +24,9 @@ pub(super) fn reject_lambda_skill_gate_preflight(
         if pending.permits_concrete_call(tool_id, input) {
             return None;
         }
-        return Some(lambda_skill_gate_denial(
+        return Some(lambda_skill_pending_bridge_denial(
             tool_id,
+            pending.concrete_tool(),
             format!(
                 "pending formal host call {} requires next concrete tool {} with the declared input",
                 pending.host_tool(),
@@ -34,7 +35,7 @@ pub(super) fn reject_lambda_skill_gate_preflight(
         ));
     }
     if state.lambda_gate.is_some() {
-        return Some(lambda_skill_gate_denial(
+        return Some(lambda_skill_bridge_required_denial(
             tool_id,
             "active Lambda Skill requires LambdaHostCall before concrete tool calls".to_string(),
         ));
@@ -52,7 +53,7 @@ pub(super) fn commit_lambda_skill_gate_call(
             return Ok(None);
         };
         let Some(gate) = state.lambda_gate.as_mut() else {
-            return Err(lambda_skill_gate_denial(
+            return Err(lambda_skill_bridge_required_denial(
                 tool_id,
                 "pending formal host call has no active Lambda Skill gate".to_string(),
             ));
@@ -73,7 +74,7 @@ pub(super) fn commit_lambda_skill_gate_call(
     if tool_id == SKILL_TOOL_ID {
         return Ok(None);
     }
-    Err(lambda_skill_gate_denial(
+    Err(lambda_skill_bridge_required_denial(
         tool_id,
         "active Lambda Skill requires LambdaHostCall before concrete tool calls".to_string(),
     ))
@@ -209,11 +210,62 @@ struct LambdaHostCallInput {
 }
 
 fn lambda_skill_gate_denial(tool_id: &str, reason: String) -> ToolExecutionResult {
-    blocked_runtime_tool(
+    lambda_skill_recoverable_denial(
         tool_id,
-        ToolPermissionBehavior::Deny,
-        Some(format!("Lambda Skill gate rejected call: {reason}")),
+        reason,
+        LAMBDA_HOST_CALL_TOOL_ID,
+        "Retry by calling LambdaHostCall with the formal host_tool, formal args, target concrete tool, and exact concrete input. After LambdaHostCall is admitted, call the declared concrete tool once. Puffer will then run normal user approval for that concrete tool if approval is required.",
     )
+}
+
+fn lambda_skill_bridge_required_denial(tool_id: &str, reason: String) -> ToolExecutionResult {
+    lambda_skill_recoverable_denial(
+        tool_id,
+        reason,
+        LAMBDA_HOST_CALL_TOOL_ID,
+        "Retry by calling LambdaHostCall before this concrete tool call. Include the formal host_tool, formal args, this concrete tool name, and the exact concrete input you intended. Puffer will ask the user to approve the concrete tool later if approval is required.",
+    )
+}
+
+fn lambda_skill_pending_bridge_denial(
+    tool_id: &str,
+    next_tool: &str,
+    reason: String,
+) -> ToolExecutionResult {
+    lambda_skill_recoverable_denial(
+        tool_id,
+        reason,
+        next_tool,
+        "A LambdaHostCall bridge is already pending. Retry by calling the pending concrete tool with the exact input declared by that LambdaHostCall; do not call LambdaHostCall again until the pending bridge completes.",
+    )
+}
+
+fn lambda_skill_recoverable_denial(
+    tool_id: &str,
+    reason: String,
+    retry_tool: &str,
+    retry_advice: &str,
+) -> ToolExecutionResult {
+    ToolExecutionResult {
+        tool_id: tool_id.to_string(),
+        success: false,
+        output: ToolOutput {
+            stdout: format!(
+                "Lambda Skill gate rejected call: {reason}\nRecoverable: {retry_advice}"
+            ),
+            stderr: String::new(),
+            metadata: json!({
+                "lambda_skill": {
+                    "event": "gate_rejected",
+                    "recoverable": true,
+                    "rejected_tool": tool_id,
+                    "retry_tool": retry_tool,
+                    "reason": reason,
+                    "approval_path": "normal permission approval runs after LambdaHostCall admits the concrete tool"
+                }
+            }),
+        },
+    }
 }
 
 fn successful_runtime_tool_with_metadata(

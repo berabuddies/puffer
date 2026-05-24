@@ -166,6 +166,22 @@ fn lambda_gate_rejects_direct_concrete_tool_without_host_bridge() {
         .output
         .stdout
         .contains("requires LambdaHostCall before concrete tool calls"));
+    assert!(result
+        .output
+        .stdout
+        .contains("Recoverable: Retry by calling LambdaHostCall before this concrete tool call"));
+    assert_eq!(
+        result.output.metadata["lambda_skill"]["event"],
+        json!("gate_rejected")
+    );
+    assert_eq!(
+        result.output.metadata["lambda_skill"]["recoverable"],
+        json!(true)
+    );
+    assert_eq!(
+        result.output.metadata["lambda_skill"]["retry_tool"],
+        json!("LambdaHostCall")
+    );
 }
 
 #[test]
@@ -414,6 +430,22 @@ fn lambda_host_call_rejects_mismatched_concrete_input() {
         .output
         .stdout
         .contains("pending formal host call formal_search requires next concrete tool ToolSearch"));
+    assert!(rejected
+        .output
+        .stdout
+        .contains("Recoverable: A LambdaHostCall bridge is already pending"));
+    assert_eq!(
+        rejected.output.metadata["lambda_skill"]["event"],
+        json!("gate_rejected")
+    );
+    assert_eq!(
+        rejected.output.metadata["lambda_skill"]["recoverable"],
+        json!(true)
+    );
+    assert_eq!(
+        rejected.output.metadata["lambda_skill"]["retry_tool"],
+        json!("ToolSearch")
+    );
     assert!(state.pending_lambda_host_call.is_some());
 }
 
