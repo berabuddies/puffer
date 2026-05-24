@@ -4456,6 +4456,83 @@ mod tests {
         assert!(manifest.contains("- Read"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn desktop_lambda_skill_library_save_infers_compiler_and_source_bindings() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let external_project = temp.path().join("external-project");
+        let lambda_root = external_project.join("skills");
+        let compiler = external_project.join("lean/LambdaW/.lake/build/bin/lskillc");
+        let skill_dir = lambda_root.join("vendor/web-check");
+        std::fs::create_dir_all(skill_dir.join("out")).expect("skill dir");
+        std::fs::create_dir_all(compiler.parent().unwrap()).expect("compiler dir");
+        std::fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {\n  tool fetch_page(url: Str) -> Str {\n    effects: [net_r]\n  }\n  tool ask_for_approval() -> Unit {\n    effects: [user_in]\n  }\n}\nskill web_check {}\n",
+        )
+        .expect("skill source");
+        std::fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: web-check\ndescription: Verified web check\n---\nUse generated prompt.\n",
+        )
+        .expect("generated skill");
+        std::fs::write(
+            &compiler,
+            "#!/bin/sh\nif [ \"$1\" = help ]; then echo help; exit 0; fi\nif [ \"$1\" != export-json ]; then exit 9; fi\ncat <<'JSON'\n{\"effects\":[\"net_r\",\"user_in\"],\"domains\":[],\"tools\":[{\"name\":\"fetch_page\",\"params\":[{\"name\":\"url\",\"ty\":\"str\"}],\"result\":\"str\",\"effects\":[\"net_r\"],\"registers\":[],\"contextReq\":null},{\"name\":\"ask_for_approval\",\"params\":[],\"result\":\"unit\",\"effects\":[\"user_in\"],\"registers\":[],\"contextReq\":null}]}\nJSON\n",
+        )
+        .expect("compiler");
+        let mut permissions = std::fs::metadata(&compiler).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&compiler, permissions).expect("chmod compiler");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let saved = handle_save_lambda_skill_library(
+            &state,
+            &json!({
+                "id": "verified",
+                "root": lambda_root.display().to_string()
+            }),
+        )
+        .expect("save lambda skill library");
+
+        assert_eq!(
+            saved["libraries"][0]["compilerPath"],
+            compiler.display().to_string()
+        );
+        assert!(saved["libraries"][0]["allowedTools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool == "Bash"));
+        assert_eq!(
+            saved["libraries"][0]["hostToolBindings"]["fetch_page"][0],
+            "Bash"
+        );
+        assert_eq!(
+            saved["libraries"][0]["hostToolBindings"]["ask_for_approval"][0],
+            "AskUserQuestion"
+        );
+        assert!(saved["doctor"]
+            .as_str()
+            .unwrap()
+            .contains("lambda_skills=1 strict_catalogues=0 manifest_compilers=1"));
+        assert!(saved["doctor"]
+            .as_str()
+            .unwrap()
+            .contains("model-invocable"));
+    }
+
     #[test]
     fn browser_permission_payload_json_exposes_context_only() {
         let payload =
