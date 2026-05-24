@@ -39,6 +39,13 @@ struct SetLambdaSkillEnabledParams {
     enabled: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoveLambdaSkillLibraryParams {
+    library_id: String,
+    source_kind: String,
+}
+
 #[derive(Deserialize, Serialize, Default)]
 struct LambdaSkillLibraryManifestDto {
     id: String,
@@ -153,18 +160,15 @@ pub(crate) fn handle_save_lambda_skill_library(
     };
     infer_missing_lambda_skill_manifest_fields(&mut manifest);
     validate_lambda_skill_library_import(&manifest)?;
-    let paths = state.config_paths();
-    let dir = match params.scope.as_deref().unwrap_or("workspace") {
-        "user" => paths
-            .user_config_dir
-            .join("resources/lambda_skill_libraries"),
-        "local" | "project" | "workspace" => paths
-            .workspace_config_dir
-            .join("resources/lambda_skill_libraries"),
-        other => anyhow::bail!("unsupported Lambda Skill library scope `{other}`"),
-    };
+    let dir = lambda_skill_manifest_dir(state, params.scope.as_deref().unwrap_or("workspace"))?;
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{id}.yaml"));
+    let new_root = canonical_or_clean(&resolved_lambda_skill_manifest_root(&manifest, &path));
+    let existing = raw_lambda_skill_library_manifest_dtos(state)?;
+    if lambda_skill_library_is_covered_by_parent(&existing, &new_root, &path) {
+        return lambda_skill_libraries_snapshot(state);
+    }
+    remove_redundant_lambda_skill_manifests(&existing, &new_root, &path)?;
     std::fs::write(&path, serde_yaml::to_string(&manifest)?)
         .with_context(|| format!("write {}", path.display()))?;
     lambda_skill_libraries_snapshot(state)
@@ -202,22 +206,27 @@ pub(crate) fn handle_set_lambda_skill_enabled(
     lambda_skill_libraries_snapshot(state)
 }
 
+pub(crate) fn handle_remove_lambda_skill_library(
+    state: &DaemonState,
+    params: &Value,
+) -> Result<Value> {
+    let params: RemoveLambdaSkillLibraryParams = serde_json::from_value(params.clone())?;
+    let id = params.library_id.trim();
+    validate_lambda_skill_library_id(id)?;
+    let path = lambda_skill_manifest_path(state, params.source_kind.trim(), id)?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).with_context(|| format!("remove {}", path.display())),
+    }
+    lambda_skill_libraries_snapshot(state)
+}
+
 fn lambda_skill_libraries_snapshot(state: &DaemonState) -> Result<Value> {
-    let paths = state.config_paths();
-    let workspace_dir = paths
-        .workspace_config_dir
-        .join("resources/lambda_skill_libraries");
-    let user_dir = paths
-        .user_config_dir
-        .join("resources/lambda_skill_libraries");
-    let libraries = if workspace_dir == user_dir {
-        lambda_skill_library_manifest_dtos(&workspace_dir, "workspace")?
-    } else {
-        lambda_skill_library_manifest_dtos(&workspace_dir, "workspace")?
-            .into_iter()
-            .chain(lambda_skill_library_manifest_dtos(&user_dir, "user")?)
-            .collect::<Vec<_>>()
-    };
+    let workspace_dir = lambda_skill_manifest_dir(state, "workspace")?;
+    let user_dir = lambda_skill_manifest_dir(state, "user")?;
+    let libraries =
+        effective_lambda_skill_libraries(raw_lambda_skill_library_manifest_dtos(state)?);
     let skills = lambda_verified_skill_dtos(&libraries);
     let doctor = lambda_desktop_doctor_summary(&skills);
     let warnings = lambda_desktop_warning_lines(&skills);
@@ -234,17 +243,41 @@ fn lambda_skill_libraries_snapshot(state: &DaemonState) -> Result<Value> {
 }
 
 fn lambda_skill_manifest_path(state: &DaemonState, source_kind: &str, id: &str) -> Result<PathBuf> {
-    let paths = state.config_paths();
-    let dir = match source_kind {
-        "user" => paths
-            .user_config_dir
-            .join("resources/lambda_skill_libraries"),
-        "local" | "project" | "workspace" => paths
-            .workspace_config_dir
-            .join("resources/lambda_skill_libraries"),
-        other => anyhow::bail!("unsupported Lambda Skill library scope `{other}`"),
-    };
+    let dir = lambda_skill_manifest_dir(state, source_kind)?;
     Ok(dir.join(format!("{id}.yaml")))
+}
+
+fn lambda_skill_manifest_dir(state: &DaemonState, source_kind: &str) -> Result<PathBuf> {
+    let paths = state.config_paths();
+    match source_kind {
+        "user" => Ok(paths
+            .user_config_dir
+            .join("resources/lambda_skill_libraries")),
+        "local" | "project" | "workspace" => Ok(paths
+            .workspace_config_dir
+            .join("resources/lambda_skill_libraries")),
+        other => anyhow::bail!("unsupported Lambda Skill library scope `{other}`"),
+    }
+}
+
+fn lambda_skill_manifest_dirs(state: &DaemonState) -> Result<Vec<(PathBuf, &'static str)>> {
+    let workspace_dir = lambda_skill_manifest_dir(state, "workspace")?;
+    let user_dir = lambda_skill_manifest_dir(state, "user")?;
+    if workspace_dir == user_dir {
+        Ok(vec![(workspace_dir, "workspace")])
+    } else {
+        Ok(vec![(workspace_dir, "workspace"), (user_dir, "user")])
+    }
+}
+
+fn raw_lambda_skill_library_manifest_dtos(
+    state: &DaemonState,
+) -> Result<Vec<LambdaSkillLibraryInfoDto>> {
+    let mut libraries = Vec::new();
+    for (dir, source_kind) in lambda_skill_manifest_dirs(state)? {
+        libraries.extend(lambda_skill_library_manifest_dtos(&dir, source_kind)?);
+    }
+    Ok(libraries)
 }
 
 fn lambda_skill_library_manifest_dtos(
@@ -290,6 +323,98 @@ fn lambda_skill_library_manifest_dtos(
             .then_with(|| left.id.cmp(&right.id))
     });
     Ok(items)
+}
+
+fn effective_lambda_skill_libraries(
+    libraries: Vec<LambdaSkillLibraryInfoDto>,
+) -> Vec<LambdaSkillLibraryInfoDto> {
+    let mut candidates = libraries
+        .into_iter()
+        .map(|library| {
+            let root = canonical_or_clean(&resolved_lambda_skill_library_root(&library));
+            (root, library)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|(left_root, left), (right_root, right)| {
+        left_root
+            .components()
+            .count()
+            .cmp(&right_root.components().count())
+            .then_with(|| {
+                source_kind_priority(&left.source_kind)
+                    .cmp(&source_kind_priority(&right.source_kind))
+            })
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    let mut kept: Vec<(PathBuf, LambdaSkillLibraryInfoDto)> = Vec::new();
+    for (root, library) in candidates {
+        if kept
+            .iter()
+            .any(|(kept_root, _)| path_contains(kept_root, &root))
+        {
+            continue;
+        }
+        kept.push((root, library));
+    }
+
+    let mut libraries = kept
+        .into_iter()
+        .map(|(_, library)| library)
+        .collect::<Vec<_>>();
+    libraries.sort_by(|left, right| {
+        left.source_kind
+            .cmp(&right.source_kind)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    libraries
+}
+
+fn source_kind_priority(source_kind: &str) -> usize {
+    match source_kind {
+        "workspace" | "local" | "project" => 0,
+        "user" => 1,
+        _ => 2,
+    }
+}
+
+fn lambda_skill_library_is_covered_by_parent(
+    libraries: &[LambdaSkillLibraryInfoDto],
+    new_root: &Path,
+    target_manifest_path: &Path,
+) -> bool {
+    libraries.iter().any(|library| {
+        let source_path = PathBuf::from(&library.source_path);
+        if same_path(&source_path, target_manifest_path) {
+            return false;
+        }
+        let existing_root = canonical_or_clean(&resolved_lambda_skill_library_root(library));
+        existing_root != new_root && path_contains(&existing_root, new_root)
+    })
+}
+
+fn remove_redundant_lambda_skill_manifests(
+    libraries: &[LambdaSkillLibraryInfoDto],
+    new_root: &Path,
+    target_manifest_path: &Path,
+) -> Result<()> {
+    for library in libraries {
+        let source_path = PathBuf::from(&library.source_path);
+        if same_path(&source_path, target_manifest_path) {
+            continue;
+        }
+        let existing_root = canonical_or_clean(&resolved_lambda_skill_library_root(library));
+        if existing_root == new_root || path_contains(new_root, &existing_root) {
+            match std::fs::remove_file(&source_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).with_context(|| format!("remove {}", source_path.display()))
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn lambda_verified_skill_dtos(
@@ -446,6 +571,46 @@ fn resolved_lambda_skill_library_root(library: &LambdaSkillLibraryInfoDto) -> Pa
         .parent()
         .unwrap_or_else(|| Path::new(""))
         .join(root)
+}
+
+fn resolved_lambda_skill_manifest_root(
+    manifest: &LambdaSkillLibraryManifestDto,
+    manifest_path: &Path,
+) -> PathBuf {
+    let root = PathBuf::from(&manifest.root);
+    if root.is_absolute() {
+        return root;
+    }
+    manifest_path
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join(root)
+}
+
+fn canonical_or_clean(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| clean_path(path))
+}
+
+fn clean_path(path: &Path) -> PathBuf {
+    let mut clean = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                clean.pop();
+            }
+            other => clean.push(other.as_os_str()),
+        }
+    }
+    clean
+}
+
+fn path_contains(parent: &Path, child: &Path) -> bool {
+    parent == child || child.starts_with(parent)
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    canonical_or_clean(left) == canonical_or_clean(right)
 }
 
 fn collect_lambda_skill_dirs_for_snapshot(dir: &Path, out: &mut Vec<PathBuf>) {

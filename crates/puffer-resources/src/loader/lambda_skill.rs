@@ -2,7 +2,7 @@ use super::{
     first_descriptive_line, frontmatter_string, normalize_skill_name, runner_path_exists,
     split_frontmatter,
 };
-use crate::model::{LoadedItem, SkillSpec, SkillVerificationSpec, SourceInfo};
+use crate::model::{LoadedItem, SkillSpec, SkillVerificationSpec, SourceInfo, SourceKind};
 use anyhow::{anyhow, Context, Result};
 use puffer_runner_api::{RunnerError, ToolRunner};
 use serde::Deserialize;
@@ -63,8 +63,7 @@ pub(super) fn load_lambda_skill_libraries(
     diagnostics: &mut Vec<String>,
 ) -> Result<Vec<LoadedItem<SkillSpec>>> {
     let mut items = Vec::new();
-    for library in libraries {
-        let root = resolve_lambda_skill_root(&library.value.root, &library.source_info.path);
+    for (library, root) in effective_lambda_skill_libraries(libraries) {
         items.extend(load_lambda_skill_library(
             runner,
             &library.value,
@@ -74,6 +73,52 @@ pub(super) fn load_lambda_skill_libraries(
         )?);
     }
     Ok(items)
+}
+
+fn effective_lambda_skill_libraries<'a>(
+    libraries: &'a [LoadedItem<LambdaSkillLibrarySpec>],
+) -> Vec<(&'a LoadedItem<LambdaSkillLibrarySpec>, PathBuf)> {
+    let mut candidates = libraries
+        .iter()
+        .map(|library| {
+            let root = resolve_lambda_skill_root(&library.value.root, &library.source_info.path);
+            (clean_path(&root), library, root)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|(left_key, left, _), (right_key, right, _)| {
+        left_key
+            .components()
+            .count()
+            .cmp(&right_key.components().count())
+            .then_with(|| {
+                source_kind_priority(left.source_info.kind)
+                    .cmp(&source_kind_priority(right.source_info.kind))
+            })
+            .then_with(|| left.value.id.cmp(&right.value.id))
+    });
+
+    let mut kept: Vec<(PathBuf, &'a LoadedItem<LambdaSkillLibrarySpec>, PathBuf)> = Vec::new();
+    for (key, library, root) in candidates {
+        if kept
+            .iter()
+            .any(|(kept_key, _, _)| path_contains(kept_key, &key))
+        {
+            continue;
+        }
+        kept.push((key, library, root));
+    }
+
+    kept.into_iter()
+        .map(|(_, library, root)| (library, root))
+        .collect()
+}
+
+fn source_kind_priority(kind: SourceKind) -> usize {
+    match kind {
+        SourceKind::Workspace => 0,
+        SourceKind::User => 1,
+        SourceKind::Builtin => 2,
+    }
 }
 
 fn load_lambda_skill_library(
@@ -291,6 +336,24 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
+}
+
+fn clean_path(path: &Path) -> PathBuf {
+    let mut clean = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                clean.pop();
+            }
+            other => clean.push(other.as_os_str()),
+        }
+    }
+    clean
+}
+
+fn path_contains(parent: &Path, child: &Path) -> bool {
+    parent == child || child.starts_with(parent)
 }
 
 fn lambda_skill_source_path(runner: &dyn ToolRunner, dir: &Path) -> Option<PathBuf> {

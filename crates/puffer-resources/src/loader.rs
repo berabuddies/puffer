@@ -1419,6 +1419,72 @@ mod tests {
     }
 
     #[test]
+    fn lambda_skill_library_ignores_nested_duplicate_roots() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        let external_root = temp.path().join("lambda-library");
+        let nested_root = external_root.join("source-pack");
+        let skill_dir = nested_root.join("gh-fix-ci");
+        fs::create_dir_all(skill_dir.join("out")).unwrap();
+        fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {}\nskill gh_fix_ci {}\n",
+        )
+        .unwrap();
+        fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: gh-fix-ci\ndescription: Verified CI repair\n---\nUse generated prompt.\n",
+        )
+        .unwrap();
+        fs::write(
+            skill_dir.join("out/host.json"),
+            r#"{"effects":[],"domains":[],"tools":[{"name":"gh_auth_status","effects":[],"concreteTools":["Bash"]}]}"#,
+        )
+        .unwrap();
+
+        let manifest_dir = root.join(".puffer/resources/lambda_skill_libraries");
+        fs::create_dir_all(&manifest_dir).unwrap();
+        fs::write(
+            manifest_dir.join("parent.yaml"),
+            format!(
+                "id: parent\nroot: '{}'\nhost_catalogue_subpath: out/host.json\nallowed_tools:\n  - Bash\n",
+                external_root.display()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            manifest_dir.join("nested.yaml"),
+            format!(
+                "id: nested\nroot: '{}'\nhost_catalogue_subpath: out/host.json\nallowed_tools:\n  - Bash\n",
+                nested_root.display()
+            ),
+        )
+        .unwrap();
+
+        let paths = ConfigPaths::discover(&root);
+        let loaded = load_resources(&paths, &FsTestRunner).unwrap();
+        let expected_source = skill_dir.join("skill.lskill").display().to_string();
+        let lambda_skill_count = loaded
+            .skills
+            .iter()
+            .filter(|skill| {
+                skill.value.name == "gh-fix-ci"
+                    && skill
+                        .value
+                        .verification
+                        .as_ref()
+                        .is_some_and(|verification| {
+                            verification.system == "lambda-skill"
+                                && verification.source_path.as_deref()
+                                    == Some(expected_source.as_str())
+                        })
+            })
+            .count();
+
+        assert_eq!(lambda_skill_count, 1);
+    }
+
+    #[test]
     fn lambda_skill_library_disables_named_generated_skill() {
         let temp = tempdir().unwrap();
         let root = temp.path().join("workspace");
