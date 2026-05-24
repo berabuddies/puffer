@@ -74,7 +74,7 @@ pub(super) fn execute_tool_call(
     tool_id: &str,
     input: Value,
 ) -> Result<ToolExecutionResult> {
-    let effective_tool_filter = active_tool_filter(state, tool_filter);
+    let effective_tool_filter = active_tool_filter(state, tool_filter, tool_id);
     let structured_output = match backend {
         ToolExecutionBackend::Anthropic {
             structured_output, ..
@@ -225,13 +225,18 @@ pub(super) fn execute_tool_call(
 fn active_tool_filter(
     state: &AppState,
     tool_filter: Option<&RequestToolFilter>,
+    tool_id: &str,
 ) -> Option<RequestToolFilter> {
-    tool_filter.cloned().or_else(|| {
-        state
-            .lambda_gate
-            .as_ref()
-            .and_then(|gate| gate.request_tool_filter().cloned())
-    })
+    if let Some(tool_filter) = tool_filter {
+        return Some(tool_filter.clone());
+    }
+    if tool_id == "Skill" {
+        return None;
+    }
+    state
+        .lambda_gate
+        .as_ref()
+        .and_then(|gate| gate.request_tool_filter().cloned())
 }
 
 fn successful_runtime_tool(tool_id: &str, stdout: String) -> ToolExecutionResult {
@@ -290,7 +295,7 @@ pub(super) fn resolve_tool_permission(
     input: &Value,
     tool_filter: Option<&super::RequestToolFilter>,
 ) -> Result<PermissionOutcome> {
-    let effective_tool_filter = active_tool_filter(state, tool_filter);
+    let effective_tool_filter = active_tool_filter(state, tool_filter, tool_id);
     let definition = match registry.definition(tool_id) {
         Some(d) => d.clone(),
         None => {

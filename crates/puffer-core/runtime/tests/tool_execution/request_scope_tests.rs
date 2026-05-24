@@ -123,11 +123,11 @@ fn send_user_message_ignores_workspace_ask_permissions() {
 }
 
 #[test]
-fn lambda_gate_rejects_tool_outside_active_skill_catalogue() {
+fn lambda_gate_rejects_direct_concrete_tool_without_host_bridge() {
     let mut state = temp_state();
     let cwd = state.cwd.clone();
     let host = LambdaHostEnv::from_json_str(
-        r#"{"effects":[],"domains":[],"tools":[{"name":"OtherTool","effects":[]}]}"#,
+        r#"{"effects":[],"domains":[],"tools":[{"name":"ToolSearch","effects":[]}]}"#,
     )
     .unwrap();
     state.lambda_gate = Some(LambdaGateState::with_host_caps(host));
@@ -165,11 +165,11 @@ fn lambda_gate_rejects_tool_outside_active_skill_catalogue() {
     assert!(result
         .output
         .stdout
-        .contains("Lambda Skill gate rejected call: unknown tool: ToolSearch"));
+        .contains("requires LambdaHostCall before concrete tool calls"));
 }
 
 #[test]
-fn lambda_gate_commits_facts_after_accepted_tool_call() {
+fn lambda_gate_does_not_commit_facts_for_direct_concrete_tool() {
     let mut state = temp_state();
     let cwd = state.cwd.clone();
     let host = LambdaHostEnv::from_json_str(
@@ -207,21 +207,13 @@ fn lambda_gate_commits_facts_after_accepted_tool_call() {
     )
     .unwrap();
 
-    assert!(result.success);
-    assert_eq!(
-        result.output.metadata["lambda_skill"]["event"],
-        json!("host_call_committed")
-    );
-    assert_eq!(
-        result.output.metadata["lambda_skill"]["host_tool"],
-        json!("ToolSearch")
-    );
-    assert_eq!(
-        result.output.metadata["lambda_skill"]["registered_facts"][0]["pred"],
-        json!("searched")
-    );
+    assert!(!result.success);
+    assert!(result
+        .output
+        .stdout
+        .contains("requires LambdaHostCall before concrete tool calls"));
     let gate = state.lambda_gate.as_ref().expect("gate remains installed");
-    assert!(gate
+    assert!(!gate
         .facts()
         .contains(&LambdaFact::new("searched", Vec::new())));
 }
@@ -698,6 +690,114 @@ fn model_invoked_verified_lambda_skill_installs_gate_and_tool_scope() {
         committed.output.metadata["lambda_skill"]["event"],
         json!("host_call_committed")
     );
+    assert!(state.pending_lambda_host_call.is_none());
+}
+
+#[test]
+fn model_invoked_plain_skill_clears_active_lambda_gate() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let host_path = cwd.join("verified-host.json");
+    fs::write(
+        &host_path,
+        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","params":[{"name":"query","ty":"str"}],"effects":[]}]}"#,
+    )
+    .unwrap();
+    let mut skill_tool = loaded_tool("Skill", "Load a skill", "runtime:skill");
+    skill_tool.value.approval_policy = Some("auto".to_string());
+    skill_tool.value.sandbox_policy = Some("read-only".to_string());
+    let resources = LoadedResources {
+        tools: vec![skill_tool],
+        skills: vec![
+            LoadedItem {
+                value: SkillSpec {
+                    name: "issue-triage".to_string(),
+                    description: "Triage issues".to_string(),
+                    content: "Use LambdaHostCall before concrete tools.".to_string(),
+                    allowed_tools: vec!["ToolSearch".to_string()],
+                    disable_model_invocation: false,
+                    verification: Some(SkillVerificationSpec {
+                        system: "lambda-skill".to_string(),
+                        source_path: Some("skills/issue-triage/skill.lskill".to_string()),
+                        generated_path: Some(
+                            "skills/issue-triage/out/GENERATED.SKILL.md".to_string(),
+                        ),
+                        host_catalogue_path: Some(host_path.display().to_string()),
+                        compiler_path: None,
+                        tools: Some(1),
+                        actions: Some(1),
+                    }),
+                    ..SkillSpec::default()
+                },
+                source_info: SourceInfo {
+                    path: "skills/issue-triage/skill.lskill".into(),
+                    kind: SourceKind::Workspace,
+                },
+            },
+            LoadedItem {
+                value: SkillSpec {
+                    name: "reviewer".to_string(),
+                    description: "Review changes".to_string(),
+                    content: "Review normal changes.".to_string(),
+                    disable_model_invocation: false,
+                    ..SkillSpec::default()
+                },
+                source_info: SourceInfo {
+                    path: "skills/reviewer/SKILL.md".into(),
+                    kind: SourceKind::Workspace,
+                },
+            },
+        ],
+        ..LoadedResources::default()
+    };
+    let registry = ToolRegistry::from_resources(&resources);
+    let providers = empty_providers();
+    let request_config = test_openai_request_config();
+
+    let loaded_lambda = execute_tool_call(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &registry,
+        "gpt-5",
+        &cwd,
+        ToolExecutionBackend::OpenAi {
+            request_config: &request_config,
+            structured_output: None,
+        },
+        None,
+        "Skill",
+        json!({"skill": "issue-triage"}),
+    )
+    .unwrap();
+    assert!(loaded_lambda.success);
+    assert!(state.lambda_gate.is_some());
+
+    let loaded_plain = execute_tool_call(
+        &mut state,
+        &resources,
+        &providers,
+        &mut AuthStore::default(),
+        &registry,
+        "gpt-5",
+        &cwd,
+        ToolExecutionBackend::OpenAi {
+            request_config: &request_config,
+            structured_output: None,
+        },
+        None,
+        "Skill",
+        json!({"skill": "reviewer"}),
+    )
+    .unwrap();
+
+    assert!(loaded_plain.success);
+    assert!(loaded_plain
+        .output
+        .stdout
+        .contains("<command-name>reviewer</command-name>"));
+    assert!(state.lambda_gate.is_none());
     assert!(state.pending_lambda_host_call.is_none());
 }
 

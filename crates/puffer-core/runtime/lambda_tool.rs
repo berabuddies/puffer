@@ -9,6 +9,7 @@ use serde_json::Value;
 use std::path::Path;
 
 pub(super) const LAMBDA_HOST_CALL_TOOL_ID: &str = "LambdaHostCall";
+const SKILL_TOOL_ID: &str = "Skill";
 
 /// Rejects concrete tool calls that do not match the active Lambda Skill gate.
 pub(super) fn reject_lambda_skill_gate_preflight(
@@ -16,6 +17,9 @@ pub(super) fn reject_lambda_skill_gate_preflight(
     tool_id: &str,
     input: &Value,
 ) -> Option<ToolExecutionResult> {
+    if tool_id == SKILL_TOOL_ID {
+        return None;
+    }
     if let Some(pending) = state.pending_lambda_host_call.as_ref() {
         if pending.permits_concrete_call(tool_id, input) {
             return None;
@@ -29,11 +33,13 @@ pub(super) fn reject_lambda_skill_gate_preflight(
             ),
         ));
     }
-    let gate = state.lambda_gate.as_ref()?;
-    match gate.admit_call(tool_id) {
-        LambdaGateVerdict::Accept => None,
-        LambdaGateVerdict::Reject(reason) => Some(lambda_skill_gate_denial(tool_id, reason)),
+    if state.lambda_gate.is_some() {
+        return Some(lambda_skill_gate_denial(
+            tool_id,
+            "active Lambda Skill requires LambdaHostCall before concrete tool calls".to_string(),
+        ));
     }
+    None
 }
 
 /// Commits the Lambda Skill gate transition after the concrete tool succeeds permission checks.
@@ -61,14 +67,16 @@ pub(super) fn commit_lambda_skill_gate_call(
             LambdaGateVerdict::Reject(reason) => Err(lambda_skill_gate_denial(tool_id, reason)),
         };
     }
-    let Some(gate) = state.lambda_gate.as_mut() else {
+    if state.lambda_gate.is_none() {
         return Ok(None);
-    };
-    let metadata = gate.committed_host_call_metadata(tool_id, None, None);
-    match gate.step_call(tool_id) {
-        LambdaGateVerdict::Accept => Ok(Some(metadata)),
-        LambdaGateVerdict::Reject(reason) => Err(lambda_skill_gate_denial(tool_id, reason)),
     }
+    if tool_id == SKILL_TOOL_ID {
+        return Ok(None);
+    }
+    Err(lambda_skill_gate_denial(
+        tool_id,
+        "active Lambda Skill requires LambdaHostCall before concrete tool calls".to_string(),
+    ))
 }
 
 /// Prepares a verified formal host-call bridge for the next concrete tool call.

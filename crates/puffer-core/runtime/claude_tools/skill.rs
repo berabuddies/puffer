@@ -56,6 +56,9 @@ pub fn execute_claude_skill_tool(
     if is_lambda_verified_skill(&skill.value) {
         state.lambda_gate = gate_for_verified_skill_activation(&skill.value)?;
         state.pending_lambda_host_call = None;
+    } else {
+        state.lambda_gate = None;
+        state.pending_lambda_host_call = None;
     }
 
     let rendered = crate::skill_support::render_skill_prompt(
