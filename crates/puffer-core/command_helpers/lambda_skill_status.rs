@@ -1,5 +1,5 @@
+use crate::runtime::lambda_skill_activation::gate_for_verified_skill_activation;
 use puffer_resources::{LoadedResources, SkillSpec};
-use std::path::Path;
 
 /// Summarizes verified Lambda Skill readiness for user-facing surfaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,42 +85,21 @@ struct LambdaSkillReadiness {
 
 fn lambda_skill_readiness(
     skill: &SkillSpec,
-    verification: &puffer_resources::SkillVerificationSpec,
+    _verification: &puffer_resources::SkillVerificationSpec,
 ) -> LambdaSkillReadiness {
-    if skill.allowed_tools.is_empty() {
-        return not_ready("missing allowed_tools");
+    match gate_for_verified_skill_activation(skill) {
+        Ok(Some(_)) => {
+            let gate_source = skill
+                .verification
+                .as_ref()
+                .and_then(|verification| verification.host_catalogue_path.as_ref())
+                .map(|_| "host catalogue")
+                .unwrap_or("compiler");
+            ready(gate_source)
+        }
+        Ok(None) => not_ready("missing host_catalogue_subpath or compiler_path"),
+        Err(error) => not_ready(error.to_string()),
     }
-    if let Some(path) = verification.host_catalogue_path.as_deref() {
-        let trimmed = path.trim();
-        if trimmed.is_empty() {
-            return not_ready("empty host catalogue path");
-        }
-        if !Path::new(trimmed).is_file() {
-            return not_ready(format!("host catalogue not found at {trimmed}"));
-        }
-        return ready("host catalogue");
-    }
-    if let Some(compiler) = verification.compiler_path.as_deref() {
-        let compiler = compiler.trim();
-        if compiler.is_empty() {
-            return not_ready("empty compiler path");
-        }
-        if !Path::new(compiler).is_file() {
-            return not_ready(format!("compiler not found at {compiler}"));
-        }
-        let Some(source) = verification.source_path.as_deref() else {
-            return not_ready("missing formal source path");
-        };
-        let source = source.trim();
-        if source.is_empty() {
-            return not_ready("empty formal source path");
-        }
-        if !Path::new(source).is_file() {
-            return not_ready(format!("formal source not found at {source}"));
-        }
-        return ready("compiler");
-    }
-    not_ready("missing host_catalogue_subpath or compiler_path")
 }
 
 fn ready(source: &str) -> LambdaSkillReadiness {

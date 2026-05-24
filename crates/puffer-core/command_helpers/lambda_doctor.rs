@@ -1,4 +1,4 @@
-use super::lambda_skill_status::{LambdaSkillStatus, lambda_skill_statuses};
+use super::lambda_skill_status::{lambda_skill_statuses, LambdaSkillStatus};
 use anyhow::Result;
 use puffer_resources::LoadedResources;
 use std::fmt::Write as _;
@@ -256,15 +256,13 @@ mod tests {
         ));
         assert!(status.contains("lambda_skill_configured_compiler=<missing>"));
         assert!(status.contains(
-            "lambda_skill verified-demo: not gate-ready: missing host_catalogue_subpath or compiler_path; model invocation blocked; allowed tools Read"
+            "lambda_skill verified-demo: not gate-ready: verified Lambda Skill requires an active host catalogue; set host_catalogue_subpath or compiler_path in the lambda_skill_libraries manifest; model invocation blocked; allowed tools Read"
         ));
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].summary.contains("verified-demo"));
-        assert!(
-            warnings[0]
-                .detail
-                .contains("missing host_catalogue_subpath or compiler_path")
-        );
+        assert!(warnings[0]
+            .detail
+            .contains("requires an active host catalogue"));
     }
 
     #[test]
@@ -311,5 +309,53 @@ mod tests {
             "lambda_skill verified-ready: gate-ready via host catalogue; model-invocable; allowed tools Read, ToolSearch"
         ));
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn render_lambda_status_rejects_invalid_host_catalogue() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_path = temp.path().join("skill.lskill");
+        let host_path = temp.path().join("host.json");
+        std::fs::write(&source_path, "skill source").unwrap();
+        std::fs::write(&host_path, "not-json").unwrap();
+        let resources = LoadedResources {
+            skills: vec![LoadedItem {
+                value: SkillSpec {
+                    name: "verified-broken".to_string(),
+                    allowed_tools: vec!["Read".to_string()],
+                    verification: Some(SkillVerificationSpec {
+                        system: "lambda-skill".to_string(),
+                        source_path: Some(source_path.display().to_string()),
+                        generated_path: Some(
+                            temp.path()
+                                .join("out/GENERATED.SKILL.md")
+                                .display()
+                                .to_string(),
+                        ),
+                        host_catalogue_path: Some(host_path.display().to_string()),
+                        compiler_path: None,
+                        tools: Some(2),
+                        actions: Some(1),
+                    }),
+                    ..SkillSpec::default()
+                },
+                source_info: SourceInfo {
+                    path: source_path,
+                    kind: SourceKind::Workspace,
+                },
+            }],
+            ..LoadedResources::default()
+        };
+
+        let status = render_lambda_skill_doctor_status(&resources);
+        let warnings = lambda_skill_doctor_warnings(&resources);
+
+        assert!(status.contains(
+            "lambda_skill verified-broken: not gate-ready: failed to parse host catalogue; model invocation blocked; allowed tools Read"
+        ));
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0]
+            .detail
+            .contains("failed to parse host catalogue"));
     }
 }
