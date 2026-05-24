@@ -1766,6 +1766,45 @@ export type PermissionsSnapshot = {
   tools: Record<string, string>;
 };
 
+export type LambdaSkillLibraryInfo = {
+  id: string;
+  root: string;
+  generatedSubpath?: string | null;
+  hostCatalogueSubpath?: string | null;
+  compilerPath?: string | null;
+  allowedTools: string[];
+  hostToolBindings: Record<string, string[]>;
+  skillHostToolBindings: Record<string, Record<string, string[]>>;
+  userInvocable: boolean;
+  disableModelInvocation: boolean;
+  sourceKind: string;
+  sourcePath: string;
+};
+
+export type LambdaSkillLibrariesSnapshot = {
+  directories: {
+    workspace: string;
+    user: string;
+  };
+  libraries: LambdaSkillLibraryInfo[];
+  doctor: string;
+  warnings: string[];
+};
+
+export type SaveLambdaSkillLibraryInput = {
+  id: string;
+  root: string;
+  generatedSubpath?: string | null;
+  hostCatalogueSubpath?: string | null;
+  compilerPath?: string | null;
+  allowedTools?: string[];
+  hostToolBindings?: Record<string, string[]>;
+  skillHostToolBindings?: Record<string, Record<string, string[]>>;
+  userInvocable?: boolean;
+  disableModelInvocation?: boolean;
+  scope?: "workspace" | "user";
+};
+
 export type ConfigPatch = {
   defaultProvider?: string | null;
   defaultModel?: string | null;
@@ -1804,6 +1843,18 @@ export async function savePermissions(
 ): Promise<PermissionsSnapshot> {
   const client = await ensureLocalDaemonClient();
   return client.request<PermissionsSnapshot>("save_permissions", { tools });
+}
+
+export async function listLambdaSkillLibraries(): Promise<LambdaSkillLibrariesSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<LambdaSkillLibrariesSnapshot>("list_lambda_skill_libraries");
+}
+
+export async function saveLambdaSkillLibrary(
+  input: SaveLambdaSkillLibraryInput
+): Promise<LambdaSkillLibrariesSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<LambdaSkillLibrariesSnapshot>("save_lambda_skill_library", input);
 }
 
 /** Patch the user config file and return the fresh settings snapshot. The
