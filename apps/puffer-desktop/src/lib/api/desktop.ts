@@ -158,6 +158,7 @@ type BackendTimelineItem =
       input_json?: Record<string, unknown> | null;
       outputText?: string;
       output_text?: string;
+      metadata?: unknown;
     } & BackendActorFields
   | ({
       kind: "permission_dialog";
@@ -491,6 +492,7 @@ function normalizeTimelineItem(value: BackendTimelineItem): TimelineItem {
         input: inputText,
         output: outputText,
         inputJson,
+        metadata: value.metadata,
         actor: value.actor ?? null,
         subject: value.subject ?? null
       };

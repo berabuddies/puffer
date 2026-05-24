@@ -147,6 +147,7 @@ export type ToolTimelineItem = TimelineBase & {
   input: string;
   output: string;
   inputJson: Record<string, unknown> | null;
+  metadata?: unknown;
   subject?: MessageActor | null;
 };
 

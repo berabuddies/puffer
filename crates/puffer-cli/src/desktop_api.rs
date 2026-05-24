@@ -1025,7 +1025,7 @@ fn timeline_items(record: &SessionRecord) -> Vec<TimelineItemDto> {
                 success,
                 actor,
                 subject,
-                ..
+                metadata,
             } => {
                 let status = if *success { "ok" } else { "error" };
                 let summary = summarize_tool_input(tool_id, input);
@@ -1037,9 +1037,17 @@ fn timeline_items(record: &SessionRecord) -> Vec<TimelineItemDto> {
                     input_text: input.clone(),
                     input_json: serde_json::from_str(input).ok(),
                     output_text: output.clone(),
+                    metadata: metadata.clone(),
                     actor: actor.clone(),
                     subject: subject.clone(),
                 });
+                if let Some(text) = lambda_gate_timeline_text(metadata, tool_id) {
+                    items.push(TimelineItemDto::SystemMessage {
+                        id: format!("timeline-{index}-{call_id}-lambda-gate"),
+                        text,
+                        actor: actor.clone(),
+                    });
+                }
                 if let Some((state, reason)) = permission_state(output) {
                     items.push(TimelineItemDto::PermissionDialog {
                         id: format!("timeline-{index}-{call_id}-permission"),
@@ -1094,6 +1102,38 @@ fn flush_pending_assistant(
     }
 }
 
+fn lambda_gate_timeline_text(metadata: &Option<Value>, tool_id: &str) -> Option<String> {
+    let lambda = metadata.as_ref()?.get("lambda_skill")?;
+    let event = lambda.get("event").and_then(Value::as_str)?;
+    let host_tool = lambda.get("host_tool").and_then(Value::as_str);
+    let concrete_tool = lambda.get("concrete_tool").and_then(Value::as_str);
+    let text = match event {
+        "host_call_admitted" => format!(
+            "Verified Skill Gate admitted {} for {}.",
+            host_tool.unwrap_or("host call"),
+            concrete_tool.unwrap_or(tool_id)
+        ),
+        "host_call_committed" => format!(
+            "Verified Skill Gate committed {} through {}.",
+            host_tool.unwrap_or("host call"),
+            concrete_tool.unwrap_or(tool_id)
+        ),
+        "gate_rejected" => {
+            let reason = lambda
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("gate rejected the tool call");
+            let retry = lambda
+                .get("retry_tool")
+                .and_then(Value::as_str)
+                .unwrap_or("LambdaHostCall");
+            format!("Verified Skill Gate rejected {tool_id}: {reason}. Retry with {retry}.")
+        }
+        other => format!("Verified Skill Gate event: {other}."),
+    };
+    Some(text)
+}
+
 fn parse_system_message(
     index: usize,
     text: &str,
@@ -1109,6 +1149,7 @@ fn parse_system_message(
             input_text: parsed.input_text.clone(),
             input_json: parsed.input_json,
             output_text: parsed.output_text.clone(),
+            metadata: None,
             actor: actor.clone(),
             subject: None,
         }];
@@ -1586,6 +1627,7 @@ mod tests {
     use puffer_session_store::{
         SessionMetadata, SessionRecord, TranscriptEvent, TranscriptRewrite,
     };
+    use serde_json::json;
     use std::path::PathBuf;
     use uuid::Uuid;
 
@@ -1616,6 +1658,35 @@ mod tests {
             TimelineItemDto::ToolCall { .. } => "tool",
             TimelineItemDto::PermissionDialog { .. } => "permission",
             TimelineItemDto::DiffSnapshot { .. } => "diff",
+        }
+    }
+
+    #[test]
+    fn timeline_surfaces_lambda_gate_metadata_as_system_event() {
+        let items = timeline_items(&record(vec![TranscriptEvent::ToolInvocation {
+            call_id: "call-1".to_string(),
+            tool_id: "LambdaHostCall".to_string(),
+            input: "{}".to_string(),
+            output: "admitted".to_string(),
+            success: true,
+            metadata: Some(json!({
+                "lambda_skill": {
+                    "event": "host_call_admitted",
+                    "host_tool": "gh_pr_view",
+                    "concrete_tool": "Bash"
+                }
+            })),
+            actor: None,
+            subject: None,
+        }]));
+
+        assert_eq!(items.len(), 2);
+        assert!(matches!(items[0], TimelineItemDto::ToolCall { .. }));
+        match &items[1] {
+            TimelineItemDto::SystemMessage { text, .. } => {
+                assert!(text.contains("Verified Skill Gate admitted gh_pr_view"));
+            }
+            other => panic!("expected lambda gate system event, got {other:?}"),
         }
     }
 

@@ -39,8 +39,8 @@ use puffer_core::{
     provider_preference_family, supported_effort_levels, with_user_question_prompt_handler,
     AppState, BrowserPermissionPromptActionSet, BrowserPermissionPromptSource,
     BrowserPermissionPromptTargetClass, CancelToken, MessageRole, ModelPreferenceFamily,
-    PermissionPromptAction, PermissionPromptRequest, TurnStreamEvent, UserQuestionPromptRequest,
-    UserQuestionPromptResponse,
+    PermissionPromptAction, PermissionPromptRequest, ToolInvocation, TurnStreamEvent,
+    UserQuestionPromptRequest, UserQuestionPromptResponse,
 };
 use puffer_provider_openai::{
     exchange_authorization_code as exchange_openai_authorization_code,
@@ -504,6 +504,26 @@ fn event_payload_with_actor(mut payload: Value, actor: &MessageActor) -> Value {
         map.insert("actor".to_string(), json!(actor));
     }
     payload
+}
+
+fn lambda_gate_stream_payload(turn_id: &str, invocation: &ToolInvocation) -> Option<Value> {
+    let lambda = invocation.metadata.get("lambda_skill")?;
+    let event = lambda.get("event").and_then(Value::as_str)?;
+    Some(json!({
+        "type": "lambda-gate",
+        "turnId": turn_id,
+        "callId": &invocation.call_id,
+        "toolId": &invocation.tool_id,
+        "gateEvent": event,
+        "hostTool": lambda.get("host_tool").and_then(Value::as_str),
+        "hostArgs": lambda.get("host_args").cloned(),
+        "concreteTool": lambda.get("concrete_tool").and_then(Value::as_str),
+        "concreteInput": lambda.get("concrete_input").cloned(),
+        "reason": lambda.get("reason").and_then(Value::as_str),
+        "retryTool": lambda.get("retry_tool").and_then(Value::as_str),
+        "recoverable": lambda.get("recoverable").and_then(Value::as_bool),
+        "registeredFacts": lambda.get("registered_facts").cloned(),
+    }))
 }
 
 async fn handle_socket(socket: WebSocket, state: Arc<DaemonState>) {
@@ -2753,17 +2773,29 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                         "input": r.input,
                     })).collect::<Vec<_>>(),
                 }),
-                TurnStreamEvent::ToolInvocations(invs) => json!({
-                    "type": "tool-invocations",
-                    "turnId": ev_turn,
-                    "invocations": invs.iter().map(|i| json!({
-                        "callId": i.call_id,
-                        "toolId": i.tool_id,
-                        "input": i.input,
-                        "output": i.output,
-                        "success": i.success,
-                    })).collect::<Vec<_>>(),
-                }),
+                TurnStreamEvent::ToolInvocations(invs) => {
+                    for gate_payload in invs
+                        .iter()
+                        .filter_map(|inv| lambda_gate_stream_payload(&ev_turn, inv))
+                    {
+                        ev_state.publish_event(ServerEnvelope::Event {
+                            event: ev_channel.clone(),
+                            payload: event_payload_with_actor(gate_payload, &ev_actor),
+                        });
+                    }
+                    json!({
+                        "type": "tool-invocations",
+                        "turnId": ev_turn,
+                        "invocations": invs.iter().map(|i| json!({
+                            "callId": i.call_id,
+                            "toolId": i.tool_id,
+                            "input": i.input,
+                            "output": i.output,
+                            "success": i.success,
+                            "metadata": if i.metadata.is_null() { Value::Null } else { i.metadata.clone() },
+                        })).collect::<Vec<_>>(),
+                    })
+                }
                 TurnStreamEvent::PlanUpdated { file_path, content } => json!({
                     "type": "plan-updated",
                     "turnId": ev_turn,
@@ -3328,7 +3360,7 @@ mod tests {
     };
     use indexmap::IndexMap;
     use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
-    use puffer_core::{AppState, ModelPreferenceFamily};
+    use puffer_core::{AppState, ModelPreferenceFamily, ToolInvocation};
     use puffer_provider_registry::{
         AuthStore, Modality, ModelDescriptor, ProviderDescriptor, ProviderRegistry,
     };
@@ -3377,6 +3409,37 @@ mod tests {
                 _lock: lock,
             }
         }
+    }
+
+    #[test]
+    fn lambda_gate_stream_payload_maps_tool_metadata() {
+        let invocation = ToolInvocation {
+            call_id: "call-1".to_string(),
+            tool_id: "LambdaHostCall".to_string(),
+            input: "{}".to_string(),
+            output: "admitted".to_string(),
+            success: true,
+            metadata: json!({
+                "lambda_skill": {
+                    "event": "host_call_admitted",
+                    "host_tool": "gh_pr_view",
+                    "host_args": {"owner": "acme"},
+                    "concrete_tool": "Bash",
+                    "concrete_input": {"command": "gh pr view"}
+                }
+            }),
+            terminate: false,
+        };
+
+        let payload =
+            super::lambda_gate_stream_payload("turn-1", &invocation).expect("lambda gate event");
+
+        assert_eq!(payload["type"], "lambda-gate");
+        assert_eq!(payload["turnId"], "turn-1");
+        assert_eq!(payload["callId"], "call-1");
+        assert_eq!(payload["gateEvent"], "host_call_admitted");
+        assert_eq!(payload["hostTool"], "gh_pr_view");
+        assert_eq!(payload["concreteTool"], "Bash");
     }
 
     impl Drop for DiscoveryCacheEnvGuard {

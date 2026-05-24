@@ -438,6 +438,7 @@
       case "text-delta":
       case "tool-calls-requested":
       case "tool-invocations":
+      case "lambda-gate":
         setLiveSidebarAgentState(sid, "running", ev.turnId);
         break;
       case "permission-request":
@@ -1671,7 +1672,8 @@
         status: inv.success ? "success" : "error",
         input: inv.input,
         output: inv.output,
-        inputJson: safeParseJson(inv.input)
+        inputJson: safeParseJson(inv.input),
+        metadata: inv.metadata
       };
       const existingIdx = liveItems.findIndex((item) => item.id === id);
       liveItems = existingIdx >= 0
@@ -1688,6 +1690,70 @@
         liveStreamItems: liveItems,
         turnThinking: false,
         turnStatusHint: null
+      })
+    );
+  }
+
+  function lambdaGateSummary(
+    ev: Extract<SessionStreamEvent, { type: "lambda-gate" }>
+  ): string {
+    if (ev.gateEvent === "host_call_admitted") {
+      return `Gate admitted ${ev.hostTool ?? "host call"} for ${ev.concreteTool ?? ev.toolId}`;
+    }
+    if (ev.gateEvent === "host_call_committed") {
+      return `Gate committed ${ev.hostTool ?? "host call"} through ${ev.concreteTool ?? ev.toolId}`;
+    }
+    if (ev.gateEvent === "gate_rejected") {
+      return `Gate rejected ${ev.toolId}: ${ev.reason ?? "call did not satisfy the Verified Skill gate"}`;
+    }
+    return `Gate event: ${ev.gateEvent}`;
+  }
+
+  function lambdaGateBody(
+    ev: Extract<SessionStreamEvent, { type: "lambda-gate" }>
+  ): string {
+    const rows = [
+      `event: ${ev.gateEvent}`,
+      ev.hostTool ? `host_tool: ${ev.hostTool}` : null,
+      ev.concreteTool ? `concrete_tool: ${ev.concreteTool}` : null,
+      ev.reason ? `reason: ${ev.reason}` : null,
+      ev.retryTool ? `retry_tool: ${ev.retryTool}` : null,
+      ev.hostArgs !== undefined && ev.hostArgs !== null ? `host_args: ${stableJsonText(ev.hostArgs)}` : null,
+      ev.concreteInput !== undefined && ev.concreteInput !== null ? `concrete_input: ${stableJsonText(ev.concreteInput)}` : null
+    ].filter((row): row is string => row !== null);
+    return rows.join("\n");
+  }
+
+  function cacheBackgroundLambdaGateEvent(
+    sessionId: string,
+    ev: Extract<SessionStreamEvent, { type: "lambda-gate" }>
+  ) {
+    const cached = transientConversationStates[sessionId] ?? emptyTransientConversationState();
+    const id = `live-gate-${ev.turnId}-${ev.callId}-${ev.gateEvent}`;
+    const payload: TimelineItem = {
+      id,
+      kind: "system",
+      title: "Verified Skill Gate",
+      summary: lambdaGateSummary(ev),
+      body: lambdaGateBody(ev),
+      meta: ["verified skill", ev.gateEvent],
+      status: ev.gateEvent === "gate_rejected" ? "error" : "success",
+      actor: ev.actor ?? null
+    };
+    const existingIdx = cached.liveStreamItems.findIndex((item) => item.id === id);
+    const liveItems = existingIdx >= 0
+      ? [
+          ...cached.liveStreamItems.slice(0, existingIdx),
+          payload,
+          ...cached.liveStreamItems.slice(existingIdx + 1)
+        ]
+      : appendCachedLiveItem(cached, payload);
+    setTransientConversationState(
+      sessionId,
+      withCachedTurnState(cached, ev.turnId, {
+        liveStreamItems: liveItems,
+        turnThinking: false,
+        turnStatusHint: ev.gateEvent === "gate_rejected" ? "Gate rejected" : "Gate checked"
       })
     );
   }
@@ -1856,6 +1922,9 @@
         break;
       case "tool-invocations":
         cacheBackgroundToolInvocations(sessionId, ev);
+        break;
+      case "lambda-gate":
+        cacheBackgroundLambdaGateEvent(sessionId, ev);
         break;
       case "permission-request":
         cacheBackgroundPermissionRequest(sessionId, ev);
@@ -3140,11 +3209,40 @@
             status: inv.success ? "success" : "error",
             input: inv.input,
             output: inv.output,
-            inputJson: safeParseJson(inv.input)
+            inputJson: safeParseJson(inv.input),
+            metadata: inv.metadata
           };
           if (existingIdx >= 0) {
             // Upgrade the pending card in place. Svelte needs a new array
             // reference to observe the change.
+            liveStreamItems = [
+              ...liveStreamItems.slice(0, existingIdx),
+              payload,
+              ...liveStreamItems.slice(existingIdx + 1)
+            ];
+          } else {
+            appendLive(payload);
+          }
+        }
+        break;
+      case "lambda-gate":
+        markTurnActive(sid, ev.turnId);
+        turnThinking = false;
+        turnStatusHint = ev.gateEvent === "gate_rejected" ? "Gate rejected" : "Gate checked";
+        {
+          const id = `live-gate-${ev.turnId}-${ev.callId}-${ev.gateEvent}`;
+          const payload: TimelineItem = {
+            id,
+            kind: "system",
+            title: "Verified Skill Gate",
+            summary: lambdaGateSummary(ev),
+            body: lambdaGateBody(ev),
+            meta: ["verified skill", ev.gateEvent],
+            status: ev.gateEvent === "gate_rejected" ? "error" : "success",
+            actor: ev.actor ?? null
+          };
+          const existingIdx = liveStreamItems.findIndex((item) => item.id === id);
+          if (existingIdx >= 0) {
             liveStreamItems = [
               ...liveStreamItems.slice(0, existingIdx),
               payload,

@@ -128,6 +128,8 @@ pub(crate) enum TimelineItemDto {
         input_json: Option<Value>,
         output_text: String,
         #[serde(skip_serializing_if = "Option::is_none")]
+        metadata: Option<Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         actor: Option<MessageActor>,
         #[serde(skip_serializing_if = "Option::is_none")]
         subject: Option<MessageActor>,
