@@ -44,7 +44,7 @@ fn default_lambda_skill_user_invocable() -> bool {
 }
 
 fn default_lambda_skill_disable_model_invocation() -> bool {
-    true
+    false
 }
 
 /// Loads Lambda Skills declared by resource manifests.

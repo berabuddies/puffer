@@ -234,7 +234,7 @@ pub(crate) fn execute_tool(
         "Skill" => Ok(tool_result(
             definition,
             true,
-            skill::execute_claude_skill_tool(resources, input)?,
+            skill::execute_claude_skill_tool(state, resources, input)?,
         )),
         "ToolSearch" => Ok(tool_result(
             definition,
@@ -333,9 +333,9 @@ pub(crate) fn execute_tool(
 /// `Glob | Grep | WebFetch` in the parallel path), execution is routed through the supplied
 /// `Arc<dyn ToolRunner>` so a `RemoteToolRunner` can intercept parallel
 /// batches the same way it intercepts serial calls. The remaining
-/// parallel-safe tools (`WebSearch | ToolSearch | Skill`) intentionally stay
-/// on the in-process path: WebSearch needs provider context that isn't on
-/// the runner trait, and Skill / ToolSearch are local-only.
+/// parallel-safe tools (`WebSearch | ToolSearch`) intentionally stay on the
+/// in-process path: WebSearch needs provider context that isn't on the runner
+/// trait, and ToolSearch is local-only.
 pub(crate) fn execute_parallel_tool(
     definition: &ToolDefinition,
     cwd: &Path,
@@ -406,11 +406,6 @@ pub(crate) fn execute_parallel_tool(
             definition,
             true,
             tool_search::execute_claude_tool_search_tool(registry, input)?,
-        )),
-        "Skill" => Ok(tool_result(
-            definition,
-            true,
-            skill::execute_claude_skill_tool(resources, input)?,
         )),
         other => bail!("tool {other} is not parallel-safe"),
     }

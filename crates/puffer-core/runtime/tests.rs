@@ -1193,6 +1193,8 @@ mod anthropic_sse_error_event;
 mod http_retries;
 #[path = "tests/iteration_behavior.rs"]
 mod iteration_behavior;
+#[path = "tests/lambda_skill_agent_loop.rs"]
+mod lambda_skill_agent_loop;
 #[path = "tests/openai_stream_transport.rs"]
 mod openai_stream_transport;
 #[path = "tests/openai_tool_errors.rs"]

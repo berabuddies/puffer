@@ -1,3 +1,4 @@
+use super::RequestToolFilter;
 use anyhow::{anyhow, Context, Result};
 use puffer_resources::{SkillSpec, SkillVerificationSpec};
 use serde::Deserialize;
@@ -156,6 +157,7 @@ pub(crate) struct LambdaGateState {
     host: LambdaHostEnv,
     caps: BTreeSet<String>,
     facts: BTreeSet<LambdaFact>,
+    request_tool_filter: Option<RequestToolFilter>,
 }
 
 impl LambdaGateState {
@@ -166,6 +168,7 @@ impl LambdaGateState {
             host,
             caps,
             facts: BTreeSet::new(),
+            request_tool_filter: None,
         }
     }
 
@@ -176,7 +179,18 @@ impl LambdaGateState {
             host,
             caps: caps.into_iter().collect(),
             facts: BTreeSet::new(),
+            request_tool_filter: None,
         }
+    }
+
+    /// Attaches the concrete Puffer tool scope active for this Lambda Skill.
+    pub(crate) fn set_request_tool_filter(&mut self, filter: RequestToolFilter) {
+        self.request_tool_filter = Some(filter);
+    }
+
+    /// Returns the concrete Puffer tool scope active for this Lambda Skill.
+    pub(crate) fn request_tool_filter(&self) -> Option<&RequestToolFilter> {
+        self.request_tool_filter.as_ref()
     }
 
     /// Returns the current standing facts.

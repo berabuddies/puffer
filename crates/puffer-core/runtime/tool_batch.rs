@@ -45,7 +45,7 @@ pub(super) fn execute_tool_batch(
     tool_calls: &[ToolCallRequest],
     parent_span_ctx: Option<&puffer_observability::OtelContext>,
 ) -> Result<Vec<ToolInvocation>> {
-    if inputs.state.lambda_gate.is_some() {
+    if inputs.state.lambda_gate.is_some() || tool_calls.iter().any(|tc| tc.tool_id == "Skill") {
         return execute_tool_batch_serial(inputs, session, cwd, tool_calls, parent_span_ctx);
     }
     let parallel_count = tool_calls

@@ -9,8 +9,10 @@ use super::browser_auto_review::{
 use super::claude_tools::{self, ProviderToolContext};
 use super::filesystem_access::{ensure_filesystem_path_access, runtime_filesystem_policy};
 use super::hook_support::{run_tool_end_hooks, run_tool_start_hooks};
-use super::lambda_gate::{
-    admitted_host_call_metadata, merge_tool_metadata, LambdaGateVerdict, PendingLambdaHostCall,
+use super::lambda_gate::merge_tool_metadata;
+use super::lambda_tool::{
+    commit_lambda_skill_gate_call, prepare_lambda_host_call, reject_lambda_skill_gate_preflight,
+    LAMBDA_HOST_CALL_TOOL_ID,
 };
 use super::local_tools::{
     enrich_browser_permission_input, read_current_tab_context, BrowserCurrentTabStatus,
@@ -40,14 +42,11 @@ use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use puffer_resources::LoadedResources;
 use puffer_tools::{ToolExecutionResult, ToolOutput, ToolRegistry};
 use puffer_transport_anthropic::AnthropicRequestConfig;
-use serde::Deserialize;
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const BROWSER_REVIEW_METADATA_KEY: &str = "__pufferBrowserReview";
-const LAMBDA_HOST_CALL_TOOL_ID: &str = "LambdaHostCall";
-
 /// Identifies which provider loop is currently executing a tool call.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum ToolExecutionBackend<'a> {
@@ -75,6 +74,7 @@ pub(super) fn execute_tool_call(
     tool_id: &str,
     input: Value,
 ) -> Result<ToolExecutionResult> {
+    let effective_tool_filter = active_tool_filter(state, tool_filter);
     let structured_output = match backend {
         ToolExecutionBackend::Anthropic {
             structured_output, ..
@@ -90,7 +90,14 @@ pub(super) fn execute_tool_call(
             .ok_or_else(|| anyhow!("unknown tool {tool_id}"))?,
     };
     if definition.id == LAMBDA_HOST_CALL_TOOL_ID {
-        return Ok(prepare_lambda_host_call(state, registry, tool_id, input));
+        return Ok(prepare_lambda_host_call(
+            state,
+            registry,
+            cwd,
+            effective_tool_filter.as_ref(),
+            tool_id,
+            input,
+        ));
     }
     if let Some(denied) = reject_lambda_skill_gate_preflight(state, tool_id, &input) {
         return Ok(denied);
@@ -101,7 +108,7 @@ pub(super) fn execute_tool_call(
         resources,
         state,
         RuntimePermissionInputs {
-            request_tool_filter: tool_filter.cloned(),
+            request_tool_filter: effective_tool_filter.clone(),
         },
     )?;
     let mut filesystem_policy = permission_context.derived_policy().filesystem().clone();
@@ -122,7 +129,7 @@ pub(super) fn execute_tool_call(
                 providers,
                 auth_store,
                 cwd,
-                tool_filter,
+                effective_tool_filter.as_ref(),
                 &definition,
                 &input,
                 permission_decision.reason.as_deref(),
@@ -149,7 +156,7 @@ pub(super) fn execute_tool_call(
         cwd,
         &definition,
         &input,
-        tool_filter,
+        effective_tool_filter.as_ref(),
         filesystem_policy,
     )? {
         Ok(policy) => policy,
@@ -215,172 +222,16 @@ pub(super) fn execute_tool_call(
     Ok(result)
 }
 
-fn reject_lambda_skill_gate_preflight(
+fn active_tool_filter(
     state: &AppState,
-    tool_id: &str,
-    input: &Value,
-) -> Option<ToolExecutionResult> {
-    if let Some(pending) = state.pending_lambda_host_call.as_ref() {
-        if pending.permits_concrete_call(tool_id, input) {
-            return None;
-        }
-        return Some(lambda_skill_gate_denial(
-            tool_id,
-            format!(
-                "pending formal host call {} requires next concrete tool {} with the declared input",
-                pending.host_tool(),
-                pending.concrete_tool()
-            ),
-        ));
-    }
-    let gate = state.lambda_gate.as_ref()?;
-    match gate.admit_call(tool_id) {
-        LambdaGateVerdict::Accept => None,
-        LambdaGateVerdict::Reject(reason) => Some(lambda_skill_gate_denial(tool_id, reason)),
-    }
-}
-
-fn commit_lambda_skill_gate_call(
-    state: &mut AppState,
-    tool_id: &str,
-) -> std::result::Result<Option<Value>, ToolExecutionResult> {
-    if state.pending_lambda_host_call.is_some() {
-        let Some(pending) = state.pending_lambda_host_call.take() else {
-            return Ok(None);
-        };
-        let Some(gate) = state.lambda_gate.as_mut() else {
-            return Err(lambda_skill_gate_denial(
-                tool_id,
-                "pending formal host call has no active Lambda Skill gate".to_string(),
-            ));
-        };
-        let metadata = gate.committed_host_call_metadata(
-            pending.host_tool(),
-            Some(pending.host_args()),
-            Some(pending.concrete_tool()),
-        );
-        return match gate.step_call(pending.host_tool()) {
-            LambdaGateVerdict::Accept => Ok(Some(metadata)),
-            LambdaGateVerdict::Reject(reason) => Err(lambda_skill_gate_denial(tool_id, reason)),
-        };
-    }
-    let Some(gate) = state.lambda_gate.as_mut() else {
-        return Ok(None);
-    };
-    let metadata = gate.committed_host_call_metadata(tool_id, None, None);
-    match gate.step_call(tool_id) {
-        LambdaGateVerdict::Accept => Ok(Some(metadata)),
-        LambdaGateVerdict::Reject(reason) => Err(lambda_skill_gate_denial(tool_id, reason)),
-    }
-}
-
-fn lambda_skill_gate_denial(tool_id: &str, reason: String) -> ToolExecutionResult {
-    blocked_runtime_tool(
-        tool_id,
-        ToolPermissionBehavior::Deny,
-        Some(format!("Lambda Skill gate rejected call: {reason}")),
-    )
-}
-
-#[derive(Debug, Deserialize)]
-struct LambdaHostCallInput {
-    host_tool: String,
-    args: Value,
-    tool: String,
-    input: Value,
-}
-
-fn prepare_lambda_host_call(
-    state: &mut AppState,
-    registry: &ToolRegistry,
-    tool_id: &str,
-    input: Value,
-) -> ToolExecutionResult {
-    let parsed = match serde_json::from_value::<LambdaHostCallInput>(input) {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            return blocked_runtime_tool(
-                tool_id,
-                ToolPermissionBehavior::Deny,
-                Some(format!("invalid LambdaHostCall input: {error}")),
-            );
-        }
-    };
-    if parsed.host_tool.trim().is_empty() {
-        return blocked_runtime_tool(
-            tool_id,
-            ToolPermissionBehavior::Deny,
-            Some("LambdaHostCall requires a non-empty host_tool".to_string()),
-        );
-    }
-    if parsed.tool.trim().is_empty() {
-        return blocked_runtime_tool(
-            tool_id,
-            ToolPermissionBehavior::Deny,
-            Some("LambdaHostCall requires a non-empty concrete tool".to_string()),
-        );
-    }
-    let Some(gate) = state.lambda_gate.as_ref() else {
-        return blocked_runtime_tool(
-            tool_id,
-            ToolPermissionBehavior::Deny,
-            Some("LambdaHostCall requires an active Lambda Skill gate".to_string()),
-        );
-    };
-    if let Some(pending) = state.pending_lambda_host_call.as_ref() {
-        return blocked_runtime_tool(
-            tool_id,
-            ToolPermissionBehavior::Deny,
-            Some(format!(
-                "pending formal host call {} must be completed before admitting another host call",
-                pending.host_tool()
-            )),
-        );
-    }
-    if parsed.tool == LAMBDA_HOST_CALL_TOOL_ID {
-        return blocked_runtime_tool(
-            tool_id,
-            ToolPermissionBehavior::Deny,
-            Some("LambdaHostCall cannot target itself".to_string()),
-        );
-    }
-    if registry.definition(&parsed.tool).is_none() {
-        return blocked_runtime_tool(
-            tool_id,
-            ToolPermissionBehavior::Deny,
-            Some(format!(
-                "LambdaHostCall target tool {} is not available",
-                parsed.tool
-            )),
-        );
-    }
-    match gate.admit_call_with_args(&parsed.host_tool, &parsed.args) {
-        LambdaGateVerdict::Accept => {
-            let host_tool = parsed.host_tool.clone();
-            let host_args = parsed.args.clone();
-            let concrete_tool = parsed.tool.clone();
-            let metadata = admitted_host_call_metadata(
-                &host_tool,
-                host_args.clone(),
-                &concrete_tool,
-                parsed.input.clone(),
-            );
-            state.pending_lambda_host_call = Some(PendingLambdaHostCall::new(
-                parsed.host_tool,
-                parsed.args,
-                parsed.tool,
-                parsed.input,
-            ));
-            successful_runtime_tool_with_metadata(
-                tool_id,
-                format!(
-                    "Lambda host call admitted: {host_tool}. Next call must be {concrete_tool} with the declared input."
-                ),
-                metadata,
-            )
-        }
-        LambdaGateVerdict::Reject(reason) => lambda_skill_gate_denial(tool_id, reason),
-    }
+    tool_filter: Option<&RequestToolFilter>,
+) -> Option<RequestToolFilter> {
+    tool_filter.cloned().or_else(|| {
+        state
+            .lambda_gate
+            .as_ref()
+            .and_then(|gate| gate.request_tool_filter().cloned())
+    })
 }
 
 fn successful_runtime_tool(tool_id: &str, stdout: String) -> ToolExecutionResult {
@@ -411,7 +262,7 @@ fn successful_runtime_tool_with_metadata(
 pub(super) fn is_parallel_safe_tool(tool_id: &str) -> bool {
     matches!(
         tool_id,
-        "Glob" | "Grep" | "WebFetch" | "WebSearch" | "ToolSearch" | "Skill"
+        "Glob" | "Grep" | "WebFetch" | "WebSearch" | "ToolSearch"
     )
 }
 
@@ -439,6 +290,7 @@ pub(super) fn resolve_tool_permission(
     input: &Value,
     tool_filter: Option<&super::RequestToolFilter>,
 ) -> Result<PermissionOutcome> {
+    let effective_tool_filter = active_tool_filter(state, tool_filter);
     let definition = match registry.definition(tool_id) {
         Some(d) => d.clone(),
         None => {
@@ -455,7 +307,7 @@ pub(super) fn resolve_tool_permission(
         resources,
         state,
         RuntimePermissionInputs {
-            request_tool_filter: tool_filter.cloned(),
+            request_tool_filter: effective_tool_filter.clone(),
         },
     )?;
     let permission_decision = permission_context.decision_for_tool_call(&definition, &input);
@@ -475,7 +327,7 @@ pub(super) fn resolve_tool_permission(
                 providers,
                 auth_store,
                 cwd,
-                tool_filter,
+                effective_tool_filter.as_ref(),
                 &definition,
                 &input,
                 permission_decision.reason.as_deref(),
@@ -487,7 +339,12 @@ pub(super) fn resolve_tool_permission(
                 }
                 AskResolution::AllowSession => {
                     remember_browser_target(state, &definition, &input);
-                    runtime_filesystem_policy(cwd, resources, state, tool_filter)?
+                    runtime_filesystem_policy(
+                        cwd,
+                        resources,
+                        state,
+                        effective_tool_filter.as_ref(),
+                    )?
                 }
                 AskResolution::Deny => {
                     return Ok(PermissionOutcome::Denied(blocked_runtime_tool(
@@ -507,7 +364,7 @@ pub(super) fn resolve_tool_permission(
         cwd,
         &definition,
         &input,
-        tool_filter,
+        effective_tool_filter.as_ref(),
         base_policy,
     )
     .map(|outcome| match outcome {

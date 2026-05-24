@@ -1,7 +1,10 @@
 use super::{append_tool_invocations, append_trace_events};
-use crate::runtime::lambda_gate::{gate_for_verified_skill, LambdaGateState};
+use crate::runtime::lambda_gate::LambdaGateState;
+use crate::runtime::lambda_skill_activation::{
+    allowed_tools_for_verified_skill, gate_for_verified_skill_activation,
+};
 use crate::{AppState, MessageRole};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use puffer_resources::{skill_by_name, LoadedItem, LoadedResources, SkillSpec, SourceKind};
 use puffer_session_store::{GitDiffSnapshot, SessionStore, TranscriptEvent};
@@ -10,7 +13,6 @@ use std::io::{self, IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const LAMBDA_HOST_CALL_TOOL_ID: &str = "LambdaHostCall";
 const SKILL_DESCRIPTION_CHARS_PER_TOKEN: usize = 4;
 
 /// Lists loaded skills in slash-command form.
@@ -217,7 +219,19 @@ pub(crate) fn execute_skill_command(
 
     let rendered =
         crate::skill_support::render_skill_prompt(skill, args, &state.session.id.to_string());
-    let allowed_tools = skill_allowed_tools_for_side_turn(&skill.value);
+    let allowed_tools = match skill_allowed_tools_for_side_turn(&skill.value) {
+        Ok(allowed_tools) => allowed_tools,
+        Err(error) => {
+            return emit_system(
+                state,
+                session_store,
+                format!(
+                    "Skill command /skill:{} failed to load Lambda Skill tool scope: {error:#}",
+                    skill.value.name
+                ),
+            )
+        }
+    };
     let tool_filter = crate::runtime::build_request_tool_filter(&allowed_tools)?;
 
     state.push_message(MessageRole::User, rendered.clone());
@@ -288,34 +302,12 @@ fn apply_skill_runtime_overrides(
     }
 }
 
-fn skill_allowed_tools_for_side_turn(skill: &SkillSpec) -> Vec<String> {
-    let mut allowed_tools = skill.allowed_tools.clone();
-    if !allowed_tools.is_empty()
-        && is_lambda_verified_skill(skill)
-        && !allowed_tools
-            .iter()
-            .any(|tool| tool.eq_ignore_ascii_case(LAMBDA_HOST_CALL_TOOL_ID))
-    {
-        allowed_tools.push(LAMBDA_HOST_CALL_TOOL_ID.to_string());
-    }
-    allowed_tools
+fn skill_allowed_tools_for_side_turn(skill: &SkillSpec) -> Result<Vec<String>> {
+    allowed_tools_for_verified_skill(skill)
 }
 
 fn lambda_gate_for_skill_command(skill: &SkillSpec) -> Result<Option<LambdaGateState>> {
-    let gate = gate_for_verified_skill(skill)?;
-    if is_lambda_verified_skill(skill) && gate.is_none() {
-        bail!(
-            "verified Lambda Skill requires an active host catalogue; set host_catalogue_subpath or compiler_path in the lambda_skill_libraries manifest"
-        );
-    }
-    Ok(gate)
-}
-
-fn is_lambda_verified_skill(skill: &SkillSpec) -> bool {
-    skill
-        .verification
-        .as_ref()
-        .is_some_and(|verification| verification.system == "lambda-skill")
+    gate_for_verified_skill_activation(skill)
 }
 
 /// Appends a system message to the in-memory transcript and session log.
@@ -828,7 +820,7 @@ mod tests {
             ..SkillSpec::default()
         };
 
-        let allowed = skill_allowed_tools_for_side_turn(&skill);
+        let allowed = skill_allowed_tools_for_side_turn(&skill).unwrap();
 
         assert_eq!(
             allowed,
@@ -837,7 +829,7 @@ mod tests {
     }
 
     #[test]
-    fn lambda_skill_side_turn_keeps_empty_filter_unrestricted() {
+    fn lambda_skill_side_turn_rejects_empty_filter() {
         let skill = SkillSpec {
             name: "verified-ci".to_string(),
             verification: Some(SkillVerificationSpec {
@@ -854,9 +846,11 @@ mod tests {
             ..SkillSpec::default()
         };
 
-        let allowed = skill_allowed_tools_for_side_turn(&skill);
+        let error = skill_allowed_tools_for_side_turn(&skill)
+            .unwrap_err()
+            .to_string();
 
-        assert!(allowed.is_empty());
+        assert!(error.contains("requires non-empty allowed_tools"));
     }
 
     #[test]

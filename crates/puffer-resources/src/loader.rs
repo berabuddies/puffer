@@ -1367,7 +1367,7 @@ mod tests {
         fs::write(
             manifest_dir.join("verified.yaml"),
             format!(
-                "id: verified\nroot: '{}'\ncompiler_path: '{}'\nallowed_tools:\n  - Bash\n  - Read\ndisable_model_invocation: false\n",
+                "id: verified\nroot: '{}'\ncompiler_path: '{}'\nallowed_tools:\n  - Bash\n  - Read\n",
                 external_root.display(),
                 compiler.display()
             ),
