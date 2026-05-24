@@ -17,6 +17,8 @@ mod legacy_alias_permissions;
 mod lambda_gate_scope;
 #[path = "tool_execution/multi_agent_e2e.rs"]
 mod multi_agent_e2e;
+#[path = "tool_execution/openai_lambda_batch.rs"]
+mod openai_lambda_batch;
 #[path = "tool_execution/request_scope_tests.rs"]
 mod request_scope_tests;
 

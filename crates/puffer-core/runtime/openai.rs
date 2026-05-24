@@ -436,7 +436,7 @@ pub(super) fn execute_openai_tool_calls(
     structured_output: Option<&StructuredOutputConfig>,
     tool_filter: Option<&super::RequestToolFilter>,
 ) -> Result<OpenAIToolResults> {
-    if state.lambda_gate.is_some() {
+    if state.lambda_gate.is_some() || tool_calls.iter().any(|tc| tc.name == "Skill") {
         return execute_openai_tool_calls_serial(
             state,
             resources,
