@@ -24,6 +24,12 @@ pub(super) struct LambdaSkillLibrarySpec {
     allowed_tools: Vec<String>,
     #[serde(default, alias = "tool_bindings")]
     host_tool_bindings: BTreeMap<String, Vec<String>>,
+    #[serde(
+        default,
+        alias = "per_skill_host_tool_bindings",
+        alias = "skill_tool_bindings"
+    )]
+    skill_host_tool_bindings: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     #[serde(default = "default_lambda_skill_user_invocable")]
     user_invocable: bool,
     #[serde(default = "default_lambda_skill_disable_model_invocation")]
@@ -193,6 +199,8 @@ fn load_lambda_skill_dir(
         .as_deref()
         .map(|path| resolve_lambda_skill_root(path, &source_info.path));
 
+    let host_tool_bindings = host_tool_bindings_for_skill(spec, &name);
+
     Ok(Some(LoadedItem {
         value: SkillSpec {
             name,
@@ -212,7 +220,7 @@ fn load_lambda_skill_dir(
                 generated_path: Some(generated_path.display().to_string()),
                 host_catalogue_path: host_catalogue_path.map(|path| path.display().to_string()),
                 compiler_path: compiler_path.map(|path| path.display().to_string()),
-                host_tool_bindings: spec.host_tool_bindings.clone(),
+                host_tool_bindings,
                 tools: stats.as_ref().and_then(|stats| stats.tools),
                 actions: stats.as_ref().and_then(|stats| stats.actions),
             }),
@@ -222,6 +230,19 @@ fn load_lambda_skill_dir(
             kind: source_info.kind,
         },
     }))
+}
+
+fn host_tool_bindings_for_skill(
+    spec: &LambdaSkillLibrarySpec,
+    skill_name: &str,
+) -> BTreeMap<String, Vec<String>> {
+    let mut bindings = spec.host_tool_bindings.clone();
+    for (configured_name, skill_bindings) in &spec.skill_host_tool_bindings {
+        if normalize_skill_name(configured_name) == skill_name {
+            bindings.extend(skill_bindings.clone());
+        }
+    }
+    bindings
 }
 
 fn load_lambda_skill_stats(runner: &dyn ToolRunner, path: &Path) -> Option<LambdaSkillStats> {
