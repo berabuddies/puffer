@@ -1,7 +1,7 @@
 use super::{append_tool_invocations, append_trace_events};
-use crate::runtime::lambda_gate::gate_for_verified_skill;
+use crate::runtime::lambda_gate::{gate_for_verified_skill, LambdaGateState};
 use crate::{AppState, MessageRole};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use puffer_provider_registry::{AuthStore, ProviderRegistry};
 use puffer_resources::{skill_by_name, LoadedItem, LoadedResources, SkillSpec, SourceKind};
 use puffer_session_store::{GitDiffSnapshot, SessionStore, TranscriptEvent};
@@ -191,7 +191,7 @@ pub(crate) fn execute_skill_command(
             ),
         );
     }
-    let lambda_gate = match gate_for_verified_skill(&skill.value) {
+    let lambda_gate = match lambda_gate_for_skill_command(&skill.value) {
         Ok(gate) => gate,
         Err(error) => {
             return emit_system(
@@ -291,10 +291,7 @@ fn apply_skill_runtime_overrides(
 fn skill_allowed_tools_for_side_turn(skill: &SkillSpec) -> Vec<String> {
     let mut allowed_tools = skill.allowed_tools.clone();
     if !allowed_tools.is_empty()
-        && skill
-            .verification
-            .as_ref()
-            .is_some_and(|verification| verification.system == "lambda-skill")
+        && is_lambda_verified_skill(skill)
         && !allowed_tools
             .iter()
             .any(|tool| tool.eq_ignore_ascii_case(LAMBDA_HOST_CALL_TOOL_ID))
@@ -302,6 +299,23 @@ fn skill_allowed_tools_for_side_turn(skill: &SkillSpec) -> Vec<String> {
         allowed_tools.push(LAMBDA_HOST_CALL_TOOL_ID.to_string());
     }
     allowed_tools
+}
+
+fn lambda_gate_for_skill_command(skill: &SkillSpec) -> Result<Option<LambdaGateState>> {
+    let gate = gate_for_verified_skill(skill)?;
+    if is_lambda_verified_skill(skill) && gate.is_none() {
+        bail!(
+            "verified Lambda Skill requires an active host catalogue; set host_catalogue_path, enable PUFFER_LAMBDA_SKILL_GATE=compile with compiler_path, set PUFFER_LSKILLC, or install lskillc on PATH"
+        );
+    }
+    Ok(gate)
+}
+
+fn is_lambda_verified_skill(skill: &SkillSpec) -> bool {
+    skill
+        .verification
+        .as_ref()
+        .is_some_and(|verification| verification.system == "lambda-skill")
 }
 
 /// Appends a system message to the in-memory transcript and session log.
@@ -659,7 +673,9 @@ fn append_patch_section(text: &mut String, cwd: &PathBuf, title: &str, args: &[&
 
 #[cfg(test)]
 mod tests {
-    use super::{render_skills_panel, skill_allowed_tools_for_side_turn};
+    use super::{
+        lambda_gate_for_skill_command, render_skills_panel, skill_allowed_tools_for_side_turn,
+    };
     use puffer_resources::{
         LoadedItem, LoadedResources, SkillSpec, SkillVerificationSpec, SourceInfo, SourceKind,
     };
@@ -768,9 +784,9 @@ mod tests {
                     description: "Fix verified CI failures".to_string(),
                     verification: Some(SkillVerificationSpec {
                         system: "lambda-skill".to_string(),
-                        source_path: Some("/tmp/skills/verified-ci/skill.lskill".to_string()),
+                        source_path: Some("fixtures/skills/verified-ci/skill.lskill".to_string()),
                         generated_path: Some(
-                            "/tmp/skills/verified-ci/out/GENERATED.SKILL.md".to_string(),
+                            "fixtures/skills/verified-ci/out/GENERATED.SKILL.md".to_string(),
                         ),
                         host_catalogue_path: None,
                         compiler_path: None,
@@ -780,7 +796,7 @@ mod tests {
                     ..SkillSpec::default()
                 },
                 source_info: SourceInfo {
-                    path: PathBuf::from("/tmp/skills/verified-ci/skill.lskill"),
+                    path: PathBuf::from("fixtures/skills/verified-ci/skill.lskill"),
                     kind: SourceKind::Workspace,
                 },
             }],
@@ -800,8 +816,10 @@ mod tests {
             allowed_tools: vec!["Read".to_string()],
             verification: Some(SkillVerificationSpec {
                 system: "lambda-skill".to_string(),
-                source_path: Some("/tmp/skills/verified-ci/skill.lskill".to_string()),
-                generated_path: Some("/tmp/skills/verified-ci/out/GENERATED.SKILL.md".to_string()),
+                source_path: Some("fixtures/skills/verified-ci/skill.lskill".to_string()),
+                generated_path: Some(
+                    "fixtures/skills/verified-ci/out/GENERATED.SKILL.md".to_string(),
+                ),
                 host_catalogue_path: None,
                 compiler_path: None,
                 tools: Some(10),
@@ -824,8 +842,10 @@ mod tests {
             name: "verified-ci".to_string(),
             verification: Some(SkillVerificationSpec {
                 system: "lambda-skill".to_string(),
-                source_path: Some("/tmp/skills/verified-ci/skill.lskill".to_string()),
-                generated_path: Some("/tmp/skills/verified-ci/out/GENERATED.SKILL.md".to_string()),
+                source_path: Some("fixtures/skills/verified-ci/skill.lskill".to_string()),
+                generated_path: Some(
+                    "fixtures/skills/verified-ci/out/GENERATED.SKILL.md".to_string(),
+                ),
                 host_catalogue_path: None,
                 compiler_path: None,
                 tools: Some(10),
@@ -837,6 +857,52 @@ mod tests {
         let allowed = skill_allowed_tools_for_side_turn(&skill);
 
         assert!(allowed.is_empty());
+    }
+
+    #[test]
+    fn lambda_skill_command_rejects_prompt_only_verified_skill() {
+        let _guard = crate::test_locks::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let old_gate = std::env::var_os(crate::runtime::lambda_gate::LAMBDA_SKILL_GATE_ENV);
+        let old_compiler = std::env::var_os(crate::runtime::lambda_gate::LAMBDA_SKILL_COMPILER_ENV);
+        std::env::remove_var(crate::runtime::lambda_gate::LAMBDA_SKILL_GATE_ENV);
+        std::env::remove_var(crate::runtime::lambda_gate::LAMBDA_SKILL_COMPILER_ENV);
+
+        let skill = SkillSpec {
+            name: "verified-ci".to_string(),
+            verification: Some(SkillVerificationSpec {
+                system: "lambda-skill".to_string(),
+                source_path: Some("fixtures/skills/verified-ci/skill.lskill".to_string()),
+                generated_path: Some(
+                    "fixtures/skills/verified-ci/out/GENERATED.SKILL.md".to_string(),
+                ),
+                host_catalogue_path: None,
+                compiler_path: None,
+                tools: Some(10),
+                actions: Some(2),
+            }),
+            ..SkillSpec::default()
+        };
+
+        let error = lambda_gate_for_skill_command(&skill)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("verified Lambda Skill requires an active host catalogue"));
+
+        match old_gate {
+            Some(value) => {
+                std::env::set_var(crate::runtime::lambda_gate::LAMBDA_SKILL_GATE_ENV, value)
+            }
+            None => std::env::remove_var(crate::runtime::lambda_gate::LAMBDA_SKILL_GATE_ENV),
+        }
+        match old_compiler {
+            Some(value) => std::env::set_var(
+                crate::runtime::lambda_gate::LAMBDA_SKILL_COMPILER_ENV,
+                value,
+            ),
+            None => std::env::remove_var(crate::runtime::lambda_gate::LAMBDA_SKILL_COMPILER_ENV),
+        }
     }
 }
 
