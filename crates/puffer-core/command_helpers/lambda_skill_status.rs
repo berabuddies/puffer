@@ -3,14 +3,14 @@ use puffer_resources::{LoadedResources, SkillSpec};
 
 /// Summarizes verified Lambda Skill readiness for user-facing surfaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LambdaSkillStatus {
-    pub(crate) name: String,
-    pub(crate) ready: bool,
-    pub(crate) gate_source: Option<String>,
-    pub(crate) model_invocable: bool,
-    pub(crate) model_invocation_disabled: bool,
-    pub(crate) allowed_tools: Vec<String>,
-    pub(crate) failure_reason: Option<String>,
+pub struct LambdaSkillStatus {
+    pub name: String,
+    pub ready: bool,
+    pub gate_source: Option<String>,
+    pub model_invocable: bool,
+    pub model_invocation_disabled: bool,
+    pub allowed_tools: Vec<String>,
+    pub failure_reason: Option<String>,
 }
 
 impl LambdaSkillStatus {
@@ -49,7 +49,7 @@ impl LambdaSkillStatus {
 }
 
 /// Returns one status value for a Lambda-verified skill.
-pub(crate) fn lambda_skill_status(skill: &SkillSpec) -> Option<LambdaSkillStatus> {
+pub fn lambda_skill_status(skill: &SkillSpec) -> Option<LambdaSkillStatus> {
     let verification = skill
         .verification
         .as_ref()
@@ -68,7 +68,7 @@ pub(crate) fn lambda_skill_status(skill: &SkillSpec) -> Option<LambdaSkillStatus
 }
 
 /// Returns sorted status values for all loaded Lambda-verified skills.
-pub(crate) fn lambda_skill_statuses(resources: &LoadedResources) -> Vec<LambdaSkillStatus> {
+pub fn lambda_skill_statuses(resources: &LoadedResources) -> Vec<LambdaSkillStatus> {
     let mut statuses = resources
         .skills
         .iter()

@@ -1417,6 +1417,42 @@ mod tests {
     }
 
     #[test]
+    fn lambda_skill_library_disables_named_generated_skill() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        let external_root = temp.path().join("lambda-library");
+        let skill_dir = external_root.join("source-pack/gh-fix-ci");
+        fs::create_dir_all(skill_dir.join("out")).unwrap();
+        fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {}\nskill gh_fix_ci {}\n",
+        )
+        .unwrap();
+        fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: gh-fix-ci\ndescription: Verified CI repair\n---\n# Runtime body\nUse generated prompt.\n",
+        )
+        .unwrap();
+
+        let manifest_dir = root.join(".puffer/resources/lambda_skill_libraries");
+        fs::create_dir_all(&manifest_dir).unwrap();
+        fs::write(
+            manifest_dir.join("verified.yaml"),
+            format!(
+                "id: verified\nroot: '{}'\nallowed_tools:\n  - Bash\ndisabled_skills:\n  - gh-fix-ci\n",
+                external_root.display()
+            ),
+        )
+        .unwrap();
+
+        let paths = ConfigPaths::discover(&root);
+        let loaded = load_resources(&paths, &FsTestRunner).unwrap();
+        let skill = skill_by_name(&loaded, "gh-fix-ci").expect("lambda skill should import");
+
+        assert!(skill.value.disable_model_invocation);
+    }
+
+    #[test]
     fn workspace_resources_override_user_and_bundled_resources_by_id() {
         let temp = tempdir().unwrap();
         let root = temp.path().join("workspace");

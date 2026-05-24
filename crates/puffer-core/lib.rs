@@ -29,6 +29,7 @@ pub use command_helpers::execute_connect_flow;
 pub use command_helpers::execute_monitor_flow;
 pub use command_helpers::CommandActionEntry;
 pub use command_helpers::CopyActionEntry;
+pub use command_helpers::LambdaSkillStatus;
 pub use command_helpers::McpActionEntry;
 pub use command_helpers::PluginActionEntry;
 pub use command_helpers::ResumeLaunchResolution;
@@ -135,6 +136,11 @@ pub fn lambda_skill_doctor_warning_lines(resources: &LoadedResources) -> Vec<Str
         .into_iter()
         .map(|warning| format!("{}; {}", warning.summary, warning.detail))
         .collect()
+}
+
+/// Returns Lambda Skill readiness rows used by UI surfaces.
+pub fn lambda_skill_statuses(resources: &LoadedResources) -> Vec<LambdaSkillStatus> {
+    command_helpers::lambda_skill_statuses(resources)
 }
 
 /// Renders the current `/context` summary used by interactive overlays.

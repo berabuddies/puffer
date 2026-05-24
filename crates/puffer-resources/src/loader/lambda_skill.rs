@@ -34,6 +34,8 @@ pub(super) struct LambdaSkillLibrarySpec {
     user_invocable: bool,
     #[serde(default = "default_lambda_skill_disable_model_invocation")]
     disable_model_invocation: bool,
+    #[serde(default, alias = "disabledSkills")]
+    disabled_skills: Vec<String>,
     #[serde(default)]
     model: Option<String>,
     #[serde(default)]
@@ -200,6 +202,8 @@ fn load_lambda_skill_dir(
         .map(|path| resolve_lambda_skill_root(path, &source_info.path));
 
     let host_tool_bindings = host_tool_bindings_for_skill(spec, &name);
+    let disable_model_invocation =
+        spec.disable_model_invocation || lambda_skill_disabled_by_manifest(spec, &name);
 
     Ok(Some(LoadedItem {
         value: SkillSpec {
@@ -213,7 +217,7 @@ fn load_lambda_skill_dir(
             model: spec.model.clone(),
             effort: spec.effort.clone(),
             context: spec.context.clone(),
-            disable_model_invocation: spec.disable_model_invocation,
+            disable_model_invocation,
             verification: Some(SkillVerificationSpec {
                 system: "lambda-skill".to_string(),
                 source_path: Some(lambda_source_path.display().to_string()),
@@ -230,6 +234,12 @@ fn load_lambda_skill_dir(
             kind: source_info.kind,
         },
     }))
+}
+
+fn lambda_skill_disabled_by_manifest(spec: &LambdaSkillLibrarySpec, skill_name: &str) -> bool {
+    spec.disabled_skills
+        .iter()
+        .any(|configured| normalize_skill_name(configured) == skill_name)
 }
 
 fn host_tool_bindings_for_skill(

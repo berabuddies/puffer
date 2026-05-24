@@ -1,5 +1,7 @@
 use crate::daemon::DaemonState;
 use anyhow::{Context, Result};
+use puffer_core::lambda_skill_statuses;
+use puffer_resources::{LoadedItem, LoadedResources, SkillSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,7 +29,18 @@ struct SaveLambdaSkillLibraryParams {
     #[serde(default)]
     disable_model_invocation: bool,
     #[serde(default)]
+    disabled_skills: Vec<String>,
+    #[serde(default)]
     scope: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetLambdaSkillEnabledParams {
+    library_id: String,
+    source_kind: String,
+    skill_name: String,
+    enabled: bool,
 }
 
 #[derive(Deserialize, Serialize, Default)]
@@ -50,9 +63,11 @@ struct LambdaSkillLibraryManifestDto {
     user_invocable: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     disable_model_invocation: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    disabled_skills: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LambdaSkillLibraryInfoDto {
     id: String,
@@ -65,8 +80,29 @@ struct LambdaSkillLibraryInfoDto {
     skill_host_tool_bindings: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     user_invocable: bool,
     disable_model_invocation: bool,
+    disabled_skills: Vec<String>,
     source_kind: String,
     source_path: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LambdaVerifiedSkillInfoDto {
+    name: String,
+    description: String,
+    library_id: Option<String>,
+    library_root: Option<String>,
+    source_kind: Option<String>,
+    source_path: Option<String>,
+    generated_path: Option<String>,
+    ready: bool,
+    enabled: bool,
+    model_invocable: bool,
+    gate_source: Option<String>,
+    failure_reason: Option<String>,
+    allowed_tools: Vec<String>,
+    tools: Option<usize>,
+    actions: Option<usize>,
 }
 
 fn default_lambda_skill_user_invocable() -> bool {
@@ -103,6 +139,7 @@ pub(crate) fn handle_save_lambda_skill_library(
         skill_host_tool_bindings: normalize_skill_tool_bindings(params.skill_host_tool_bindings),
         user_invocable: params.user_invocable,
         disable_model_invocation: params.disable_model_invocation,
+        disabled_skills: normalize_lambda_skill_names(params.disabled_skills),
     };
     infer_missing_lambda_skill_manifest_fields(&mut manifest);
     let paths = state.config_paths();
@@ -122,8 +159,40 @@ pub(crate) fn handle_save_lambda_skill_library(
     lambda_skill_libraries_snapshot(state)
 }
 
+pub(crate) fn handle_set_lambda_skill_enabled(
+    state: &DaemonState,
+    params: &Value,
+) -> Result<Value> {
+    let params: SetLambdaSkillEnabledParams = serde_json::from_value(params.clone())?;
+    let id = params.library_id.trim();
+    validate_lambda_skill_library_id(id)?;
+    let skill_name = normalize_lambda_skill_name(params.skill_name.trim());
+    if skill_name.is_empty() {
+        anyhow::bail!("Lambda Skill name is required");
+    }
+    let path = lambda_skill_manifest_path(state, params.source_kind.trim(), id)?;
+    let raw = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let mut manifest: LambdaSkillLibraryManifestDto =
+        serde_yaml::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
+    manifest.disabled_skills = normalize_lambda_skill_names(manifest.disabled_skills);
+    if params.enabled {
+        manifest.disabled_skills.retain(|name| name != &skill_name);
+        manifest.disable_model_invocation = false;
+    } else if !manifest
+        .disabled_skills
+        .iter()
+        .any(|name| name == &skill_name)
+    {
+        manifest.disabled_skills.push(skill_name);
+        manifest.disabled_skills.sort();
+    }
+    std::fs::write(&path, serde_yaml::to_string(&manifest)?)
+        .with_context(|| format!("write {}", path.display()))?;
+    lambda_skill_libraries_snapshot(state)
+}
+
 fn lambda_skill_libraries_snapshot(state: &DaemonState) -> Result<Value> {
-    let (doctor, warnings) = state.lambda_skill_doctor_snapshot()?;
+    let (doctor, warnings, resources) = state.lambda_skill_resources_snapshot()?;
     let paths = state.config_paths();
     let workspace_dir = paths
         .workspace_config_dir
@@ -131,18 +200,35 @@ fn lambda_skill_libraries_snapshot(state: &DaemonState) -> Result<Value> {
     let user_dir = paths
         .user_config_dir
         .join("resources/lambda_skill_libraries");
+    let libraries = lambda_skill_library_manifest_dtos(&workspace_dir, "workspace")?
+        .into_iter()
+        .chain(lambda_skill_library_manifest_dtos(&user_dir, "user")?)
+        .collect::<Vec<_>>();
+    let skills = lambda_verified_skill_dtos(&resources, &libraries);
     Ok(json!({
         "directories": {
             "workspace": workspace_dir.display().to_string(),
             "user": user_dir.display().to_string(),
         },
-        "libraries": lambda_skill_library_manifest_dtos(&workspace_dir, "workspace")?
-            .into_iter()
-            .chain(lambda_skill_library_manifest_dtos(&user_dir, "user")?)
-            .collect::<Vec<_>>(),
+        "libraries": libraries,
+        "skills": skills,
         "doctor": doctor,
         "warnings": warnings,
     }))
+}
+
+fn lambda_skill_manifest_path(state: &DaemonState, source_kind: &str, id: &str) -> Result<PathBuf> {
+    let paths = state.config_paths();
+    let dir = match source_kind {
+        "user" => paths
+            .user_config_dir
+            .join("resources/lambda_skill_libraries"),
+        "local" | "project" | "workspace" => paths
+            .workspace_config_dir
+            .join("resources/lambda_skill_libraries"),
+        other => anyhow::bail!("unsupported Lambda Skill library scope `{other}`"),
+    };
+    Ok(dir.join(format!("{id}.yaml")))
 }
 
 fn lambda_skill_library_manifest_dtos(
@@ -176,6 +262,7 @@ fn lambda_skill_library_manifest_dtos(
             skill_host_tool_bindings: manifest.skill_host_tool_bindings,
             user_invocable: manifest.user_invocable,
             disable_model_invocation: manifest.disable_model_invocation,
+            disabled_skills: normalize_lambda_skill_names(manifest.disabled_skills),
             source_kind: source_kind.to_string(),
             source_path: path.display().to_string(),
         });
@@ -186,6 +273,92 @@ fn lambda_skill_library_manifest_dtos(
             .then_with(|| left.id.cmp(&right.id))
     });
     Ok(items)
+}
+
+fn lambda_verified_skill_dtos(
+    resources: &LoadedResources,
+    libraries: &[LambdaSkillLibraryInfoDto],
+) -> Vec<LambdaVerifiedSkillInfoDto> {
+    let status_by_name = lambda_skill_statuses(resources)
+        .into_iter()
+        .map(|status| (status.name.clone(), status))
+        .collect::<BTreeMap<_, _>>();
+    let mut skills = resources
+        .skills
+        .iter()
+        .filter_map(|skill| lambda_verified_skill_dto(skill, &status_by_name, libraries))
+        .collect::<Vec<_>>();
+    skills.sort_by(|left, right| {
+        left.source_kind
+            .cmp(&right.source_kind)
+            .then_with(|| left.library_id.cmp(&right.library_id))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    skills
+}
+
+fn lambda_verified_skill_dto(
+    skill: &LoadedItem<SkillSpec>,
+    status_by_name: &BTreeMap<String, puffer_core::LambdaSkillStatus>,
+    libraries: &[LambdaSkillLibraryInfoDto],
+) -> Option<LambdaVerifiedSkillInfoDto> {
+    let verification = skill
+        .value
+        .verification
+        .as_ref()
+        .filter(|verification| verification.system == "lambda-skill")?;
+    let library = lambda_skill_library_for_source(&skill.source_info.path, libraries);
+    let status = status_by_name.get(&skill.value.name);
+    Some(LambdaVerifiedSkillInfoDto {
+        name: skill.value.name.clone(),
+        description: skill.value.description.clone(),
+        library_id: library.map(|library| library.id.clone()),
+        library_root: library.map(|library| library.root.clone()),
+        source_kind: library.map(|library| library.source_kind.clone()),
+        source_path: verification.source_path.clone(),
+        generated_path: verification.generated_path.clone(),
+        ready: status.is_some_and(|status| status.ready),
+        enabled: !skill.value.disable_model_invocation,
+        model_invocable: status.is_some_and(|status| status.model_invocable),
+        gate_source: status.and_then(|status| status.gate_source.clone()),
+        failure_reason: status.and_then(|status| status.failure_reason.clone()),
+        allowed_tools: skill.value.allowed_tools.clone(),
+        tools: verification.tools,
+        actions: verification.actions,
+    })
+}
+
+fn lambda_skill_library_for_source<'a>(
+    source_path: &Path,
+    libraries: &'a [LambdaSkillLibraryInfoDto],
+) -> Option<&'a LambdaSkillLibraryInfoDto> {
+    libraries
+        .iter()
+        .filter(|library| lambda_skill_source_belongs_to_library(source_path, library))
+        .max_by_key(|library| library.root.len())
+}
+
+fn lambda_skill_source_belongs_to_library(
+    source_path: &Path,
+    library: &LambdaSkillLibraryInfoDto,
+) -> bool {
+    let root = resolved_lambda_skill_library_root(library);
+    let canonical_root = root.canonicalize().unwrap_or(root);
+    let canonical_source = source_path
+        .canonicalize()
+        .unwrap_or_else(|_| source_path.to_path_buf());
+    canonical_source.starts_with(canonical_root)
+}
+
+fn resolved_lambda_skill_library_root(library: &LambdaSkillLibraryInfoDto) -> PathBuf {
+    let root = PathBuf::from(&library.root);
+    if root.is_absolute() {
+        return root;
+    }
+    PathBuf::from(&library.source_path)
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join(root)
 }
 
 fn validate_lambda_skill_library_id(id: &str) -> Result<()> {
@@ -215,6 +388,32 @@ fn normalize_non_empty_list(values: Vec<String>) -> Vec<String> {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .collect()
+}
+
+fn normalize_lambda_skill_names(values: Vec<String>) -> Vec<String> {
+    let mut names = values
+        .into_iter()
+        .map(|value| normalize_lambda_skill_name(&value))
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn normalize_lambda_skill_name(raw: &str) -> String {
+    let mut normalized = String::new();
+    let mut last_was_dash = false;
+    for ch in raw.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            normalized.push(ch.to_ascii_lowercase());
+            last_was_dash = false;
+        } else if !last_was_dash {
+            normalized.push('-');
+            last_was_dash = true;
+        }
+    }
+    normalized.trim_matches('-').to_string()
 }
 
 fn normalize_tool_bindings(

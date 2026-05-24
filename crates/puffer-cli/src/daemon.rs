@@ -82,6 +82,7 @@ use crate::daemon_browser::BrowserRegistry;
 use crate::daemon_fs_watch::FsWatchRegistry;
 use crate::daemon_lambda_skills::{
     handle_list_lambda_skill_libraries, handle_save_lambda_skill_library,
+    handle_set_lambda_skill_enabled,
 };
 use crate::daemon_pty::PtyRegistry;
 use crate::daemon_turn_routing::persist_explicit_turn_routing;
@@ -292,13 +293,14 @@ impl DaemonState {
         &self.paths
     }
 
-    /// Returns Lambda Skill doctor output for desktop settings snapshots.
-    pub(crate) fn lambda_skill_doctor_snapshot(&self) -> Result<(String, Vec<String>)> {
+    /// Returns Lambda Skill doctor output and loaded resources for desktop snapshots.
+    pub(crate) fn lambda_skill_resources_snapshot(
+        &self,
+    ) -> Result<(String, Vec<String>, LoadedResources)> {
         let inputs = self.build_runtime_inputs_without_discovery()?;
-        Ok((
-            render_lambda_skill_doctor_status(&inputs.resources),
-            lambda_skill_doctor_warning_lines(&inputs.resources),
-        ))
+        let doctor = render_lambda_skill_doctor_status(&inputs.resources);
+        let warnings = lambda_skill_doctor_warning_lines(&inputs.resources);
+        Ok((doctor, warnings, inputs.resources))
     }
 }
 
@@ -769,6 +771,9 @@ async fn dispatch_request(
         }
         "save_lambda_skill_library" => {
             respond!(detached!(|s, p| handle_save_lambda_skill_library(&s, &p)))
+        }
+        "set_lambda_skill_enabled" => {
+            respond!(detached!(|s, p| handle_set_lambda_skill_enabled(&s, &p)))
         }
         "list_provider_models" => {
             respond!(detached!(|s, p| handle_list_provider_models(&s, &p)))
@@ -3325,9 +3330,9 @@ mod tests {
         browser_permission_payload_json, handle_create_session, handle_import_external_credential,
         handle_list_lambda_skill_libraries, handle_list_permissions, handle_list_provider_models,
         handle_login_with_api_key, handle_logout_provider, handle_save_lambda_skill_library,
-        handle_save_permissions, model_descriptor_dto, permission_review_payload_json,
-        requires_explicit_subscription, resolve_create_session_model_id, run_off_runtime,
-        DaemonState, TurnRequestOptions,
+        handle_save_permissions, handle_set_lambda_skill_enabled, model_descriptor_dto,
+        permission_review_payload_json, requires_explicit_subscription,
+        resolve_create_session_model_id, run_off_runtime, DaemonState, TurnRequestOptions,
     };
     use indexmap::IndexMap;
     use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
@@ -4437,6 +4442,10 @@ mod tests {
         assert_eq!(saved["libraries"][0]["allowedTools"][0], "Bash");
         assert_eq!(saved["libraries"][0]["allowedTools"][1], "Read");
         assert!(saved["warnings"].as_array().unwrap().is_empty());
+        assert_eq!(saved["skills"][0]["name"], "gh-fix-ci");
+        assert_eq!(saved["skills"][0]["enabled"], true);
+        assert_eq!(saved["skills"][0]["modelInvocable"], true);
+        assert_eq!(saved["skills"][0]["libraryId"], "verified");
         assert!(saved["doctor"]
             .as_str()
             .unwrap()
@@ -4454,6 +4463,93 @@ mod tests {
         assert!(manifest.contains("host_catalogue_subpath: out/host.json"));
         assert!(manifest.contains("- Bash"));
         assert!(manifest.contains("- Read"));
+    }
+
+    #[test]
+    fn desktop_lambda_skill_enabled_toggle_updates_manifest_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let lambda_root = temp.path().join("lambda-skills");
+        let skill_dir = lambda_root.join("ci/gh-fix-ci");
+        std::fs::create_dir_all(skill_dir.join("out")).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {}\nskill gh_fix_ci {}\n",
+        )
+        .expect("skill source");
+        std::fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: gh-fix-ci\ndescription: Verified CI repair\n---\nUse generated prompt.\n",
+        )
+        .expect("generated skill");
+        std::fs::write(
+            skill_dir.join("out/host.json"),
+            r#"{
+              "effects": ["net_r"],
+              "domains": [],
+              "tools": [
+                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash"], "registers": [], "contextReq": null}
+              ]
+            }"#,
+        )
+        .expect("host catalogue");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        handle_save_lambda_skill_library(
+            &state,
+            &json!({
+                "id": "verified",
+                "root": lambda_root.display().to_string()
+            }),
+        )
+        .expect("save lambda skill library");
+
+        let disabled = handle_set_lambda_skill_enabled(
+            &state,
+            &json!({
+                "libraryId": "verified",
+                "sourceKind": "workspace",
+                "skillName": "gh-fix-ci",
+                "enabled": false
+            }),
+        )
+        .expect("disable lambda skill");
+
+        assert_eq!(disabled["libraries"][0]["disabledSkills"][0], "gh-fix-ci");
+        assert_eq!(disabled["skills"][0]["enabled"], false);
+        assert_eq!(disabled["skills"][0]["modelInvocable"], false);
+        let manifest_path = state
+            .paths
+            .workspace_config_dir
+            .join("resources/lambda_skill_libraries/verified.yaml");
+        let manifest = std::fs::read_to_string(&manifest_path).expect("read manifest");
+        assert!(manifest.contains("disabled_skills:"));
+
+        let enabled = handle_set_lambda_skill_enabled(
+            &state,
+            &json!({
+                "libraryId": "verified",
+                "sourceKind": "workspace",
+                "skillName": "gh-fix-ci",
+                "enabled": true
+            }),
+        )
+        .expect("enable lambda skill");
+
+        assert!(enabled["libraries"][0]["disabledSkills"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(enabled["skills"][0]["enabled"], true);
+        assert_eq!(enabled["skills"][0]["modelInvocable"], true);
     }
 
     #[cfg(unix)]
