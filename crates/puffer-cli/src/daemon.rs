@@ -36,7 +36,8 @@ use puffer_config::{
 };
 use puffer_core::{
     default_effort_level, enter_plan_mode, execute_user_turn_streaming_with_permissions_and_cancel,
-    provider_preference_family, supported_effort_levels, with_user_question_prompt_handler,
+    lambda_skill_doctor_warning_lines, provider_preference_family,
+    render_lambda_skill_doctor_status, supported_effort_levels, with_user_question_prompt_handler,
     AppState, BrowserPermissionPromptActionSet, BrowserPermissionPromptSource,
     BrowserPermissionPromptTargetClass, CancelToken, MessageRole, ModelPreferenceFamily,
     PermissionPromptAction, PermissionPromptRequest, TurnStreamEvent, UserQuestionPromptRequest,
@@ -79,6 +80,9 @@ use crate::auth_provider::{
 };
 use crate::daemon_browser::BrowserRegistry;
 use crate::daemon_fs_watch::FsWatchRegistry;
+use crate::daemon_lambda_skills::{
+    handle_list_lambda_skill_libraries, handle_save_lambda_skill_library,
+};
 use crate::daemon_pty::PtyRegistry;
 use crate::daemon_turn_routing::persist_explicit_turn_routing;
 use crate::daemon_ui_state::{
@@ -286,6 +290,15 @@ impl DaemonState {
 
     pub(crate) fn config_paths(&self) -> &ConfigPaths {
         &self.paths
+    }
+
+    /// Returns Lambda Skill doctor output for desktop settings snapshots.
+    pub(crate) fn lambda_skill_doctor_snapshot(&self) -> Result<(String, Vec<String>)> {
+        let inputs = self.build_runtime_inputs_without_discovery()?;
+        Ok((
+            render_lambda_skill_doctor_status(&inputs.resources),
+            lambda_skill_doctor_warning_lines(&inputs.resources),
+        ))
     }
 }
 
@@ -751,6 +764,12 @@ async fn dispatch_request(
         "logout_provider" => respond!(detached!(|s, p| handle_logout_provider(&s, &p))),
         "list_mcp_servers" => respond!(detached!(|s| handle_list_mcp_servers(&s))),
         "add_mcp_server" => respond!(detached!(|s, p| handle_add_mcp_server(&s, &p))),
+        "list_lambda_skill_libraries" => {
+            respond!(detached!(|s| handle_list_lambda_skill_libraries(&s)))
+        }
+        "save_lambda_skill_library" => {
+            respond!(detached!(|s, p| handle_save_lambda_skill_library(&s, &p)))
+        }
         "list_provider_models" => {
             respond!(detached!(|s, p| handle_list_provider_models(&s, &p)))
         }
@@ -3304,10 +3323,11 @@ mod tests {
     use super::{
         apply_daemon_yolo_mode, apply_turn_model_override, apply_turn_request_options,
         browser_permission_payload_json, handle_create_session, handle_import_external_credential,
-        handle_list_permissions, handle_list_provider_models, handle_login_with_api_key,
-        handle_logout_provider, handle_save_permissions, model_descriptor_dto,
-        permission_review_payload_json, requires_explicit_subscription,
-        resolve_create_session_model_id, run_off_runtime, DaemonState, TurnRequestOptions,
+        handle_list_lambda_skill_libraries, handle_list_permissions, handle_list_provider_models,
+        handle_login_with_api_key, handle_logout_provider, handle_save_lambda_skill_library,
+        handle_save_permissions, model_descriptor_dto, permission_review_payload_json,
+        requires_explicit_subscription, resolve_create_session_model_id, run_off_runtime,
+        DaemonState, TurnRequestOptions,
     };
     use indexmap::IndexMap;
     use puffer_config::{ensure_workspace_dirs, ConfigPaths, PufferConfig};
@@ -4307,6 +4327,60 @@ mod tests {
             stored["browser"]["deny_domains"][0].as_str(),
             Some("example.com")
         );
+    }
+
+    #[test]
+    fn desktop_lambda_skill_library_save_writes_manifest_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let lambda_root = temp.path().join("lambda-skills");
+        let compiler = temp.path().join("lskillc");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let saved = handle_save_lambda_skill_library(
+            &state,
+            &json!({
+                "id": "verified",
+                "root": lambda_root.display().to_string(),
+                "compilerPath": compiler.display().to_string(),
+                "allowedTools": [" Bash ", "Read"],
+                "hostToolBindings": {
+                    " formal_search ": [" Bash "]
+                },
+                "skillHostToolBindings": {
+                    "gh-fix-ci": {
+                        " gh_pr_view ": [" Bash "]
+                    }
+                }
+            }),
+        )
+        .expect("save lambda skill library");
+
+        assert_eq!(saved["libraries"][0]["id"], "verified");
+        assert_eq!(saved["libraries"][0]["allowedTools"][0], "Bash");
+        let manifest_path = state
+            .paths
+            .workspace_config_dir
+            .join("resources/lambda_skill_libraries/verified.yaml");
+        let manifest = std::fs::read_to_string(&manifest_path).expect("read manifest");
+        assert!(manifest.contains("compiler_path:"));
+        assert!(manifest.contains("host_tool_bindings:"));
+        assert!(manifest.contains("skill_host_tool_bindings:"));
+
+        let listed = handle_list_lambda_skill_libraries(&state).expect("list libraries");
+        assert_eq!(listed["libraries"][0]["sourceKind"], "workspace");
+        assert!(listed["doctor"]
+            .as_str()
+            .unwrap()
+            .contains("lambda_skills=0"));
     }
 
     #[test]

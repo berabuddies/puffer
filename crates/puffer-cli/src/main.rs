@@ -14,6 +14,7 @@ mod daemon;
 mod daemon_browser;
 mod daemon_files;
 mod daemon_fs_watch;
+mod daemon_lambda_skills;
 mod daemon_lsp;
 mod daemon_pty;
 mod daemon_title;
