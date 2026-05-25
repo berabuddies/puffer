@@ -1107,31 +1107,62 @@ fn lambda_gate_timeline_text(metadata: &Option<Value>, tool_id: &str) -> Option<
     let event = lambda.get("event").and_then(Value::as_str)?;
     let host_tool = lambda.get("host_tool").and_then(Value::as_str);
     let concrete_tool = lambda.get("concrete_tool").and_then(Value::as_str);
-    let text = match event {
-        "host_call_admitted" => format!(
-            "Verified Skill Gate admitted {} for {}.",
-            host_tool.unwrap_or("host call"),
-            concrete_tool.unwrap_or(tool_id)
-        ),
-        "host_call_committed" => format!(
-            "Verified Skill Gate committed {} through {}.",
-            host_tool.unwrap_or("host call"),
-            concrete_tool.unwrap_or(tool_id)
-        ),
-        "gate_rejected" => {
-            let reason = lambda
-                .get("reason")
-                .and_then(Value::as_str)
-                .unwrap_or("gate rejected the tool call");
-            let retry = lambda
-                .get("retry_tool")
-                .and_then(Value::as_str)
-                .unwrap_or("LambdaHostCall");
-            format!("Verified Skill Gate rejected {tool_id}: {reason}. Retry with {retry}.")
+    let host_tool_label = host_tool.unwrap_or("host call");
+    let concrete_tool_label = concrete_tool.unwrap_or(tool_id);
+    let mut lines = vec!["Verified Skill Gate".to_string(), format!("event: {event}")];
+    if event == "gate_rejected" {
+        lines.push(
+            "check: Compared the attempted tool call against the active LambdaHostCall gate."
+                .to_string(),
+        );
+        if let Some(reason) = lambda.get("reason").and_then(Value::as_str) {
+            lines.push(format!("reason: {reason}"));
         }
-        other => format!("Verified Skill Gate event: {other}."),
-    };
-    Some(text)
+        if let Some(retry) = lambda.get("retry_tool").and_then(Value::as_str) {
+            lines.push(format!("retry_tool: {retry}"));
+        }
+        lines.push(
+            "confirmation: Puffer rejected this call before committing the Lambda gate. Retry by opening LambdaHostCall with the formal host tool, host args, concrete tool, and exact concrete input."
+                .to_string(),
+        );
+        return Some(lines.join("\n"));
+    }
+    if event == "host_call_committed" {
+        lines.push(format!(
+            "check: Confirmed the concrete {concrete_tool_label} call matched the pending LambdaHostCall bridge for formal host tool {host_tool_label}."
+        ));
+    } else {
+        lines.push(format!(
+            "check: Verified LambdaHostCall may bind formal host tool {host_tool_label} to concrete tool {concrete_tool_label}, and recorded the exact concrete input that must run next."
+        ));
+    }
+    lines.push(format!("host_tool: {host_tool_label}"));
+    if let Some(args) = lambda.get("host_args").map(compact_json_text) {
+        lines.push(format!("host_args: {args}"));
+    }
+    lines.push(format!("concrete_tool: {concrete_tool_label}"));
+    if let Some(input) = lambda.get("concrete_input").map(compact_json_text) {
+        lines.push(format!("concrete_input: {input}"));
+    }
+    if let Some(facts) = lambda.get("registered_facts").map(compact_json_text) {
+        lines.push(format!("registered_facts: {facts}"));
+    }
+    if event == "host_call_committed" {
+        lines.push(
+            "confirmation: Puffer observed the declared concrete tool succeed, then committed the Lambda gate and any registered facts."
+                .to_string(),
+        );
+    } else {
+        lines.push(
+            "confirmation: Compare concrete_tool with the next activity row's tool name and concrete_input with that tool's input. Puffer only allows the next concrete call when both match exactly."
+                .to_string(),
+        );
+    }
+    Some(lines.join("\n"))
+}
+
+fn compact_json_text(value: &Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
 }
 
 fn parse_system_message(
@@ -1673,7 +1704,9 @@ mod tests {
                 "lambda_skill": {
                     "event": "host_call_admitted",
                     "host_tool": "gh_pr_view",
-                    "concrete_tool": "Bash"
+                    "host_args": {"number": 42},
+                    "concrete_tool": "Bash",
+                    "concrete_input": {"command": "gh pr view 42"}
                 }
             })),
             actor: None,
@@ -1684,7 +1717,15 @@ mod tests {
         assert!(matches!(items[0], TimelineItemDto::ToolCall { .. }));
         match &items[1] {
             TimelineItemDto::SystemMessage { text, .. } => {
-                assert!(text.contains("Verified Skill Gate admitted gh_pr_view"));
+                assert!(text.contains("Verified Skill Gate"));
+                assert!(text.contains("event: host_call_admitted"));
+                assert!(text.contains("host_tool: gh_pr_view"));
+                assert!(text.contains(r#"host_args: {"number":42}"#));
+                assert!(text.contains("concrete_tool: Bash"));
+                assert!(text.contains(r#"concrete_input: {"command":"gh pr view 42"}"#));
+                assert!(
+                    text.contains("Compare concrete_tool with the next activity row's tool name")
+                );
             }
             other => panic!("expected lambda gate system event, got {other:?}"),
         }

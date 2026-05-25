@@ -468,7 +468,6 @@
         kind: "agent";
         item: MessageTimelineItem | null;
         children: ActivityChild[];
-        gates: MessageTimelineItem[];
         approvals: PermissionTimelineItem[];
         questions: UserQuestionTimelineItem[];
       };
@@ -477,6 +476,11 @@
     state: "success" | "error";
     label: string;
     detail: string;
+  };
+  type GateDetailRow = {
+    label: string;
+    value: string;
+    code: boolean;
   };
 
   function isVerifiedSkillGateItem(item: TimelineItem): item is MessageTimelineItem {
@@ -552,6 +556,34 @@
       label: "Gate checked",
       detail: compact
     };
+  }
+
+  function addGateDetailRow(
+    rows: GateDetailRow[],
+    label: string,
+    value: string | null,
+    code = false
+  ) {
+    const trimmed = value?.trim();
+    if (!trimmed) return;
+    rows.push({ label, value: trimmed, code });
+  }
+
+  function gateDetailRows(item: MessageTimelineItem): GateDetailRow[] {
+    const display = verifiedSkillGateDisplay(item);
+    const rows: GateDetailRow[] = [];
+    addGateDetailRow(rows, "Event", gateField(item, "event") ?? firstGateMetaEvent(item), true);
+    addGateDetailRow(rows, "Check", gateField(item, "check") ?? display.detail);
+    addGateDetailRow(rows, "Host tool", gateField(item, "host_tool") ?? gateField(item, "hosttool"), true);
+    addGateDetailRow(rows, "Host args", gateField(item, "host_args") ?? gateField(item, "hostargs"), true);
+    addGateDetailRow(rows, "Concrete tool", gateField(item, "concrete_tool") ?? gateField(item, "concretetool"), true);
+    addGateDetailRow(rows, "Concrete input", gateField(item, "concrete_input") ?? gateField(item, "concreteinput"), true);
+    addGateDetailRow(rows, "Registered facts", gateField(item, "registered_facts") ?? gateField(item, "registeredfacts"), true);
+    addGateDetailRow(rows, "Reason", gateField(item, "reason"));
+    addGateDetailRow(rows, "Retry with", gateField(item, "retry_tool") ?? gateField(item, "retrytool"), true);
+    addGateDetailRow(rows, "How Puffer confirmed it", gateField(item, "confirmation"));
+    if (rows.length === 0) addGateDetailRow(rows, display.label, display.detail);
+    return rows;
   }
 
   function isActivityMessage(child: ActivityChild): child is MessageTimelineItem {
@@ -632,7 +664,6 @@
       kind: "agent",
       item: null,
       children: [],
-      gates: [],
       approvals: [],
       questions: []
     });
@@ -664,7 +695,7 @@
       } else if (item.kind === "system") {
         if (isVerifiedSkillGateItem(item)) {
           if (!current) current = startAgentRow(item);
-          current.gates.push(item as MessageTimelineItem);
+          current.children.push(item as MessageTimelineItem);
         } else {
           flushCurrent();
           rows.push({
@@ -999,7 +1030,6 @@
         kind: "agent",
         item: null,
         children: [],
-        gates: [],
         approvals: [...pendingPermissions],
         questions: [...pendingQuestions]
       });
@@ -1007,7 +1037,7 @@
     return out;
   });
 
-  type ActivityCategory = "thought" | "message" | "agent" | "write" | "read" | "browser" | "terminal" | "search" | "diff" | "other";
+  type ActivityCategory = "thought" | "message" | "gate" | "agent" | "write" | "read" | "browser" | "terminal" | "search" | "diff" | "other";
 
   type ActivitySummary = {
     icons: IconName[];
@@ -1015,7 +1045,7 @@
     failed: number;
   };
 
-  const activityOrder: ActivityCategory[] = ["thought", "message", "agent", "write", "read", "browser", "terminal", "search", "diff", "other"];
+  const activityOrder: ActivityCategory[] = ["thought", "message", "gate", "agent", "write", "read", "browser", "terminal", "search", "diff", "other"];
 
   let activeTurnAgentRowIndex = $derived.by(() => {
     if (!turnRunning) return -1;
@@ -1061,7 +1091,10 @@
 
   function shouldCollapseActivity(row: Extract<RowKind, { kind: "agent" }>, idx: number): boolean {
     const isActiveTurn = idx === activeTurnAgentRowIndex;
-    return !isActiveTurn && row.children.length > 0 && Boolean(row.item?.body.trim());
+    return !isActiveTurn && row.children.length > 0 && (
+      Boolean(row.item?.body.trim()) ||
+      row.children.some(isGateActivity)
+    );
   }
 
   function activityGroupId(row: Extract<RowKind, { kind: "agent" }>, idx: number): string {
@@ -1110,6 +1143,7 @@
   function activityIcon(category: ActivityCategory): IconName {
     if (category === "thought") return "sparkles";
     if (category === "message") return "sparkles";
+    if (category === "gate") return "shield";
     if (category === "agent") return "plug";
     if (category === "write") return "edit";
     if (category === "read") return "file";
@@ -1148,6 +1182,7 @@
   }
 
   function childActivityCategory(child: ActivityChild): ActivityCategory {
+    if (isGateActivity(child)) return "gate";
     if (child.kind === "diff") return "diff";
     if (child.kind !== "tool") return "message";
     const name = child.toolName.toLowerCase();
@@ -1169,6 +1204,10 @@
     return name === "bash" || name === "shell" || name === "powershell";
   }
 
+  function isGateActivity(child: ActivityChild): child is MessageTimelineItem & { kind: "system" } {
+    return child.kind === "system" && isVerifiedSkillGateItem(child);
+  }
+
   function activityActionSelected(activityId: string, child: ActivityChild): boolean {
     return activityChildSelected(activityId, child.id);
   }
@@ -1178,12 +1217,14 @@
   }
 
   function childFailed(child: ActivityChild): boolean {
+    if (isGateActivity(child)) return verifiedSkillGateDisplay(child).state === "error";
     if (child.kind === "assistant" || child.kind === "command") return false;
     const status = (child.status ?? "").toLowerCase();
     return status.includes("err") || status.includes("fail");
   }
 
   function activityStatus(child: ActivityChild): string {
+    if (isGateActivity(child)) return verifiedSkillGateDisplay(child).state === "error" ? "failed" : "done";
     if (child.kind === "assistant" || child.kind === "command") return "done";
     const status = (child.status ?? "").toLowerCase();
     if (status.includes("run") || status === "pending") return "running";
@@ -1543,6 +1584,7 @@
 
   function activityActionName(child: ActivityChild): string {
     if (child.kind === "diff") return "Diff";
+    if (isGateActivity(child)) return verifiedSkillGateDisplay(child).label;
     if (child.kind !== "tool") return "Message";
     const input = parseInputObject(child);
     const fileChange = fileChangeDisplay(child);
@@ -1592,6 +1634,7 @@
 
   function activityActionArg(child: ActivityChild): string {
     if (child.kind === "diff") return child.diff.title;
+    if (isGateActivity(child)) return verifiedSkillGateDisplay(child).detail;
     if (child.kind !== "tool") {
       const compact = child.body.replace(/\s+/g, " ").trim();
       return compact.length > 96 ? `${compact.slice(0, 95)}...` : compact || "Assistant message";
@@ -1640,6 +1683,8 @@
     if (searchCount > 0) parts.push(searchCount === 1 ? "Searched" : `Searched ${searchCount} times`);
     const diffCount = counts.get("diff") ?? 0;
     if (diffCount > 0) parts.push(`Updated ${plural(diffCount, "diff", "diffs")}`);
+    const gateCount = counts.get("gate") ?? 0;
+    if (gateCount > 0) parts.push(gateCount === 1 ? "Checked 1 gate" : `Checked ${gateCount} gates`);
     const messageCount = counts.get("message") ?? 0;
     if (messageCount > 0) parts.push(messageCount === 1 ? "Intermediate message" : `${messageCount} intermediate messages`);
     const agentCount = counts.get("agent") ?? 0;
@@ -1705,7 +1750,7 @@
                 <div class="pf-msg-meta">
                   <span class="name">{engineerName}</span>
                 </div>
-                {#if row.children.length || row.gates.length || row.approvals.length || row.questions.length}
+                {#if row.children.length || row.approvals.length || row.questions.length}
                   <div class="agent-tools">
                     {#if row.children.length}
                       {#if shouldCollapseActivity(row, idx)}
@@ -1796,6 +1841,19 @@
                                     />
                                   {:else if selected.child.kind === "diff"}
                                     <DiffCard item={selected.child as DiffTimelineItem} defaultCollapsed={false} />
+                                  {:else if isGateActivity(selected.child)}
+                                    <div class="gate-detail-panel pf-msg-text">
+                                      {#each gateDetailRows(selected.child) as row (row.label)}
+                                        <div class="gate-detail-row">
+                                          <span class="gate-detail-label">{row.label}</span>
+                                          {#if row.code}
+                                            <code class="gate-detail-value">{row.value}</code>
+                                          {:else}
+                                            <span class="gate-detail-value">{row.value}</span>
+                                          {/if}
+                                        </div>
+                                      {/each}
+                                    </div>
                                   {:else}
                                     <div class="activity-message pf-msg-text">
                                       <MessageBody body={(selected.child as MessageTimelineItem).body} onOpenFile={onOpenFileLink} />
@@ -1815,6 +1873,19 @@
                             />
                           {:else if child.kind === "diff"}
                             <DiffCard item={child as DiffTimelineItem} />
+                          {:else if isGateActivity(child)}
+                            <div class="gate-detail-panel pf-msg-text">
+                              {#each gateDetailRows(child) as row (row.label)}
+                                <div class="gate-detail-row">
+                                  <span class="gate-detail-label">{row.label}</span>
+                                  {#if row.code}
+                                    <code class="gate-detail-value">{row.value}</code>
+                                  {:else}
+                                    <span class="gate-detail-value">{row.value}</span>
+                                  {/if}
+                                </div>
+                              {/each}
+                            </div>
                           {:else}
                             <div class="activity-message pf-msg-text">
                               <MessageBody body={(child as MessageTimelineItem).body} onOpenFile={onOpenFileLink} />
@@ -1823,20 +1894,6 @@
                         {/each}
                       {/if}
                     {/if}
-                    {#each row.gates as gateItem (gateItem.id)}
-                      {@const gate = verifiedSkillGateDisplay(gateItem)}
-                      <div class="gate-toast-row">
-                        <div class="gate-toast" data-state={gate.state}>
-                          <span class="gate-toast-icon">
-                            <Icon name={gate.state === "error" ? "x" : "shield"} size={12} />
-                          </span>
-                          <span class="gate-toast-title">{gate.label}</span>
-                          {#if gate.detail}
-                            <span class="gate-toast-detail" title={gate.detail}>{gate.detail}</span>
-                          {/if}
-                        </div>
-                      </div>
-                    {/each}
                     {#each row.approvals as p (p.id)}
                       <Approval item={p} disabled={!turnCancelable || isPermissionResolving(p)} onResolve={onResolvePermission} />
                     {/each}
@@ -2045,57 +2102,6 @@
     font-weight: 600;
     background: color-mix(in oklab, var(--muted) 28%, var(--background));
   }
-  .gate-toast-row {
-    display: flex;
-    min-width: 0;
-  }
-  .gate-toast {
-    width: 100%;
-    max-width: 100%;
-    min-height: 30px;
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 10px;
-    border: 1px solid color-mix(in oklab, oklch(0.7 0.18 145) 28%, var(--border));
-    border-radius: 8px;
-    background: color-mix(in oklab, oklch(0.7 0.18 145) 8%, var(--background));
-    color: var(--foreground);
-    font-family: var(--font-sans);
-    font-size: var(--pf-chat-detail-size);
-    line-height: 1.35;
-    box-shadow: 0 1px 0 color-mix(in oklab, var(--foreground) 4%, transparent);
-  }
-  .gate-toast[data-state="error"] {
-    border-color: color-mix(in oklab, var(--destructive, #dc2626) 26%, var(--border));
-    background: color-mix(in oklab, var(--destructive, #dc2626) 7%, var(--background));
-  }
-  .gate-toast-icon {
-    width: 18px;
-    height: 18px;
-    border-radius: 5px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    flex: 0 0 auto;
-    color: oklch(0.48 0.17 145);
-    background: color-mix(in oklab, oklch(0.7 0.18 145) 14%, transparent);
-  }
-  .gate-toast[data-state="error"] .gate-toast-icon {
-    color: color-mix(in oklab, var(--destructive, #dc2626) 85%, var(--foreground));
-    background: color-mix(in oklab, var(--destructive, #dc2626) 13%, transparent);
-  }
-  .gate-toast-title {
-    flex: 0 0 auto;
-    font-weight: 650;
-  }
-  .gate-toast-detail {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--muted-foreground);
-  }
   .agent-tools {
     display: flex;
     flex-direction: column;
@@ -2292,6 +2298,44 @@
   }
   .activity-panel :global(.pf-tool-body) {
     max-height: 360px;
+  }
+  .gate-detail-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 12px;
+    border: 1px solid color-mix(in oklab, oklch(0.7 0.18 145) 24%, var(--border));
+    border-radius: 8px;
+    background: color-mix(in oklab, oklch(0.7 0.18 145) 6%, var(--background));
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-size: var(--pf-chat-detail-size);
+    line-height: 1.5;
+  }
+  .gate-detail-row {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: minmax(112px, 0.24fr) minmax(0, 1fr);
+    gap: 10px;
+    align-items: start;
+  }
+  .gate-detail-label {
+    color: var(--muted-foreground);
+    font-size: var(--pf-chat-meta-size);
+    font-weight: 650;
+  }
+  .gate-detail-value {
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  code.gate-detail-value {
+    display: inline;
+    padding: 1px 4px;
+    border-radius: 4px;
+    background: color-mix(in oklab, var(--muted) 38%, var(--background));
+    font-family: var(--font-mono);
+    font-size: 0.92em;
   }
   .typing {
     display: flex;

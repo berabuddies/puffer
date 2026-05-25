@@ -2610,6 +2610,94 @@ test("completed background turns keep tool activity until persistence catches up
   await expect(panel).toContainText("completed hidden tool output");
 });
 
+test("verified skill gate events render inside agent activity with check details", async ({
+  page
+}) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-gate-activity",
+        displayName: "Gate activity",
+        title: "Gate activity",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Gate activity/);
+  await page.locator(".pf-composer textarea").fill("Use the arxiv verified skill");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.sessionId === "session-gate-activity"
+  );
+
+  daemon.emit("session:session-gate-activity:event", {
+    type: "lambda-gate",
+    turnId: "turn-session-gate-activity",
+    callId: "gate-admit",
+    toolId: "LambdaHostCall",
+    gateEvent: "host_call_admitted",
+    hostTool: "arxiv_search",
+    hostArgs: { query: "au:\"Hanzhi Liu\"", maxresults: 10 },
+    concreteTool: "Bash",
+    concreteInput: { command: "python3 arxiv_search.py" }
+  });
+  daemon.emit("session:session-gate-activity:event", {
+    type: "tool-invocations",
+    turnId: "turn-session-gate-activity",
+    invocations: [
+      {
+        callId: "gate-bash",
+        toolId: "Bash",
+        input: "{\"command\":\"python3 arxiv_search.py\"}",
+        output: "arxiv result",
+        success: true
+      }
+    ]
+  });
+  daemon.emit("session:session-gate-activity:event", {
+    type: "lambda-gate",
+    turnId: "turn-session-gate-activity",
+    callId: "gate-commit",
+    toolId: "Bash",
+    gateEvent: "host_call_committed",
+    hostTool: "arxiv_search",
+    hostArgs: { query: "au:\"Hanzhi Liu\"", maxresults: 10 },
+    concreteTool: "Bash",
+    concreteInput: { command: "python3 arxiv_search.py" },
+    registeredFacts: [{ pred: "searched", args: ["au:\"Hanzhi Liu\""] }]
+  });
+  daemon.emit("session:session-gate-activity:event", {
+    type: "turn-complete",
+    turnId: "turn-session-gate-activity",
+    assistantText: "Found the arXiv paper."
+  });
+
+  await expect(page.locator(".gate-toast")).toHaveCount(0);
+  const activity = page.getByRole("button", { name: /Agent activity/ });
+  await expect(activity).toContainText("Checked 2 gates");
+  await activity.click();
+
+  const admitted = page.locator(".activity-action").filter({ hasText: "Gate admitted" });
+  await expect(admitted).toContainText("arxiv_search -> Bash");
+  await admitted.click();
+  const panel = page.locator(".activity-panel").filter({ hasText: "Host args" });
+  await expect(panel).toContainText("Verified LambdaHostCall may bind formal host tool arxiv_search");
+  await expect(panel).toContainText('"query":"au:\\"Hanzhi Liu\\""');
+  await expect(panel).toContainText("Concrete input");
+  await expect(panel).toContainText("Compare concrete_tool with the next activity row's tool name");
+});
+
 test("daemon-running background sessions receive approval events", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [

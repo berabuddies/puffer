@@ -1709,17 +1709,53 @@
     return `Gate event: ${ev.gateEvent}`;
   }
 
+  function gateJson(value: unknown): string | null {
+    if (value === null || value === undefined) return null;
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+
   function lambdaGateBody(
     ev: Extract<SessionStreamEvent, { type: "lambda-gate" }>
   ): string {
+    const hostTool = ev.hostTool ?? "host call";
+    const concreteTool = ev.concreteTool ?? ev.toolId;
+    const hostArgs = gateJson(ev.hostArgs);
+    const concreteInput = gateJson(ev.concreteInput);
+    const registeredFacts = gateJson(ev.registeredFacts);
+    const lines = ["Verified Skill Gate", `event: ${ev.gateEvent}`];
     if (ev.gateEvent === "gate_rejected") {
-      const retry = ev.retryTool ? ` Retry with ${ev.retryTool}.` : "";
-      return `${ev.reason ?? "The Verified Skill gate rejected this call."}${retry}`;
+      lines.push("check: Compared the attempted tool call against the active LambdaHostCall gate.");
+      if (ev.reason) lines.push(`reason: ${ev.reason}`);
+      if (ev.retryTool) lines.push(`retry_tool: ${ev.retryTool}`);
+      lines.push(
+        "confirmation: Puffer rejected this call before committing the Lambda gate. Retry by opening LambdaHostCall with the formal host tool, host args, concrete tool, and exact concrete input."
+      );
+      return lines.join("\n");
     }
-    const route = [ev.hostTool ?? "host call", ev.concreteTool ?? ev.toolId]
-      .filter(Boolean)
-      .join(" -> ");
-    return route ? `${route}.` : lambdaGateSummary(ev);
+    if (ev.gateEvent === "host_call_committed") {
+      lines.push(
+        `check: Confirmed the concrete ${concreteTool} call matched the pending LambdaHostCall bridge for formal host tool ${hostTool}.`
+      );
+    } else {
+      lines.push(
+        `check: Verified LambdaHostCall may bind formal host tool ${hostTool} to concrete tool ${concreteTool}, and recorded the exact concrete input that must run next.`
+      );
+    }
+    lines.push(`host_tool: ${hostTool}`);
+    if (hostArgs) lines.push(`host_args: ${hostArgs}`);
+    lines.push(`concrete_tool: ${concreteTool}`);
+    if (concreteInput) lines.push(`concrete_input: ${concreteInput}`);
+    if (registeredFacts) lines.push(`registered_facts: ${registeredFacts}`);
+    lines.push(
+      ev.gateEvent === "host_call_committed"
+        ? "confirmation: Puffer observed the declared concrete tool succeed, then committed the Lambda gate and any registered facts."
+        : "confirmation: Compare concrete_tool with the next activity row's tool name and concrete_input with that tool's input. Puffer only allows the next concrete call when both match exactly."
+    );
+    return lines.join("\n");
   }
 
   function cacheBackgroundLambdaGateEvent(
@@ -2855,6 +2891,45 @@
     return input ? `${item.toolName}:${input}` : null;
   }
 
+  function normalizedGateKey(value: string | null | undefined): string {
+    return (value ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  }
+
+  function gateBodyField(item: TimelineItem, name: string): string | null {
+    if (item.kind !== "system") return null;
+    const target = normalizedGateKey(name);
+    for (const line of item.body.split("\n")) {
+      const idx = line.indexOf(":");
+      if (idx < 0) continue;
+      if (normalizedGateKey(line.slice(0, idx)) !== target) continue;
+      const value = line.slice(idx + 1).trim();
+      return value || null;
+    }
+    return null;
+  }
+
+  function transientGateSignature(item: TimelineItem): string | null {
+    if (item.kind !== "system") return null;
+    const isGate =
+      item.title === "Verified Skill Gate" ||
+      item.meta.includes("verified skill") ||
+      item.body.trim().startsWith("Verified Skill Gate");
+    if (!isGate) return null;
+    const event = gateBodyField(item, "event") ??
+      item.meta.find((value) => normalizedGateKey(value) !== "verifiedskill") ??
+      null;
+    const hostTool = gateBodyField(item, "host_tool") ?? gateBodyField(item, "hosttool");
+    const concreteTool = gateBodyField(item, "concrete_tool") ?? gateBodyField(item, "concretetool");
+    const reason = gateBodyField(item, "reason");
+    if (!event && !hostTool && !concreteTool && !reason) return null;
+    return stableJsonText({
+      event: event ? normalizedGateKey(event) : null,
+      hostTool,
+      concreteTool,
+      reason
+    });
+  }
+
   function reuseTransientMessageIds(
     persisted: TimelineItem[],
     transient: TimelineItem[]
@@ -2894,6 +2969,14 @@
   }
 
   function timelineHasTransientMatch(items: TimelineItem[], pending: TimelineItem): boolean {
+    const gateSignature = transientGateSignature(pending);
+    if (gateSignature) {
+      return items.some(
+        (item) =>
+          !wasPersistedBeforeSubmit(pending.id, item.id) &&
+          transientGateSignature(item) === gateSignature
+      );
+    }
     const body = timelineItemBody(pending).trim();
     if (!body) {
       const toolSignature = transientToolSignature(pending);
