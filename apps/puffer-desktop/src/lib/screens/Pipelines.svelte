@@ -115,6 +115,7 @@
     { label: "All", query: "" },
     { label: "Trigger", query: "trigger-ready" },
     { label: "Monitor", query: "monitor" },
+    { label: "Tasks", query: "monitor task" },
     { label: "Repair", query: "repair" },
     { label: "Active", query: "active" },
     { label: "Idle", query: "idle" },
@@ -1395,6 +1396,11 @@
               <div class="pf-connector-result-summary" aria-label="Connector search results">
                 {filteredConnectors.length}/{connectors.length} connectors; {filteredConnections.length}/{connections.length} connections
               </div>
+              {#if activeMonitorTasks.length > 0}
+                <div class="pf-connector-result-summary" aria-label="Monitor task search results">
+                  {filteredMonitorTasks.length}/{activeMonitorTasks.length} monitor tasks
+                </div>
+              {/if}
 
               {#if snapshot.connector_error}
                 <div class="pf-connector-empty">Connector runtime unavailable.</div>

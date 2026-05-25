@@ -10,6 +10,8 @@ use puffer_workflow::{TriggerSpec, WorkflowDefinition, WorkflowRun, WorkflowStor
 use std::cmp::Ordering;
 use std::fmt::Write as _;
 
+mod monitor_tasks;
+
 /// Renders a terminal-friendly workflow, connection, and connector summary.
 pub(crate) fn handle_workflows_command(state: &AppState, args: &str) -> Result<String> {
     let paths = ConfigPaths::discover(&state.cwd);
@@ -17,34 +19,59 @@ pub(crate) fn handle_workflows_command(state: &AppState, args: &str) -> Result<S
     let workflows = store.list()?;
     let runs = store.list_runs()?;
     let connector_context = connector_context();
+    let monitor_task_context = monitor_tasks::load_monitor_task_context(&paths);
     let roots = subscriber_manifest_roots(&paths);
     let mut parts = args.split_whitespace();
     let mode = parts.next().unwrap_or_default();
     let query = parts.collect::<Vec<_>>().join(" ");
 
     let mut out = String::new();
+    if matches!(
+        mode,
+        "" | "show"
+            | "list"
+            | "connections"
+            | "connection"
+            | "connectors"
+            | "connector"
+            | "tasks"
+            | "task"
+            | "monitors"
+            | "monitor-tasks"
+            | "runs"
+            | "run"
+    ) {
+        write_header(
+            &mut out,
+            &paths,
+            &workflows,
+            &runs,
+            &connector_context,
+            &monitor_task_context,
+        );
+    }
     match mode {
         "" | "show" | "list" => {
-            write_header(&mut out, &paths, &workflows, &runs, &connector_context);
             write_workflows(&mut out, &workflows, &runs);
             write_connections(&mut out, &connector_context, &roots, "");
+            monitor_tasks::write_monitor_tasks(&mut out, &monitor_task_context, "");
             write_connectors(&mut out, &connector_context, &roots, false, "");
         }
         "connections" | "connection" => {
-            write_header(&mut out, &paths, &workflows, &runs, &connector_context);
             write_connections(&mut out, &connector_context, &roots, &query);
         }
         "connectors" | "connector" => {
-            write_header(&mut out, &paths, &workflows, &runs, &connector_context);
             write_connectors(&mut out, &connector_context, &roots, true, &query);
         }
+        "tasks" | "task" | "monitors" | "monitor-tasks" => {
+            monitor_tasks::write_monitor_tasks(&mut out, &monitor_task_context, &query);
+        }
         "runs" | "run" => {
-            write_header(&mut out, &paths, &workflows, &runs, &connector_context);
             write_runs(&mut out, &runs, &query);
         }
         _ => {
             out.push_str(
-                "Usage: /workflows [list|connections|connectors|runs] [query]\n\
+                "Usage: /workflows [list|connections|connectors|tasks|runs] [query]\n\
                  Tip: use /connect to add a connector connection, then select it as a workflow trigger.",
             );
         }
@@ -85,19 +112,25 @@ fn write_header(
     workflows: &[WorkflowDefinition],
     runs: &[WorkflowRun],
     context: &ConnectorContext,
+    monitor_tasks: &monitor_tasks::MonitorTaskContext,
 ) {
     let _ = writeln!(out, "Workflow dashboard");
     let _ = writeln!(out, "workspace={}", paths.workspace_root.display());
     let _ = writeln!(
         out,
-        "workflows={} runs={} connections={} connectors={}",
+        "workflows={} runs={} connections={} connectors={} monitor_tasks={}/{}",
         workflows.len(),
         runs.len(),
         context.connections.len(),
-        context.connectors.len()
+        context.connectors.len(),
+        monitor_tasks.active_count(),
+        monitor_tasks.tasks.len()
     );
     if let Some(error) = &context.error {
         let _ = writeln!(out, "connector_runtime={}", first_line(error));
+    }
+    if let Some(error) = &monitor_tasks.error {
+        let _ = writeln!(out, "monitor_tasks={}", first_line(error));
     }
 }
 

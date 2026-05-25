@@ -193,6 +193,12 @@ test("pipeline connector filter presets apply stable search terms", async ({ pag
   await expect(resultSummary).toHaveText("0/11 connectors; 1/2 connections");
   await expect(page.locator('[aria-label="Connections"]')).toContainText("telegram-user");
 
+  await filters.getByRole("button", { name: "Tasks" }).click();
+  await expect(page.getByLabel("Search connectors")).toHaveValue("monitor task");
+  await expect(resultSummary).toHaveText("0/11 connectors; 0/2 connections");
+  await expect(page.getByLabel("Monitor task search results")).toHaveText("1/1 monitor tasks");
+  await expect(page.getByLabel("Monitor tasks")).toContainText("Reply to Telegram support ping");
+
   await filters.getByRole("button", { name: "Repair" }).click();
   await expect(page.getByLabel("Search connectors")).toHaveValue("repair");
   await expect(resultSummary).toHaveText("0/11 connectors; 2/2 connections");
@@ -370,6 +376,7 @@ test("pipeline monitor task panel exposes task actions", async ({ page }) => {
 
   await page.getByLabel("Search connectors").fill("support ping");
   await expect(tasks).toContainText("1/1");
+  await expect(page.getByLabel("Monitor task search results")).toHaveText("1/1 monitor tasks");
   await expect(tasks).toContainText("Draft reply");
 
   await tasks.getByRole("button", { name: "Run monitor action monitor-1 Draft reply" }).click();
