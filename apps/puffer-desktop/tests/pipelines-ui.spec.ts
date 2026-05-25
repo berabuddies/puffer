@@ -88,6 +88,27 @@ test("pipeline connector search matches multiple metadata terms", async ({ page 
   await expect(catalog.getByText("telegram-login")).not.toBeVisible();
 });
 
+test("pipeline connector search shows action matches", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  await page.getByLabel("Search connectors").fill("send message");
+
+  const catalog = page.locator('[aria-label="Connector catalog"]');
+  const telegram = catalog.getByRole("button", { name: "Plan telegram-login workflow trigger" });
+  const slack = catalog.getByRole("button", { name: "Select slack-app connector setup" });
+
+  await expect(telegram).toContainText("send_message");
+  await expect(slack).toContainText("send_message");
+
+  await page.getByLabel("Search connectors").fill("vote poll");
+  await expect(telegram).toContainText("vote_poll");
+  await expect(slack).not.toBeVisible();
+});
+
 test("pipeline connector catalog stages a deterministic connect command", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

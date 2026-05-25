@@ -158,8 +158,41 @@ fn workflows_connectors_filter_shows_connect_commands() {
 
     let text = &state.transcript.last().unwrap().text;
     assert!(text.contains("telegram-login"));
+    assert!(text.contains("actions=send_message"));
     assert!(text.contains("connect=/connect telegram-login telegram-user"));
     assert!(!text.contains("- email ["));
+}
+
+#[test]
+fn workflows_connectors_filter_matches_action_terms() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = AppState::new(
+        PufferConfig::default(),
+        tempdir.path().to_path_buf(),
+        session,
+    );
+
+    dispatch_command(
+        &mut state,
+        &supported_commands(),
+        &LoadedResources::default(),
+        &mut ProviderRegistry::new(),
+        &mut AuthStore::default(),
+        &session_store,
+        "/workflows connectors vote poll",
+    )
+    .unwrap();
+
+    let text = &state.transcript.last().unwrap().text;
+    assert!(text.contains("telegram-login"));
+    assert!(text.contains("vote_poll"));
+    assert!(!text.contains("- slack-login ["));
 }
 
 #[test]

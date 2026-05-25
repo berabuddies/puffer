@@ -196,13 +196,14 @@ fn write_connectors(
         .iter()
         .filter(|connector| include_all || connector_workflow_trigger_supported(roots, connector))
         .filter(|connector| {
+            let action_slugs = connector_action_slugs(connector);
             matches_query(
                 query,
-                [
+                action_slugs.into_iter().chain([
                     connector.slug.as_str(),
                     connector.description.as_str(),
                     connector.skill.as_str(),
-                ],
+                ]),
             )
         })
         .collect::<Vec<_>>();
@@ -231,16 +232,59 @@ fn write_connectors(
         if !connector.actions.is_empty() {
             capabilities.push("actions");
         }
+        let action_summary = connector_action_summary(connector, query)
+            .map(|summary| format!(" actions={summary}"))
+            .unwrap_or_default();
         let _ = writeln!(
             out,
-            "- {} [{}] {} connect=/connect {} {}",
+            "- {} [{}] {}{} connect=/connect {} {}",
             connector.slug,
             capabilities.join(","),
             connector.description,
+            action_summary,
             connector.slug,
             suggested_connection_slug(&connector.slug)
         );
     }
+}
+
+fn connector_action_slugs(connector: &ConnectorTemplate) -> Vec<&str> {
+    connector.actions.keys().map(String::as_str).collect()
+}
+
+fn connector_action_summary(connector: &ConnectorTemplate, query: &str) -> Option<String> {
+    let slugs = connector_action_slugs(connector);
+    if slugs.is_empty() {
+        return None;
+    }
+    let matching = matching_action_slugs(&slugs, query);
+    let visible_source = if matching.is_empty() {
+        slugs.as_slice()
+    } else {
+        matching.as_slice()
+    };
+    let visible = visible_source.iter().take(3).copied().collect::<Vec<_>>();
+    let hidden = slugs.len().saturating_sub(visible.len());
+    let mut summary = visible.join(",");
+    if hidden > 0 {
+        let _ = write!(summary, ",+{hidden}");
+    }
+    Some(summary)
+}
+
+fn matching_action_slugs<'a>(slugs: &[&'a str], query: &str) -> Vec<&'a str> {
+    let terms = search_terms(query);
+    if terms.is_empty() {
+        return Vec::new();
+    }
+    slugs
+        .iter()
+        .copied()
+        .filter(|slug| {
+            let normalized = slug.to_ascii_lowercase();
+            terms.iter().all(|term| normalized.contains(term))
+        })
+        .collect()
 }
 
 fn connection_trigger_supported(
@@ -309,11 +353,25 @@ fn first_line(text: &str) -> &str {
 }
 
 fn matches_query<'a>(query: &str, values: impl IntoIterator<Item = &'a str>) -> bool {
-    let needle = query.trim().to_ascii_lowercase();
-    needle.is_empty()
-        || values
-            .into_iter()
-            .any(|value| value.to_ascii_lowercase().contains(&needle))
+    let terms = search_terms(query);
+    if terms.is_empty() {
+        return true;
+    }
+    let haystack = values
+        .into_iter()
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ");
+    terms.iter().all(|term| haystack.contains(term))
+}
+
+fn search_terms(query: &str) -> Vec<String> {
+    query
+        .split_whitespace()
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
 }
 
 fn subscriber_manifest_roots(paths: &ConfigPaths) -> SubscriberManifestRoots {

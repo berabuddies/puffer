@@ -350,7 +350,7 @@ export class FakeDaemon {
         can_trigger_workflow: true,
         suggested_connection_slug: "telegram-user",
         connect_command: "/connect telegram-login telegram-user",
-        action_slugs: ["send_message"]
+        action_slugs: ["send_message", "edit_message", "delete_messages", "vote_poll"]
       },
       {
         connector_slug: "slack-app",

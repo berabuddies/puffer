@@ -462,6 +462,17 @@
     return connector.can_trigger_workflow ?? connector.can_subscribe;
   }
 
+  function connectorActionSlugs(connector: WorkflowConnector | undefined, query: string): string[] {
+    const actions = connector?.action_slugs ?? [];
+    const terms = searchTerms(query);
+    const matching = terms.length === 0 ? [] : actions.filter((action) => matchesSearchTerms(terms, action.toLowerCase()));
+    return (matching.length > 0 ? matching : actions).slice(0, 3);
+  }
+
+  function connectorHiddenActionCount(connector: WorkflowConnector | undefined, visibleActions: string[]): number {
+    return Math.max(0, (connector?.action_slugs.length ?? 0) - visibleActions.length);
+  }
+
   function connectionTriggerSupported(connection: WorkflowConnection): boolean {
     return connection.can_trigger_workflow ?? connectorTriggerSupported(connectorBySlug(connection.connector_slug));
   }
@@ -1065,6 +1076,8 @@
                   {#each filteredConnections as connection (connection.slug)}
                     {@const connector = connectorBySlug(connection.connector_slug)}
                     {@const canTrigger = connectionTriggerSupported(connection)}
+                    {@const actionSlugs = connectorActionSlugs(connector, connectorQuery)}
+                    {@const hiddenActions = connectorHiddenActionCount(connector, actionSlugs)}
                     <button
                       type="button"
                       class="pf-connection-row"
@@ -1081,6 +1094,10 @@
                       <span class="pf-connector-tags">
                         <span class="pf-connection-state" data-state={connection.state}>{connection.state}</span>
                         {#if !canTrigger}<span>no trigger</span>{/if}
+                        {#each actionSlugs as action}
+                          <span class="pf-connector-action">{action}</span>
+                        {/each}
+                        {#if hiddenActions > 0}<span>+{hiddenActions} actions</span>{/if}
                       </span>
                     </button>
                   {/each}
@@ -1093,6 +1110,8 @@
                   {#each filteredConnectors as connector (connector.connector_slug)}
                     {@const connectorConnections = connectionsForConnector(connector.connector_slug)}
                     {@const canTrigger = connectorTriggerSupported(connector)}
+                    {@const actionSlugs = connectorActionSlugs(connector, connectorQuery)}
+                    {@const hiddenActions = connectorHiddenActionCount(connector, actionSlugs)}
                     <button
                       type="button"
                       class="pf-connector-row"
@@ -1110,6 +1129,10 @@
                         {#if connector.can_subscribe}<span>events</span>{/if}
                         {#if canTrigger}<span>trigger</span>{:else}<span>no trigger</span>{/if}
                         {#if connector.can_proxy_agent}<span>proxy</span>{/if}
+                        {#each actionSlugs as action}
+                          <span class="pf-connector-action">{action}</span>
+                        {/each}
+                        {#if hiddenActions > 0}<span>+{hiddenActions} actions</span>{/if}
                         {#if connectorConnections.length > 0}<span>{connectorConnections.length} conn</span>{/if}
                       </span>
                     </button>
