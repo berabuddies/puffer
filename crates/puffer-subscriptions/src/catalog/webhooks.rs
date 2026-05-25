@@ -37,6 +37,12 @@ pub(super) fn builtin_webhook_templates() -> Vec<ConnectorTemplate> {
             opsgenie_alert_output_schema(),
         ),
         webhook_preset_template(
+            "bitbucket-webhook",
+            "Bitbucket push and pull request webhook preset backed by puffer serve",
+            "bitbucket-webhook",
+            bitbucket_event_output_schema(),
+        ),
+        webhook_preset_template(
             "github-webhook",
             "GitHub event webhook preset backed by puffer serve",
             "github-webhook",
@@ -109,6 +115,7 @@ pub(super) fn is_builtin_webhook_slug(slug: &str) -> bool {
             | "datadog-webhook"
             | "newrelic-webhook"
             | "opsgenie-webhook"
+            | "bitbucket-webhook"
             | "github-webhook"
             | "grafana-webhook"
             | "gitlab-webhook"

@@ -540,6 +540,19 @@ export class FakeDaemon {
         action_slugs: []
       },
       {
+        connector_slug: "bitbucket-webhook",
+        description: "Bitbucket push and pull request webhook preset backed by puffer serve",
+        skill: "bitbucket-webhook",
+        runtime_hints: ["serve"],
+        requires_auth: false,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "bitbucket-webhook",
+        connect_command: "/connect bitbucket-webhook bitbucket-webhook",
+        action_slugs: []
+      },
+      {
         connector_slug: "github-webhook",
         description: "GitHub event webhook preset backed by puffer serve",
         skill: "github-webhook",

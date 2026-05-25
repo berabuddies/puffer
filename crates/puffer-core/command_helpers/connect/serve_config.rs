@@ -233,6 +233,11 @@ fn webhook_preset(connector_slug: &str) -> Result<WebhookPreset> {
             default_path: "/opsgenie",
             method: "Opsgenie alert action webhook",
         },
+        "bitbucket-webhook" => WebhookPreset {
+            product: "Bitbucket",
+            default_path: "/bitbucket",
+            method: "Bitbucket repository webhook",
+        },
         "github-webhook" => WebhookPreset {
             product: "GitHub",
             default_path: "/github",

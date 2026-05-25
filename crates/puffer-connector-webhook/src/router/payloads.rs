@@ -6,6 +6,7 @@ use super::{header_value, number_or_string, pointer_string, snippet, string_fiel
 
 mod alertmanager;
 mod asana;
+mod bitbucket;
 mod datadog;
 mod grafana;
 mod newrelic;
@@ -28,6 +29,7 @@ pub(super) fn asana_inbound(headers: &HeaderMap, payload: &Value) -> Option<Inbo
 /// Converts a known provider webhook payload into an inbound Puffer message.
 pub(super) fn provider_inbound(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
     asana_inbound(headers, payload)
+        .or_else(|| bitbucket_inbound(headers, payload))
         .or_else(|| jira_inbound(headers, payload))
         .or_else(|| grafana_inbound(headers, payload))
         .or_else(|| alertmanager_inbound(headers, payload))
@@ -40,6 +42,11 @@ pub(super) fn provider_inbound(headers: &HeaderMap, payload: &Value) -> Option<I
         .or_else(|| stripe_inbound(headers, payload))
         .or_else(|| trello_inbound(headers, payload))
         .or_else(|| gitlab_inbound(headers, payload))
+}
+
+/// Converts a Bitbucket Cloud webhook payload into an inbound Puffer message.
+pub(super) fn bitbucket_inbound(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
+    bitbucket::bitbucket_inbound(headers, payload)
 }
 
 /// Converts a Prometheus Alertmanager webhook payload into an inbound Puffer message.

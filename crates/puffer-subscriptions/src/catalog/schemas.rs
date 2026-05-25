@@ -266,6 +266,27 @@ pub(super) fn gitlab_event_output_schema() -> Value {
     })
 }
 
+/// Returns the Bitbucket webhook event output schema.
+pub(super) fn bitbucket_event_output_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "const": "bitbucket_event"},
+            "event": {"type": "string"},
+            "repository": {"type": "string"},
+            "actor": {"type": "string"},
+            "pull_request_id": {"type": "string"},
+            "pull_request_title": {"type": "string"},
+            "branch": {"type": "string"},
+            "commit": {"type": "string"},
+            "message": {"type": "string"},
+            "url": {"type": "string"}
+        },
+        "required": ["event", "repository", "message"],
+        "additionalProperties": true
+    })
+}
+
 /// Returns the Jira webhook event output schema.
 pub(super) fn jira_event_output_schema() -> Value {
     serde_json::json!({
