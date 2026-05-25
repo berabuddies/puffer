@@ -25,9 +25,22 @@ input_schema:
       type: object
       additionalProperties: true
       description: JSON arguments passed to the MCP tool.
-  required:
-    - server
-    - tool
+    qualifiedToolName:
+      type: string
+      description: Normalized Lambda/Hermes or Puffer MCP tool name, such as mcp_agentmail_send_message or mcp__agentmail__send_message.
+    argsJson:
+      type: string
+      description: JSON-encoded arguments passed to the resolved MCP tool.
+    registry:
+      description: Formal Lambda ToolRegistry proof argument for the admitted host call.
+  oneOf:
+    - required:
+        - server
+        - tool
+    - required:
+        - qualifiedToolName
+        - argsJson
+        - registry
   additionalProperties: false
 metadata:
   may_spawn_processes: true
