@@ -71,6 +71,116 @@ fn arxiv_host_json() -> String {
                         "timeout": 60000
                     }
                 }
+            },
+            {
+                "name": "web_extract_abstract",
+                "params": [{"name": "arxiv_id", "ty": "str{valid_arxiv_id(id)}"}],
+                "result": "str",
+                "effects": ["net_r"],
+                "concreteTools": ["Bash"],
+                "concreteInputContracts": {
+                    "Bash": {
+                        "command": {"$template": "curl -L -s \"https://arxiv.org/abs/${arxiv_id}\""},
+                        "run_in_background": false,
+                        "timeout": 60000
+                    }
+                }
+            },
+            {
+                "name": "web_extract_pdf",
+                "params": [{"name": "arxiv_id", "ty": "str{valid_arxiv_id(id)}"}],
+                "result": "str",
+                "effects": ["net_r"],
+                "concreteTools": ["Bash"],
+                "concreteInputContracts": {
+                    "Bash": {
+                        "command": {"$template": "curl -L -s \"https://arxiv.org/pdf/${arxiv_id}\""},
+                        "run_in_background": false,
+                        "timeout": 60000
+                    }
+                }
+            },
+            {
+                "name": "semantic_scholar_paper",
+                "params": [
+                    {"name": "arxiv_id", "ty": "str{valid_arxiv_id(id)}"},
+                    {"name": "fields", "ty": "str"}
+                ],
+                "result": "SemanticPaper",
+                "effects": ["net_r"],
+                "concreteTools": ["Bash"],
+                "concreteInputContracts": {
+                    "Bash": {
+                        "command": {"$template": "semantic-scholar paper ${arxiv_id} ${fields}"},
+                        "run_in_background": false,
+                        "timeout": 60000
+                    }
+                }
+            },
+            {
+                "name": "semantic_scholar_citations",
+                "params": [
+                    {"name": "arxiv_id", "ty": "str{valid_arxiv_id(id)}"},
+                    {"name": "limit", "ty": "int"}
+                ],
+                "result": "[SemanticPaper]",
+                "effects": ["net_r"],
+                "concreteTools": ["Bash"],
+                "concreteInputContracts": {
+                    "Bash": {
+                        "command": {"$template": "semantic-scholar citations ${arxiv_id} ${limit}"},
+                        "run_in_background": false,
+                        "timeout": 60000
+                    }
+                }
+            },
+            {
+                "name": "semantic_scholar_references",
+                "params": [
+                    {"name": "arxiv_id", "ty": "str{valid_arxiv_id(id)}"},
+                    {"name": "limit", "ty": "int"}
+                ],
+                "result": "[SemanticPaper]",
+                "effects": ["net_r"],
+                "concreteTools": ["Bash"],
+                "concreteInputContracts": {
+                    "Bash": {
+                        "command": {"$template": "semantic-scholar references ${arxiv_id} ${limit}"},
+                        "run_in_background": false,
+                        "timeout": 60000
+                    }
+                }
+            },
+            {
+                "name": "semantic_scholar_recommendations",
+                "params": [
+                    {"name": "positive_ids", "ty": "[str]"},
+                    {"name": "negative_ids", "ty": "[str]"}
+                ],
+                "result": "[SemanticPaper]",
+                "effects": ["net_r"],
+                "concreteTools": ["Bash"],
+                "concreteInputContracts": {
+                    "Bash": {
+                        "command": {"$template": "semantic-scholar recommendations ${json:positive_ids} ${json:negative_ids}"},
+                        "run_in_background": false,
+                        "timeout": 60000
+                    }
+                }
+            },
+            {
+                "name": "semantic_scholar_author",
+                "params": [{"name": "query", "ty": "str"}],
+                "result": "AuthorProfile",
+                "effects": ["net_r"],
+                "concreteTools": ["Bash"],
+                "concreteInputContracts": {
+                    "Bash": {
+                        "command": {"$template": "semantic-scholar author ${query}"},
+                        "run_in_background": false,
+                        "timeout": 60000
+                    }
+                }
             }
         ]
     }))
@@ -249,5 +359,65 @@ fn arxiv_id_refinement_guards_fetch_and_bibtex_inputs() {
             "generate_bibtex",
             &json!({"paper": {"title": "Missing id"}})
         )
+        .is_accept());
+}
+
+#[test]
+fn arxiv_related_tool_refinements_cover_the_full_catalogue() {
+    let raw = arxiv_host_json();
+    let host = LambdaHostEnv::from_json_str(&raw).unwrap();
+    let gate = LambdaGateState::with_host_caps(host);
+
+    assert!(gate
+        .admit_call_with_args("web_extract_abstract", &json!({"arxiv_id": "2402.03300"}))
+        .is_accept());
+    assert!(gate
+        .admit_call_with_args("web_extract_pdf", &json!({"arxiv_id": "hep-th/0601001v2"}))
+        .is_accept());
+    assert!(!gate
+        .admit_call_with_args(
+            "web_extract_pdf",
+            &json!({"arxiv_id": "https://arxiv.org/pdf/2402.03300"})
+        )
+        .is_accept());
+
+    assert!(gate
+        .admit_call_with_args(
+            "semantic_scholar_paper",
+            &json!({"arxiv_id": "1706.03762v7", "fields": "title,authors"})
+        )
+        .is_accept());
+    assert!(!gate
+        .admit_call_with_args(
+            "semantic_scholar_paper",
+            &json!({"arxiv_id": "arXiv:1706.03762", "fields": "title"})
+        )
+        .is_accept());
+    assert!(gate
+        .admit_call_with_args(
+            "semantic_scholar_citations",
+            &json!({"arxiv_id": "2402.03300", "limit": 10})
+        )
+        .is_accept());
+    assert!(gate
+        .admit_call_with_args(
+            "semantic_scholar_references",
+            &json!({"arxiv_id": "2402.03300", "limit": 10})
+        )
+        .is_accept());
+    assert!(gate
+        .admit_call_with_args(
+            "semantic_scholar_recommendations",
+            &json!({"positive_ids": ["arXiv:2402.03300"], "negative_ids": []})
+        )
+        .is_accept());
+    assert!(!gate
+        .admit_call_with_args(
+            "semantic_scholar_recommendations",
+            &json!({"positive_ids": "arXiv:2402.03300", "negative_ids": []})
+        )
+        .is_accept());
+    assert!(gate
+        .admit_call_with_args("semantic_scholar_author", &json!({"query": "Hanzhi Liu"}))
         .is_accept());
 }
