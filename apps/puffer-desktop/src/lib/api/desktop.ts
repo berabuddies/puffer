@@ -1095,6 +1095,12 @@ export async function saveWorkflow(workflow: WorkflowDefinition): Promise<Workfl
   return client.request<WorkflowSnapshot>("workflow_save", { workflow });
 }
 
+/** Toggle a native workflow or subscription workflow binding. */
+export async function toggleWorkflow(slug: string, enabled: boolean): Promise<WorkflowSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<WorkflowSnapshot>("workflow_toggle", { slug, enabled });
+}
+
 /** Load runs for one workflow slug from the daemon. */
 export async function listWorkflowRuns(workflowSlug: string): Promise<WorkflowRun[]> {
   const client = await ensureLocalDaemonClient();

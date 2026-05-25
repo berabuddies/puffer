@@ -53,6 +53,8 @@ type WorkflowSnapshotFixture = {
   connectors?: JsonRecord[];
   connections?: JsonRecord[];
   connector_error?: string | null;
+  workflow_bindings?: JsonRecord[];
+  workflow_binding_error?: string | null;
   monitor_tasks?: JsonRecord[];
   monitor_task_error?: string | null;
 };
@@ -511,6 +513,21 @@ export class FakeDaemon {
       }
     ],
     connector_error: null,
+    workflow_bindings: [
+      {
+        slug: "monitor-telegram-user",
+        description: "Monitor telegram-user for actionable tasks",
+        connection_slug: "telegram-user",
+        connector_slug: "telegram-login",
+        status: "enabled",
+        enabled: true,
+        action_type: "triage_agent",
+        monitor: true,
+        monitor_memory_path: "/tmp/telegram-user.md",
+        created_at_ms: now - 45_000
+      }
+    ],
+    workflow_binding_error: null,
     monitor_tasks: [
       {
         task_id: "monitor-1",
@@ -669,6 +686,8 @@ export class FakeDaemon {
       connectors: snapshot.connectors?.map((connector) => ({ ...connector })),
       connections: snapshot.connections?.map((connection) => ({ ...connection })),
       connector_error: snapshot.connector_error ?? null,
+      workflow_bindings: snapshot.workflow_bindings?.map((binding) => ({ ...binding })),
+      workflow_binding_error: snapshot.workflow_binding_error ?? null,
       monitor_tasks: snapshot.monitor_tasks?.map((task) => ({ ...task })),
       monitor_task_error: snapshot.monitor_task_error ?? null
     };
@@ -997,6 +1016,8 @@ export class FakeDaemon {
         return this.workflowListResponse();
       case "workflow_save":
         return this.saveWorkflow(request.params);
+      case "workflow_toggle":
+        return this.toggleWorkflow(request.params);
       case "list_dir":
         return this.listDir(request.params);
       case "load_file_tabs":
@@ -1025,6 +1046,8 @@ export class FakeDaemon {
       connectors: this.workflowSnapshot.connectors?.map((connector) => ({ ...connector })) ?? [],
       connections: this.workflowSnapshot.connections?.map((connection) => ({ ...connection })) ?? [],
       connector_error: this.workflowSnapshot.connector_error ?? null,
+      workflow_bindings: this.workflowSnapshot.workflow_bindings?.map((binding) => ({ ...binding })) ?? [],
+      workflow_binding_error: this.workflowSnapshot.workflow_binding_error ?? null,
       monitor_tasks: this.workflowSnapshot.monitor_tasks?.map((task) => ({ ...task })) ?? [],
       monitor_task_error: this.workflowSnapshot.monitor_task_error ?? null
     };
@@ -1041,6 +1064,28 @@ export class FakeDaemon {
         { ...workflow }
       ].sort((a, b) => String(a.slug ?? "").localeCompare(String(b.slug ?? "")))
     };
+    return this.workflowListResponse();
+  }
+
+  private toggleWorkflow(params: JsonRecord): JsonRecord {
+    const slug = String(params.slug ?? "");
+    const enabled = Boolean(params.enabled);
+    if (!slug) throw new Error("missing workflow slug");
+    let matched = false;
+    this.workflowSnapshot = {
+      ...this.workflowSnapshot,
+      workflows: this.workflowSnapshot.workflows.map((workflow) => {
+        if (workflow.slug !== slug) return workflow;
+        matched = true;
+        return { ...workflow, enabled };
+      }),
+      workflow_bindings: this.workflowSnapshot.workflow_bindings?.map((binding) => {
+        if (binding.slug !== slug) return binding;
+        matched = true;
+        return { ...binding, enabled, status: enabled ? "enabled" : "paused" };
+      })
+    };
+    if (!matched) throw new Error(`workflow ${slug} not found`);
     return this.workflowListResponse();
   }
 

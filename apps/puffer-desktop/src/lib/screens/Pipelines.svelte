@@ -2,11 +2,12 @@
   import "../design/pipeline.css";
 
   import { onMount } from "svelte";
-  import { loadWorkflowSnapshot, saveWorkflow } from "../api/desktop";
+  import { loadWorkflowSnapshot, saveWorkflow, toggleWorkflow } from "../api/desktop";
   import Icon, { type IconName } from "../design/Icon.svelte";
   import Puffer from "../design/Puffer.svelte";
   import type {
     WorkflowConnection,
+    WorkflowBinding,
     WorkflowConnector,
     WorkflowDefinition,
     WorkflowMonitorTask,
@@ -62,6 +63,11 @@
 
   type MonitorTaskSearchRow = {
     task: WorkflowMonitorTask;
+    searchText: string;
+  };
+
+  type MonitorBindingSearchRow = {
+    binding: WorkflowBinding;
     searchText: string;
   };
 
@@ -132,6 +138,8 @@
     connectors: [],
     connections: [],
     connector_error: null,
+    workflow_bindings: [],
+    workflow_binding_error: null,
     monitor_tasks: [],
     monitor_task_error: null
   });
@@ -150,6 +158,7 @@
   let connectionCommandRunningFor = $state<string | null>(null);
   let monitorCommandRunningFor = $state<string | null>(null);
   let monitorTaskCommandRunningFor = $state<string | null>(null);
+  let togglingWorkflowSlug = $state<string | null>(null);
   let savingWorkflowSlug = $state<string | null>(null);
   let refreshGeneration = 0;
   let dirtyWorkflowSlugs = $state<string[]>([]);
@@ -158,13 +167,17 @@
   let workflows = $derived(editorWorkflows);
   let connectors = $derived(snapshot.connectors ?? []);
   let connections = $derived(snapshot.connections ?? []);
+  let workflowBindings = $derived(snapshot.workflow_bindings ?? []);
+  let monitorBindings = $derived(workflowBindings.filter((binding) => binding.monitor === true));
   let monitorTasks = $derived(snapshot.monitor_tasks ?? []);
   let activeMonitorTasks = $derived(monitorTasks.filter((task) => !monitorTaskIgnored(task)));
   let triggerReadyConnections = $derived(connections.filter((connection) => connectionTriggerSupported(connection)));
   let connectorSearchRows = $derived(indexConnectors(connectors, connections));
   let connectionSearchRows = $derived(indexConnections(connections, connectorSearchRows));
+  let monitorBindingSearchRows = $derived(indexMonitorBindings(monitorBindings));
   let monitorTaskSearchRows = $derived(indexMonitorTasks(activeMonitorTasks));
   let filteredConnections = $derived(filterConnections(connectionSearchRows, connectorQuery));
+  let filteredMonitorBindings = $derived(filterMonitorBindings(monitorBindingSearchRows, connectorQuery));
   let filteredMonitorTasks = $derived(filterMonitorTasks(monitorTaskSearchRows, connectorQuery));
   let filteredConnectors = $derived(filterConnectors(connectorSearchRows, connectorQuery));
   let workflow = $derived(
@@ -363,6 +376,8 @@
       connectors: next.connectors ?? [],
       connections: next.connections ?? [],
       connector_error: next.connector_error ?? null,
+      workflow_bindings: next.workflow_bindings ?? [],
+      workflow_binding_error: next.workflow_binding_error ?? null,
       monitor_tasks: next.monitor_tasks ?? [],
       monitor_task_error: next.monitor_task_error ?? null
     };
@@ -462,6 +477,27 @@
       saveNotice = `Could not save ${savedSlug}: ${message}`;
     } finally {
       savingWorkflowSlug = null;
+    }
+  }
+
+  async function toggleCurrentWorkflowEnabled() {
+    if (!workflow || workflowDirty || savingWorkflowSlug || togglingWorkflowSlug) return;
+    const slug = workflow.slug;
+    const enabled = !workflow.enabled;
+    togglingWorkflowSlug = slug;
+    error = null;
+    saveNotice = `${enabled ? "Resuming" : "Pausing"} ${slug}...`;
+    try {
+      const next = await toggleWorkflow(slug, enabled);
+      applyWorkflowSnapshot(next);
+      workflowSlug = slug;
+      saveNotice = `${enabled ? "Resumed" : "Paused"} ${slug}.`;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      error = message;
+      saveNotice = `Could not toggle ${slug}: ${message}`;
+    } finally {
+      togglingWorkflowSlug = null;
     }
   }
 
@@ -657,7 +693,8 @@
       || connectorCommandRunningFor !== null
       || connectionCommandRunningFor !== null
       || monitorCommandRunningFor !== null
-      || monitorTaskCommandRunningFor !== null;
+      || monitorTaskCommandRunningFor !== null
+      || togglingWorkflowSlug !== null;
   }
 
   async function runConnectionConnectCommand(connection: WorkflowConnection) {
@@ -694,6 +731,38 @@
 
   function monitorTaskIgnored(task: WorkflowMonitorTask): boolean {
     return task.ignored === true;
+  }
+
+  function monitorBindingLabel(binding: WorkflowBinding): string {
+    return binding.description?.trim() || binding.slug;
+  }
+
+  function monitorBindingStatus(binding: WorkflowBinding): string {
+    if (binding.status?.trim()) return binding.status;
+    return binding.enabled ? "enabled" : "paused";
+  }
+
+  function monitorBindingToggleLabel(binding: WorkflowBinding): string {
+    return `${binding.enabled ? "Pause" : "Resume"} ${binding.slug}`;
+  }
+
+  async function toggleMonitorBinding(binding: WorkflowBinding) {
+    if (togglingWorkflowSlug) return;
+    const enabled = !binding.enabled;
+    togglingWorkflowSlug = binding.slug;
+    error = null;
+    saveNotice = `${enabled ? "Resuming" : "Pausing"} ${binding.slug}...`;
+    try {
+      const next = await toggleWorkflow(binding.slug, enabled);
+      applyWorkflowSnapshot(next);
+      saveNotice = `${enabled ? "Resumed" : "Paused"} ${binding.slug}.`;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      error = message;
+      saveNotice = `Could not toggle ${binding.slug}: ${message}`;
+    } finally {
+      togglingWorkflowSlug = null;
+    }
   }
 
   function monitorTaskActions(task: WorkflowMonitorTask): WorkflowMonitorTaskAction[] {
@@ -892,6 +961,23 @@
     });
   }
 
+  function indexMonitorBindings(items: WorkflowBinding[]): MonitorBindingSearchRow[] {
+    return items.map((binding) => ({
+      binding,
+      searchText: buildSearchText([
+        "monitor workflow connection monitor",
+        binding.slug,
+        binding.description,
+        binding.connection_slug,
+        binding.connector_slug,
+        binding.status,
+        binding.enabled ? "enabled active" : "paused disabled",
+        binding.action_type,
+        binding.monitor_memory_path
+      ])
+    }));
+  }
+
   function indexMonitorTasks(items: WorkflowMonitorTask[]): MonitorTaskSearchRow[] {
     return items.map((task) => ({
       task,
@@ -908,6 +994,11 @@
         monitorTaskIgnoreReasons(task).join(" ")
       ])
     }));
+  }
+
+  function filterMonitorBindings(rows: MonitorBindingSearchRow[], query: string): WorkflowBinding[] {
+    const terms = searchTerms(query);
+    return rows.filter((row) => matchesSearchTerms(terms, row.searchText)).map((row) => row.binding);
   }
 
   function filterConnections(rows: ConnectionSearchRow[], query: string): WorkflowConnection[] {
@@ -1217,6 +1308,19 @@
         class="sc-btn"
         data-variant="ghost"
         data-size="sm"
+        aria-label={workflow?.enabled ? "Pause workflow" : "Resume workflow"}
+        aria-busy={togglingWorkflowSlug === workflow?.slug}
+        disabled={!workflow || workflowDirty || savingWorkflowSlug !== null || togglingWorkflowSlug !== null}
+        title={workflowDirty ? "Save local edits before toggling" : workflow?.enabled ? "Pause workflow" : "Resume workflow"}
+        onclick={toggleCurrentWorkflowEnabled}
+      >
+        <Icon name={workflow?.enabled ? "pause2" : "play"} size={12} />{workflow?.enabled ? "Pause" : "Resume"}
+      </button>
+      <button
+        type="button"
+        class="sc-btn"
+        data-variant="ghost"
+        data-size="sm"
         aria-label="Save workflow"
         aria-busy={savingWorkflowSlug === workflow?.slug}
         disabled={!workflow || !workflowDirty || savingWorkflowSlug !== null}
@@ -1465,6 +1569,11 @@
               <div class="pf-connector-result-summary" aria-label="Connector search results">
                 {filteredConnectors.length}/{connectors.length} connectors; {filteredConnections.length}/{connections.length} connections
               </div>
+              {#if monitorBindings.length > 0}
+                <div class="pf-connector-result-summary" aria-label="Monitor workflow search results">
+                  {filteredMonitorBindings.length}/{monitorBindings.length} monitors
+                </div>
+              {/if}
               {#if activeMonitorTasks.length > 0}
                 <div class="pf-connector-result-summary" aria-label="Monitor task search results">
                   {filteredMonitorTasks.length}/{activeMonitorTasks.length} monitor tasks
@@ -1540,6 +1649,47 @@
                     </div>
                   {/each}
                 </div>
+
+                {#if monitorBindings.length > 0 || snapshot.workflow_binding_error}
+                  <div class="pf-monitor-workflows" aria-label="Monitor workflows">
+                    <div class="pf-monitor-tasks-head">
+                      <span><Icon name="bot" size={12} />Connection monitors</span>
+                      <small>{filteredMonitorBindings.length}/{monitorBindings.length}</small>
+                    </div>
+                    {#if snapshot.workflow_binding_error}
+                      <div class="pf-connector-empty">Monitor workflows unavailable.</div>
+                    {:else if filteredMonitorBindings.length === 0}
+                      <div class="pf-connector-empty">No matching monitor workflows.</div>
+                    {/if}
+                    {#each filteredMonitorBindings as binding (binding.slug)}
+                      <div class="pf-monitor-workflow-row" data-enabled={binding.enabled}>
+                        <div class="pf-monitor-workflow-main">
+                          <span class="pf-connector-main">
+                            <strong>{monitorBindingLabel(binding)}</strong>
+                            <small>{binding.slug} - {binding.connection_slug}</small>
+                          </span>
+                          <span class="pf-connector-tags">
+                            <span>{monitorBindingStatus(binding)}</span>
+                            {#if binding.connector_slug}<span>{binding.connector_slug}</span>{/if}
+                            <span>{binding.action_type}</span>
+                            {#if binding.monitor_memory_path}<span>memory</span>{/if}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          class="pf-monitor-action-btn"
+                          aria-label={monitorBindingToggleLabel(binding)}
+                          title={monitorBindingToggleLabel(binding)}
+                          aria-busy={togglingWorkflowSlug === binding.slug}
+                          disabled={togglingWorkflowSlug !== null}
+                          onclick={() => toggleMonitorBinding(binding)}
+                        >
+                          <Icon name={binding.enabled ? "pause2" : "play"} size={11} />{binding.enabled ? "Pause" : "Resume"}
+                        </button>
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
 
                 {#if activeMonitorTasks.length > 0 || snapshot.monitor_task_error}
                   <div class="pf-monitor-tasks" aria-label="Monitor tasks">
@@ -2330,6 +2480,7 @@
     overflow: auto;
   }
 
+  .pf-monitor-workflows,
   .pf-monitor-tasks {
     display: grid;
     gap: 5px;
@@ -2360,6 +2511,7 @@
     font-size: 10.5px;
   }
 
+  .pf-monitor-workflow-row,
   .pf-monitor-task-row {
     display: grid;
     gap: 5px;
@@ -2367,6 +2519,24 @@
     border-radius: 8px;
     background: color-mix(in oklab, var(--puffer-accent) 5%, var(--card));
     padding: 5px;
+  }
+
+  .pf-monitor-workflow-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+  }
+
+  .pf-monitor-workflow-row[data-enabled="false"] {
+    border-color: var(--border);
+    background: var(--card);
+  }
+
+  .pf-monitor-workflow-main {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: start;
+    min-width: 0;
   }
 
   .pf-monitor-task-main {

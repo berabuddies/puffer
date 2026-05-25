@@ -98,6 +98,36 @@ test("pipeline editor saves workflow changes through daemon", async ({ page }) =
   await expect(saveButton).toBeDisabled();
 });
 
+test("pipeline editor can pause and resume workflows through daemon", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const pauseButton = page.getByRole("button", { name: "Pause workflow" });
+  await expect(pauseButton).toBeEnabled();
+  await pauseButton.click();
+
+  const pauseRequest = await daemon.waitForRequest(
+    "workflow_toggle",
+    (candidate) => candidate.params.slug === "agent-review-pipeline" && candidate.params.enabled === false
+  );
+  expect(pauseRequest.params.slug).toBe("agent-review-pipeline");
+  await expect(page.locator(".pf-run-header-state")).toHaveText("disabled");
+
+  const resumeButton = page.getByRole("button", { name: "Resume workflow" });
+  await expect(resumeButton).toBeEnabled();
+  await resumeButton.click();
+
+  const resumeRequest = await daemon.waitForRequest(
+    "workflow_toggle",
+    (candidate) => candidate.params.slug === "agent-review-pipeline" && candidate.params.enabled === true
+  );
+  expect(resumeRequest.params.enabled).toBe(true);
+  await expect(page.locator(".pf-run-header-state")).toHaveText("enabled");
+});
+
 test("pipeline connector search matches multiple metadata terms", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
@@ -388,6 +418,38 @@ test("pipeline connection picker can start connector task monitors", async ({ pa
     (candidate) => candidate.params.message === "/monitor telegram-user"
   );
   expect(String(request.params.sessionId ?? "")).not.toHaveLength(0);
+});
+
+test("pipeline monitor workflow panel can pause and resume monitor bindings", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const monitors = page.getByLabel("Monitor workflows");
+  await expect(monitors).toContainText("monitor-telegram-user");
+  await expect(monitors).toContainText("telegram-user");
+  await expect(page.getByLabel("Monitor workflow search results")).toHaveText("1/1 monitors");
+
+  await page.getByLabel("Search connectors").fill("triage telegram");
+  await expect(monitors).toContainText("1/1");
+  await monitors.getByRole("button", { name: "Pause monitor-telegram-user" }).click();
+
+  const pauseRequest = await daemon.waitForRequest(
+    "workflow_toggle",
+    (candidate) => candidate.params.slug === "monitor-telegram-user" && candidate.params.enabled === false
+  );
+  expect(pauseRequest.params.slug).toBe("monitor-telegram-user");
+  await expect(monitors).toContainText("paused");
+
+  await monitors.getByRole("button", { name: "Resume monitor-telegram-user" }).click();
+  const resumeRequest = await daemon.waitForRequest(
+    "workflow_toggle",
+    (candidate) => candidate.params.slug === "monitor-telegram-user" && candidate.params.enabled === true
+  );
+  expect(resumeRequest.params.enabled).toBe(true);
+  await expect(monitors).toContainText("enabled");
 });
 
 test("pipeline monitor task panel exposes task actions", async ({ page }) => {

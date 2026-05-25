@@ -438,12 +438,27 @@ export type WorkflowMonitorTask = {
   updated_at_ms?: number | null;
 };
 
+export type WorkflowBinding = {
+  slug: string;
+  description: string;
+  connection_slug: string;
+  connector_slug?: string | null;
+  status: string;
+  enabled: boolean;
+  action_type: string;
+  monitor?: boolean;
+  monitor_memory_path?: string | null;
+  created_at_ms?: number | null;
+};
+
 export type WorkflowSnapshot = {
   workflows: WorkflowDefinition[];
   runs: WorkflowRun[];
   connectors?: WorkflowConnector[];
   connections?: WorkflowConnection[];
   connector_error?: string | null;
+  workflow_bindings?: WorkflowBinding[];
+  workflow_binding_error?: string | null;
   monitor_tasks?: WorkflowMonitorTask[];
   monitor_task_error?: string | null;
 };

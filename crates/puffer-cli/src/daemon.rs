@@ -823,6 +823,10 @@ async fn dispatch_request(
             &state.paths,
             &params
         )),
+        "workflow_toggle" => respond!(crate::daemon_workflows::handle_workflow_toggle(
+            &state.paths,
+            &params
+        )),
         "workflow_runs_list" => respond!(crate::daemon_workflows::handle_workflow_runs_list(
             &state.paths,
             &params

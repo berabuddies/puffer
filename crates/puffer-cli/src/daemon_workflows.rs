@@ -5,8 +5,8 @@ use puffer_config::ConfigPaths;
 use puffer_core::subscription_manager;
 use puffer_subscriptions::{
     connection_workflow_trigger_supported, connector_runtime_hints,
-    connector_workflow_trigger_supported, suggested_connection_slug, ConnectionRecord,
-    SubscriberManifestRoots,
+    connector_workflow_trigger_supported, suggested_connection_slug, ActionSpec, ConnectionRecord,
+    SubscriberManifestRoots, WorkflowBindingSpec, WorkflowBindingStatus,
 };
 use puffer_workflow::{RegisterOptions, WorkflowStore};
 use serde::Deserialize;
@@ -18,6 +18,7 @@ pub(crate) fn handle_workflow_list(paths: &ConfigPaths) -> Result<Value> {
     let store = WorkflowStore::new(&paths.workspace_config_dir);
     let mut snapshot = serde_json::to_value(store.snapshot()?)?;
     add_connector_context(paths, &mut snapshot);
+    add_workflow_binding_context(paths, &mut snapshot);
     add_monitor_task_context(paths, &mut snapshot);
     Ok(snapshot)
 }
@@ -33,8 +34,52 @@ pub(crate) fn handle_workflow_save(paths: &ConfigPaths, params: &Value) -> Resul
     store.register_json(workflow, RegisterOptions::default())?;
     let mut snapshot = serde_json::to_value(store.snapshot()?)?;
     add_connector_context(paths, &mut snapshot);
+    add_workflow_binding_context(paths, &mut snapshot);
     add_monitor_task_context(paths, &mut snapshot);
     Ok(snapshot)
+}
+
+/// Toggles a native workflow or subscription workflow binding.
+pub(crate) fn handle_workflow_toggle(paths: &ConfigPaths, params: &Value) -> Result<Value> {
+    let slug = params
+        .get("slug")
+        .and_then(Value::as_str)
+        .context("missing slug")?;
+    let enabled = params
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .context("missing enabled")?;
+    let store = WorkflowStore::new(&paths.workspace_config_dir);
+    if let Some(mut workflow) = store.get(slug)? {
+        workflow.enabled = enabled;
+        let workflow = store.upsert(workflow)?;
+        if let Ok(manager) = subscription_manager() {
+            let binding_slug = format!("workflow-{}", workflow.slug);
+            if manager.store().get(&binding_slug).is_some() {
+                manager
+                    .store()
+                    .set_status(&binding_slug, workflow_status(enabled))?;
+                manager.refresh_connection_consumers()?;
+            }
+        }
+        return handle_workflow_list(paths);
+    }
+    let manager = subscription_manager()?;
+    let binding_slug = if manager.store().get(slug).is_some() {
+        slug.to_string()
+    } else {
+        let native_slug = format!("workflow-{slug}");
+        if manager.store().get(&native_slug).is_some() {
+            native_slug
+        } else {
+            anyhow::bail!("workflow `{slug}` not found");
+        }
+    };
+    manager
+        .store()
+        .set_status(&binding_slug, workflow_status(enabled))?;
+    manager.refresh_connection_consumers()?;
+    handle_workflow_list(paths)
 }
 
 /// Returns the persisted runs for one workflow slug.
@@ -137,6 +182,88 @@ fn add_monitor_task_context(paths: &ConfigPaths, snapshot: &mut Value) {
                 Value::String(error.to_string()),
             );
         }
+    }
+}
+
+fn add_workflow_binding_context(paths: &ConfigPaths, snapshot: &mut Value) {
+    let Some(object) = snapshot.as_object_mut() else {
+        return;
+    };
+    match subscription_manager() {
+        Ok(manager) => {
+            let bindings = manager
+                .store()
+                .list()
+                .into_iter()
+                .map(|binding| workflow_binding_json(paths, binding))
+                .collect::<Vec<_>>();
+            object.insert("workflow_bindings".to_string(), Value::Array(bindings));
+            object.insert("workflow_binding_error".to_string(), Value::Null);
+        }
+        Err(error) => {
+            object.insert("workflow_bindings".to_string(), Value::Array(Vec::new()));
+            object.insert(
+                "workflow_binding_error".to_string(),
+                Value::String(error.to_string()),
+            );
+        }
+    }
+}
+
+fn workflow_binding_json(paths: &ConfigPaths, binding: WorkflowBindingSpec) -> Value {
+    let action_type = workflow_action_type(&binding.action);
+    let monitor = binding.slug.starts_with("monitor-")
+        || (matches!(binding.action, ActionSpec::TriageAgent { .. })
+            && binding.description.to_ascii_lowercase().contains("monitor"));
+    let monitor_memory_path = monitor.then(|| {
+        paths
+            .workspace_config_dir
+            .join("runtime")
+            .join("monitors")
+            .join(format!("{}.md", binding.connection_slug))
+            .display()
+            .to_string()
+    });
+    json!({
+        "slug": binding.slug,
+        "description": binding.description,
+        "connection_slug": binding.connection_slug,
+        "connector_slug": binding.connector_slug,
+        "status": workflow_status_label(binding.status),
+        "enabled": binding.status == WorkflowBindingStatus::Enabled,
+        "action_type": action_type,
+        "monitor": monitor,
+        "monitor_memory_path": monitor_memory_path,
+        "created_at_ms": binding.created_at_ms,
+    })
+}
+
+fn workflow_action_type(action: &ActionSpec) -> &'static str {
+    match action {
+        ActionSpec::SqliteInsert { .. } => "sqlite_insert",
+        ActionSpec::FileAppend { .. } => "file_append",
+        ActionSpec::ForwardMessage { .. } => "forward_message",
+        ActionSpec::RunWorkflow { .. } => "run_workflow",
+        ActionSpec::ConnectorAct { .. } => "connector_act",
+        ActionSpec::ToolCall { .. } => "tool_call",
+        ActionSpec::TriageAgent { .. } => "triage_agent",
+        ActionSpec::Graph { .. } => "graph",
+        ActionSpec::Unknown => "unknown",
+    }
+}
+
+fn workflow_status(enabled: bool) -> WorkflowBindingStatus {
+    if enabled {
+        WorkflowBindingStatus::Enabled
+    } else {
+        WorkflowBindingStatus::Paused
+    }
+}
+
+fn workflow_status_label(status: WorkflowBindingStatus) -> &'static str {
+    match status {
+        WorkflowBindingStatus::Enabled => "enabled",
+        WorkflowBindingStatus::Paused => "paused",
     }
 }
 
@@ -412,6 +539,39 @@ mod tests {
             "duplicate support ping"
         );
         assert_eq!(snapshot["monitor_task_error"], Value::Null);
+    }
+
+    #[test]
+    fn workflow_binding_json_marks_monitor_bindings() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(tempdir.path());
+        let binding = WorkflowBindingSpec {
+            slug: "monitor-telegram-user".to_string(),
+            description: "Monitor telegram-user for actionable tasks".to_string(),
+            connection_slug: "telegram-user".to_string(),
+            connector_slug: Some("telegram-login".to_string()),
+            status: WorkflowBindingStatus::Paused,
+            filter: None,
+            classify_prompt: None,
+            classify_model: None,
+            action: ActionSpec::TriageAgent {
+                prompt: "triage events".to_string(),
+                model: None,
+            },
+            created_at_ms: 42,
+        };
+
+        let value = workflow_binding_json(&paths, binding);
+
+        assert_eq!(value["slug"], "monitor-telegram-user");
+        assert_eq!(value["status"], "paused");
+        assert_eq!(value["enabled"], false);
+        assert_eq!(value["action_type"], "triage_agent");
+        assert_eq!(value["monitor"], true);
+        assert!(value["monitor_memory_path"]
+            .as_str()
+            .unwrap()
+            .ends_with("runtime/monitors/telegram-user.md"));
     }
 
     #[test]
