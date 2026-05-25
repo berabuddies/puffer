@@ -60,7 +60,7 @@ pub(super) fn commit_successful_lambda_skill_gate_call(
             Some(pending.host_args()),
             Some(pending.concrete_tool()),
         );
-        return match gate.step_call(pending.host_tool()) {
+        return match gate.step_call_with_args(pending.host_tool(), pending.host_args()) {
             LambdaGateVerdict::Accept => {
                 state.pending_lambda_host_call = None;
                 Ok(Some(metadata))

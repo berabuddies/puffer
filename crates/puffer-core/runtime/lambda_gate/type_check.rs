@@ -1,3 +1,4 @@
+use super::LambdaFact;
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 
@@ -17,14 +18,14 @@ pub(super) fn lambda_arg_matches_type_with_facts(
     param_name: &str,
     all_args: &Map<String, Value>,
     ty: &str,
-    available_predicates: &BTreeSet<String>,
+    facts: &BTreeSet<LambdaFact>,
 ) -> bool {
     let (base, refinement) = split_refinement(ty);
-    if !base_matches(value, base, param_name, all_args, available_predicates) {
+    if !base_matches(value, base, param_name, all_args, facts) {
         return false;
     }
     refinement
-        .map(|expr| refinement_matches(value, param_name, all_args, expr, available_predicates))
+        .map(|expr| refinement_matches(value, param_name, all_args, expr, facts))
         .unwrap_or(true)
 }
 
@@ -61,19 +62,13 @@ fn base_matches(
     base: &str,
     param_name: &str,
     all_args: &Map<String, Value>,
-    available_predicates: &BTreeSet<String>,
+    facts: &BTreeSet<LambdaFact>,
 ) -> bool {
     let lowered = base.trim().to_ascii_lowercase();
     if let Some(inner) = lowered.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
         return value.as_array().is_some_and(|items| {
             items.iter().all(|item| {
-                lambda_arg_matches_type_with_facts(
-                    item,
-                    param_name,
-                    all_args,
-                    inner,
-                    available_predicates,
-                )
+                lambda_arg_matches_type_with_facts(item, param_name, all_args, inner, facts)
             })
         });
     }
@@ -93,7 +88,7 @@ fn refinement_matches(
     param_name: &str,
     all_args: &Map<String, Value>,
     expr: &str,
-    available_predicates: &BTreeSet<String>,
+    facts: &BTreeSet<LambdaFact>,
 ) -> bool {
     let expr = strip_outer_parens(expr.trim());
     if expr.is_empty() {
@@ -101,9 +96,9 @@ fn refinement_matches(
     }
     let and_parts = split_top_level(expr, "&&");
     if and_parts.len() > 1 {
-        return and_parts.iter().all(|part| {
-            refinement_matches(value, param_name, all_args, part, available_predicates)
-        });
+        return and_parts
+            .iter()
+            .all(|part| refinement_matches(value, param_name, all_args, part, facts));
     }
     if let Some(inner) = negated_expr(expr) {
         return semantic_refinement_matches(value, param_name, all_args, inner)
@@ -112,9 +107,9 @@ fn refinement_matches(
     }
     let or_parts = split_top_level(expr, "||");
     if or_parts.len() > 1 {
-        return or_parts.iter().any(|part| {
-            refinement_matches(value, param_name, all_args, part, available_predicates)
-        });
+        return or_parts
+            .iter()
+            .any(|part| refinement_matches(value, param_name, all_args, part, facts));
     }
     if let Some(result) = compare_expr(value, param_name, all_args, expr) {
         return result;
@@ -125,13 +120,65 @@ fn refinement_matches(
     if let Some(result) = string_predicate(value, expr) {
         return result;
     }
-    if let Some(name) = predicate_call_name(expr) {
-        return available_predicates.contains(name);
-    }
-    if let Some(name) = predicate_atom_name(expr) {
-        return available_predicates.contains(name);
+    if let Some(result) = fact_predicate_matches(value, param_name, all_args, expr, facts) {
+        return result;
     }
     false
+}
+
+fn fact_predicate_matches(
+    value: &Value,
+    param_name: &str,
+    all_args: &Map<String, Value>,
+    expr: &str,
+    facts: &BTreeSet<LambdaFact>,
+) -> Option<bool> {
+    if let Some((name, args)) = predicate_call(expr) {
+        let mut resolved = Vec::with_capacity(args.len());
+        for arg in args {
+            resolved.push(resolve_fact_arg(arg, value, param_name, all_args)?);
+        }
+        return Some(facts.contains(&LambdaFact::new(name, resolved)));
+    }
+    predicate_atom_name(expr)
+        .map(|name| facts.contains(&LambdaFact::new(name, Vec::<String>::new())))
+}
+
+fn resolve_fact_arg(
+    raw: &str,
+    current: &Value,
+    param_name: &str,
+    all_args: &Map<String, Value>,
+) -> Option<String> {
+    let token = raw.trim();
+    if token.is_empty() {
+        return None;
+    }
+    if token == param_name {
+        return Some(canonical_fact_arg(current));
+    }
+    if let Some(value) = all_args.get(token) {
+        return Some(canonical_fact_arg(value));
+    }
+    if let Some(unquoted) = token
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| {
+            token
+                .strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+        })
+    {
+        return Some(unquoted.to_string());
+    }
+    if is_identifier(token) {
+        return Some(canonical_fact_arg(current));
+    }
+    Some(token.to_string())
+}
+
+fn canonical_fact_arg(value: &Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
 }
 
 fn semantic_refinement_matches(
@@ -508,14 +555,26 @@ fn runtime_predicate_shape(expr: &str) -> bool {
     })
 }
 
-fn predicate_call_name(expr: &str) -> Option<&str> {
+fn predicate_call(expr: &str) -> Option<(&str, Vec<&str>)> {
     let (name, rest) = expr.split_once('(')?;
     let name = name.trim();
     if !is_identifier(name) {
         return None;
     }
     let args = rest.strip_suffix(')')?;
-    balanced_parens(args).then_some(name)
+    if !balanced_parens(args) {
+        return None;
+    }
+    let args = if args.trim().is_empty() {
+        Vec::new()
+    } else {
+        split_top_level(args, ",")
+    };
+    Some((name, args))
+}
+
+fn predicate_call_name(expr: &str) -> Option<&str> {
+    predicate_call(expr).map(|(name, _)| name)
 }
 
 fn predicate_atom_name(expr: &str) -> Option<&str> {
@@ -802,7 +861,10 @@ mod tests {
             "Plan{plan_approved(p)}",
             &facts,
         ));
-        facts.insert("plan_approved".to_string());
+        facts.insert(LambdaFact::new(
+            "plan_approved",
+            vec![serde_json::to_string(args.get("plan").unwrap()).unwrap()],
+        ));
         assert!(lambda_arg_matches_type_with_facts(
             args.get("plan").unwrap(),
             "plan",
@@ -810,12 +872,26 @@ mod tests {
             "Plan{plan_approved(p)}",
             &facts,
         ));
+        let mut wrong_facts = BTreeSet::new();
+        wrong_facts.insert(LambdaFact::new(
+            "plan_approved",
+            vec![serde_json::to_string(&json!("delete files")).unwrap()],
+        ));
+        assert!(!lambda_arg_matches_type_with_facts(
+            args.get("plan").unwrap(),
+            "plan",
+            &args,
+            "Plan{plan_approved(p)}",
+            &wrong_facts,
+        ));
+        let mut zero_arg_facts = BTreeSet::new();
+        zero_arg_facts.insert(LambdaFact::new("plan_approved", Vec::new()));
         assert!(lambda_arg_matches_type_with_facts(
             args.get("plan").unwrap(),
             "plan",
             &args,
             "Plan{plan_approved}",
-            &facts,
+            &zero_arg_facts,
         ));
     }
 

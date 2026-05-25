@@ -53,7 +53,17 @@ fn gate_tracks_registered_facts_for_context_requirements() {
     assert!(gate
         .facts()
         .contains(&LambdaFact::new("authed", Vec::new())));
-    assert!(gate.step_call("execute_swap").is_accept());
+    assert!(gate.admit_call("execute_swap").is_accept());
+    assert!(gate
+        .step_call_with_args(
+            "execute_swap",
+            &serde_json::json!({
+                "from": "ETH",
+                "to": "USDC",
+                "amount": 10.5
+            })
+        )
+        .is_accept());
 }
 
 #[test]
@@ -103,6 +113,59 @@ fn gate_validates_formal_host_arguments() {
         .reason(),
         Some("formal args for execute_swap missing parameter to")
     );
+}
+
+#[test]
+fn gate_context_requirements_bind_to_registered_argument_values() {
+    let host = LambdaHostEnv::from_json_str(
+        r#"{"effects":["net_w"],"domains":[],"tools":[
+          {"name":"login","params":[{"name":"app","ty":"str"}],"result":"unit","effects":[],"concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":{"$template":"login ${app}"}}},"registers":[{"pred":"authed","args":["app"]}]},
+          {"name":"send","params":[{"name":"app","ty":"str"}],"result":"unit","effects":["net_w"],"concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":{"$template":"send ${app}"}}},"registers":[],"contextReq":{"pred":"authed","args":["app"]}}
+        ]}"#,
+    )
+    .unwrap();
+    let mut gate = LambdaGateState::with_host_caps(host);
+
+    assert!(gate
+        .step_call_with_args("login", &serde_json::json!({"app": "github"}))
+        .is_accept());
+    assert!(gate.facts().contains(&LambdaFact::new(
+        "authed",
+        vec![serde_json::to_string(&serde_json::json!("github")).unwrap()]
+    )));
+    assert!(gate
+        .admit_call_with_args("send", &serde_json::json!({"app": "github"}))
+        .is_accept());
+    assert_eq!(
+        gate.admit_call_with_args("send", &serde_json::json!({"app": "slack"}))
+            .reason(),
+        Some("contextReq not satisfied for send: (authed)")
+    );
+}
+
+#[test]
+fn gate_custom_refinements_bind_to_registered_argument_values() {
+    let host = LambdaHostEnv::from_json_str(
+        r#"{"effects":["fs_w"],"domains":[],"tools":[
+          {"name":"approve_plan","params":[{"name":"plan","ty":"str"}],"result":"unit","effects":[],"concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":{"$template":"approve ${plan}"}}},"registers":[{"pred":"plan_approved","args":["plan"]}]},
+          {"name":"apply_plan","params":[{"name":"plan","ty":"Plan{plan_approved(p)}"}],"result":"unit","effects":["fs_w"],"concreteTools":["Bash"],"concreteInputContracts":{"Bash":{"command":{"$template":"apply ${shell:plan}"}}},"registers":[]}
+        ]}"#,
+    )
+    .unwrap();
+    let mut gate = LambdaGateState::with_host_caps(host);
+
+    assert!(!gate
+        .admit_call_with_args("apply_plan", &serde_json::json!({"plan": "move files"}))
+        .is_accept());
+    assert!(gate
+        .step_call_with_args("approve_plan", &serde_json::json!({"plan": "move files"}))
+        .is_accept());
+    assert!(gate
+        .admit_call_with_args("apply_plan", &serde_json::json!({"plan": "move files"}))
+        .is_accept());
+    assert!(!gate
+        .admit_call_with_args("apply_plan", &serde_json::json!({"plan": "delete files"}))
+        .is_accept());
 }
 
 #[test]

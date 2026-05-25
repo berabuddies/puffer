@@ -36,6 +36,23 @@ impl LambdaFact {
     pub(crate) fn args(&self) -> &[String] {
         &self.args
     }
+
+    fn instantiate(&self, args: &Map<String, Value>) -> Self {
+        let resolved: Vec<String> = self
+            .args
+            .iter()
+            .map(|arg| {
+                args.get(arg)
+                    .map(canonical_fact_arg)
+                    .unwrap_or_else(|| arg.clone())
+            })
+            .collect();
+        Self::new(self.pred.clone(), resolved)
+    }
+}
+
+fn canonical_fact_arg(value: &Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
 }
 
 /// One tool signature from a Lambda Skill host catalogue.
@@ -70,7 +87,7 @@ impl LambdaToolSig {
         self.context_req.as_ref()
     }
 
-    fn validate_args(&self, args: &Value, facts: &BTreeSet<String>) -> Option<String> {
+    fn validate_args(&self, args: &Value, facts: &BTreeSet<LambdaFact>) -> Option<String> {
         let Some(object) = args.as_object() else {
             return Some(format!(
                 "formal args for {} must be a JSON object",
@@ -106,6 +123,17 @@ impl LambdaToolSig {
             }
         }
         None
+    }
+
+    fn required_context_satisfied(
+        &self,
+        args: &Map<String, Value>,
+        facts: &BTreeSet<LambdaFact>,
+    ) -> bool {
+        self.context_req
+            .as_ref()
+            .map(|required| facts.contains(&required.instantiate(args)))
+            .unwrap_or(true)
     }
 
     fn allows_concrete_tool(&self, concrete_tool: &str) -> bool {
@@ -168,10 +196,11 @@ impl LambdaToolSig {
         Ok(())
     }
 
-    fn result_predicate_facts(&self) -> impl Iterator<Item = LambdaFact> + '_ {
-        type_check::predicate_names_in_type(&self.result)
-            .into_iter()
-            .map(|pred| LambdaFact::new(pred, Vec::<String>::new()))
+    fn instantiated_registers<'a>(
+        &'a self,
+        args: &'a Map<String, Value>,
+    ) -> impl Iterator<Item = LambdaFact> + 'a {
+        self.registers.iter().map(|fact| fact.instantiate(args))
     }
 
     fn validate_concrete_input(
@@ -359,6 +388,12 @@ impl LambdaGateState {
             ));
         }
         if let Some(required) = sig.context_req.as_ref() {
+            if !required.args().is_empty() {
+                return LambdaGateVerdict::reject(format!(
+                    "contextReq for {tool} requires formal args: ({})",
+                    required.pred()
+                ));
+            }
             if !self.facts.contains(required) {
                 return LambdaGateVerdict::reject(format!(
                     "contextReq not satisfied for {tool}: ({})",
@@ -371,15 +406,29 @@ impl LambdaGateState {
 
     /// Admits one proposed host tool call and validates its formal arguments.
     pub(crate) fn admit_call_with_args(&self, tool: &str, args: &Value) -> LambdaGateVerdict {
-        let verdict = self.admit_call(tool);
-        if !verdict.is_accept() {
-            return verdict;
-        }
         let Some(sig) = self.host.lookup_tool(tool) else {
             return LambdaGateVerdict::reject(format!("unknown tool: {tool}"));
         };
-        let predicates = self.available_predicates();
-        if let Some(reason) = sig.validate_args(args, &predicates) {
+        if !sig.effects.is_subset(&self.caps) {
+            return LambdaGateVerdict::reject(format!(
+                "tool effects exceed gate capabilities: {tool}"
+            ));
+        }
+        let Some(object) = args.as_object() else {
+            return LambdaGateVerdict::reject(format!(
+                "formal args for {} must be a JSON object",
+                sig.name
+            ));
+        };
+        if !sig.required_context_satisfied(object, &self.facts) {
+            if let Some(required) = sig.context_req.as_ref() {
+                return LambdaGateVerdict::reject(format!(
+                    "contextReq not satisfied for {tool}: ({})",
+                    required.pred()
+                ));
+            }
+        }
+        if let Some(reason) = sig.validate_args(args, &self.facts) {
             return LambdaGateVerdict::reject(reason);
         }
         LambdaGateVerdict::Accept
@@ -424,24 +473,23 @@ impl LambdaGateState {
         LambdaGateVerdict::Accept
     }
 
-    /// Gates one call and commits registered facts when accepted.
+    /// Gates one no-argument call and commits registered facts when accepted.
     pub(crate) fn step_call(&mut self, tool: &str) -> LambdaGateVerdict {
-        let verdict = self.admit_call(tool);
+        self.step_call_with_args(tool, &Value::Object(Map::new()))
+    }
+
+    /// Gates one call and commits instantiated registered facts when accepted.
+    pub(crate) fn step_call_with_args(&mut self, tool: &str, args: &Value) -> LambdaGateVerdict {
+        let verdict = self.admit_call_with_args(tool, args);
         if verdict.is_accept() {
             if let Some(sig) = self.host.lookup_tool(tool) {
-                for fact in &sig.registers {
-                    self.facts.insert(fact.clone());
-                }
-                for fact in sig.result_predicate_facts() {
+                let object = args.as_object().cloned().unwrap_or_default();
+                for fact in sig.instantiated_registers(&object) {
                     self.facts.insert(fact);
                 }
             }
         }
         verdict
-    }
-
-    fn available_predicates(&self) -> BTreeSet<String> {
-        self.facts.iter().map(|fact| fact.pred.clone()).collect()
     }
 
     /// Builds trace metadata for a committed host call.
@@ -451,10 +499,19 @@ impl LambdaGateState {
         host_args: Option<&Value>,
         concrete_tool: Option<&str>,
     ) -> Value {
+        let host_arg_object = host_args.and_then(Value::as_object);
         let registered_facts = self
             .host
             .lookup_tool(host_tool)
-            .map(|sig| sig.registers.iter().map(lambda_fact_metadata).collect())
+            .map(|sig| {
+                host_arg_object
+                    .map(|args| {
+                        sig.instantiated_registers(args)
+                            .map(|fact| lambda_fact_metadata(&fact))
+                            .collect()
+                    })
+                    .unwrap_or_else(|| sig.registers.iter().map(lambda_fact_metadata).collect())
+            })
             .unwrap_or_default();
         lambda_skill_metadata(
             "host_call_committed",
