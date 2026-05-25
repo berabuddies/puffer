@@ -57,6 +57,7 @@ const defaultAdapterPath = path.join(fuzzRoot, "adapters", "playwright-actions.j
 const defaultLedgerPath = path.join(fuzzRoot, "coverage-ledger.json");
 const defaultFeedbackLedgerPath = path.join(fuzzRoot, "feedback-ledger.json");
 const defaultBugListPath = path.join(fuzzRoot, "BUGS.md");
+const defaultCandidateListPath = path.join(fuzzRoot, "BUGS_CAND.md");
 const defaultCorpusPath = path.join(fuzzRoot, "corpus", "puffer-corpus.json");
 const defaultPromptEvolutionPath = path.join(fuzzRoot, "prompt_evolution.md");
 const defaultIssuePath = "/tmp/puffer_issue.md";
@@ -124,6 +125,8 @@ Commands:
   shrink --input run.json --case-id chat-turn-race-0001 --out /tmp/shrunk-run.json --report-out /tmp/shrink.md
   bug-list --append --title "..." --severity P1 --area chat --shard chat-composer-send --evidence apps/.../final.md
   bug-list --set-status --id PUF-FUZZ-0001 --status fixed --note "fixed by abc123"
+  candidate-list --append --verdict apps/.../verdict.json --gate apps/.../verdict-gate.json --evidence apps/.../bounded-replay-report.json
+  candidate-list --set-status --id PUF-CAND-0001 --status soft-bug --note "reviewer admitted"
 
 Related helper:
   puffer-fuzz-replay-loop.mjs --input run.json --seeds chat-turn-race --shard chat-composer-send
@@ -141,6 +144,7 @@ Options:
   --feedback-ledger <path> Default: apps/puffer-desktop/tests/fuzz/feedback-ledger.json
   --corpus <path>    Default: apps/puffer-desktop/tests/fuzz/corpus/puffer-corpus.json
   --bug-list <path> Default: apps/puffer-desktop/tests/fuzz/BUGS.md
+  --candidate-list <path> Default: apps/puffer-desktop/tests/fuzz/BUGS_CAND.md
   --prompt-guide <path> Default: apps/puffer-desktop/tests/fuzz/prompt_evolution.md
   --issue <path>      Default: /tmp/puffer_issue.md
   --pics-dir <path>   Default: bugs/pics
@@ -538,10 +542,28 @@ async function main() {
     return;
   }
 
+  if (command === "candidate-list") {
+    const candidateListPath = args["candidate-list"] ?? defaultCandidateListPath;
+    if (args.append) {
+      const text = await appendCandidateListEntry(candidateListPath, args);
+      process.stdout.write(text);
+      return;
+    }
+    if (args["set-status"]) {
+      const text = await updateCandidateListStatus(candidateListPath, args);
+      process.stdout.write(text);
+      return;
+    }
+    await ensureCandidateList(candidateListPath);
+    process.stdout.write(`Candidate list: ${candidateListPath}\n`);
+    return;
+  }
+
   throw new Error(`Unknown command: ${command}`);
 }
 
 const bugListStatusValues = new Set(["pending", "fixed", "duplicate", "rejected", "out-of-scope"]);
+const candidateListStatusValues = new Set(["candidate", "soft-bug", "dismissed", "human-queue"]);
 
 function bugListTemplate() {
   return `# Puffer UI/UX Fuzz Bug List
@@ -667,6 +689,138 @@ async function updateBugListStatus(filePath, args) {
   });
 }
 
+function candidateListTemplate() {
+  return `# Puffer UI/UX Fuzz Candidate Ledger
+
+This file is the main-agent-owned ledger for UI/UX fuzz candidates that cite
+real replay evidence but do not yet satisfy the deterministic predicate gate.
+Subagents should not edit this file directly.
+
+## Status Values
+
+- \`candidate\`: real cited evidence, awaiting reviewer or human decision.
+- \`soft-bug\`: reviewer accepted the candidate as likely product-relevant.
+- \`dismissed\`: reviewer or human dismissed the candidate.
+- \`human-queue\`: requires manual review.
+
+## Ledger
+
+| ID | Status | Area | Shard | Title | Evidence | Updated |
+| --- | --- | --- | --- | --- | --- | --- |
+
+## Details
+
+`;
+}
+
+async function ensureCandidateList(filePath) {
+  try {
+    await readFile(filePath, "utf8");
+  } catch (error) {
+    if (!error || error.code !== "ENOENT") throw error;
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(filePath, candidateListTemplate(), "utf8");
+  }
+}
+
+async function readCandidateList(filePath) {
+  await ensureCandidateList(filePath);
+  return readFile(filePath, "utf8");
+}
+
+async function writeCandidateList(filePath, text) {
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, text, "utf8");
+}
+
+async function appendCandidateListEntry(filePath, args) {
+  const verdictPath = requiredArg(args, "verdict");
+  const gatePath = requiredArg(args, "gate");
+  const evidencePath = args.evidence ?? "";
+  const verdict = await readJson(verdictPath);
+  const gate = await readJson(gatePath);
+  if (gate.disposition !== "candidate") {
+    throw new Error(`Refusing to append candidate with gate disposition ${gate.disposition}`);
+  }
+  const status = normalizeCandidateStatus(args.status ?? "candidate");
+  const updated = new Date().toISOString();
+  return withFileLock(filePath, async () => {
+    const current = await readCandidateList(filePath);
+    const id = args.id ?? nextCandidateId(current);
+    if (current.includes(`| ${id} |`) || current.includes(`### ${id}:`)) {
+      throw new Error(`Candidate id already exists in ${filePath}: ${id}`);
+    }
+    const row = `| ${escapeTable(id)} | ${escapeTable(status)} | ${escapeTable(verdict.area)} | ${escapeTable(verdict.shard)} | ${escapeTable(verdict.title)} | ${escapeTable(verdictPath)} | ${escapeTable(updated)} |`;
+    const detail = [
+      `### ${id}: ${verdict.title}`,
+      "",
+      `- Status: ${status}`,
+      `- Area: ${verdict.area}`,
+      `- Shard: ${verdict.shard}`,
+      `- Source run: ${verdict.source_run || "n/a"}`,
+      `- Verdict: ${verdictPath}`,
+      `- Gate: ${gatePath}`,
+      `- Evidence: ${evidencePath || "n/a"}`,
+      `- Gate failures: ${(gate.failureReasons ?? []).join("; ") || "n/a"}`,
+      `- Expected: ${verdict.expected || "n/a"}`,
+      `- Actual: ${verdict.actual || "n/a"}`,
+      `- Impact: ${verdict.impact || "n/a"}`,
+      `- Repro: ${(verdict.repro ?? []).join(" / ") || "n/a"}`,
+      `- Notes: ${verdict.notes || "n/a"}`,
+      `- Updated: ${updated}`,
+      ""
+    ].join("\n");
+    const next = insertCandidateListRow(current, row).trimEnd() + `\n\n${detail}`;
+    await writeCandidateList(filePath, next);
+    return `Appended ${id} to ${filePath}\n`;
+  });
+}
+
+async function updateCandidateListStatus(filePath, args) {
+  const id = requiredArg(args, "id");
+  const status = normalizeCandidateStatus(requiredArg(args, "status"));
+  const note = args.note ?? "";
+  const updated = new Date().toISOString();
+  return withFileLock(filePath, async () => {
+    const current = await readCandidateList(filePath);
+    if (!current.includes(`| ${id} |`) && !current.includes(`### ${id}:`)) {
+      throw new Error(`Candidate id not found in ${filePath}: ${id}`);
+    }
+    const lines = current.split("\n").map((line) => {
+      if (!line.startsWith(`| ${id} |`)) return line;
+      const parts = line.split("|").map((item) => item.trim());
+      if (parts.length < 8) return line;
+      parts[2] = status;
+      parts[7] = updated;
+      return `| ${parts.slice(1, 8).join(" | ")} |`;
+    });
+    const statusPattern = new RegExp(`(### ${escapeRegExp(id)}:[\\s\\S]*?\\n- Status: )[^\\n]+`);
+    let next = lines.join("\n").replace(statusPattern, `$1${status}`);
+    const detailPattern = new RegExp(`(### ${escapeRegExp(id)}:[\\s\\S]*?)(?=\\n### PUF-CAND-|\\n*$)`);
+    next = next.replace(detailPattern, (match) => {
+      const lines = [`${match.trimEnd()}`, `- Status update: ${updated} ${status}${note ? ` - ${note}` : ""}`, ""];
+      return lines.join("\n");
+    });
+    await writeCandidateList(filePath, next);
+    return `Updated ${id} to ${status} in ${filePath}\n`;
+  });
+}
+
+function insertCandidateListRow(text, row) {
+  const marker = "## Details";
+  const index = text.indexOf(`\n${marker}`);
+  if (index === -1) return `${text.trimEnd()}\n${row}\n`;
+  const before = text.slice(0, index).trimEnd();
+  const after = text.slice(index);
+  return `${before}\n${row}\n${after}`;
+}
+
+function nextCandidateId(text) {
+  const matches = [...text.matchAll(/PUF-CAND-(\d{4})/g)];
+  const max = matches.reduce((value, match) => Math.max(value, Number(match[1])), 0);
+  return `PUF-CAND-${String(max + 1).padStart(4, "0")}`;
+}
+
 function insertBugListRow(text, row) {
   const marker = "## Details";
   const index = text.indexOf(`\n${marker}`);
@@ -686,6 +840,14 @@ function normalizeBugStatus(value) {
   const status = String(value).trim().toLowerCase();
   if (!bugListStatusValues.has(status)) {
     throw new Error(`Invalid status "${value}". Expected one of: ${[...bugListStatusValues].join(", ")}`);
+  }
+  return status;
+}
+
+function normalizeCandidateStatus(value) {
+  const status = String(value).trim().toLowerCase();
+  if (!candidateListStatusValues.has(status)) {
+    throw new Error(`Invalid candidate status "${value}". Expected one of: ${[...candidateListStatusValues].join(", ")}`);
   }
   return status;
 }

@@ -19,6 +19,7 @@
     "bug-list": "node bin/puffer-fuzz.mjs bug-list",
     "openrouter-explorer": "node bin/puffer-openrouter-explorer.mjs",
     "openrouter-aggregate": "node bin/puffer-openrouter-aggregate.mjs",
-    "openrouter-triage": "node bin/puffer-openrouter-triage.mjs"
+    "openrouter-triage": "node bin/puffer-openrouter-triage.mjs",
+    "openrouter-reviewer": "node bin/puffer-openrouter-reviewer.mjs"
   }
 }
