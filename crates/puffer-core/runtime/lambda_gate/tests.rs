@@ -375,6 +375,40 @@ fn host_catalogue_runtime_validation_rejects_malformed_result_refinement() {
 }
 
 #[test]
+fn host_catalogue_runtime_validation_rejects_unproduced_fact_refinement() {
+    let error = validate_host_catalogue_runtime(
+            r#"{"effects":[],"domains":[],"tools":[{"name":"apply_plan","effects":[],"concreteTools":["Bash"],"concreteInputContracts":{"Bash":{"command":{"$template":"apply ${shell:plan}"}}},"params":[{"name":"plan","ty":"Plan{plan_approved(p)}"}]}]}"#,
+        )
+        .expect_err("fact refinement without a producer must fail");
+
+    assert!(format!("{error:#}").contains("without a matching registered fact"));
+}
+
+#[test]
+fn host_catalogue_runtime_validation_accepts_produced_fact_refinement() {
+    validate_host_catalogue_runtime(
+            r#"{"effects":[],"domains":[],"tools":[
+              {"name":"approve_plan","effects":[],"concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":{"$template":"approve ${plan}"}}},"params":[{"name":"plan","ty":"str"}],"registers":[{"pred":"plan_approved","args":["plan"]}]},
+              {"name":"apply_plan","effects":[],"concreteTools":["Bash"],"concreteInputContracts":{"Bash":{"command":{"$template":"apply ${shell:plan}"}}},"params":[{"name":"plan","ty":"Plan{plan_approved(p)}"}]}
+            ]}"#,
+        )
+        .unwrap();
+}
+
+#[test]
+fn host_catalogue_runtime_validation_rejects_result_bound_fact_producer() {
+    let error = validate_host_catalogue_runtime(
+            r#"{"effects":[],"domains":[],"tools":[
+              {"name":"resolve_pr","effects":[],"concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":"resolve pr"}},"registers":[{"pred":"pr_resolved","args":["pr"]}]},
+              {"name":"read_pr","effects":[],"concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":{"$template":"read ${pr}"}}},"params":[{"name":"pr","ty":"PRRef{pr_resolved(p)}"}]}
+            ]}"#,
+        )
+        .expect_err("result-bound fact producer must not make param refinement ready");
+
+    assert!(format!("{error:#}").contains("without a matching registered fact"));
+}
+
+#[test]
 fn gate_for_verified_skill_reads_catalogue_file() {
     let root = tempfile::tempdir().unwrap();
     let catalogue = root.path().join("host.json");

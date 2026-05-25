@@ -140,7 +140,11 @@ impl LambdaToolSig {
         self.concrete_tools.contains(concrete_tool)
     }
 
-    fn validate_runtime_contract(&self) -> Result<()> {
+    fn validate_runtime_contract(
+        &self,
+        dynamic_facts: &BTreeSet<(String, usize)>,
+        available_facts: &BTreeSet<(String, usize)>,
+    ) -> Result<()> {
         let declared_params = self
             .params
             .iter()
@@ -156,6 +160,17 @@ impl LambdaToolSig {
                     unsupported.join(", ")
                 ));
             }
+            for (pred, arity) in type_check::fact_refinement_shapes_in_type(&param.ty) {
+                if !dynamic_facts.contains(&(pred.clone(), arity)) {
+                    return Err(anyhow!(
+                        "Lambda Skill host tool {} parameter {} uses fact refinement {}({} args) without a matching registered fact",
+                        self.name,
+                        param.name,
+                        pred,
+                        arity
+                    ));
+                }
+            }
         }
         let unsupported_result = type_check::unsupported_refinements_in_type(&self.result);
         if !unsupported_result.is_empty() {
@@ -164,6 +179,17 @@ impl LambdaToolSig {
                 self.name,
                 unsupported_result.join(", ")
             ));
+        }
+        if let Some(required) = self.context_req.as_ref() {
+            let shape = (required.pred().to_string(), required.args().len());
+            if !available_facts.contains(&shape) {
+                return Err(anyhow!(
+                    "Lambda Skill host tool {} contextReq {}({} args) has no matching registered fact",
+                    self.name,
+                    required.pred(),
+                    required.args().len()
+                ));
+            }
         }
         for concrete_tool in &self.concrete_tools {
             let Some(contract) = self.concrete_input_contracts.get(concrete_tool) else {
@@ -316,8 +342,36 @@ impl LambdaHostEnv {
     }
 
     fn validate_runtime_contracts(&self) -> Result<()> {
+        let dynamic_facts = self
+            .tools
+            .values()
+            .flat_map(|sig| {
+                let param_names = sig
+                    .params
+                    .iter()
+                    .map(|param| param.name.as_str())
+                    .collect::<BTreeSet<_>>();
+                sig.registers
+                    .iter()
+                    .filter(move |fact| {
+                        fact.args()
+                            .iter()
+                            .all(|arg| param_names.contains(arg.as_str()))
+                    })
+                    .map(|fact| (fact.pred().to_string(), fact.args().len()))
+            })
+            .collect::<BTreeSet<_>>();
+        let available_facts = self
+            .tools
+            .values()
+            .flat_map(|sig| {
+                sig.registers
+                    .iter()
+                    .map(|fact| (fact.pred().to_string(), fact.args().len()))
+            })
+            .collect::<BTreeSet<_>>();
         for sig in self.tools.values() {
-            sig.validate_runtime_contract()?;
+            sig.validate_runtime_contract(&dynamic_facts, &available_facts)?;
         }
         Ok(())
     }

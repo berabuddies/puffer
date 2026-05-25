@@ -48,6 +48,17 @@ pub(super) fn predicate_names_in_type(ty: &str) -> Vec<String> {
     names
 }
 
+/// Returns custom fact predicate shapes required by refinements in this type.
+pub(super) fn fact_refinement_shapes_in_type(ty: &str) -> Vec<(String, usize)> {
+    let mut shapes = refinement_segments(ty)
+        .into_iter()
+        .flat_map(fact_refinement_shapes_in_expr)
+        .collect::<Vec<_>>();
+    shapes.sort();
+    shapes.dedup();
+    shapes
+}
+
 fn split_refinement(ty: &str) -> (&str, Option<&str>) {
     let trimmed = ty.trim();
     let Some((base, tail)) = trimmed.split_once('{') else {
@@ -282,6 +293,39 @@ fn predicate_names_in_expr(expr: &str) -> Vec<String> {
     predicate_call_name(expr)
         .or_else(|| predicate_atom_name(expr))
         .map(|name| vec![name.to_string()])
+        .unwrap_or_default()
+}
+
+fn fact_refinement_shapes_in_expr(expr: &str) -> Vec<(String, usize)> {
+    let expr = strip_outer_parens(expr.trim());
+    if expr.is_empty() || record_field_type_list(expr) {
+        return Vec::new();
+    }
+    let and_parts = split_top_level(expr, "&&");
+    if and_parts.len() > 1 {
+        return and_parts
+            .into_iter()
+            .flat_map(fact_refinement_shapes_in_expr)
+            .collect();
+    }
+    if let Some(inner) = negated_expr(expr) {
+        return fact_refinement_shapes_in_expr(inner);
+    }
+    let or_parts = split_top_level(expr, "||");
+    if or_parts.len() > 1 {
+        return or_parts
+            .into_iter()
+            .flat_map(fact_refinement_shapes_in_expr)
+            .collect();
+    }
+    if compare_expr_shape(expr) || runtime_predicate_shape(expr) || string_predicate_shape(expr) {
+        return Vec::new();
+    }
+    if let Some((name, args)) = predicate_call(expr) {
+        return vec![(name.to_string(), args.len())];
+    }
+    predicate_atom_name(expr)
+        .map(|name| vec![(name.to_string(), 0)])
         .unwrap_or_default()
 }
 
@@ -947,6 +991,15 @@ mod tests {
                 "authed".to_string(),
                 "phase1_done".to_string(),
                 "safe".to_string()
+            ]
+        );
+        assert_eq!(
+            fact_refinement_shapes_in_type(
+                "Plan{plan_approved(p) && ends_with_md(path) && phase1_done}"
+            ),
+            vec![
+                ("phase1_done".to_string(), 0),
+                ("plan_approved".to_string(), 1)
             ]
         );
         assert_eq!(
