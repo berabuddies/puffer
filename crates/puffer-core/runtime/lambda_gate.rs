@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 mod fact_extraction;
 mod input_contract;
+mod semantic_predicate;
 mod type_check;
 
 /// One structured host fact tracked by the Lambda Skill call gate.

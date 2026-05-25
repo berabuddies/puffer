@@ -1,4 +1,4 @@
-use super::LambdaFact;
+use super::{semantic_predicate, LambdaFact};
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 
@@ -574,29 +574,11 @@ fn string_predicate_shape(expr: &str) -> bool {
 }
 
 fn runtime_predicate(value: &Value, expr: &str) -> Option<bool> {
-    let (name, _) = expr.split_once('(')?;
-    match name.trim() {
-        "valid_arxiv_id" => value.as_str().map(valid_arxiv_id_list),
-        "valid_address" => value.as_str().map(valid_evm_address),
-        "valid_uri" | "valid_url" => value.as_str().map(valid_url),
-        "emergency_number" => value.as_str().map(emergency_number),
-        "parsed_ok" => Some(parsed_paper_value(value)),
-        _ => None,
-    }
+    semantic_predicate::matches(value, expr)
 }
 
 fn runtime_predicate_shape(expr: &str) -> bool {
-    expr.split_once('(').is_some_and(|(name, _)| {
-        matches!(
-            name.trim(),
-            "valid_arxiv_id"
-                | "valid_address"
-                | "valid_uri"
-                | "valid_url"
-                | "emergency_number"
-                | "parsed_ok"
-        )
-    })
+    semantic_predicate::is_supported_expr(expr)
 }
 
 fn predicate_call(expr: &str) -> Option<(&str, Vec<&str>)> {
@@ -623,87 +605,6 @@ fn predicate_call_name(expr: &str) -> Option<&str> {
 
 fn predicate_atom_name(expr: &str) -> Option<&str> {
     is_identifier(expr).then_some(expr.trim())
-}
-
-fn valid_arxiv_id_list(text: &str) -> bool {
-    let mut seen = false;
-    for item in text.split(',') {
-        let id = item.trim();
-        if id.is_empty() || !valid_arxiv_id(id) {
-            return false;
-        }
-        seen = true;
-    }
-    seen
-}
-
-fn valid_arxiv_id(id: &str) -> bool {
-    let base = id
-        .rsplit_once('v')
-        .and_then(|(prefix, suffix)| {
-            (!suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit())).then_some(prefix)
-        })
-        .unwrap_or(id);
-    valid_new_arxiv_id(base) || valid_old_arxiv_id(base)
-}
-
-fn valid_new_arxiv_id(id: &str) -> bool {
-    let Some((ym, number)) = id.split_once('.') else {
-        return false;
-    };
-    ym.len() == 4
-        && ym.chars().all(|ch| ch.is_ascii_digit())
-        && matches!(number.len(), 4 | 5)
-        && number.chars().all(|ch| ch.is_ascii_digit())
-}
-
-fn valid_old_arxiv_id(id: &str) -> bool {
-    let Some((archive, number)) = id.split_once('/') else {
-        return false;
-    };
-    !archive.is_empty()
-        && archive
-            .chars()
-            .all(|ch| ch.is_ascii_alphabetic() || matches!(ch, '-' | '.'))
-        && number.len() == 7
-        && number.chars().all(|ch| ch.is_ascii_digit())
-}
-
-fn valid_evm_address(text: &str) -> bool {
-    text.len() == 42 && text.starts_with("0x") && text[2..].chars().all(|ch| ch.is_ascii_hexdigit())
-}
-
-fn valid_url(text: &str) -> bool {
-    url::Url::parse(text)
-        .ok()
-        .is_some_and(|url| url.host_str().is_some())
-}
-
-fn emergency_number(text: &str) -> bool {
-    let digits = text
-        .chars()
-        .filter(|ch| ch.is_ascii_digit())
-        .collect::<String>();
-    matches!(
-        digits.as_str(),
-        "000" | "110" | "112" | "118" | "119" | "911" | "999"
-    ) || digits.ends_with("911")
-        || digits.ends_with("112")
-}
-
-fn parsed_paper_value(value: &Value) -> bool {
-    let Some(object) = value.as_object() else {
-        return false;
-    };
-    let has_title = object
-        .get("title")
-        .and_then(Value::as_str)
-        .is_some_and(|title| !title.trim().is_empty());
-    let has_valid_id = ["arxiv_id", "id", "eprint"]
-        .into_iter()
-        .filter_map(|key| object.get(key).and_then(Value::as_str))
-        .any(valid_arxiv_id);
-    has_title && has_valid_id
 }
 
 fn json_integer(value: &Value) -> Option<i128> {
