@@ -48,6 +48,7 @@ let error = "";
 let beforeScore = null;
 let afterScore = null;
 let newSolved = [];
+let matchedTargets = [];
 try {
   if (!baseUrl) {
     baseUrl = `http://127.0.0.1:${port}`;
@@ -101,8 +102,8 @@ try {
     metadata: { shardId, phase: "after-score" }
   });
   const expectedSolved = new Set(shard.target_challenges ?? []);
-  const matchedTargets = newSolved.filter((item) => expectedSolved.has(item.key));
-  if (newSolved.length > 0) {
+  matchedTargets = newSolved.filter((item) => expectedSolved.has(item.key));
+  if (matchedTargets.length > 0) {
     records.push({
       type: "predicate",
       value: JSON.stringify({
@@ -114,6 +115,8 @@ try {
       }),
       metadata: { shardId, predicate: "native-score-diff" }
     });
+  } else if (newSolved.length > 0) {
+    status = "off-target-score";
   } else {
     status = "no-new-score";
   }
@@ -128,7 +131,7 @@ try {
 }
 
 const evidence = buildEvidenceIndex(records);
-const verdict = buildVerdict({ status, error, shard, plan, evidenceIndex: evidence.evidence_index, beforeScore, afterScore, newSolved });
+const verdict = buildVerdict({ status, error, shard, plan, evidenceIndex: evidence.evidence_index, beforeScore, afterScore, newSolved, matchedTargets });
 const gate = evaluateFindingAdmission(verdict, evidence.evidence_index);
 const result = {
   version: 1,
@@ -141,6 +144,7 @@ const result = {
   scoreBefore: summarizeScore(beforeScore),
   scoreAfter: summarizeScore(afterScore),
   newSolved,
+  matchedTargets,
   targetChallenges: shard.target_challenges ?? [],
   plan,
   ...evidence,
@@ -278,13 +282,13 @@ async function compactDom(page) {
   }));
 }
 
-function buildVerdict({ status, error, shard, plan, evidenceIndex, beforeScore, afterScore, newSolved }) {
-  if (newSolved.length === 0) {
+function buildVerdict({ status, error, shard, plan, evidenceIndex, beforeScore, afterScore, newSolved, matchedTargets }) {
+  if (matchedTargets.length === 0) {
     return buildNoFindingVerdict({
       namespace,
       shard: shard.id,
       seed: plan.shard_id,
-      replaySummary: { status, error, before: summarizeScore(beforeScore), after: summarizeScore(afterScore) }
+      replaySummary: { status, error, before: summarizeScore(beforeScore), after: summarizeScore(afterScore), newSolved }
     });
   }
   const predicate = evidenceIndex.find((entry) => entry.type === "predicate");
@@ -295,7 +299,7 @@ function buildVerdict({ status, error, shard, plan, evidenceIndex, beforeScore, 
   return {
     version: 1,
     decision: "admit",
-    title: `Juice Shop shard solved ${newSolved.length} native challenge(s)`,
+    title: `Juice Shop shard solved ${matchedTargets.length} target native challenge(s)`,
     severity: "P2",
     area: `juice-shop/${shard.area}`,
     shard: shard.id,
@@ -303,8 +307,8 @@ function buildVerdict({ status, error, shard, plan, evidenceIndex, beforeScore, 
     primary_cause: predicate ? { id: predicate.id, type: "predicate", quote_hash: predicate.sha256 } : null,
     citations,
     expected: `Shard should make progress on native Juice Shop target(s): ${(shard.target_challenges ?? []).join(", ")}`,
-    actual: `New solved challenge(s): ${newSolved.map((item) => item.key).join(", ")}`,
-    impact: "The benchmark-native score changed, so the shard produced a measurable Juice Shop result.",
+    actual: `Target challenge(s) solved: ${matchedTargets.map((item) => item.key).join(", ")}; off-target solved: ${newSolved.filter((item) => !(shard.target_challenges ?? []).includes(item.key)).map((item) => item.key).join(", ") || "none"}`,
+    impact: "The benchmark-native score changed for this shard's target challenge, so the shard produced a measurable Juice Shop result.",
     repro: (plan.actions ?? []).map((item) => JSON.stringify(item)),
     notes: `Before ${summarizeScore(beforeScore).solved}/${summarizeScore(beforeScore).total}; after ${summarizeScore(afterScore).solved}/${summarizeScore(afterScore).total}`
   };
@@ -335,6 +339,7 @@ function formatMarkdown(result) {
     `- Score before: ${result.scoreBefore.solved}/${result.scoreBefore.total}`,
     `- Score after: ${result.scoreAfter.solved}/${result.scoreAfter.total}`,
     `- New solved: ${result.newSolved.map((item) => item.key).join(", ") || "none"}`,
+    `- Target matched: ${result.matchedTargets.map((item) => item.key).join(", ") || "none"}`,
     `- Screenshot: ${result.artifacts.screenshot}`,
     ""
   ].join("\n");

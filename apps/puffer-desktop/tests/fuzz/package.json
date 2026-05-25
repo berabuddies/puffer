@@ -23,6 +23,7 @@
     "guiflow-smoke": "node bin/puffer-guiflow-smoke.mjs",
     "juice-shop-runner": "node bin/puffer-juice-shop-runner.mjs",
     "juice-shop-aggregate": "node bin/puffer-juice-shop-aggregate.mjs",
+    "juice-shop-suite-from-live": "node bin/puffer-juice-shop-suite-from-live.mjs",
     "webarena-runner": "node bin/puffer-webarena-runner.mjs",
     "webarena-aggregate": "node bin/puffer-webarena-aggregate.mjs",
     "webarena-suite-from-configs": "node bin/puffer-webarena-suite-from-configs.mjs",

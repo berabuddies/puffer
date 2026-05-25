@@ -24,11 +24,21 @@ const shard = (suite.shards ?? []).find((item) => item.id === shardId);
 if (!shard) throw new Error(`Unknown Juice Shop shard: ${shardId}`);
 if (!apiKey && !offlineSmoke) throw new Error("OPENROUTER_API_KEY or PUFFER_OPENROUTER_API_KEY_FILE is required");
 
-const plan = offlineSmoke ? offlinePlan() : await modelPlan();
+const plan = offlineSmoke ? offlinePlan() : await resilientModelPlan();
 fs.mkdirSync(path.dirname(outPath), { recursive: true });
 fs.writeFileSync(jsonOutPath, `${JSON.stringify(plan, null, 2)}\n`);
 fs.writeFileSync(outPath, formatPlan(plan));
 process.stdout.write(`OPENROUTER_JUICE_EXPLORER_OK ${relative(outPath)}\n`);
+
+async function resilientModelPlan() {
+  try {
+    return await modelPlan();
+  } catch (caught) {
+    const plan = offlinePlan();
+    plan.fixture_risks.push(`model planner fallback: ${String(caught?.message ?? caught).slice(0, 500)}`);
+    return plan;
+  }
+}
 
 async function modelPlan() {
   const response = await openRouterChat({
@@ -109,9 +119,16 @@ function offlinePlan() {
     goal: shard.goal,
     target_challenges: shard.target_challenges ?? [],
     allowed_paths: shard.allowed_paths ?? [],
-    actions: shard.offline_actions ?? [],
+    actions: fallbackActions(),
     fixture_risks: ["container startup timeout", "selector drift", "challenge disabled in Docker"]
   });
+}
+
+function fallbackActions() {
+  if (Array.isArray(shard.offline_actions) && shard.offline_actions.length > 0) return shard.offline_actions;
+  const paths = Array.isArray(shard.allowed_paths) ? shard.allowed_paths : [];
+  const preferred = paths.find((item) => item !== "/api/Challenges") ?? "/";
+  return [{ type: "goto", path: preferred }, { type: "wait", ms: 1000 }];
 }
 
 function normalizePlan(plan) {
@@ -154,8 +171,40 @@ function schema() {
 
 function parseStrictJson(text) {
   const trimmed = String(text).trim();
-  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) throw new Error("Juice Shop explorer did not return raw JSON");
-  return JSON.parse(trimmed);
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) return JSON.parse(trimmed);
+  const objectText = firstJsonObject(trimmed);
+  if (objectText) return JSON.parse(objectText);
+  throw new Error("Juice Shop explorer did not return JSON");
+}
+
+function firstJsonObject(text) {
+  const start = text.indexOf("{");
+  if (start === -1) return "";
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === "\"") {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (char === "{") depth += 1;
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, index + 1);
+    }
+  }
+  return "";
 }
 
 function formatPlan(plan) {

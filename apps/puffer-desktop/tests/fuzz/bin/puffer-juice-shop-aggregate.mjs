@@ -50,6 +50,7 @@ function readShard(dir) {
     scoreBefore: result?.scoreBefore ?? { solved: 0, total: 0, solvedKeys: [] },
     scoreAfter: result?.scoreAfter ?? { solved: 0, total: 0, solvedKeys: [] },
     newSolved: result?.newSolved ?? [],
+    matchedTargets: result?.matchedTargets ?? [],
     evidenceEntries: Array.isArray(result?.evidence_index) ? result.evidence_index.length : 0,
     workerPlanPresent: Boolean(workerPlan),
     artifacts: {
@@ -63,8 +64,10 @@ function readShard(dir) {
 
 function summarize(shards) {
   const solvedKeys = new Set();
+  const targetSolvedKeys = new Set();
   for (const shard of shards) {
     for (const item of shard.newSolved ?? []) solvedKeys.add(item.key);
+    for (const item of shard.matchedTargets ?? []) targetSolvedKeys.add(item.key);
   }
   return {
     shards: shards.length,
@@ -78,6 +81,9 @@ function summarize(shards) {
     newSolvedEvents: shards.reduce((sum, item) => sum + (item.newSolved ?? []).length, 0),
     uniqueSolvedChallenges: solvedKeys.size,
     uniqueSolvedKeys: [...solvedKeys].sort(),
+    targetSolvedEvents: shards.reduce((sum, item) => sum + (item.matchedTargets ?? []).length, 0),
+    uniqueTargetSolvedChallenges: targetSolvedKeys.size,
+    uniqueTargetSolvedKeys: [...targetSolvedKeys].sort(),
     evidenceEntries: shards.reduce((sum, item) => sum + item.evidenceEntries, 0)
   };
 }
@@ -99,12 +105,15 @@ function formatMarkdown(report) {
     `- New solved events: ${report.summary.newSolvedEvents}`,
     `- Unique solved challenges: ${report.summary.uniqueSolvedChallenges}`,
     `- Unique solved keys: ${report.summary.uniqueSolvedKeys.join(", ") || "none"}`,
+    `- Target solved events: ${report.summary.targetSolvedEvents}`,
+    `- Unique target solved challenges: ${report.summary.uniqueTargetSolvedChallenges}`,
+    `- Unique target solved keys: ${report.summary.uniqueTargetSolvedKeys.join(", ") || "none"}`,
     "",
     "## Shards",
     ""
   ];
   for (const shard of report.shards) {
-    lines.push(`- ${shard.shardId}: status=${shard.status}, gate=${shard.gateDisposition}, score=${shard.scoreBefore.solved}/${shard.scoreBefore.total}->${shard.scoreAfter.solved}/${shard.scoreAfter.total}, new=${(shard.newSolved ?? []).map((item) => item.key).join(",") || "none"}`);
+    lines.push(`- ${shard.shardId}: status=${shard.status}, gate=${shard.gateDisposition}, score=${shard.scoreBefore.solved}/${shard.scoreBefore.total}->${shard.scoreAfter.solved}/${shard.scoreAfter.total}, target=${(shard.matchedTargets ?? []).map((item) => item.key).join(",") || "none"}, new=${(shard.newSolved ?? []).map((item) => item.key).join(",") || "none"}`);
   }
   return `${lines.join("\n")}\n`;
 }
