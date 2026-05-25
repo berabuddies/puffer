@@ -210,6 +210,7 @@ fn write_connectors(
         .filter(|connector| {
             let action_slugs = connector_action_slugs(connector);
             let suggested_connection = suggested_connection_slug(&connector.slug);
+            let connect_command = connector_connect_command(connector);
             let connection_values = context
                 .connections
                 .iter()
@@ -224,6 +225,9 @@ fn write_connectors(
                         connector.description.as_str(),
                         connector.skill.as_str(),
                         suggested_connection.as_str(),
+                        connect_command.as_str(),
+                        "connect",
+                        "setup",
                     ])
                     .chain(connection_values),
             )
@@ -260,16 +264,16 @@ fn write_connectors(
         let connection_summary = connector_connection_summary(context, connector)
             .map(|summary| format!(" connections={summary}"))
             .unwrap_or_default();
+        let connect_command = connector_connect_command(connector);
         let _ = writeln!(
             out,
-            "- {} [{}] {}{}{} connect=/connect {} {}",
+            "- {} [{}] {}{}{} connect={}",
             connector.slug,
             capabilities.join(","),
             connector.description,
             action_summary,
             connection_summary,
-            connector.slug,
-            suggested_connection_slug(&connector.slug)
+            connect_command
         );
     }
 }
@@ -280,6 +284,14 @@ fn connector_action_slugs(connector: &ConnectorTemplate) -> Vec<&str> {
 
 fn connection_connect_command(connection: &ConnectionRecord) -> String {
     format!("/connect {} {}", connection.connector_slug, connection.slug)
+}
+
+fn connector_connect_command(connector: &ConnectorTemplate) -> String {
+    format!(
+        "/connect {} {}",
+        connector.slug,
+        suggested_connection_slug(&connector.slug)
+    )
 }
 
 fn connector_action_summary(connector: &ConnectorTemplate, query: &str) -> Option<String> {
@@ -585,6 +597,26 @@ mod tests {
 
         assert!(out.contains("- demo-chat"));
         assert!(out.contains("connections=team-demo"));
+        assert!(!out.contains("- other-chat"));
+    }
+
+    #[test]
+    fn workflow_connectors_filter_matches_setup_command_terms() {
+        let roots = SubscriberManifestRoots::new("/tmp/workspace", "/tmp/user", "/tmp/builtin");
+        let mut other = trigger_template();
+        other.slug = "other-chat".to_string();
+        other.description = "Other chat".to_string();
+        let context = ConnectorContext {
+            connectors: vec![trigger_template(), other],
+            connections: Vec::new(),
+            error: None,
+        };
+        let mut out = String::new();
+
+        write_connectors(&mut out, &context, &roots, true, "setup /connect demo-chat");
+
+        assert!(out.contains("- demo-chat"));
+        assert!(out.contains("connect=/connect demo-chat demo-chat"));
         assert!(!out.contains("- other-chat"));
     }
 }

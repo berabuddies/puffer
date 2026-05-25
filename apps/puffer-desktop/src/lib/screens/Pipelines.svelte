@@ -118,6 +118,7 @@
   let loading = $state(false);
   let error = $state<string | null>(null);
   let connectorCommandRunning = $state(false);
+  let connectorCommandRunningFor = $state<string | null>(null);
   let connectionCommandRunningFor = $state<string | null>(null);
   let monitorCommandRunningFor = $state<string | null>(null);
   let refreshGeneration = 0;
@@ -527,6 +528,25 @@
     }
   }
 
+  async function runConnectorSetupCommand(connector: WorkflowConnector) {
+    const connectionName = connectorConnectionHint(connector);
+    const command = connectorConnectCommand(connector, connectionName);
+    if (connectorCommandRunnerBusy() || !onRunConnectCommand) return;
+    selectedConnectorSlug = connector.connector_slug;
+    selectedConnectorConnectionName = connectionName;
+    connectorCommandRunningFor = connector.connector_slug;
+    try {
+      const started = await onRunConnectCommand(command);
+      saveNotice = started === false
+        ? `Could not start ${command}.`
+        : `Started ${command} in an agent session.`;
+    } catch (err) {
+      saveNotice = `Could not start ${command}.`;
+    } finally {
+      connectorCommandRunningFor = null;
+    }
+  }
+
   function connectionMonitorSupported(connection: WorkflowConnection): boolean {
     if (connection.monitor_command !== undefined) return Boolean(connection.monitor_command);
     return connectionTriggerSupported(connection);
@@ -541,7 +561,10 @@
   }
 
   function connectorCommandRunnerBusy(): boolean {
-    return connectorCommandRunning || connectionCommandRunningFor !== null || monitorCommandRunningFor !== null;
+    return connectorCommandRunning
+      || connectorCommandRunningFor !== null
+      || connectionCommandRunningFor !== null
+      || monitorCommandRunningFor !== null;
   }
 
   async function runConnectionConnectCommand(connection: WorkflowConnection) {
@@ -642,6 +665,9 @@
         connector.connector_slug,
         connector.description,
         connector.skill,
+        connector.connect_command,
+        connector.suggested_connection_slug,
+        "connect setup",
         connector.action_slugs.join(" ")
       ])
     }));
@@ -1266,32 +1292,46 @@
                   {#each filteredConnectors as connector (connector.connector_slug)}
                     {@const connectorConnections = connectionsForConnector(connector.connector_slug)}
                     {@const canTrigger = connectorTriggerSupported(connector)}
+                    {@const connectCommand = connectorConnectCommand(connector)}
                     {@const actionSlugs = connectorActionSlugs(connector, connectorQuery)}
                     {@const hiddenActions = connectorHiddenActionCount(connector, actionSlugs)}
-                    <button
-                      type="button"
-                      class="pf-connector-row"
-                      data-selected={selectedConnectorSlug === connector.connector_slug}
-                      data-supported={canTrigger}
-                      aria-label={canTrigger ? `Plan ${connector.connector_slug} workflow trigger` : `Select ${connector.connector_slug} connector setup`}
-                      onclick={() => useConnectorTemplate(connector)}
-                    >
-                      <span class="pf-connector-main">
-                        <strong>{connector.connector_slug}</strong>
-                        <small>{connector.description}</small>
-                      </span>
-                      <span class="pf-connector-tags">
-                        {#if connector.requires_auth}<span>auth</span>{/if}
-                        {#if connector.can_subscribe}<span>events</span>{/if}
-                        {#if canTrigger}<span>trigger</span>{:else}<span>no trigger</span>{/if}
-                        {#if connector.can_proxy_agent}<span>proxy</span>{/if}
-                        {#each actionSlugs as action}
-                          <span class="pf-connector-action">{action}</span>
-                        {/each}
-                        {#if hiddenActions > 0}<span>+{hiddenActions} actions</span>{/if}
-                        {#if connectorConnections.length > 0}<span>{connectorConnections.length} conn</span>{/if}
-                      </span>
-                    </button>
+                    <div class="pf-connector-row-group">
+                      <button
+                        type="button"
+                        class="pf-connector-row"
+                        data-selected={selectedConnectorSlug === connector.connector_slug}
+                        data-supported={canTrigger}
+                        aria-label={canTrigger ? `Plan ${connector.connector_slug} workflow trigger` : `Select ${connector.connector_slug} connector setup`}
+                        onclick={() => useConnectorTemplate(connector)}
+                      >
+                        <span class="pf-connector-main">
+                          <strong>{connector.connector_slug}</strong>
+                          <small>{connector.description}</small>
+                        </span>
+                        <span class="pf-connector-tags">
+                          {#if connector.requires_auth}<span>auth</span>{/if}
+                          {#if connector.can_subscribe}<span>events</span>{/if}
+                          {#if canTrigger}<span>trigger</span>{:else}<span>no trigger</span>{/if}
+                          {#if connector.can_proxy_agent}<span>proxy</span>{/if}
+                          {#each actionSlugs as action}
+                            <span class="pf-connector-action">{action}</span>
+                          {/each}
+                          {#if hiddenActions > 0}<span>+{hiddenActions} actions</span>{/if}
+                          {#if connectorConnections.length > 0}<span>{connectorConnections.length} conn</span>{/if}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        class="pf-icon-btn pf-connect-btn"
+                        aria-label={`Run ${connectCommand}`}
+                        title={connectCommand}
+                        aria-busy={connectorCommandRunningFor === connector.connector_slug}
+                        disabled={connectorCommandRunnerBusy() || !onRunConnectCommand}
+                        onclick={() => runConnectorSetupCommand(connector)}
+                      >
+                        <Icon name="plug" size={12} />
+                      </button>
+                    </div>
                   {/each}
                 </div>
 
@@ -1924,11 +1964,19 @@
     overflow: auto;
   }
 
-  .pf-connection-row-group {
+  .pf-connection-row-group,
+  .pf-connector-row-group {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 30px 30px;
     align-items: stretch;
     gap: 5px;
+  }
+
+  .pf-connection-row-group {
+    grid-template-columns: minmax(0, 1fr) 30px 30px;
+  }
+
+  .pf-connector-row-group {
+    grid-template-columns: minmax(0, 1fr) 30px;
   }
 
   .pf-connection-row {
@@ -1945,7 +1993,8 @@
     text-align: left;
   }
 
-  .pf-connection-row-group .pf-icon-btn {
+  .pf-connection-row-group .pf-icon-btn,
+  .pf-connector-row-group .pf-icon-btn {
     width: 30px;
     height: auto;
     min-height: 100%;

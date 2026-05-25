@@ -155,6 +155,31 @@ test("pipeline connector command can start setup from the picker", async ({ page
   expect(String(request.params.sessionId ?? "")).not.toHaveLength(0);
 });
 
+test("pipeline connector catalog can run default setup from a connector row", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  await page.getByLabel("Search connectors").fill("setup lark app react");
+  const connector = page
+    .locator('[aria-label="Connector catalog"]')
+    .getByRole("button", { name: "Select lark-app connector setup" });
+  await expect(connector).toContainText("react");
+  await expect(connector).toContainText("no trigger");
+
+  const runButton = page.getByRole("button", { name: "Run /connect lark-app lark-app" });
+  await expect(runButton).toHaveAttribute("title", "/connect lark-app lark-app");
+  await runButton.click();
+
+  const request = await daemon.waitForRequest(
+    "run_agent_turn",
+    (candidate) => candidate.params.message === "/connect lark-app lark-app"
+  );
+  expect(String(request.params.sessionId ?? "")).not.toHaveLength(0);
+});
+
 test("pipeline connection picker can start connector task monitors", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

@@ -389,6 +389,30 @@ export class FakeDaemon {
         action_slugs: []
       },
       {
+        connector_slug: "lark-app",
+        description: "Lark custom app connector over OpenAPI",
+        skill: "lark",
+        requires_auth: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "lark-app",
+        connect_command: "/connect lark-app lark-app",
+        action_slugs: ["send_message", "react", "remove_reaction"]
+      },
+      {
+        connector_slug: "lark-login",
+        description: "Lark user-token account connector over OpenAPI",
+        skill: "lark",
+        requires_auth: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "lark-login",
+        connect_command: "/connect lark-login lark-login",
+        action_slugs: ["send_message", "react", "remove_reaction"]
+      },
+      {
         connector_slug: "email",
         description: "Email connector over SMTP and IMAP-compatible polling",
         skill: "email",
