@@ -52,7 +52,8 @@ append run-specific feedback, but workers should not rewrite these rules.
 
 - Explorer agents create candidate interactions only.
 - Replay validates whether the interaction is stable and product-visible.
-- Triage promotes only replay-backed product candidates.
+- Triage writes strict `verdict.json`; the citation gate writes
+  `verdict-gate.json`, and the main agent owns all ledger appends.
 - Failed validation should feed the next prompt as a concrete rejection rule:
   what looked suspicious, why it was not a product bug, and which evidence was
   missing.

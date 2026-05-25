@@ -104,7 +104,7 @@ function summarize(shards) {
     completedReplayReports: 0,
     missingReplayReports: 0,
     finalReportsPresent: 0,
-    bugListAppendBlocks: 0,
+    legacyBugListAppendBlocks: 0,
     verdictReportsPresent: 0,
     admittedVerdicts: 0,
     candidateVerdicts: 0,
@@ -129,7 +129,7 @@ function summarize(shards) {
     if (shard.gate?.disposition === "candidate") summary.candidateVerdicts += 1;
     if (shard.gate?.disposition === "dismissed") summary.dismissedVerdicts += 1;
     if (shard.gate?.disposition === "gate_failed") summary.gateFailedVerdicts += 1;
-    summary.bugListAppendBlocks += shard.bugListAppendBlocks.length;
+    summary.legacyBugListAppendBlocks += shard.bugListAppendBlocks.length;
     summary.totalReplayCases += Number(shard.summary.total ?? 0);
     summary.newCandidateFindings += Number(shard.summary.newCandidateFindings ?? 0);
     summary.knownDuplicateFindings += Number(shard.summary.knownDuplicateFindings ?? 0);
@@ -172,7 +172,7 @@ function formatMarkdown(payload) {
     `- Completed replay reports: ${payload.summary.completedReplayReports}`,
     `- Missing replay reports: ${payload.summary.missingReplayReports}`,
     `- Final reports present: ${payload.summary.finalReportsPresent}`,
-    `- BUG_LIST_APPEND blocks: ${payload.summary.bugListAppendBlocks}`,
+    `- Legacy BUG_LIST_APPEND blocks: ${payload.summary.legacyBugListAppendBlocks}`,
     `- Verdict reports present: ${payload.summary.verdictReportsPresent}`,
     `- Admitted verdicts: ${payload.summary.admittedVerdicts}`,
     `- Candidate verdicts: ${payload.summary.candidateVerdicts}`,
@@ -204,13 +204,13 @@ function formatMarkdown(payload) {
     lines.push(`- Known duplicates: ${shard.summary.knownDuplicateFindings ?? 0}`);
     lines.push(`- Non-passing failures: ${shard.summary.nonPassingFailures ?? shard.summary.actionableFailures ?? 0}`);
     lines.push(`- Actionable product failures: ${shard.summary.actionableFailures ?? 0}`);
-    lines.push(`- BUG_LIST_APPEND blocks: ${shard.bugListAppendBlocks.length}`);
+    lines.push(`- Legacy BUG_LIST_APPEND blocks: ${shard.bugListAppendBlocks.length}`);
     if (shard.gate?.failureReasons?.length) {
       lines.push(`- Gate failures: ${shard.gate.failureReasons.join("; ")}`);
     }
     lines.push("");
   }
-  lines.push("## BUG_LIST_APPEND Blocks", "");
+  lines.push("## Legacy BUG_LIST_APPEND Blocks", "");
   const blocks = payload.shards.flatMap((shard) =>
     shard.bugListAppendBlocks.map((block) => ({ shard: shard.name, block }))
   );

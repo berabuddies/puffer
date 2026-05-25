@@ -236,21 +236,14 @@ function formatFindingReport({ namespace, shard, seed, replaySummary, artifacts,
   ];
   if (gate.disposition === "admitted") {
     lines.push(
-      "BUG_LIST_APPEND",
-      `title: ${verdict.title}`,
-      "status: pending",
-      `severity: ${verdict.severity}`,
-      `area: ${verdict.area}`,
-      `shard: ${verdict.shard}`,
-      `source-run: ${verdict.source_run}`,
-      `evidence: apps/puffer-desktop/tests/fuzz/.runs/${namespace}/verdict.json`,
-      "stability: replay-gated",
-      `expected: ${verdict.expected}`,
-      `actual: ${verdict.actual}`,
-      `impact: ${verdict.impact}`,
-      `repro: ${verdict.repro.join(" / ")}`,
-      `notes: ${verdict.notes}`,
-      "END_BUG_LIST_APPEND"
+      "Admitted by citation gate. Main-agent ledger append command:",
+      "",
+      "```sh",
+      "node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs bug-list \\",
+      "  --append-from-verdict \\",
+      `  --verdict apps/puffer-desktop/tests/fuzz/.runs/${namespace}/verdict.json \\`,
+      `  --gate apps/puffer-desktop/tests/fuzz/.runs/${namespace}/verdict-gate.json`,
+      "```"
     );
   } else {
     lines.push(`No admitted findings. Gate disposition: ${gate.disposition}.`);

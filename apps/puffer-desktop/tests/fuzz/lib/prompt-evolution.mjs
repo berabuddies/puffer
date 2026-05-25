@@ -89,7 +89,7 @@ export function formatPromptEvolutionMarkdown({ baseGuide, pack }) {
     "## Worker Output Contract",
     "",
     "- Explorer workers should output candidate cases only; they should not claim findings.",
-    "- Triage workers should emit BUG_LIST_APPEND only when replay evidence crosses the accepted finding standard.",
+    "- Triage workers should emit structured verdicts only when replay evidence crosses the accepted finding standard.",
     "- Reports must include rejected-candidate reasons, not just accepted findings.",
     "- Each accepted item must include a minimal repro, expected behavior, actual behavior, impact, evidence path, and stability.",
     ""
@@ -110,7 +110,7 @@ function runtimeAdjustments(pack) {
     lines.push("- No replay feedback has been recorded in the ledger yet; keep the acceptance bar strict and require direct replay evidence.");
   }
   if (pack.feedbackStats.knownDuplicateFindings > 0 || pack.feedbackStats.duplicateRate > 0.25) {
-    lines.push("- Duplicate pressure is non-trivial; triage must compare root cause and user intent before emitting BUG_LIST_APPEND.");
+    lines.push("- Duplicate pressure is non-trivial; triage must compare root cause and user intent before emitting an admitted verdict.");
   }
   if (pack.feedbackStats.stableFailed === 0 && pack.feedbackStats.actionableFailures === 0) {
     lines.push("- Recent broad runs produced no stable actionable failures; explorers should bias toward shorter core-loop race probes instead of broad random walks.");
@@ -119,7 +119,7 @@ function runtimeAdjustments(pack) {
     lines.push("- Flake rate is above threshold; require repeated attempts or a deterministic visible stuck/corrupt state before promotion.");
   }
   if (pack.bugMemoryStats.harness > 0) {
-    lines.push("- Recent bug memory includes harness/precondition failures; keep these under coverage gaps and do not emit BUG_LIST_APPEND for them.");
+    lines.push("- Recent bug memory includes harness/precondition failures; keep these under coverage gaps and do not emit admitted verdicts for them.");
   }
   if (pack.bugMemoryStats.noFinding > pack.bugMemoryStats.acceptedCandidates) {
     lines.push("- No-finding pressure is high; planner should bias toward uncovered runtime edges and temporal async invariants rather than broad random walks.");
@@ -127,7 +127,7 @@ function runtimeAdjustments(pack) {
   if (pack.bugStats.total === 0) {
     lines.push("- The main fuzz bug ledger is empty; accepted reports must be especially explicit so the first entries are high quality.");
   }
-  lines.push("- Always separate product bugs from harness gaps. Harness gaps can be reported under coverage gaps but must not become BUG_LIST_APPEND.");
+  lines.push("- Always separate product bugs from harness gaps. Harness gaps can be reported under coverage gaps but must not become admitted verdicts.");
   lines.push("- Prefer one high-signal accepted finding over multiple vague candidates.");
   return lines;
 }

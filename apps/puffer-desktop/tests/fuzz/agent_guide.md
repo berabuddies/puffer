@@ -14,9 +14,10 @@ Use this guide when an agent is asked to find Puffer desktop interaction bugs.
 - Prefer fake daemon for race construction.
 - Re-check high-value failures with real daemon when the path exists there.
 - Convert confirmed failures into deterministic Playwright specs.
-- Do not edit `apps/puffer-desktop/tests/fuzz/BUGS.md` from a subagent. Report
-  a finding block in your shard report; the main agent appends or updates the
-  central bug list.
+- Do not edit `apps/puffer-desktop/tests/fuzz/BUGS.md` or
+  `apps/puffer-desktop/tests/fuzz/BUGS_CAND.md` from a subagent. Shard reports
+  should point to `verdict.json`, `verdict-gate.json`, and the replay report;
+  the main agent appends or updates central ledgers.
 
 ## Agent Loop
 
@@ -35,8 +36,9 @@ Use this guide when an agent is asked to find Puffer desktop interaction bugs.
 13. Decide whether it is a product bug using the prompt-evolution acceptance and false-positive checklist.
 14. During fuzz-only campaigns, archive confirmed findings under
     `apps/puffer-desktop/tests/fuzz/.runs/<run>/findings.md`.
-15. For each accepted finding, include a `BUG_LIST_APPEND` block in the shard
-    report so the main agent can append it to `BUGS.md`.
+15. For each accepted or candidate finding, include the verdict, gate, and
+    replay artifact paths in the shard report so the main agent can append it
+    to `BUGS.md` or `BUGS_CAND.md`.
 16. Do not patch product code from a fuzz-only task.
 17. For a later product-fix task, add regression coverage and update or add a
     concise component spec.
@@ -71,46 +73,34 @@ Reject the issue if it is only:
 
 ## Bug List Handoff
 
-The central ledger is `apps/puffer-desktop/tests/fuzz/BUGS.md`. It is owned by
-the main agent to avoid concurrent edits and context drift. Subagents should
-append this block to their final report for every accepted bug:
+The central ledgers are `apps/puffer-desktop/tests/fuzz/BUGS.md` and
+`apps/puffer-desktop/tests/fuzz/BUGS_CAND.md`. They are owned by the main agent
+to avoid concurrent edits and context drift. Subagents should report these
+artifact paths for every accepted or candidate bug:
 
 ```text
-BUG_LIST_APPEND
-title: <short user-visible bug title>
-status: pending
-severity: P0|P1|P2
-area: <component or flow>
-shard: <shard id>
-source-run: <run namespace>
-evidence: apps/puffer-desktop/tests/fuzz/.runs/<run>/final.md
-stability: <for example 3/3>
-expected: <expected behavior>
-actual: <actual behavior>
-impact: <user impact>
-repro: <minimal steps>
-notes: <duplicate/out-of-shard/source pointers if relevant>
-END_BUG_LIST_APPEND
+verdict: apps/puffer-desktop/tests/fuzz/.runs/<run>/verdict.json
+gate: apps/puffer-desktop/tests/fuzz/.runs/<run>/verdict-gate.json
+replay: apps/puffer-desktop/tests/fuzz/.runs/<run>/bounded-replay-report.json
 ```
 
-The main agent should append it with:
+The main agent should append admitted verdicts with:
 
 ```sh
 node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs bug-list \
+  --append-from-verdict \
+  --verdict apps/puffer-desktop/tests/fuzz/.runs/<run>/verdict.json \
+  --gate apps/puffer-desktop/tests/fuzz/.runs/<run>/verdict-gate.json
+```
+
+The main agent should append predicate-missing candidates with:
+
+```sh
+node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs candidate-list \
   --append \
-  --title "<title>" \
-  --status pending \
-  --severity P1 \
-  --area "<area>" \
-  --shard "<shard>" \
-  --source-run "<run>" \
-  --evidence "<evidence>" \
-  --stability "<stability>" \
-  --expected "<expected>" \
-  --actual "<actual>" \
-  --impact "<impact>" \
-  --repro "<repro>" \
-  --notes "<notes>"
+  --verdict apps/puffer-desktop/tests/fuzz/.runs/<run>/verdict.json \
+  --gate apps/puffer-desktop/tests/fuzz/.runs/<run>/verdict-gate.json \
+  --evidence apps/puffer-desktop/tests/fuzz/.runs/<run>/bounded-replay-report.json
 ```
 
 When a product fix lands, update the entry with:

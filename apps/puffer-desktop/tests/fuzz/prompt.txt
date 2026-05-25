@@ -15,9 +15,10 @@ Rules:
 - Use scheduler shard boundaries when available. Treat `ownedNodes` as the
   accepted-finding boundary, and use `allowedSetupNodes` only to reach that
   subtree.
-- Do not edit `apps/puffer-desktop/tests/fuzz/BUGS.md` directly. For every
-  accepted finding, include a `BUG_LIST_APPEND` block in your report so the
-  main agent can append it with `puffer-fuzz.mjs bug-list --append`.
+- Do not edit `apps/puffer-desktop/tests/fuzz/BUGS.md` or
+  `apps/puffer-desktop/tests/fuzz/BUGS_CAND.md` directly. Bounded replay writes
+  evidence, triage writes `verdict.json`, and the citation gate writes
+  `verdict-gate.json`; the main agent appends admitted or candidate verdicts.
 
 Workflow:
 1. Read `apps/puffer-desktop/tests/fuzz/README.md`, `apps/puffer-desktop/tests/fuzz/agent_guide.md`, and `apps/puffer-desktop/tests/fuzz/playwright_adapter.md`.
@@ -45,7 +46,7 @@ Workflow:
 10. If a replay fails, use the repeated attempts in the bounded report to check stability.
 11. Shrink the repro mentally or by creating a smaller temporary probe under `apps/puffer-desktop/tests/fuzz/.runs/<unique-run-name>/` only if needed.
 
-For every accepted bug, write a detailed finding with:
+For every accepted or candidate bug, write a detailed finding with:
 - Title
 - Severity estimate: P0/P1/P2
 - Area/component
@@ -60,24 +61,12 @@ For every accepted bug, write a detailed finding with:
 - Relevant source files/components likely involved
 - Suggested regression test target
 - Any screenshots/error-context paths if generated
-- A `BUG_LIST_APPEND` block with the fields below:
+- The structured verdict/gate artifact paths:
 
 ```
-BUG_LIST_APPEND
-title: <short user-visible bug title>
-status: pending
-severity: P0|P1|P2
-area: <component or flow>
-shard: <shard id>
-source-run: <unique-run-name>
-evidence: apps/puffer-desktop/tests/fuzz/.runs/<unique-run-name>/findings.md
-stability: <for example 3/3>
-expected: <expected behavior>
-actual: <actual behavior>
-impact: <user impact>
-repro: <minimal steps>
-notes: <duplicate/out-of-shard/source pointers if relevant>
-END_BUG_LIST_APPEND
+verdict: apps/puffer-desktop/tests/fuzz/.runs/<unique-run-name>/verdict.json
+gate: apps/puffer-desktop/tests/fuzz/.runs/<unique-run-name>/verdict-gate.json
+replay: apps/puffer-desktop/tests/fuzz/.runs/<unique-run-name>/bounded-replay-report.json
 ```
 
 At the end:

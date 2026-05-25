@@ -153,7 +153,7 @@ Produce a short execution plan for small-model worker shards:
 - likely false-positive patterns
 - prompt-evolution checklist items that workers must obey
 - exact report format requirements
-- reminder that workers must output BUG_LIST_APPEND blocks, not edit BUGS.md
+- reminder that triage writes verdict.json and verdict-gate.json, not direct BUGS edits
 - reminder that workers should execute the fixed commands instead of
   improvising campaign strategy
 
@@ -210,8 +210,9 @@ case ID, minimal trigger steps, expected behavior, actual behavior, user impact,
 why this is a product bug, shard ownership, stability, likely source area,
 regression test target, and artifact paths.
 
-Accepted findings must include a BUG_LIST_APPEND block. Workers must not edit
-apps/puffer-desktop/tests/fuzz/BUGS.md directly.
+Triage must emit strict `verdict.json`; the deterministic citation gate writes
+`verdict-gate.json`. Only the main agent may append admitted verdicts to
+apps/puffer-desktop/tests/fuzz/BUGS.md.
 """
 
 

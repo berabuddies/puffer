@@ -232,15 +232,16 @@ agentflow run apps/puffer-desktop/tests/fuzz/agentflow_puffer_openrouter_campaig
   --output summary
 ```
 
-The OpenRouter campaign uses the same UI-tree scheduler and `BUG_LIST_APPEND`
+The OpenRouter campaign uses the same UI-tree scheduler and verdict/gate
 handoff. Codex plans the shard boundaries and report expectations, the
 OpenRouter-backed Explorer uses function tools to construct the assigned GUI
 trigger sequence, the harness replays that generated case, and an
 OpenRouter-backed triage step writes the shard finding report. Preflight also
 writes an evolution plan and passes it back into scheduling. Triage now emits a
-strict `verdict.json`; the citation gate writes `verdict-gate.json` and only
-admitted verdicts can produce a `BUG_LIST_APPEND` block. Candidate verdicts can
-be reviewed with `puffer-openrouter-reviewer.mjs`; the reviewer writes
+strict `verdict.json`; the citation gate writes `verdict-gate.json`, and only
+the main agent can append admitted verdicts to `BUGS.md` with
+`bug-list --append-from-verdict`. Candidate verdicts can be reviewed with
+`puffer-openrouter-reviewer.mjs`; the reviewer writes
 `reviewer.json` but does not edit ledgers. It defaults to two shards and two-way
 concurrency. Increase `PUFFER_OPENROUTER_SHARD_LIMIT` and
 `PUFFER_OPENROUTER_CONCURRENCY` only after the small run shows acceptable
@@ -286,9 +287,9 @@ and the fixed checkout app to produce zero admitted findings.
    --fail-on-new-finding`, which keeps specs, logs, and Playwright output under
    `apps/puffer-desktop/tests/fuzz/.runs/<namespace>/`.
 7. Record replay feedback with `record-feedback --shard <id> --input <bounded-replay-report.json>`.
-8. If it reproduces a product bug, ask the main agent to append the candidate
-   to `BUGS.md` with `bug-list --append`; subagents should not edit `BUGS.md`
-   directly.
+8. If it reproduces a product bug, ask the main agent to append the admitted
+   verdict with `bug-list --append-from-verdict`; subagents should not edit
+   `BUGS.md` or `BUGS_CAND.md` directly.
 9. Shrink the sequence to the smallest stable
    reproducer.
 10. For fuzz-only campaigns, write the finding under
@@ -326,7 +327,8 @@ For day-to-day use, treat the app as ready only when:
 - `adapters/playwright-actions.json`: generated-action support map.
 - `coverage-ledger.json`: validated coverage and fixed finding ledger.
 - `feedback-ledger.json`: scheduler feedback from replay runs.
-- `BUGS.md`: main-agent-owned candidate/fixed bug ledger.
+- `BUGS.md`: main-agent-owned admitted/fixed bug ledger.
+- `BUGS_CAND.md`: main-agent-owned predicate-missing candidate ledger.
 - `bin/puffer-fuzz.mjs`: CLI entrypoint.
 - `lib/*.mjs`: deterministic generator, coverage summarizer, and formatters.
 - `playwright/pufferCoverage.ts`: reusable state, element, and trace helpers for Playwright replays.
