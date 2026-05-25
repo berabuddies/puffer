@@ -1833,16 +1833,21 @@
   ) {
     const cached = transientConversationStates[sessionId] ?? emptyTransientConversationState();
     const { [ev.turnId]: _dropReplay, ...replayTextByTurn } = cached.replayTextByTurn;
-    const settledLiveItems = cached.liveStreamItems.filter(
-      (item) => item.kind !== "permission" && item.kind !== "question"
-    );
+    const wasCancelingTurn = cached.cancelingTurnId === ev.turnId;
+    const settledLiveItems = wasCancelingTurn
+      ? withoutLiveItemsForTurn(cached.liveStreamItems, ev.turnId)
+      : cached.liveStreamItems.filter(
+          (item) => item.kind !== "permission" && item.kind !== "question"
+        );
     setTransientConversationState(sessionId, {
       ...cached,
-      liveStreamItems: withCompletionAssistantFallback(
-        settledLiveItems,
-        ev.assistantText,
-        ev.turnId
-      ),
+      liveStreamItems: wasCancelingTurn
+        ? settledLiveItems
+        : withCompletionAssistantFallback(
+            settledLiveItems,
+            ev.assistantText,
+            ev.turnId
+          ),
       replayTextByTurn,
       turnPermissionLookup: {},
       turnQuestionLookup: {},
@@ -1863,9 +1868,12 @@
     const cached = transientConversationStates[sessionId] ?? emptyTransientConversationState();
     const detail = ev.error?.trim() || "Unknown agent error.";
     const { [ev.turnId]: _dropReplay, ...replayTextByTurn } = cached.replayTextByTurn;
-    const settledLiveItems = cached.liveStreamItems.filter(
-      (item) => item.kind !== "permission" && item.kind !== "question"
-    );
+    const wasCancelingTurn = cached.cancelingTurnId === ev.turnId;
+    const settledLiveItems = wasCancelingTurn
+      ? withoutLiveItemsForTurn(cached.liveStreamItems, ev.turnId)
+      : cached.liveStreamItems.filter(
+          (item) => item.kind !== "permission" && item.kind !== "question"
+        );
     setTransientConversationState(sessionId, {
       ...cached,
       liveStreamItems: appendCachedLiveItem(
@@ -2737,6 +2745,8 @@
     try {
       const result = await cancelTurn(turnId);
       if (!result.ok && currentTurnId === turnId) {
+        if (selectedSession) markTurnSettled(selectedSession.id, turnId);
+        liveStreamItems = withoutLiveItemsForTurn(liveStreamItems, turnId);
         cancelingTurnId = null;
         currentTurnId = null;
         turnStartedAtMs = null;
@@ -3027,6 +3037,22 @@
     return `live-tool-${turnId}-${callId}`;
   }
 
+  function liveItemBelongsToTurn(item: TimelineItem, turnId: string): boolean {
+    return (
+      item.id === streamingAssistantId(turnId) ||
+      item.id === `live-complete-assistant-${turnId}` ||
+      item.id === `live-error-turn-error-${turnId}` ||
+      item.id.startsWith(`live-tool-${turnId}-`) ||
+      item.id.startsWith(`live-gate-${turnId}-`) ||
+      item.id.startsWith(`live-perm-${turnId}-`) ||
+      item.id.startsWith(`live-question-${turnId}-`)
+    );
+  }
+
+  function withoutLiveItemsForTurn(items: TimelineItem[], turnId: string): TimelineItem[] {
+    return items.filter((item) => !liveItemBelongsToTurn(item, turnId));
+  }
+
   function upsertStreamingAssistant(turnId: string, delta: string) {
     const id = streamingAssistantId(turnId);
     const existingIdx = liveStreamItems.findIndex((item) => item.id === id && item.kind === "assistant");
@@ -3092,6 +3118,12 @@
     rememberSettledTurn(sessionId, turnId);
     const { [turnId]: _drop, ...rest } = replayTextByTurn;
     replayTextByTurn = rest;
+    turnPermissionLookup = Object.fromEntries(
+      Object.entries(turnPermissionLookup).filter(([, mapping]) => mapping.turnId !== turnId)
+    );
+    turnQuestionLookup = Object.fromEntries(
+      Object.entries(turnQuestionLookup).filter(([, mapping]) => mapping.turnId !== turnId)
+    );
     if (cancelingTurnId === turnId) {
       cancelingTurnId = null;
     }
@@ -3331,7 +3363,8 @@
         break;
       }
       case "turn-complete":
-      case "turn-error":
+      case "turn-error": {
+        const wasCancelingTurn = cancelingTurnId === ev.turnId;
         markTurnSettled(sid, ev.turnId);
         turnStartedAtMs = null;
         turnThinking = false;
@@ -3349,11 +3382,13 @@
         if (selectedSession) {
           const sessionToRefresh = selectedSession;
           const completionText = ev.type === "turn-complete" ? ev.assistantText : "";
-          const liveItemsAtCompletion = withCompletionAssistantFallback(
-            liveStreamItems,
-            completionText,
-            ev.turnId
-          );
+          const liveItemsAtCompletion = wasCancelingTurn
+            ? withoutLiveItemsForTurn(liveStreamItems, ev.turnId)
+            : withCompletionAssistantFallback(
+                liveStreamItems,
+                completionText,
+                ev.turnId
+              );
           const submittedAtCompletion = submittedMessages;
           liveStreamItems = stillMissingFromPersisted(
             [...(sessionDetail?.timeline ?? []), ...submittedAtCompletion],
@@ -3373,6 +3408,7 @@
           );
         }
         break;
+      }
     }
   }
 

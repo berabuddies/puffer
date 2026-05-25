@@ -4810,6 +4810,77 @@ test("turn cancellation completion restores send after backend reconnect", async
   await expect(page.locator(".pf-composer textarea")).toBeEnabled();
 });
 
+test("canceled turn live tool calls do not append after the next message", async ({ page }) => {
+  const daemon = new FakeDaemon({
+    sessions: [
+      {
+        sessionId: "session-cancel-live-tools",
+        displayName: "Cancel live tools",
+        title: "Cancel live tools",
+        cwd: "/tmp/puffer",
+        folderPath: "/tmp/puffer",
+        updatedAtMs: baseTime,
+        createdAtMs: baseTime - 60_000,
+        eventCount: 0,
+        activityStatus: "idle",
+        providerId: "codex",
+        modelId: "test-model",
+        timeline: []
+      }
+    ]
+  });
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await openSession(page, /Cancel live tools/);
+  await page.locator(".pf-composer textarea").fill("Start a tool-heavy turn");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.sessionId === "session-cancel-live-tools"
+  );
+
+  daemon.emit("session:session-cancel-live-tools:event", {
+    type: "tool-calls-requested",
+    turnId: "turn-session-cancel-live-tools",
+    requests: [
+      {
+        callId: "old-tool",
+        toolId: "Bash",
+        input: "{\"command\":\"stale-cancel-tool\"}"
+      }
+    ]
+  });
+  const staleTool = page.locator(".pf-tool").filter({ hasText: "stale-cancel-tool" });
+  await expect(staleTool).toBeVisible();
+
+  await page.getByRole("button", { name: "Stop turn" }).click();
+  await daemon.waitForRequest(
+    "cancel_turn",
+    (request) => request.params.turnId === "turn-session-cancel-live-tools"
+  );
+  daemon.emit("session:session-cancel-live-tools:event", {
+    type: "turn-complete",
+    turnId: "turn-session-cancel-live-tools",
+    assistantText: ""
+  });
+
+  await expect(page.getByRole("button", { name: "Stop turn" })).toHaveCount(0);
+  await expect(staleTool).toHaveCount(0);
+
+  await page.locator(".pf-composer textarea").fill("Follow up after cancel");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await daemon.waitForRequest(
+    "run_agent_turn",
+    (request) => request.params.message === "Follow up after cancel"
+  );
+
+  await expect(
+    page.locator('.pf-msg[data-role="user"]').filter({ hasText: "Follow up after cancel" })
+  ).toBeVisible();
+  await expect(staleTool).toHaveCount(0);
+});
+
 test("turn completion restores send after backend reconnect", async ({ page }) => {
   const daemon = new FakeDaemon({
     sessions: [
