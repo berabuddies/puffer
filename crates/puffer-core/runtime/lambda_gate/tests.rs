@@ -411,6 +411,54 @@ fn host_catalogue_runtime_validation_rejects_missing_input_contract() {
 }
 
 #[test]
+fn host_catalogue_runtime_validation_rejects_effectful_lambda_internal() {
+    let error = validate_host_catalogue_runtime(
+        r#"{
+            "effects": [],
+            "domains": [],
+            "tools": [{
+                "name": "send_mail",
+                "effects": ["net_w"],
+                "concreteTools": ["LambdaInternal"],
+                "concreteInputContracts": {
+                    "LambdaInternal": {
+                        "step": "mail.send",
+                        "args": {"to": {"$arg": "to"}}
+                    }
+                },
+                "params": [{"name": "to", "ty": "str"}]
+            }]
+        }"#,
+    )
+    .expect_err("effectful LambdaInternal binding must fail");
+
+    assert!(format!("{error:#}").contains("binds LambdaInternal despite external effects [net_w]"));
+}
+
+#[test]
+fn host_catalogue_runtime_validation_accepts_internal_lambda_step() {
+    validate_host_catalogue_runtime(
+        r#"{
+            "effects": [],
+            "domains": [],
+            "tools": [{
+                "name": "classify",
+                "effects": ["proc"],
+                "concreteTools": ["LambdaInternal"],
+                "concreteInputContracts": {
+                    "LambdaInternal": {
+                        "step": "demo.classify",
+                        "args": {"text": {"$arg": "text"}}
+                    }
+                },
+                "params": [{"name": "text", "ty": "str"}]
+            }]
+        }"#,
+    )
+    .unwrap();
+}
+
+#[test]
 fn host_catalogue_runtime_validation_rejects_malformed_refinement() {
     let error = validate_host_catalogue_runtime(
             r#"{"effects":[],"domains":[],"tools":[{"name":"custom_fetch","effects":[],"concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":{"$arg":"id"}}},"params":[{"name":"id","ty":"str{host_custom_rule id}"}]}]}"#,

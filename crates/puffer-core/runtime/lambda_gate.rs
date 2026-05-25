@@ -152,6 +152,15 @@ impl LambdaToolSig {
         dynamic_facts: &BTreeSet<(String, usize)>,
         available_facts: &BTreeSet<(String, usize)>,
     ) -> Result<()> {
+        if self.concrete_tools.contains("LambdaInternal")
+            && self.effects.iter().any(|effect| effect != "proc")
+        {
+            return Err(anyhow!(
+                "Lambda Skill host tool {} binds LambdaInternal despite external effects [{}]",
+                self.name,
+                self.effects.iter().cloned().collect::<Vec<_>>().join(", ")
+            ));
+        }
         let declared_params = self
             .params
             .iter()
