@@ -153,6 +153,7 @@ const SUPPORTED_LAMBDA_CONCRETE_TOOLS: &[&str] = &[
     "SendUserMessage",
     "Skill",
     "SlackAction",
+    "SpotifyAction",
     "Sleep",
     "StructuredOutput",
     "SubscriberInstall",

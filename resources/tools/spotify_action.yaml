@@ -1,0 +1,85 @@
+id: SpotifyAction
+name: SpotifyAction
+description: |-
+  Execute one declared Spotify Web API action through Puffer's typed Spotify
+  runtime.
+
+  Use this for verified Lambda Skill contracts whose concrete input fully names
+  the Spotify resource, action, and arguments. Puffer owns bearer-token lookup
+  and sends the exact Web API request described by the concrete contract.
+handler: runtime:workflow:spotify_action
+approval_policy: ask
+sandbox_policy: network
+input_schema:
+  type: object
+  properties:
+    resource:
+      type: string
+      enum:
+        - playback
+        - devices
+        - queue
+        - playlists
+        - library
+      description: Spotify API resource family.
+    action:
+      type: string
+      description: Resource-specific action such as play, pause, transfer, add, create, add_items, save, remove, list, or contains.
+    contextUri:
+      type: string
+      description: Spotify context URI or URL for playback.
+    uris:
+      description: Spotify URI, JSON string array, or string array.
+    uri:
+      type: string
+      description: Single Spotify URI or URL.
+    volumePercent:
+      type: integer
+      minimum: 0
+      maximum: 100
+      description: Playback volume percentage for set_volume.
+    deviceId:
+      type: string
+      description: Spotify device id for transfer.
+    play:
+      type: boolean
+      description: Whether transfer should immediately start playback.
+    playlistId:
+      type: string
+      description: Spotify playlist id, URI, or URL.
+    name:
+      type: string
+      description: Playlist name for create.
+    public:
+      type: boolean
+      description: Whether a created playlist is public.
+    collaborative:
+      type: boolean
+      description: Whether a created playlist is collaborative.
+    description:
+      type: string
+      description: Playlist description for create.
+    kind:
+      type: string
+      enum:
+        - tracks
+        - albums
+      description: Library item kind.
+    limit:
+      type: integer
+      minimum: 1
+      maximum: 50
+      description: Library list limit.
+  required:
+    - resource
+    - action
+  additionalProperties: false
+metadata:
+  may_spawn_processes: false
+  may_read_files: false
+  may_write_files: false
+  may_access_network: true
+display:
+  group: media
+  title: SpotifyAction
+  show_in_status: true

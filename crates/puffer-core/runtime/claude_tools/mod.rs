@@ -762,6 +762,7 @@ pub fn execute_workflow_tool(
         }
         "Slack" => workflow::slack::execute_slack(state, cwd, input),
         "SlackAction" => workflow::slack_action::execute_slack_action(state, cwd, input),
+        "SpotifyAction" => workflow::spotify_action::execute_spotify_action(state, cwd, input),
         "StructuredOutput" => workflow::structured_output::execute_structured_output(
             state,
             cwd,

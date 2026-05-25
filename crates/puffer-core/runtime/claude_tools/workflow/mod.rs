@@ -25,6 +25,7 @@ pub mod send_message;
 pub mod send_user_message;
 pub mod slack;
 pub mod slack_action;
+pub mod spotify_action;
 pub mod structured_output;
 pub mod subscriber_install;
 pub mod subscriber_list;
