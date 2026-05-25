@@ -285,7 +285,7 @@ pub fn supported_commands() -> Vec<CommandSpec> {
             "monitor",
             &[],
             "Create connector monitors that turn messages into tasks",
-            Some("<connection> [connection ...]"),
+            Some("[connection search | connection ...]"),
             CommandKind::Local,
         ),
         cmd(

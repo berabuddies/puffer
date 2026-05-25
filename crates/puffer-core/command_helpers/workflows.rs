@@ -165,19 +165,26 @@ fn write_connections(
         } else {
             "consumer=idle"
         };
-        let trigger = if connection_trigger_supported(context, roots, connection) {
+        let trigger_supported = connection_trigger_supported(context, roots, connection);
+        let trigger = if trigger_supported {
             "trigger=ready"
         } else {
             "trigger=unavailable"
         };
+        let monitor = if trigger_supported {
+            format!(" monitor=/monitor {}", connection.slug)
+        } else {
+            String::new()
+        };
         let _ = writeln!(
             out,
-            "- {} connector={} state={:?} {} {} {}",
+            "- {} connector={} state={:?} {} {}{} {}",
             connection.slug,
             connection.connector_slug,
             connection.state,
             consumer,
             trigger,
+            monitor,
             connection.description
         );
     }
@@ -380,4 +387,78 @@ fn subscriber_manifest_roots(paths: &ConfigPaths) -> SubscriberManifestRoots {
         paths.user_config_dir.clone(),
         paths.builtin_resources_dir.clone(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use puffer_subscriptions::ConnectionState;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    fn trigger_template() -> ConnectorTemplate {
+        ConnectorTemplate {
+            slug: "demo-chat".to_string(),
+            description: "Demo chat".to_string(),
+            skill: "demo".to_string(),
+            binary: "demo".to_string(),
+            command: vec!["true".to_string()],
+            requires_auth: false,
+            can_subscribe: true,
+            can_proxy_agent: false,
+            subscriber: None,
+            output_schema: json!({}),
+            actions: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn workflow_connections_show_monitor_command_for_trigger_ready_connections() {
+        let roots = SubscriberManifestRoots::new("/tmp/workspace", "/tmp/user", "/tmp/builtin");
+        let context = ConnectorContext {
+            connectors: vec![trigger_template()],
+            connections: vec![ConnectionRecord {
+                slug: "demo-main".to_string(),
+                connector_slug: "demo-chat".to_string(),
+                description: "Demo main channel".to_string(),
+                state: ConnectionState::Authenticated,
+                has_consumer: false,
+                cursor: None,
+                auth_failure_notified: false,
+            }],
+            error: None,
+        };
+        let mut out = String::new();
+
+        write_connections(&mut out, &context, &roots, "");
+
+        assert!(out.contains("trigger=ready monitor=/monitor demo-main"));
+    }
+
+    #[test]
+    fn workflow_connections_omit_monitor_command_for_non_trigger_connections() {
+        let roots = SubscriberManifestRoots::new("/tmp/workspace", "/tmp/user", "/tmp/builtin");
+        let mut template = trigger_template();
+        template.can_subscribe = false;
+        template.command.clear();
+        let context = ConnectorContext {
+            connectors: vec![template],
+            connections: vec![ConnectionRecord {
+                slug: "demo-main".to_string(),
+                connector_slug: "demo-chat".to_string(),
+                description: "Demo main channel".to_string(),
+                state: ConnectionState::Authenticated,
+                has_consumer: false,
+                cursor: None,
+                auth_failure_notified: false,
+            }],
+            error: None,
+        };
+        let mut out = String::new();
+
+        write_connections(&mut out, &context, &roots, "");
+
+        assert!(out.contains("trigger=unavailable"));
+        assert!(!out.contains("monitor=/monitor"));
+    }
 }
