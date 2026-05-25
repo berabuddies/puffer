@@ -792,6 +792,7 @@ pub fn execute_workflow_tool(
             workflow::workflow_tools::execute_workflow_validate(state, cwd, input)
         }
         "TaskCreate" => workflow::task_create::execute_task_create(state, cwd, input),
+        "TaskFlow" => workflow::task_flow::execute_task_flow(state, cwd, input),
         "TaskGet" => workflow::task_get::execute_task_get(state, cwd, input),
         "TaskList" => workflow::task_list::execute_task_list(state, cwd, input),
         "TaskOutput" => workflow::task_output::execute_task_output(state, cwd, input),

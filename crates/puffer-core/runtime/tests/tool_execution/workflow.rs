@@ -88,6 +88,136 @@ fn process_control_lists_logs_and_stops_interactive_processes() {
 }
 
 #[test]
+fn task_flow_enforces_revisions_and_persists_state() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let created = crate::runtime::claude_tools::workflow::task_flow::execute_task_flow(
+        &mut state,
+        &cwd,
+        json!({
+            "action": "create_managed",
+            "controllerId": "controller",
+            "goal": "triage inbox",
+            "currentStep": "classify",
+            "stateJson": "{\"items\":[]}"
+        }),
+    )
+    .unwrap();
+    let created: Value = serde_json::from_str(&created).unwrap();
+    let flow_id = created["flowId"].as_str().unwrap();
+    assert_eq!(created["revision"], 1);
+    assert_eq!(created["flow"]["status"], "running");
+
+    let waiting = crate::runtime::claude_tools::workflow::task_flow::execute_task_flow(
+        &mut state,
+        &cwd,
+        json!({
+            "action": "set_waiting",
+            "flowId": flow_id,
+            "expectedRevision": 1,
+            "currentStep": "await_reply",
+            "stateJson": {"items": ["thread-1"]},
+            "waitJson": {"kind": "slack_reply", "thread": "thread-1"}
+        }),
+    )
+    .unwrap();
+    let waiting: Value = serde_json::from_str(&waiting).unwrap();
+    assert_eq!(waiting["applied"], true);
+    assert_eq!(waiting["revision"], 2);
+
+    let stale = crate::runtime::claude_tools::workflow::task_flow::execute_task_flow(
+        &mut state,
+        &cwd,
+        json!({
+            "action": "resume",
+            "flowId": flow_id,
+            "expectedRevision": 1,
+            "currentStep": "route",
+            "stateJson": "{}"
+        }),
+    )
+    .unwrap();
+    let stale: Value = serde_json::from_str(&stale).unwrap();
+    assert_eq!(stale["applied"], false);
+    assert_eq!(stale["code"], "revision_mismatch");
+    assert_eq!(stale["currentRevision"], 2);
+
+    let finished = crate::runtime::claude_tools::workflow::task_flow::execute_task_flow(
+        &mut state,
+        &cwd,
+        json!({
+            "action": "finish",
+            "flowId": flow_id,
+            "expectedRevision": "2",
+            "stateJson": {"done": true}
+        }),
+    )
+    .unwrap();
+    let finished: Value = serde_json::from_str(&finished).unwrap();
+    assert_eq!(finished["status"], "finished");
+    assert_eq!(finished["revision"], 3);
+
+    let summary = crate::runtime::claude_tools::workflow::task_flow::execute_task_flow(
+        &mut state,
+        &cwd,
+        json!({
+            "action": "get_task_summary",
+            "flowId": flow_id
+        }),
+    )
+    .unwrap();
+    let summary: Value = serde_json::from_str(&summary).unwrap();
+    assert_eq!(summary["summary"]["status"], "finished");
+    assert_eq!(summary["summary"]["state"], json!({"done": true}));
+}
+
+#[test]
+fn task_flow_bindings_and_buffers_do_not_spawn_or_call_network() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let binding = crate::runtime::claude_tools::workflow::task_flow::execute_task_flow(
+        &mut state,
+        &cwd,
+        json!({
+            "action": "bind_session",
+            "sessionKey": "agent:main",
+            "requesterOrigin": "local"
+        }),
+    )
+    .unwrap();
+    let binding: Value = serde_json::from_str(&binding).unwrap();
+    assert_eq!(binding["flow"]["sessionKey"], "agent:main");
+
+    let appended = crate::runtime::claude_tools::workflow::task_flow::execute_task_flow(
+        &mut state,
+        &cwd,
+        json!({
+            "action": "append_buffer",
+            "namespace": "eod",
+            "item": "send tomorrow"
+        }),
+    )
+    .unwrap();
+    let appended: Value = serde_json::from_str(&appended).unwrap();
+    assert_eq!(appended["applied"], true);
+    assert_eq!(appended["count"], 1);
+
+    let error = crate::runtime::claude_tools::workflow::task_flow::execute_task_flow(
+        &mut state,
+        &cwd,
+        json!({
+            "action": "append_buffer",
+            "namespace": "../eod",
+            "item": "bad"
+        }),
+    )
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("namespace must be a simple identifier"));
+}
+
+#[test]
 fn config_tool_supports_editor_mode() {
     let mut state = temp_state();
     let cwd = state.cwd.clone();

@@ -32,6 +32,7 @@ pub(crate) mod subscription_globals;
 pub mod subscription_list;
 pub mod subscription_pause;
 pub mod task_create;
+pub mod task_flow;
 pub mod task_get;
 pub mod task_list;
 pub mod task_output;
