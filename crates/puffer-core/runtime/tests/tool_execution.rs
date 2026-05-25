@@ -25,6 +25,8 @@ mod multi_agent_e2e;
 mod openai_lambda_batch;
 #[path = "tool_execution/request_scope_tests.rs"]
 mod request_scope_tests;
+#[path = "tool_execution/task_flow_run_task.rs"]
+mod task_flow_run_task;
 
 fn temp_state() -> AppState {
     let tempdir = tempfile::tempdir().unwrap();

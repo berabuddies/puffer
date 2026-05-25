@@ -13,6 +13,7 @@ enum TaskFlowAction {
     FromToolContext,
     BindSession,
     CreateManaged,
+    RunTask,
     SetWaiting,
     Resume,
     Finish,
@@ -44,6 +45,19 @@ struct TaskFlowInput {
     state_json: Option<Value>,
     #[serde(default, rename = "waitJson", alias = "wait_json")]
     wait_json: Option<Value>,
+    #[serde(default)]
+    runtime: Option<String>,
+    #[serde(
+        default,
+        rename = "childSessionKey",
+        alias = "child_session_key",
+        alias = "child_key"
+    )]
+    child_session_key: Option<String>,
+    #[serde(default, rename = "runId", alias = "run_id")]
+    run_id: Option<String>,
+    #[serde(default, rename = "taskDesc", alias = "task_desc", alias = "task")]
+    task_desc: Option<String>,
     #[serde(default, rename = "flowId", alias = "flow_id")]
     flow_id: Option<String>,
     #[serde(default, rename = "expectedRevision", alias = "expected_revision")]
@@ -71,8 +85,21 @@ struct ManagedFlow {
     status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    children: Vec<LinkedChildTask>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     flow_binding: Option<Value>,
+    created_at_ms: u64,
+    updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct LinkedChildTask {
+    run_id: String,
+    runtime: String,
+    child_session_key: String,
+    task: String,
+    status: String,
     created_at_ms: u64,
     updated_at_ms: u64,
 }
@@ -96,6 +123,7 @@ pub fn execute_task_flow(_state: &mut AppState, cwd: &Path, input: Value) -> Res
         TaskFlowAction::FromToolContext => from_tool_context(parsed),
         TaskFlowAction::BindSession => bind_session(parsed),
         TaskFlowAction::CreateManaged => create_managed(cwd, parsed),
+        TaskFlowAction::RunTask => run_task(cwd, parsed),
         TaskFlowAction::SetWaiting => update_flow(cwd, parsed, FlowMutation::Waiting),
         TaskFlowAction::Resume => update_flow(cwd, parsed, FlowMutation::Resume),
         TaskFlowAction::Finish => update_flow(cwd, parsed, FlowMutation::Finish),
@@ -158,6 +186,7 @@ fn create_managed(cwd: &Path, input: TaskFlowInput) -> Result<String> {
         wait: None,
         status: "running".to_string(),
         reason: None,
+        children: Vec::new(),
         flow_binding: input.flow,
         created_at_ms: timestamp,
         updated_at_ms: timestamp,
@@ -170,6 +199,44 @@ fn create_managed(cwd: &Path, input: TaskFlowInput) -> Result<String> {
         "flowId": id,
         "revision": flow.revision,
         "flow": flow_summary(&flow),
+    }))
+}
+
+fn run_task(cwd: &Path, input: TaskFlowInput) -> Result<String> {
+    let path = task_flow_path(cwd)?;
+    let mut store = load_store::<TaskFlowStore>(&path)?;
+    let flow_id = required_flow_id(&input)?;
+    let Some(flow) = store.flows.get_mut(&flow_id) else {
+        bail!("flowId `{flow_id}` not found");
+    };
+    let runtime = required_string(input.runtime, "runtime")?;
+    let child_session_key = required_string(input.child_session_key, "childSessionKey")?;
+    let task = required_string(input.task_desc, "taskDesc")?;
+    let run_id = input
+        .run_id
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| next_child_run_id(flow));
+    let timestamp = now_ms();
+    let child = LinkedChildTask {
+        run_id,
+        runtime,
+        child_session_key,
+        task,
+        status: "running".to_string(),
+        created_at_ms: timestamp,
+        updated_at_ms: timestamp,
+    };
+    flow.children.push(child.clone());
+    flow.revision += 1;
+    flow.updated_at_ms = timestamp;
+    let revision = flow.revision;
+    save_store(&path, &store)?;
+    json_output(&json!({
+        "ok": true,
+        "created": true,
+        "flowId": flow_id,
+        "revision": revision,
+        "child": child,
     }))
 }
 
@@ -364,6 +431,7 @@ fn flow_summary(flow: &ManagedFlow) -> Value {
         "state": flow.state,
         "wait": flow.wait,
         "reason": flow.reason,
+        "children": flow.children,
         "updatedAtMs": flow.updated_at_ms,
     })
 }
@@ -378,6 +446,17 @@ fn next_flow_id(store: &TaskFlowStore) -> String {
         if !store.flows.contains_key(&id) {
             return id;
         }
+    }
+}
+
+fn next_child_run_id(flow: &ManagedFlow) -> String {
+    let mut index = flow.children.len() + 1;
+    loop {
+        let candidate = format!("{}-child-{index}", flow.id);
+        if !flow.children.iter().any(|child| child.run_id == candidate) {
+            return candidate;
+        }
+        index += 1;
     }
 }
 

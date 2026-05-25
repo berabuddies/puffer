@@ -4,9 +4,9 @@ description: |-
   Typed workflow-state surface for verified Lambda Skill contracts.
 
   Use this for contracts that create or update a managed workflow state record,
-  enforce an expected revision before mutating state, append to a named local
-  buffer, or read a compact flow summary. It does not spawn child agents, send
-  network messages, or execute shell commands.
+  link child work to a flow, enforce an expected revision before mutating state,
+  append to a named local buffer, or read a compact flow summary. It does not
+  send network messages or execute shell commands.
 handler: runtime:workflow:task_flow
 approval_policy: auto
 sandbox_policy: workspace-write
@@ -19,6 +19,7 @@ input_schema:
         - from_tool_context
         - bind_session
         - create_managed
+        - run_task
         - set_waiting
         - resume
         - finish
@@ -51,6 +52,18 @@ input_schema:
       description: JSON state object or JSON-encoded state string.
     waitJson:
       description: JSON wait object or JSON-encoded wait string.
+    runtime:
+      type: string
+      description: Runtime identifier for run_task.
+    childSessionKey:
+      type: string
+      description: Child session key to link to the flow for run_task.
+    runId:
+      type: string
+      description: Optional child run id. Defaults to a deterministic local child id.
+    taskDesc:
+      type: string
+      description: Task description to link to the flow for run_task.
     flowId:
       type: string
       description: Managed workflow id.
