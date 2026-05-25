@@ -45,6 +45,7 @@ run("syntax", "Static syntax checks", [
   "node --check apps/puffer-desktop/tests/fuzz/lib/scheduler.mjs",
   "node --check apps/puffer-desktop/tests/fuzz/lib/prompt-evolution.mjs",
   "node --check apps/puffer-desktop/tests/fuzz/lib/openrouter-auth.mjs",
+  "for schema in apps/puffer-desktop/tests/fuzz/schemas/*.json; do python3 -m json.tool \"$schema\" >/dev/null; done",
   "python3 -m py_compile apps/puffer-desktop/tests/fuzz/agentflow_puffer_openrouter_campaign.py",
   "bash -n apps/puffer-desktop/tests/fuzz/run_openrouter_campaign_loop.sh"
 ].join(" && "));
@@ -202,6 +203,7 @@ if (!runRealOpenRouter) {
 
 const summary = summarize();
 const phaseCoverage = buildPhaseCoverage();
+const deliverables = buildDeliverables();
 const report = {
   version: 1,
   generatedAt: new Date().toISOString(),
@@ -210,6 +212,7 @@ const report = {
   environment: envSummary,
   summary,
   phaseCoverage,
+  deliverables,
   steps
 };
 fs.writeFileSync(path.join(outDir, "plan-verification.json"), `${JSON.stringify(report, null, 2)}\n`);
@@ -374,6 +377,97 @@ function buildPhaseCoverage() {
   });
 }
 
+function buildDeliverables() {
+  const localDeliverables = [
+    deliverable("fuzzer-implementation", "Upgraded Puffer fuzzer implementation", [
+      "apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs",
+      "apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-replay-loop.mjs",
+      "apps/puffer-desktop/tests/fuzz/lib/evidence-index.mjs",
+      "apps/puffer-desktop/tests/fuzz/lib/admission-gate.mjs"
+    ]),
+    deliverable("schemas", "Evidence, verdict, and gate contract files", [
+      "apps/puffer-desktop/tests/fuzz/schemas/evidence-index.schema.json",
+      "apps/puffer-desktop/tests/fuzz/schemas/verdict.schema.json",
+      "apps/puffer-desktop/tests/fuzz/schemas/verdict-gate.schema.json",
+      "apps/puffer-desktop/tests/fuzz/schemas/reviewer.schema.json"
+    ]),
+    deliverable("candidate-reviewer", "Candidate ledger and reviewer support", [
+      "apps/puffer-desktop/tests/fuzz/BUGS_CAND.md",
+      "apps/puffer-desktop/tests/fuzz/bin/puffer-openrouter-reviewer.mjs",
+      path.join(outDir, "reviewer-aggregate.json")
+    ]),
+    deliverable("bridge-shards", "Bridge shard manifests and replay evidence", [
+      "apps/puffer-desktop/tests/fuzz/shards/bridge-chat-permission-session-reload.json",
+      "apps/puffer-desktop/tests/fuzz/shards/bridge-new-agent-settings-model.json",
+      path.join(fuzzRoot, ".runs", `${namespace}-bridge-chat`, "bounded-replay-report.json"),
+      path.join(fuzzRoot, ".runs", `${namespace}-bridge-model`, "bounded-replay-report.json")
+    ]),
+    deliverable("evolution-schedule", "Evolution schedule support", [
+      "apps/puffer-desktop/tests/fuzz/lib/scheduler.mjs",
+      path.join(outDir, "evolved.json"),
+      path.join(outDir, "schedule.json"),
+      path.join(outDir, "evolution-policy.json")
+    ]),
+    deliverable("puffer-smoke-summary", "Puffer campaign smoke and scale summaries", [
+      path.join(outDir, "agentflow-aggregate.json"),
+      path.join(outDir, "scale-aggregate.json")
+    ]),
+    deliverable("guiflow-smoke-summary", "GUIFlow smoke benchmark run summary", [
+      path.join(outDir, "guiflow-smoke", "guiflow-smoke-report.json"),
+      path.join(outDir, "guiflow-smoke", "checkout-buggy-total", "final-page.png"),
+      path.join(outDir, "guiflow-smoke", "checkout-fixed-total", "final-page.png")
+    ]),
+    deliverable("runbook", "Operator README and handoff runbook", [
+      "apps/puffer-desktop/tests/fuzz/README.md",
+      "apps/puffer-desktop/tests/fuzz/agent_guide.md",
+      "apps/puffer-desktop/tests/fuzz/playwright_adapter.md"
+    ])
+  ];
+
+  return [
+    ...localDeliverables,
+    {
+      id: "real-openrouter-smoke",
+      title: "Real OpenRouter small-model smoke summary",
+      status: stepStatus("openrouter-real") === "passed" ? "present" : runRealOpenRouter ? "blocked_external" : "not-run",
+      external: true,
+      artifacts: artifactStatuses([
+        path.join(outDir, "real-openrouter-aggregate.json"),
+        path.join(outDir, "real-openrouter-feedback-ledger.json"),
+        path.join(outDir, "real-openrouter-coverage-ledger.json")
+      ])
+    }
+  ];
+}
+
+function deliverable(id, title, artifacts) {
+  const artifactStatus = artifactStatuses(artifacts);
+  return {
+    id,
+    title,
+    status: artifactStatus.every((item) => item.present) ? "present" : "missing",
+    external: false,
+    artifacts: artifactStatus
+  };
+}
+
+function artifactStatuses(artifacts) {
+  return artifacts.map((artifact) => {
+    const filePath = path.isAbsolute(String(artifact))
+      ? String(artifact)
+      : path.join(repoRoot, String(artifact));
+    return {
+      path: relative(filePath),
+      present: fs.existsSync(filePath),
+      bytes: fs.existsSync(filePath) ? fs.statSync(filePath).size : 0
+    };
+  });
+}
+
+function stepStatus(id) {
+  return steps.find((step) => step.id === id)?.status ?? "missing";
+}
+
 function collectStepStatuses(stepIds) {
   return stepIds.map((stepId) => {
     const step = steps.find((candidate) => candidate.id === stepId);
@@ -448,6 +542,17 @@ function formatMarkdown(report) {
     }
     if (phase.caveat) {
       lines.push(`  Caveat: ${phase.caveat}`);
+    }
+  }
+  lines.push(
+    "",
+    "## Deliverables",
+    ""
+  );
+  for (const item of report.deliverables) {
+    lines.push(`- ${item.id}: ${item.status}${item.external ? " (external)" : ""}`);
+    for (const artifact of item.artifacts) {
+      lines.push(`  ${artifact.present ? "present" : "missing"} ${artifact.path}${artifact.present ? ` (${artifact.bytes} bytes)` : ""}`);
     }
   }
   lines.push(

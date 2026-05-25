@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PufferUiuxVerdictGate",
+  "type": "object",
+  "required": [
+    "version",
+    "generatedAt",
+    "disposition",
+    "passed",
+    "candidateEligible",
+    "clauses",
+    "failureReasons",
+    "verdict"
+  ],
+  "properties": {
+    "version": { "const": 1 },
+    "generatedAt": { "type": "string" },
+    "disposition": {
+      "enum": ["admitted", "candidate", "dismissed", "gate_failed"]
+    },
+    "passed": { "type": "boolean" },
+    "candidateEligible": { "type": "boolean" },
+    "clauses": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/clause" }
+    },
+    "failureReasons": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "verdict": { "type": "object" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "clause": {
+      "type": "object",
+      "required": ["id", "passed", "detail"],
+      "properties": {
+        "id": {
+          "enum": [
+            "schema-valid",
+            "citation-exists",
+            "citation-type-match",
+            "citation-value-match",
+            "primary-cause-is-predicate",
+            "prose-not-page-copy"
+          ]
+        },
+        "passed": { "type": "boolean" },
+        "detail": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -174,6 +174,8 @@ Those reports include a `phaseCoverage` section that maps the Phase 0-9 upgrade
 plan to concrete verifier steps and keeps the real OpenRouter campaign as an
 explicit external gate. A phase reports `blocked_external` when local evidence
 passed but a required external gate, such as real OpenRouter, is missing.
+The same reports also include a `deliverables` section that maps the plan's
+final deliverables to concrete repo files or run artifacts.
 
 To require a real OpenRouter small-model campaign, pass
 `--require-real-openrouter` with `OPENROUTER_API_KEY` already exported.
@@ -384,6 +386,9 @@ For day-to-day use, treat the app as ready only when:
 - `feedback-ledger.json`: scheduler feedback from replay runs.
 - `BUGS.md`: main-agent-owned admitted/fixed bug ledger.
 - `BUGS_CAND.md`: main-agent-owned predicate-missing candidate ledger.
+- `schemas/*.schema.json`: JSON artifact contracts for fuzz runs, evidence
+  indexes, triage verdicts, citation gates, reviewer decisions, ledgers, UI
+  states, action events, and exported bug reports.
 - `bin/puffer-fuzz.mjs`: CLI entrypoint.
 - `lib/*.mjs`: deterministic generator, coverage summarizer, and formatters.
 - `playwright/pufferCoverage.ts`: reusable state, element, and trace helpers for Playwright replays.

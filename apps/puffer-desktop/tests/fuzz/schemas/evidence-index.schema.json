@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PufferUiuxEvidenceIndex",
+  "type": "object",
+  "required": ["evidence_index", "evidence_source"],
+  "properties": {
+    "evidence_index": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/evidenceEntry" }
+    },
+    "evidence_source": { "type": "string" }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "evidenceEntry": {
+      "type": "object",
+      "required": ["id", "type", "byte_span", "sha256", "value", "metadata"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^ev-(action|network|storage|url|console|accessibility|predicate)-[0-9]{4}$"
+        },
+        "type": {
+          "enum": [
+            "action",
+            "network",
+            "storage",
+            "url",
+            "console",
+            "accessibility",
+            "predicate"
+          ]
+        },
+        "byte_span": {
+          "type": "array",
+          "prefixItems": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "integer", "minimum": 0 }
+          ],
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "value": { "type": "string" },
+        "metadata": { "type": "object" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

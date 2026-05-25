@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PufferUiuxReviewerDecision",
+  "type": "object",
+  "required": [
+    "version",
+    "decision",
+    "confidence",
+    "reason",
+    "cited_evidence",
+    "notes"
+  ],
+  "properties": {
+    "version": { "const": 1 },
+    "decision": { "enum": ["admit", "dismiss", "human_queue"] },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "reason": { "type": "string" },
+    "cited_evidence": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "notes": { "type": "string" }
+  },
+  "additionalProperties": false
+}
