@@ -152,6 +152,7 @@ if (!runRealOpenRouter) {
 }
 
 const summary = summarize();
+const phaseCoverage = buildPhaseCoverage();
 const report = {
   version: 1,
   generatedAt: new Date().toISOString(),
@@ -159,6 +160,7 @@ const report = {
   outDir: relative(outDir),
   environment: envSummary,
   summary,
+  phaseCoverage,
   steps
 };
 fs.writeFileSync(path.join(outDir, "plan-verification.json"), `${JSON.stringify(report, null, 2)}\n`);
@@ -230,6 +232,129 @@ function summarize() {
   };
 }
 
+function buildPhaseCoverage() {
+  const phaseDefinitions = [
+    {
+      id: "phase-0",
+      title: "Baseline Freeze and Smoke",
+      localSteps: ["metadata", "agentflow-offline"],
+      evidence: "Validates baseline metadata, selftest invariants, and Codex-planned AgentFlow orchestration without requiring network access.",
+      caveat: realOpenRouterCaveat()
+    },
+    {
+      id: "phase-1",
+      title: "Evidence Index and Structured Verdict",
+      localSteps: ["metadata", "evidence-replay", "no-key-triage"],
+      evidence: "Checks evidence_index emission and strict JSON no-signal verdict generation."
+    },
+    {
+      id: "phase-2",
+      title: "5-Clause Citation Gate",
+      localSteps: ["metadata", "no-key-triage"],
+      evidence: "Selftest covers admitted verdicts, malformed verdicts, hallucinated evidence ids, and missing predicate rejection."
+    },
+    {
+      id: "phase-3",
+      title: "Candidate Ledger and Reviewer Agent",
+      localSteps: ["metadata", "reviewer-aggregate"],
+      evidence: "Aggregates a synthetic predicate-missing candidate plus reviewer human_queue decision."
+    },
+    {
+      id: "phase-4",
+      title: "Bridge Shards",
+      localSteps: ["evolution", "bridge-replay"],
+      evidence: "Schedules evolved shards and replays two bridge shards through the same evidence path."
+    },
+    {
+      id: "phase-5",
+      title: "Tree Resplit, Demote, and Starvation Floor",
+      localSteps: ["evolution", "evolution-policy"],
+      evidence: "Checks deterministic evolved scheduling plus synthetic split, demote, and starvation-floor decisions."
+    },
+    {
+      id: "phase-6",
+      title: "Codex-Planned Campaign Integration",
+      localSteps: ["agentflow-offline"],
+      externalSteps: ["openrouter-real"],
+      evidence: "Verifies Codex planner wiring in offline mode; real small-model explorer coverage is tracked as an external gate.",
+      caveat: realOpenRouterCaveat()
+    },
+    {
+      id: "phase-7",
+      title: "Puffer Internal Validation",
+      localSteps: ["syntax", "metadata", "evidence-replay", "no-key-triage", "bridge-replay"],
+      evidence: "Combines syntax, metadata, replay evidence, no-finding triage, and bridge replay checks against Puffer."
+    },
+    {
+      id: "phase-8",
+      title: "GUIFlow Benchmark Adapter",
+      localSteps: ["guiflow-smoke"],
+      evidence: "Requires buggy GUIFlow smoke app to admit a predicate-backed finding and fixed app to admit none."
+    },
+    {
+      id: "phase-9",
+      title: "Reporting and Handoff",
+      localSteps: ["syntax", "reviewer-aggregate", "agentflow-offline"],
+      evidence: "Confirms machine-readable reports include aggregate reviewer counts and planner campaign artifacts."
+    }
+  ];
+
+  return phaseDefinitions.map((definition) => {
+    const localStepStatuses = collectStepStatuses(definition.localSteps ?? []);
+    const externalStepStatuses = collectStepStatuses(definition.externalSteps ?? []);
+    const missingLocalSteps = localStepStatuses.filter((step) => step.status === "missing");
+    const failedLocalSteps = localStepStatuses.filter((step) => step.status === "failed" || step.status === "skipped-required");
+    const status = missingLocalSteps.length > 0 || failedLocalSteps.length > 0 ? "failed" : "passed";
+    const externalStatus = summarizeExternalPhaseStatus(externalStepStatuses);
+    return {
+      id: definition.id,
+      title: definition.title,
+      status,
+      externalStatus,
+      localSteps: localStepStatuses,
+      externalSteps: externalStepStatuses,
+      evidence: definition.evidence,
+      caveat: definition.caveat
+    };
+  });
+}
+
+function collectStepStatuses(stepIds) {
+  return stepIds.map((stepId) => {
+    const step = steps.find((candidate) => candidate.id === stepId);
+    if (!step) {
+      return { id: stepId, status: "missing" };
+    }
+    if (step.status === "skipped" && step.required) {
+      return { id: stepId, status: "skipped-required" };
+    }
+    return {
+      id: step.id,
+      status: step.status,
+      required: step.required,
+      external: step.external
+    };
+  });
+}
+
+function summarizeExternalPhaseStatus(stepStatuses) {
+  if (stepStatuses.length === 0) return "not-applicable";
+  if (stepStatuses.every((step) => step.status === "passed")) return "passed";
+  if (stepStatuses.some((step) => step.status === "failed" || step.status === "skipped-required")) return "failed";
+  if (stepStatuses.some((step) => step.status === "skipped")) return "not-run";
+  return "unknown";
+}
+
+function realOpenRouterCaveat() {
+  if (runRealOpenRouter && envSummary.openRouterKeyPresent) {
+    return "Real OpenRouter campaign was requested and key-backed execution was available.";
+  }
+  if (runRealOpenRouter) {
+    return "Real OpenRouter campaign was requested but OPENROUTER_API_KEY was missing.";
+  }
+  return "Real OpenRouter small-model campaign was not requested in this local verifier run.";
+}
+
 function formatMarkdown(report) {
   const lines = [
     "# Puffer UI/UX Fuzz Plan Verification",
@@ -254,13 +379,34 @@ function formatMarkdown(report) {
     `- GUIFlow root: ${report.environment.guiflowRoot ? "present" : "missing"}`,
     `- OpenRouter key: ${report.environment.openRouterKeyPresent ? "present" : "missing"}`,
     "",
-    "## Steps",
+    "## Phase Coverage",
     ""
   ];
+  for (const phase of report.phaseCoverage) {
+    lines.push(`- ${phase.id} ${phase.title}: ${phase.status} (external: ${phase.externalStatus})`);
+    lines.push(`  Evidence: ${phase.evidence}`);
+    lines.push(`  Local steps: ${formatStepList(phase.localSteps)}`);
+    if (phase.externalSteps.length > 0) {
+      lines.push(`  External steps: ${formatStepList(phase.externalSteps)}`);
+    }
+    if (phase.caveat) {
+      lines.push(`  Caveat: ${phase.caveat}`);
+    }
+  }
+  lines.push(
+    "",
+    "## Steps",
+    ""
+  );
   for (const step of report.steps) {
     lines.push(`- ${step.id}: ${step.status}${step.external ? " (external)" : ""}${step.required ? "" : " (optional)"}`);
   }
   return `${lines.join("\n")}\n`;
+}
+
+function formatStepList(stepStatuses) {
+  if (stepStatuses.length === 0) return "none";
+  return stepStatuses.map((step) => `${step.id}=${step.status}`).join(", ");
 }
 
 function commandExists(name) {

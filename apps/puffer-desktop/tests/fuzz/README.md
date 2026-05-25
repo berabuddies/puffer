@@ -163,6 +163,11 @@ node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-verify-plan.mjs \
   --out apps/puffer-desktop/tests/fuzz/.runs/plan-verify
 ```
 
+The verifier writes both `plan-verification.json` and `plan-verification.md`.
+Those reports include a `phaseCoverage` section that maps the Phase 0-9 upgrade
+plan to concrete verifier steps and keeps the real OpenRouter campaign as an
+explicit external gate.
+
 To require a real OpenRouter small-model campaign, pass
 `--require-real-openrouter` with `OPENROUTER_API_KEY` already exported.
 
