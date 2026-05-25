@@ -14,6 +14,7 @@ pub enum BrowserActionSet {
 enum BrowserIntentAction {
     List,
     Snapshot,
+    ConsoleLogs,
     Screenshot,
     Open,
     New,
@@ -46,7 +47,9 @@ enum BrowserIntentAction {
 impl BrowserIntentAction {
     fn action_set(self) -> BrowserActionSet {
         match self {
-            Self::List | Self::Snapshot | Self::Screenshot => BrowserActionSet::Inspect,
+            Self::List | Self::Snapshot | Self::ConsoleLogs | Self::Screenshot => {
+                BrowserActionSet::Inspect
+            }
             Self::Open
             | Self::New
             | Self::Focus
@@ -103,6 +106,7 @@ fn browser_intent_action(action: &str) -> Option<BrowserIntentAction> {
     match normalized_token(action).as_str() {
         "list" => Some(BrowserIntentAction::List),
         "snapshot" => Some(BrowserIntentAction::Snapshot),
+        "consolelogs" | "console" => Some(BrowserIntentAction::ConsoleLogs),
         "screenshot" => Some(BrowserIntentAction::Screenshot),
         "open" => Some(BrowserIntentAction::Open),
         "new" => Some(BrowserIntentAction::New),
@@ -150,6 +154,10 @@ mod tests {
         );
         assert_eq!(
             browser_action_set_for_action("screenshot"),
+            Some(BrowserActionSet::Inspect)
+        );
+        assert_eq!(
+            browser_action_set_for_action("consoleLogs"),
             Some(BrowserActionSet::Inspect)
         );
         assert_eq!(

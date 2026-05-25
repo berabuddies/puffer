@@ -20,8 +20,9 @@ use super::chrome::{
     close_page_target, create_page_target, initial_page_target, read_devtools_ws_url,
     resolve_chrome_executable, ChromePageTarget,
 };
+use super::console::BrowserConsoleRegistry;
 use super::cursor::{cursor_eval_expression, parse_cursor_response};
-use super::devtools::emit_devtools_event;
+use super::devtools::{devtools_event_payload, emit_devtools_payload};
 use super::input::send_input;
 use super::recording::BrowserRecordingRegistry;
 use super::screenshot::{
@@ -183,6 +184,7 @@ impl BrowserSession {
     pub(super) fn spawn(
         events: broadcast::Sender<ServerEnvelope>,
         recordings: Arc<Mutex<BrowserRecordingRegistry>>,
+        console_logs: Arc<Mutex<BrowserConsoleRegistry>>,
         session_id: String,
         root: BrowserRootSession,
         width: u32,
@@ -206,6 +208,7 @@ impl BrowserSession {
             run_cdp_worker(
                 events,
                 recordings,
+                console_logs,
                 session_id,
                 worker_root,
                 target,
@@ -440,6 +443,7 @@ enum PendingKind {
 fn run_cdp_worker(
     events: broadcast::Sender<ServerEnvelope>,
     recordings: Arc<Mutex<BrowserRecordingRegistry>>,
+    console_logs: Arc<Mutex<BrowserConsoleRegistry>>,
     session_id: String,
     root: BrowserRootSession,
     target: ChromePageTarget,
@@ -515,6 +519,7 @@ fn run_cdp_worker(
                         &channel_devtools,
                         &session_id,
                         &recordings,
+                        &console_logs,
                         &mut socket,
                         &mut next_id,
                         &mut pending,
@@ -678,6 +683,7 @@ fn handle_cdp_message(
     channel_devtools: &str,
     session_id: &str,
     recordings: &Arc<Mutex<BrowserRecordingRegistry>>,
+    console_logs: &Arc<Mutex<BrowserConsoleRegistry>>,
     socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
     next_id: &mut u64,
     pending: &mut HashMap<u64, PendingKind>,
@@ -861,8 +867,12 @@ fn handle_cdp_message(
                 }
             }
         }
-        _ if emit_devtools_event(events, channel_devtools, method, &value) => {}
-        _ => {}
+        _ => {
+            if let Some(payload) = devtools_event_payload(method, &value) {
+                console_logs.lock().unwrap().record(session_id, &payload);
+                emit_devtools_payload(events, channel_devtools, payload);
+            }
+        }
     }
 }
 

@@ -97,6 +97,8 @@ struct BrowserToolInput {
     label: Option<String>,
     #[serde(default)]
     url: Option<String>,
+    #[serde(default)]
+    page: Option<Value>,
     #[serde(default, rename = "ref")]
     ref_id: Option<String>,
     #[serde(default)]
@@ -117,6 +119,8 @@ struct BrowserToolInput {
     height: Option<u32>,
     #[serde(default)]
     activate: Option<bool>,
+    #[serde(default)]
+    clear: Option<bool>,
     #[serde(default)]
     files: Option<Vec<String>>,
     #[serde(default)]
@@ -413,6 +417,7 @@ mod tests {
                 tab_id: None,
                 label: None,
                 url: None,
+                page: None,
                 ref_id: None,
                 value: None,
                 text: None,
@@ -423,6 +428,7 @@ mod tests {
                 width: None,
                 height: None,
                 activate: None,
+                clear: None,
                 files: None,
                 annotate: None,
                 screenshot_format: None,
@@ -443,6 +449,7 @@ mod tests {
             tab_id: None,
             label: None,
             url: None,
+            page: None,
             ref_id: None,
             value: None,
             text: None,
@@ -453,6 +460,7 @@ mod tests {
             width: None,
             height: None,
             activate: None,
+            clear: None,
             files: None,
             annotate: None,
             screenshot_format: None,
@@ -471,6 +479,8 @@ mod tests {
             "value": "New York",
             "direction": "down",
             "px": 480,
+            "page": {"tabId": "t2"},
+            "clear": true,
             "files": ["/tmp/upload.txt"],
             "annotate": true,
             "screenshotFormat": "jpeg",
@@ -490,13 +500,24 @@ mod tests {
         assert_eq!(roundtrip.get("px").and_then(Value::as_u64), Some(480));
         assert_eq!(
             roundtrip
+                .get("page")
+                .and_then(|page| page.get("tabId"))
+                .and_then(Value::as_str),
+            Some("t2")
+        );
+        assert_eq!(roundtrip.get("clear").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            roundtrip
                 .get("files")
                 .and_then(Value::as_array)
                 .and_then(|files| files.first())
                 .and_then(Value::as_str),
             Some("/tmp/upload.txt")
         );
-        assert_eq!(roundtrip.get("annotate").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            roundtrip.get("annotate").and_then(Value::as_bool),
+            Some(true)
+        );
         assert_eq!(
             roundtrip.get("screenshotFormat").and_then(Value::as_str),
             Some("jpeg")

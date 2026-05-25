@@ -20,6 +20,7 @@ use crate::daemon::ServerEnvelope;
 mod agent;
 mod chrome;
 mod client;
+mod console;
 mod cursor;
 mod devtools;
 mod input;
@@ -38,6 +39,7 @@ mod worker;
 pub(crate) use agent::handle_browser_agent;
 use chrome::safe_profile_name;
 pub(crate) use client::{default_cli_session_id, ensure_daemon, send_daemon_request};
+use console::BrowserConsoleRegistry;
 use recording::BrowserRecordingRegistry;
 pub(crate) use rpc::*;
 use screenshot::BrowserElementRef;
@@ -68,6 +70,7 @@ pub(crate) struct BrowserRegistry {
     sessions: Arc<Mutex<HashMap<String, BrowserSession>>>,
     tabs: Arc<Mutex<BrowserTabRegistry>>,
     agent_refs: Arc<Mutex<HashMap<String, Vec<BrowserElementRef>>>>,
+    console_logs: Arc<Mutex<BrowserConsoleRegistry>>,
     recordings: Arc<Mutex<BrowserRecordingRegistry>>,
 }
 
@@ -78,12 +81,14 @@ impl BrowserRegistry {
         let sessions = Arc::new(Mutex::new(HashMap::<String, BrowserSession>::new()));
         let tabs = Arc::new(Mutex::new(BrowserTabRegistry::default()));
         let agent_refs = Arc::new(Mutex::new(HashMap::new()));
+        let console_logs = Arc::new(Mutex::new(BrowserConsoleRegistry::default()));
         if enabled {
             spawn_idle_pruner(
                 Arc::clone(&roots),
                 Arc::clone(&sessions),
                 Arc::clone(&tabs),
                 Arc::clone(&agent_refs),
+                Arc::clone(&console_logs),
             );
         }
         Self {
@@ -93,6 +98,7 @@ impl BrowserRegistry {
             sessions,
             tabs,
             agent_refs,
+            console_logs,
             recordings: Arc::new(Mutex::new(BrowserRecordingRegistry::default())),
         }
     }
@@ -125,6 +131,7 @@ impl BrowserRegistry {
         let session = BrowserSession::spawn(
             events,
             Arc::clone(&self.recordings),
+            Arc::clone(&self.console_logs),
             session_id.clone(),
             root,
             width,
@@ -290,6 +297,18 @@ impl BrowserRegistry {
         Ok(self.list_tabs(root_session_id))
     }
 
+    /// Reads buffered console logs for a live browser page worker.
+    pub(crate) fn console_logs(&self, session_id: &str, clear: bool) -> Result<Value> {
+        self.get(session_id)?;
+        let logs = self.console_logs.lock().unwrap().read(session_id, clear);
+        let count = logs.len();
+        Ok(json!({
+            "logs": logs,
+            "count": count,
+            "cleared": clear
+        }))
+    }
+
     /// Tears down the shared Chrome root and every page worker below it.
     pub(crate) fn close_root(&self, root_session_id: &str) -> Result<()> {
         self.shutdown_root(root_session_id, false)
@@ -371,6 +390,7 @@ impl BrowserRegistry {
 
     fn remove_page_session(&self, session_id: &str) -> Option<BrowserSession> {
         self.agent_refs.lock().unwrap().remove(session_id);
+        self.console_logs.lock().unwrap().remove(session_id);
         self.sessions.lock().unwrap().remove(session_id)
     }
 
@@ -384,6 +404,7 @@ impl BrowserRegistry {
         cleanup_root_metadata(
             &self.tabs,
             &self.agent_refs,
+            &self.console_logs,
             root_session_id,
             &backend_ids,
             preserve_tabs,
@@ -431,6 +452,7 @@ fn spawn_idle_pruner(
     sessions: Arc<Mutex<HashMap<String, BrowserSession>>>,
     tabs: Arc<Mutex<BrowserTabRegistry>>,
     agent_refs: Arc<Mutex<HashMap<String, Vec<BrowserElementRef>>>>,
+    console_logs: Arc<Mutex<BrowserConsoleRegistry>>,
 ) {
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(60));
@@ -457,7 +479,14 @@ fn spawn_idle_pruner(
                 .iter()
                 .map(|(session_id, _)| session_id.clone())
                 .collect::<Vec<_>>();
-            cleanup_root_metadata(&tabs, &agent_refs, &root_session_id, &backend_ids, true);
+            cleanup_root_metadata(
+                &tabs,
+                &agent_refs,
+                &console_logs,
+                &root_session_id,
+                &backend_ids,
+                true,
+            );
             for (_, session) in root_sessions {
                 let _ = session.close();
             }
@@ -485,6 +514,7 @@ fn drain_root_sessions(
 fn cleanup_root_metadata(
     tabs: &Arc<Mutex<BrowserTabRegistry>>,
     agent_refs: &Arc<Mutex<HashMap<String, Vec<BrowserElementRef>>>>,
+    console_logs: &Arc<Mutex<BrowserConsoleRegistry>>,
     root_session_id: &str,
     backend_ids: &[String],
     preserve_tabs: bool,
@@ -492,6 +522,14 @@ fn cleanup_root_metadata(
     {
         let mut refs = agent_refs.lock().unwrap();
         refs.retain(|session_id, _| session_root_id(session_id) != root_session_id);
+    }
+    if preserve_tabs {
+        let mut console_logs = console_logs.lock().unwrap();
+        for backend_id in backend_ids {
+            console_logs.remove(backend_id);
+        }
+    } else {
+        console_logs.lock().unwrap().remove_root(root_session_id);
     }
     let mut tabs = tabs.lock().unwrap();
     if preserve_tabs {

@@ -133,6 +133,15 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
             state.browsers.arm_agent_recording(&backend_id);
             state.browsers.agent_snapshot(&backend_id)
         }
+        "consoleLogs" | "console" => {
+            let (_, backend_id) =
+                ensure_target_tab(state, &root_session_id, params, width, height)?;
+            let clear = params
+                .get("clear")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            state.browsers.console_logs(&backend_id, clear)
+        }
         "screenshot" => {
             let (tab_id, backend_id) =
                 ensure_target_tab(state, &root_session_id, params, width, height)?;
@@ -538,7 +547,7 @@ fn ensure_target_tab(
     height: u32,
 ) -> Result<(String, String)> {
     let tabs = state.browsers.list_tabs(root_session_id);
-    if let Some(tab_id) = optional_string(params, "tabId") {
+    if let Some(tab_id) = optional_string(params, "tabId").or_else(|| tab_id_from_page(params)) {
         let backend_id = backend_session_id(root_session_id, &tab_id);
         let restore_url = tabs
             .tabs
@@ -581,6 +590,23 @@ fn ensure_target_tab(
     )?;
     publish_tabs(state, root_session_id);
     Ok((tab.tab_id, tab.backend_session_id))
+}
+
+fn tab_id_from_page(params: &Value) -> Option<String> {
+    let page = params.get("page")?;
+    if let Some(tab_id) = page
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(tab_id.to_string());
+    }
+    page.get("tabId")
+        .or_else(|| page.get("tab_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
 }
 
 fn ensure_backend_session(
@@ -730,5 +756,17 @@ mod tests {
         let tab_id = resolve_open_target_tab_id(&browsers, "root", &json!({}), true);
 
         assert_eq!(tab_id, "existing");
+    }
+
+    #[test]
+    fn page_handle_can_resolve_target_tab_id() {
+        assert_eq!(
+            tab_id_from_page(&json!({ "page": { "tabId": "t3" } })).as_deref(),
+            Some("t3")
+        );
+        assert_eq!(
+            tab_id_from_page(&json!({ "page": "t4" })).as_deref(),
+            Some("t4")
+        );
     }
 }

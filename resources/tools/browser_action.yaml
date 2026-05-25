@@ -27,6 +27,7 @@ input_schema:
         - back
         - forward
         - snapshot
+        - consoleLogs
         - screenshot
         - click
         - dblclick
@@ -58,6 +59,11 @@ input_schema:
     url:
       type: string
       description: URL for open or navigate actions.
+    page:
+      description: Browser page handle or tab id for actions that read an existing page.
+    clear:
+      type: boolean
+      description: Whether consoleLogs should clear the buffered console entries after reading them.
     ref:
       type: string
       description: Fresh element ref from the latest snapshot for ref-based actions, such as @e1.
