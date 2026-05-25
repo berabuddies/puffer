@@ -13,6 +13,8 @@ mod agent_team_e2e;
 mod anthropic_stream;
 #[path = "tool_execution/browser_permissions.rs"]
 mod browser_permissions;
+#[path = "tool_execution/computer_use_action.rs"]
+mod computer_use_action;
 #[path = "tool_execution/lambda_arxiv_contract.rs"]
 mod lambda_arxiv_contract;
 #[path = "tool_execution/lambda_gate_scope.rs"]

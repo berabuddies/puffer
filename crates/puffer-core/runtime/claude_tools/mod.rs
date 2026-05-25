@@ -720,6 +720,9 @@ pub fn execute_workflow_tool(
         "AskUserQuestion" => {
             workflow::ask_user_question::execute_ask_user_question(state, cwd, input)
         }
+        "ComputerUseAction" => {
+            workflow::computer_use_action::execute_computer_use_action(state, cwd, input)
+        }
         "Config" => workflow::config::execute_config(state, cwd, input),
         "ConnectionCreate" => {
             workflow::connector_tools::execute_connection_create(state, cwd, input)
