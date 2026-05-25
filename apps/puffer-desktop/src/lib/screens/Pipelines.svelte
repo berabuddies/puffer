@@ -486,11 +486,12 @@
   }
 
   function connectionMonitorSupported(connection: WorkflowConnection): boolean {
+    if (connection.monitor_command !== undefined) return Boolean(connection.monitor_command);
     return connectionTriggerSupported(connection);
   }
 
   function connectionMonitorCommand(connection: WorkflowConnection): string {
-    return `/monitor ${connection.slug}`;
+    return connection.monitor_command || `/monitor ${connection.slug}`;
   }
 
   async function runConnectionMonitorCommand(connection: WorkflowConnection) {
@@ -590,6 +591,7 @@
           connection.slug,
           connection.description,
           connection.connector_slug,
+          connection.monitor_command,
           connector?.description,
           connector?.skill,
           connector?.action_slugs.join(" ")
@@ -1134,6 +1136,7 @@
                     {@const connector = connectorBySlug(connection.connector_slug)}
                     {@const canTrigger = connectionTriggerSupported(connection)}
                     {@const canMonitor = connectionMonitorSupported(connection)}
+                    {@const monitorCommand = connectionMonitorCommand(connection)}
                     {@const actionSlugs = connectorActionSlugs(connector, connectorQuery)}
                     {@const hiddenActions = connectorHiddenActionCount(connector, actionSlugs)}
                     <div class="pf-connection-row-group">
@@ -1152,6 +1155,7 @@
                         </span>
                         <span class="pf-connector-tags">
                           <span class="pf-connection-state" data-state={connection.state}>{connection.state}</span>
+                          {#if canMonitor}<span>monitor</span>{/if}
                           {#if !canTrigger}<span>no trigger</span>{/if}
                           {#each actionSlugs as action}
                             <span class="pf-connector-action">{action}</span>
@@ -1162,8 +1166,8 @@
                       <button
                         type="button"
                         class="pf-icon-btn pf-monitor-btn"
-                        aria-label={`Monitor ${connection.slug} connector tasks`}
-                        title="Monitor connector tasks"
+                        aria-label={`Run ${monitorCommand}`}
+                        title={monitorCommand}
                         aria-busy={monitorCommandRunningFor === connection.slug}
                         disabled={!canMonitor || monitorCommandRunningFor !== null || !onRunConnectCommand}
                         onclick={() => runConnectionMonitorCommand(connection)}

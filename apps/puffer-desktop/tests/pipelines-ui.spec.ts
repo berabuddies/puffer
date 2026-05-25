@@ -151,8 +151,11 @@ test("pipeline connection picker can start connector task monitors", async ({ pa
 
   await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
 
-  await page.getByLabel("Search connectors").fill("telegram");
-  await page.getByRole("button", { name: "Monitor telegram-user connector tasks" }).click();
+  await page.getByLabel("Search connectors").fill("monitor telegram");
+  const monitorButton = page.getByRole("button", { name: "Run /monitor telegram-user" });
+  await expect(monitorButton).toHaveAttribute("title", "/monitor telegram-user");
+  await expect(page.locator('[aria-label="Connections"]')).toContainText("monitor");
+  await monitorButton.click();
 
   const request = await daemon.waitForRequest(
     "run_agent_turn",

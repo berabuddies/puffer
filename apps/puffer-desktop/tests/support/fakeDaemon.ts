@@ -409,7 +409,8 @@ export class FakeDaemon {
         state: "authenticated",
         has_consumer: false,
         auth_failure_notified: false,
-        can_trigger_workflow: false
+        can_trigger_workflow: false,
+        monitor_command: null
       },
       {
         slug: "telegram-user",
@@ -418,7 +419,8 @@ export class FakeDaemon {
         state: "authenticated",
         has_consumer: false,
         auth_failure_notified: false,
-        can_trigger_workflow: true
+        can_trigger_workflow: true,
+        monitor_command: "/monitor telegram-user"
       }
     ],
     connector_error: null

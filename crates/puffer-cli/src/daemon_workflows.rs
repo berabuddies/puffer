@@ -5,7 +5,7 @@ use puffer_config::ConfigPaths;
 use puffer_core::subscription_manager;
 use puffer_subscriptions::{
     connection_workflow_trigger_supported, connector_workflow_trigger_supported,
-    suggested_connection_slug, SubscriberManifestRoots,
+    suggested_connection_slug, ConnectionRecord, SubscriberManifestRoots,
 };
 use puffer_workflow::WorkflowStore;
 use serde_json::{json, Value};
@@ -86,15 +86,7 @@ fn add_connector_context(paths: &ConfigPaths, snapshot: &mut Value) {
                         .is_some_and(|template| {
                             connection_workflow_trigger_supported(&roots, &connection, &template)
                         });
-                    json!({
-                        "slug": connection.slug,
-                        "connector_slug": connection.connector_slug,
-                        "description": connection.description,
-                        "state": connection.state,
-                        "has_consumer": connection.has_consumer,
-                        "auth_failure_notified": connection.auth_failure_notified,
-                        "can_trigger_workflow": can_trigger_workflow,
-                    })
+                    connection_snapshot_json(connection, can_trigger_workflow)
                 })
                 .collect::<Vec<_>>();
             (connectors, connections, refresh_error)
@@ -109,10 +101,50 @@ fn add_connector_context(paths: &ConfigPaths, snapshot: &mut Value) {
     );
 }
 
+fn connection_snapshot_json(connection: ConnectionRecord, can_trigger_workflow: bool) -> Value {
+    let monitor_command = can_trigger_workflow.then(|| format!("/monitor {}", connection.slug));
+    json!({
+        "slug": connection.slug,
+        "connector_slug": connection.connector_slug,
+        "description": connection.description,
+        "state": connection.state,
+        "has_consumer": connection.has_consumer,
+        "auth_failure_notified": connection.auth_failure_notified,
+        "can_trigger_workflow": can_trigger_workflow,
+        "monitor_command": monitor_command,
+    })
+}
+
 fn subscriber_manifest_roots(paths: &ConfigPaths) -> SubscriberManifestRoots {
     SubscriberManifestRoots::new(
         paths.workspace_config_dir.clone(),
         paths.user_config_dir.clone(),
         paths.builtin_resources_dir.clone(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trigger_ready_connection_snapshot_includes_monitor_command() {
+        let connection =
+            ConnectionRecord::authenticated("telegram-user", "telegram-login", "Personal Telegram");
+
+        let snapshot = connection_snapshot_json(connection, true);
+
+        assert_eq!(snapshot["monitor_command"], "/monitor telegram-user");
+        assert_eq!(snapshot["can_trigger_workflow"], true);
+    }
+
+    #[test]
+    fn non_trigger_connection_snapshot_omits_monitor_command() {
+        let connection = ConnectionRecord::authenticated("slack-app", "slack-app", "Slack");
+
+        let snapshot = connection_snapshot_json(connection, false);
+
+        assert!(snapshot["monitor_command"].is_null());
+        assert_eq!(snapshot["can_trigger_workflow"], false);
+    }
 }
