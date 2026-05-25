@@ -45,6 +45,28 @@
     },
     "notes": { "type": "string" }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "decision": { "enum": ["admit", "candidate"] } },
+        "required": ["decision"]
+      },
+      "then": {
+        "properties": {
+          "title": { "minLength": 1 },
+          "area": { "minLength": 1 },
+          "shard": { "minLength": 1 },
+          "source_run": { "minLength": 1 },
+          "expected": { "minLength": 1 },
+          "actual": { "minLength": 1 },
+          "impact": { "minLength": 1 },
+          "primary_cause": { "$ref": "#/$defs/citation" },
+          "repro": { "minItems": 1 }
+        }
+      }
+    }
+  ],
+  "additionalProperties": false,
   "$defs": {
     "citation": {
       "type": "object",
@@ -62,8 +84,9 @@
             "predicate"
           ]
         },
-        "quote_hash": { "type": "string" }
-      }
+        "quote_hash": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
     }
   }
 }

@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { evaluateFindingAdmission } from "../lib/admission-gate.mjs";
+import { evaluateFindingAdmission, parseStrictVerdictJson } from "../lib/admission-gate.mjs";
 import { buildEvidenceIndex } from "../lib/evidence-index.mjs";
 
 const fuzzRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -51,11 +51,21 @@ const admittedGate = evaluateFindingAdmission(admittedVerdict, evidence.evidence
 const candidateGate = evaluateFindingAdmission(candidateVerdict, evidence.evidence_index);
 const hallucinatedGate = evaluateFindingAdmission(hallucinatedVerdict, evidence.evidence_index);
 const malformedGate = evaluateFindingAdmission(malformedVerdict, evidence.evidence_index);
+const parsedVerdict = parseStrictVerdictJson(JSON.stringify(admittedVerdict));
 
 assert(admittedGate.disposition === "admitted" && admittedGate.passed, "valid predicate verdict must be admitted");
 assert(candidateGate.disposition === "candidate", "non-predicate primary cause must become candidate");
 assert(hallucinatedGate.disposition === "gate_failed", "hallucinated evidence id must fail gate");
 assert(malformedGate.disposition === "gate_failed", "schema-invalid admitted verdict must fail gate");
+assert(parsedVerdict.decision === "admit", "raw JSON verdict should parse");
+assertThrows(
+  () => parseStrictVerdictJson(`\`\`\`json\n${JSON.stringify(admittedVerdict)}\n\`\`\``),
+  "Markdown-fenced verdict must fail strict parser"
+);
+assertThrows(
+  () => parseStrictVerdictJson(`prefix ${JSON.stringify(admittedVerdict)}`),
+  "prefixed verdict must fail strict parser"
+);
 
 const admittedVerdictPath = writeJson("admitted-verdict.json", admittedVerdict);
 const admittedGatePath = writeJson("admitted-gate.json", admittedGate);
@@ -208,6 +218,15 @@ function runExpect(expected, command) {
 
 function assert(value, message) {
   if (!value) throw new Error(message);
+}
+
+function assertThrows(callback, message) {
+  try {
+    callback();
+  } catch {
+    return;
+  }
+  throw new Error(message);
 }
 
 function relative(filePath) {

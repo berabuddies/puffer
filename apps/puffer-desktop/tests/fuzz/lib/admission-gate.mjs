@@ -3,6 +3,19 @@ import { EVIDENCE_TYPES, hashEvidenceValue } from "./evidence-index.mjs";
 export const VERDICT_DECISIONS = new Set(["admit", "candidate", "dismiss"]);
 export const REVIEWER_DECISIONS = new Set(["admit", "dismiss", "human_queue"]);
 
+export function parseStrictVerdictJson(content) {
+  const text = String(content ?? "").trim();
+  if (!text) throw new Error("verdict content is empty");
+  if (text.startsWith("```") || text.endsWith("```")) {
+    throw new Error("verdict must be raw JSON, not a Markdown code fence");
+  }
+  const parsed = JSON.parse(text);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("verdict must parse to a JSON object");
+  }
+  return parsed;
+}
+
 export function buildNoFindingVerdict({ namespace, shard, seed, replaySummary = {} }) {
   return {
     version: 1,

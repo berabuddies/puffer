@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { buildNoFindingVerdict, evaluateFindingAdmission, normalizeVerdict } from "../lib/admission-gate.mjs";
+import { buildNoFindingVerdict, evaluateFindingAdmission, normalizeVerdict, parseStrictVerdictJson } from "../lib/admission-gate.mjs";
 import { promptEvolutionExcerpt } from "../lib/prompt-evolution.mjs";
 
 const fuzzRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -280,9 +280,8 @@ function parseVerdictOrDismiss(content, context) {
       notes: `Seed ${context.seed}`
     };
   }
-  const jsonText = extractJsonObject(content);
   try {
-    return JSON.parse(jsonText);
+    return parseStrictVerdictJson(content);
   } catch (error) {
     return {
       version: 1,
@@ -301,15 +300,6 @@ function parseVerdictOrDismiss(content, context) {
       notes: content.slice(0, 500)
     };
   }
-}
-
-function extractJsonObject(content) {
-  const fenced = String(content).match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const text = fenced ? fenced[1] : String(content);
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start < 0 || end < start) return text;
-  return text.slice(start, end + 1);
 }
 
 function verdictSchema() {
