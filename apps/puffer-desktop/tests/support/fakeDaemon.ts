@@ -365,18 +365,6 @@ export class FakeDaemon {
         action_slugs: ["send_message"]
       },
       {
-        connector_slug: "slack-app",
-        description: "Slack app connector for bot-token Web API actions",
-        skill: "slack",
-        requires_auth: true,
-        can_subscribe: false,
-        can_proxy_agent: false,
-        can_trigger_workflow: false,
-        suggested_connection_slug: "slack-app",
-        connect_command: "/connect slack-app slack-app",
-        action_slugs: ["send_message"]
-      },
-      {
         connector_slug: "discord-bot",
         description: "Discord bot connector configured through puffer serve",
         skill: "discord",
@@ -398,7 +386,7 @@ export class FakeDaemon {
         can_trigger_workflow: false,
         suggested_connection_slug: "lark-app",
         connect_command: "/connect lark-app lark-app",
-        action_slugs: ["send_message", "react", "remove_reaction"]
+        action_slugs: ["send_message", "react", "send_reaction", "remove_reaction"]
       },
       {
         connector_slug: "lark-login",
@@ -410,7 +398,55 @@ export class FakeDaemon {
         can_trigger_workflow: false,
         suggested_connection_slug: "lark-login",
         connect_command: "/connect lark-login lark-login",
-        action_slugs: ["send_message", "react", "remove_reaction"]
+        action_slugs: ["send_message", "react", "send_reaction", "remove_reaction"]
+      },
+      {
+        connector_slug: "matrix-bot",
+        description: "Matrix room connector configured through puffer serve",
+        skill: "matrix",
+        requires_auth: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "matrix-bot",
+        connect_command: "/connect matrix-bot matrix-bot",
+        action_slugs: []
+      },
+      {
+        connector_slug: "slack-app",
+        description: "Slack app connector for bot-token Web API actions",
+        skill: "slack",
+        requires_auth: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "slack-app",
+        connect_command: "/connect slack-app slack-app",
+        action_slugs: ["send_message", "react", "send_reaction", "remove_reaction"]
+      },
+      {
+        connector_slug: "slack-login",
+        description: "Slack workspace account over Web API or local app session",
+        skill: "slack",
+        requires_auth: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "slack-login",
+        connect_command: "/connect slack-login slack-login",
+        action_slugs: ["send_message", "react", "send_reaction", "remove_reaction"]
+      },
+      {
+        connector_slug: "slack-bot",
+        description: "Legacy Slack bot connector placeholder; use slack-app or slack-login actions",
+        skill: "slack",
+        requires_auth: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "slack-bot",
+        connect_command: "/connect slack-bot slack-bot",
+        action_slugs: []
       },
       {
         connector_slug: "email",
@@ -423,6 +459,18 @@ export class FakeDaemon {
         suggested_connection_slug: "email",
         connect_command: "/connect email email",
         action_slugs: ["send_message"]
+      },
+      {
+        connector_slug: "webhook",
+        description: "HTTP webhook connector configured through puffer serve",
+        skill: "webhook",
+        requires_auth: true,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "webhook",
+        connect_command: "/connect webhook webhook",
+        action_slugs: []
       }
     ],
     connections: [

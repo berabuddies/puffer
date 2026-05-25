@@ -1218,6 +1218,9 @@
                   />
                 </span>
               </label>
+              <div class="pf-connector-result-summary" aria-label="Connector search results">
+                {filteredConnectors.length}/{connectors.length} connectors; {filteredConnections.length}/{connections.length} connections
+              </div>
 
               {#if snapshot.connector_error}
                 <div class="pf-connector-empty">Connector runtime unavailable.</div>
@@ -1922,6 +1925,13 @@
 
   .pf-connector-search {
     gap: 5px !important;
+  }
+
+  .pf-connector-result-summary {
+    color: var(--muted-foreground);
+    font-size: 11px;
+    line-height: 1.3;
+    padding: 0 1px 1px;
   }
 
   .pf-connector-searchbox {

@@ -88,6 +88,45 @@ test("pipeline connector search matches multiple metadata terms", async ({ page 
   await expect(catalog.getByText("telegram-login")).not.toBeVisible();
 });
 
+test("pipeline connector catalog shows built-in coverage and result counts", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const catalog = page.locator('[aria-label="Connector catalog"]');
+  const resultSummary = page.getByLabel("Connector search results");
+  const connectorSlugs = [
+    "telegram-login",
+    "telegram-bot",
+    "discord-bot",
+    "lark-app",
+    "lark-login",
+    "matrix-bot",
+    "slack-app",
+    "slack-login",
+    "slack-bot",
+    "email",
+    "webhook"
+  ];
+
+  await expect(resultSummary).toHaveText("11/11 connectors; 2/2 connections");
+  for (const slug of connectorSlugs) {
+    await expect(catalog).toContainText(slug);
+  }
+
+  await page.getByLabel("Search connectors").fill("workspace local session");
+  await expect(resultSummary).toHaveText("1/11 connectors; 0/2 connections");
+  await expect(catalog.getByRole("button", { name: "Select slack-login connector setup" })).toBeVisible();
+  await expect(catalog.getByRole("button", { name: "Select slack-app connector setup" })).not.toBeVisible();
+
+  await page.getByLabel("Search connectors").fill("serve webhook");
+  await expect(resultSummary).toHaveText("1/11 connectors; 0/2 connections");
+  await expect(catalog.getByRole("button", { name: "Select webhook connector setup" })).toBeVisible();
+  await expect(catalog.getByRole("button", { name: "Select matrix-bot connector setup" })).not.toBeVisible();
+});
+
 test("pipeline connector search shows action matches", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
