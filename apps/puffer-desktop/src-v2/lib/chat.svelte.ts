@@ -4,26 +4,31 @@
  * Owns every dynamic Momo conversation surfaced under `/agent/<sessionId>`.
  * Two flavours of session live in here:
  *
- *   1. Ad-hoc sessions created from the global Composer, identified by a
- *      `chat-<timestamp>-<rand>` id. These start with the user's first
- *      message and are filled in as the conversation goes.
+ *   1. Dynamic puffer-backed sessions created from the global Composer.
+ *      The sessionId is whatever `create_session` returns (a UUID today).
+ *      Real LLM output streams in via WebSocket events from the Tauri
+ *      backend; see `lib/agentClient.ts` and `lib/wsClient.ts`.
  *   2. The two static "scripted" tasks (calendar, restaurant) which are
- *      seeded from src-v2/data/conversations.ts on first read so the user
- *      can keep typing into the same thread.
+ *      seeded from `data/conversations.ts` on first read so the user can
+ *      keep typing into the same thread. Those are still mock-only —
+ *      additional turns appended to scripted sessions just sit in the
+ *      transcript without firing an agent run.
  *
- * Mock-only — no real LLM. The mock assistant pushes a `pending: true`
- * placeholder bubble immediately and resolves it ~700ms later with one of
- * the proactive reply lines below (occasionally followed by a short
- * second beat to mimic multi-turn pacing).
+ * Discriminator: if `data/conversations.ts` has an entry for the
+ * sessionId, treat it as scripted; otherwise treat it as dynamic and
+ * route through `agentClient`.
  *
  * Consumers:
- *   - `Composer.svelte` calls `createSessionFromText` / `appendUserMessage`.
- *   - `Agent.svelte` calls `ensureSession` from a `$effect` to seed/create
- *     the entry, then reads `chatSessions[id]` from a `$derived` — splitting
+ *   - `Composer.svelte` awaits `createSessionFromText` / `appendUserMessage`.
+ *   - `Agent.svelte` calls `ensureSession` from a `$effect` to seed the
+ *     entry, then reads `chatSessions[id]` from a `$derived` — splitting
  *     read from write avoids Svelte 5's `state_unsafe_mutation` guard.
  */
 
 import { conversations } from "../data/conversations";
+import * as agent from "./agentClient";
+import type { SessionEventPayload } from "./agentClient";
+import { pushToast } from "./toast.svelte";
 
 export interface ChatMessage {
   id: string;
@@ -32,6 +37,8 @@ export interface ChatMessage {
   /** True while the assistant bubble is rendering its "typing…" indicator. */
   pending?: boolean;
   createdAt: number;
+  /** Set when the assistant bubble represents an error (e.g. turn-error). */
+  error?: boolean;
 }
 
 /** Map of sessionId → ordered message list. */
@@ -45,46 +52,112 @@ function nextMessageId(): string {
   return `msg-${Date.now().toString(36)}-${messageCounter}`;
 }
 
-function nextSessionId(): string {
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `chat-${Date.now().toString(36)}-${rand}`;
+/* ── Subscription bookkeeping ─────────────────────────────────── */
+
+/** Active session-event unsubscribers, keyed by sessionId. */
+const subscriptions = new Map<string, () => void>();
+/** Per-session id of the assistant bubble currently filling from deltas. */
+const pendingByTurn = new Map<string, { sessionId: string; messageId: string }>();
+
+function ensureSubscription(sessionId: string): void {
+  if (subscriptions.has(sessionId)) return;
+  const unsub = agent.subscribeSessionEvents(sessionId, (payload) => {
+    handleSessionEvent(sessionId, payload);
+  });
+  subscriptions.set(sessionId, unsub);
 }
 
-/* ── Mock assistant reply pool ────────────────────────────────── */
-
-/**
- * Proactive, friendly, Momo-flavoured one-liners. Each tries to either
- * acknowledge + commit to action, ask a clarifying question, or surface
- * a related signal so the assistant feels like it's leaning forward.
- */
-const MOCK_PRIMARY_REPLIES: readonly string[] = [
-  "Got it. Drafting the reply for you — give me a sec.",
-  "Looks like this involves your calendar. Want me to connect Google Calendar?",
-  "Done. I've put it on your Friday at 7:30 PM. Sent confirmation to Hanzhi.",
-  "Before I act, can you confirm: is this for the team dinner or the client meeting?",
-  "I noticed two of your meetings overlap tomorrow. Want me to reschedule the 2 PM?",
-  "Heads up — the restaurant doesn't take same-day bookings online. I'll call them at 11 AM.",
-  "Top up Wallet first? It needs about $50 to cover this.",
-  "On it. I'll loop in Mei and Daniel and share the agenda once it's locked.",
-  "Quick check — should I keep this private, or share with the team channel too?",
-  "I can handle this end-to-end. Want me to just do it and ping you when it's done?"
-];
-
-/** Occasional second beat to suggest a multi-turn cadence. */
-const MOCK_FOLLOWUP_REPLIES: readonly string[] = [
-  "Anything else?",
-  "Let me know if you'd like me to proceed.",
-  "I'll keep watching for updates in the meantime."
-];
-
-function pickReply(): string {
-  const idx = Math.floor(Math.random() * MOCK_PRIMARY_REPLIES.length);
-  return MOCK_PRIMARY_REPLIES[idx];
+function handleSessionEvent(sessionId: string, payload: SessionEventPayload): void {
+  const list = chatSessions[sessionId];
+  if (!list) return;
+  switch (payload.type) {
+    case "turn-start": {
+      // Normal path: fireTurn's .then already registered the bubble for this
+      // turnId before this event fired (Tauri WS poll sends the run_agent_turn
+      // response inline at the end of an iteration, then drains broadcast
+      // events at the top of the next iteration — see
+      // apps/puffer-desktop/src-tauri/src/websocket.rs:46-55). So if we
+      // already have a binding for this turnId there's nothing to do.
+      const turnId = (payload as { turnId: string }).turnId;
+      if (pendingByTurn.has(turnId)) break;
+      // Defensive; the .then in fireTurn registers normally. Fall back to a
+      // pending bubble not yet claimed by another in-flight turn (NOT just
+      // the first pending one — concurrent submits would all collide on #1).
+      const claimed = new Set(
+        Array.from(pendingByTurn.values())
+          .filter((r) => r.sessionId === sessionId)
+          .map((r) => r.messageId)
+      );
+      let bubble = list.find(
+        (m) => m.pending && m.role === "assistant" && !claimed.has(m.id)
+      );
+      if (!bubble) {
+        bubble = {
+          id: nextMessageId(),
+          role: "assistant",
+          text: "",
+          pending: true,
+          createdAt: Date.now(),
+        };
+        list.push(bubble);
+      }
+      pendingByTurn.set(turnId, { sessionId, messageId: bubble.id });
+      break;
+    }
+    case "text-delta": {
+      const turnId = (payload as { turnId: string }).turnId;
+      const delta = (payload as { delta: string }).delta ?? "";
+      const ref = pendingByTurn.get(turnId);
+      if (!ref) return;
+      const target = list.find((m) => m.id === ref.messageId);
+      if (!target) return;
+      target.text = (target.text ?? "") + delta;
+      break;
+    }
+    case "turn-complete": {
+      const turnId = (payload as { turnId: string }).turnId;
+      const assistantText = (payload as { assistantText?: string }).assistantText;
+      const ref = pendingByTurn.get(turnId);
+      if (!ref) return;
+      const target = list.find((m) => m.id === ref.messageId);
+      if (target) {
+        if (typeof assistantText === "string" && assistantText.length > 0) {
+          target.text = assistantText;
+        }
+        target.pending = false;
+      }
+      pendingByTurn.delete(turnId);
+      break;
+    }
+    case "turn-error": {
+      const turnId = (payload as { turnId: string }).turnId;
+      const error = (payload as { error: string }).error ?? "Turn failed";
+      const ref = pendingByTurn.get(turnId);
+      if (ref) {
+        const target = list.find((m) => m.id === ref.messageId);
+        if (target) {
+          target.text = `Error: ${error}`;
+          target.pending = false;
+          target.error = true;
+        }
+        pendingByTurn.delete(turnId);
+      }
+      pushToast(error, "error");
+      break;
+    }
+    // thinking-delta, tool-calls-requested, tool-invocations,
+    // permission-request, user-question-request, plan-*, usage,
+    // reflection-checkpoint, retry-attempt — intentionally no-op for the
+    // first cut. Will be surfaced once the V2 UI has primitives for them.
+    default:
+      break;
+  }
 }
 
-function pickFollowup(): string {
-  const idx = Math.floor(Math.random() * MOCK_FOLLOWUP_REPLIES.length);
-  return MOCK_FOLLOWUP_REPLIES[idx];
+/* ── Scripted detection ───────────────────────────────────────── */
+
+function isScripted(sessionId: string): boolean {
+  return Object.prototype.hasOwnProperty.call(conversations, sessionId);
 }
 
 /* ── Public helpers ───────────────────────────────────────────── */
@@ -104,32 +177,50 @@ export function getSession(sessionId: string): ChatMessage[] {
 }
 
 /**
- * Create a brand-new ad-hoc chat from the user's first composer message,
- * write it into the store, kick off a mock assistant reply, and return the
- * fresh sessionId so the caller can navigate to `/agent/<id>`.
+ * Create a brand-new puffer-backed chat from the user's first composer
+ * message: requests a fresh sessionId, seeds the user + pending bubble,
+ * subscribes to session events, kicks off the turn, and returns the
+ * sessionId so the caller can navigate to `/agent/<id>`.
+ *
+ * Errors during session creation surface as a toast and propagate so the
+ * caller can decide whether to leave the composer alone.
  */
-export function createSessionFromText(text: string): string {
-  const sessionId = nextSessionId();
+export async function createSessionFromText(text: string): Promise<string> {
   const trimmed = text.trim();
+  let result: agent.CreateSessionResult;
+  try {
+    result = await agent.createSession({ providerId: "puffer" });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    pushToast(`Could not start session: ${msg}`, "error");
+    throw err;
+  }
+  const sessionId = result.sessionId;
   chatSessions[sessionId] = [];
   if (trimmed) {
     pushUser(sessionId, trimmed);
-    scheduleAssistantReply(sessionId);
+    const bubbleId = pushPendingAssistant(sessionId);
+    ensureSubscription(sessionId);
+    fireTurn(sessionId, bubbleId, trimmed);
   }
   return sessionId;
 }
 
 /**
- * Append a user turn to an existing session (any of the chat-* ids, or
- * the seeded "calendar" / "restaurant" sessions) and trigger the mock
- * assistant reply.
+ * Append a user turn to an existing session. Scripted sessions
+ * (calendar / restaurant) stay mock-only — we just push the user message
+ * and stop, since there's no real agent on the other end. Dynamic
+ * sessions go through `run_agent_turn` like the create path.
  */
-export function appendUserMessage(sessionId: string, text: string): void {
+export async function appendUserMessage(sessionId: string, text: string): Promise<void> {
   const trimmed = text.trim();
   if (!trimmed) return;
   ensureSession(sessionId);
   pushUser(sessionId, trimmed);
-  scheduleAssistantReply(sessionId);
+  if (isScripted(sessionId)) return;
+  const bubbleId = pushPendingAssistant(sessionId);
+  ensureSubscription(sessionId);
+  fireTurn(sessionId, bubbleId, trimmed);
 }
 
 /* ── Internals ────────────────────────────────────────────────── */
@@ -162,6 +253,14 @@ export function ensureSession(sessionId: string): void {
     return;
   }
   chatSessions[sessionId] = [];
+  // Dynamic session existed before this page load (e.g. user hit refresh
+  // mid-conversation). Subscribe so any in-flight turn still streams in.
+  // Note: we don't reload past transcript here — the V2 UI doesn't
+  // surface a "load history" affordance yet; turn-* events for new turns
+  // will continue to land correctly.
+  if (!isScripted(sessionId)) {
+    ensureSubscription(sessionId);
+  }
 }
 
 function pushUser(sessionId: string, text: string): void {
@@ -173,47 +272,42 @@ function pushUser(sessionId: string, text: string): void {
   });
 }
 
-/**
- * Push a pending assistant bubble immediately so the UI can render a
- * "typing…" indicator, then resolve it ~700ms later with mock copy.
- * Roughly 30% of the time, queue a short follow-up beat.
- */
-function scheduleAssistantReply(sessionId: string): void {
-  if (typeof window === "undefined") return;
-  const pendingMsg: ChatMessage = {
-    id: nextMessageId(),
+function pushPendingAssistant(sessionId: string): string {
+  const id = nextMessageId();
+  chatSessions[sessionId].push({
+    id,
     role: "assistant",
     text: "",
     pending: true,
-    createdAt: Date.now()
-  };
-  chatSessions[sessionId].push(pendingMsg);
+    createdAt: Date.now(),
+  });
+  return id;
+}
 
-  window.setTimeout(() => {
-    const list = chatSessions[sessionId];
-    if (!list) return;
-    const target = list.find((m) => m.id === pendingMsg.id);
-    if (!target) return;
-    target.text = pickReply();
-    target.pending = false;
-
-    if (Math.random() < 0.3) {
-      const followup: ChatMessage = {
-        id: nextMessageId(),
-        role: "assistant",
-        text: "",
-        pending: true,
-        createdAt: Date.now()
-      };
-      chatSessions[sessionId].push(followup);
-      window.setTimeout(() => {
-        const live = chatSessions[sessionId];
-        if (!live) return;
-        const t = live.find((m) => m.id === followup.id);
-        if (!t) return;
-        t.text = pickFollowup();
-        t.pending = false;
-      }, 600);
-    }
-  }, 700);
+function fireTurn(sessionId: string, bubbleId: string, message: string): void {
+  agent
+    .runAgentTurn(sessionId, message)
+    .then((res) => {
+      // Bind the bubble to the turn at the submission site so concurrent
+      // in-flight turns can't collide on the same pending bubble. The Tauri
+      // WS poll loop sends the run_agent_turn response before broadcasting
+      // turn-start (websocket.rs:46-55), so this .then runs ahead of any
+      // event for this turn.
+      if (res.turnId) {
+        pendingByTurn.set(res.turnId, { sessionId, messageId: bubbleId });
+      }
+    })
+    .catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      const list = chatSessions[sessionId];
+      if (list) {
+        const target = list.find((m) => m.id === bubbleId);
+        if (target) {
+          target.text = `Error: ${msg}`;
+          target.pending = false;
+          target.error = true;
+        }
+      }
+      pushToast(`Turn failed: ${msg}`, "error");
+    });
 }

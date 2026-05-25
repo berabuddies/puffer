@@ -49,22 +49,31 @@
     return rest;
   }
 
+  /**
+   * Optimistically clear the input the moment the user submits; the chat
+   * store handles its own error surfacing via toast so we don't need to
+   * keep the text around for a retry. `createSessionFromText` /
+   * `appendUserMessage` are now async (they hit the puffer WS), so we
+   * fire-and-forget here — `Promise` rejections already bubble to the
+   * toast stack inside the store.
+   */
   function handleSubmit(event?: SubmitEvent): void {
     event?.preventDefault();
     const text = (value ?? "").trim();
     if (!text) return;
+    value = "";
     if (onsubmit) {
       onsubmit(text);
-    } else {
-      const active = activeAgentSessionId();
-      if (active) {
-        appendUserMessage(active, text);
-      } else {
-        const sessionId = createSessionFromText(text);
-        navigate(`/agent/${sessionId}`);
-      }
+      return;
     }
-    value = "";
+    const active = activeAgentSessionId();
+    if (active) {
+      void appendUserMessage(active, text);
+    } else {
+      void createSessionFromText(text).then((sessionId) => {
+        navigate(`/agent/${sessionId}`);
+      });
+    }
   }
 
   function handleKey(event: KeyboardEvent): void {

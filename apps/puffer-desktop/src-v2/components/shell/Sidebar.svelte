@@ -262,8 +262,9 @@
    * no seed user turn; the user types in the Composer to drive it.
    */
   function startNewChat(): void {
-    const sessionId = createSessionFromText("");
-    navigate(`/agent/${sessionId}`);
+    void createSessionFromText("").then((sessionId) => {
+      navigate(`/agent/${sessionId}`);
+    });
   }
 </script>
 
