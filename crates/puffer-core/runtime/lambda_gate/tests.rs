@@ -131,6 +131,29 @@ fn gate_validates_precompiled_concrete_input_contract() {
 }
 
 #[test]
+fn shell_template_contract_quotes_arguments() {
+    let host = LambdaHostEnv::from_json_str(
+        r#"{"effects":[],"domains":[],"tools":[{"name":"cli_lookup","effects":["proc"],"params":[{"name":"query","ty":"str"},{"name":"limit","ty":"int"}],"concreteTools":["Bash"],"concreteInputContracts":{"Bash":{"command":{"$template":"lookup --query ${shell:query} --limit ${shell:limit}"},"run_in_background":false,"timeout":120,"tty":false}}}]}"#,
+    )
+    .unwrap();
+    let gate = LambdaGateState::with_host_caps(host);
+
+    assert!(gate
+        .admit_concrete_input_binding(
+            "cli_lookup",
+            &serde_json::json!({"query": "a' $(rm -rf /)", "limit": 10}),
+            "Bash",
+            &serde_json::json!({
+                "command": "lookup --query 'a'\"'\"' $(rm -rf /)' --limit '10'",
+                "run_in_background": false,
+                "timeout": 120,
+                "tty": false
+            })
+        )
+        .is_accept());
+}
+
+#[test]
 fn skill_path_contract_matches_loaded_skill_root() {
     let root = tempfile::tempdir().unwrap();
     let skill_source = root.path().join("skill.lskill");

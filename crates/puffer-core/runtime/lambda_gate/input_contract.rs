@@ -143,7 +143,7 @@ fn collect_template_arg_refs(template: &str, out: &mut BTreeSet<String>) {
         let Some(end) = rest.find('}') else {
             return;
         };
-        if let Some(name) = template_placeholder_arg(&rest[..end]) {
+        if let Some((_, name)) = template_placeholder(&rest[..end]) {
             out.insert(name.to_string());
         }
         rest = &rest[end + 1..];
@@ -158,14 +158,18 @@ fn render_template(template: &str, args: &Map<String, Value>) -> Option<String> 
         rest = &rest[start + 2..];
         let end = rest.find('}')?;
         let placeholder = &rest[..end];
-        let name = template_placeholder_arg(placeholder)?;
+        let (format, name) = template_placeholder(placeholder)?;
         let value = args.get(name)?;
-        if placeholder.trim().starts_with("json:") {
-            output.push_str(&serde_json::to_string(value).ok()?);
-        } else if let Some(text) = value.as_str() {
-            output.push_str(text);
-        } else {
-            output.push_str(&serde_json::to_string(value).ok()?);
+        match format {
+            TemplateFormat::Json => output.push_str(&serde_json::to_string(value).ok()?),
+            TemplateFormat::Shell => output.push_str(&shell_quote_value(value)?),
+            TemplateFormat::Raw => {
+                if let Some(text) = value.as_str() {
+                    output.push_str(text);
+                } else {
+                    output.push_str(&serde_json::to_string(value).ok()?);
+                }
+            }
         }
         rest = &rest[end + 1..];
     }
@@ -173,12 +177,34 @@ fn render_template(template: &str, args: &Map<String, Value>) -> Option<String> 
     Some(output)
 }
 
-fn template_placeholder_arg(placeholder: &str) -> Option<&str> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TemplateFormat {
+    Raw,
+    Json,
+    Shell,
+}
+
+fn template_placeholder(placeholder: &str) -> Option<(TemplateFormat, &str)> {
     let trimmed = placeholder.trim();
-    let name = trimmed.strip_prefix("json:").unwrap_or(trimmed).trim();
+    let (format, name) = if let Some(name) = trimmed.strip_prefix("json:") {
+        (TemplateFormat::Json, name.trim())
+    } else if let Some(name) = trimmed.strip_prefix("shell:") {
+        (TemplateFormat::Shell, name.trim())
+    } else {
+        (TemplateFormat::Raw, trimmed)
+    };
     (!name.is_empty()
         && name
             .chars()
             .all(|ch| ch == '_' || ch == '-' || ch.is_ascii_alphanumeric()))
-    .then_some(name)
+    .then_some((format, name))
+}
+
+fn shell_quote_value(value: &Value) -> Option<String> {
+    let text = if let Some(text) = value.as_str() {
+        text.to_string()
+    } else {
+        serde_json::to_string(value).ok()?
+    };
+    Some(format!("'{}'", text.replace('\'', r#"'"'"'"#)))
 }
