@@ -157,6 +157,64 @@ fn computer_use_click_coord_maps_coordinates() {
 }
 
 #[test]
+fn computer_use_focus_app_binds_active_app_without_raising() {
+    let runner = Arc::new(RecordingRunner::default());
+    let mut state = temp_state().with_tool_runner(runner.clone());
+    let cwd = state.cwd.clone();
+
+    crate::runtime::claude_tools::workflow::computer_use_action::execute_computer_use_action(
+        &mut state,
+        &cwd,
+        json!({
+            "action": "focusApp",
+            "app": "Safari",
+            "raiseWindow": false
+        }),
+    )
+    .unwrap();
+    crate::runtime::claude_tools::workflow::computer_use_action::execute_computer_use_action(
+        &mut state,
+        &cwd,
+        json!({
+            "action": "typeText",
+            "text": "hello"
+        }),
+    )
+    .unwrap();
+
+    let calls = runner.calls();
+    assert_eq!(calls[0].0, "computer_use");
+    assert_eq!(calls[0].1, "list_apps");
+    assert_eq!(calls[0].2, json!({}));
+    assert_eq!(calls[1].1, "type_text");
+    assert_eq!(calls[1].2["app"], "Safari");
+    assert_eq!(calls[1].2["text"], "hello");
+}
+
+#[test]
+fn computer_use_focus_app_can_raise_window() {
+    let runner = Arc::new(RecordingRunner::default());
+    let mut state = temp_state().with_tool_runner(runner.clone());
+    let cwd = state.cwd.clone();
+
+    crate::runtime::claude_tools::workflow::computer_use_action::execute_computer_use_action(
+        &mut state,
+        &cwd,
+        json!({
+            "action": "focusApp",
+            "app": "Finder",
+            "raiseWindow": true
+        }),
+    )
+    .unwrap();
+
+    let calls = runner.calls();
+    assert_eq!(calls[0].0, "computer_use");
+    assert_eq!(calls[0].1, "get_app_state");
+    assert_eq!(calls[0].2["app"], "Finder");
+}
+
+#[test]
 fn computer_use_app_less_action_requires_active_app() {
     let mut state = temp_state().with_tool_runner(Arc::new(RecordingRunner::default()));
     let cwd = state.cwd.clone();

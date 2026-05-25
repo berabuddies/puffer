@@ -17,6 +17,7 @@ input_schema:
       type: string
       enum:
         - capture
+        - focusApp
         - clickElement
         - clickCoord
         - doubleClick
@@ -31,6 +32,9 @@ input_schema:
     app:
       type: string
       description: macOS app name or bundle id.
+    raiseWindow:
+      type: boolean
+      description: For focusApp, whether to raise/capture the app window. Defaults to false.
     element:
       type: integer
       description: Element index from the current capture.

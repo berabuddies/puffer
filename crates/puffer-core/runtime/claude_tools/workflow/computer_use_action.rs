@@ -34,6 +34,8 @@ struct ComputerUseInput {
     modifiers: Vec<String>,
     #[serde(default, rename = "captureAfter", alias = "capture_after")]
     capture_after: bool,
+    #[serde(default, rename = "raiseWindow", alias = "raise_window")]
+    raise_window: Option<bool>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -51,6 +53,7 @@ pub fn execute_computer_use_action(
         serde_json::from_value(input).context("invalid ComputerUseAction input")?;
     let output = match parsed.action.as_str() {
         "capture" => capture(state, cwd, parsed)?,
+        "focusApp" => focus_app(state, cwd, parsed)?,
         "clickElement" => click_element(state, cwd, parsed)?,
         "clickCoord" => click_coord(state, cwd, parsed)?,
         "doubleClick" => element_click(state, cwd, parsed, 2, None)?,
@@ -61,6 +64,26 @@ pub fn execute_computer_use_action(
         other => bail!("unsupported ComputerUseAction action `{other}`"),
     };
     Ok(serde_json::to_string_pretty(&output)?)
+}
+
+fn focus_app(state: &mut AppState, cwd: &Path, input: ComputerUseInput) -> Result<Value> {
+    let app = required_string(input.app, "app")?;
+    save_active_app(cwd, &app)?;
+    let raise_window = input.raise_window.unwrap_or(false);
+    let tool = if raise_window {
+        "get_app_state"
+    } else {
+        "list_apps"
+    };
+    let args = if raise_window {
+        json!({ "app": app })
+    } else {
+        json!({})
+    };
+    let mut output = format_result(call_mcp(state, tool, args)?);
+    output["app"] = json!(app);
+    output["raiseWindow"] = json!(raise_window);
+    Ok(output)
 }
 
 fn capture(state: &mut AppState, cwd: &Path, input: ComputerUseInput) -> Result<Value> {
