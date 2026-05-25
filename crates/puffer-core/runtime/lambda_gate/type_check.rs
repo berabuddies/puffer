@@ -540,9 +540,17 @@ fn compare_values(left: &CmpValue, right: &CmpValue, op: &str) -> Option<bool> {
         (CmpValue::Number(left), CmpValue::Number(right), "<=") => Some(left <= right),
         (CmpValue::Number(left), CmpValue::Number(right), ">") => Some(left > right),
         (CmpValue::Number(left), CmpValue::Number(right), "<") => Some(left < right),
-        (_, _, "=" | "==") => Some(left == right),
-        (_, _, "!=") => Some(left != right),
+        (_, _, "=" | "==") => Some(cmp_values_equal(left, right)),
+        (_, _, "!=") => Some(!cmp_values_equal(left, right)),
         _ => None,
+    }
+}
+
+fn cmp_values_equal(left: &CmpValue, right: &CmpValue) -> bool {
+    match (left, right) {
+        (CmpValue::String(left), CmpValue::Symbol(right))
+        | (CmpValue::Symbol(left), CmpValue::String(right)) => left == right,
+        _ => left == right,
     }
 }
 
@@ -786,6 +794,29 @@ mod tests {
             "to",
             &args,
             "TokenAddr{to != from}",
+        ));
+    }
+
+    #[test]
+    fn enum_symbol_refinements_match_json_strings() {
+        let args = object(json!({"cred": "secret", "mode": "private"}));
+        assert!(lambda_arg_matches_type(
+            args.get("cred").unwrap(),
+            "cred",
+            &args,
+            "TrelloCred{sec = secret}",
+        ));
+        assert!(lambda_arg_matches_type(
+            args.get("mode").unwrap(),
+            "mode",
+            &args,
+            "Visibility{mode == private}",
+        ));
+        assert!(!lambda_arg_matches_type(
+            args.get("mode").unwrap(),
+            "mode",
+            &args,
+            "Visibility{mode != private}",
         ));
     }
 
