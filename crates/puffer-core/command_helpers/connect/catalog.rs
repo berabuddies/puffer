@@ -151,6 +151,10 @@ fn connector_option_description(connector: &Value) -> String {
     if !actions.is_empty() {
         details.push(format!("actions={}", action_summary(&actions)));
     }
+    let runtime_hints = connector_runtime_hints(connector);
+    if !runtime_hints.is_empty() {
+        details.push(format!("runtime={}", action_summary(&runtime_hints)));
+    }
     format!("{description} ({})", details.join("; "))
 }
 
@@ -174,6 +178,10 @@ fn connector_template_description(template: &ConnectorTemplate) -> String {
     if !actions.is_empty() {
         details.push(format!("actions={}", action_summary(&actions)));
     }
+    let runtime_hints = connector_template_runtime_hints(template);
+    if !runtime_hints.is_empty() {
+        details.push(format!("runtime={}", action_summary(&runtime_hints)));
+    }
     format!("{} ({})", template.description, details.join("; "))
 }
 
@@ -192,6 +200,40 @@ fn connector_action_slugs(connector: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn connector_runtime_hints(connector: &Value) -> Vec<String> {
+    connector
+        .get("runtime_hints")
+        .and_then(Value::as_array)
+        .map(|hints| {
+            hints
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn connector_template_runtime_hints(template: &ConnectorTemplate) -> Vec<String> {
+    let mut hints = Vec::new();
+    if template.subscriber.is_some() {
+        hints.push("subscriber");
+    }
+    if template.command_argv().is_some() {
+        hints.push("command");
+    }
+    if template.binary.starts_with("puffer internal-tool") {
+        hints.push("internal-tool");
+    }
+    if matches!(
+        template.slug.as_str(),
+        "telegram-bot" | "discord-bot" | "matrix-bot" | "webhook"
+    ) {
+        hints.push("serve");
+    }
+    hints.into_iter().map(str::to_string).collect()
 }
 
 fn action_summary(actions: &[String]) -> String {
@@ -280,6 +322,7 @@ mod tests {
             .expect("telegram-login option");
 
         assert!(telegram.1.contains("skill=telegram"));
+        assert!(telegram.1.contains("runtime=internal-tool,subscriber"));
         assert!(telegram.1.contains("vote_poll"));
         assert_eq!(
             matching_connector_options(&options, "vote poll"),
@@ -298,6 +341,7 @@ mod tests {
                     "requires_auth": false,
                     "can_subscribe": true,
                     "can_proxy_agent": false,
+                    "runtime_hints": ["command"],
                     "actions": {
                         "send_message": {},
                         "react": {}
@@ -310,6 +354,7 @@ mod tests {
 
         assert!(options[0].1.contains("skill=demo"));
         assert!(options[0].1.contains("send_message"));
+        assert!(options[0].1.contains("runtime=command"));
         assert_eq!(
             matching_connector_options(&options, "send message"),
             options
@@ -334,6 +379,16 @@ mod tests {
         let slug = resolve_connector_slug(&mut state, &resources, "vote poll").expect("slug");
 
         assert_eq!(slug, "telegram-login");
+    }
+
+    #[test]
+    fn resolve_connector_slug_accepts_unique_runtime_term_match() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let slug = resolve_connector_slug(&mut state, &resources, "serve webhook").expect("slug");
+
+        assert_eq!(slug, "webhook");
     }
 
     #[test]

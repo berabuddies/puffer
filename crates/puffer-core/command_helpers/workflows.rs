@@ -2,7 +2,7 @@ use crate::{subscription_manager, AppState};
 use anyhow::Result;
 use puffer_config::ConfigPaths;
 use puffer_subscriptions::{
-    builtin_connector_templates, connection_workflow_trigger_supported,
+    builtin_connector_templates, connection_workflow_trigger_supported, connector_runtime_hints,
     connector_workflow_trigger_supported, suggested_connection_slug, ConnectionRecord,
     ConnectorTemplate, SubscriberManifestRoots,
 };
@@ -223,6 +223,7 @@ fn write_connectors(
             let suggested_connection = suggested_connection_slug(&connector.slug);
             let connect_command = connector_connect_command(connector);
             let trigger_supported = connector_workflow_trigger_supported(roots, connector);
+            let runtime_hints = connector_runtime_hints(roots, connector);
             let connection_values = context
                 .connections
                 .iter()
@@ -246,6 +247,7 @@ fn write_connectors(
                         "connect",
                         "setup",
                     ])
+                    .chain(runtime_hints.iter().map(String::as_str))
                     .chain(trigger_terms.into_iter().filter(|term| !term.is_empty()))
                     .chain(connection_values),
             )
@@ -290,6 +292,7 @@ fn write_connectors(
         if !connector.actions.is_empty() {
             capabilities.push("actions");
         }
+        let runtime_summary = connector_runtime_hints(roots, connector).join(",");
         let action_summary = connector_action_summary(connector, query)
             .map(|summary| format!(" actions={summary}"))
             .unwrap_or_default();
@@ -299,10 +302,11 @@ fn write_connectors(
         let connect_command = connector_connect_command(connector);
         let _ = writeln!(
             out,
-            "- {} [{}] {}{}{} connect={}",
+            "- {} [{}] {} runtime={}{}{} connect={}",
             connector.slug,
             capabilities.join(","),
             connector.description,
+            runtime_summary,
             action_summary,
             connection_summary,
             connect_command
@@ -719,6 +723,28 @@ mod tests {
 
         assert!(out.contains("showing 1/2 connectors for query=\"no trigger\""));
         assert!(out.contains("- setup-chat [no-trigger]"));
+        assert!(!out.contains("- demo-chat"));
+    }
+
+    #[test]
+    fn workflow_connectors_filter_matches_runtime_hints() {
+        let roots = SubscriberManifestRoots::new("/tmp/workspace", "/tmp/user", "/tmp/builtin");
+        let mut serve = trigger_template();
+        serve.slug = "discord-bot".to_string();
+        serve.description = "Discord bot".to_string();
+        serve.can_subscribe = false;
+        serve.command.clear();
+        let context = ConnectorContext {
+            connectors: vec![trigger_template(), serve],
+            connections: Vec::new(),
+            error: None,
+        };
+        let mut out = String::new();
+
+        write_connectors(&mut out, &context, &roots, true, "serve");
+
+        assert!(out.contains("showing 1/2 connectors for query=\"serve\""));
+        assert!(out.contains("- discord-bot [no-trigger] Discord bot runtime=serve"));
         assert!(!out.contains("- demo-chat"));
     }
 }

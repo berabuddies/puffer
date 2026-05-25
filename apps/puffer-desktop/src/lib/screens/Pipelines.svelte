@@ -669,6 +669,7 @@
           connector.connector_slug,
           connector.description,
           connector.skill,
+          connectorRuntimeHints(connector).join(" "),
           connector.connect_command,
           connector.suggested_connection_slug,
           connectorCapabilitySearchText(connector),
@@ -694,6 +695,10 @@
     return terms.join(" ");
   }
 
+  function connectorRuntimeHints(connector: WorkflowConnector | undefined): string[] {
+    return connector?.runtime_hints ?? [];
+  }
+
   function indexConnections(items: WorkflowConnection[], catalog: ConnectorSearchRow[]): ConnectionSearchRow[] {
     const catalogBySlug = new Map(catalog.map((row) => [row.connector.connector_slug, row.connector]));
     return items.map((connection) => {
@@ -710,6 +715,7 @@
           connectionTriggerSupported(connection) ? "trigger trigger-ready" : "no trigger no-trigger setup-only",
           connector?.description,
           connector?.skill,
+          connectorRuntimeHints(connector).join(" "),
           connector?.action_slugs.join(" ")
         ])
       };
@@ -1257,6 +1263,7 @@
                     {@const canMonitor = connectionMonitorSupported(connection)}
                     {@const connectCommand = connectionConnectCommand(connection)}
                     {@const monitorCommand = connectionMonitorCommand(connection)}
+                    {@const runtimeHints = connectorRuntimeHints(connector)}
                     {@const actionSlugs = connectorActionSlugs(connector, connectorQuery)}
                     {@const hiddenActions = connectorHiddenActionCount(connector, actionSlugs)}
                     <div class="pf-connection-row-group">
@@ -1278,6 +1285,9 @@
                           <span>connect</span>
                           {#if canMonitor}<span>monitor</span>{/if}
                           {#if !canTrigger}<span>no trigger</span>{/if}
+                          {#each runtimeHints as hint}
+                            <span class="pf-connector-runtime">{hint}</span>
+                          {/each}
                           {#each actionSlugs as action}
                             <span class="pf-connector-action">{action}</span>
                           {/each}
@@ -1318,6 +1328,7 @@
                     {@const connectorConnections = connectionsForConnector(connector.connector_slug)}
                     {@const canTrigger = connectorTriggerSupported(connector)}
                     {@const connectCommand = connectorConnectCommand(connector)}
+                    {@const runtimeHints = connectorRuntimeHints(connector)}
                     {@const actionSlugs = connectorActionSlugs(connector, connectorQuery)}
                     {@const hiddenActions = connectorHiddenActionCount(connector, actionSlugs)}
                     {@const visibleConnections = connectorConnections.slice(0, 2)}
@@ -1340,6 +1351,9 @@
                           {#if connector.can_subscribe}<span>events</span>{/if}
                           {#if canTrigger}<span>trigger</span>{:else}<span>no trigger</span>{/if}
                           {#if connector.can_proxy_agent}<span>proxy</span>{/if}
+                          {#each runtimeHints as hint}
+                            <span class="pf-connector-runtime">{hint}</span>
+                          {/each}
                           {#each actionSlugs as action}
                             <span class="pf-connector-action">{action}</span>
                           {/each}

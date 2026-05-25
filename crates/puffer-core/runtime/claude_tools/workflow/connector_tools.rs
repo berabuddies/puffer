@@ -6,9 +6,9 @@ use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
 use puffer_subscriber_runtime::{Event, EventEnvelope};
 use puffer_subscriptions::{
-    connector_workflow_trigger_supported, suggested_connection_slug, ActionDispatcher, ActionSpec,
-    BuiltinActionDispatcher, ConnectionRecord, ConnectionState, ConnectorActionRequest,
-    ConnectorTemplate, SubscriberManifestRoots,
+    connector_runtime_hints, connector_workflow_trigger_supported, suggested_connection_slug,
+    ActionDispatcher, ActionSpec, BuiltinActionDispatcher, ConnectionRecord, ConnectionState,
+    ConnectorActionRequest, ConnectorTemplate, SubscriberManifestRoots,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -102,6 +102,7 @@ fn connector_list_row(template: ConnectorTemplate, roots: &SubscriberManifestRoo
         "skill": template.skill,
         "binary": template.binary,
         "command": template.command,
+        "runtime_hints": connector_runtime_hints(roots, &template),
         "requires_auth": template.requires_auth,
         "can_subscribe": template.can_subscribe,
         "can_proxy_agent": template.can_proxy_agent,
@@ -485,6 +486,7 @@ mod tests {
             row["connect_command"],
             "/connect telegram-login telegram-user"
         );
+        assert_eq!(row["runtime_hints"], json!(["internal-tool"]));
         assert_eq!(row["can_trigger_workflow"], false);
     }
 
@@ -499,6 +501,7 @@ mod tests {
         assert_eq!(row["connector_slug"], "custom-feed");
         assert_eq!(row["suggested_connection_slug"], "custom-feed");
         assert_eq!(row["connect_command"], "/connect custom-feed custom-feed");
+        assert_eq!(row["runtime_hints"], json!(["command"]));
         assert_eq!(row["can_trigger_workflow"], true);
     }
 }

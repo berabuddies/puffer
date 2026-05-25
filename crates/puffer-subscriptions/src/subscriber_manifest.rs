@@ -75,6 +75,30 @@ pub fn connector_workflow_trigger_supported(
         || find_subscriber_manifest(roots, &template.slug).is_some()
 }
 
+/// Returns stable runtime/source hint labels for connector selection UIs.
+pub fn connector_runtime_hints(
+    roots: &SubscriberManifestRoots,
+    template: &ConnectorTemplate,
+) -> Vec<String> {
+    let mut hints = Vec::new();
+    if connector_subscriber_manifest_supported(roots, template) {
+        hints.push("subscriber");
+    }
+    if template.command_argv().is_some() {
+        hints.push("command");
+    }
+    if template.binary.starts_with("puffer internal-tool") {
+        hints.push("internal-tool");
+    }
+    if serve_configured_connector(&template.slug) {
+        hints.push("serve");
+    }
+    if hints.is_empty() {
+        hints.push("connector");
+    }
+    hints.into_iter().map(str::to_string).collect()
+}
+
 /// Returns whether a concrete connection can start workflow trigger events.
 pub fn connection_workflow_trigger_supported(
     roots: &SubscriberManifestRoots,
@@ -83,6 +107,22 @@ pub fn connection_workflow_trigger_supported(
 ) -> bool {
     (template.can_subscribe && template.command_argv().is_some())
         || connection_subscriber_manifest_exists(roots, connection, template)
+}
+
+fn connector_subscriber_manifest_supported(
+    roots: &SubscriberManifestRoots,
+    template: &ConnectorTemplate,
+) -> bool {
+    template.subscriber.as_ref().is_some_and(|subscriber| {
+        find_subscriber_manifest(roots, &subscriber.manifest_slug).is_some()
+    }) || find_subscriber_manifest(roots, &template.slug).is_some()
+}
+
+fn serve_configured_connector(slug: &str) -> bool {
+    matches!(
+        slug,
+        "telegram-bot" | "discord-bot" | "matrix-bot" | "webhook"
+    )
 }
 
 /// Loads the subscriber manifest for a connection, instantiating shared
@@ -361,6 +401,50 @@ mod tests {
             &connection,
             &template
         ));
+    }
+
+    #[test]
+    fn connector_runtime_hints_report_subscriber_and_internal_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(temp.path());
+        write_manifest(
+            &roots
+                .builtin_resources_dir
+                .join("subscribers/telegram-user"),
+            "telegram-user",
+            "telegram-user",
+            Some("Telegram"),
+        );
+        let mut template = template("telegram-login");
+        template.binary = "puffer internal-tool telegram".to_string();
+        template.subscriber = Some(ConnectorSubscriberTemplate {
+            manifest_slug: "telegram-user".to_string(),
+            state_root: Some("telegram-accounts".to_string()),
+            display_name: Some("Telegram".to_string()),
+        });
+
+        assert_eq!(
+            connector_runtime_hints(&roots, &template),
+            vec!["subscriber", "internal-tool"]
+        );
+    }
+
+    #[test]
+    fn connector_runtime_hints_report_serve_and_command_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(temp.path());
+        let serve_template = template("discord-bot");
+        let mut command_template = template("custom-feed");
+        command_template.command = vec!["custom-feed".to_string(), "subscribe".to_string()];
+
+        assert_eq!(
+            connector_runtime_hints(&roots, &serve_template),
+            vec!["serve"]
+        );
+        assert_eq!(
+            connector_runtime_hints(&roots, &command_template),
+            vec!["command"]
+        );
     }
 
     fn roots(root: &Path) -> SubscriberManifestRoots {

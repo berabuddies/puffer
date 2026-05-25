@@ -4,8 +4,9 @@ use anyhow::{Context, Result};
 use puffer_config::ConfigPaths;
 use puffer_core::subscription_manager;
 use puffer_subscriptions::{
-    connection_workflow_trigger_supported, connector_workflow_trigger_supported,
-    suggested_connection_slug, ConnectionRecord, SubscriberManifestRoots,
+    connection_workflow_trigger_supported, connector_runtime_hints,
+    connector_workflow_trigger_supported, suggested_connection_slug, ConnectionRecord,
+    SubscriberManifestRoots,
 };
 use puffer_workflow::WorkflowStore;
 use serde_json::{json, Value};
@@ -65,6 +66,7 @@ fn add_connector_context(paths: &ConfigPaths, snapshot: &mut Value) {
                         "connector_slug": slug,
                         "description": template.description,
                         "skill": template.skill,
+                        "runtime_hints": connector_runtime_hints(&roots, &template),
                         "requires_auth": template.requires_auth,
                         "can_subscribe": template.can_subscribe,
                         "can_proxy_agent": template.can_proxy_agent,

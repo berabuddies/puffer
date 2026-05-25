@@ -76,6 +76,7 @@ pub use store::{
 };
 pub use subscriber_manifest::{
     connection_subscriber_manifest, connection_subscriber_manifest_exists,
-    connection_workflow_trigger_supported, connector_workflow_trigger_supported,
-    direct_subscriber_manifest, find_subscriber_manifest, SubscriberManifestRoots,
+    connection_workflow_trigger_supported, connector_runtime_hints,
+    connector_workflow_trigger_supported, direct_subscriber_manifest, find_subscriber_manifest,
+    SubscriberManifestRoots,
 };
