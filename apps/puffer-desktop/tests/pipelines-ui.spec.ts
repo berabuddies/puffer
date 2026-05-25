@@ -150,6 +150,29 @@ test("pipeline connector picker keeps non-trigger connections disabled while set
   await expect(page.getByLabel("Trigger type")).toHaveValue("subscription");
 });
 
+test("pipeline connector catalog stages telegram bot setup", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  await page.getByLabel("Search connectors").fill("telegram bot");
+
+  const connector = page
+    .locator('[aria-label="Connector catalog"]')
+    .getByRole("button", { name: "Select telegram-bot connector setup" });
+
+  await expect(connector).toBeEnabled();
+  await expect(connector).toContainText("events");
+  await expect(connector).toContainText("proxy");
+  await expect(connector).toContainText("no trigger");
+  await expect(connector).toContainText("send_message");
+  await connector.click();
+  await expect(page.getByLabel("Selected connector command")).toContainText("/connect telegram-bot telegram-bot");
+  await expect(page.getByLabel("Trigger type")).toHaveValue("subscription");
+});
+
 test("pipeline connector catalog can search serve-mode connectors as unavailable triggers", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

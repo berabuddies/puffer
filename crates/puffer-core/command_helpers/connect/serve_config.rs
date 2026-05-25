@@ -6,6 +6,39 @@ use puffer_resources::LoadedResources;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Configures the Telegram bot serve-mode connector from deterministic questions.
+pub(super) fn connect_telegram_bot(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    connection: &str,
+) -> Result<ConnectResult> {
+    let token = ask_input(
+        state,
+        resources,
+        "Bot Token",
+        "What Telegram bot token should Puffer use?",
+    )?;
+    let path = write_workspace_connector_config(
+        state,
+        "telegram",
+        connection,
+        &[
+            ("token", toml::Value::String(token)),
+            ("require_mention", toml::Value::Boolean(true)),
+            (
+                "group_key_policy",
+                toml::Value::String("per_user".to_string()),
+            ),
+        ],
+    )?;
+    Ok(serve_summary(
+        "telegram-bot",
+        connection,
+        "Bot token",
+        &path,
+    ))
+}
+
 /// Configures the Discord serve-mode connector from deterministic questions.
 pub(super) fn connect_discord_bot(
     state: &mut AppState,
@@ -259,6 +292,7 @@ mod tests {
             .expect("question text")
             .to_string();
         let answer = match question.as_str() {
+            "What Telegram bot token should Puffer use?" => "telegram-token",
             "What Discord bot token should Puffer use?" => "discord-token",
             "What Matrix homeserver URL should Puffer use?" => "https://matrix.example.org",
             "What Matrix username should Puffer use?" => "puffer-bot",
@@ -271,6 +305,34 @@ mod tests {
             answers: Map::from_iter([(question, json!(answer))]),
             annotations: Map::new(),
         }
+    }
+
+    #[test]
+    fn telegram_bot_connect_writes_wrapped_workspace_config() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+        let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let request_log = Arc::clone(&requests);
+
+        let result = with_user_question_prompt_handler(
+            move |request| {
+                request_log.lock().unwrap().push(request.questions.clone());
+                answer_request(&request)
+            },
+            || connect_telegram_bot(&mut state, &resources, "telegram-bot"),
+        )
+        .expect("connect result");
+
+        assert!(result.summary.contains("connector: telegram-bot"));
+        assert!(result.summary.contains("run `puffer serve`"));
+        let path = state.cwd.join(".puffer/connectors.toml");
+        let raw = fs::read_to_string(path).expect("connector config");
+        assert!(raw.contains("[connectors.telegram]"));
+        assert!(raw.contains("display_name = \"telegram-bot\""));
+        assert!(raw.contains("token = \"telegram-token\""));
+        assert!(raw.contains("require_mention = true"));
+        assert!(raw.contains("group_key_policy = \"per_user\""));
+        assert_eq!(requests.lock().unwrap()[0][0]["type"], "input");
     }
 
     #[test]

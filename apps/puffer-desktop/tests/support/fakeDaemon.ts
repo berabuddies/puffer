@@ -353,6 +353,18 @@ export class FakeDaemon {
         action_slugs: ["send_message", "edit_message", "delete_messages", "vote_poll"]
       },
       {
+        connector_slug: "telegram-bot",
+        description: "Telegram bot connector for agent proxy and bot chats",
+        skill: "telegram-bot",
+        requires_auth: true,
+        can_subscribe: true,
+        can_proxy_agent: true,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "telegram-bot",
+        connect_command: "/connect telegram-bot telegram-bot",
+        action_slugs: ["send_message"]
+      },
+      {
         connector_slug: "slack-app",
         description: "Slack app connector for bot-token Web API actions",
         skill: "slack",

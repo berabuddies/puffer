@@ -21,6 +21,9 @@ pub fn execute_connect_flow(
         "lark-app" => connect_lark_app(state, resources, &target.connection_name)?,
         "lark-login" => connect_lark_login(state, resources, &target.connection_name)?,
         "email" => connect_email(state, resources, &target.connection_name)?,
+        "telegram-bot" => {
+            serve_config::connect_telegram_bot(state, resources, &target.connection_name)?
+        }
         "discord-bot" => {
             serve_config::connect_discord_bot(state, resources, &target.connection_name)?
         }
@@ -868,5 +871,37 @@ mod tests {
         let raw =
             std::fs::read_to_string(state.cwd.join(".puffer/connectors.toml")).expect("config");
         assert!(raw.contains("[connectors.webhook]"));
+    }
+
+    #[test]
+    fn execute_connect_flow_dispatches_telegram_bot_setup() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let turn = with_user_question_prompt_handler(
+            |request| {
+                let question = request.questions[0]["question"]
+                    .as_str()
+                    .expect("question text")
+                    .to_string();
+                let answer = match question.as_str() {
+                    "What Telegram bot token should Puffer use?" => "telegram-token",
+                    other => panic!("unexpected question: {other}"),
+                };
+                UserQuestionPromptResponse {
+                    answers: Map::from_iter([(question, json!(answer))]),
+                    annotations: Map::new(),
+                }
+            },
+            || execute_connect_flow(&mut state, &resources, "telegram-bot telegram-bot"),
+        )
+        .expect("connect turn");
+
+        assert!(turn.assistant_text.contains("connector: telegram-bot"));
+        assert!(turn.assistant_text.contains("run `puffer serve`"));
+        let raw =
+            std::fs::read_to_string(state.cwd.join(".puffer/connectors.toml")).expect("config");
+        assert!(raw.contains("[connectors.telegram]"));
+        assert!(raw.contains("token = \"telegram-token\""));
     }
 }
