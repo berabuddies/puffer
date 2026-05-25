@@ -1,4 +1,6 @@
-use crate::runtime::lambda_skill_activation::gate_for_verified_skill_activation;
+use crate::runtime::lambda_skill_activation::{
+    allowed_tools_for_verified_skill, gate_for_verified_skill_activation,
+};
 use puffer_resources::{LoadedResources, SkillSpec};
 
 /// Summarizes verified Lambda Skill readiness for user-facing surfaces.
@@ -54,7 +56,8 @@ pub fn lambda_skill_status(skill: &SkillSpec) -> Option<LambdaSkillStatus> {
         .verification
         .as_ref()
         .filter(|verification| verification.system == "lambda-skill")?;
-    let allowed_tools = skill.allowed_tools.clone();
+    let allowed_tools =
+        allowed_tools_for_verified_skill(skill).unwrap_or_else(|_| skill.allowed_tools.clone());
     let readiness = lambda_skill_readiness(skill, verification);
     Some(LambdaSkillStatus {
         name: skill.name.clone(),

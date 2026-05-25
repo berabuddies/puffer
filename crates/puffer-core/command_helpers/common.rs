@@ -850,7 +850,7 @@ mod tests {
 
         let rendered = render_skills_panel(&resources);
         assert!(rendered.contains(
-            "- /verified-ci · ~6 description tokens · verified lambda-skill (10 tools, 2 actions) · gate-ready via host catalogue · model-invocable · allowed tools Read"
+            "- /verified-ci · ~6 description tokens · verified lambda-skill (10 tools, 2 actions) · gate-ready via host catalogue · model-invocable · allowed tools Read, LambdaHostCall, LambdaInternal"
         ));
     }
 
@@ -878,7 +878,11 @@ mod tests {
 
         assert_eq!(
             allowed,
-            vec!["Read".to_string(), "LambdaHostCall".to_string()]
+            vec![
+                "Read".to_string(),
+                "LambdaHostCall".to_string(),
+                "LambdaInternal".to_string()
+            ]
         );
     }
 

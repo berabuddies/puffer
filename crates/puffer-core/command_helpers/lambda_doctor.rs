@@ -201,7 +201,7 @@ mod tests {
             "lambda_skills=1 precompiled_catalogues=0 missing_gate_config=1 stats_known=1 tools=2 actions=3"
         ));
         assert!(status.contains(
-            "lambda_skill verified-demo: not gate-ready: verified Lambda Skill requires a precompiled host catalogue; set host_catalogue_subpath in the lambda_skill_libraries manifest; model invocation blocked; allowed tools Read"
+            "lambda_skill verified-demo: not gate-ready: verified Lambda Skill requires a precompiled host catalogue; set host_catalogue_subpath in the lambda_skill_libraries manifest; model invocation blocked; allowed tools Read, LambdaHostCall, LambdaInternal"
         ));
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].summary.contains("verified-demo"));
@@ -252,7 +252,7 @@ mod tests {
 
         assert!(status.contains("lambda_skills=1 precompiled_catalogues=1"));
         assert!(status.contains(
-            "lambda_skill verified-ready: gate-ready via host catalogue; model-invocable; allowed tools Read, ToolSearch"
+            "lambda_skill verified-ready: gate-ready via host catalogue; model-invocable; allowed tools Read, ToolSearch, LambdaHostCall, LambdaInternal"
         ));
         assert!(warnings.is_empty());
     }
@@ -300,7 +300,9 @@ mod tests {
         assert!(status.contains(
             "lambda_skill verified-broken: not gate-ready: failed to parse host catalogue"
         ));
-        assert!(status.contains("model invocation blocked; allowed tools Read"));
+        assert!(status.contains(
+            "model invocation blocked; allowed tools Read, LambdaHostCall, LambdaInternal"
+        ));
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0]
             .detail

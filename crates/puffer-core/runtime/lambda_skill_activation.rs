@@ -4,6 +4,7 @@ use anyhow::{anyhow, bail, Result};
 use puffer_resources::SkillSpec;
 
 const LAMBDA_HOST_CALL_TOOL_ID: &str = "LambdaHostCall";
+const LAMBDA_INTERNAL_TOOL_ID: &str = "LambdaInternal";
 
 /// Returns true when a loaded skill carries Lambda Skill verification metadata.
 pub(crate) fn is_lambda_verified_skill(skill: &SkillSpec) -> bool {
@@ -46,6 +47,12 @@ pub(crate) fn allowed_tools_for_verified_skill(skill: &SkillSpec) -> Result<Vec<
         .any(|tool| tool.eq_ignore_ascii_case(LAMBDA_HOST_CALL_TOOL_ID))
     {
         allowed_tools.push(LAMBDA_HOST_CALL_TOOL_ID.to_string());
+    }
+    if !allowed_tools
+        .iter()
+        .any(|tool| tool.eq_ignore_ascii_case(LAMBDA_INTERNAL_TOOL_ID))
+    {
+        allowed_tools.push(LAMBDA_INTERNAL_TOOL_ID.to_string());
     }
     Ok(allowed_tools)
 }

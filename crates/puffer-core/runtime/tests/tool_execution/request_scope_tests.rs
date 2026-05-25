@@ -643,7 +643,7 @@ fn model_invoked_verified_lambda_skill_installs_gate_and_tool_scope() {
     assert!(loaded
         .output
         .stdout
-        .contains("allowed-tools: ToolSearch, LambdaHostCall"));
+        .contains("allowed-tools: ToolSearch, LambdaHostCall, LambdaInternal"));
     assert!(state.lambda_gate.is_some());
 
     let denied_target = execute_tool_call(
