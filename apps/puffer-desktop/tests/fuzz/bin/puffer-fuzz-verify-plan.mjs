@@ -211,7 +211,7 @@ if (!runRealOpenRouter) {
     `PUFFER_OPENROUTER_NAMESPACE=${sh(`${namespace}-real-openrouter`)} node apps/puffer-desktop/tests/fuzz/bin/puffer-openrouter-aggregate.mjs`,
     `cp apps/puffer-desktop/tests/fuzz/.runs/openrouter-campaign/puffer_openrouter_fuzz_report.json ${sh(path.join(outDir, "real-openrouter-aggregate.json"))}`,
     `test "$(jq '.summary.missingReplayReports' ${sh(path.join(outDir, "real-openrouter-aggregate.json"))})" -eq 0`
-  ].join(" && "), { timeout: 420_000 });
+  ].join(" && "), { timeout: 420_000, external: true });
 }
 
 const summary = summarize();
