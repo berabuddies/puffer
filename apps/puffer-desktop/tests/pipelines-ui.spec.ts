@@ -188,6 +188,11 @@ test("pipeline connector filter presets apply stable search terms", async ({ pag
   await expect(resultSummary).toHaveText("2/11 connectors; 1/2 connections");
   await expect(filters.getByRole("button", { name: "Trigger", exact: true })).toHaveAttribute("aria-pressed", "true");
 
+  await filters.getByRole("button", { name: "Monitor" }).click();
+  await expect(page.getByLabel("Search connectors")).toHaveValue("monitor");
+  await expect(resultSummary).toHaveText("0/11 connectors; 1/2 connections");
+  await expect(page.locator('[aria-label="Connections"]')).toContainText("telegram-user");
+
   await filters.getByRole("button", { name: "Actions" }).click();
   await expect(page.getByLabel("Search connectors")).toHaveValue("has-actions");
   await expect(resultSummary).toHaveText("7/11 connectors; 2/2 connections");

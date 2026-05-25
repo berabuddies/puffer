@@ -142,19 +142,11 @@ fn write_connections(
         .connections
         .iter()
         .filter(|connection| {
-            let connect_command = connection_connect_command(connection);
-            matches_query(
-                query,
-                [
-                    connection.slug.as_str(),
-                    connection.connector_slug.as_str(),
-                    connection.description.as_str(),
-                    connect_command.as_str(),
-                    "repair",
-                ],
-            )
+            let terms = connection_search_terms(context, roots, connection);
+            matches_query(query, terms.iter().map(String::as_str))
         })
         .collect::<Vec<_>>();
+    write_connection_filter_hints(out);
     write_result_summary(
         out,
         connections.len(),
@@ -201,6 +193,10 @@ fn write_connections(
             connection.description
         );
     }
+}
+
+fn write_connection_filter_hints(out: &mut String) {
+    out.push_str("filters: trigger-ready | no-trigger | monitor | repair | active | idle\n");
 }
 
 fn write_connectors(
@@ -362,6 +358,61 @@ fn connector_action_slugs(connector: &ConnectorTemplate) -> Vec<&str> {
 
 fn connection_connect_command(connection: &ConnectionRecord) -> String {
     format!("/connect {} {}", connection.connector_slug, connection.slug)
+}
+
+fn connection_search_terms(
+    context: &ConnectorContext,
+    roots: &SubscriberManifestRoots,
+    connection: &ConnectionRecord,
+) -> Vec<String> {
+    let connect_command = connection_connect_command(connection);
+    let trigger_supported = connection_trigger_supported(context, roots, connection);
+    let mut terms = vec![
+        connection.slug.clone(),
+        connection.connector_slug.clone(),
+        connection.description.clone(),
+        format!("{:?}", connection.state).to_ascii_lowercase(),
+        connect_command,
+        "connect".to_string(),
+        "repair".to_string(),
+        "reconnect".to_string(),
+    ];
+    if connection.has_consumer {
+        terms.extend(["consumer", "active"].into_iter().map(str::to_string));
+    } else {
+        terms.extend(["consumer", "idle"].into_iter().map(str::to_string));
+    }
+    if trigger_supported {
+        terms.extend(
+            ["trigger", "trigger-ready", "monitor", "monitorable"]
+                .into_iter()
+                .map(str::to_string),
+        );
+        terms.push(format!("/monitor {}", connection.slug));
+    } else {
+        terms.extend(
+            ["no trigger", "no-trigger", "setup-only"]
+                .into_iter()
+                .map(str::to_string),
+        );
+    }
+    if let Some(connector) = context
+        .connectors
+        .iter()
+        .find(|template| template.slug == connection.connector_slug)
+    {
+        terms.extend(
+            [
+                connector.description.clone(),
+                connector.skill.clone(),
+                connector_runtime_hints(roots, connector).join(" "),
+                connector_action_slugs(connector).join(" "),
+            ]
+            .into_iter()
+            .filter(|term| !term.is_empty()),
+        );
+    }
+    terms
 }
 
 fn connector_connect_command(connector: &ConnectorTemplate) -> String {
@@ -570,6 +621,7 @@ mod tests {
 
         write_connections(&mut out, &context, &roots, "");
 
+        assert!(out.contains("filters: trigger-ready | no-trigger | monitor | repair"));
         assert!(out.contains(
             "trigger=ready repair=/connect demo-chat demo-main monitor=/monitor demo-main"
         ));
@@ -625,6 +677,97 @@ mod tests {
 
         assert!(out.contains("showing 1/1 connections for query=\"repair demo-chat\""));
         assert!(out.contains("repair=/connect demo-chat demo-main"));
+    }
+
+    #[test]
+    fn workflow_connections_filter_matches_monitor_and_trigger_terms() {
+        let roots = SubscriberManifestRoots::new("/tmp/workspace", "/tmp/user", "/tmp/builtin");
+        let mut setup_only = trigger_template();
+        setup_only.slug = "setup-chat".to_string();
+        setup_only.can_subscribe = false;
+        setup_only.command.clear();
+        let context = ConnectorContext {
+            connectors: vec![trigger_template(), setup_only],
+            connections: vec![
+                ConnectionRecord {
+                    slug: "demo-main".to_string(),
+                    connector_slug: "demo-chat".to_string(),
+                    description: "Demo main channel".to_string(),
+                    state: ConnectionState::Authenticated,
+                    has_consumer: false,
+                    cursor: None,
+                    auth_failure_notified: false,
+                },
+                ConnectionRecord {
+                    slug: "setup-main".to_string(),
+                    connector_slug: "setup-chat".to_string(),
+                    description: "Setup main channel".to_string(),
+                    state: ConnectionState::Authenticated,
+                    has_consumer: false,
+                    cursor: None,
+                    auth_failure_notified: false,
+                },
+            ],
+            error: None,
+        };
+        let mut out = String::new();
+
+        write_connections(&mut out, &context, &roots, "monitor");
+
+        assert!(out.contains("showing 1/2 connections for query=\"monitor\""));
+        assert!(out.contains("- demo-main"));
+        assert!(out.contains("monitor=/monitor demo-main"));
+        assert!(!out.contains("- setup-main"));
+
+        out.clear();
+        write_connections(&mut out, &context, &roots, "no-trigger");
+
+        assert!(out.contains("showing 1/2 connections for query=\"no-trigger\""));
+        assert!(out.contains("- setup-main"));
+        assert!(!out.contains("- demo-main"));
+    }
+
+    #[test]
+    fn workflow_connections_filter_matches_consumer_terms() {
+        let roots = SubscriberManifestRoots::new("/tmp/workspace", "/tmp/user", "/tmp/builtin");
+        let context = ConnectorContext {
+            connectors: vec![trigger_template()],
+            connections: vec![
+                ConnectionRecord {
+                    slug: "demo-active".to_string(),
+                    connector_slug: "demo-chat".to_string(),
+                    description: "Demo active channel".to_string(),
+                    state: ConnectionState::Active,
+                    has_consumer: true,
+                    cursor: None,
+                    auth_failure_notified: false,
+                },
+                ConnectionRecord {
+                    slug: "demo-idle".to_string(),
+                    connector_slug: "demo-chat".to_string(),
+                    description: "Demo idle channel".to_string(),
+                    state: ConnectionState::Authenticated,
+                    has_consumer: false,
+                    cursor: None,
+                    auth_failure_notified: false,
+                },
+            ],
+            error: None,
+        };
+        let mut out = String::new();
+
+        write_connections(&mut out, &context, &roots, "consumer active");
+
+        assert!(out.contains("showing 1/2 connections for query=\"consumer active\""));
+        assert!(out.contains("- demo-active"));
+        assert!(!out.contains("- demo-idle"));
+
+        out.clear();
+        write_connections(&mut out, &context, &roots, "consumer idle");
+
+        assert!(out.contains("showing 1/2 connections for query=\"consumer idle\""));
+        assert!(out.contains("- demo-idle"));
+        assert!(!out.contains("- demo-active"));
     }
 
     #[test]
