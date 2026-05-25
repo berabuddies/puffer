@@ -23,6 +23,7 @@ const outPath = path.resolve(repoRoot, requireArg(args, "out"));
 const model = args.model ?? process.env.PUFFER_OPENROUTER_MODEL ?? "inclusionai/ling-2.6-flash";
 const baseUrl = (process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1").replace(/\/+$/, "");
 const apiKey = process.env.OPENROUTER_API_KEY;
+const offlineSmoke = args.offline === "true" || process.env.PUFFER_OPENROUTER_OFFLINE_SMOKE === "1";
 const maxSteps = Number(args.steps ?? 8);
 const caseCount = Math.max(1, Number(args.cases ?? process.env.PUFFER_OPENROUTER_CASES ?? 1));
 const requestTimeoutMs = Math.max(1000, Number(process.env.PUFFER_OPENROUTER_REQUEST_TIMEOUT_MS ?? 30000));
@@ -40,7 +41,7 @@ const shard = await readJson(path.join(fuzzRoot, "shards", `${shardId}.json`));
 const rng = createRng(`${namespace}:openrouter-explorer`);
 const selectedActions = [];
 
-if (!apiKey) throw new Error("OPENROUTER_API_KEY is required");
+if (!apiKey && !offlineSmoke) throw new Error("OPENROUTER_API_KEY is required");
 
 const allowedActions = buildAllowedActions(seed, shard);
 if (allowedActions.length === 0) {
@@ -59,8 +60,9 @@ const run = {
   manifestVersion: manifest.version,
   generatedAt: new Date().toISOString(),
   options: {
-    mode: "openrouter-explorer",
+    mode: offlineSmoke ? "offline-openrouter-smoke" : "openrouter-explorer",
     model,
+    offlineSmoke,
     namespace,
     shard: shardId,
     seed: seedId,
@@ -78,6 +80,9 @@ async function generateSelectedActions(caseIndex) {
   selectedActions.length = 0;
   explorerResources.clear();
   applySetupResources(explorerResources);
+  if (offlineSmoke) {
+    return generateOfflineSelectedActions(caseIndex);
+  }
   let fallbackReason = "fallback allowed action";
 
   const messages = [
@@ -164,6 +169,45 @@ async function generateSelectedActions(caseIndex) {
     params: action.params,
     reason: action.reason
   }));
+}
+
+function generateOfflineSelectedActions(caseIndex) {
+  const candidates = allowedActions
+    .filter((action) => hasPrimaryOwnedCoverage(action))
+    .sort((left, right) => {
+      const leftScore = offlineActionScore(left);
+      const rightScore = offlineActionScore(right);
+      if (rightScore !== leftScore) return rightScore - leftScore;
+      return left.id.localeCompare(right.id);
+    });
+  const ordered = rotate(candidates.length > 0 ? candidates : allowedActions, caseIndex - 1);
+  for (const action of ordered) {
+    if (appendActionWithPrereqs(action, new Set())) break;
+  }
+  ensureOwnedCoverage();
+  return selectedActions.map((action) => ({
+    actionId: action.actionId,
+    params: action.params,
+    reason: action.reason || "Selected by offline smoke explorer to validate campaign orchestration."
+  }));
+}
+
+function offlineActionScore(action) {
+  let score = 0;
+  if (action.target === shard.entrypoint) score += 20;
+  for (const tag of action.coverage ?? []) {
+    if (String(tag).startsWith("async:")) score += 8;
+    if (String(tag).startsWith("control:")) score += 6;
+    if (String(tag).startsWith("state:")) score += 4;
+  }
+  score += (action.expectedDaemon ? 3 : 0);
+  return score;
+}
+
+function rotate(items, offset) {
+  if (items.length === 0) return [];
+  const normalized = ((offset % items.length) + items.length) % items.length;
+  return [...items.slice(normalized), ...items.slice(0, normalized)];
 }
 
 async function openRouterChat(messages) {
@@ -333,7 +377,7 @@ function buildCase({ seed, shard, namespace, selectedActions, rng, caseIndex }) 
       invalidates: action.invalidates ?? [],
       produces: action.produces ?? [],
       expectedDaemon: action.expectedDaemon ?? null,
-      note: selectedActions[index].reason || "Selected by OpenRouter explorer"
+      note: selectedActions[index].reason || (offlineSmoke ? "Selected by offline smoke explorer" : "Selected by OpenRouter explorer")
     };
     steps.push(step);
     applyResourceTransitions(resources, step);
@@ -361,6 +405,7 @@ function buildCase({ seed, shard, namespace, selectedActions, rng, caseIndex }) 
     severityTarget: seed.severityTarget,
     explorer: {
       model,
+      offlineSmoke,
       namespace,
       shard: shard.id,
       selectedActions

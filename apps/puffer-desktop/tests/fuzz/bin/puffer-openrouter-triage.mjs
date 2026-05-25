@@ -20,10 +20,6 @@ const runDir = path.resolve(fuzzRoot, ".runs", namespace);
 const apiKey = process.env.OPENROUTER_API_KEY;
 const baseUrl = (process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1").replace(/\/+$/, "");
 
-if (!apiKey) {
-  throw new Error("OPENROUTER_API_KEY is required");
-}
-
 const artifacts = {
   planner: readOptional(path.join(runDir, "planner.md")),
   top: readOptional(path.join(runDir, "top.md")),
@@ -53,6 +49,10 @@ if (!hasActionableReplaySignal(replaySummary, replayFindings)) {
   });
   process.stdout.write(`OPENROUTER_TRIAGE_OK ${relative(outPath)}\n`);
   process.exit(0);
+}
+
+if (!apiKey) {
+  throw new Error("OPENROUTER_API_KEY is required when replay contains actionable triage signal");
 }
 
 const payload = await openRouterChat({

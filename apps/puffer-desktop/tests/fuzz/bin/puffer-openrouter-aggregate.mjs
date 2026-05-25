@@ -17,7 +17,7 @@ const shardDirs = fs.existsSync(runsRoot)
     .filter((entry) =>
       entry.isDirectory() &&
       entry.name.startsWith(`${namespace}-`) &&
-      entry.name !== `${namespace}-runs`
+      !isCampaignControlDir(entry.name, namespace)
     )
     .map((entry) => path.join(runsRoot, entry.name))
     .sort()
@@ -74,6 +74,13 @@ function readShard(dir) {
     bugListAppendBlocks: extractBugListAppendBlocks(findingsText),
     finalReportPresent: findingsText.trim().length > 0
   };
+}
+
+function isCampaignControlDir(name, namespace) {
+  return name === `${namespace}-runs` ||
+    name === `${namespace}-local-runs` ||
+    name.endsWith("-local-runs") ||
+    name.endsWith("-scheduler-preselect");
 }
 
 function normalizeShardSummary(summary) {

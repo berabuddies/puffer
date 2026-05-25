@@ -247,6 +247,12 @@ concurrency. Increase `PUFFER_OPENROUTER_SHARD_LIMIT` and
 `PUFFER_OPENROUTER_CONCURRENCY` only after the small run shows acceptable
 instruction-following and false-positive rates.
 
+For a local no-network orchestration smoke, set
+`PUFFER_OPENROUTER_OFFLINE_SMOKE=1` and omit `OPENROUTER_API_KEY`. This uses a
+deterministic offline explorer only to validate AgentFlow preflight, shard
+fanout, bounded replay, deterministic no-finding triage, and aggregate output.
+It is not a substitute for a real small-model campaign.
+
 Maintain candidate findings from the main-agent process only:
 
 ```sh

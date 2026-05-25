@@ -8,6 +8,10 @@ Required environment:
 
   export OPENROUTER_API_KEY="<key>"
 
+For local no-network orchestration smoke only:
+
+  export PUFFER_OPENROUTER_OFFLINE_SMOKE=1
+
 Optional controls:
 
   export PUFFER_OPENROUTER_PLANNER_MODEL="gpt-5.4"
@@ -265,7 +269,11 @@ cat > "$out_dir/planner.md" <<'PLANNER_EOF'
 {{ nodes.plan.output }}
 PLANNER_EOF
 node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs validate
-node apps/puffer-desktop/tests/fuzz/bin/puffer-openrouter-explorer.mjs --namespace {{ item.namespace }} --shard {{ item.name }} --seed {{ item.seed }} --steps {{ item.steps }} --cases ${PUFFER_OPENROUTER_CASES:-1} --model ${PUFFER_OPENROUTER_MODEL:-inclusionai/ling-2.6-flash} --out "$out_dir/run.json"
+explorer_args=()
+if [[ "${PUFFER_OPENROUTER_OFFLINE_SMOKE:-0}" == "1" ]]; then
+  explorer_args+=(--offline)
+fi
+node apps/puffer-desktop/tests/fuzz/bin/puffer-openrouter-explorer.mjs "${explorer_args[@]}" --namespace {{ item.namespace }} --shard {{ item.name }} --seed {{ item.seed }} --steps {{ item.steps }} --cases ${PUFFER_OPENROUTER_CASES:-1} --model ${PUFFER_OPENROUTER_MODEL:-inclusionai/ling-2.6-flash} --out "$out_dir/run.json"
 node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs report --input "$out_dir/run.json" --out "$out_dir/report.md"
 node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs top-cases --input "$out_dir/run.json" --shard {{ item.name }} --limit {{ item.replay_limit }} --out "$out_dir/top.json" --report-out "$out_dir/top.md"
 set +e
@@ -301,7 +309,7 @@ with Graph(
         task_id="preflight",
         script=(
             "set -euo pipefail\n"
-            "test -n \"${OPENROUTER_API_KEY:-}\"\n"
+            "test -n \"${OPENROUTER_API_KEY:-}\" || test \"${PUFFER_OPENROUTER_OFFLINE_SMOKE:-0}\" = \"1\"\n"
             "rm -rf apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight apps/puffer-desktop/tests/fuzz/.runs/openrouter-campaign\n"
             + CLEAN_SELECTED_ARTIFACTS
             + "mkdir -p apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight\n"
