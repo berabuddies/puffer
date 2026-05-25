@@ -129,6 +129,7 @@ fn serve_configured_connector(slug: &str) -> bool {
             | "gitlab-webhook"
             | "jira-webhook"
             | "linear-webhook"
+            | "pagerduty-webhook"
             | "sentry-webhook"
             | "shopify-webhook"
             | "stripe-webhook"

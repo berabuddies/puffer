@@ -540,6 +540,19 @@ export class FakeDaemon {
         action_slugs: []
       },
       {
+        connector_slug: "pagerduty-webhook",
+        description: "PagerDuty incident and service webhook preset backed by puffer serve",
+        skill: "pagerduty-webhook",
+        runtime_hints: ["serve"],
+        requires_auth: false,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "pagerduty-webhook",
+        connect_command: "/connect pagerduty-webhook pagerduty-webhook",
+        action_slugs: []
+      },
+      {
         connector_slug: "sentry-webhook",
         description: "Sentry issue, event, and alert webhook preset backed by puffer serve",
         skill: "sentry-webhook",

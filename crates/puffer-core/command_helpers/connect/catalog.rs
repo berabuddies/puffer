@@ -237,6 +237,7 @@ fn connector_template_runtime_hints(template: &ConnectorTemplate) -> Vec<String>
             | "gitlab-webhook"
             | "jira-webhook"
             | "linear-webhook"
+            | "pagerduty-webhook"
             | "sentry-webhook"
             | "shopify-webhook"
             | "stripe-webhook"
@@ -455,6 +456,17 @@ mod tests {
         let slug = resolve_connector_slug(&mut state, &resources, "linear issue").expect("slug");
 
         assert_eq!(slug, "linear-webhook");
+    }
+
+    #[test]
+    fn resolve_connector_slug_accepts_pagerduty_webhook_terms() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let slug =
+            resolve_connector_slug(&mut state, &resources, "pagerduty incident").expect("slug");
+
+        assert_eq!(slug, "pagerduty-webhook");
     }
 
     #[test]

@@ -233,6 +233,11 @@ fn webhook_preset(connector_slug: &str) -> Result<WebhookPreset> {
             default_path: "/linear",
             method: "Linear event webhook",
         },
+        "pagerduty-webhook" => WebhookPreset {
+            product: "PagerDuty",
+            default_path: "/pagerduty",
+            method: "PagerDuty event webhook",
+        },
         "sentry-webhook" => WebhookPreset {
             product: "Sentry",
             default_path: "/sentry",
@@ -421,6 +426,8 @@ mod tests {
             "What URL path should Jira post webhook events to?" => "jira",
             "What bind address should the Linear webhook listen on?" => "127.0.0.1:9393",
             "What URL path should Linear post webhook events to?" => "linear",
+            "What bind address should the PagerDuty webhook listen on?" => "127.0.0.1:9796",
+            "What URL path should PagerDuty post webhook events to?" => "pagerduty",
             "What bind address should the Sentry webhook listen on?" => "127.0.0.1:9798",
             "What URL path should Sentry post webhook events to?" => "sentry",
             "What bind address should the Shopify webhook listen on?" => "127.0.0.1:9999",
@@ -645,6 +652,35 @@ mod tests {
         assert!(raw.contains("bind_address = \"127.0.0.1:9393\""));
         assert!(raw.contains("path = \"/linear\""));
         assert!(raw.contains("welcome_message = \"Linear webhook ready.\""));
+    }
+
+    #[test]
+    fn pagerduty_webhook_connect_writes_webhook_preset_config() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let result = with_user_question_prompt_handler(
+            |request| answer_request(&request),
+            || {
+                connect_webhook_preset(
+                    &mut state,
+                    &resources,
+                    "pagerduty-webhook",
+                    "pagerduty-webhook",
+                )
+            },
+        )
+        .expect("connect result");
+
+        assert!(result.summary.contains("connector: pagerduty-webhook"));
+        assert!(result.summary.contains("run `puffer serve`"));
+        let path = state.cwd.join(".puffer/connectors.toml");
+        let raw = fs::read_to_string(path).expect("connector config");
+        assert!(raw.contains("[connectors.webhook]"));
+        assert!(raw.contains("display_name = \"pagerduty-webhook\""));
+        assert!(raw.contains("bind_address = \"127.0.0.1:9796\""));
+        assert!(raw.contains("path = \"/pagerduty\""));
+        assert!(raw.contains("welcome_message = \"PagerDuty webhook ready.\""));
     }
 
     #[test]

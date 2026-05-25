@@ -320,6 +320,26 @@ pub(super) fn stripe_event_output_schema() -> Value {
     })
 }
 
+/// Returns the PagerDuty webhook event output schema.
+pub(super) fn pagerduty_event_output_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "const": "pagerduty_event"},
+            "event_type": {"type": "string"},
+            "resource_type": {"type": "string"},
+            "incident_id": {"type": "string"},
+            "service": {"type": "string"},
+            "status": {"type": "string"},
+            "urgency": {"type": "string"},
+            "message": {"type": "string"},
+            "url": {"type": "string"}
+        },
+        "required": ["event_type", "message"],
+        "additionalProperties": true
+    })
+}
+
 /// Returns the Sentry webhook event output schema.
 pub(super) fn sentry_event_output_schema() -> Value {
     serde_json::json!({

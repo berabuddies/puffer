@@ -31,8 +31,8 @@ pub fn execute_connect_flow(
             serve_config::connect_matrix_bot(state, resources, &target.connection_name)?
         }
         "asana-webhook" | "github-webhook" | "gitlab-webhook" | "jira-webhook"
-        | "linear-webhook" | "sentry-webhook" | "shopify-webhook" | "stripe-webhook"
-        | "trello-webhook" => serve_config::connect_webhook_preset(
+        | "linear-webhook" | "pagerduty-webhook" | "sentry-webhook" | "shopify-webhook"
+        | "stripe-webhook" | "trello-webhook" => serve_config::connect_webhook_preset(
             state,
             resources,
             &target.connector_slug,
@@ -801,6 +801,8 @@ mod tests {
             "What URL path should GitHub post webhook events to?" => "/github",
             "What bind address should the Linear webhook listen on?" => "127.0.0.1:9393",
             "What URL path should Linear post webhook events to?" => "linear",
+            "What bind address should the PagerDuty webhook listen on?" => "127.0.0.1:9796",
+            "What URL path should PagerDuty post webhook events to?" => "pagerduty",
             "What bind address should the Sentry webhook listen on?" => "127.0.0.1:9798",
             "What URL path should Sentry post webhook events to?" => "sentry",
             "What bind address should the Shopify webhook listen on?" => "127.0.0.1:9999",
