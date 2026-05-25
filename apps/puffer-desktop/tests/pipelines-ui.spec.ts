@@ -88,7 +88,7 @@ test("pipeline connector catalog stages a deterministic connect command", async 
   await expect(page.locator(".pf-connector-row", { hasText: "email" })).toHaveAttribute("data-selected", "true");
 });
 
-test("pipeline connector picker disables connections that cannot trigger workflows", async ({ page }) => {
+test("pipeline connector picker keeps non-trigger connections disabled while setup rows stay selectable", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
   await daemon.open(page);
@@ -102,11 +102,13 @@ test("pipeline connector picker disables connections that cannot trigger workflo
     .getByRole("button", { name: "slack-app cannot start workflow triggers" });
   const connector = page
     .locator('[aria-label="Connector catalog"]')
-    .getByRole("button", { name: "slack-app cannot start workflow triggers" });
+    .getByRole("button", { name: "Select slack-app connector setup" });
 
   await expect(connection).toBeDisabled();
-  await expect(connector).toBeDisabled();
+  await expect(connector).toBeEnabled();
   await expect(connector).toContainText("no trigger");
+  await connector.click();
+  await expect(page.getByLabel("Selected connector command")).toContainText("/connect slack-app slack-app");
   await expect(page.getByLabel("Trigger type")).toHaveValue("subscription");
 });
 
@@ -121,11 +123,14 @@ test("pipeline connector catalog can search serve-mode connectors as unavailable
 
   const connector = page
     .locator('[aria-label="Connector catalog"]')
-    .getByRole("button", { name: "discord-bot cannot start workflow triggers" });
+    .getByRole("button", { name: "Select discord-bot connector setup" });
 
-  await expect(connector).toBeDisabled();
+  await expect(connector).toBeEnabled();
   await expect(connector).toContainText("no trigger");
   await expect(connector).toContainText("auth");
+  await connector.click();
+  await expect(page.getByLabel("Selected connector command")).toContainText("/connect discord-bot discord-bot");
+  await expect(connector).toHaveAttribute("data-selected", "true");
   await expect(page.getByLabel("Trigger type")).toHaveValue("subscription");
 });
 

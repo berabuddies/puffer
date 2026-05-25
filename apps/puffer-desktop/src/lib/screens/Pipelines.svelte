@@ -418,7 +418,7 @@
   function useConnectorTemplate(connector: WorkflowConnector) {
     selectedConnectorSlug = connector.connector_slug;
     if (!connectorTriggerSupported(connector)) {
-      saveNotice = `${connector.connector_slug} cannot start workflow triggers yet. Use an event-capable connector.`;
+      saveNotice = `${connector.connector_slug} cannot start workflow triggers yet. ${connectorConnectCommand(connector)} is available for connector setup.`;
       return;
     }
     const existingConnection = connectionsForConnector(connector.connector_slug)[0];
@@ -1060,8 +1060,7 @@
                       class="pf-connector-row"
                       data-selected={selectedConnectorSlug === connector.connector_slug}
                       data-supported={canTrigger}
-                      aria-label={canTrigger ? `Plan ${connector.connector_slug} workflow trigger` : `${connector.connector_slug} cannot start workflow triggers`}
-                      disabled={!canTrigger}
+                      aria-label={canTrigger ? `Plan ${connector.connector_slug} workflow trigger` : `Select ${connector.connector_slug} connector setup`}
                       onclick={() => useConnectorTemplate(connector)}
                     >
                       <span class="pf-connector-main">
@@ -1689,14 +1688,12 @@
     background: var(--pf-selected-bg-hover);
   }
 
-  .pf-connection-row:disabled,
-  .pf-connector-row:disabled {
+  .pf-connection-row:disabled {
     cursor: not-allowed;
     opacity: 0.58;
   }
 
-  .pf-connection-row:disabled:hover,
-  .pf-connector-row:disabled:hover {
+  .pf-connection-row:disabled:hover {
     border-color: var(--border);
     background: var(--card);
   }
@@ -1728,6 +1725,16 @@
 
   .pf-connector-row[data-selected="true"] {
     box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--puffer-accent) 45%, transparent);
+  }
+
+  .pf-connector-row[data-supported="false"] {
+    color: var(--muted-foreground);
+  }
+
+  .pf-connector-row[data-supported="false"]:hover,
+  .pf-connector-row[data-supported="false"][data-selected="true"] {
+    border-color: color-mix(in oklab, var(--puffer-accent) 22%, var(--border));
+    background: color-mix(in oklab, var(--puffer-accent) 6%, var(--card));
   }
 
   .pf-connector-main {
