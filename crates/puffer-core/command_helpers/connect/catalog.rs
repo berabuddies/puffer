@@ -2,6 +2,7 @@ use super::{ask_searchable_choice, call_tool};
 use crate::AppState;
 use anyhow::{anyhow, bail, Result};
 use puffer_resources::LoadedResources;
+use puffer_subscriptions::ConnectorTemplate;
 use serde_json::{json, Value};
 
 /// Asks the user to choose a connector from the searchable connector catalog.
@@ -74,22 +75,8 @@ fn builtin_connector_options() -> Vec<(String, String)> {
     puffer_subscriptions::builtin_connector_templates()
         .into_iter()
         .map(|template| {
-            let mut traits = Vec::new();
-            if template.requires_auth {
-                traits.push("auth");
-            } else {
-                traits.push("no auth");
-            }
-            if template.can_subscribe {
-                traits.push("subscribe");
-            }
-            if template.can_proxy_agent {
-                traits.push("agent proxy");
-            }
-            (
-                template.slug,
-                format!("{} ({})", template.description, traits.join(", ")),
-            )
+            let description = connector_template_description(&template);
+            (template.slug, description)
         })
         .collect()
 }
@@ -128,31 +115,89 @@ fn connector_option_description(connector: &Value) -> String {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("Connector template");
-    let mut traits = Vec::new();
+    let mut details = Vec::new();
     if connector
         .get("requires_auth")
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        traits.push("auth");
+        details.push("auth".to_string());
     } else {
-        traits.push("no auth");
+        details.push("no auth".to_string());
     }
     if connector
         .get("can_subscribe")
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        traits.push("subscribe");
+        details.push("subscribe".to_string());
     }
     if connector
         .get("can_proxy_agent")
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        traits.push("agent proxy");
+        details.push("agent proxy".to_string());
     }
-    format!("{description} ({})", traits.join(", "))
+    if let Some(skill) = connector
+        .get("skill")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        details.push(format!("skill={skill}"));
+    }
+    let actions = connector_action_slugs(connector);
+    if !actions.is_empty() {
+        details.push(format!("actions={}", action_summary(&actions)));
+    }
+    format!("{description} ({})", details.join("; "))
+}
+
+fn connector_template_description(template: &ConnectorTemplate) -> String {
+    let mut details = Vec::new();
+    if template.requires_auth {
+        details.push("auth".to_string());
+    } else {
+        details.push("no auth".to_string());
+    }
+    if template.can_subscribe {
+        details.push("subscribe".to_string());
+    }
+    if template.can_proxy_agent {
+        details.push("agent proxy".to_string());
+    }
+    if !template.skill.trim().is_empty() {
+        details.push(format!("skill={}", template.skill.trim()));
+    }
+    let actions = template.actions.keys().cloned().collect::<Vec<_>>();
+    if !actions.is_empty() {
+        details.push(format!("actions={}", action_summary(&actions)));
+    }
+    format!("{} ({})", template.description, details.join("; "))
+}
+
+fn connector_action_slugs(connector: &Value) -> Vec<String> {
+    if let Some(actions) = connector.get("actions").and_then(Value::as_object) {
+        return actions.keys().cloned().collect();
+    }
+    connector
+        .get("action_slugs")
+        .and_then(Value::as_array)
+        .map(|actions| {
+            actions
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn action_summary(actions: &[String]) -> String {
+    let mut actions = actions.to_vec();
+    actions.sort();
+    actions.join(",")
 }
 
 fn matching_connector_options(options: &[(String, String)], query: &str) -> Vec<(String, String)> {
@@ -227,6 +272,51 @@ mod tests {
     }
 
     #[test]
+    fn builtin_connector_options_include_skill_and_action_metadata() {
+        let options = builtin_connector_options();
+        let telegram = options
+            .iter()
+            .find(|(slug, _)| slug == "telegram-login")
+            .expect("telegram-login option");
+
+        assert!(telegram.1.contains("skill=telegram"));
+        assert!(telegram.1.contains("vote_poll"));
+        assert_eq!(
+            matching_connector_options(&options, "vote poll"),
+            vec![telegram.clone()]
+        );
+    }
+
+    #[test]
+    fn connector_options_include_action_slugs_from_connector_list_rows() {
+        let output = json!({
+            "connectors": [
+                {
+                    "connector_slug": "demo-chat",
+                    "description": "Demo chat connector",
+                    "skill": "demo",
+                    "requires_auth": false,
+                    "can_subscribe": true,
+                    "can_proxy_agent": false,
+                    "actions": {
+                        "send_message": {},
+                        "react": {}
+                    }
+                }
+            ]
+        });
+
+        let options = connector_options(&output).expect("options");
+
+        assert!(options[0].1.contains("skill=demo"));
+        assert!(options[0].1.contains("send_message"));
+        assert_eq!(
+            matching_connector_options(&options, "send message"),
+            options
+        );
+    }
+
+    #[test]
     fn resolve_connector_slug_accepts_unique_partial_builtin() {
         let mut state = temp_state();
         let resources = LoadedResources::default();
@@ -234,6 +324,16 @@ mod tests {
         let slug = resolve_connector_slug(&mut state, &resources, "matrix").expect("slug");
 
         assert_eq!(slug, "matrix-bot");
+    }
+
+    #[test]
+    fn resolve_connector_slug_accepts_unique_action_term_match() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let slug = resolve_connector_slug(&mut state, &resources, "vote poll").expect("slug");
+
+        assert_eq!(slug, "telegram-login");
     }
 
     #[test]

@@ -800,6 +800,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_target_resolves_unique_action_search_term() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let target =
+            parse_or_ask_target(&mut state, &resources, "vote telegram-user").expect("target");
+
+        assert_eq!(target.connector_slug, "telegram-login");
+        assert_eq!(target.connection_name, "telegram-user");
+    }
+
+    #[test]
     fn parse_target_asks_for_missing_values_with_input_questions() {
         let mut state = temp_state();
         let resources = LoadedResources::default();
