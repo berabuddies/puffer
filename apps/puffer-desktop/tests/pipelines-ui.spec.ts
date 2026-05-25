@@ -135,11 +135,22 @@ test("pipeline connector command can start setup from the picker", async ({ page
 
   await page.getByLabel("Search connectors").fill("email");
   await page.getByRole("button", { name: "Plan email workflow trigger" }).click();
+
+  const connectionName = page.getByLabel("Connector connection name");
+  await expect(connectionName).toHaveValue("email");
+  await connectionName.fill("Team Email");
+  await expect(page.getByLabel("Selected connector command")).toContainText("Enter a valid connection name.");
+  await expect(page.getByRole("button", { name: "Run connector command" })).toBeDisabled();
+
+  await connectionName.fill("team-email");
+  await expect(page.getByLabel("Workflow connection")).toHaveValue("team-email");
+  await expect(page.locator(".pf-pipe-graph").getByRole("button", { name: /team-email/ })).toBeVisible();
+  await expect(page.getByLabel("Selected connector command")).toContainText("/connect email team-email");
   await page.getByRole("button", { name: "Run connector command" }).click();
 
   const request = await daemon.waitForRequest(
     "run_agent_turn",
-    (candidate) => candidate.params.message === "/connect email email"
+    (candidate) => candidate.params.message === "/connect email team-email"
   );
   expect(String(request.params.sessionId ?? "")).not.toHaveLength(0);
 });

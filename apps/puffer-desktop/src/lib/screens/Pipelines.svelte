@@ -112,6 +112,7 @@
   let selectedNodeId = $state<string | null>("codex-implement");
   let connectorQuery = $state("");
   let selectedConnectorSlug = $state<string | null>(null);
+  let selectedConnectorConnectionName = $state("");
   let runIdx = $state<number | null>(null);
   let stepIdx = $state<number | null>(null);
   let loading = $state(false);
@@ -152,7 +153,14 @@
     workflow?.pipeline.nodes.find((node) => node.id === selectedNodeId) ?? workflow?.pipeline.nodes[0] ?? null
   );
   let selectedConnector = $derived(connectors.find((connector) => connector.connector_slug === selectedConnectorSlug) ?? null);
-  let selectedConnectorCommand = $derived(selectedConnector ? connectorConnectCommand(selectedConnector) : "");
+  let selectedConnectorConnectionInvalid = $derived(
+    selectedConnector !== null && !connectionSlugValid(selectedConnectorConnectionName)
+  );
+  let selectedConnectorCommand = $derived(
+    selectedConnector && !selectedConnectorConnectionInvalid
+      ? connectorConnectCommand(selectedConnector, selectedConnectorConnectionName.trim())
+      : ""
+  );
 
   let wrapEl = $state<HTMLDivElement | undefined>();
   let scale = $state(0.8);
@@ -428,7 +436,10 @@
       saveNotice = `${connection.slug} cannot start workflow triggers. Choose an event-capable connection.`;
       return;
     }
-    selectedConnectorSlug = connection?.connector_slug ?? selectedConnectorSlug;
+    if (connection) {
+      selectedConnectorSlug = connection.connector_slug;
+      selectedConnectorConnectionName = connection.slug;
+    }
     updateCurrentWorkflow((item) => ({
       ...item,
       trigger: { type: "connection", connection_slug: connectionSlug, pattern: defaultPattern(item) }
@@ -436,19 +447,21 @@
   }
 
   function useConnectorTemplate(connector: WorkflowConnector) {
-    selectedConnectorSlug = connector.connector_slug;
-    if (!connectorTriggerSupported(connector)) {
-      saveNotice = `${connector.connector_slug} cannot start workflow triggers yet. ${connectorConnectCommand(connector)} is available for connector setup.`;
-      return;
-    }
     const existingConnection = connectionsForConnector(connector.connector_slug)[0];
     const connectionSlug = existingConnection?.slug ?? connectorConnectionHint(connector);
+    const command = connectorConnectCommand(connector, connectionSlug);
+    selectedConnectorSlug = connector.connector_slug;
+    selectedConnectorConnectionName = connectionSlug;
+    if (!connectorTriggerSupported(connector)) {
+      saveNotice = `${connector.connector_slug} cannot start workflow triggers yet. ${command} is available for connector setup.`;
+      return;
+    }
     updateCurrentWorkflow((item) => ({
       ...item,
       trigger: { type: "connection", connection_slug: connectionSlug, pattern: defaultPattern(item) }
     }));
     if (!existingConnection) {
-      saveNotice = `Run ${connectorConnectCommand(connector)} before enabling this workflow trigger.`;
+      saveNotice = `Run ${command} before enabling this workflow trigger.`;
     }
   }
 
@@ -456,12 +469,36 @@
     return connector.suggested_connection_slug || connector.connector_slug;
   }
 
-  function connectorConnectCommand(connector: WorkflowConnector): string {
-    return connector.connect_command || `/connect ${connector.connector_slug} ${connectorConnectionHint(connector)}`;
+  function connectorConnectCommand(
+    connector: WorkflowConnector,
+    connectionName = connectorConnectionHint(connector)
+  ): string {
+    const name = connectionName.trim();
+    if (name === connectorConnectionHint(connector) && connector.connect_command) return connector.connect_command;
+    return `/connect ${connector.connector_slug} ${name}`;
+  }
+
+  function connectionSlugValid(value: string): boolean {
+    return /^[a-z0-9-]+$/.test(value.trim());
+  }
+
+  function updateSelectedConnectorConnectionName(value: string) {
+    selectedConnectorConnectionName = value;
+    if (!selectedConnector || !connectorTriggerSupported(selectedConnector) || !connectionSlugValid(value)) {
+      return;
+    }
+    updateCurrentWorkflow((item) => ({
+      ...item,
+      trigger: { type: "connection", connection_slug: value.trim(), pattern: defaultPattern(item) }
+    }));
   }
 
   async function copySelectedConnectorCommand() {
     const command = selectedConnectorCommand.trim();
+    if (selectedConnectorConnectionInvalid) {
+      saveNotice = "Connection names must use lowercase letters, digits, and hyphens.";
+      return;
+    }
     if (!command) return;
     try {
       await navigator.clipboard.writeText(command);
@@ -473,6 +510,10 @@
 
   async function runSelectedConnectorCommand() {
     const command = selectedConnectorCommand.trim();
+    if (selectedConnectorConnectionInvalid) {
+      saveNotice = "Connection names must use lowercase letters, digits, and hyphens.";
+      return;
+    }
     if (!command || connectorCommandRunning || !onRunConnectCommand) return;
     connectorCommandRunning = true;
     try {
@@ -1214,33 +1255,48 @@
                   {/each}
                 </div>
 
-                {#if selectedConnectorCommand}
-                  <div class="pf-connector-command" aria-label="Selected connector command">
-                    <Icon name="terminal" size={12} />
-                    <code>{selectedConnectorCommand}</code>
-                    <div class="pf-connector-command-actions">
-                      <button
-                        type="button"
-                        class="pf-icon-btn"
-                        aria-label="Copy connector command"
-                        title="Copy connector command"
-                        onclick={copySelectedConnectorCommand}
-                      >
-                        <Icon name="copy" size={12} />
-                      </button>
-                      {#if onRunConnectCommand}
+                {#if selectedConnector}
+                  <div class="pf-connector-setup">
+                    <label class="pf-connector-name">
+                      <span>Connection name</span>
+                      <input
+                        aria-label="Connector connection name"
+                        aria-invalid={selectedConnectorConnectionInvalid}
+                        value={selectedConnectorConnectionName}
+                        oninput={(event) => updateSelectedConnectorConnectionName(event.currentTarget.value)}
+                      />
+                    </label>
+                    {#if selectedConnectorConnectionInvalid}
+                      <div class="pf-connector-validation">Use lowercase letters, digits, and hyphens.</div>
+                    {/if}
+                    <div class="pf-connector-command" aria-label="Selected connector command">
+                      <Icon name="terminal" size={12} />
+                      <code>{selectedConnectorCommand || "Enter a valid connection name."}</code>
+                      <div class="pf-connector-command-actions">
                         <button
                           type="button"
                           class="pf-icon-btn"
-                          aria-label="Run connector command"
-                          title="Run connector command"
-                          aria-busy={connectorCommandRunning}
-                          disabled={connectorCommandRunning}
-                          onclick={runSelectedConnectorCommand}
+                          aria-label="Copy connector command"
+                          title="Copy connector command"
+                          disabled={!selectedConnectorCommand}
+                          onclick={copySelectedConnectorCommand}
                         >
-                          <Icon name="play" size={12} />
+                          <Icon name="copy" size={12} />
                         </button>
-                      {/if}
+                        {#if onRunConnectCommand}
+                          <button
+                            type="button"
+                            class="pf-icon-btn"
+                            aria-label="Run connector command"
+                            title="Run connector command"
+                            aria-busy={connectorCommandRunning}
+                            disabled={connectorCommandRunning || !selectedConnectorCommand}
+                            onclick={runSelectedConnectorCommand}
+                          >
+                            <Icon name="play" size={12} />
+                          </button>
+                        {/if}
+                      </div>
                     </div>
                   </div>
                 {/if}
@@ -1974,6 +2030,29 @@
     border: 1px dashed var(--border);
     border-radius: 8px;
     background: var(--card);
+  }
+
+  .pf-connector-setup {
+    display: grid;
+    gap: 6px;
+  }
+
+  .pf-connector-name {
+    display: grid !important;
+    grid-template-columns: minmax(0, 0.62fr) minmax(0, 1fr);
+    align-items: center;
+    gap: 7px !important;
+  }
+
+  .pf-connector-name input[aria-invalid="true"] {
+    border-color: var(--pf-run-failed);
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--pf-run-failed) 14%, transparent);
+  }
+
+  .pf-connector-validation {
+    color: var(--pf-run-failed);
+    font-size: 10.5px;
+    font-weight: 600;
   }
 
   .pf-connector-command {
