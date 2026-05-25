@@ -31,12 +31,14 @@ pub fn execute_connect_flow(
             serve_config::connect_matrix_bot(state, resources, &target.connection_name)?
         }
         "asana-webhook" | "github-webhook" | "gitlab-webhook" | "jira-webhook"
-        | "linear-webhook" | "stripe-webhook" => serve_config::connect_webhook_preset(
-            state,
-            resources,
-            &target.connector_slug,
-            &target.connection_name,
-        )?,
+        | "linear-webhook" | "stripe-webhook" | "trello-webhook" => {
+            serve_config::connect_webhook_preset(
+                state,
+                resources,
+                &target.connector_slug,
+                &target.connection_name,
+            )?
+        }
         "webhook" => serve_config::connect_webhook(state, resources, &target.connection_name)?,
         _ => connect_generic(state, resources, &target)?,
     };
@@ -802,6 +804,8 @@ mod tests {
             "What URL path should Linear post webhook events to?" => "linear",
             "What bind address should the Stripe webhook listen on?" => "127.0.0.1:9696",
             "What URL path should Stripe post webhook events to?" => "stripe",
+            "What bind address should the Trello webhook listen on?" => "127.0.0.1:9898",
+            "What URL path should Trello post webhook events to?" => "trello",
             "What Telegram bot token should Puffer use?" => "telegram-token",
             other => panic!("unexpected question: {other}"),
         };

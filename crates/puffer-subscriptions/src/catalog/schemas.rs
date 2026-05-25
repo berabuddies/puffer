@@ -319,3 +319,21 @@ pub(super) fn stripe_event_output_schema() -> Value {
         "additionalProperties": true
     })
 }
+
+/// Returns the Trello webhook event output schema.
+pub(super) fn trello_event_output_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "const": "trello_event"},
+            "action_type": {"type": "string"},
+            "board": {"type": "string"},
+            "card": {"type": "string"},
+            "list": {"type": "string"},
+            "actor": {"type": "string"},
+            "message": {"type": "string"}
+        },
+        "required": ["action_type", "message"],
+        "additionalProperties": true
+    })
+}

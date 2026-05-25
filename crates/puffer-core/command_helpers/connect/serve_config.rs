@@ -238,6 +238,11 @@ fn webhook_preset(connector_slug: &str) -> Result<WebhookPreset> {
             default_path: "/stripe",
             method: "Stripe event webhook",
         },
+        "trello-webhook" => WebhookPreset {
+            product: "Trello",
+            default_path: "/trello",
+            method: "Trello event webhook",
+        },
         _ => bail!("unsupported webhook preset `{connector_slug}`"),
     };
     Ok(preset)
@@ -408,6 +413,8 @@ mod tests {
             "What URL path should Linear post webhook events to?" => "linear",
             "What bind address should the Stripe webhook listen on?" => "127.0.0.1:9696",
             "What URL path should Stripe post webhook events to?" => "stripe",
+            "What bind address should the Trello webhook listen on?" => "127.0.0.1:9898",
+            "What URL path should Trello post webhook events to?" => "trello",
             "What bind address should the webhook listen on?" => "127.0.0.1:9191",
             "Should this webhook require bearer-token auth?" => "No bearer token",
             other => panic!("unexpected question: {other}"),
@@ -646,6 +653,28 @@ mod tests {
         assert!(raw.contains("bind_address = \"127.0.0.1:9696\""));
         assert!(raw.contains("path = \"/stripe\""));
         assert!(raw.contains("welcome_message = \"Stripe webhook ready.\""));
+    }
+
+    #[test]
+    fn trello_webhook_connect_writes_webhook_preset_config() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let result = with_user_question_prompt_handler(
+            |request| answer_request(&request),
+            || connect_webhook_preset(&mut state, &resources, "trello-webhook", "trello-webhook"),
+        )
+        .expect("connect result");
+
+        assert!(result.summary.contains("connector: trello-webhook"));
+        assert!(result.summary.contains("run `puffer serve`"));
+        let path = state.cwd.join(".puffer/connectors.toml");
+        let raw = fs::read_to_string(path).expect("connector config");
+        assert!(raw.contains("[connectors.webhook]"));
+        assert!(raw.contains("display_name = \"trello-webhook\""));
+        assert!(raw.contains("bind_address = \"127.0.0.1:9898\""));
+        assert!(raw.contains("path = \"/trello\""));
+        assert!(raw.contains("welcome_message = \"Trello webhook ready.\""));
     }
 
     #[test]

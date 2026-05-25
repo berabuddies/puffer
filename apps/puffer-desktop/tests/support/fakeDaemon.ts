@@ -553,6 +553,19 @@ export class FakeDaemon {
         action_slugs: []
       },
       {
+        connector_slug: "trello-webhook",
+        description: "Trello board, card, list, and comment webhook preset backed by puffer serve",
+        skill: "trello-webhook",
+        runtime_hints: ["serve"],
+        requires_auth: false,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "trello-webhook",
+        connect_command: "/connect trello-webhook trello-webhook",
+        action_slugs: []
+      },
+      {
         connector_slug: "webhook",
         description: "HTTP webhook connector configured through puffer serve",
         skill: "webhook",

@@ -23,6 +23,7 @@ fn builtins_cover_required_initial_connectors() {
     assert!(slugs.contains(&"jira-webhook".to_string()));
     assert!(slugs.contains(&"linear-webhook".to_string()));
     assert!(slugs.contains(&"stripe-webhook".to_string()));
+    assert!(slugs.contains(&"trello-webhook".to_string()));
     assert!(slugs.contains(&"webhook".to_string()));
 }
 
@@ -51,6 +52,10 @@ fn suggested_connection_slugs_match_connect_defaults() {
     assert_eq!(
         suggested_connection_slug("stripe-webhook"),
         "stripe-webhook"
+    );
+    assert_eq!(
+        suggested_connection_slug("trello-webhook"),
+        "trello-webhook"
     );
     assert_eq!(suggested_connection_slug("webhook"), "webhook");
     assert_eq!(suggested_connection_slug("custom-feed"), "custom-feed");
@@ -124,6 +129,7 @@ fn serve_mode_connectors_do_not_claim_workflow_runtime_capabilities() {
         "jira-webhook",
         "linear-webhook",
         "stripe-webhook",
+        "trello-webhook",
         "webhook",
     ] {
         let template = builtin_connector_template(slug).unwrap();

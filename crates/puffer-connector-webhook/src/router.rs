@@ -62,7 +62,7 @@ pub fn build_router(state: AppState) -> Router {
     let config_path = state.config.resolved_path();
     Router::new()
         .route("/health", get(health))
-        .route(&config_path, post(webhook))
+        .route(&config_path, post(webhook).head(webhook_validation))
         .with_state(state)
 }
 
@@ -70,24 +70,16 @@ async fn health() -> Response {
     (StatusCode::OK, "puffer").into_response()
 }
 
-async fn webhook(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
-    let origin = headers
-        .get(axum::http::header::ORIGIN)
-        .and_then(|v| v.to_str().ok());
-    if !state.config.is_origin_allowed(origin) {
-        return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
+async fn webhook_validation(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = reject_webhook_request(&state.config, &headers) {
+        return response;
     }
+    StatusCode::OK.into_response()
+}
 
-    // Auth check runs in the transport so the handler can stay pure
-    // `InboundMessage` logic. We preserve the legacy semantics: reject
-    // when a token is configured but the request's Bearer token does
-    // not match.
-    let auth_header = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
-    let presented_token = auth_header.and_then(extract_bearer);
-    if !state.config.is_token_allowed(presented_token.as_deref()) {
-        return (StatusCode::UNAUTHORIZED, "request rejected").into_response();
+async fn webhook(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    if let Some(response) = reject_webhook_request(&state.config, &headers) {
+        return response;
     }
 
     if let Some(response) = asana_handshake_response(&headers) {
@@ -152,6 +144,28 @@ async fn webhook(State(state): State<AppState>, headers: HeaderMap, body: Bytes)
     }
 }
 
+fn reject_webhook_request(config: &WebhookConfig, headers: &HeaderMap) -> Option<Response> {
+    let origin = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok());
+    if !config.is_origin_allowed(origin) {
+        return Some((StatusCode::FORBIDDEN, "origin not allowed").into_response());
+    }
+
+    // Auth check runs in the transport so the handler can stay pure
+    // `InboundMessage` logic. We preserve the legacy semantics: reject
+    // when a token is configured but the request's Bearer token does
+    // not match.
+    let auth_header = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+    let presented_token = auth_header.and_then(extract_bearer);
+    if !config.is_token_allowed(presented_token.as_deref()) {
+        return Some((StatusCode::UNAUTHORIZED, "request rejected").into_response());
+    }
+    None
+}
+
 fn inbound_from_payload(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
     puffer_inbound(payload)
         .or_else(|| github_inbound(headers, payload))
@@ -159,6 +173,7 @@ fn inbound_from_payload(headers: &HeaderMap, payload: &Value) -> Option<InboundM
         .or_else(|| payloads::asana_inbound(headers, payload))
         .or_else(|| payloads::jira_inbound(headers, payload))
         .or_else(|| payloads::stripe_inbound(headers, payload))
+        .or_else(|| payloads::trello_inbound(headers, payload))
         .or_else(|| payloads::gitlab_inbound(headers, payload))
 }
 
@@ -633,6 +648,27 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], b"puffer");
+    }
+
+    #[tokio::test]
+    async fn webhook_validation_head_returns_200_ok() {
+        let runtime = test_runtime(tempdir().unwrap().path().to_path_buf());
+        let router = build_router(AppState {
+            runtime,
+            config: Arc::new(base_config()),
+        });
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("HEAD")
+                    .uri("/puffer")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]

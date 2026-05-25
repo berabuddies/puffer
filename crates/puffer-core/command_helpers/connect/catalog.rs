@@ -238,6 +238,7 @@ fn connector_template_runtime_hints(template: &ConnectorTemplate) -> Vec<String>
             | "jira-webhook"
             | "linear-webhook"
             | "stripe-webhook"
+            | "trello-webhook"
             | "webhook"
     ) {
         hints.push("serve");
@@ -463,6 +464,17 @@ mod tests {
             resolve_connector_slug(&mut state, &resources, "stripe invoice payment").expect("slug");
 
         assert_eq!(slug, "stripe-webhook");
+    }
+
+    #[test]
+    fn resolve_connector_slug_accepts_trello_webhook_terms() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let slug =
+            resolve_connector_slug(&mut state, &resources, "trello board card").expect("slug");
+
+        assert_eq!(slug, "trello-webhook");
     }
 
     #[test]

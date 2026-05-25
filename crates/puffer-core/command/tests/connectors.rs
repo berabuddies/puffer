@@ -32,7 +32,7 @@ fn connector_search_output(query: &str) -> String {
 fn workflows_connectors_catalog_includes_jira_webhook_preset() {
     let text = connector_search_output("jira issue comment");
 
-    assert!(text.contains("showing 1/17 connectors for query=\"jira issue comment\""));
+    assert!(text.contains("showing 1/18 connectors for query=\"jira issue comment\""));
     assert!(text.contains("jira-webhook"));
     assert!(text.contains("connect=/connect jira-webhook jira-webhook"));
     assert!(text.contains("runtime=serve"));
@@ -43,7 +43,7 @@ fn workflows_connectors_catalog_includes_jira_webhook_preset() {
 fn workflows_connectors_catalog_includes_asana_webhook_preset() {
     let text = connector_search_output("asana task project");
 
-    assert!(text.contains("showing 1/17 connectors for query=\"asana task project\""));
+    assert!(text.contains("showing 1/18 connectors for query=\"asana task project\""));
     assert!(text.contains("asana-webhook"));
     assert!(text.contains("connect=/connect asana-webhook asana-webhook"));
     assert!(text.contains("runtime=serve"));
@@ -54,9 +54,20 @@ fn workflows_connectors_catalog_includes_asana_webhook_preset() {
 fn workflows_connectors_catalog_includes_stripe_webhook_preset() {
     let text = connector_search_output("stripe invoice payment");
 
-    assert!(text.contains("showing 1/17 connectors for query=\"stripe invoice payment\""));
+    assert!(text.contains("showing 1/18 connectors for query=\"stripe invoice payment\""));
     assert!(text.contains("stripe-webhook"));
     assert!(text.contains("connect=/connect stripe-webhook stripe-webhook"));
+    assert!(text.contains("runtime=serve"));
+    assert!(text.contains("[no-trigger]"));
+}
+
+#[test]
+fn workflows_connectors_catalog_includes_trello_webhook_preset() {
+    let text = connector_search_output("trello board card");
+
+    assert!(text.contains("showing 1/18 connectors for query=\"trello board card\""));
+    assert!(text.contains("trello-webhook"));
+    assert!(text.contains("connect=/connect trello-webhook trello-webhook"));
     assert!(text.contains("runtime=serve"));
     assert!(text.contains("[no-trigger]"));
 }
