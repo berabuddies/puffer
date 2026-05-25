@@ -12,6 +12,11 @@ For local no-network orchestration smoke only:
 
   export PUFFER_OPENROUTER_OFFLINE_SMOKE=1
 
+For scale-readiness plumbing checks without model or Playwright cost:
+
+  export PUFFER_OPENROUTER_SYNTHETIC_SHARDS=1
+  export PUFFER_OPENROUTER_FORCE_FALLBACK_PLAN=1
+
 Optional controls:
 
   export PUFFER_OPENROUTER_PLANNER_MODEL="gpt-5.4"
@@ -238,7 +243,10 @@ cat > "$fallback_file" <<'FALLBACK_PLAN_EOF'
 {FALLBACK_PLANNER_TEXT}
 FALLBACK_PLAN_EOF
 planner_timeout="${{PUFFER_OPENROUTER_CODEX_PLAN_TIMEOUT_SECONDS:-180}}"
-if timeout "$planner_timeout" codex exec \
+if [[ "${{PUFFER_OPENROUTER_FORCE_FALLBACK_PLAN:-0}}" == "1" ]]; then
+  echo "OPENROUTER_PLAN_FALLBACK forced"
+  cat "$fallback_file"
+elif timeout "$planner_timeout" codex exec \
   --model "${{PUFFER_OPENROUTER_PLANNER_MODEL:-gpt-5.4}}" \
   --sandbox read-only \
   -c model_reasoning_effort="${{PUFFER_OPENROUTER_PLANNER_EFFORT:-high}}" \
@@ -271,6 +279,94 @@ cat > "$out_dir/planner.md" <<'PLANNER_EOF'
 {{ nodes.plan.output }}
 PLANNER_EOF
 node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs validate
+if [[ "${PUFFER_OPENROUTER_SYNTHETIC_SHARDS:-0}" == "1" ]]; then
+  node --input-type=module <<'SYNTHETIC_SHARD_EOF'
+import { createHash } from "node:crypto";
+import fs from "node:fs";
+
+const outDir = "apps/puffer-desktop/tests/fuzz/.runs/{{ item.namespace }}";
+const namespace = "{{ item.namespace }}";
+const shard = "{{ item.name }}";
+const seed = "{{ item.seed }}";
+const value = JSON.stringify({
+  caseId: `${namespace}-synthetic-0001`,
+  step: 1,
+  action: "synthetic-scale-check",
+  phase: "fuzz",
+  target: shard,
+  params: {},
+  coverage: []
+});
+const sha256 = createHash("sha256").update(value).digest("hex");
+fs.writeFileSync(`${outDir}/run.json`, `${JSON.stringify({
+  version: 1,
+  generatedAt: new Date().toISOString(),
+  seed: { id: seed },
+  cases: []
+}, null, 2)}\n`);
+fs.writeFileSync(`${outDir}/report.md`, `# Synthetic scale shard\n\n- Namespace: ${namespace}\n- Shard: ${shard}\n`);
+fs.writeFileSync(`${outDir}/top.json`, `${JSON.stringify({ version: 1, selected: [] }, null, 2)}\n`);
+fs.writeFileSync(`${outDir}/top.md`, `# Synthetic top cases\n\n- None\n`);
+fs.writeFileSync(`${outDir}/bounded-replay-report.json`, `${JSON.stringify({
+  version: 1,
+  namespace,
+  shard,
+  seed,
+  artifactDir: outDir,
+  summary: {
+    total: 1,
+    passed: 1,
+    stableFailed: 0,
+    flaky: 0,
+    timeout: 0,
+    knownDuplicateFailures: 0,
+    knownDuplicateFindings: 0,
+    newCandidateFindings: 0,
+    productCandidateFindings: 0,
+    nonPassingFailures: 0,
+    actionableFailures: 0,
+    byClassification: {}
+  },
+  results: [
+    {
+      caseId: `${namespace}-synthetic-0001`,
+      status: "passed",
+      classification: "synthetic-scale-check",
+      coverage: [],
+      attempts: [],
+      stepDetails: []
+    }
+  ],
+  findings: [],
+  evidence_index: [
+    {
+      id: "ev-action-0001",
+      type: "action",
+      byte_span: [0, Buffer.byteLength(value, "utf8")],
+      sha256,
+      value,
+      metadata: { caseId: `${namespace}-synthetic-0001`, action: "synthetic-scale-check", step: 1 }
+    }
+  ],
+  evidence_source: `${value}\n`
+}, null, 2)}\n`);
+fs.writeFileSync(`${outDir}/bounded-replay-report.md`, `# Synthetic bounded replay\n\n- Namespace: ${namespace}\n- Shard: ${shard}\n- Passed: 1\n`);
+SYNTHETIC_SHARD_EOF
+  feedback_args=()
+  if [[ -n "${PUFFER_OPENROUTER_FEEDBACK_LEDGER:-}" ]]; then
+    feedback_args+=(--feedback-ledger "$PUFFER_OPENROUTER_FEEDBACK_LEDGER" --out "$PUFFER_OPENROUTER_FEEDBACK_LEDGER")
+  fi
+  if [[ -n "${PUFFER_OPENROUTER_COVERAGE_LEDGER:-}" ]]; then
+    feedback_args+=(--ledger "$PUFFER_OPENROUTER_COVERAGE_LEDGER" --coverage-ledger-out "$PUFFER_OPENROUTER_COVERAGE_LEDGER")
+  fi
+  if [[ "${PUFFER_OPENROUTER_NO_COVERAGE_LEDGER:-0}" == "1" ]]; then
+    feedback_args+=(--no-coverage-ledger)
+  fi
+  node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs record-feedback "${feedback_args[@]}" --shard {{ item.name }} --input "$out_dir/bounded-replay-report.json" --namespace {{ item.namespace }}
+  node apps/puffer-desktop/tests/fuzz/bin/puffer-openrouter-triage.mjs --namespace {{ item.namespace }} --shard {{ item.name }} --seed {{ item.seed }} --model ${PUFFER_OPENROUTER_MODEL:-inclusionai/ling-2.6-flash} --out "$out_dir/findings.md"
+  echo OPENROUTER_SHARD_OK {{ item.namespace }}
+  exit 0
+fi
 explorer_args=()
 if [[ "${PUFFER_OPENROUTER_OFFLINE_SMOKE:-0}" == "1" ]]; then
   explorer_args+=(--offline)

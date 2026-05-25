@@ -132,6 +132,34 @@ if (skipAgentflow) {
   ].join(" && "), { timeout: 300_000 });
 }
 
+if (skipAgentflow) {
+  skip("scale-readiness", "AgentFlow scale-readiness check skipped by flag");
+} else if (!envSummary.agentflow) {
+  skip("scale-readiness", "AgentFlow is unavailable", { required: true });
+} else {
+  run("scale-readiness", "50-shard synthetic fanout and aggregate scale gate", [
+    `export PUFFER_OPENROUTER_OFFLINE_SMOKE=1`,
+    `export PUFFER_OPENROUTER_SYNTHETIC_SHARDS=1`,
+    `export PUFFER_OPENROUTER_FORCE_FALLBACK_PLAN=1`,
+    `export PUFFER_OPENROUTER_NAMESPACE=${sh(`${namespace}-scale50`)}`,
+    `export PUFFER_OPENROUTER_SHARD_LIMIT=50`,
+    `export PUFFER_OPENROUTER_CONCURRENCY=10`,
+    `export PUFFER_OPENROUTER_CASES=1`,
+    `export PUFFER_OPENROUTER_TIMEOUT_SECONDS=180`,
+    `export PUFFER_OPENROUTER_PLAN_NODE_TIMEOUT_SECONDS=30`,
+    `export PUFFER_OPENROUTER_FEEDBACK_LEDGER=${sh(path.join(outDir, "scale-feedback-ledger.json"))}`,
+    `export PUFFER_OPENROUTER_COVERAGE_LEDGER=${sh(path.join(outDir, "scale-coverage-ledger.json"))}`,
+    `agentflow run apps/puffer-desktop/tests/fuzz/agentflow_puffer_openrouter_campaign.py --runs-dir ${sh(path.join(outDir, "scale-agentflow-local-runs"))} --output summary`,
+    `PUFFER_OPENROUTER_NAMESPACE=${sh(`${namespace}-scale50`)} node apps/puffer-desktop/tests/fuzz/bin/puffer-openrouter-aggregate.mjs`,
+    `cp apps/puffer-desktop/tests/fuzz/.runs/openrouter-campaign/puffer_openrouter_fuzz_report.json ${sh(path.join(outDir, "scale-aggregate.json"))}`,
+    `test "$(jq '.summary.shards' ${sh(path.join(outDir, "scale-aggregate.json"))})" -eq 50`,
+    `test "$(jq '.summary.missingReplayReports' ${sh(path.join(outDir, "scale-aggregate.json"))})" -eq 0`,
+    `test "$(jq '.summary.verdictReportsPresent' ${sh(path.join(outDir, "scale-aggregate.json"))})" -eq 50`,
+    `test "$(jq '.runs | length' ${sh(path.join(outDir, "scale-feedback-ledger.json"))})" -eq 50`,
+    `test "$(jq '.runtimeCoverage.shards | length' ${sh(path.join(outDir, "scale-coverage-ledger.json"))})" -ge 1`
+  ].join(" && "), { timeout: 420_000 });
+}
+
 if (!runRealOpenRouter) {
   skip("openrouter-real", "Real OpenRouter campaign not requested", { external: true });
 } else if (!envSummary.openRouterKeyPresent) {
@@ -274,9 +302,9 @@ function buildPhaseCoverage() {
     {
       id: "phase-6",
       title: "Codex-Planned Campaign Integration",
-      localSteps: ["agentflow-offline"],
+      localSteps: ["agentflow-offline", "scale-readiness"],
       externalSteps: ["openrouter-real"],
-      evidence: "Verifies Codex planner wiring in offline mode; real small-model explorer coverage is tracked as an external gate.",
+      evidence: "Verifies Codex planner wiring in offline mode plus 50-shard synthetic fanout, isolated ledgers, verdict artifacts, and aggregate reporting; real small-model explorer coverage is tracked as an external gate.",
       caveat: realOpenRouterCaveat()
     },
     {
@@ -294,8 +322,8 @@ function buildPhaseCoverage() {
     {
       id: "phase-9",
       title: "Reporting and Handoff",
-      localSteps: ["syntax", "reviewer-aggregate", "agentflow-offline"],
-      evidence: "Confirms machine-readable reports include aggregate reviewer counts and planner campaign artifacts."
+      localSteps: ["syntax", "reviewer-aggregate", "agentflow-offline", "scale-readiness"],
+      evidence: "Confirms machine-readable reports include aggregate reviewer counts, planner campaign artifacts, and 50-shard scale summaries."
     }
   ];
 

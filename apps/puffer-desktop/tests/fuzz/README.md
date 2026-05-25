@@ -273,6 +273,13 @@ deterministic offline explorer only to validate AgentFlow preflight, shard
 fanout, bounded replay, deterministic no-finding triage, and aggregate output.
 It is not a substitute for a real small-model campaign.
 
+For larger plumbing-only checks, add `PUFFER_OPENROUTER_SYNTHETIC_SHARDS=1`
+and `PUFFER_OPENROUTER_FORCE_FALLBACK_PLAN=1`. Synthetic shards still exercise
+AgentFlow fanout, per-shard artifact directories, temporary feedback/coverage
+ledgers, strict no-finding verdicts, citation gates, and aggregate reporting,
+but they intentionally skip model calls and Playwright replay. This is useful
+for 50-shard scale readiness; it is not bug-finding evidence.
+
 Maintain candidate findings from the main-agent process only:
 
 ```sh
