@@ -59,7 +59,7 @@ fn workflows_command_is_registered_as_local_command() {
     assert_eq!(workflows.kind, CommandKind::Local);
     assert_eq!(
         workflows.argument_hint.as_deref(),
-        Some("[list|connections|connectors|tasks|runs] [query]")
+        Some("[list|new|connections|connectors|tasks|runs] [query]")
     );
     assert_eq!(
         find_command(&commands, "pipelines").map(|command| command.name.as_str()),
@@ -131,6 +131,46 @@ fn workflows_command_summarizes_native_workflows() {
     assert!(text.contains("Monitor tasks"));
     assert!(text.contains("telegram-login"));
     assert!(!text.contains("telegram-bot"));
+}
+
+#[test]
+fn workflows_new_creates_disabled_starter_workflow() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = AppState::new(
+        PufferConfig::default(),
+        tempdir.path().to_path_buf(),
+        session,
+    );
+
+    dispatch_command(
+        &mut state,
+        &supported_commands(),
+        &LoadedResources::default(),
+        &mut ProviderRegistry::new(),
+        &mut AuthStore::default(),
+        &session_store,
+        "/workflows new Customer-Triage",
+    )
+    .unwrap();
+
+    let text = &state.transcript.last().unwrap().text;
+    assert!(text.contains("Created disabled workflow draft."));
+    assert!(text.contains("slug: customer-triage"));
+    assert!(text.contains("trigger: subscription:workspace.task.created"));
+    let workflows = puffer_workflow::WorkflowStore::new(&paths.workspace_config_dir)
+        .list()
+        .unwrap();
+    assert_eq!(workflows.len(), 1);
+    assert_eq!(workflows[0].slug, "customer-triage");
+    assert!(!workflows[0].enabled);
+    assert_eq!(workflows[0].pipeline.name, "Customer Triage");
+    assert_eq!(workflows[0].pipeline.nodes[0].id, "codex-task");
 }
 
 #[test]

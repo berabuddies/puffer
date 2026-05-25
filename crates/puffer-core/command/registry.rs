@@ -471,7 +471,7 @@ pub fn supported_commands() -> Vec<CommandSpec> {
             "workflows",
             &["workflow", "pipelines", "pipeline"],
             "Show workflow, connector, and connection status",
-            Some("[list|connections|connectors|tasks|runs] [query]"),
+            Some("[list|new|connections|connectors|tasks|runs] [query]"),
             CommandKind::Local,
         ),
     ]

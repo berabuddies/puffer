@@ -215,14 +215,18 @@
   let wrapEl = $state<HTMLDivElement | undefined>();
   let scale = $state(0.8);
 
-  function starterWorkflow(): EditableWorkflow {
+  function starterWorkflow(
+    slug = "agent-review-pipeline",
+    name = "Agent review pipeline",
+    enabled = true
+  ): EditableWorkflow {
     return {
       schema: "puffer.workflow.v1",
-      slug: "agent-review-pipeline",
-      enabled: true,
+      slug,
+      enabled,
       trigger: { type: "subscription", source_topic: "workspace.task.created", pattern: "review|implement|ship" },
       pipeline: {
-        name: "Agent review pipeline",
+        name,
         working_dir: "/Users/shou/corbina",
         concurrency: 1,
         nodes: [
@@ -395,6 +399,28 @@
     workflowSlug = slug;
     const next = editorWorkflows.find((item) => item.slug === slug);
     selectedNodeId = next?.pipeline.nodes[0]?.id ?? null;
+  }
+
+  function createWorkflowDraft() {
+    const slug = uniqueWorkflowSlug("workflow-draft");
+    const draft = starterWorkflow(slug, "Workflow draft", false);
+    const connection = triggerReadyConnections[0];
+    draft.trigger = connection
+      ? { type: "connection", connection_slug: connection.slug, pattern: ".*" }
+      : { type: "subscription", source_topic: "workspace.task.created", pattern: ".*" };
+    editorWorkflows = [...editorWorkflows, draft];
+    workflowSlug = slug;
+    selectedNodeId = draft.pipeline.nodes[0]?.id ?? null;
+    dirtyWorkflowSlugs = Array.from(new Set([...dirtyWorkflowSlugs, slug]));
+    saveNotice = `Created ${slug} locally. Save to persist this workflow.`;
+  }
+
+  function uniqueWorkflowSlug(base: string): string {
+    const existing = new Set(editorWorkflows.map((item) => item.slug));
+    if (!existing.has(base)) return base;
+    let index = 2;
+    while (existing.has(`${base}-${index}`)) index += 1;
+    return `${base}-${index}`;
   }
 
   function selectRun(idx: number) {
@@ -1298,6 +1324,16 @@
       <span class="pf-pipe-save-note">{saveNotice}</span>
     </div>
     <div class="pf-pipe-top-right">
+      <button
+        type="button"
+        class="sc-btn"
+        data-variant="ghost"
+        data-size="sm"
+        aria-label="New workflow"
+        onclick={createWorkflowDraft}
+      >
+        <Icon name="plus" size={12} />New
+      </button>
       {#each providerOptions as provider (provider.id)}
         <button type="button" class="sc-btn" data-variant="ghost" data-size="sm" onclick={() => addAgent(provider.id)}>
           <Icon name="plus" size={12} />{provider.short}

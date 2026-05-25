@@ -98,6 +98,43 @@ test("pipeline editor saves workflow changes through daemon", async ({ page }) =
   await expect(saveButton).toBeDisabled();
 });
 
+test("pipeline editor creates new workflow drafts before saving", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  await page.getByRole("button", { name: "New workflow" }).click();
+
+  await expect(page.locator(".pf-pipe-save-note")).toContainText("Created workflow-draft locally");
+  await expect(page.locator(".pf-editor-config").getByLabel("Name")).toHaveValue("Workflow draft");
+  await expect(page.locator(".pf-editor-config").getByLabel("Slug")).toHaveValue("workflow-draft");
+  await expect(page.locator(".pf-editor-inline").getByRole("checkbox")).not.toBeChecked();
+  await expect(page.getByLabel("Trigger type")).toHaveValue("connection");
+  await expect(page.getByLabel("Workflow connection")).toHaveValue("telegram-user");
+
+  const saveButton = page.getByRole("button", { name: "Save workflow" });
+  await expect(saveButton).toBeEnabled();
+  await saveButton.click();
+
+  const request = await daemon.waitForRequest("workflow_save", (candidate) => {
+    const workflow = candidate.params.workflow as { slug?: string };
+    return workflow.slug === "workflow-draft";
+  });
+  const workflow = request.params.workflow as {
+    slug?: string;
+    enabled?: boolean;
+    trigger?: { type?: string; connection_slug?: string };
+    pipeline?: { name?: string };
+  };
+  expect(workflow.enabled).toBe(false);
+  expect(workflow.trigger).toMatchObject({ type: "connection", connection_slug: "telegram-user" });
+  expect(workflow.pipeline?.name).toBe("Workflow draft");
+  await expect(page.locator(".pf-pipe-save-note")).toContainText("Saved workflow-draft.");
+  await expect(saveButton).toBeDisabled();
+});
+
 test("pipeline editor can pause and resume workflows through daemon", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

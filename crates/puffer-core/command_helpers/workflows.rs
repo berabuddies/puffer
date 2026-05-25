@@ -10,6 +10,7 @@ use puffer_workflow::{TriggerSpec, WorkflowDefinition, WorkflowRun, WorkflowStor
 use std::cmp::Ordering;
 use std::fmt::Write as _;
 
+mod create;
 mod monitor_tasks;
 
 /// Renders a terminal-friendly workflow, connection, and connector summary.
@@ -69,9 +70,12 @@ pub(crate) fn handle_workflows_command(state: &AppState, args: &str) -> Result<S
         "runs" | "run" => {
             write_runs(&mut out, &runs, &query);
         }
+        "new" | "create" => {
+            out.push_str(&create::create_workflow(&paths, &query)?);
+        }
         _ => {
             out.push_str(
-                "Usage: /workflows [list|connections|connectors|tasks|runs] [query]\n\
+                "Usage: /workflows [list|new|connections|connectors|tasks|runs] [query]\n\
                  Tip: use /connect to add a connector connection, then select it as a workflow trigger.",
             );
         }
