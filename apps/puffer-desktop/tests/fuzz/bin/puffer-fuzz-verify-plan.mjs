@@ -332,12 +332,18 @@ function buildPhaseCoverage() {
     const externalStepStatuses = collectStepStatuses(definition.externalSteps ?? []);
     const missingLocalSteps = localStepStatuses.filter((step) => step.status === "missing");
     const failedLocalSteps = localStepStatuses.filter((step) => step.status === "failed" || step.status === "skipped-required");
-    const status = missingLocalSteps.length > 0 || failedLocalSteps.length > 0 ? "failed" : "passed";
+    const localStatus = missingLocalSteps.length > 0 || failedLocalSteps.length > 0 ? "failed" : "passed";
     const externalStatus = summarizeExternalPhaseStatus(externalStepStatuses);
+    const status = localStatus === "failed"
+      ? "failed"
+      : externalStatus === "failed"
+        ? "blocked_external"
+        : "passed";
     return {
       id: definition.id,
       title: definition.title,
       status,
+      localStatus,
       externalStatus,
       localSteps: localStepStatuses,
       externalSteps: externalStepStatuses,
