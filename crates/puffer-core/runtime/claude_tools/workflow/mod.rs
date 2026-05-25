@@ -16,6 +16,7 @@ pub mod http_request;
 pub mod lark;
 pub mod lambda_internal;
 pub mod lsp;
+pub mod mcp_tool_call;
 mod lsp_live;
 mod lsp_live_diagnostics;
 pub mod powershell;

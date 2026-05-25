@@ -753,6 +753,7 @@ pub fn execute_workflow_tool(
         "HttpRequest" => workflow::http_request::execute_http_request(state, cwd, input),
         "Lark" => workflow::lark::execute_lark(state, cwd, input),
         "LSP" => workflow::lsp::execute_lsp(state, resources, cwd, input),
+        "McpToolCall" => workflow::mcp_tool_call::execute_mcp_tool_call(state, cwd, input),
         "ProcessControl" => workflow::process_control::execute_process_control(state, cwd, input),
         "PowerShell" => workflow::powershell::execute_powershell(state, cwd, input),
         "SendMessage" => workflow::send_message::execute_send_message(state, cwd, input),
