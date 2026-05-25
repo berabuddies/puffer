@@ -154,6 +154,29 @@ fn shell_template_contract_quotes_arguments() {
 }
 
 #[test]
+fn shell_join_template_contract_quotes_array_arguments() {
+    let host = LambdaHostEnv::from_json_str(
+        r#"{"effects":[],"domains":[],"tools":[{"name":"cli_lookup_many","effects":["proc"],"params":[{"name":"symbols","ty":"[str]"}],"concreteTools":["Bash"],"concreteInputContracts":{"Bash":{"command":{"$template":"lookup ${shell_join:symbols}"},"run_in_background":false,"timeout":120,"tty":false}}}]}"#,
+    )
+    .unwrap();
+    let gate = LambdaGateState::with_host_caps(host);
+
+    assert!(gate
+        .admit_concrete_input_binding(
+            "cli_lookup_many",
+            &serde_json::json!({"symbols": ["AAPL", "BRK B"]}),
+            "Bash",
+            &serde_json::json!({
+                "command": "lookup 'AAPL' 'BRK B'",
+                "run_in_background": false,
+                "timeout": 120,
+                "tty": false
+            })
+        )
+        .is_accept());
+}
+
+#[test]
 fn skill_path_contract_matches_loaded_skill_root() {
     let root = tempfile::tempdir().unwrap();
     let skill_source = root.path().join("skill.lskill");

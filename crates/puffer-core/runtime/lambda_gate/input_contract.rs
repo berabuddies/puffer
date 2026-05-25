@@ -163,6 +163,7 @@ fn render_template(template: &str, args: &Map<String, Value>) -> Option<String> 
         match format {
             TemplateFormat::Json => output.push_str(&serde_json::to_string(value).ok()?),
             TemplateFormat::Shell => output.push_str(&shell_quote_value(value)?),
+            TemplateFormat::ShellJoin => output.push_str(&shell_quote_array(value)?),
             TemplateFormat::Raw => {
                 if let Some(text) = value.as_str() {
                     output.push_str(text);
@@ -182,6 +183,7 @@ enum TemplateFormat {
     Raw,
     Json,
     Shell,
+    ShellJoin,
 }
 
 fn template_placeholder(placeholder: &str) -> Option<(TemplateFormat, &str)> {
@@ -190,6 +192,8 @@ fn template_placeholder(placeholder: &str) -> Option<(TemplateFormat, &str)> {
         (TemplateFormat::Json, name.trim())
     } else if let Some(name) = trimmed.strip_prefix("shell:") {
         (TemplateFormat::Shell, name.trim())
+    } else if let Some(name) = trimmed.strip_prefix("shell_join:") {
+        (TemplateFormat::ShellJoin, name.trim())
     } else {
         (TemplateFormat::Raw, trimmed)
     };
@@ -207,4 +211,13 @@ fn shell_quote_value(value: &Value) -> Option<String> {
         serde_json::to_string(value).ok()?
     };
     Some(format!("'{}'", text.replace('\'', r#"'"'"'"#)))
+}
+
+fn shell_quote_array(value: &Value) -> Option<String> {
+    let items = value.as_array()?;
+    items
+        .iter()
+        .map(shell_quote_value)
+        .collect::<Option<Vec<_>>>()
+        .map(|quoted| quoted.join(" "))
 }
