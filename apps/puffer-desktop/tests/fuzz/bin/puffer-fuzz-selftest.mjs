@@ -67,6 +67,8 @@ const malformedVerdictPath = writeJson("malformed-verdict.json", malformedVerdic
 const malformedGatePath = writeJson("malformed-gate.json", malformedGate);
 const bugListPath = path.join(runDir, "BUGS.md");
 const candidateListPath = path.join(runDir, "BUGS_CAND.md");
+const evidencePath = writeJson("evidence.json", evidence);
+const reviewerPath = path.join(runDir, "reviewer.json");
 
 runExpect(0, [
   "node",
@@ -116,7 +118,36 @@ runExpect(0, [
   "--gate",
   relative(candidateGatePath),
   "--evidence",
-  relative(writeJson("evidence.json", evidence))
+  relative(evidencePath)
+]);
+runExpect(0, [
+  "node",
+  "apps/puffer-desktop/tests/fuzz/bin/puffer-openrouter-reviewer.mjs",
+  "--offline",
+  "--verdict",
+  relative(candidateVerdictPath),
+  "--gate",
+  relative(candidateGatePath),
+  "--replay",
+  relative(evidencePath),
+  "--out",
+  relative(reviewerPath)
+]);
+const review = JSON.parse(fs.readFileSync(reviewerPath, "utf8"));
+assert(review.decision === "human_queue", "offline candidate reviewer must produce a human_queue decision");
+runExpect(0, [
+  "node",
+  "apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs",
+  "candidate-list",
+  "--candidate-list",
+  relative(candidateListPath),
+  "--set-status",
+  "--id",
+  "PUF-CAND-0001",
+  "--status",
+  "human-queue",
+  "--note",
+  "offline reviewer smoke"
 ]);
 
 const result = {
@@ -127,6 +158,7 @@ const result = {
   candidateDisposition: candidateGate.disposition,
   hallucinatedDisposition: hallucinatedGate.disposition,
   malformedDisposition: malformedGate.disposition,
+  reviewerDecision: review.decision,
   bugListPath: relative(bugListPath),
   candidateListPath: relative(candidateListPath)
 };

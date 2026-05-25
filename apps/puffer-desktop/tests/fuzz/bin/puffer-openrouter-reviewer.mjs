@@ -15,6 +15,7 @@ const outPath = path.resolve(repoRoot, args.out ?? path.join(path.dirname(verdic
 const model = args.model ?? process.env.PUFFER_OPENROUTER_REVIEWER_MODEL ??
   process.env.PUFFER_OPENROUTER_MODEL ?? "inclusionai/ling-2.6-flash";
 const apiKey = process.env.OPENROUTER_API_KEY;
+const offlineReview = args.offline === "true" || process.env.PUFFER_OPENROUTER_REVIEWER_OFFLINE === "1";
 const baseUrl = (process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1").replace(/\/+$/, "");
 
 const verdict = JSON.parse(fs.readFileSync(verdictPath, "utf8"));
@@ -34,9 +35,23 @@ if (gate.disposition !== "candidate") {
   process.exit(0);
 }
 
-if (!apiKey) throw new Error("OPENROUTER_API_KEY is required");
-
 const evidence = citedEvidence(verdict, replay.evidence_index ?? []);
+if (offlineReview) {
+  writeReview({
+    version: 1,
+    decision: evidence.length > 0 ? "human_queue" : "dismiss",
+    confidence: evidence.length > 0 ? 0.5 : 1,
+    reason: evidence.length > 0
+      ? "Offline reviewer smoke saw cited evidence but did not make a network-backed promotion decision."
+      : "Offline reviewer smoke found no cited evidence.",
+    cited_evidence: evidence.map((entry) => entry.id),
+    notes: "Offline reviewer smoke validates candidate-review artifact shape only."
+  });
+  process.stdout.write(`OPENROUTER_REVIEWER_OK ${relative(outPath)}\n`);
+  process.exit(0);
+}
+
+if (!apiKey) throw new Error("OPENROUTER_API_KEY is required");
 const payload = await openRouterChat({
   model,
   temperature: 0.1,

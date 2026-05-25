@@ -282,6 +282,11 @@ node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs candidate-list \
   --note "reviewer admitted"
 ```
 
+For no-network reviewer plumbing tests, `puffer-openrouter-reviewer.mjs
+--offline` writes a `human_queue` review when cited evidence exists. This only
+validates artifact shape and ledger status handling; it is not a network-backed
+reviewer decision.
+
 Run the GUIFlow smoke benchmark through the same evidence and citation gate:
 
 ```sh
