@@ -17,6 +17,9 @@ input_schema:
     prompt:
       type: string
       description: Literal prompt text or a workspace-relative prompt file path.
+    promptReference:
+      type: string
+      description: Optional workspace-relative prompt/reference file to prepend as generation context.
     aspect:
       type: string
       description: Aspect ratio such as square, landscape, portrait, 1:1, 16:9, 9:16, or auto.

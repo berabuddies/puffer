@@ -18,6 +18,8 @@ const MAX_PROMPT_CHARS: usize = 20_000;
 struct ImageGenerationInput {
     prompt: String,
     #[serde(default)]
+    prompt_reference: Option<String>,
+    #[serde(default)]
     aspect: Option<String>,
     #[serde(default)]
     output_path: Option<String>,
@@ -85,7 +87,7 @@ pub fn execute_image_generation(_state: &mut AppState, cwd: &Path, input: Value)
 }
 
 fn build_image_request(cwd: &Path, input: ImageGenerationInput) -> Result<ImageRequest> {
-    let prompt = prompt_text(cwd, &input.prompt)?;
+    let prompt = prompt_text(cwd, &input.prompt, input.prompt_reference.as_deref())?;
     let model = std::env::var("PUFFER_IMAGE_MODEL")
         .ok()
         .map(|value| value.trim().to_string())
@@ -101,21 +103,34 @@ fn build_image_request(cwd: &Path, input: ImageGenerationInput) -> Result<ImageR
     })
 }
 
-fn prompt_text(cwd: &Path, value: &str) -> Result<String> {
+fn prompt_text(cwd: &Path, value: &str, reference: Option<&str>) -> Result<String> {
+    let primary = prompt_fragment(cwd, value, "prompt")?;
+    let Some(reference) = reference.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(primary);
+    };
+    let reference = prompt_fragment(cwd, reference, "promptReference")?;
+    let prompt = format!("Reference prompt document:\n{reference}\n\nImage prompt:\n{primary}");
+    if prompt.chars().count() > MAX_PROMPT_CHARS {
+        bail!("ImageGeneration prompt exceeds {MAX_PROMPT_CHARS} characters");
+    }
+    Ok(prompt)
+}
+
+fn prompt_fragment(cwd: &Path, value: &str, field: &str) -> Result<String> {
     let text = value.trim();
     if text.is_empty() {
-        bail!("ImageGeneration `prompt` is required");
+        bail!("ImageGeneration `{field}` is required");
     }
     let candidate = cwd.join(text);
     let prompt = if safe_relative_path(text) && candidate.is_file() {
         fs::read_to_string(&candidate)
-            .with_context(|| format!("read image prompt {}", candidate.display()))?
+            .with_context(|| format!("read ImageGeneration `{field}` {}", candidate.display()))?
     } else {
         text.to_string()
     };
     let prompt = prompt.trim();
     if prompt.is_empty() {
-        bail!("ImageGeneration prompt is empty");
+        bail!("ImageGeneration `{field}` is empty");
     }
     if prompt.chars().count() > MAX_PROMPT_CHARS {
         bail!("ImageGeneration prompt exceeds {MAX_PROMPT_CHARS} characters");
@@ -233,9 +248,31 @@ mod tests {
         fs::write(dir.path().join("prompt.md"), "draw a careful diagram").unwrap();
 
         assert_eq!(
-            prompt_text(dir.path(), "prompt.md").unwrap(),
+            prompt_text(dir.path(), "prompt.md", None).unwrap(),
             "draw a careful diagram"
         );
+    }
+
+    #[test]
+    fn combines_prompt_reference_with_primary_prompt() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("prompts.md"), "character guide").unwrap();
+
+        let prompt = prompt_text(dir.path(), "panel 1 action", Some("prompts.md")).unwrap();
+
+        assert!(prompt.contains("character guide"));
+        assert!(prompt.contains("panel 1 action"));
+    }
+
+    #[test]
+    fn parses_prompt_reference_from_tool_input() {
+        let parsed: ImageGenerationInput = serde_json::from_value(json!({
+            "prompt": "panel 1 action",
+            "promptReference": "prompts.md"
+        }))
+        .unwrap();
+
+        assert_eq!(parsed.prompt_reference.as_deref(), Some("prompts.md"));
     }
 
     #[test]
@@ -273,6 +310,7 @@ mod tests {
             dir.path(),
             ImageGenerationInput {
                 prompt: "prompt.md".to_string(),
+                prompt_reference: None,
                 aspect: Some("square".to_string()),
                 output_path: Some("out/image.png".to_string()),
                 purpose: Some("test".to_string()),
