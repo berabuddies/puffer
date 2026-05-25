@@ -23,8 +23,12 @@
     "guiflow-smoke": "node bin/puffer-guiflow-smoke.mjs",
     "juice-shop-runner": "node bin/puffer-juice-shop-runner.mjs",
     "juice-shop-aggregate": "node bin/puffer-juice-shop-aggregate.mjs",
+    "webarena-runner": "node bin/puffer-webarena-runner.mjs",
+    "webarena-aggregate": "node bin/puffer-webarena-aggregate.mjs",
+    "webarena-suite-from-configs": "node bin/puffer-webarena-suite-from-configs.mjs",
     "openrouter-explorer": "node bin/puffer-openrouter-explorer.mjs",
     "openrouter-juice-shop-explorer": "node bin/puffer-openrouter-juice-shop-explorer.mjs",
+    "openrouter-webarena-explorer": "node bin/puffer-openrouter-webarena-explorer.mjs",
     "openrouter-aggregate": "node bin/puffer-openrouter-aggregate.mjs",
     "openrouter-triage": "node bin/puffer-openrouter-triage.mjs",
     "openrouter-reviewer": "node bin/puffer-openrouter-reviewer.mjs"

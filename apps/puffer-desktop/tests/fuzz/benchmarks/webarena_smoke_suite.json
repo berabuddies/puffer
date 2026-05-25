@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "name": "webarena-smoke-suite",
+  "description": "Small WebArena-compatible smoke suite using official no-login example tasks. This validates the Puffer UI-tree benchmark harness without requiring the full WebArena multi-site deployment.",
+  "source": {
+    "repository": "https://github.com/web-arena-x/webarena",
+    "config_files": [
+      "config_files/examples/2.json",
+      "config_files/examples/3.json"
+    ],
+    "score_semantics": "Mean pass rate over this smoke suite, not the full official 812-task WebArena score."
+  },
+  "shards": [
+    {
+      "id": "misc-classification-nav",
+      "area": "misc",
+      "task_id": 2,
+      "shard_path": "webarena/misc/2",
+      "require_login": false,
+      "start_url": "https://russmaxdesign.github.io/exercise",
+      "intent": "Check out the classification section",
+      "eval": {
+        "eval_types": ["url_match"],
+        "reference_url": "https://russmaxdesign.github.io/exercise/#link-two",
+        "reference_answers": null,
+        "program_html": [
+          {
+            "url": "",
+            "required_contents": []
+          }
+        ]
+      },
+      "offline_actions": [
+        {
+          "type": "goto",
+          "url": "https://russmaxdesign.github.io/exercise"
+        },
+        {
+          "type": "click",
+          "withinRole": "navigation",
+          "role": "link",
+          "name": "Classification"
+        },
+        {
+          "type": "stop",
+          "answer": "Wilson and Reade"
+        }
+      ]
+    },
+    {
+      "id": "misc-mammal-classification-answer",
+      "area": "misc",
+      "task_id": 3,
+      "shard_path": "webarena/misc/3",
+      "require_login": false,
+      "start_url": "https://russmaxdesign.github.io/exercise",
+      "intent": "Tell me who provide a collection of concise, detailed information for mammal classification in 2005",
+      "eval": {
+        "eval_types": ["string_match"],
+        "reference_url": "",
+        "reference_answers": ["Wilson and Reader"],
+        "program_html": [
+          {
+            "url": "",
+            "required_contents": []
+          }
+        ]
+      },
+      "offline_actions": [
+        {
+          "type": "goto",
+          "url": "https://russmaxdesign.github.io/exercise"
+        },
+        {
+          "type": "stop",
+          "answer": "Wilson and Reader"
+        }
+      ]
+    }
+  ]
+}

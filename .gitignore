@@ -23,6 +23,7 @@ env.txt
 audits/
 bugs/
 apps/puffer-desktop/tests/fuzz/.runs/
+apps/puffer-desktop/tests/fuzz/benchmarks/*.local.json
 apps/puffer-desktop/tests/fuzz/__pycache__/
 apps/puffer-desktop/tests/fuzz/**/*.pyc
 apps/puffer-desktop/tests/*.tmp.spec.ts
