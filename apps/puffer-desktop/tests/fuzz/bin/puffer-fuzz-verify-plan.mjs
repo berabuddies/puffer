@@ -77,6 +77,16 @@ run("evolution", "Tree evolution and bridge-aware scheduling", [
   `test "$(jq '.selectedShardIds | length' ${sh(path.join(outDir, "schedule.json"))})" -eq 2`
 ].join(" && "));
 
+run("evolution-policy", "Synthetic split/demote/starvation evolution policy", [
+  `rm -rf ${sh(path.join(outDir, "evolution-policy-shards"))}`,
+  `mkdir -p ${sh(path.join(outDir, "evolution-policy-shards"))}`,
+  `node -e ${sh(syntheticEvolutionPolicyScript(outDir))}`,
+  `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs evolve-tree --shard-dir ${sh(path.join(outDir, "evolution-policy-shards"))} --feedback-ledger ${sh(path.join(outDir, "evolution-policy-feedback.json"))} --out ${sh(path.join(outDir, "evolution-policy.md"))} --json-out ${sh(path.join(outDir, "evolution-policy.json"))} --starvation-floor 1`,
+  `jq -e '.shards["synthetic-hot-parent"].actions | index("split")' ${sh(path.join(outDir, "evolution-policy.json"))} >/dev/null`,
+  `jq -e '.shards["synthetic-cold-leaf"].actions | index("demote")' ${sh(path.join(outDir, "evolution-policy.json"))} >/dev/null`,
+  `jq -e '.shards["synthetic-starved-leaf"].actions | index("force-starvation-floor")' ${sh(path.join(outDir, "evolution-policy.json"))} >/dev/null`
+].join(" && "));
+
 run("bridge-replay", "Two bridge shards replay through evidence path", [
   `rm -rf ${sh(path.join(fuzzRoot, ".runs", `${namespace}-bridge-chat`))} ${sh(path.join(fuzzRoot, ".runs", `${namespace}-bridge-model`))}`,
   `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-replay-loop.mjs --seeds chat-turn-race --shard bridge-chat-permission-session-reload --limit 1 --attempts 1 --timeout 90 --rng-seed ${sh(`${namespace}-bridge-chat`)} --namespace ${sh(`${namespace}-bridge-chat`)}`,
@@ -314,6 +324,41 @@ fs.writeFileSync(dir + "/reviewer.json", JSON.stringify({
   reason: "synthetic aggregate reviewer smoke",
   cited_evidence: ["ev-action-0001"],
   notes: "synthetic"
+}, null, 2) + "\\n");
+`;
+}
+
+function syntheticEvolutionPolicyScript(outputDir) {
+  const shardDir = path.join(outputDir, "evolution-policy-shards");
+  const feedbackPath = path.join(outputDir, "evolution-policy-feedback.json");
+  return `
+const fs = require("node:fs");
+const shardDir = ${JSON.stringify(shardDir)};
+const feedbackPath = ${JSON.stringify(feedbackPath)};
+const shard = (id, startNode) => ({
+  id,
+  title: id,
+  seed: "chat-turn-race",
+  startNode,
+  ownedNodes: [startNode],
+  allowedSetupNodes: [],
+  ownedCoverage: [],
+  allowedAsyncEvents: [],
+  invariants: []
+});
+fs.writeFileSync(shardDir + "/synthetic-hot-parent.json", JSON.stringify(shard("synthetic-hot-parent", "chat"), null, 2) + "\\n");
+fs.writeFileSync(shardDir + "/synthetic-cold-leaf.json", JSON.stringify(shard("synthetic-cold-leaf", "workspace/landing-search"), null, 2) + "\\n");
+fs.writeFileSync(shardDir + "/synthetic-starved-leaf.json", JSON.stringify(shard("synthetic-starved-leaf", "browser/address-navigation"), null, 2) + "\\n");
+fs.writeFileSync(feedbackPath, JSON.stringify({
+  version: 1,
+  runs: [
+    { shardId: "synthetic-cold-leaf", recordedAt: "2026-05-25T00:00:00.000Z", total: 1, passed: 1, stableFailed: 0, actionableFailures: 0, newCandidateFindings: 0, coveredTags: [] },
+    { shardId: "synthetic-cold-leaf", recordedAt: "2026-05-25T00:01:00.000Z", total: 1, passed: 1, stableFailed: 0, actionableFailures: 0, newCandidateFindings: 0, coveredTags: [] },
+    { shardId: "synthetic-hot-parent", recordedAt: "2026-05-25T00:02:00.000Z", total: 5, passed: 0, stableFailed: 5, actionableFailures: 5, newCandidateFindings: 2, coveredTags: ["route:chat-composer", "control:chat.send"] },
+    { shardId: "synthetic-hot-parent", recordedAt: "2026-05-25T00:03:00.000Z", total: 5, passed: 0, stableFailed: 5, actionableFailures: 5, newCandidateFindings: 2, coveredTags: ["route:chat-composer", "control:chat.send"] }
+  ],
+  shards: {},
+  notes: []
 }, null, 2) + "\\n");
 `;
 }
