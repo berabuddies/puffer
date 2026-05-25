@@ -9,6 +9,8 @@ use uuid::Uuid;
 
 #[path = "tool_execution/agent_team_e2e.rs"]
 mod agent_team_e2e;
+#[path = "tool_execution/anthropic_stream.rs"]
+mod anthropic_stream;
 #[path = "tool_execution/browser_permissions.rs"]
 mod browser_permissions;
 #[path = "tool_execution/lambda_arxiv_contract.rs"]

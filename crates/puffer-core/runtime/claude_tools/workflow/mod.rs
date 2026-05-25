@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod anthropic_stream;
 pub mod ask_user_question;
 mod ask_user_question_types;
 pub mod config;
@@ -17,9 +18,9 @@ pub mod http_request;
 pub mod lark;
 pub mod lambda_internal;
 pub mod lsp;
-pub mod mcp_tool_call;
 mod lsp_live;
 mod lsp_live_diagnostics;
+pub mod mcp_tool_call;
 pub mod powershell;
 pub mod process_control;
 pub mod send_message;

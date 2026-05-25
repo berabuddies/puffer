@@ -1,0 +1,34 @@
+id: AnthropicStream
+name: AnthropicStream
+description: |-
+  Parse an Anthropic API stream value through Puffer's typed stream runtime.
+
+  Use this for verified Lambda Skill contracts that consume a previously
+  opened Anthropic SSE stream and need the final assistant text. The tool does
+  not open network connections or execute shell commands.
+handler: runtime:workflow:anthropic_stream
+approval_policy: auto
+sandbox_policy: read-only
+input_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - finalMessage
+      description: Anthropic stream action to perform.
+    stream:
+      description: Raw SSE stream text or an object containing stdout/output text.
+  required:
+    - action
+    - stream
+  additionalProperties: false
+metadata:
+  may_spawn_processes: false
+  may_read_files: false
+  may_write_files: false
+  may_access_network: false
+display:
+  group: ai
+  title: AnthropicStream
+  show_in_status: true

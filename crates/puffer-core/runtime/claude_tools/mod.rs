@@ -714,6 +714,9 @@ pub fn execute_workflow_tool(
 ) -> Result<String> {
     match tool_id {
         "Agent" => workflow::agent::execute_agent(state, cwd, input),
+        "AnthropicStream" => {
+            workflow::anthropic_stream::execute_anthropic_stream(state, cwd, input)
+        }
         "AskUserQuestion" => {
             workflow::ask_user_question::execute_ask_user_question(state, cwd, input)
         }
