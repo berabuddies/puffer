@@ -177,6 +177,14 @@ pub(super) fn prepare_lambda_host_call(
             {
                 return lambda_skill_gate_denial(tool_id, reason);
             }
+            if let LambdaGateVerdict::Reject(reason) = gate.admit_concrete_input_binding(
+                &parsed.host_tool,
+                &parsed.args,
+                &parsed.tool,
+                &parsed.input,
+            ) {
+                return lambda_skill_gate_denial(tool_id, reason);
+            }
             let host_tool = parsed.host_tool.clone();
             let host_args = parsed.args.clone();
             let concrete_tool = parsed.tool.clone();

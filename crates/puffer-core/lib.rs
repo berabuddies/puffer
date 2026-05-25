@@ -143,6 +143,11 @@ pub fn lambda_skill_statuses(resources: &LoadedResources) -> Vec<LambdaSkillStat
     command_helpers::lambda_skill_statuses(resources)
 }
 
+/// Validates a precompiled Lambda Skill host catalogue for runtime use.
+pub fn validate_lambda_host_catalogue_runtime(raw: &str) -> Result<()> {
+    runtime::lambda_gate::validate_host_catalogue_runtime(raw)
+}
+
 /// Renders the current `/context` summary used by interactive overlays.
 pub fn render_context_panel(
     state: &AppState,

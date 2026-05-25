@@ -16,6 +16,14 @@ pub(super) fn lambda_arg_matches_type(
         .unwrap_or(true)
 }
 
+/// Returns refinements in this type that the runtime cannot evaluate.
+pub(super) fn unsupported_refinements_in_type(ty: &str) -> Vec<String> {
+    let (_, refinement) = split_refinement(ty);
+    refinement
+        .map(unsupported_refinements_in_expr)
+        .unwrap_or_default()
+}
+
 fn split_refinement(ty: &str) -> (&str, Option<&str>) {
     let trimmed = ty.trim();
     let Some((base, tail)) = trimmed.split_once('{') else {
@@ -75,10 +83,38 @@ fn refinement_matches(
     if let Some(result) = compare_expr(value, param_name, all_args, expr) {
         return result;
     }
+    if let Some(result) = runtime_predicate(value, expr) {
+        return result;
+    }
     if let Some(result) = string_predicate(value, expr) {
         return result;
     }
     false
+}
+
+fn unsupported_refinements_in_expr(expr: &str) -> Vec<String> {
+    let expr = strip_outer_parens(expr.trim());
+    if expr.is_empty() {
+        return Vec::new();
+    }
+    let and_parts = split_top_level(expr, "&&");
+    if and_parts.len() > 1 {
+        return and_parts
+            .iter()
+            .flat_map(|part| unsupported_refinements_in_expr(part))
+            .collect();
+    }
+    let or_parts = split_top_level(expr, "||");
+    if or_parts.len() > 1 {
+        return or_parts
+            .iter()
+            .flat_map(|part| unsupported_refinements_in_expr(part))
+            .collect();
+    }
+    if compare_expr_shape(expr) || runtime_predicate_shape(expr) || string_predicate_shape(expr) {
+        return Vec::new();
+    }
+    vec![expr.to_string()]
 }
 
 fn strip_outer_parens(mut expr: &str) -> &str {
@@ -161,6 +197,15 @@ fn compare_expr(
     None
 }
 
+fn compare_expr_shape(expr: &str) -> bool {
+    [">=", "<=", "!=", "==", "=", ">", "<"]
+        .into_iter()
+        .any(|op| {
+            expr.split_once(op)
+                .is_some_and(|(left, right)| !left.trim().is_empty() && !right.trim().is_empty())
+        })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum CmpValue {
     Number(f64),
@@ -228,6 +273,84 @@ fn string_predicate(value: &Value, expr: &str) -> Option<bool> {
         let suffix = suffix.trim_start_matches('.');
         text.ends_with(&format!(".{suffix}")) || text.ends_with(suffix)
     }))
+}
+
+fn string_predicate_shape(expr: &str) -> bool {
+    expr.split_once('(')
+        .is_some_and(|(name, _)| name.trim().starts_with("ends_with_"))
+}
+
+fn runtime_predicate(value: &Value, expr: &str) -> Option<bool> {
+    let (name, _) = expr.split_once('(')?;
+    match name.trim() {
+        "valid_arxiv_id" => value.as_str().map(valid_arxiv_id_list),
+        "parsed_ok" => Some(parsed_paper_value(value)),
+        _ => None,
+    }
+}
+
+fn runtime_predicate_shape(expr: &str) -> bool {
+    expr.split_once('(')
+        .is_some_and(|(name, _)| matches!(name.trim(), "valid_arxiv_id" | "parsed_ok"))
+}
+
+fn valid_arxiv_id_list(text: &str) -> bool {
+    let mut seen = false;
+    for item in text.split(',') {
+        let id = item.trim();
+        if id.is_empty() || !valid_arxiv_id(id) {
+            return false;
+        }
+        seen = true;
+    }
+    seen
+}
+
+fn valid_arxiv_id(id: &str) -> bool {
+    let base = id
+        .rsplit_once('v')
+        .and_then(|(prefix, suffix)| {
+            (!suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit())).then_some(prefix)
+        })
+        .unwrap_or(id);
+    valid_new_arxiv_id(base) || valid_old_arxiv_id(base)
+}
+
+fn valid_new_arxiv_id(id: &str) -> bool {
+    let Some((ym, number)) = id.split_once('.') else {
+        return false;
+    };
+    ym.len() == 4
+        && ym.chars().all(|ch| ch.is_ascii_digit())
+        && matches!(number.len(), 4 | 5)
+        && number.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn valid_old_arxiv_id(id: &str) -> bool {
+    let Some((archive, number)) = id.split_once('/') else {
+        return false;
+    };
+    !archive.is_empty()
+        && archive
+            .chars()
+            .all(|ch| ch.is_ascii_alphabetic() || matches!(ch, '-' | '.'))
+        && number.len() == 7
+        && number.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn parsed_paper_value(value: &Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    let has_title = object
+        .get("title")
+        .and_then(Value::as_str)
+        .is_some_and(|title| !title.trim().is_empty());
+    let has_valid_id = ["arxiv_id", "id", "eprint"]
+        .into_iter()
+        .filter_map(|key| object.get(key).and_then(Value::as_str))
+        .any(valid_arxiv_id);
+    has_title && has_valid_id
 }
 
 fn json_integer(value: &Value) -> Option<i128> {
@@ -309,6 +432,58 @@ mod tests {
     }
 
     #[test]
+    fn arxiv_id_refinements_must_hold() {
+        let args = object(json!({"id": "2402.03300"}));
+        assert!(lambda_arg_matches_type(
+            args.get("id").unwrap(),
+            "id",
+            &args,
+            "str{valid_arxiv_id(id)}",
+        ));
+        let args = object(json!({"id": "hep-th/0601001v2"}));
+        assert!(lambda_arg_matches_type(
+            args.get("id").unwrap(),
+            "id",
+            &args,
+            "str{valid_arxiv_id(id)}",
+        ));
+        let args = object(json!({"id_list": "2402.03300, 1706.03762v7"}));
+        assert!(lambda_arg_matches_type(
+            args.get("id_list").unwrap(),
+            "id_list",
+            &args,
+            "str{valid_arxiv_id(id)}",
+        ));
+        let args = object(json!({"id": "https://arxiv.org/abs/2402.03300"}));
+        assert!(!lambda_arg_matches_type(
+            args.get("id").unwrap(),
+            "id",
+            &args,
+            "str{valid_arxiv_id(id)}",
+        ));
+    }
+
+    #[test]
+    fn parsed_ok_refinements_must_hold() {
+        let args = object(json!({
+            "paper": {"title": "Attention Is All You Need", "arxiv_id": "1706.03762v7"}
+        }));
+        assert!(lambda_arg_matches_type(
+            args.get("paper").unwrap(),
+            "paper",
+            &args,
+            "Paper{parsed_ok(p)}",
+        ));
+        let args = object(json!({"paper": {"title": "Missing identifier"}}));
+        assert!(!lambda_arg_matches_type(
+            args.get("paper").unwrap(),
+            "paper",
+            &args,
+            "Paper{parsed_ok(p)}",
+        ));
+    }
+
+    #[test]
     fn cross_argument_comparisons_must_hold() {
         let args = object(json!({"from": "USDC", "to": "ETH"}));
         assert!(lambda_arg_matches_type(
@@ -341,5 +516,18 @@ mod tests {
             &args,
             "str{valid_address(a)}",
         ));
+    }
+
+    #[test]
+    fn unsupported_refinements_are_reported_for_readiness() {
+        assert_eq!(
+            unsupported_refinements_in_type("str{(valid_arxiv_id(id) && ends_with_pdf(path))}"),
+            Vec::<String>::new()
+        );
+        assert!(unsupported_refinements_in_type("int{n > 0 && n <= 10}").is_empty());
+        assert_eq!(
+            unsupported_refinements_in_type("str{host_custom_rule(x)}"),
+            vec!["host_custom_rule(x)".to_string()]
+        );
     }
 }

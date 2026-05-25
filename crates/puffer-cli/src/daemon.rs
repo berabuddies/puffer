@@ -4477,7 +4477,7 @@ mod tests {
               "effects": ["net_r"],
               "domains": [],
               "tools": [
-                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash", "Read"], "registers": [], "contextReq": null}
+                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash", "Read"], "concreteInputContracts": {"Bash": {"command": "gh pr view"}, "Read": {"file_path": "README.md"}}, "registers": [], "contextReq": null}
               ]
             }"#,
         )
@@ -4557,7 +4557,7 @@ mod tests {
               "effects": ["net_r"],
               "domains": [],
               "tools": [
-                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash", "Read"], "registers": [], "contextReq": null}
+                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash", "Read"], "concreteInputContracts": {"Bash": {"command": "gh pr view"}, "Read": {"file_path": "README.md"}}, "registers": [], "contextReq": null}
               ]
             }"#,
         )
@@ -4630,7 +4630,7 @@ mod tests {
               "effects": ["net_r"],
               "domains": [],
               "tools": [
-                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash"], "registers": [], "contextReq": null}
+                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash"], "concreteInputContracts": {"Bash": {"command": "gh pr view"}}, "registers": [], "contextReq": null}
               ]
             }"#,
         )
@@ -4695,7 +4695,7 @@ mod tests {
               "effects": ["net_r"],
               "domains": [],
               "tools": [
-                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash"], "registers": [], "contextReq": null}
+                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash"], "concreteInputContracts": {"Bash": {"command": "gh pr view"}}, "registers": [], "contextReq": null}
               ]
             }"#,
         )
@@ -4748,7 +4748,7 @@ mod tests {
               "effects": ["net_r"],
               "domains": [],
               "tools": [
-                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash"], "registers": [], "contextReq": null}
+                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash"], "concreteInputContracts": {"Bash": {"command": "gh pr view"}}, "registers": [], "contextReq": null}
               ]
             }"#,
         )
@@ -4814,7 +4814,7 @@ mod tests {
               "effects": ["net_r"],
               "domains": [],
               "tools": [
-                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash"], "registers": [], "contextReq": null}
+                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash"], "concreteInputContracts": {"Bash": {"command": "gh pr view"}}, "registers": [], "contextReq": null}
               ]
             }"#,
         )
@@ -4878,7 +4878,7 @@ mod tests {
               "effects": ["net_r"],
               "domains": [],
               "tools": [
-                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash"], "registers": [], "contextReq": null}
+                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash"], "concreteInputContracts": {"Bash": {"command": "gh pr view"}}, "registers": [], "contextReq": null}
               ]
             }"#,
         )
@@ -4942,7 +4942,7 @@ mod tests {
               "effects": ["net_r"],
               "domains": [],
               "tools": [
-                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash"], "registers": [], "contextReq": null}
+                {"name": "gh_pr_view", "params": [], "result": "unit", "effects": ["net_r"], "concreteTools": ["Bash"], "concreteInputContracts": {"Bash": {"command": "gh pr view"}}, "registers": [], "contextReq": null}
               ]
             }"#,
         )
@@ -5100,7 +5100,60 @@ mod tests {
         )
         .expect_err("raw host catalogue should reject import");
 
-        assert!(error.to_string().contains("lack concreteTools bindings"));
+        assert!(error.to_string().contains("lacks concreteTools bindings"));
+    }
+
+    #[test]
+    fn desktop_lambda_skill_library_save_rejects_host_without_input_contracts() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = temp.path().join("workspace");
+        let lambda_root = temp.path().join("lambda-skills");
+        let skill_dir = lambda_root.join("vendor/web-check");
+        std::fs::create_dir_all(skill_dir.join("out")).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("skill.lskill"),
+            "host {\n  tool fetch_page(url: Str) -> Str {\n    effects: [net_r]\n  }\n}\nskill web_check {}\n",
+        )
+        .expect("skill source");
+        std::fs::write(
+            skill_dir.join("out/GENERATED.SKILL.md"),
+            "---\nname: web-check\ndescription: Verified web check\n---\nUse generated prompt.\n",
+        )
+        .expect("generated skill");
+        std::fs::write(
+            skill_dir.join("out/host.json"),
+            r#"{
+              "effects": ["net_r"],
+              "domains": [],
+              "tools": [
+                {"name": "fetch_page", "params": [{"name": "url", "ty": "str"}], "result": "str", "effects": ["net_r"], "concreteTools": ["ToolSearch"], "registers": [], "contextReq": null}
+              ]
+            }"#,
+        )
+        .expect("host catalogue");
+        let paths = ConfigPaths {
+            workspace_root: workspace_root.clone(),
+            workspace_config_dir: workspace_root.join(".puffer"),
+            user_config_dir: temp.path().join("home").join(".puffer"),
+            builtin_resources_dir: workspace_root.join("resources"),
+        };
+        ensure_workspace_dirs(&paths).expect("workspace dirs");
+        let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
+            .expect("daemon state");
+
+        let error = handle_save_lambda_skill_library(
+            &state,
+            &json!({
+                "id": "verified",
+                "root": lambda_root.display().to_string()
+            }),
+        )
+        .expect_err("host without concrete input contracts should reject import");
+
+        assert!(error.to_string().contains("not runtime-ready"));
+        assert!(error
+            .to_string()
+            .contains("lacks a concrete input contract"));
     }
 
     #[test]

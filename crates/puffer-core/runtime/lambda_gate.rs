@@ -1,11 +1,13 @@
 use super::RequestToolFilter;
 use anyhow::{anyhow, Context, Result};
+use input_contract::LambdaInputPattern;
 use puffer_resources::{SkillSpec, SkillVerificationSpec};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 
+mod input_contract;
 mod type_check;
 
 /// One structured host fact tracked by the Lambda Skill call gate.
@@ -45,6 +47,7 @@ pub(crate) struct LambdaToolSig {
     registers: Vec<LambdaFact>,
     context_req: Option<LambdaFact>,
     concrete_tools: BTreeSet<String>,
+    concrete_input_contracts: BTreeMap<String, LambdaInputPattern>,
 }
 
 impl LambdaToolSig {
@@ -100,6 +103,89 @@ impl LambdaToolSig {
 
     fn allows_concrete_tool(&self, concrete_tool: &str) -> bool {
         self.concrete_tools.contains(concrete_tool)
+    }
+
+    fn validate_runtime_contract(&self) -> Result<()> {
+        let declared_params = self
+            .params
+            .iter()
+            .map(|param| param.name.clone())
+            .collect::<BTreeSet<_>>();
+        for param in &self.params {
+            let unsupported = type_check::unsupported_refinements_in_type(&param.ty);
+            if !unsupported.is_empty() {
+                return Err(anyhow!(
+                    "Lambda Skill host tool {} parameter {} uses unsupported runtime refinement {}",
+                    self.name,
+                    param.name,
+                    unsupported.join(", ")
+                ));
+            }
+        }
+        let unsupported_result = type_check::unsupported_refinements_in_type(&self.result);
+        if !unsupported_result.is_empty() {
+            return Err(anyhow!(
+                "Lambda Skill host tool {} result uses unsupported runtime refinement {}",
+                self.name,
+                unsupported_result.join(", ")
+            ));
+        }
+        for concrete_tool in &self.concrete_tools {
+            let Some(contract) = self.concrete_input_contracts.get(concrete_tool) else {
+                return Err(anyhow!(
+                    "Lambda Skill host tool {} lacks a concrete input contract for {}",
+                    self.name,
+                    concrete_tool
+                ));
+            };
+            let mut refs = BTreeSet::new();
+            contract.collect_arg_refs(&mut refs);
+            if refs != declared_params {
+                return Err(anyhow!(
+                    "Lambda Skill host tool {} concrete input contract for {} must bind exactly the formal parameters [{}]",
+                    self.name,
+                    concrete_tool,
+                    declared_params.iter().cloned().collect::<Vec<_>>().join(", ")
+                ));
+            }
+        }
+        for concrete_tool in self.concrete_input_contracts.keys() {
+            if !self.concrete_tools.contains(concrete_tool) {
+                return Err(anyhow!(
+                    "Lambda Skill host tool {} declares a concrete input contract for unbound concrete tool {}",
+                    self.name,
+                    concrete_tool
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_concrete_input(
+        &self,
+        concrete_tool: &str,
+        args: &Value,
+        input: &Value,
+    ) -> Option<String> {
+        let Some(object) = args.as_object() else {
+            return Some(format!(
+                "formal args for {} must be a JSON object",
+                self.name
+            ));
+        };
+        let Some(contract) = self.concrete_input_contracts.get(concrete_tool) else {
+            return Some(format!(
+                "host tool {} lacks a concrete input contract for {}",
+                self.name, concrete_tool
+            ));
+        };
+        if contract.matches(object, input) {
+            return None;
+        }
+        Some(format!(
+            "concrete input for {} does not match the precompiled {} contract",
+            self.name, concrete_tool
+        ))
     }
 }
 
@@ -180,6 +266,13 @@ impl LambdaHostEnv {
                     sig.name
                 ));
             }
+        }
+        Ok(())
+    }
+
+    fn validate_runtime_contracts(&self) -> Result<()> {
+        for sig in self.tools.values() {
+            sig.validate_runtime_contract()?;
         }
         Ok(())
     }
@@ -290,6 +383,23 @@ impl LambdaGateState {
         LambdaGateVerdict::reject(format!(
             "host tool {host_tool} is not bound to concrete tool {concrete_tool}"
         ))
+    }
+
+    /// Admits or rejects the concrete input bound to a host tool call.
+    pub(crate) fn admit_concrete_input_binding(
+        &self,
+        host_tool: &str,
+        args: &Value,
+        concrete_tool: &str,
+        concrete_input: &Value,
+    ) -> LambdaGateVerdict {
+        let Some(sig) = self.host.lookup_tool(host_tool) else {
+            return LambdaGateVerdict::reject(format!("unknown tool: {host_tool}"));
+        };
+        if let Some(reason) = sig.validate_concrete_input(concrete_tool, args, concrete_input) {
+            return LambdaGateVerdict::reject(reason);
+        }
+        LambdaGateVerdict::Accept
     }
 
     /// Gates one call and commits registered facts when accepted.
@@ -481,7 +591,18 @@ pub(crate) fn gate_for_verified_skill(skill: &SkillSpec) -> Result<Option<Lambda
         .context("failed to apply host tool bindings")?;
     host.validate_concrete_tool_bindings()
         .context("failed to validate host tool bindings")?;
+    host.validate_runtime_contracts()
+        .context("failed to validate Lambda Skill runtime contracts")?;
     Ok(Some(LambdaGateState::with_host_caps(host)))
+}
+
+/// Validates a host catalogue against the runtime harness requirements.
+pub(crate) fn validate_host_catalogue_runtime(raw: &str) -> Result<()> {
+    let host = LambdaHostEnv::from_json_str(raw).context("failed to parse host catalogue")?;
+    host.validate_concrete_tool_bindings()
+        .context("failed to validate host tool bindings")?;
+    host.validate_runtime_contracts()
+        .context("failed to validate Lambda Skill runtime contracts")
 }
 
 fn host_catalogue_json_for_verification(
@@ -548,10 +669,20 @@ struct ToolSigJson {
     context_req: Option<FactJson>,
     #[serde(default, rename = "concreteTools", alias = "concrete_tools")]
     concrete_tools: Vec<String>,
+    #[serde(
+        default,
+        rename = "concreteInputContracts",
+        alias = "concrete_input_contracts"
+    )]
+    concrete_input_contracts: Value,
 }
 
 impl ToolSigJson {
     fn into_sig(self) -> Result<LambdaToolSig> {
+        let concrete_input_contracts =
+            parse_concrete_input_contracts(self.concrete_input_contracts).with_context(|| {
+                format!("failed to parse concrete input contracts for {}", self.name)
+            })?;
         Ok(LambdaToolSig {
             name: self.name,
             params: self
@@ -571,7 +702,43 @@ impl ToolSigJson {
                 .collect(),
             context_req: self.context_req.map(FactJson::into_fact),
             concrete_tools: self.concrete_tools.into_iter().collect(),
+            concrete_input_contracts,
         })
+    }
+}
+
+fn parse_concrete_input_contracts(value: Value) -> Result<BTreeMap<String, LambdaInputPattern>> {
+    match value {
+        Value::Null => Ok(BTreeMap::new()),
+        Value::Object(object) => object
+            .into_iter()
+            .map(|(tool, pattern)| Ok((tool, LambdaInputPattern::from_json(pattern)?)))
+            .collect(),
+        Value::Array(items) => {
+            let mut contracts = BTreeMap::new();
+            for item in items {
+                let Value::Object(mut object) = item else {
+                    return Err(anyhow!("concrete input contract must be an object"));
+                };
+                let Some(tool) = object
+                    .remove("tool")
+                    .and_then(|value| value.as_str().map(str::to_string))
+                else {
+                    return Err(anyhow!("concrete input contract missing tool"));
+                };
+                let Some(input) = object.remove("input") else {
+                    return Err(anyhow!("concrete input contract for {tool} missing input"));
+                };
+                if contracts
+                    .insert(tool.clone(), LambdaInputPattern::from_json(input)?)
+                    .is_some()
+                {
+                    return Err(anyhow!("duplicate concrete input contract for {tool}"));
+                }
+            }
+            Ok(contracts)
+        }
+        _ => Err(anyhow!("concreteInputContracts must be an object or array")),
     }
 }
 
@@ -601,9 +768,9 @@ mod tests {
     const SWAP_HOST_JSON: &str = r#"{
       "effects": ["net_r", "net_w", "sign"], "domains": ["TokenAddr"],
       "tools": [
-        {"name": "get_quote", "params": [{"name": "from", "ty": "TokenAddr"}, {"name": "to", "ty": "TokenAddr"}], "result": "real{p > 0}", "effects": ["net_r"], "concreteTools": ["ToolSearch"], "registers": [], "contextReq": null},
-        {"name": "authenticate", "params": [], "result": "unit", "effects": [], "concreteTools": ["ToolSearch"], "registers": [{"pred": "authed", "args": []}], "contextReq": null},
-        {"name": "execute_swap", "params": [{"name": "from", "ty": "TokenAddr"}, {"name": "to", "ty": "TokenAddr"}, {"name": "amount", "ty": "real{a > 0}"}], "result": "Result<Receipt, SwapErr>", "effects": ["net_w", "sign"], "concreteTools": ["Bash"], "registers": [], "contextReq": {"pred": "authed", "args": []}}
+        {"name": "get_quote", "params": [{"name": "from", "ty": "TokenAddr"}, {"name": "to", "ty": "TokenAddr"}], "result": "real{p > 0}", "effects": ["net_r"], "concreteTools": ["ToolSearch"], "concreteInputContracts": {"ToolSearch": {"query": {"$template": "quote ${from} ${to}"}}}, "registers": [], "contextReq": null},
+        {"name": "authenticate", "params": [], "result": "unit", "effects": [], "concreteTools": ["ToolSearch"], "concreteInputContracts": {"ToolSearch": {"query": "authenticate"}}, "registers": [{"pred": "authed", "args": []}], "contextReq": null},
+        {"name": "execute_swap", "params": [{"name": "from", "ty": "TokenAddr"}, {"name": "to", "ty": "TokenAddr"}, {"name": "amount", "ty": "real{a > 0}"}], "result": "Result<Receipt, SwapErr>", "effects": ["net_w", "sign"], "concreteTools": ["Bash"], "concreteInputContracts": {"Bash": {"command": {"$template": "swap ${from} ${to} ${amount}"}}}, "registers": [], "contextReq": {"pred": "authed", "args": []}}
       ]
     }"#;
 
@@ -704,12 +871,69 @@ mod tests {
     }
 
     #[test]
+    fn gate_validates_precompiled_concrete_input_contract() {
+        let host = LambdaHostEnv::from_json_str(SWAP_HOST_JSON).unwrap();
+        let gate = LambdaGateState::with_host_caps(host);
+
+        assert!(gate
+            .admit_concrete_input_binding(
+                "get_quote",
+                &serde_json::json!({"from": "ETH", "to": "USDC"}),
+                "ToolSearch",
+                &serde_json::json!({"query": "quote ETH USDC"})
+            )
+            .is_accept());
+        assert_eq!(
+            gate.admit_concrete_input_binding(
+                "get_quote",
+                &serde_json::json!({"from": "ETH", "to": "USDC"}),
+                "ToolSearch",
+                &serde_json::json!({"query": "quote BTC USDC"})
+            )
+            .reason(),
+            Some("concrete input for get_quote does not match the precompiled ToolSearch contract")
+        );
+    }
+
+    #[test]
+    fn host_catalogue_runtime_validation_rejects_missing_input_contract() {
+        let error = validate_host_catalogue_runtime(
+            r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","effects":[],"concreteTools":["ToolSearch"],"params":[{"name":"query","ty":"str"}]}]}"#,
+        )
+        .expect_err("missing concrete input contract must fail");
+
+        assert!(format!("{error:#}").contains("lacks a concrete input contract"));
+    }
+
+    #[test]
+    fn host_catalogue_runtime_validation_rejects_unsupported_refinement() {
+        let error = validate_host_catalogue_runtime(
+            r#"{"effects":[],"domains":[],"tools":[{"name":"custom_fetch","effects":[],"concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":{"$arg":"id"}}},"params":[{"name":"id","ty":"str{host_custom_rule(id)}"}]}]}"#,
+        )
+        .expect_err("unsupported runtime refinement must fail");
+
+        assert!(
+            format!("{error:#}").contains("unsupported runtime refinement host_custom_rule(id)")
+        );
+    }
+
+    #[test]
+    fn host_catalogue_runtime_validation_rejects_unsupported_result_refinement() {
+        let error = validate_host_catalogue_runtime(
+            r#"{"effects":[],"domains":[],"tools":[{"name":"custom_parse","effects":[],"concreteTools":["Bash"],"concreteInputContracts":{"Bash":{"command":"parse"}},"result":"Paper{host_custom_rule(p)}"}]}"#,
+        )
+        .expect_err("unsupported result refinement must fail");
+
+        assert!(format!("{error:#}").contains("unsupported runtime refinement host_custom_rule(p)"));
+    }
+
+    #[test]
     fn gate_for_verified_skill_reads_catalogue_file() {
         let root = tempfile::tempdir().unwrap();
         let catalogue = root.path().join("host.json");
         fs::write(
             &catalogue,
-            r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","effects":[]}]}"#,
+            r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","effects":[],"concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":"formal"}}}]}"#,
         )
         .unwrap();
         let mut skill = SkillSpec::default();
@@ -719,10 +943,7 @@ mod tests {
             generated_path: None,
             host_catalogue_path: Some(catalogue.display().to_string()),
             compiler_path: None,
-            host_tool_bindings: std::collections::BTreeMap::from([(
-                "formal_search".to_string(),
-                vec!["ToolSearch".to_string()],
-            )]),
+            host_tool_bindings: Default::default(),
             tools: None,
             actions: None,
         });

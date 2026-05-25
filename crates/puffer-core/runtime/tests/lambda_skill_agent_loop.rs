@@ -106,7 +106,7 @@ fn openai_responses_model_selected_lambda_skill_scope_is_turn_local() {
     let host_path = temp.path().join("verified-host.json");
     std::fs::write(
         &host_path,
-        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","concreteTools":["ToolSearch"],"effects":[]}]}"#,
+        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":"formal"}},"effects":[]}]}"#,
     )
     .unwrap();
     let (base_url, server) = spawn_server("application/json", 2, |index| {

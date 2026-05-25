@@ -519,6 +519,15 @@ fn lambda_desktop_readiness(
         if allowed_tools.is_empty() {
             return lambda_desktop_not_ready("missing concrete tool scope");
         }
+        let raw = match std::fs::read_to_string(host_catalogue_path) {
+            Ok(raw) => raw,
+            Err(error) => {
+                return lambda_desktop_not_ready(format!("failed to read host catalogue: {error}"));
+            }
+        };
+        if let Err(error) = puffer_core::validate_lambda_host_catalogue_runtime(&raw) {
+            return lambda_desktop_not_ready(format!("{error:#}"));
+        }
         return lambda_desktop_ready("host catalogue");
     }
     lambda_desktop_not_ready("missing precompiled host catalogue")
@@ -817,7 +826,7 @@ fn validate_lambda_skill_library_import(manifest: &LambdaSkillLibraryManifestDto
     let mut missing_generated = Vec::new();
     let mut missing_host = Vec::new();
     let mut invalid_host = Vec::new();
-    let mut missing_concrete = Vec::new();
+    let mut invalid_runtime_contracts = Vec::new();
 
     for skill_dir in &skill_dirs {
         let generated_path = skill_dir.join(generated_subpath);
@@ -830,18 +839,18 @@ fn validate_lambda_skill_library_import(manifest: &LambdaSkillLibraryManifestDto
             missing_host.push(display_relative_to(&root, &host_path));
             continue;
         }
-        match host_catalogue_missing_concrete_tools(&host_path) {
-            Ok(missing) => {
-                missing_concrete.extend(
-                    missing
-                        .into_iter()
-                        .map(|tool| format!("{}:{tool}", display_relative_to(&root, &host_path))),
-                );
-            }
+        match validate_host_catalogue_for_import(&host_path) {
+            Ok(()) => {}
             Err(error) => invalid_host.push(format!(
                 "{} ({error})",
                 display_relative_to(&root, &host_path)
             )),
+        }
+        if let Err(error) = validate_host_catalogue_runtime_for_import(&host_path) {
+            invalid_runtime_contracts.push(format!(
+                "{} ({error:#})",
+                display_relative_to(&root, &host_path)
+            ));
         }
     }
 
@@ -863,10 +872,10 @@ fn validate_lambda_skill_library_import(manifest: &LambdaSkillLibraryManifestDto
             format_examples(&invalid_host)
         );
     }
-    if !missing_concrete.is_empty() {
+    if !invalid_runtime_contracts.is_empty() {
         anyhow::bail!(
-            "Verified Skills import is incomplete: host catalogues lack concreteTools bindings at {}",
-            format_examples(&missing_concrete)
+            "Verified Skills import is incomplete: host catalogues are not runtime-ready at {}",
+            format_examples(&invalid_runtime_contracts)
         );
     }
     if manifest.host_catalogue_subpath.is_none() {
@@ -882,21 +891,26 @@ fn validate_lambda_skill_library_import(manifest: &LambdaSkillLibraryManifestDto
     Ok(())
 }
 
-fn host_catalogue_missing_concrete_tools(path: &Path) -> Result<Vec<String>> {
+fn validate_host_catalogue_for_import(path: &Path) -> Result<()> {
     let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let parsed: HostCatalogueForInference =
         serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
-    let mut missing = Vec::new();
     for (index, tool) in parsed.tools.into_iter().enumerate() {
         if tool
             .concrete_tools
             .iter()
             .all(|concrete| concrete.trim().is_empty())
         {
-            missing.push(tool.name.unwrap_or_else(|| format!("tool#{index}")));
+            let name = tool.name.unwrap_or_else(|| format!("tool#{index}"));
+            anyhow::bail!("host tool {name} lacks concreteTools bindings");
         }
     }
-    Ok(missing)
+    Ok(())
+}
+
+fn validate_host_catalogue_runtime_for_import(path: &Path) -> Result<()> {
+    let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    puffer_core::validate_lambda_host_catalogue_runtime(&raw)
 }
 
 fn display_relative_to(root: &Path, path: &Path) -> String {

@@ -1360,7 +1360,7 @@ mod tests {
         .unwrap();
         fs::write(
             skill_dir.join("out/host.json"),
-            r#"{"effects":[],"domains":[],"tools":[{"name":"gh_auth_status","effects":[],"concreteTools":["Bash"]}]}"#,
+            r#"{"effects":[],"domains":[],"tools":[{"name":"gh_auth_status","effects":[],"concreteTools":["Bash"],"concreteInputContracts":{"Bash":{"command":"gh auth status"}}}]}"#,
         )
         .unwrap();
 
@@ -1438,7 +1438,7 @@ mod tests {
         .unwrap();
         fs::write(
             skill_dir.join("out/host.json"),
-            r#"{"effects":[],"domains":[],"tools":[{"name":"gh_auth_status","effects":[],"concreteTools":["Bash"]}]}"#,
+            r#"{"effects":[],"domains":[],"tools":[{"name":"gh_auth_status","effects":[],"concreteTools":["Bash"],"concreteInputContracts":{"Bash":{"command":"gh auth status"}}}]}"#,
         )
         .unwrap();
 

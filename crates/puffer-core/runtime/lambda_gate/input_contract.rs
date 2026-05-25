@@ -1,0 +1,147 @@
+use anyhow::{anyhow, Result};
+use serde_json::{Map, Value};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Concrete input pattern compiled from a Lambda Skill host catalogue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum LambdaInputPattern {
+    Exact(Value),
+    Arg(String),
+    Template(String),
+    Object(BTreeMap<String, LambdaInputPattern>),
+    Array(Vec<LambdaInputPattern>),
+}
+
+impl LambdaInputPattern {
+    pub(super) fn from_json(value: Value) -> Result<Self> {
+        match value {
+            Value::Object(mut object) => {
+                if object.len() == 1 {
+                    if let Some(arg) = object.remove("$arg") {
+                        let Some(arg) = arg.as_str() else {
+                            return Err(anyhow!("$arg contract must be a string"));
+                        };
+                        return Ok(Self::Arg(arg.to_string()));
+                    }
+                    if let Some(template) = object.remove("$template") {
+                        let Some(template) = template.as_str() else {
+                            return Err(anyhow!("$template contract must be a string"));
+                        };
+                        return Ok(Self::Template(template.to_string()));
+                    }
+                }
+                object
+                    .into_iter()
+                    .map(|(key, value)| Ok((key, Self::from_json(value)?)))
+                    .collect::<Result<BTreeMap<_, _>>>()
+                    .map(Self::Object)
+            }
+            Value::Array(items) => items
+                .into_iter()
+                .map(Self::from_json)
+                .collect::<Result<Vec<_>>>()
+                .map(Self::Array),
+            other => Ok(Self::Exact(other)),
+        }
+    }
+
+    pub(super) fn collect_arg_refs(&self, out: &mut BTreeSet<String>) {
+        match self {
+            Self::Arg(name) => {
+                out.insert(name.clone());
+            }
+            Self::Template(template) => {
+                collect_template_arg_refs(template, out);
+            }
+            Self::Object(object) => {
+                for value in object.values() {
+                    value.collect_arg_refs(out);
+                }
+            }
+            Self::Array(items) => {
+                for item in items {
+                    item.collect_arg_refs(out);
+                }
+            }
+            Self::Exact(_) => {}
+        }
+    }
+
+    pub(super) fn matches(&self, args: &Map<String, Value>, input: &Value) -> bool {
+        match self {
+            Self::Exact(expected) => expected == input,
+            Self::Arg(name) => args.get(name) == Some(input),
+            Self::Template(template) => input.as_str().is_some_and(|text| {
+                render_template(template, args).is_some_and(|expected| expected == text)
+            }),
+            Self::Object(pattern) => {
+                let Some(object) = input.as_object() else {
+                    return false;
+                };
+                object.len() == pattern.len()
+                    && pattern.iter().all(|(key, pattern)| {
+                        object
+                            .get(key)
+                            .is_some_and(|value| pattern.matches(args, value))
+                    })
+            }
+            Self::Array(pattern) => {
+                let Some(items) = input.as_array() else {
+                    return false;
+                };
+                items.len() == pattern.len()
+                    && pattern
+                        .iter()
+                        .zip(items)
+                        .all(|(pattern, value)| pattern.matches(args, value))
+            }
+        }
+    }
+}
+
+fn collect_template_arg_refs(template: &str, out: &mut BTreeSet<String>) {
+    let mut rest = template;
+    while let Some(start) = rest.find("${") {
+        rest = &rest[start + 2..];
+        let Some(end) = rest.find('}') else {
+            return;
+        };
+        if let Some(name) = template_placeholder_arg(&rest[..end]) {
+            out.insert(name.to_string());
+        }
+        rest = &rest[end + 1..];
+    }
+}
+
+fn render_template(template: &str, args: &Map<String, Value>) -> Option<String> {
+    let mut output = String::new();
+    let mut rest = template;
+    while let Some(start) = rest.find("${") {
+        output.push_str(&rest[..start]);
+        rest = &rest[start + 2..];
+        let end = rest.find('}')?;
+        let placeholder = &rest[..end];
+        let name = template_placeholder_arg(placeholder)?;
+        let value = args.get(name)?;
+        if placeholder.trim().starts_with("json:") {
+            output.push_str(&serde_json::to_string(value).ok()?);
+        } else if let Some(text) = value.as_str() {
+            output.push_str(text);
+        } else {
+            output.push_str(&serde_json::to_string(value).ok()?);
+        }
+        rest = &rest[end + 1..];
+    }
+    output.push_str(rest);
+    Some(output)
+}
+
+fn template_placeholder_arg(placeholder: &str) -> Option<&str> {
+    let trimmed = placeholder.trim();
+    let name = trimmed.strip_prefix("json:").unwrap_or(trimmed).trim();
+    (!name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch == '_' || ch == '-' || ch.is_ascii_alphanumeric()))
+    .then_some(name)
+}

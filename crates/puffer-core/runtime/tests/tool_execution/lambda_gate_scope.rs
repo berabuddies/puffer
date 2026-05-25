@@ -11,7 +11,7 @@ fn model_invoked_plain_skill_cannot_escape_active_lambda_gate() {
     let host_path = cwd.join("verified-host.json");
     fs::write(
         &host_path,
-        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","concreteTools":["ToolSearch"],"params":[{"name":"query","ty":"str"}],"effects":[]}]}"#,
+        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":{"$arg":"query"}}},"params":[{"name":"query","ty":"str"}],"effects":[]}]}"#,
     )
     .unwrap();
     let mut skill_tool = loaded_tool("Skill", "Load a skill", "runtime:skill");
@@ -115,7 +115,7 @@ fn lambda_bridge_preserves_concrete_tool_approval_prompt() {
     let mut state = temp_state();
     let cwd = state.cwd.clone();
     let host = LambdaHostEnv::from_json_str(
-        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","concreteTools":["ToolSearch"],"params":[{"name":"query","ty":"str"}],"effects":[]}]}"#,
+        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":{"$arg":"query"}}},"params":[{"name":"query","ty":"str"}],"effects":[]}]}"#,
     )
     .unwrap();
     state.lambda_gate = Some(LambdaGateState::with_host_caps(host));
@@ -206,7 +206,7 @@ fn lambda_host_call_rejects_unbound_concrete_tool() {
     let mut state = temp_state();
     let cwd = state.cwd.clone();
     let host = LambdaHostEnv::from_json_str(
-        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","concreteTools":["ToolSearch"],"params":[{"name":"query","ty":"str"}],"effects":[]}]}"#,
+        r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":{"$arg":"query"}}},"params":[{"name":"query","ty":"str"}],"effects":[]}]}"#,
     )
     .unwrap();
     state.lambda_gate = Some(LambdaGateState::with_host_caps(host));
@@ -268,7 +268,7 @@ fn lambda_gate_commits_facts_only_after_successful_concrete_tool() {
     state.grant_all_tools_for_session();
     let cwd = state.cwd.clone();
     let host = LambdaHostEnv::from_json_str(
-        r#"{"effects":["proc"],"domains":[],"tools":[{"name":"formal_run","concreteTools":["Bash"],"effects":["proc"],"registers":[{"pred":"ran","args":[]}]}]}"#,
+        r#"{"effects":["proc"],"domains":[],"tools":[{"name":"formal_run","concreteTools":["Bash"],"concreteInputContracts":{"Bash":{"command":"false"}},"effects":["proc"],"registers":[{"pred":"ran","args":[]}]}]}"#,
     )
     .unwrap();
     state.lambda_gate = Some(LambdaGateState::with_host_caps(host));
