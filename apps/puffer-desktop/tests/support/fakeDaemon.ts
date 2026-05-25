@@ -488,6 +488,19 @@ export class FakeDaemon {
         action_slugs: []
       },
       {
+        connector_slug: "alertmanager-webhook",
+        description: "Prometheus Alertmanager webhook preset backed by puffer serve",
+        skill: "alertmanager-webhook",
+        runtime_hints: ["serve"],
+        requires_auth: false,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "alertmanager-webhook",
+        connect_command: "/connect alertmanager-webhook alertmanager-webhook",
+        action_slugs: []
+      },
+      {
         connector_slug: "github-webhook",
         description: "GitHub event webhook preset backed by puffer serve",
         skill: "github-webhook",

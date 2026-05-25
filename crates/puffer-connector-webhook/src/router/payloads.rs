@@ -4,6 +4,7 @@ use serde_json::Value;
 
 use super::{header_value, number_or_string, pointer_string, snippet, string_field};
 
+mod alertmanager;
 mod asana;
 mod grafana;
 mod pagerduty;
@@ -26,12 +27,18 @@ pub(super) fn provider_inbound(headers: &HeaderMap, payload: &Value) -> Option<I
     asana_inbound(headers, payload)
         .or_else(|| jira_inbound(headers, payload))
         .or_else(|| grafana_inbound(headers, payload))
+        .or_else(|| alertmanager_inbound(headers, payload))
         .or_else(|| pagerduty_inbound(headers, payload))
         .or_else(|| sentry_inbound(headers, payload))
         .or_else(|| shopify_inbound(headers, payload))
         .or_else(|| stripe_inbound(headers, payload))
         .or_else(|| trello_inbound(headers, payload))
         .or_else(|| gitlab_inbound(headers, payload))
+}
+
+/// Converts a Prometheus Alertmanager webhook payload into an inbound Puffer message.
+pub(super) fn alertmanager_inbound(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
+    alertmanager::alertmanager_inbound(headers, payload)
 }
 
 /// Converts a Grafana Alerting webhook payload into an inbound Puffer message.

@@ -208,6 +208,11 @@ struct WebhookPreset {
 
 fn webhook_preset(connector_slug: &str) -> Result<WebhookPreset> {
     let preset = match connector_slug {
+        "alertmanager-webhook" => WebhookPreset {
+            product: "Alertmanager",
+            default_path: "/alertmanager",
+            method: "Alertmanager webhook",
+        },
         "asana-webhook" => WebhookPreset {
             product: "Asana",
             default_path: "/asana",
@@ -266,6 +271,11 @@ fn webhook_preset(connector_slug: &str) -> Result<WebhookPreset> {
         _ => bail!("unsupported webhook preset `{connector_slug}`"),
     };
     Ok(preset)
+}
+
+/// Returns whether a connector slug is served by the generic webhook preset flow.
+pub(super) fn is_webhook_preset(connector_slug: &str) -> bool {
+    webhook_preset(connector_slug).is_ok()
 }
 
 fn normalize_webhook_path_with_default(value: &str, default: &str) -> String {
@@ -421,6 +431,8 @@ mod tests {
             "What Matrix homeserver URL should Puffer use?" => "https://matrix.example.org",
             "What Matrix username should Puffer use?" => "puffer-bot",
             "What Matrix password should Puffer use?" => "matrix-password",
+            "What bind address should the Alertmanager webhook listen on?" => "127.0.0.1:9597",
+            "What URL path should Alertmanager post webhook events to?" => "alertmanager",
             "What bind address should the Asana webhook listen on?" => "127.0.0.1:9797",
             "What URL path should Asana post webhook events to?" => "asana",
             "What bind address should the GitHub webhook listen on?" => "127.0.0.1:9292",
@@ -571,6 +583,35 @@ mod tests {
         assert!(raw.contains("bind_address = \"127.0.0.1:9292\""));
         assert!(raw.contains("path = \"/github\""));
         assert!(raw.contains("welcome_message = \"GitHub webhook ready.\""));
+    }
+
+    #[test]
+    fn alertmanager_webhook_connect_writes_webhook_preset_config() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let result = with_user_question_prompt_handler(
+            |request| answer_request(&request),
+            || {
+                connect_webhook_preset(
+                    &mut state,
+                    &resources,
+                    "alertmanager-webhook",
+                    "alerts-webhook",
+                )
+            },
+        )
+        .expect("connect result");
+
+        assert!(result.summary.contains("connector: alertmanager-webhook"));
+        assert!(result.summary.contains("run `puffer serve`"));
+        let path = state.cwd.join(".puffer/connectors.toml");
+        let raw = fs::read_to_string(path).expect("connector config");
+        assert!(raw.contains("[connectors.webhook]"));
+        assert!(raw.contains("display_name = \"alerts-webhook\""));
+        assert!(raw.contains("bind_address = \"127.0.0.1:9597\""));
+        assert!(raw.contains("path = \"/alertmanager\""));
+        assert!(raw.contains("welcome_message = \"Alertmanager webhook ready.\""));
     }
 
     #[test]

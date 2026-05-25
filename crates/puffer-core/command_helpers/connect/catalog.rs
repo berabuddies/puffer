@@ -232,6 +232,7 @@ fn connector_template_runtime_hints(template: &ConnectorTemplate) -> Vec<String>
         "telegram-bot"
             | "discord-bot"
             | "matrix-bot"
+            | "alertmanager-webhook"
             | "asana-webhook"
             | "github-webhook"
             | "grafana-webhook"
@@ -457,6 +458,17 @@ mod tests {
         let slug = resolve_connector_slug(&mut state, &resources, "linear issue").expect("slug");
 
         assert_eq!(slug, "linear-webhook");
+    }
+
+    #[test]
+    fn resolve_connector_slug_accepts_alertmanager_webhook_terms() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let slug = resolve_connector_slug(&mut state, &resources, "prometheus alertmanager")
+            .expect("slug");
+
+        assert_eq!(slug, "alertmanager-webhook");
     }
 
     #[test]

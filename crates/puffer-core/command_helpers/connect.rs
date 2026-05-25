@@ -30,16 +30,12 @@ pub fn execute_connect_flow(
         "matrix-bot" => {
             serve_config::connect_matrix_bot(state, resources, &target.connection_name)?
         }
-        "asana-webhook" | "github-webhook" | "grafana-webhook" | "gitlab-webhook"
-        | "jira-webhook" | "linear-webhook" | "pagerduty-webhook" | "sentry-webhook"
-        | "shopify-webhook" | "stripe-webhook" | "trello-webhook" => {
-            serve_config::connect_webhook_preset(
-                state,
-                resources,
-                &target.connector_slug,
-                &target.connection_name,
-            )?
-        }
+        slug if serve_config::is_webhook_preset(slug) => serve_config::connect_webhook_preset(
+            state,
+            resources,
+            &target.connector_slug,
+            &target.connection_name,
+        )?,
         "webhook" => serve_config::connect_webhook(state, resources, &target.connection_name)?,
         _ => connect_generic(state, resources, &target)?,
     };
@@ -799,6 +795,8 @@ mod tests {
         let answer = match question.as_str() {
             "What bind address should the webhook listen on?" => "127.0.0.1:9191",
             "Should this webhook require bearer-token auth?" => "No bearer token",
+            "What bind address should the Alertmanager webhook listen on?" => "127.0.0.1:9597",
+            "What URL path should Alertmanager post webhook events to?" => "alertmanager",
             "What bind address should the GitHub webhook listen on?" => "127.0.0.1:9292",
             "What URL path should GitHub post webhook events to?" => "/github",
             "What bind address should the Grafana webhook listen on?" => "127.0.0.1:9596",

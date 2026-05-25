@@ -285,6 +285,26 @@ pub(super) fn jira_event_output_schema() -> Value {
     })
 }
 
+/// Returns the Prometheus Alertmanager webhook output schema.
+pub(super) fn alertmanager_alert_output_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "const": "alertmanager_alert"},
+            "receiver": {"type": "string"},
+            "status": {"type": "string"},
+            "alert_count": {"type": "integer"},
+            "group_key": {"type": "string"},
+            "labels": {"type": "object"},
+            "annotations": {"type": "object"},
+            "message": {"type": "string"},
+            "external_url": {"type": "string"}
+        },
+        "required": ["status", "message"],
+        "additionalProperties": true
+    })
+}
+
 /// Returns the Grafana Alerting webhook output schema.
 pub(super) fn grafana_alert_output_schema() -> Value {
     serde_json::json!({

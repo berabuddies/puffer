@@ -110,6 +110,7 @@ pub fn builtin_connector_templates() -> Vec<ConnectorTemplate> {
         slack_login_template(),
         slack_bot_template(),
         email_template(),
+        alertmanager_webhook_template(),
         asana_webhook_template(),
         github_webhook_template(),
         grafana_webhook_template(),
@@ -145,6 +146,7 @@ pub fn suggested_connection_slug(connector_slug: &str) -> String {
         "slack-login" => "slack-login".to_string(),
         "telegram-bot" => "telegram-bot".to_string(),
         "slack-bot" => "slack-bot".to_string(),
+        "alertmanager-webhook" => "alertmanager-webhook".to_string(),
         "asana-webhook" => "asana-webhook".to_string(),
         "github-webhook" => "github-webhook".to_string(),
         "grafana-webhook" => "grafana-webhook".to_string(),
@@ -338,6 +340,22 @@ fn webhook_template() -> ConnectorTemplate {
         can_proxy_agent: false,
         subscriber: None,
         output_schema: message_output_schema(),
+        actions: BTreeMap::new(),
+    }
+}
+
+fn alertmanager_webhook_template() -> ConnectorTemplate {
+    ConnectorTemplate {
+        slug: "alertmanager-webhook".to_string(),
+        description: "Prometheus Alertmanager webhook preset backed by puffer serve".to_string(),
+        skill: "alertmanager-webhook".to_string(),
+        binary: "puffer connector webhook".to_string(),
+        command: Vec::new(),
+        requires_auth: false,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        subscriber: None,
+        output_schema: alertmanager_alert_output_schema(),
         actions: BTreeMap::new(),
     }
 }
