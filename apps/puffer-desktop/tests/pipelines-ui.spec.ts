@@ -175,6 +175,26 @@ test("pipeline connection picker can start connector task monitors", async ({ pa
   expect(String(request.params.sessionId ?? "")).not.toHaveLength(0);
 });
 
+test("pipeline connection picker can start connection repair setup", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  await page.getByLabel("Search connectors").fill("repair slack");
+  const repairButton = page.getByRole("button", { name: "Run /connect slack-app slack-app" });
+  await expect(repairButton).toHaveAttribute("title", "/connect slack-app slack-app");
+  await expect(page.locator('[aria-label="Connections"]')).toContainText("connect");
+  await repairButton.click();
+
+  const request = await daemon.waitForRequest(
+    "run_agent_turn",
+    (candidate) => candidate.params.message === "/connect slack-app slack-app"
+  );
+  expect(String(request.params.sessionId ?? "")).not.toHaveLength(0);
+});
+
 test("pipeline connector picker keeps non-trigger connections disabled while setup rows stay selectable", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

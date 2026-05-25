@@ -413,6 +413,7 @@ export type WorkflowConnection = {
   has_consumer: boolean;
   auth_failure_notified?: boolean;
   can_trigger_workflow?: boolean;
+  connect_command?: string | null;
   monitor_command?: string | null;
 };
 

@@ -141,12 +141,15 @@ fn write_connections(
         .connections
         .iter()
         .filter(|connection| {
+            let connect_command = connection_connect_command(connection);
             matches_query(
                 query,
                 [
                     connection.slug.as_str(),
                     connection.connector_slug.as_str(),
                     connection.description.as_str(),
+                    connect_command.as_str(),
+                    "repair",
                 ],
             )
         })
@@ -176,14 +179,16 @@ fn write_connections(
         } else {
             String::new()
         };
+        let connect_command = connection_connect_command(connection);
         let _ = writeln!(
             out,
-            "- {} connector={} state={:?} {} {}{} {}",
+            "- {} connector={} state={:?} {} {} repair={}{} {}",
             connection.slug,
             connection.connector_slug,
             connection.state,
             consumer,
             trigger,
+            connect_command,
             monitor,
             connection.description
         );
@@ -271,6 +276,10 @@ fn write_connectors(
 
 fn connector_action_slugs(connector: &ConnectorTemplate) -> Vec<&str> {
     connector.actions.keys().map(String::as_str).collect()
+}
+
+fn connection_connect_command(connection: &ConnectionRecord) -> String {
+    format!("/connect {} {}", connection.connector_slug, connection.slug)
 }
 
 fn connector_action_summary(connector: &ConnectorTemplate, query: &str) -> Option<String> {
@@ -471,7 +480,9 @@ mod tests {
 
         write_connections(&mut out, &context, &roots, "");
 
-        assert!(out.contains("trigger=ready monitor=/monitor demo-main"));
+        assert!(out.contains(
+            "trigger=ready repair=/connect demo-chat demo-main monitor=/monitor demo-main"
+        ));
     }
 
     #[test]
@@ -498,7 +509,31 @@ mod tests {
         write_connections(&mut out, &context, &roots, "");
 
         assert!(out.contains("trigger=unavailable"));
+        assert!(out.contains("repair=/connect demo-chat demo-main"));
         assert!(!out.contains("monitor=/monitor"));
+    }
+
+    #[test]
+    fn workflow_connections_filter_matches_repair_command_terms() {
+        let roots = SubscriberManifestRoots::new("/tmp/workspace", "/tmp/user", "/tmp/builtin");
+        let context = ConnectorContext {
+            connectors: vec![trigger_template()],
+            connections: vec![ConnectionRecord {
+                slug: "demo-main".to_string(),
+                connector_slug: "demo-chat".to_string(),
+                description: "Demo main channel".to_string(),
+                state: ConnectionState::Authenticated,
+                has_consumer: false,
+                cursor: None,
+                auth_failure_notified: false,
+            }],
+            error: None,
+        };
+        let mut out = String::new();
+
+        write_connections(&mut out, &context, &roots, "repair demo-chat");
+
+        assert!(out.contains("repair=/connect demo-chat demo-main"));
     }
 
     #[test]

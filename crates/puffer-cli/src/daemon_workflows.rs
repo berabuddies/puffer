@@ -103,6 +103,7 @@ fn add_connector_context(paths: &ConfigPaths, snapshot: &mut Value) {
 
 fn connection_snapshot_json(connection: ConnectionRecord, can_trigger_workflow: bool) -> Value {
     let monitor_command = can_trigger_workflow.then(|| format!("/monitor {}", connection.slug));
+    let connect_command = format!("/connect {} {}", connection.connector_slug, connection.slug);
     json!({
         "slug": connection.slug,
         "connector_slug": connection.connector_slug,
@@ -111,6 +112,7 @@ fn connection_snapshot_json(connection: ConnectionRecord, can_trigger_workflow: 
         "has_consumer": connection.has_consumer,
         "auth_failure_notified": connection.auth_failure_notified,
         "can_trigger_workflow": can_trigger_workflow,
+        "connect_command": connect_command,
         "monitor_command": monitor_command,
     })
 }
@@ -134,6 +136,10 @@ mod tests {
 
         let snapshot = connection_snapshot_json(connection, true);
 
+        assert_eq!(
+            snapshot["connect_command"],
+            "/connect telegram-login telegram-user"
+        );
         assert_eq!(snapshot["monitor_command"], "/monitor telegram-user");
         assert_eq!(snapshot["can_trigger_workflow"], true);
     }
@@ -144,6 +150,7 @@ mod tests {
 
         let snapshot = connection_snapshot_json(connection, false);
 
+        assert_eq!(snapshot["connect_command"], "/connect slack-app slack-app");
         assert!(snapshot["monitor_command"].is_null());
         assert_eq!(snapshot["can_trigger_workflow"], false);
     }

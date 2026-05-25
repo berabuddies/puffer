@@ -410,6 +410,7 @@ export class FakeDaemon {
         has_consumer: false,
         auth_failure_notified: false,
         can_trigger_workflow: false,
+        connect_command: "/connect slack-app slack-app",
         monitor_command: null
       },
       {
@@ -420,6 +421,7 @@ export class FakeDaemon {
         has_consumer: false,
         auth_failure_notified: false,
         can_trigger_workflow: true,
+        connect_command: "/connect telegram-login telegram-user",
         monitor_command: "/monitor telegram-user"
       }
     ],

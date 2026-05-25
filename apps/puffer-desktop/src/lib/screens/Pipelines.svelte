@@ -118,6 +118,7 @@
   let loading = $state(false);
   let error = $state<string | null>(null);
   let connectorCommandRunning = $state(false);
+  let connectionCommandRunningFor = $state<string | null>(null);
   let monitorCommandRunningFor = $state<string | null>(null);
   let refreshGeneration = 0;
   let dirtyWorkflowSlugs = $state<string[]>([]);
@@ -514,7 +515,7 @@
       saveNotice = "Connection names must use lowercase letters, digits, and hyphens.";
       return;
     }
-    if (!command || connectorCommandRunning || !onRunConnectCommand) return;
+    if (!command || connectorCommandRunnerBusy() || !onRunConnectCommand) return;
     connectorCommandRunning = true;
     try {
       const started = await onRunConnectCommand(command);
@@ -535,9 +536,33 @@
     return connection.monitor_command || `/monitor ${connection.slug}`;
   }
 
+  function connectionConnectCommand(connection: WorkflowConnection): string {
+    return connection.connect_command || `/connect ${connection.connector_slug} ${connection.slug}`;
+  }
+
+  function connectorCommandRunnerBusy(): boolean {
+    return connectorCommandRunning || connectionCommandRunningFor !== null || monitorCommandRunningFor !== null;
+  }
+
+  async function runConnectionConnectCommand(connection: WorkflowConnection) {
+    const command = connectionConnectCommand(connection);
+    if (connectorCommandRunnerBusy() || !onRunConnectCommand) return;
+    connectionCommandRunningFor = connection.slug;
+    try {
+      const started = await onRunConnectCommand(command);
+      saveNotice = started === false
+        ? `Could not start ${command}.`
+        : `Started ${command} in an agent session.`;
+    } catch (err) {
+      saveNotice = `Could not start ${command}.`;
+    } finally {
+      connectionCommandRunningFor = null;
+    }
+  }
+
   async function runConnectionMonitorCommand(connection: WorkflowConnection) {
     const command = connectionMonitorCommand(connection);
-    if (!connectionMonitorSupported(connection) || monitorCommandRunningFor || !onRunConnectCommand) return;
+    if (!connectionMonitorSupported(connection) || connectorCommandRunnerBusy() || !onRunConnectCommand) return;
     monitorCommandRunningFor = connection.slug;
     try {
       const started = await onRunConnectCommand(command);
@@ -632,7 +657,9 @@
           connection.slug,
           connection.description,
           connection.connector_slug,
+          connection.connect_command,
           connection.monitor_command,
+          "connect repair reconnect",
           connector?.description,
           connector?.skill,
           connector?.action_slugs.join(" ")
@@ -1177,6 +1204,7 @@
                     {@const connector = connectorBySlug(connection.connector_slug)}
                     {@const canTrigger = connectionTriggerSupported(connection)}
                     {@const canMonitor = connectionMonitorSupported(connection)}
+                    {@const connectCommand = connectionConnectCommand(connection)}
                     {@const monitorCommand = connectionMonitorCommand(connection)}
                     {@const actionSlugs = connectorActionSlugs(connector, connectorQuery)}
                     {@const hiddenActions = connectorHiddenActionCount(connector, actionSlugs)}
@@ -1196,6 +1224,7 @@
                         </span>
                         <span class="pf-connector-tags">
                           <span class="pf-connection-state" data-state={connection.state}>{connection.state}</span>
+                          <span>connect</span>
                           {#if canMonitor}<span>monitor</span>{/if}
                           {#if !canTrigger}<span>no trigger</span>{/if}
                           {#each actionSlugs as action}
@@ -1206,11 +1235,22 @@
                       </button>
                       <button
                         type="button"
+                        class="pf-icon-btn pf-connect-btn"
+                        aria-label={`Run ${connectCommand}`}
+                        title={connectCommand}
+                        aria-busy={connectionCommandRunningFor === connection.slug}
+                        disabled={connectorCommandRunnerBusy() || !onRunConnectCommand}
+                        onclick={() => runConnectionConnectCommand(connection)}
+                      >
+                        <Icon name="wrench" size={12} />
+                      </button>
+                      <button
+                        type="button"
                         class="pf-icon-btn pf-monitor-btn"
                         aria-label={`Run ${monitorCommand}`}
                         title={monitorCommand}
                         aria-busy={monitorCommandRunningFor === connection.slug}
-                        disabled={!canMonitor || monitorCommandRunningFor !== null || !onRunConnectCommand}
+                        disabled={!canMonitor || connectorCommandRunnerBusy() || !onRunConnectCommand}
                         onclick={() => runConnectionMonitorCommand(connection)}
                       >
                         <Icon name="bot" size={12} />
@@ -1290,7 +1330,7 @@
                             aria-label="Run connector command"
                             title="Run connector command"
                             aria-busy={connectorCommandRunning}
-                            disabled={connectorCommandRunning || !selectedConnectorCommand}
+                            disabled={connectorCommandRunnerBusy() || !selectedConnectorCommand}
                             onclick={runSelectedConnectorCommand}
                           >
                             <Icon name="play" size={12} />
@@ -1886,7 +1926,7 @@
 
   .pf-connection-row-group {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 30px;
+    grid-template-columns: minmax(0, 1fr) 30px 30px;
     align-items: stretch;
     gap: 5px;
   }
