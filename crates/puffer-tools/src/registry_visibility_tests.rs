@@ -166,6 +166,7 @@ fn workspace_builtin_tool_resources_are_registerable() {
         missing.is_empty(),
         "builtin resources produced unsupported tool registrations: {missing:?}"
     );
+    assert!(registry.definition("BrowserAction").is_some());
     assert!(registry.definition("Sleep").is_some());
     assert!(!registered.contains("Browser"));
     assert!(!registered.contains("Email"));
