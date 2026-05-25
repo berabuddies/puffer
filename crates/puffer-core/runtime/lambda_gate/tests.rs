@@ -401,6 +401,58 @@ fn skill_path_contract_matches_loaded_skill_root() {
 }
 
 #[test]
+fn skill_shell_path_template_contract_quotes_loaded_skill_root() {
+    let root = tempfile::tempdir().unwrap();
+    let skill_root = root.path().join("skill root");
+    let skill_source = skill_root.join("skill.lskill");
+    let catalogue = skill_root.join("out/host.json");
+    fs::create_dir_all(catalogue.parent().unwrap()).unwrap();
+    fs::write(&skill_source, "host {}\nskill demo {}\n").unwrap();
+    fs::write(
+        &catalogue,
+        r#"{"effects":[],"domains":[],"tools":[{"name":"run_helper","effects":["proc"],"params":[{"name":"input","ty":"str"}],"concreteTools":["Bash"],"concreteInputContracts":{"Bash":{"command":{"$template":"python3 ${skill_shell_path:scripts/run.py} --input ${shell:input}"},"run_in_background":false,"timeout":120,"tty":false}}}]}"#,
+    )
+    .unwrap();
+    let mut skill = SkillSpec::default();
+    skill.verification = Some(SkillVerificationSpec {
+        system: "lambda-skill".to_string(),
+        source_path: Some(skill_source.display().to_string()),
+        generated_path: None,
+        host_catalogue_path: Some(catalogue.display().to_string()),
+        compiler_path: None,
+        host_tool_bindings: Default::default(),
+        tools: None,
+        actions: None,
+    });
+
+    let gate = gate_for_verified_skill(&skill).unwrap().unwrap();
+    let expected_script = skill_root.join("scripts/run.py").display().to_string();
+    assert!(gate
+        .admit_concrete_input_binding(
+            "run_helper",
+            &serde_json::json!({"input": "a b"}),
+            "Bash",
+            &serde_json::json!({
+                "command": format!("python3 '{}' --input 'a b'", expected_script),
+                "run_in_background": false,
+                "timeout": 120,
+                "tty": false
+            })
+        )
+        .is_accept());
+}
+
+#[test]
+fn skill_path_template_contract_rejects_parent_escape() {
+    let error = validate_host_catalogue_runtime(
+        r#"{"effects":[],"domains":[],"tools":[{"name":"run_helper","effects":["proc"],"concreteTools":["Bash"],"concreteInputContracts":{"Bash":{"command":{"$template":"python3 ${skill_shell_path:../run.py}"},"run_in_background":false,"timeout":120,"tty":false}}}]}"#,
+    )
+    .expect_err("escaping skill paths in templates must fail");
+
+    assert!(format!("{error:#}").contains("$skill_path contract cannot escape"));
+}
+
+#[test]
 fn host_catalogue_runtime_validation_rejects_missing_input_contract() {
     let error = validate_host_catalogue_runtime(
             r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","effects":[],"concreteTools":["ToolSearch"],"params":[{"name":"query","ty":"str"}]}]}"#,

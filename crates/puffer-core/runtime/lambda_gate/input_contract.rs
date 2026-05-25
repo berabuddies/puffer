@@ -38,6 +38,7 @@ impl LambdaInputPattern {
                         let Some(template) = template.as_str() else {
                             return Err(anyhow!("$template contract must be a string"));
                         };
+                        validate_template_placeholders(template)?;
                         return Ok(Self::Template(template.to_string()));
                     }
                     if let Some(shell_json) = object.remove("$shell_json") {
@@ -114,7 +115,9 @@ impl LambdaInputPattern {
                 let root = skill_root?;
                 Some(Value::String(root.join(relative).display().to_string()))
             }
-            Self::Template(template) => render_template(template, args).map(Value::String),
+            Self::Template(template) => {
+                render_template(template, args, skill_root).map(Value::String)
+            }
             Self::ShellJson(pattern) => {
                 let value = pattern.render_value(args, skill_root)?;
                 let json = serde_json::to_string(&value).ok()?;
@@ -138,7 +141,11 @@ impl LambdaInputPattern {
         }
     }
 
-    fn render_string(&self, args: &Map<String, Value>, skill_root: Option<&Path>) -> Option<String> {
+    fn render_string(
+        &self,
+        args: &Map<String, Value>,
+        skill_root: Option<&Path>,
+    ) -> Option<String> {
         match self.render_value(args, skill_root)? {
             Value::String(text) => Some(text),
             value => serde_json::to_string(&value).ok(),
@@ -166,6 +173,26 @@ fn validate_skill_path(path: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_template_placeholders(template: &str) -> Result<()> {
+    let mut rest = template;
+    while let Some(start) = rest.find("${") {
+        rest = &rest[start + 2..];
+        let Some(end) = rest.find('}') else {
+            return Ok(());
+        };
+        if let Some(placeholder) = template_placeholder(&rest[..end]) {
+            if matches!(
+                placeholder.format,
+                TemplateFormat::SkillPath | TemplateFormat::SkillShellPath
+            ) {
+                validate_skill_path(placeholder.name)?;
+            }
+        }
+        rest = &rest[end + 1..];
+    }
+    Ok(())
+}
+
 fn collect_template_arg_refs(template: &str, out: &mut BTreeSet<String>) {
     let mut rest = template;
     while let Some(start) = rest.find("${") {
@@ -173,14 +200,20 @@ fn collect_template_arg_refs(template: &str, out: &mut BTreeSet<String>) {
         let Some(end) = rest.find('}') else {
             return;
         };
-        if let Some((_, name)) = template_placeholder(&rest[..end]) {
-            out.insert(name.to_string());
+        if let Some(placeholder) = template_placeholder(&rest[..end]) {
+            if placeholder.format.is_argument_ref() {
+                out.insert(placeholder.name.to_string());
+            }
         }
         rest = &rest[end + 1..];
     }
 }
 
-fn render_template(template: &str, args: &Map<String, Value>) -> Option<String> {
+fn render_template(
+    template: &str,
+    args: &Map<String, Value>,
+    skill_root: Option<&Path>,
+) -> Option<String> {
     let mut output = String::new();
     let mut rest = template;
     while let Some(start) = rest.find("${") {
@@ -188,14 +221,36 @@ fn render_template(template: &str, args: &Map<String, Value>) -> Option<String> 
         rest = &rest[start + 2..];
         let end = rest.find('}')?;
         let placeholder = &rest[..end];
-        let (format, name) = template_placeholder(placeholder)?;
-        let value = args.get(name)?;
-        match format {
-            TemplateFormat::Json => output.push_str(&serde_json::to_string(value).ok()?),
-            TemplateFormat::Shell => output.push_str(&shell_quote_value(value)?),
-            TemplateFormat::ShellJoin => output.push_str(&shell_quote_array(value)?),
-            TemplateFormat::Url => output.push_str(&url_encode_value(value)?),
+        let placeholder = template_placeholder(placeholder)?;
+        match placeholder.format {
+            TemplateFormat::SkillPath | TemplateFormat::SkillShellPath => {
+                validate_skill_path(placeholder.name).ok()?;
+                let root = skill_root?;
+                let path = root.join(placeholder.name).display().to_string();
+                if placeholder.format == TemplateFormat::SkillShellPath {
+                    output.push_str(&shell_quote_string(&path));
+                } else {
+                    output.push_str(&path);
+                }
+            }
+            TemplateFormat::Json => {
+                let value = args.get(placeholder.name)?;
+                output.push_str(&serde_json::to_string(value).ok()?);
+            }
+            TemplateFormat::Shell => {
+                let value = args.get(placeholder.name)?;
+                output.push_str(&shell_quote_value(value)?);
+            }
+            TemplateFormat::ShellJoin => {
+                let value = args.get(placeholder.name)?;
+                output.push_str(&shell_quote_array(value)?);
+            }
+            TemplateFormat::Url => {
+                let value = args.get(placeholder.name)?;
+                output.push_str(&url_encode_value(value)?);
+            }
             TemplateFormat::Raw => {
+                let value = args.get(placeholder.name)?;
                 if let Some(text) = value.as_str() {
                     output.push_str(text);
                 } else {
@@ -216,26 +271,50 @@ enum TemplateFormat {
     Shell,
     ShellJoin,
     Url,
+    SkillPath,
+    SkillShellPath,
 }
 
-fn template_placeholder(placeholder: &str) -> Option<(TemplateFormat, &str)> {
+impl TemplateFormat {
+    fn is_argument_ref(self) -> bool {
+        !matches!(self, Self::SkillPath | Self::SkillShellPath)
+    }
+}
+
+struct TemplatePlaceholder<'a> {
+    format: TemplateFormat,
+    name: &'a str,
+}
+
+fn template_placeholder(placeholder: &str) -> Option<TemplatePlaceholder<'_>> {
     let trimmed = placeholder.trim();
-    let (format, name) = if let Some(name) = trimmed.strip_prefix("json:") {
-        (TemplateFormat::Json, name.trim())
+    let (format, name, is_skill_path) = if let Some(name) = trimmed.strip_prefix("json:") {
+        (TemplateFormat::Json, name.trim(), false)
     } else if let Some(name) = trimmed.strip_prefix("shell:") {
-        (TemplateFormat::Shell, name.trim())
+        (TemplateFormat::Shell, name.trim(), false)
     } else if let Some(name) = trimmed.strip_prefix("shell_join:") {
-        (TemplateFormat::ShellJoin, name.trim())
+        (TemplateFormat::ShellJoin, name.trim(), false)
     } else if let Some(name) = trimmed.strip_prefix("url:") {
-        (TemplateFormat::Url, name.trim())
+        (TemplateFormat::Url, name.trim(), false)
+    } else if let Some(name) = trimmed.strip_prefix("skill_path:") {
+        (TemplateFormat::SkillPath, name.trim(), true)
+    } else if let Some(name) = trimmed.strip_prefix("skill_shell_path:") {
+        (TemplateFormat::SkillShellPath, name.trim(), true)
     } else {
-        (TemplateFormat::Raw, trimmed)
+        (TemplateFormat::Raw, trimmed, false)
     };
-    (!name.is_empty()
-        && name
+    if is_skill_path {
+        if name.is_empty() {
+            return None;
+        }
+    } else if name.is_empty()
+        || !name
             .chars()
-            .all(|ch| ch == '_' || ch == '-' || ch.is_ascii_alphanumeric()))
-    .then_some((format, name))
+            .all(|ch| ch == '_' || ch == '-' || ch.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    Some(TemplatePlaceholder { format, name })
 }
 
 fn shell_quote_value(value: &Value) -> Option<String> {
