@@ -408,4 +408,57 @@ mod tests {
             .detail
             .contains("lacks a concrete input contract"));
     }
+
+    #[test]
+    fn render_lambda_status_blocks_unsupported_refinement_predicates() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_path = temp.path().join("skill.lskill");
+        let host_path = temp.path().join("host.json");
+        std::fs::write(&source_path, "skill source").unwrap();
+        std::fs::write(
+            &host_path,
+            r#"{"effects":[],"domains":[],"tools":[{"name":"custom_fetch","effects":[],"concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":{"$arg":"id"}}},"params":[{"name":"id","ty":"str{host_custom_rule(id)}"}]}]}"#,
+        )
+        .unwrap();
+        let resources = LoadedResources {
+            skills: vec![LoadedItem {
+                value: SkillSpec {
+                    name: "verified-unsupported".to_string(),
+                    allowed_tools: vec!["ToolSearch".to_string()],
+                    verification: Some(SkillVerificationSpec {
+                        system: "lambda-skill".to_string(),
+                        source_path: Some(source_path.display().to_string()),
+                        generated_path: Some(
+                            temp.path()
+                                .join("out/GENERATED.SKILL.md")
+                                .display()
+                                .to_string(),
+                        ),
+                        host_catalogue_path: Some(host_path.display().to_string()),
+                        compiler_path: None,
+                        host_tool_bindings: Default::default(),
+                        tools: Some(1),
+                        actions: Some(1),
+                    }),
+                    ..SkillSpec::default()
+                },
+                source_info: SourceInfo {
+                    path: source_path,
+                    kind: SourceKind::Workspace,
+                },
+            }],
+            ..LoadedResources::default()
+        };
+
+        let status = render_lambda_skill_doctor_status(&resources);
+        let warnings = lambda_skill_doctor_warnings(&resources);
+
+        assert!(status.contains("not gate-ready"));
+        assert!(status.contains("unsupported runtime refinement host_custom_rule(id)"));
+        assert!(status.contains("model invocation blocked; allowed tools ToolSearch"));
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0]
+            .detail
+            .contains("unsupported runtime refinement host_custom_rule(id)"));
+    }
 }
