@@ -36,6 +36,9 @@ pub fn execute_connect_flow(
         "gitlab-webhook" => {
             serve_config::connect_gitlab_webhook(state, resources, &target.connection_name)?
         }
+        "jira-webhook" => {
+            serve_config::connect_jira_webhook(state, resources, &target.connection_name)?
+        }
         "linear-webhook" => {
             serve_config::connect_linear_webhook(state, resources, &target.connection_name)?
         }
@@ -760,7 +763,9 @@ fn status(output: &Value) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::{with_user_question_prompt_handler, UserQuestionPromptResponse};
+    use crate::runtime::{
+        with_user_question_prompt_handler, UserQuestionPromptRequest, UserQuestionPromptResponse,
+    };
     use puffer_config::PufferConfig;
     use puffer_session_store::SessionMetadata;
     use serde_json::Map;
@@ -782,6 +787,31 @@ mod tests {
             note: None,
         };
         AppState::new(PufferConfig::default(), cwd, session)
+    }
+
+    fn connector_config(state: &AppState) -> String {
+        std::fs::read_to_string(state.cwd.join(".puffer/connectors.toml")).expect("config")
+    }
+
+    fn answer_connect_question(request: &UserQuestionPromptRequest) -> UserQuestionPromptResponse {
+        let question = request.questions[0]["question"]
+            .as_str()
+            .expect("question text")
+            .to_string();
+        let answer = match question.as_str() {
+            "What bind address should the webhook listen on?" => "127.0.0.1:9191",
+            "Should this webhook require bearer-token auth?" => "No bearer token",
+            "What bind address should the GitHub webhook listen on?" => "127.0.0.1:9292",
+            "What URL path should GitHub post webhook events to?" => "/github",
+            "What bind address should the Linear webhook listen on?" => "127.0.0.1:9393",
+            "What URL path should Linear post webhook events to?" => "linear",
+            "What Telegram bot token should Puffer use?" => "telegram-token",
+            other => panic!("unexpected question: {other}"),
+        };
+        UserQuestionPromptResponse {
+            answers: Map::from_iter([(question, json!(answer))]),
+            annotations: Map::new(),
+        }
     }
 
     #[test]
@@ -868,29 +898,14 @@ mod tests {
         let resources = LoadedResources::default();
 
         let turn = with_user_question_prompt_handler(
-            |request| {
-                let question = request.questions[0]["question"]
-                    .as_str()
-                    .expect("question text")
-                    .to_string();
-                let answer = match question.as_str() {
-                    "What bind address should the webhook listen on?" => "127.0.0.1:9191",
-                    "Should this webhook require bearer-token auth?" => "No bearer token",
-                    other => panic!("unexpected question: {other}"),
-                };
-                UserQuestionPromptResponse {
-                    answers: Map::from_iter([(question, json!(answer))]),
-                    annotations: Map::new(),
-                }
-            },
+            |request| answer_connect_question(&request),
             || execute_connect_flow(&mut state, &resources, "webhook local-hook"),
         )
         .expect("connect turn");
 
         assert!(turn.assistant_text.contains("connection: local-hook"));
         assert!(turn.assistant_text.contains("run `puffer serve`"));
-        let raw =
-            std::fs::read_to_string(state.cwd.join(".puffer/connectors.toml")).expect("config");
+        let raw = connector_config(&state);
         assert!(raw.contains("[connectors.webhook]"));
     }
 
@@ -900,21 +915,7 @@ mod tests {
         let resources = LoadedResources::default();
 
         let turn = with_user_question_prompt_handler(
-            |request| {
-                let question = request.questions[0]["question"]
-                    .as_str()
-                    .expect("question text")
-                    .to_string();
-                let answer = match question.as_str() {
-                    "What bind address should the GitHub webhook listen on?" => "127.0.0.1:9292",
-                    "What URL path should GitHub post webhook events to?" => "/github",
-                    other => panic!("unexpected question: {other}"),
-                };
-                UserQuestionPromptResponse {
-                    answers: Map::from_iter([(question, json!(answer))]),
-                    annotations: Map::new(),
-                }
-            },
+            |request| answer_connect_question(&request),
             || execute_connect_flow(&mut state, &resources, "github-webhook github-events"),
         )
         .expect("connect turn");
@@ -922,8 +923,7 @@ mod tests {
         assert!(turn.assistant_text.contains("connector: github-webhook"));
         assert!(turn.assistant_text.contains("connection: github-events"));
         assert!(turn.assistant_text.contains("run `puffer serve`"));
-        let raw =
-            std::fs::read_to_string(state.cwd.join(".puffer/connectors.toml")).expect("config");
+        let raw = connector_config(&state);
         assert!(raw.contains("[connectors.webhook]"));
         assert!(raw.contains("display_name = \"github-events\""));
         assert!(raw.contains("path = \"/github\""));
@@ -935,21 +935,7 @@ mod tests {
         let resources = LoadedResources::default();
 
         let turn = with_user_question_prompt_handler(
-            |request| {
-                let question = request.questions[0]["question"]
-                    .as_str()
-                    .expect("question text")
-                    .to_string();
-                let answer = match question.as_str() {
-                    "What bind address should the Linear webhook listen on?" => "127.0.0.1:9393",
-                    "What URL path should Linear post webhook events to?" => "linear",
-                    other => panic!("unexpected question: {other}"),
-                };
-                UserQuestionPromptResponse {
-                    answers: Map::from_iter([(question, json!(answer))]),
-                    annotations: Map::new(),
-                }
-            },
+            |request| answer_connect_question(&request),
             || execute_connect_flow(&mut state, &resources, "linear-webhook linear-events"),
         )
         .expect("connect turn");
@@ -957,8 +943,7 @@ mod tests {
         assert!(turn.assistant_text.contains("connector: linear-webhook"));
         assert!(turn.assistant_text.contains("connection: linear-events"));
         assert!(turn.assistant_text.contains("run `puffer serve`"));
-        let raw =
-            std::fs::read_to_string(state.cwd.join(".puffer/connectors.toml")).expect("config");
+        let raw = connector_config(&state);
         assert!(raw.contains("[connectors.webhook]"));
         assert!(raw.contains("display_name = \"linear-events\""));
         assert!(raw.contains("path = \"/linear\""));
@@ -970,28 +955,14 @@ mod tests {
         let resources = LoadedResources::default();
 
         let turn = with_user_question_prompt_handler(
-            |request| {
-                let question = request.questions[0]["question"]
-                    .as_str()
-                    .expect("question text")
-                    .to_string();
-                let answer = match question.as_str() {
-                    "What Telegram bot token should Puffer use?" => "telegram-token",
-                    other => panic!("unexpected question: {other}"),
-                };
-                UserQuestionPromptResponse {
-                    answers: Map::from_iter([(question, json!(answer))]),
-                    annotations: Map::new(),
-                }
-            },
+            |request| answer_connect_question(&request),
             || execute_connect_flow(&mut state, &resources, "telegram-bot telegram-bot"),
         )
         .expect("connect turn");
 
         assert!(turn.assistant_text.contains("connector: telegram-bot"));
         assert!(turn.assistant_text.contains("run `puffer serve`"));
-        let raw =
-            std::fs::read_to_string(state.cwd.join(".puffer/connectors.toml")).expect("config");
+        let raw = connector_config(&state);
         assert!(raw.contains("[connectors.telegram]"));
         assert!(raw.contains("token = \"telegram-token\""));
     }

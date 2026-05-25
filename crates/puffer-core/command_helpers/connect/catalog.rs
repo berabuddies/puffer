@@ -234,6 +234,7 @@ fn connector_template_runtime_hints(template: &ConnectorTemplate) -> Vec<String>
             | "matrix-bot"
             | "github-webhook"
             | "gitlab-webhook"
+            | "jira-webhook"
             | "linear-webhook"
             | "webhook"
     ) {
@@ -417,6 +418,17 @@ mod tests {
             resolve_connector_slug(&mut state, &resources, "gitlab merge request").expect("slug");
 
         assert_eq!(slug, "gitlab-webhook");
+    }
+
+    #[test]
+    fn resolve_connector_slug_accepts_jira_webhook_terms() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let slug =
+            resolve_connector_slug(&mut state, &resources, "jira issue comment").expect("slug");
+
+        assert_eq!(slug, "jira-webhook");
     }
 
     #[test]

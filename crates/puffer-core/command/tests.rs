@@ -11,6 +11,7 @@ use tempfile::tempdir;
 mod artifacts;
 mod basics;
 mod commit;
+mod connectors;
 mod context;
 mod doctor;
 mod files;
