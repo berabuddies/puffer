@@ -28,6 +28,7 @@ input_schema:
       type: string
       enum:
         - import_desktop
+        - list_messages
         - list_peers
         - login_qr
         - login_qr_wait
@@ -74,6 +75,9 @@ input_schema:
     limit:
       type: integer
       description: Optional maximum result count for list_peers/search_peers/search_messages.
+    before_id:
+      type: integer
+      description: Optional exclusive Telegram message id cursor for older list_messages pages.
     context:
       type: integer
       description: Optional previous message count before each match for search_messages.

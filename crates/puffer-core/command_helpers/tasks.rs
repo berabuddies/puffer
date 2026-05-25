@@ -1,9 +1,11 @@
 use super::emit_system;
 use super::CommandActionEntry;
 use crate::runtime::claude_tools::workflow::{task_get, task_list, task_output, task_stop};
-use crate::{AppState, TaskStatus};
+use crate::AppState;
 use anyhow::{Context, Result};
 use puffer_config::{ensure_workspace_dirs, ConfigPaths};
+use puffer_provider_registry::{AuthStore, ProviderRegistry};
+use puffer_resources::LoadedResources;
 use puffer_session_store::SessionStore;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -14,12 +16,20 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+mod monitor;
+mod render;
+use monitor::*;
+use render::*;
+
 /// Backward-compatible alias for task action picker rows.
 pub type TaskActionEntry = CommandActionEntry;
 
 /// Handles `/tasks` by inspecting and managing persisted workflow task state.
 pub(crate) fn handle_tasks_command(
     state: &mut AppState,
+    resources: &LoadedResources,
+    providers: &ProviderRegistry,
+    auth_store: &mut AuthStore,
     session_store: &SessionStore,
     args: &str,
 ) -> Result<()> {
@@ -63,10 +73,14 @@ pub(crate) fn handle_tasks_command(
             let text = stop_task(state, task_id)?;
             emit_system(state, session_store, text)
         }
+        _ if trimmed.starts_with("ignore ") => {
+            let text = ignore_task(state, resources, providers, auth_store, trimmed)?;
+            emit_system(state, session_store, text)
+        }
         _ => emit_system(
             state,
             session_store,
-            "Usage: /tasks [show|list|path|agents|teams|worktrees|todos|get <task-id>|show <task-id>|output <task-id>|stop <task-id>]".to_string(),
+            "Usage: /tasks [show|list|path|agents|teams|worktrees|todos|get <task-id>|show <task-id>|output <task-id>|stop <task-id>|ignore <task-id> [reason]]".to_string(),
         ),
     }
 }
@@ -129,7 +143,7 @@ pub(crate) fn render_task_actions(state: &mut AppState) -> Result<Vec<TaskAction
         },
     ];
 
-    for task in &tasks {
+    for task in tasks.iter().filter(|task| !task_is_ignored(&task.metadata)) {
         actions.push(TaskActionEntry {
             command: format!("/tasks show {}", task.task_id),
             description: format!(
@@ -140,6 +154,34 @@ pub(crate) fn render_task_actions(state: &mut AppState) -> Result<Vec<TaskAction
                 shorten(&task.subject, 80)
             ),
         });
+        if task_is_monitor(&task.metadata) {
+            actions.push(TaskActionEntry {
+                command: ignore_command(&task.task_id, None),
+                description: format!("Ignore {} ({})", task.task_id, shorten(&task.subject, 72)),
+            });
+            for reason in task_ignore_reasons(&task.metadata) {
+                actions.push(TaskActionEntry {
+                    command: ignore_command(&task.task_id, Some(&reason)),
+                    description: format!("Ignore {}: {}", task.task_id, shorten(&reason, 72)),
+                });
+            }
+            for action in task_actions(&task.metadata) {
+                actions.push(TaskActionEntry {
+                    command: action_prompt(
+                        &task.task_id,
+                        &task.subject,
+                        &task.description,
+                        &action,
+                    ),
+                    description: format!(
+                        "{} [{}] {}",
+                        task.task_id,
+                        action.name,
+                        shorten(&task.subject, 72)
+                    ),
+                });
+            }
+        }
         if supports_task_stop(task) && matches!(task.status.as_str(), "running" | "in_progress") {
             actions.push(TaskActionEntry {
                 command: format!("/tasks stop {}", task.task_id),
@@ -392,6 +434,7 @@ fn default_can_stop() -> bool {
 struct WorkflowPaths {
     root: PathBuf,
     tasks: PathBuf,
+    monitor_tasks: PathBuf,
     todos: PathBuf,
     agents: PathBuf,
     teams: PathBuf,
@@ -410,11 +453,11 @@ fn render_tasks_dashboard(state: &mut AppState) -> Result<String> {
     let mut text = String::new();
     let structured_tasks = tasks
         .iter()
-        .filter(|task| task_kind(task) == "task")
+        .filter(|task| task_kind(task) == "task" && !task_is_ignored(&task.metadata))
         .collect::<Vec<_>>();
     let background_tasks = tasks
         .iter()
-        .filter(|task| task_kind(task) != "task")
+        .filter(|task| task_kind(task) != "task" && !task_is_ignored(&task.metadata))
         .collect::<Vec<_>>();
 
     let _ = writeln!(
@@ -440,9 +483,10 @@ fn render_tasks_dashboard(state: &mut AppState) -> Result<String> {
 fn render_task_paths(state: &AppState) -> Result<String> {
     let paths = workflow_paths(state)?;
     Ok(format!(
-        "Task paths\nworkflow_root={}\ntasks_json={}\ntodos_json={}\nagents_json={}\nteams_json={}\nworktrees_json={}\nshell_outputs={}\nagent_outputs={}",
+        "Task paths\nworkflow_root={}\ntasks_json={}\nmonitor_tasks_json={}\ntodos_json={}\nagents_json={}\nteams_json={}\nworktrees_json={}\nshell_outputs={}\nagent_outputs={}",
         paths.root.display(),
         paths.tasks.display(),
+        paths.monitor_tasks.display(),
         paths.todos.display(),
         paths.agents.display(),
         paths.teams.display(),
@@ -598,9 +642,15 @@ fn load_task(state: &mut AppState, task_id: &str) -> Result<WorkflowTaskView> {
             anyhow::bail!("unknown task `{task_id}`")
         }
     };
-    let stored = load_json_store::<WorkflowTaskStoreView>(&workflow_paths(state)?.tasks)?
+    let paths = workflow_paths(state)?;
+    let stored = load_json_store::<WorkflowTaskStoreView>(&paths.tasks)?
         .tasks
         .into_iter()
+        .chain(
+            load_json_store::<WorkflowTaskStoreView>(&paths.monitor_tasks)?
+                .tasks
+                .into_iter(),
+        )
         .find(|entry| entry.task_id == task.task_id);
     Ok(merge_task_get(stored, task))
 }
@@ -611,6 +661,13 @@ fn load_workflow_tasks(state: &mut AppState) -> Result<Vec<WorkflowTaskView>> {
         .into_iter()
         .map(|task| (task.task_id.clone(), task))
         .collect::<BTreeMap<_, _>>();
+    let paths = workflow_paths(state)?;
+    stored.extend(
+        load_json_store::<WorkflowTaskStoreView>(&paths.monitor_tasks)?
+            .tasks
+            .into_iter()
+            .map(|task| (task.task_id.clone(), task)),
+    );
     let cwd = state.cwd.clone();
     let tasks = match task_list::execute_task_list(state, &cwd, json!({})) {
         Ok(raw) => match serde_json::from_str::<WorkflowTaskListPayload>(&raw)
@@ -742,6 +799,7 @@ fn workflow_paths(state: &AppState) -> Result<WorkflowPaths> {
         .with_context(|| format!("failed to create {}", agent_outputs.display()))?;
     Ok(WorkflowPaths {
         tasks: root.join("tasks.json"),
+        monitor_tasks: root.join("monitor_tasks.json"),
         todos: root.join("todos.json"),
         agents: root.join("agents.json"),
         teams: root.join("teams.json"),
@@ -761,194 +819,6 @@ fn task_argument(args: &str) -> Result<String> {
         anyhow::bail!("expected a task id");
     }
     Ok(task_id.to_string())
-}
-
-fn append_task_section<'a>(text: &mut String, title: &str, tasks: &[&'a WorkflowTaskView]) {
-    let _ = writeln!(text, "\n{title}:");
-    if tasks.is_empty() {
-        let _ = writeln!(text, "- <none>");
-        return;
-    }
-    for task in tasks {
-        let _ = writeln!(
-            text,
-            "- {} [{}:{}] {}",
-            task.task_id,
-            task_kind(task),
-            task.status,
-            task.subject
-        );
-        if let Some(owner) = task.owner.as_deref() {
-            let _ = writeln!(text, "  owner={owner}");
-        }
-        if !task.blocked_by.is_empty() {
-            let _ = writeln!(text, "  blocked_by={}", task.blocked_by.join(", "));
-        }
-        if !task.blocks.is_empty() {
-            let _ = writeln!(text, "  blocks={}", task.blocks.join(", "));
-        }
-        if let Some(command) = task.command.as_deref() {
-            let _ = writeln!(text, "  command={}", shorten(command, 120));
-        } else {
-            let _ = writeln!(text, "  detail={}", shorten(&task.description, 120));
-        }
-    }
-}
-
-fn append_agent_section(text: &mut String, agents: &[WorkflowAgentView]) {
-    let _ = writeln!(text, "\nBackground agents:");
-    if agents.is_empty() {
-        let _ = writeln!(text, "- <none>");
-        return;
-    }
-    for agent in agents {
-        let label = agent.name.as_deref().unwrap_or(agent.agent_id.as_str());
-        let _ = writeln!(text, "- {} [{}] {}", agent.agent_id, agent.status, label);
-        let _ = writeln!(text, "  detail={}", shorten(&agent.description, 120));
-        if let Some(model) = agent.model.as_deref() {
-            let _ = writeln!(text, "  model={model}");
-        }
-        if let Some(team_name) = agent.team_name.as_deref() {
-            let _ = writeln!(text, "  team={team_name}");
-        }
-    }
-}
-
-fn append_team_section(text: &mut String, teams: &[WorkflowTeamView]) {
-    let _ = writeln!(text, "\nTeams:");
-    if teams.is_empty() {
-        let _ = writeln!(text, "- <none>");
-        return;
-    }
-    for team in teams {
-        let _ = writeln!(
-            text,
-            "- {} members={} agent_type={}",
-            team.team_name,
-            team.members.len(),
-            team.agent_type.as_deref().unwrap_or("<none>")
-        );
-        if let Some(description) = team.description.as_deref() {
-            let _ = writeln!(text, "  detail={}", shorten(description, 120));
-        }
-        if !team.members.is_empty() {
-            let _ = writeln!(text, "  members={}", team.members.join(", "));
-        }
-    }
-}
-
-fn append_worktree_section(text: &mut String, worktrees: &[WorkflowWorktreeView]) {
-    let _ = writeln!(text, "\nWorktrees:");
-    if worktrees.is_empty() {
-        let _ = writeln!(text, "- <none>");
-        return;
-    }
-    for worktree in worktrees {
-        let _ = writeln!(
-            text,
-            "- {} branch={} path={}",
-            worktree.name,
-            worktree.branch.as_deref().unwrap_or("<none>"),
-            worktree.path
-        );
-        let _ = writeln!(text, "  base_cwd={}", worktree.base_cwd);
-        if let Some(commit) = worktree.original_head_commit.as_deref() {
-            let _ = writeln!(text, "  original_head_commit={commit}");
-        }
-    }
-}
-
-fn append_todo_section(text: &mut String, todos: &[WorkflowTodoView]) {
-    let _ = writeln!(text, "\nTodos:");
-    if todos.is_empty() {
-        let _ = writeln!(text, "- <none>");
-        return;
-    }
-    for todo in todos {
-        let _ = writeln!(
-            text,
-            "- [{}] {} ({})",
-            todo.status, todo.content, todo.active_form
-        );
-    }
-}
-
-fn append_runtime_section(text: &mut String, state: &AppState) {
-    let _ = writeln!(text, "\nRecent runtime activity:");
-    if state.tasks().is_empty() {
-        let _ = writeln!(text, "- <none>");
-        return;
-    }
-    for task in state.tasks().iter().rev().take(10) {
-        let status = match task.status {
-            TaskStatus::Completed => "completed",
-            TaskStatus::Failed => "failed",
-        };
-        let _ = writeln!(text, "- #{} {} [{}]", task.id, task.label, status);
-        let _ = writeln!(text, "  {}", shorten(&task.detail, 120));
-    }
-}
-
-fn render_task_detail(task: &WorkflowTaskView) -> String {
-    let mut text = String::new();
-    let _ = writeln!(
-        &mut text,
-        "Task {}\ntype={}\nstatus={}\nsubject={}\ndescription={}\nactive_form={}\nowner={}\ncommand={}\nprocess_id={}\noutput_file={}\nstarted_at_ms={}\nupdated_at_ms={}\nexit_code={}",
-        task.task_id,
-        task_kind(task),
-        task.status,
-        task.subject,
-        task.description,
-        task.active_form,
-        task.owner.as_deref().unwrap_or("<none>"),
-        task.command.as_deref().unwrap_or("<none>"),
-        task.process_id
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "<none>".to_string()),
-        task.output_file.as_deref().unwrap_or("<none>"),
-        display_optional_u64(task.started_at_ms),
-        display_optional_u64(task.updated_at_ms),
-        task.exit_code
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "<none>".to_string())
-    );
-    let _ = writeln!(
-        &mut text,
-        "blocked_by={}\nblocks={}",
-        render_list(&task.blocked_by),
-        render_list(&task.blocks)
-    );
-    let _ = writeln!(
-        &mut text,
-        "metadata={}",
-        if task.metadata.is_empty() {
-            "<none>".to_string()
-        } else {
-            serde_json::to_string_pretty(&task.metadata).unwrap_or_default()
-        }
-    );
-    if let Some(output) = task.output.as_deref() {
-        let _ = writeln!(&mut text, "\nOutput preview:\n{}", preview_text(output, 20));
-    }
-    text.trim_end().to_string()
-}
-
-fn render_agent_detail(agent: &WorkflowAgentView) -> String {
-    format!(
-        "Agent {}\nname={}\nstatus={}\ndescription={}\nprompt={}\nsubagent_type={}\nmodel={}\nteam_name={}\nmode={}\nisolation={}\ncwd={}\noutput_file={}",
-        agent.agent_id,
-        agent.name.as_deref().unwrap_or("<none>"),
-        agent.status,
-        agent.description,
-        agent.prompt,
-        agent.subagent_type.as_deref().unwrap_or("<none>"),
-        agent.model.as_deref().unwrap_or("<none>"),
-        agent.team_name.as_deref().unwrap_or("<none>"),
-        agent.mode.as_deref().unwrap_or("<none>"),
-        agent.isolation.as_deref().unwrap_or("<none>"),
-        agent.cwd.as_deref().unwrap_or("<none>"),
-        agent.output_file
-    )
 }
 
 fn load_json_store<T>(path: &Path) -> Result<T>
@@ -1010,67 +880,5 @@ fn default_task_view(task_id: &str) -> WorkflowTaskView {
         started_at_ms: None,
         updated_at_ms: None,
         exit_code: None,
-    }
-}
-
-fn task_kind(task: &WorkflowTaskView) -> &str {
-    task.task_type.as_deref().unwrap_or("task")
-}
-
-fn supports_task_stop(task: &WorkflowTaskView) -> bool {
-    task.process_id.is_some()
-        || task.command.is_some()
-        || matches!(task.task_type.as_deref(), Some(kind) if kind != "task")
-}
-
-fn agent_status_is_terminal(status: &str) -> bool {
-    matches!(status, "completed" | "failed" | "stopped" | "deleted")
-}
-
-fn render_list(values: &[String]) -> String {
-    if values.is_empty() {
-        "<none>".to_string()
-    } else {
-        values.join(", ")
-    }
-}
-
-fn display_optional_u64(value: Option<u64>) -> String {
-    value
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "<none>".to_string())
-}
-
-fn shorten(text: &str, limit: usize) -> String {
-    let mut shortened = String::new();
-    for (index, ch) in text.chars().enumerate() {
-        if index >= limit {
-            shortened.push_str("...");
-            return shortened;
-        }
-        shortened.push(ch);
-    }
-    shortened
-}
-
-fn preview_text(text: &str, max_lines: usize) -> String {
-    let lines = text.lines().collect::<Vec<_>>();
-    if lines.len() <= max_lines {
-        return text.to_string();
-    }
-    let mut preview = lines[..max_lines].join("\n");
-    let _ = write!(
-        &mut preview,
-        "\n... ({} more lines, use `/tasks output <task-id>` for full output)",
-        lines.len() - max_lines
-    );
-    preview
-}
-
-fn value_as_display(value: Option<&Value>) -> String {
-    match value {
-        Some(Value::Null) | None => "<none>".to_string(),
-        Some(Value::String(text)) => text.clone(),
-        Some(other) => other.to_string(),
     }
 }

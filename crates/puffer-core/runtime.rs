@@ -1,19 +1,16 @@
 use crate::AppState;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use puffer_provider_registry::{AuthStore, ProviderDescriptor, ProviderRegistry};
 use puffer_resources::LoadedResources;
 use puffer_tools::{ToolExecutionResult, ToolRegistry};
 #[cfg(test)]
 #[allow(unused_imports)]
 use puffer_transport_anthropic::{AnthropicAuth, AnthropicRequestConfig};
-use reqwest::blocking::Client;
-use reqwest::StatusCode;
 #[cfg(test)]
 #[allow(unused_imports)]
 use serde_json::json;
 use serde_json::Value;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 
 mod agent_loop;
 #[cfg(test)]
@@ -32,6 +29,7 @@ pub mod errors;
 mod filesystem_access;
 pub mod goals;
 mod hook_support;
+mod http_support;
 pub(crate) mod internal_tool_permissions;
 mod local_tools;
 pub mod mcp_discovery;
@@ -54,6 +52,7 @@ mod system_prompt;
 pub mod teammate_loop;
 mod tool_batch;
 mod tool_executor;
+mod tool_results;
 
 mod debug_context;
 
@@ -124,11 +123,21 @@ pub(crate) use self::context_usage::render_context_usage_summary;
 pub(crate) use self::debug_context::render_debug_context;
 pub(crate) use self::hook_support::run_turn_hooks;
 #[cfg(test)]
+pub(crate) use self::http_support::{
+    http_5xx_backoff_with_jitter, http_5xx_base_delay, http_5xx_max_attempts, http_retry_config,
+    is_retryable_http_error, parse_retry_after_headers, retry_delay, HttpRetryConfig,
+    RawHttpResponse, HTTP_RETRY_ATTEMPTS_ENV, HTTP_RETRY_DELAY_MS_ENV,
+};
+pub(crate) use self::http_support::{
+    parse_http_json_response, retry_on_5xx, send_http_request, send_http_request_raw,
+};
+#[cfg(test)]
+use self::openai::parse_openai_sse_response;
+#[cfg(test)]
 use self::openai::{
     build_codex_openai_request_body, execute_openai_tool_calls, openai_tool_definitions,
     parse_openai_sse_response_streaming, resolve_openai_execution_config,
 };
-use self::openai::{is_event_stream, parse_openai_sse_response};
 pub use self::permission_prompt::{
     with_permission_prompt_handler, with_user_question_prompt_handler,
     BrowserPermissionPromptActionSet, BrowserPermissionPromptPayload,
@@ -150,12 +159,16 @@ use self::tool_executor::{
     execute_tool_call, is_parallel_safe_tool, resolve_tool_permission, PermissionOutcome,
     ToolExecutionBackend,
 };
+#[cfg(test)]
+pub(crate) use self::tool_results::{build_persisted_output_message, PREVIEW_SIZE_CHARS};
+pub(crate) use self::tool_results::{
+    enforce_tool_result_budget, git_status_context, process_tool_result, resolve_max_output_tokens,
+    MAX_TOOL_RESULT_CHARS,
+};
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const OPENAI_CODEX_COMPAT_VERSION: &str = "0.125.0";
 const OPENAI_CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
-const HTTP_RETRY_ATTEMPTS_ENV: &str = "PUFFER_HTTP_RETRY_ATTEMPTS";
-const HTTP_RETRY_DELAY_MS_ENV: &str = "PUFFER_HTTP_RETRY_DELAY_MS";
 const SUPPRESS_TOOLS_FOR_SIMPLE_TURNS_ENV: &str = "PUFFER_SUPPRESS_TOOLS_FOR_SIMPLE_TURNS";
 const LOCAL_REPLY_FOR_SIMPLE_TURNS_ENV: &str = "PUFFER_LOCAL_REPLY_FOR_SIMPLE_TURNS";
 
@@ -185,19 +198,6 @@ struct TurnRequestOptions<'a> {
     /// process-wide handle without lifetime gymnastics.
     observability: Option<puffer_observability::ObservabilityHandle>,
     lightweight_context: bool,
-}
-
-#[derive(Debug)]
-struct RawHttpResponse {
-    status: StatusCode,
-    content_type: Option<String>,
-    text: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct HttpRetryConfig {
-    retries: usize,
-    delay_ms: u64,
 }
 
 /// Cooperative cancellation handle threaded through the agent loop and
@@ -405,6 +405,18 @@ pub fn execute_tool_action_once(
         input,
         claude_tools::ProviderToolContext::None,
     )
+}
+
+/// Executes the runtime-backed `Agent` tool from local command handlers.
+pub fn execute_agent_tool_once(
+    state: &AppState,
+    resources: &LoadedResources,
+    providers: &ProviderRegistry,
+    auth_store: &mut AuthStore,
+    cwd: &std::path::Path,
+    input: Value,
+) -> Result<String> {
+    agents::execute_agent_tool(state, resources, providers, auth_store, cwd, input)
 }
 
 /// Shuts down long-lived runtime services such as cached LSP sessions.
@@ -916,632 +928,6 @@ fn resolve_model_api(
                 .map(|model| model.api.clone())
         })
         .unwrap_or_else(|| provider.default_api.clone())
-}
-
-fn send_http_request(
-    url: &str,
-    headers: &[(String, String)],
-    body: &str,
-    anthropic: bool,
-) -> Result<Value> {
-    let response = send_http_request_raw(url, headers, body, anthropic)?;
-    parse_http_json_response(url, anthropic, response)
-}
-
-fn send_http_request_raw(
-    url: &str,
-    headers: &[(String, String)],
-    body: &str,
-    anthropic: bool,
-) -> Result<RawHttpResponse> {
-    trace_http_exchange("request", url, headers, body);
-    let retry_config = http_retry_config();
-    let total_attempts = retry_config.retries.saturating_add(1);
-    for attempt in 1..=total_attempts {
-        match send_http_request_raw_once(url, headers, body, anthropic) {
-            Ok(response) => {
-                trace_http_response(url, response.status.as_u16(), &response.text);
-                // Retry on 429 (rate limit) and 5xx (server errors) — UNLESS
-                // the response classifies as a `QuotaError`. Retrying a 429
-                // 4 times with linear backoff burns the budget the typed
-                // quota path is supposed to protect: by the time the
-                // classifier sees the error, the orchestrator has already
-                // wasted ~10s of cooldown on a window that needs minutes
-                // (or hours for `access_terminated`). Bail immediately so
-                // the provider adapter can promote the error and the
-                // benchmark CLI can exit with `QUOTA_EXIT_CODE`.
-                let status = response.status.as_u16();
-                let provider = if anthropic { "anthropic" } else { "openai" };
-                if quota::classify_response(provider, status, &response.text).is_some() {
-                    return Ok(response);
-                }
-                if attempt < total_attempts && (status == 429 || (500..=599).contains(&status)) {
-                    let delay = retry_delay(retry_config, attempt);
-                    if !delay.is_zero() {
-                        std::thread::sleep(delay);
-                    }
-                    continue;
-                }
-                return Ok(response);
-            }
-            Err(error) if attempt < total_attempts && is_retryable_http_error(&error) => {
-                trace_http_retry(url, attempt, &error);
-                let delay = retry_delay(retry_config, attempt);
-                if !delay.is_zero() {
-                    std::thread::sleep(delay);
-                }
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    unreachable!("http retry loop exited without returning")
-}
-
-fn send_http_request_raw_once(
-    url: &str,
-    headers: &[(String, String)],
-    body: &str,
-    anthropic: bool,
-) -> Result<RawHttpResponse> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(300))
-        .build()
-        .unwrap_or_else(|_| Client::new());
-    let mut request = client.post(url);
-    for (key, value) in headers {
-        request = request.header(key, value);
-    }
-    if !headers
-        .iter()
-        .any(|(key, _)| key.eq_ignore_ascii_case("content-type"))
-    {
-        request = request.header("content-type", "application/json");
-    }
-    if anthropic
-        && !headers
-            .iter()
-            .any(|(key, _)| key.eq_ignore_ascii_case("anthropic-version"))
-    {
-        request = request.header("anthropic-version", "2023-06-01");
-    }
-    let response = request
-        .body(body.to_string())
-        .send()
-        .with_context(|| format!("request to {url} failed"))?;
-    let status = response.status();
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(ToString::to_string);
-    let text = response
-        .text()
-        .with_context(|| format!("failed to read response body from {url}"))?;
-    Ok(RawHttpResponse {
-        status,
-        content_type,
-        text,
-    })
-}
-
-fn http_retry_config() -> HttpRetryConfig {
-    HttpRetryConfig {
-        retries: parsed_env_usize(HTTP_RETRY_ATTEMPTS_ENV)
-            .unwrap_or(3)
-            .min(10),
-        delay_ms: parsed_env_u64(HTTP_RETRY_DELAY_MS_ENV)
-            .unwrap_or(1_000)
-            .min(30_000),
-    }
-}
-
-fn parsed_env_usize(name: &str) -> Option<usize> {
-    std::env::var(name).ok()?.trim().parse().ok()
-}
-
-fn parsed_env_u64(name: &str) -> Option<u64> {
-    std::env::var(name).ok()?.trim().parse().ok()
-}
-
-fn retry_delay(config: HttpRetryConfig, attempt: usize) -> Duration {
-    if config.delay_ms == 0 {
-        return Duration::ZERO;
-    }
-    Duration::from_millis(config.delay_ms.saturating_mul(attempt as u64))
-}
-
-/// Provider-agnostic helper that retries a closure returning a
-/// `reqwest::blocking::Response` whenever the response status is 5xx.
-/// Mirrors Claude Code's SDK retry policy (`shouldRetry` in
-/// claude-2.1.133 bundle: retries on 408 / 409 / 429 / >=500) but
-/// scoped to 5xx — 408 / 409 are rare for our LLM providers and
-/// 429 is already promoted to typed `QuotaError` in the body-inspect
-/// layer (see `runtime::quota`).
-///
-/// Caller is responsible for connection-level retry (`reqwest::Error`)
-/// — that lives provider-side (`retry_openai_transport`,
-/// future Anthropic equivalent). This wrapper sits BETWEEN
-/// connection-retry and the response-body parse, catching transient
-/// 502/503/504 gateway errors that would otherwise abort the turn
-/// and force the harness to retry the whole task.
-///
-/// Backoff: exponential with up to 25% reduction (one-sided, matches
-/// CC's `1 - random()*0.25`), capped at 8 seconds —
-/// matches CC's `min(0.5 * 2^attempt, 8) * (1 - random()*0.25)`
-/// formula. Configurable via env:
-///   - `PUFFER_HTTP_5XX_MAX_ATTEMPTS` (default 3, clamp 1–5)
-///   - `PUFFER_HTTP_5XX_BASE_DELAY_MS` (default 500, clamp 100–8000)
-///
-/// `on_retry` is called once per retry decision so the agent loop
-/// can surface the event in observability spans.
-pub(crate) fn retry_on_5xx<F>(
-    mut op: F,
-    mut on_retry: impl FnMut(usize, usize, reqwest::StatusCode),
-) -> Result<reqwest::blocking::Response>
-where
-    F: FnMut() -> Result<reqwest::blocking::Response>,
-{
-    let max_attempts = http_5xx_max_attempts();
-    let base_delay = http_5xx_base_delay();
-    for attempt in 1..=max_attempts {
-        let response = op()?;
-        let status = response.status();
-        if !status.is_server_error() || attempt == max_attempts {
-            return Ok(response);
-        }
-        // Honor server-supplied retry hints when present
-        // (`retry-after-ms` wins over `Retry-After`, mirroring CC's
-        // claude-2.1.133 bundle line 50). Falls back to exponential
-        // backoff with jitter otherwise.
-        let server_hint = parse_retry_after_headers(response.headers());
-        // Free the failed response's connection before sleeping;
-        // some servers won't accept a parallel retry on the same
-        // socket otherwise.
-        drop(response);
-        on_retry(attempt, max_attempts, status);
-        let delay =
-            server_hint.unwrap_or_else(|| http_5xx_backoff_with_jitter(base_delay, attempt));
-        std::thread::sleep(delay);
-    }
-    unreachable!("retry_on_5xx loop always returns or errors")
-}
-
-/// Maximum delay we'll honor from a server-supplied `Retry-After` /
-/// `retry-after-ms` header. Caps malicious or misconfigured upstreams
-/// from making puffer hang indefinitely while still allowing reasonable
-/// rate-limit cooldowns. CC's bundle uses the same 60s ceiling.
-const RETRY_AFTER_CAP_MS: u64 = 60_000;
-
-/// Parse `retry-after-ms` (preferred) or `Retry-After` (RFC 7231 §7.1.3)
-/// from a response's headers. Returns `None` when neither header is
-/// present or parseable. Result is clamped to [0, 60_000ms].
-///
-/// Mirrors Anthropic SDK / CC bundle (claude-2.1.133, line 50):
-///   1. `retry-after-ms` — millisecond integer, non-standard but used
-///      by Anthropic's Messages API for sub-second precision.
-///   2. `Retry-After` — either a non-negative integer (delta-seconds)
-///      or an HTTP-date (RFC 7231 IMF-fixdate).
-fn parse_retry_after_headers(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
-    // 1. `retry-after-ms` takes precedence (Anthropic-specific, CC parity).
-    if let Some(value) = headers.get("retry-after-ms").and_then(|v| v.to_str().ok()) {
-        if let Ok(ms) = value.trim().parse::<u64>() {
-            return Some(Duration::from_millis(ms.min(RETRY_AFTER_CAP_MS)));
-        }
-    }
-    // 2. `Retry-After`: integer seconds OR HTTP-date.
-    let raw = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
-    let trimmed = raw.trim();
-    if let Ok(seconds) = trimmed.parse::<u64>() {
-        let ms = seconds.saturating_mul(1_000).min(RETRY_AFTER_CAP_MS);
-        return Some(Duration::from_millis(ms));
-    }
-    // HTTP-date: parse as RFC 2822 (covers IMF-fixdate, the only modern
-    // preferred HTTP-date format per RFC 7231 §7.1.1.1).
-    if let Ok(target) =
-        time::OffsetDateTime::parse(trimmed, &time::format_description::well_known::Rfc2822)
-    {
-        let now = time::OffsetDateTime::now_utc();
-        let diff = target - now;
-        let ms = diff.whole_milliseconds();
-        if ms <= 0 {
-            return Some(Duration::ZERO);
-        }
-        let ms = (ms as u64).min(RETRY_AFTER_CAP_MS);
-        return Some(Duration::from_millis(ms));
-    }
-    None
-}
-
-fn http_5xx_max_attempts() -> usize {
-    std::env::var("PUFFER_HTTP_5XX_MAX_ATTEMPTS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(3)
-        .clamp(1, 5)
-}
-
-fn http_5xx_base_delay() -> Duration {
-    let ms = std::env::var("PUFFER_HTTP_5XX_BASE_DELAY_MS")
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(500)
-        .clamp(100, 8_000);
-    Duration::from_millis(ms)
-}
-
-/// Backoff with up to 25% reduction (one-sided, matches CC's
-/// `1 - random()*0.25`) capped at 8s. `attempt` is 1-indexed.
-/// At `attempt=1`, max delay = base. At `attempt=2`, max = 2*base.
-/// At `attempt=3`, max = 4*base. The `* (1 - rand*0.25)` factor
-/// applies a deterministic-pseudo-random jitter without pulling in
-/// the `rand` crate — uses subsecond wall-clock nanos so cargo
-/// tests stay reproducible-ish without needing a seedable RNG.
-fn http_5xx_backoff_with_jitter(base: Duration, attempt: usize) -> Duration {
-    let factor = 2u64.saturating_pow((attempt as u32).saturating_sub(1));
-    let nominal_ms = base.as_millis().saturating_mul(factor as u128).min(8_000) as u64;
-    // Cheap jitter: take low bits of wall-clock subsec nanos, scale to
-    // [0, 25%] reduction (one-sided, never adds to the delay).
-    // Falls back to no-jitter if the clock is unavailable.
-    let jitter_factor = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .map(|d| (d.subsec_nanos() % 250) as u64)
-        .unwrap_or(0);
-    let jitter_ms = nominal_ms.saturating_mul(jitter_factor) / 1_000;
-    Duration::from_millis(nominal_ms.saturating_sub(jitter_ms))
-}
-
-fn is_retryable_http_error(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<reqwest::Error>()
-            .is_some_and(|value| value.is_timeout() || value.is_connect())
-            || cause
-                .downcast_ref::<std::io::Error>()
-                .is_some_and(is_retryable_io_error)
-    })
-}
-
-fn is_retryable_io_error(error: &std::io::Error) -> bool {
-    matches!(
-        error.kind(),
-        std::io::ErrorKind::TimedOut
-            | std::io::ErrorKind::WouldBlock
-            | std::io::ErrorKind::Interrupted
-            | std::io::ErrorKind::ConnectionReset
-            | std::io::ErrorKind::ConnectionAborted
-            | std::io::ErrorKind::ConnectionRefused
-            | std::io::ErrorKind::BrokenPipe
-            | std::io::ErrorKind::UnexpectedEof
-    )
-}
-
-fn trace_http_exchange(kind: &str, url: &str, headers: &[(String, String)], body: &str) {
-    let Ok(path) = std::env::var("PUFFER_HTTP_TRACE_PATH") else {
-        return;
-    };
-    let rendered_headers = headers
-        .iter()
-        .map(|(key, value)| {
-            if key.eq_ignore_ascii_case("authorization") {
-                format!("{key}: <redacted>")
-            } else {
-                format!("{key}: {value}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .and_then(|mut file| {
-            use std::io::Write as _;
-            writeln!(
-                file,
-                "--- {} {} ---\n{}\n\n{}\n",
-                kind.to_ascii_uppercase(),
-                url,
-                rendered_headers,
-                body
-            )
-        });
-}
-
-fn trace_http_response(url: &str, status: u16, body: &str) {
-    let Ok(path) = std::env::var("PUFFER_HTTP_TRACE_PATH") else {
-        return;
-    };
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .and_then(|mut file| {
-            use std::io::Write as _;
-            writeln!(file, "--- RESPONSE {} {} ---\n{}\n", status, url, body)
-        });
-}
-
-fn trace_http_retry(url: &str, attempt: usize, error: &anyhow::Error) {
-    let Ok(path) = std::env::var("PUFFER_HTTP_TRACE_PATH") else {
-        return;
-    };
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .and_then(|mut file| {
-            use std::io::Write as _;
-            writeln!(file, "--- RETRY {} {} ---\n{}\n", attempt, url, error)
-        });
-}
-
-fn parse_http_json_response(
-    url: &str,
-    anthropic: bool,
-    response: RawHttpResponse,
-) -> Result<Value> {
-    if !response.status.is_success() {
-        // Promote 429 / 403-access-terminated to a typed `QuotaError`
-        // before falling back to the generic `bail!`. Without this, the
-        // entire Anthropic blocking path (the only caller that goes
-        // through `send_http_request` → `parse_http_json_response`)
-        // bypasses quota classification: the SSE / streaming paths in
-        // `runtime/anthropic.rs:275` and `runtime/openai.rs:1064`
-        // already do this, but the blocking path used by
-        // `one_turn_blocking` would otherwise lose the typed error and
-        // the benchmark CLI would never see `QUOTA_EXIT_CODE`.
-        let provider = if anthropic { "anthropic" } else { "openai" };
-        if let Some(quota) =
-            quota::classify_response(provider, response.status.as_u16(), &response.text)
-        {
-            return Err(anyhow::Error::new(quota));
-        }
-        bail!(
-            "request failed with status {}: {}",
-            response.status,
-            response.text
-        );
-    }
-    if !anthropic && is_event_stream(response.content_type.as_deref(), &response.text) {
-        return parse_openai_sse_response(&response.text)
-            .with_context(|| format!("failed to parse SSE response from {url}"));
-    }
-    serde_json::from_str::<Value>(&response.text)
-        .with_context(|| format!("response from {url} was not valid JSON"))
-}
-
-/// Trims older messages from the front when the estimated token count exceeds
-/// the threshold, keeping the most recent messages to stay within budget.
-/// This matches CC/Codex auto-compact behavior (triggered at ~90% of effective context).
-/// Maximum characters per individual tool result (matches CC's DEFAULT_MAX_RESULT_SIZE_CHARS).
-pub(super) const MAX_TOOL_RESULT_CHARS: usize = 50_000;
-
-/// Maximum aggregate characters for all tool results in a single turn.
-/// CC: MAX_TOOL_RESULTS_PER_MESSAGE_CHARS = 200_000.
-pub(super) const MAX_TOOL_RESULTS_PER_MESSAGE_CHARS: usize = 200_000;
-
-/// Preview size for persisted tool outputs (matches CC's PREVIEW_SIZE_BYTES).
-const PREVIEW_SIZE_CHARS: usize = 2_000;
-
-const PERSISTED_OUTPUT_TAG: &str = "<persisted-output>";
-const PERSISTED_OUTPUT_CLOSING_TAG: &str = "</persisted-output>";
-
-/// Returns a short git status summary for system-reminder injection (CC parity).
-pub(super) fn git_status_context() -> String {
-    let branch = std::process::Command::new("git")
-        .args(["branch", "--show-current"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
-    if branch.is_empty() {
-        return String::new();
-    }
-    let status = std::process::Command::new("git")
-        .args(["status", "--short", "--no-ahead-behind"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
-    let log = std::process::Command::new("git")
-        .args(["log", "--oneline", "-3", "--no-decorate"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
-    let mut result = format!("Current branch: {branch}");
-    if !status.is_empty() {
-        result.push_str(&format!("\nStatus:\n{status}"));
-    }
-    if !log.is_empty() {
-        result.push_str(&format!("\nRecent commits:\n{log}"));
-    }
-    result
-}
-
-/// Process a tool result: if oversized, persist to disk and return a preview
-/// message (CC pattern). Falls back to head truncation if persistence fails.
-pub(super) fn process_tool_result(text: &str, max_chars: usize, session_id: &uuid::Uuid) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_string();
-    }
-    // Try to persist to disk and return a preview (CC pattern).
-    if let Some(message) = persist_and_preview(text, session_id) {
-        return message;
-    }
-    // Fallback: head truncation.
-    truncate_tool_result(text, max_chars)
-}
-
-pub(super) fn truncate_tool_result(text: &str, max_chars: usize) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= max_chars {
-        return text.to_string();
-    }
-    let head_len = max_chars / 2;
-    let tail_len = max_chars - head_len;
-    let head: String = chars[..head_len].iter().collect();
-    let tail: String = chars[chars.len() - tail_len..].iter().collect();
-    let omitted = chars.len() - max_chars;
-    format!("{head}\n\n[…{omitted} chars truncated…]\n\n{tail}")
-}
-
-/// Persist text to a temp file and return a `<persisted-output>` preview message.
-fn persist_and_preview(text: &str, session_id: &uuid::Uuid) -> Option<String> {
-    let dir = std::env::temp_dir()
-        .join(format!("puffer-{session_id}"))
-        .join("tool-results");
-    std::fs::create_dir_all(&dir).ok()?;
-    let filename = format!("{}.txt", uuid::Uuid::new_v4());
-    let filepath = dir.join(&filename);
-    std::fs::write(&filepath, text).ok()?;
-    Some(build_persisted_output_message(
-        &filepath.to_string_lossy(),
-        text,
-    ))
-}
-
-fn build_persisted_output_message(filepath: &str, text: &str) -> String {
-    let total_chars = text.chars().count();
-    let size_str = format_byte_size(text.len());
-    if total_chars <= PREVIEW_SIZE_CHARS {
-        // Short enough to show in full — single-block preview, no
-        // truncation marker. (Reachable only when `text.len() >
-        // max_chars` triggered persistence but the char count is
-        // smaller than the byte length — multi-byte UTF-8 case.)
-        return format!(
-            "{PERSISTED_OUTPUT_TAG}\n\
-             Output too large ({size_str}). Full output saved to: {filepath}\n\n\
-             Preview:\n\
-             {text}\n\
-             {PERSISTED_OUTPUT_CLOSING_TAG}"
-        );
-    }
-    if total_chars <= PREVIEW_SIZE_CHARS * 2 {
-        // Output just barely exceeds the threshold — the tail would
-        // be tiny, so head-only stays as informative as head+tail
-        // would be. Preserves CC-parity wording for this common case.
-        let (preview, _) = head_preview(text, PREVIEW_SIZE_CHARS);
-        let preview_size_str = format_byte_size(PREVIEW_SIZE_CHARS);
-        return format!(
-            "{PERSISTED_OUTPUT_TAG}\n\
-             Output too large ({size_str}). Full output saved to: {filepath}\n\n\
-             Preview (first {preview_size_str}):\n\
-             {preview}\n...\n\
-             {PERSISTED_OUTPUT_CLOSING_TAG}"
-        );
-    }
-    // Long output: show head + tail so terminal failure messages
-    // (errors that print at the END of long builds / test runs /
-    // greps) survive the preview. CC v2.1.133's `I3_` is head-only;
-    // we deliberately diverge here. Anchor: 2026-04-12
-    // `make-doom-for-mips` step 44 — 1.8MB grep stderr where the
-    // useful exit-status line was at the bottom.
-    let head_budget = PREVIEW_SIZE_CHARS / 2;
-    let tail_budget = PREVIEW_SIZE_CHARS - head_budget;
-    let (head, _) = head_preview(text, head_budget);
-    let tail = tail_preview(text, tail_budget, total_chars);
-    let omitted = total_chars
-        .saturating_sub(head.chars().count())
-        .saturating_sub(tail.chars().count());
-    let head_size_str = format_byte_size(head_budget);
-    let tail_size_str = format_byte_size(tail_budget);
-    format!(
-        "{PERSISTED_OUTPUT_TAG}\n\
-         Output too large ({size_str}). Full output saved to: {filepath}\n\n\
-         Preview (first {head_size_str} head + last {tail_size_str} tail):\n\
-         {head}\n\n[…{omitted} chars truncated…]\n\n{tail}\n\
-         {PERSISTED_OUTPUT_CLOSING_TAG}"
-    )
-}
-
-/// Cut `text` to `max_chars` from the start, preferring a newline
-/// boundary within the back half to avoid mid-line breaks. Returns
-/// `(preview, has_more)`.
-fn head_preview(text: &str, max_chars: usize) -> (String, bool) {
-    if text.chars().count() <= max_chars {
-        return (text.to_string(), false);
-    }
-    let truncated: String = text.chars().take(max_chars).collect();
-    let cut = truncated
-        .rfind('\n')
-        .filter(|&pos| pos > truncated.len() / 2)
-        .unwrap_or(truncated.len());
-    (truncated[..cut].to_string(), true)
-}
-
-/// Cut `text` to `max_chars` from the END, preferring a newline
-/// boundary within the front half so we don't strand a half-line.
-/// `total_chars` is passed in to avoid re-counting (the caller
-/// already has it).
-fn tail_preview(text: &str, max_chars: usize, total_chars: usize) -> String {
-    if total_chars <= max_chars {
-        return text.to_string();
-    }
-    let skip = total_chars - max_chars;
-    let suffix: String = text.chars().skip(skip).collect();
-    // Walk forward to the next newline if it sits in the leading
-    // quarter of the suffix — drops a likely-mid-line fragment but
-    // keeps the trailing content intact.
-    let cut = suffix
-        .find('\n')
-        .filter(|&pos| pos < suffix.len() / 4)
-        .map(|pos| pos + 1)
-        .unwrap_or(0);
-    suffix[cut..].to_string()
-}
-
-fn format_byte_size(bytes: usize) -> String {
-    if bytes >= 1_000_000 {
-        format!("{:.1} MB", bytes as f64 / 1_000_000.0)
-    } else if bytes >= 1_000 {
-        format!("{:.1} KB", bytes as f64 / 1_000.0)
-    } else {
-        format!("{bytes} bytes")
-    }
-}
-
-/// Enforce per-message aggregate budget on tool result outputs.
-/// When total output exceeds MAX_TOOL_RESULTS_PER_MESSAGE_CHARS, persist the
-/// largest results to disk and replace with previews (CC pattern).
-pub(super) fn enforce_tool_result_budget(outputs: &mut [String], session_id: &uuid::Uuid) {
-    let total: usize = outputs.iter().map(|o| o.len()).sum();
-    if total <= MAX_TOOL_RESULTS_PER_MESSAGE_CHARS {
-        return;
-    }
-    // Sort indices by size (largest first), persist until under budget.
-    let mut indices: Vec<usize> = (0..outputs.len()).collect();
-    indices.sort_by(|&a, &b| outputs[b].len().cmp(&outputs[a].len()));
-    let mut remaining = total;
-    for idx in indices {
-        if remaining <= MAX_TOOL_RESULTS_PER_MESSAGE_CHARS {
-            break;
-        }
-        let output = &outputs[idx];
-        if output.contains(PERSISTED_OUTPUT_TAG) {
-            continue; // Already persisted in per-tool step.
-        }
-        if let Some(msg) = persist_and_preview(output, session_id) {
-            remaining = remaining.saturating_sub(output.len()) + msg.len();
-            outputs[idx] = msg;
-        }
-    }
-}
-
-/// Resolves the max output tokens for the given model, falling back to a
-/// sensible default when the provider catalog doesn't specify one.
-fn resolve_max_output_tokens(provider: &ProviderDescriptor, model_id: &str) -> u32 {
-    provider
-        .models
-        .iter()
-        .find(|m| m.id == model_id)
-        .map(|m| m.max_output_tokens)
-        .filter(|&v| v > 0)
-        .unwrap_or(16_384)
 }
 
 #[cfg(test)]

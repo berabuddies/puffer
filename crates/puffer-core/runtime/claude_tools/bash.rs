@@ -862,7 +862,7 @@ mod tests {
                 temp.path(),
                 &test_session_id(),
                 ClaudeBashInput {
-                    command: "printf '%0.sA' $(jot 20000); printf '%0.sZ' $(jot 20000)".to_string(),
+                    command: "i=0; while [ $i -lt 20000 ]; do printf A; i=$((i + 1)); done; i=0; while [ $i -lt 20000 ]; do printf Z; i=$((i + 1)); done".to_string(),
                     timeout: Some(5_000),
                     description: None,
                     run_in_background: false,

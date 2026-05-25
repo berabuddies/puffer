@@ -35,6 +35,11 @@ description: |-
 
   All tasks are created with status `pending`.
 
+  Monitor triage agents may create workspace-level connector tasks by setting
+  `metadata._monitor=true` or `metadata.monitor_connection`. For those tasks,
+  include `actions` and `possibleIgnoreReasons` so `/tasks` can offer concrete
+  user choices without another triage pass.
+
   ## Tips
 
   - Create tasks with clear, specific subjects that describe the outcome
@@ -57,6 +62,27 @@ input_schema:
     activeForm:
       type: string
       description: Present continuous form shown while in progress.
+    actions:
+      type: array
+      description: Suggested user-facing actions for monitored connector tasks.
+      items:
+        type: object
+        properties:
+          actionName:
+            type: string
+            description: Short button label for the action.
+          actionPrompt:
+            type: string
+            description: Prompt to send to the current agent when the action is selected.
+        required:
+          - actionName
+          - actionPrompt
+        additionalProperties: false
+    possibleIgnoreReasons:
+      type: array
+      description: Suggested reasons the user may choose when ignoring a monitored connector task.
+      items:
+        type: string
     metadata:
       type: object
       description: Arbitrary metadata to attach to the task.

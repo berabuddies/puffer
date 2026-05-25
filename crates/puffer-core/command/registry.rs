@@ -282,6 +282,13 @@ pub fn supported_commands() -> Vec<CommandSpec> {
             CommandKind::Ui,
         ),
         cmd(
+            "monitor",
+            &[],
+            "Create connector monitors that turn messages into tasks",
+            Some("<connection> [connection ...]"),
+            CommandKind::Local,
+        ),
+        cmd(
             "permissions",
             &["allowed-tools"],
             "Manage allow & deny tool permission rules",

@@ -251,7 +251,23 @@ pub(super) struct TaskCreateInput {
     #[serde(default, rename = "activeForm")]
     pub(super) active_form: Option<String>,
     #[serde(default)]
+    pub(super) actions: Vec<TaskCreateActionInput>,
+    #[serde(
+        default,
+        rename = "possibleIgnoreReasons",
+        alias = "possible_ignore_reasons"
+    )]
+    pub(super) possible_ignore_reasons: Vec<String>,
+    #[serde(default)]
     pub(super) metadata: Option<Map<String, Value>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub(super) struct TaskCreateActionInput {
+    #[serde(rename = "actionName", alias = "name")]
+    pub(super) action_name: String,
+    #[serde(rename = "actionPrompt", alias = "prompt")]
+    pub(super) action_prompt: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -608,6 +624,11 @@ pub(super) fn tasks_path(cwd: &Path, session_id: &Uuid) -> PathBuf {
     dir.join("tasks.json")
 }
 
+/// Returns the workspace-level task store used by connector monitors.
+pub(super) fn monitor_tasks_path(cwd: &Path) -> PathBuf {
+    workflow_root(cwd).unwrap().join("monitor_tasks.json")
+}
+
 /// Returns the directory used to persist one team's structured task list.
 pub(super) fn team_tasks_dir(cwd: &Path, team_name: &str) -> Result<PathBuf> {
     let dir = workflow_root(cwd)?
@@ -820,6 +841,18 @@ pub(super) fn next_task_id(tasks: &[StoredTask]) -> String {
         .unwrap_or(0)
         + 1;
     format!("task-{next}")
+}
+
+/// Returns the next sequential monitor task id.
+pub(super) fn next_monitor_task_id(tasks: &[StoredTask]) -> String {
+    let next = tasks
+        .iter()
+        .filter_map(|task| task.task_id.strip_prefix("monitor-"))
+        .filter_map(|suffix| suffix.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1;
+    format!("monitor-{next}")
 }
 
 /// Returns true when the operating-system process is still running.
