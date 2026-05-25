@@ -32,6 +32,17 @@ export function buildReplayEvidenceIndex(payload) {
   };
 }
 
+export function buildEvidenceIndex(records = []) {
+  const builder = new EvidenceIndexBuilder();
+  for (const record of records) {
+    builder.add(record.type, record.value, record.metadata ?? {});
+  }
+  return {
+    evidence_index: builder.entries,
+    evidence_source: builder.source
+  };
+}
+
 export function evidenceValue(entry) {
   if (entry?.value !== undefined) return String(entry.value);
   return "";

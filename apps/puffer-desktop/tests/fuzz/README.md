@@ -250,6 +250,19 @@ node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs candidate-list \
   --note "reviewer admitted"
 ```
 
+Run the GUIFlow smoke benchmark through the same evidence and citation gate:
+
+```sh
+node apps/puffer-desktop/tests/fuzz/bin/puffer-guiflow-smoke.mjs \
+  --root ~/Riema/guiflow-paper \
+  --suite ~/Riema/guiflow-paper/benchmarks/smoke_suite.json \
+  --out apps/puffer-desktop/tests/fuzz/.runs/guiflow-smoke
+```
+
+The smoke runner is a wiring and validation probe, not a paper result. It
+expects the buggy checkout app to produce one admitted predicate-backed finding
+and the fixed checkout app to produce zero admitted findings.
+
 ## Recommended Workflow
 
 1. Start with `schedule --limit 2` or `schedule --limit 4` for small campaigns.
