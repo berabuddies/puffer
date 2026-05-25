@@ -16,6 +16,7 @@ pub mod exit_plan_mode;
 pub mod exit_worktree;
 pub mod goal;
 pub mod http_request;
+pub mod image_generation;
 pub mod lark;
 pub mod lambda_internal;
 pub mod lsp;
