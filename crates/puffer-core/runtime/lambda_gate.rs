@@ -73,6 +73,7 @@ pub(crate) struct LambdaToolSig {
     context_req: Option<LambdaFact>,
     concrete_tools: BTreeSet<String>,
     concrete_input_contracts: BTreeMap<String, LambdaInputPattern>,
+    proof_params: BTreeSet<String>,
 }
 
 impl LambdaToolSig {
@@ -166,6 +167,26 @@ impl LambdaToolSig {
             .iter()
             .map(|param| param.name.clone())
             .collect::<BTreeSet<_>>();
+        for proof_param in &self.proof_params {
+            let Some(param) = self.params.iter().find(|param| param.name == *proof_param) else {
+                return Err(anyhow!(
+                    "Lambda Skill host tool {} proof parameter {} is not declared",
+                    self.name,
+                    proof_param
+                ));
+            };
+            if !type_check::has_refinement_in_type(&param.ty) {
+                return Err(anyhow!(
+                    "Lambda Skill host tool {} proof parameter {} must carry a runtime refinement",
+                    self.name,
+                    proof_param
+                ));
+            }
+        }
+        let concrete_bound_params = declared_params
+            .difference(&self.proof_params)
+            .cloned()
+            .collect::<BTreeSet<_>>();
         for param in &self.params {
             let unsupported = type_check::unsupported_refinements_in_type(&param.ty);
             if !unsupported.is_empty() {
@@ -217,12 +238,12 @@ impl LambdaToolSig {
             };
             let mut refs = BTreeSet::new();
             contract.collect_arg_refs(&mut refs);
-            if refs != declared_params {
+            if refs != concrete_bound_params {
                 return Err(anyhow!(
-                    "Lambda Skill host tool {} concrete input contract for {} must bind exactly the formal parameters [{}]",
+                    "Lambda Skill host tool {} concrete input contract for {} must bind exactly the non-proof formal parameters [{}]",
                     self.name,
                     concrete_tool,
-                    declared_params.iter().cloned().collect::<Vec<_>>().join(", ")
+                    concrete_bound_params.iter().cloned().collect::<Vec<_>>().join(", ")
                 ));
             }
         }
@@ -852,6 +873,14 @@ struct ToolSigJson {
         alias = "concrete_input_contracts"
     )]
     concrete_input_contracts: Value,
+    #[serde(
+        default,
+        rename = "proofParams",
+        alias = "proof_params",
+        alias = "ghostParams",
+        alias = "ghost_params"
+    )]
+    proof_params: Vec<String>,
 }
 
 impl ToolSigJson {
@@ -880,6 +909,7 @@ impl ToolSigJson {
             context_req: self.context_req.map(FactJson::into_fact),
             concrete_tools: self.concrete_tools.into_iter().collect(),
             concrete_input_contracts,
+            proof_params: self.proof_params.into_iter().collect(),
         })
     }
 }

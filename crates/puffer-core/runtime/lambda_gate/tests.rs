@@ -511,6 +511,53 @@ fn host_catalogue_runtime_validation_accepts_internal_lambda_step() {
 }
 
 #[test]
+fn proof_params_can_be_checked_without_concrete_binding() {
+    let host = LambdaHostEnv::from_json_str(
+        r#"{"effects":[],"domains":[],"tools":[
+          {"name":"approve_pr","effects":[],"concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":{"$template":"approve ${pr}"}}},"params":[{"name":"pr","ty":"str"}],"registers":[{"pred":"ci_passing","args":["pr"]}]},
+          {"name":"merge_pr","effects":["net_w"],"concreteTools":["Bash"],"concreteInputContracts":{"Bash":{"command":{"$template":"gh pr merge --merge --subject ${shell:subject}"},"run_in_background":false,"timeout":120000,"tty":false}},"params":[{"name":"pr","ty":"Pr{ci_passing(p)}"},{"name":"subject","ty":"str"}],"proofParams":["pr"]}
+        ]}"#,
+    )
+    .unwrap();
+    let mut gate = LambdaGateState::with_host_caps(host);
+
+    assert!(gate
+        .step_call_with_args("approve_pr", &serde_json::json!({"pr": "42"}))
+        .is_accept());
+    assert!(gate
+        .admit_concrete_input_binding(
+            "merge_pr",
+            &serde_json::json!({"pr": "42", "subject": "release"}),
+            "Bash",
+            &serde_json::json!({
+                "command": "gh pr merge --merge --subject 'release'",
+                "run_in_background": false,
+                "timeout": 120000,
+                "tty": false
+            }),
+        )
+        .is_accept());
+}
+
+#[test]
+fn proof_params_must_be_refined_declared_parameters() {
+    let undeclared = validate_host_catalogue_runtime(
+        r#"{"effects":[],"domains":[],"tools":[{"name":"run","effects":["proc"],"concreteTools":["Bash"],"concreteInputContracts":{"Bash":{"command":"run"}},"params":[],"proofParams":["approval"]}]}"#,
+    )
+    .expect_err("undeclared proof param must fail");
+
+    assert!(format!("{undeclared:#}").contains("proof parameter approval is not declared"));
+
+    let unrefined = validate_host_catalogue_runtime(
+        r#"{"effects":[],"domains":[],"tools":[{"name":"run","effects":["proc"],"concreteTools":["Bash"],"concreteInputContracts":{"Bash":{"command":"run"}},"params":[{"name":"approval","ty":"str"}],"proofParams":["approval"]}]}"#,
+    )
+    .expect_err("unrefined proof param must fail");
+
+    assert!(format!("{unrefined:#}")
+        .contains("proof parameter approval must carry a runtime refinement"));
+}
+
+#[test]
 fn host_catalogue_runtime_validation_rejects_malformed_refinement() {
     let error = validate_host_catalogue_runtime(
             r#"{"effects":[],"domains":[],"tools":[{"name":"custom_fetch","effects":[],"concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":{"$arg":"id"}}},"params":[{"name":"id","ty":"str{host_custom_rule id}"}]}]}"#,

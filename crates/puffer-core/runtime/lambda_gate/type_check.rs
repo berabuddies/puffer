@@ -37,6 +37,11 @@ pub(super) fn unsupported_refinements_in_type(ty: &str) -> Vec<String> {
         .collect()
 }
 
+/// Returns whether the type carries at least one explicit refinement segment.
+pub(super) fn has_refinement_in_type(ty: &str) -> bool {
+    !refinement_segments(ty).is_empty()
+}
+
 /// Returns predicate names mentioned by all refinements in this type.
 pub(super) fn predicate_names_in_type(ty: &str) -> Vec<String> {
     let mut names = refinement_segments(ty)
