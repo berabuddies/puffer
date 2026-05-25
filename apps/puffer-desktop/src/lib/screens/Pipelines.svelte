@@ -48,6 +48,16 @@
     label?: string;
   };
 
+  type ConnectorSearchRow = {
+    connector: WorkflowConnector;
+    searchText: string;
+  };
+
+  type ConnectionSearchRow = {
+    connection: WorkflowConnection;
+    searchText: string;
+  };
+
   const providerOptions: ProviderMeta[] = [
     {
       id: "codex",
@@ -108,8 +118,10 @@
   let connectors = $derived(snapshot.connectors ?? []);
   let connections = $derived(snapshot.connections ?? []);
   let triggerReadyConnections = $derived(connections.filter((connection) => connectionTriggerSupported(connection)));
-  let filteredConnections = $derived(filterConnections(connections, connectors, connectorQuery));
-  let filteredConnectors = $derived(filterConnectors(connectors, connectorQuery));
+  let connectorSearchRows = $derived(indexConnectors(connectors));
+  let connectionSearchRows = $derived(indexConnections(connections, connectorSearchRows));
+  let filteredConnections = $derived(filterConnections(connectionSearchRows, connectorQuery));
+  let filteredConnectors = $derived(filterConnectors(connectorSearchRows, connectorQuery));
   let workflow = $derived(
     workflows.find((item) => item.slug === workflowSlug) ?? workflows[0] ?? null
   );
@@ -472,34 +484,60 @@
     return connectionTriggerSupported(connection) ? label : `${label} - no trigger`;
   }
 
-  function matchesConnectorQuery(query: string, parts: Array<string | null | undefined>): boolean {
-    const needle = query.trim().toLowerCase();
-    if (!needle) return true;
-    return parts.some((part) => (part ?? "").toLowerCase().includes(needle));
+  function searchTerms(query: string): string[] {
+    return query.trim().toLowerCase().split(/\s+/).filter(Boolean);
   }
 
-  function filterConnections(items: WorkflowConnection[], catalog: WorkflowConnector[], query: string): WorkflowConnection[] {
-    return items.filter((connection) => {
-      const connector = catalog.find((item) => item.connector_slug === connection.connector_slug);
-      return matchesConnectorQuery(query, [
-        connection.slug,
-        connection.description,
-        connection.connector_slug,
-        connector?.description,
-        connector?.skill
-      ]);
-    });
+  function buildSearchText(parts: Array<string | null | undefined>): string {
+    return parts
+      .map((part) => (part ?? "").trim())
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
   }
 
-  function filterConnectors(items: WorkflowConnector[], query: string): WorkflowConnector[] {
-    return items.filter((connector) =>
-      matchesConnectorQuery(query, [
+  function matchesSearchTerms(terms: string[], searchText: string): boolean {
+    return terms.length === 0 || terms.every((term) => searchText.includes(term));
+  }
+
+  function indexConnectors(items: WorkflowConnector[]): ConnectorSearchRow[] {
+    return items.map((connector) => ({
+      connector,
+      searchText: buildSearchText([
         connector.connector_slug,
         connector.description,
         connector.skill,
         connector.action_slugs.join(" ")
       ])
-    );
+    }));
+  }
+
+  function indexConnections(items: WorkflowConnection[], catalog: ConnectorSearchRow[]): ConnectionSearchRow[] {
+    const catalogBySlug = new Map(catalog.map((row) => [row.connector.connector_slug, row.connector]));
+    return items.map((connection) => {
+      const connector = catalogBySlug.get(connection.connector_slug);
+      return {
+        connection,
+        searchText: buildSearchText([
+          connection.slug,
+          connection.description,
+          connection.connector_slug,
+          connector?.description,
+          connector?.skill,
+          connector?.action_slugs.join(" ")
+        ])
+      };
+    });
+  }
+
+  function filterConnections(rows: ConnectionSearchRow[], query: string): WorkflowConnection[] {
+    const terms = searchTerms(query);
+    return rows.filter((row) => matchesSearchTerms(terms, row.searchText)).map((row) => row.connection);
+  }
+
+  function filterConnectors(rows: ConnectorSearchRow[], query: string): WorkflowConnector[] {
+    const terms = searchTerms(query);
+    return rows.filter((row) => matchesSearchTerms(terms, row.searchText)).map((row) => row.connector);
   }
 
   function updateNode(id: string, patch: Partial<EditablePipelineNode>) {
