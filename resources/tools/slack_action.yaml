@@ -20,6 +20,7 @@ input_schema:
         - listPins
         - memberInfo
         - emojiList
+        - sendMessage
       description: Slack action to perform.
     channel:
       type: string
@@ -30,6 +31,12 @@ input_schema:
     user:
       type: string
       description: Slack user id for user-scoped actions.
+    text:
+      type: string
+      description: Message text for sendMessage.
+    threadTs:
+      type: string
+      description: Optional Slack thread timestamp for threaded sendMessage calls.
     limit:
       type: integer
       minimum: 1

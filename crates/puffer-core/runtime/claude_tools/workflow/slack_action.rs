@@ -18,6 +18,10 @@ struct SlackActionInput {
     #[serde(default)]
     message: Option<String>,
     #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    thread_ts: Option<String>,
+    #[serde(default)]
     user: Option<String>,
     #[serde(default)]
     limit: Option<u32>,
@@ -90,6 +94,19 @@ fn slack_api_request(input: SlackActionInput) -> Result<SlackApiRequest> {
             method: "emoji.list",
             params: Vec::new(),
         }),
+        "sendMessage" => {
+            let mut params = vec![
+                ("channel", required(input.channel, "channel")?),
+                ("text", required(input.text, "text")?),
+            ];
+            if let Some(thread_ts) = optional(input.thread_ts) {
+                params.push(("thread_ts", thread_ts));
+            }
+            Ok(SlackApiRequest {
+                method: "chat.postMessage",
+                params,
+            })
+        }
         other => bail!("unsupported SlackAction action `{other}`"),
     }
 }
@@ -99,6 +116,12 @@ fn required(value: Option<String>, name: &str) -> Result<String> {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .with_context(|| format!("SlackAction `{name}` is required"))
+}
+
+fn optional(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn slack_token() -> Result<String> {
@@ -138,6 +161,8 @@ mod tests {
             action: "reactions".to_string(),
             channel: Some("C123".to_string()),
             message: Some("1712023032.1234".to_string()),
+            text: None,
+            thread_ts: None,
             user: None,
             limit: None,
         })
@@ -161,6 +186,8 @@ mod tests {
             action: "readMessages".to_string(),
             channel: Some("C123".to_string()),
             message: None,
+            text: None,
+            thread_ts: None,
             user: None,
             limit: Some(500),
         })
@@ -172,6 +199,32 @@ mod tests {
                 ("channel", "C123".to_string()),
                 ("limit", "200".to_string())
             ]
+        );
+    }
+
+    #[test]
+    fn builds_send_message_request() {
+        let request = slack_api_request(SlackActionInput {
+            action: "sendMessage".to_string(),
+            channel: Some("D123".to_string()),
+            message: None,
+            text: Some("hello".to_string()),
+            thread_ts: Some("1712023032.1234".to_string()),
+            user: None,
+            limit: None,
+        })
+        .unwrap();
+
+        assert_eq!(
+            request,
+            SlackApiRequest {
+                method: "chat.postMessage",
+                params: vec![
+                    ("channel", "D123".to_string()),
+                    ("text", "hello".to_string()),
+                    ("thread_ts", "1712023032.1234".to_string())
+                ],
+            }
         );
     }
 
