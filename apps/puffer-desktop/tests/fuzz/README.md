@@ -144,6 +144,13 @@ fake daemon method names:
 node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs validate
 ```
 
+Run the local no-network selftest for evidence citation, admission, candidate,
+and ledger invariants:
+
+```sh
+node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-selftest.mjs
+```
+
 Run a one-command smoke check that validates metadata and writes a small run
 plus report:
 

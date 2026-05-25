@@ -9,6 +9,7 @@
     "run": "node bin/puffer-fuzz.mjs run",
     "report": "node bin/puffer-fuzz.mjs report",
     "validate": "node bin/puffer-fuzz.mjs validate",
+    "selftest": "node bin/puffer-fuzz-selftest.mjs",
     "smoke": "node bin/puffer-fuzz.mjs smoke",
     "frontier": "node bin/puffer-fuzz.mjs frontier",
     "schedule": "node bin/puffer-fuzz.mjs schedule",
