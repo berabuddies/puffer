@@ -153,9 +153,9 @@ node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-selftest.mjs
 
 Run the full local plan verifier. It checks syntax, metadata, selftests,
 bounded replay evidence, no-key deterministic triage, tree evolution, GUIFlow
-smoke, and a Codex-planned AgentFlow offline campaign. It writes temporary
-feedback and coverage ledgers under `.runs/` instead of touching the tracked
-ledgers:
+smoke, two bridge-shard replays, and a Codex-planned AgentFlow offline
+campaign. It writes temporary feedback and coverage ledgers under `.runs/`
+instead of touching the tracked ledgers:
 
 ```sh
 node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-verify-plan.mjs \

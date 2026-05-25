@@ -66,6 +66,14 @@ run("evolution", "Tree evolution and bridge-aware scheduling", [
   `test "$(jq '.selectedShardIds | length' ${sh(path.join(outDir, "schedule.json"))})" -eq 2`
 ].join(" && "));
 
+run("bridge-replay", "Two bridge shards replay through evidence path", [
+  `rm -rf ${sh(path.join(fuzzRoot, ".runs", `${namespace}-bridge-chat`))} ${sh(path.join(fuzzRoot, ".runs", `${namespace}-bridge-model`))}`,
+  `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-replay-loop.mjs --seeds chat-turn-race --shard bridge-chat-permission-session-reload --limit 1 --attempts 1 --timeout 90 --rng-seed ${sh(`${namespace}-bridge-chat`)} --namespace ${sh(`${namespace}-bridge-chat`)}`,
+  `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-replay-loop.mjs --seeds provider-auth-model-race --shard bridge-new-agent-settings-model --limit 1 --attempts 1 --timeout 90 --rng-seed ${sh(`${namespace}-bridge-model`)} --namespace ${sh(`${namespace}-bridge-model`)}`,
+  `test "$(jq '.evidence_index | length' ${sh(path.join(fuzzRoot, ".runs", `${namespace}-bridge-chat`, "bounded-replay-report.json"))})" -gt 0`,
+  `test "$(jq '.evidence_index | length' ${sh(path.join(fuzzRoot, ".runs", `${namespace}-bridge-model`, "bounded-replay-report.json"))})" -gt 0`
+].join(" && "), { timeout: 240_000 });
+
 if (skipGuiflow) {
   skip("guiflow-smoke", "GUIFlow smoke benchmark skipped by flag");
 } else if (!envSummary.guiflowRoot) {
