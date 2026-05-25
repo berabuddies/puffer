@@ -75,6 +75,8 @@ function readShard(dir) {
     reviewerJson: relative(reviewerJson),
     missingReplay: data === null,
     summary,
+    evidenceCount: Array.isArray(data?.evidence_index) ? data.evidence_index.length : 0,
+    evidenceByType: countEvidenceTypes(data?.evidence_index ?? []),
     findings: data?.findings ?? [],
     verdict,
     gate,
@@ -87,7 +89,10 @@ function readShard(dir) {
 function isCampaignControlDir(name, namespace) {
   return name === `${namespace}-runs` ||
     name === `${namespace}-local-runs` ||
+    name === `${namespace}-preflight` ||
+    name === `${namespace}-scheduler-preselect` ||
     name.endsWith("-local-runs") ||
+    name.endsWith("-preflight") ||
     name.endsWith("-scheduler-preselect");
 }
 
@@ -130,11 +135,14 @@ function summarize(shards) {
     reviewerDismissDecisions: 0,
     reviewerHumanQueueDecisions: 0,
     totalReplayCases: 0,
+    evidenceEntries: 0,
     newCandidateFindings: 0,
     knownDuplicateFindings: 0,
     nonPassingFailures: 0,
     actionableFailures: 0,
-    byClassification: {}
+    byClassification: {},
+    evidenceByType: {},
+    gateFailureReasons: {}
   };
   for (const shard of shards) {
     if (shard.missingReplay) {
@@ -154,12 +162,21 @@ function summarize(shards) {
     if (shard.reviewer?.decision === "human_queue") summary.reviewerHumanQueueDecisions += 1;
     summary.legacyBugListAppendBlocks += shard.bugListAppendBlocks.length;
     summary.totalReplayCases += Number(shard.summary.total ?? 0);
+    summary.evidenceEntries += shard.evidenceCount;
     summary.newCandidateFindings += Number(shard.summary.newCandidateFindings ?? 0);
     summary.knownDuplicateFindings += Number(shard.summary.knownDuplicateFindings ?? 0);
     summary.nonPassingFailures += Number(shard.summary.nonPassingFailures ?? shard.summary.actionableFailures ?? 0);
     summary.actionableFailures += Number(shard.summary.actionableFailures ?? 0);
     for (const [classification, count] of Object.entries(shard.summary.byClassification ?? {})) {
       summary.byClassification[classification] = (summary.byClassification[classification] ?? 0) + Number(count ?? 0);
+    }
+    for (const [type, count] of Object.entries(shard.evidenceByType ?? {})) {
+      summary.evidenceByType[type] = (summary.evidenceByType[type] ?? 0) + Number(count ?? 0);
+    }
+    if (["candidate", "gate_failed"].includes(shard.gate?.disposition)) {
+      for (const reason of shard.gate?.failureReasons ?? []) {
+        summary.gateFailureReasons[reason] = (summary.gateFailureReasons[reason] ?? 0) + 1;
+      }
     }
   }
   return summary;
@@ -173,6 +190,15 @@ function emptySummary() {
     nonPassingFailures: 0,
     actionableFailures: 0
   };
+}
+
+function countEvidenceTypes(evidenceIndex) {
+  const counts = {};
+  for (const entry of evidenceIndex ?? []) {
+    const type = String(entry.type ?? "unknown");
+    counts[type] = (counts[type] ?? 0) + 1;
+  }
+  return counts;
 }
 
 function extractBugListAppendBlocks(text) {
@@ -283,6 +309,7 @@ function formatMarkdown(payload) {
     `- Reviewer reports present: ${payload.summary.reviewerReportsPresent}`,
     `- Reviewer decisions admit/dismiss/human_queue: ${payload.summary.reviewerAdmitDecisions}/${payload.summary.reviewerDismissDecisions}/${payload.summary.reviewerHumanQueueDecisions}`,
     `- Replay cases: ${payload.summary.totalReplayCases}`,
+    `- Evidence entries: ${payload.summary.evidenceEntries}`,
     `- New candidate findings: ${payload.summary.newCandidateFindings}`,
     `- Known duplicate findings: ${payload.summary.knownDuplicateFindings}`,
     `- Non-passing failures: ${payload.summary.nonPassingFailures}`,
@@ -305,6 +332,18 @@ function formatMarkdown(payload) {
   }
   lines.push(
     "",
+    "## Evidence By Type",
+    ""
+  );
+  appendCountLines(lines, payload.summary.evidenceByType);
+  lines.push(
+    "",
+    "## Gate Failure Reasons",
+    ""
+  );
+  appendCountLines(lines, payload.summary.gateFailureReasons);
+  lines.push(
+    "",
     "## Classification",
     ""
   );
@@ -322,6 +361,7 @@ function formatMarkdown(payload) {
     lines.push(`- Citation gate: ${shard.gate ? `${shard.gateJson} (${shard.gate.disposition})` : "missing"}`);
     lines.push(`- Reviewer: ${shard.reviewer ? `${shard.reviewerJson} (${shard.reviewer.decision})` : "missing"}`);
     lines.push(`- Replay cases: ${shard.summary.total ?? 0}`);
+    lines.push(`- Evidence entries: ${shard.evidenceCount}`);
     lines.push(`- New candidates: ${shard.summary.newCandidateFindings ?? 0}`);
     lines.push(`- Known duplicates: ${shard.summary.knownDuplicateFindings ?? 0}`);
     lines.push(`- Non-passing failures: ${shard.summary.nonPassingFailures ?? shard.summary.actionableFailures ?? 0}`);

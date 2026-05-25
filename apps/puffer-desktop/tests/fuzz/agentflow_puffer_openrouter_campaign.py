@@ -57,7 +57,8 @@ SHARD_LIMIT = os.environ.get("PUFFER_OPENROUTER_SHARD_LIMIT", "2")
 CONCURRENCY = int(os.environ.get("PUFFER_OPENROUTER_CONCURRENCY", "2"))
 PLANNER_MODEL = os.environ.get("PUFFER_OPENROUTER_PLANNER_MODEL", "gpt-5.4")
 PLANNER_EFFORT = os.environ.get("PUFFER_OPENROUTER_PLANNER_EFFORT", "high")
-PRESELECT_DIR = "apps/puffer-desktop/tests/fuzz/.runs/openrouter-scheduler-preselect"
+PREFLIGHT_DIR = f"apps/puffer-desktop/tests/fuzz/.runs/{NAMESPACE}-preflight"
+PRESELECT_DIR = f"apps/puffer-desktop/tests/fuzz/.runs/{NAMESPACE}-scheduler-preselect"
 
 
 def scheduled_areas():
@@ -154,8 +155,8 @@ Read only these files:
 - {TASK_PATH}
 - apps/puffer-desktop/tests/fuzz/README.md
 - apps/puffer-desktop/tests/fuzz/agent_guide.md
-- apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight/prompt-evolution.md
-- apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight/evolved-schedule.md
+- {PREFLIGHT_DIR}/prompt-evolution.md
+- {PREFLIGHT_DIR}/evolved-schedule.md
 - apps/puffer-desktop/tests/fuzz/playwright_adapter.md
 - apps/puffer-desktop/tests/fuzz/BUGS.md
 
@@ -229,7 +230,7 @@ apps/puffer-desktop/tests/fuzz/BUGS.md.
 
 PLAN_SCRIPT = f"""\
 set -euo pipefail
-preflight_dir="apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight"
+preflight_dir="{PREFLIGHT_DIR}"
 mkdir -p "$preflight_dir"
 prompt_file="$preflight_dir/planner-prompt.txt"
 fallback_file="$preflight_dir/fallback-plan.md"
@@ -273,8 +274,9 @@ fi
 SHARD_SCRIPT = """\
 set -euo pipefail
 out_dir="apps/puffer-desktop/tests/fuzz/.runs/{{ item.namespace }}"
+preflight_dir="apps/puffer-desktop/tests/fuzz/.runs/${PUFFER_OPENROUTER_NAMESPACE:-openrouter-small}-preflight"
 mkdir -p "$out_dir"
-cp apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight/prompt-evolution.md "$out_dir/prompt-evolution.md"
+cp "$preflight_dir/prompt-evolution.md" "$out_dir/prompt-evolution.md"
 cat > "$out_dir/planner.md" <<'PLANNER_EOF'
 {{ nodes.plan.output }}
 PLANNER_EOF
@@ -418,13 +420,13 @@ with Graph(
         script=(
             "set -euo pipefail\n"
             "test -n \"${OPENROUTER_API_KEY:-}\" || test \"${PUFFER_OPENROUTER_OFFLINE_SMOKE:-0}\" = \"1\"\n"
-            "rm -rf apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight apps/puffer-desktop/tests/fuzz/.runs/openrouter-campaign\n"
+            f"rm -rf {PREFLIGHT_DIR} apps/puffer-desktop/tests/fuzz/.runs/openrouter-campaign\n"
             + CLEAN_SELECTED_ARTIFACTS
-            + "mkdir -p apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight\n"
+            + f"mkdir -p {PREFLIGHT_DIR}\n"
             "node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs validate\n"
-            "node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs evolve-prompt --out apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight/prompt-evolution.md --json-out apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight/prompt-evolution.json\n"
-            "node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs evolve-tree --out apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight/evolved-schedule.md --json-out apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight/evolved-schedule.json\n"
-            "node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs schedule --limit ${PUFFER_OPENROUTER_SHARD_LIMIT:-2} --namespace ${PUFFER_OPENROUTER_NAMESPACE:-openrouter-small} --evolution apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight/evolved-schedule.json --out apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight/schedule.md --json-out apps/puffer-desktop/tests/fuzz/.runs/openrouter-preflight/schedule.json\n"
+            f"node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs evolve-prompt --out {PREFLIGHT_DIR}/prompt-evolution.md --json-out {PREFLIGHT_DIR}/prompt-evolution.json\n"
+            f"node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs evolve-tree --out {PREFLIGHT_DIR}/evolved-schedule.md --json-out {PREFLIGHT_DIR}/evolved-schedule.json\n"
+            f"node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs schedule --limit ${{PUFFER_OPENROUTER_SHARD_LIMIT:-2}} --namespace ${{PUFFER_OPENROUTER_NAMESPACE:-openrouter-small}} --evolution {PREFLIGHT_DIR}/evolved-schedule.json --out {PREFLIGHT_DIR}/schedule.md --json-out {PREFLIGHT_DIR}/schedule.json\n"
             "echo OPENROUTER_PREFLIGHT_OK\n"
         ),
         timeout_seconds=120,

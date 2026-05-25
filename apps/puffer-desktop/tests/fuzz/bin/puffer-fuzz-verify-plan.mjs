@@ -69,6 +69,8 @@ run("reviewer-aggregate", "Candidate reviewer artifacts appear in aggregate", [
   `test "$(jq '.summary.candidateVerdicts' ${sh(path.join(outDir, "reviewer-aggregate.json"))})" -ge 1`,
   `test "$(jq '.summary.reviewerReportsPresent' ${sh(path.join(outDir, "reviewer-aggregate.json"))})" -ge 1`,
   `test "$(jq '.summary.reviewerHumanQueueDecisions' ${sh(path.join(outDir, "reviewer-aggregate.json"))})" -ge 1`,
+  `test "$(jq '.summary.evidenceByType.action' ${sh(path.join(outDir, "reviewer-aggregate.json"))})" -ge 1`,
+  `test "$(jq '.summary.gateFailureReasons | length' ${sh(path.join(outDir, "reviewer-aggregate.json"))})" -ge 1`,
   `test "$(jq '.blockerSummary.topBlockers | length' ${sh(path.join(outDir, "reviewer-aggregate.json"))})" -ge 1`,
   `jq -e '.blockerSummary.topBlockers[] | select(.type == "candidate-review")' ${sh(path.join(outDir, "reviewer-aggregate.json"))} >/dev/null`
 ].join(" && "));
@@ -157,15 +159,19 @@ if (skipAgentflow) {
     `export PUFFER_OPENROUTER_PLAN_NODE_TIMEOUT_SECONDS=30`,
     `export PUFFER_OPENROUTER_FEEDBACK_LEDGER=${sh(path.join(outDir, "scale-feedback-ledger.json"))}`,
     `export PUFFER_OPENROUTER_COVERAGE_LEDGER=${sh(path.join(outDir, "scale-coverage-ledger.json"))}`,
+    `rm -rf ${sh(path.join(outDir, "scale-agentflow-local-runs"))} ${sh(path.join(outDir, "scale-feedback-ledger.json"))} ${sh(path.join(outDir, "scale-coverage-ledger.json"))}`,
     `agentflow run apps/puffer-desktop/tests/fuzz/agentflow_puffer_openrouter_campaign.py --runs-dir ${sh(path.join(outDir, "scale-agentflow-local-runs"))} --output summary`,
     `PUFFER_OPENROUTER_NAMESPACE=${sh(`${namespace}-scale50`)} node apps/puffer-desktop/tests/fuzz/bin/puffer-openrouter-aggregate.mjs`,
     `cp apps/puffer-desktop/tests/fuzz/.runs/openrouter-campaign/puffer_openrouter_fuzz_report.json ${sh(path.join(outDir, "scale-aggregate.json"))}`,
     `test "$(jq '.summary.shards' ${sh(path.join(outDir, "scale-aggregate.json"))})" -eq 50`,
     `test "$(jq '.summary.missingReplayReports' ${sh(path.join(outDir, "scale-aggregate.json"))})" -eq 0`,
     `test "$(jq '.summary.verdictReportsPresent' ${sh(path.join(outDir, "scale-aggregate.json"))})" -eq 50`,
+    `test "$(jq '.summary.evidenceEntries' ${sh(path.join(outDir, "scale-aggregate.json"))})" -eq 50`,
+    `test "$(jq '.summary.evidenceByType.action' ${sh(path.join(outDir, "scale-aggregate.json"))})" -eq 50`,
     `test "$(jq '.blockerSummary.ready' ${sh(path.join(outDir, "scale-aggregate.json"))})" = "true"`,
     `test "$(jq '.blockerSummary.topBlockers | length' ${sh(path.join(outDir, "scale-aggregate.json"))})" -eq 0`,
     `test "$(jq '.runs | length' ${sh(path.join(outDir, "scale-feedback-ledger.json"))})" -eq 50`,
+    `test "$(jq '[.runs[].namespace] | unique | length' ${sh(path.join(outDir, "scale-feedback-ledger.json"))})" -eq 50`,
     `test "$(jq '.runtimeCoverage.shards | length' ${sh(path.join(outDir, "scale-coverage-ledger.json"))})" -ge 1`
   ].join(" && "), { timeout: 420_000 });
 }

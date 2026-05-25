@@ -264,15 +264,21 @@ handoff. Codex plans the shard boundaries and report expectations, the
 OpenRouter-backed Explorer uses function tools to construct the assigned GUI
 trigger sequence, the harness replays that generated case, and an
 OpenRouter-backed triage step writes the shard finding report. Preflight also
-writes an evolution plan and passes it back into scheduling. Triage now emits a
-strict `verdict.json`; the citation gate writes `verdict-gate.json`, and only
-the main agent can append admitted verdicts to `BUGS.md` with
+writes a namespace-isolated evolution plan and passes it back into scheduling,
+so parallel campaigns cannot delete each other's preflight prompt pack. Triage
+now emits a strict `verdict.json`; the citation gate writes `verdict-gate.json`,
+and only the main agent can append admitted verdicts to `BUGS.md` with
 `bug-list --append-from-verdict`. Candidate verdicts can be reviewed with
 `puffer-openrouter-reviewer.mjs`; the reviewer writes
 `reviewer.json` but does not edit ledgers. It defaults to two shards and two-way
 concurrency. Increase `PUFFER_OPENROUTER_SHARD_LIMIT` and
 `PUFFER_OPENROUTER_CONCURRENCY` only after the small run shows acceptable
 instruction-following and false-positive rates.
+
+The aggregate report includes verdict counts, reviewer decisions, evidence
+entries by type, gate failure reason counts, blocker summaries, replay totals,
+and duplicate/flake-related replay counters. Use it as the campaign-level
+readiness artifact instead of reading individual shard logs first.
 
 For a local no-network orchestration smoke, set
 `PUFFER_OPENROUTER_OFFLINE_SMOKE=1` and omit `OPENROUTER_API_KEY`. This uses a
