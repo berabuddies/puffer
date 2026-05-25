@@ -21,6 +21,7 @@ const DEFERRED_TOOL_NAMES: &[&str] = &[
     "ListMcpResourcesTool",
     "LSP",
     "NotebookEdit",
+    "ProcessControl",
     "ReadMcpResourceTool",
     "RemoteTrigger",
     "SendMessage",

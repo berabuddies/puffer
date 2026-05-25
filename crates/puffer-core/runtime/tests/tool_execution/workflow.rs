@@ -22,6 +22,72 @@ fn todo_write_rejects_multiple_in_progress_items() {
 }
 
 #[test]
+fn process_control_lists_logs_and_stops_interactive_processes() {
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let process_id = {
+        let mut store = state.process_store.lock().unwrap();
+        let process_id = store.allocate_id();
+        let entry = crate::runtime::process_store::spawn_tracked_process(
+            "printf 'ready\\n'; sleep 30",
+            &cwd,
+            process_id,
+            true,
+        )
+        .unwrap();
+        store.insert(entry);
+        process_id
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let has_output = state
+            .process_store
+            .lock()
+            .unwrap()
+            .peek(process_id)
+            .map(|entry| String::from_utf8_lossy(&entry.collect_output()).contains("ready"))
+            .unwrap_or(false);
+        if has_output || std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let listed = crate::runtime::claude_tools::workflow::process_control::execute_process_control(
+        &mut state,
+        &cwd,
+        json!({ "action": "list" }),
+    )
+    .unwrap();
+    let listed: Value = serde_json::from_str(&listed).unwrap();
+    assert_eq!(listed["processes"][0]["sessionId"], process_id.to_string());
+
+    let log = crate::runtime::claude_tools::workflow::process_control::execute_process_control(
+        &mut state,
+        &cwd,
+        json!({ "action": "log", "sessionId": process_id.to_string() }),
+    )
+    .unwrap();
+    let log: Value = serde_json::from_str(&log).unwrap();
+    assert!(log["output"].as_str().unwrap_or_default().contains("ready"));
+
+    let stopped = crate::runtime::claude_tools::workflow::process_control::execute_process_control(
+        &mut state,
+        &cwd,
+        json!({ "action": "kill", "sessionId": process_id.to_string() }),
+    )
+    .unwrap();
+    let stopped: Value = serde_json::from_str(&stopped).unwrap();
+    assert_eq!(stopped["status"], "killed");
+    assert!(state
+        .process_store
+        .lock()
+        .unwrap()
+        .peek(process_id)
+        .is_none());
+}
+
+#[test]
 fn config_tool_supports_editor_mode() {
     let mut state = temp_state();
     let cwd = state.cwd.clone();

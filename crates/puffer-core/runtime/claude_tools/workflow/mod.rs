@@ -18,6 +18,7 @@ pub mod lsp;
 mod lsp_live;
 mod lsp_live_diagnostics;
 pub mod powershell;
+pub mod process_control;
 pub mod send_message;
 pub mod send_user_message;
 pub mod slack;
