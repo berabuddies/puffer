@@ -8,6 +8,7 @@ mod alertmanager;
 mod asana;
 mod datadog;
 mod grafana;
+mod newrelic;
 mod pagerduty;
 mod sentry;
 mod shopify;
@@ -30,6 +31,7 @@ pub(super) fn provider_inbound(headers: &HeaderMap, payload: &Value) -> Option<I
         .or_else(|| grafana_inbound(headers, payload))
         .or_else(|| alertmanager_inbound(headers, payload))
         .or_else(|| datadog_inbound(headers, payload))
+        .or_else(|| newrelic_inbound(headers, payload))
         .or_else(|| pagerduty_inbound(headers, payload))
         .or_else(|| sentry_inbound(headers, payload))
         .or_else(|| shopify_inbound(headers, payload))
@@ -46,6 +48,11 @@ pub(super) fn alertmanager_inbound(headers: &HeaderMap, payload: &Value) -> Opti
 /// Converts a Datadog webhook payload into an inbound Puffer message.
 pub(super) fn datadog_inbound(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
     datadog::datadog_inbound(headers, payload)
+}
+
+/// Converts a New Relic webhook payload into an inbound Puffer message.
+pub(super) fn newrelic_inbound(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
+    newrelic::newrelic_inbound(headers, payload)
 }
 
 /// Converts a Grafana Alerting webhook payload into an inbound Puffer message.

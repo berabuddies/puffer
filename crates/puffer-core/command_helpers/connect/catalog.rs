@@ -235,6 +235,7 @@ fn connector_template_runtime_hints(template: &ConnectorTemplate) -> Vec<String>
             | "alertmanager-webhook"
             | "asana-webhook"
             | "datadog-webhook"
+            | "newrelic-webhook"
             | "github-webhook"
             | "grafana-webhook"
             | "gitlab-webhook"
@@ -490,6 +491,16 @@ mod tests {
         let slug = resolve_connector_slug(&mut state, &resources, "datadog monitor").expect("slug");
 
         assert_eq!(slug, "datadog-webhook");
+    }
+
+    #[test]
+    fn resolve_connector_slug_accepts_newrelic_webhook_terms() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let slug = resolve_connector_slug(&mut state, &resources, "new relic alert").expect("slug");
+
+        assert_eq!(slug, "newrelic-webhook");
     }
 
     #[test]

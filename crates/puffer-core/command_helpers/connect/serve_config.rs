@@ -223,6 +223,11 @@ fn webhook_preset(connector_slug: &str) -> Result<WebhookPreset> {
             default_path: "/datadog",
             method: "Datadog event webhook",
         },
+        "newrelic-webhook" => WebhookPreset {
+            product: "New Relic",
+            default_path: "/newrelic",
+            method: "New Relic issue webhook",
+        },
         "github-webhook" => WebhookPreset {
             product: "GitHub",
             default_path: "/github",
@@ -442,6 +447,8 @@ mod tests {
             "What URL path should Asana post webhook events to?" => "asana",
             "What bind address should the Datadog webhook listen on?" => "127.0.0.1:9594",
             "What URL path should Datadog post webhook events to?" => "datadog",
+            "What bind address should the New Relic webhook listen on?" => "127.0.0.1:9593",
+            "What URL path should New Relic post webhook events to?" => "newrelic",
             "What bind address should the GitHub webhook listen on?" => "127.0.0.1:9292",
             "What URL path should GitHub post webhook events to?" => "/github",
             "What bind address should the Grafana webhook listen on?" => "127.0.0.1:9596",
@@ -663,6 +670,35 @@ mod tests {
         assert!(raw.contains("bind_address = \"127.0.0.1:9594\""));
         assert!(raw.contains("path = \"/datadog\""));
         assert!(raw.contains("welcome_message = \"Datadog webhook ready.\""));
+    }
+
+    #[test]
+    fn newrelic_webhook_connect_writes_webhook_preset_config() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let result = with_user_question_prompt_handler(
+            |request| answer_request(&request),
+            || {
+                connect_webhook_preset(
+                    &mut state,
+                    &resources,
+                    "newrelic-webhook",
+                    "newrelic-alerts",
+                )
+            },
+        )
+        .expect("connect result");
+
+        assert!(result.summary.contains("connector: newrelic-webhook"));
+        assert!(result.summary.contains("run `puffer serve`"));
+        let path = state.cwd.join(".puffer/connectors.toml");
+        let raw = fs::read_to_string(path).expect("connector config");
+        assert!(raw.contains("[connectors.webhook]"));
+        assert!(raw.contains("display_name = \"newrelic-alerts\""));
+        assert!(raw.contains("bind_address = \"127.0.0.1:9593\""));
+        assert!(raw.contains("path = \"/newrelic\""));
+        assert!(raw.contains("welcome_message = \"New Relic webhook ready.\""));
     }
 
     #[test]

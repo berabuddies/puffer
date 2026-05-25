@@ -127,6 +127,7 @@ fn serve_configured_connector(slug: &str) -> bool {
             | "alertmanager-webhook"
             | "asana-webhook"
             | "datadog-webhook"
+            | "newrelic-webhook"
             | "github-webhook"
             | "grafana-webhook"
             | "gitlab-webhook"

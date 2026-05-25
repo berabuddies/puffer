@@ -327,6 +327,29 @@ pub(super) fn datadog_event_output_schema() -> Value {
     })
 }
 
+/// Returns the New Relic issue webhook output schema.
+pub(super) fn newrelic_issue_output_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "const": "newrelic_issue"},
+            "issue_id": {"type": "string"},
+            "incident_id": {"type": "string"},
+            "title": {"type": "string"},
+            "state": {"type": "string"},
+            "priority": {"type": "string"},
+            "trigger_event": {"type": "string"},
+            "condition": {"type": "string"},
+            "policy": {"type": "string"},
+            "entities": {"type": "string"},
+            "message": {"type": "string"},
+            "url": {"type": "string"}
+        },
+        "required": ["title", "message"],
+        "additionalProperties": true
+    })
+}
+
 /// Returns the Grafana Alerting webhook output schema.
 pub(super) fn grafana_alert_output_schema() -> Value {
     serde_json::json!({
