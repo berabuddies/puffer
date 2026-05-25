@@ -484,18 +484,43 @@ fn host_catalogue_runtime_validation_rejects_effectful_lambda_internal() {
     )
     .expect_err("effectful LambdaInternal binding must fail");
 
-    assert!(format!("{error:#}").contains("binds LambdaInternal despite external effects [net_w]"));
+    assert!(format!("{error:#}").contains("binds LambdaInternal despite runtime effects [net_w]"));
 }
 
 #[test]
-fn host_catalogue_runtime_validation_accepts_internal_lambda_step() {
-    validate_host_catalogue_runtime(
+fn host_catalogue_runtime_validation_rejects_proc_lambda_internal() {
+    let error = validate_host_catalogue_runtime(
         r#"{
             "effects": [],
             "domains": [],
             "tools": [{
                 "name": "classify",
                 "effects": ["proc"],
+                "concreteTools": ["LambdaInternal"],
+                "concreteInputContracts": {
+                    "LambdaInternal": {
+                        "step": "demo.classify",
+                        "args": {"text": {"$arg": "text"}}
+                    }
+                },
+                "params": [{"name": "text", "ty": "str"}]
+            }]
+        }"#,
+    )
+    .expect_err("proc LambdaInternal binding must fail");
+
+    assert!(format!("{error:#}").contains("binds LambdaInternal despite runtime effects [proc]"));
+}
+
+#[test]
+fn host_catalogue_runtime_validation_accepts_pure_internal_lambda_step() {
+    validate_host_catalogue_runtime(
+        r#"{
+            "effects": [],
+            "domains": [],
+            "tools": [{
+                "name": "classify",
+                "effects": [],
                 "concreteTools": ["LambdaInternal"],
                 "concreteInputContracts": {
                     "LambdaInternal": {

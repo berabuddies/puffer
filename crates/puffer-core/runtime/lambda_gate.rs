@@ -154,10 +154,10 @@ impl LambdaToolSig {
         available_facts: &BTreeSet<(String, usize)>,
     ) -> Result<()> {
         if self.concrete_tools.contains("LambdaInternal")
-            && self.effects.iter().any(|effect| effect != "proc")
+            && self.effects.iter().any(|effect| effect != "pure")
         {
             return Err(anyhow!(
-                "Lambda Skill host tool {} binds LambdaInternal despite external effects [{}]",
+                "Lambda Skill host tool {} binds LambdaInternal despite runtime effects [{}]",
                 self.name,
                 self.effects.iter().cloned().collect::<Vec<_>>().join(", ")
             ));
