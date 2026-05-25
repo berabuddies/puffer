@@ -2,7 +2,7 @@
   import "../design/pipeline.css";
 
   import { onMount } from "svelte";
-  import { loadWorkflowSnapshot } from "../api/desktop";
+  import { loadWorkflowSnapshot, saveWorkflow } from "../api/desktop";
   import Icon, { type IconName } from "../design/Icon.svelte";
   import Puffer from "../design/Puffer.svelte";
   import type {
@@ -150,9 +150,10 @@
   let connectionCommandRunningFor = $state<string | null>(null);
   let monitorCommandRunningFor = $state<string | null>(null);
   let monitorTaskCommandRunningFor = $state<string | null>(null);
+  let savingWorkflowSlug = $state<string | null>(null);
   let refreshGeneration = 0;
   let dirtyWorkflowSlugs = $state<string[]>([]);
-  let saveNotice = $state("Draft changes are local until workflow save lands in the daemon.");
+  let saveNotice = $state("Workflow changes save to the daemon.");
 
   let workflows = $derived(editorWorkflows);
   let connectors = $derived(snapshot.connectors ?? []);
@@ -196,6 +197,7 @@
       ? connectorConnectCommand(selectedConnector, selectedConnectorConnectionName.trim())
       : ""
   );
+  let workflowDirty = $derived(workflow ? dirtyWorkflowSlugs.includes(workflow.slug) : false);
 
   let wrapEl = $state<HTMLDivElement | undefined>();
   let scale = $state(0.8);
@@ -329,33 +331,7 @@
     try {
       const next = await loadWorkflowSnapshot();
       if (generation !== refreshGeneration) return;
-      const incoming = next.workflows.length > 0 ? next.workflows.map(editableFromWorkflow) : [starterWorkflow()];
-      const dirtyBySlug = new Map(
-        editorWorkflows
-          .filter((item) => dirtyWorkflowSlugs.includes(item.slug))
-          .map((item) => [item.slug, item])
-      );
-      const merged = incoming.map((item) => dirtyBySlug.get(item.slug) ?? item);
-      for (const dirty of dirtyBySlug.values()) {
-        if (!merged.some((item) => item.slug === dirty.slug)) merged.push(dirty);
-      }
-      snapshot = {
-        workflows: next.workflows,
-        runs: [...next.runs].sort((a, b) => b.idx - a.idx),
-        connectors: next.connectors ?? [],
-        connections: next.connections ?? [],
-        connector_error: next.connector_error ?? null,
-        monitor_tasks: next.monitor_tasks ?? [],
-        monitor_task_error: next.monitor_task_error ?? null
-      };
-      editorWorkflows = merged;
-      if (!workflowSlug || !editorWorkflows.some((item) => item.slug === workflowSlug)) {
-        workflowSlug = editorWorkflows[0]?.slug ?? "agent-review-pipeline";
-      }
-      const activeWorkflow = editorWorkflows.find((item) => item.slug === workflowSlug) ?? editorWorkflows[0];
-      if (!activeWorkflow?.pipeline.nodes.some((node) => node.id === selectedNodeId)) {
-        selectedNodeId = activeWorkflow?.pipeline.nodes[0]?.id ?? null;
-      }
+      applyWorkflowSnapshot(next);
     } catch (err) {
       if (generation !== refreshGeneration) return;
       error = err instanceof Error ? err.message : String(err);
@@ -367,6 +343,36 @@
         loading = false;
         setTimeout(measure, 0);
       }
+    }
+  }
+
+  function applyWorkflowSnapshot(next: WorkflowSnapshot) {
+    const incoming = next.workflows.length > 0 ? next.workflows.map(editableFromWorkflow) : [starterWorkflow()];
+    const dirtyBySlug = new Map(
+      editorWorkflows
+        .filter((item) => dirtyWorkflowSlugs.includes(item.slug))
+        .map((item) => [item.slug, item])
+    );
+    const merged = incoming.map((item) => dirtyBySlug.get(item.slug) ?? item);
+    for (const dirty of dirtyBySlug.values()) {
+      if (!merged.some((item) => item.slug === dirty.slug)) merged.push(dirty);
+    }
+    snapshot = {
+      workflows: next.workflows,
+      runs: [...next.runs].sort((a, b) => b.idx - a.idx),
+      connectors: next.connectors ?? [],
+      connections: next.connections ?? [],
+      connector_error: next.connector_error ?? null,
+      monitor_tasks: next.monitor_tasks ?? [],
+      monitor_task_error: next.monitor_task_error ?? null
+    };
+    editorWorkflows = merged;
+    if (!workflowSlug || !editorWorkflows.some((item) => item.slug === workflowSlug)) {
+      workflowSlug = editorWorkflows[0]?.slug ?? "agent-review-pipeline";
+    }
+    const activeWorkflow = editorWorkflows.find((item) => item.slug === workflowSlug) ?? editorWorkflows[0];
+    if (!activeWorkflow?.pipeline.nodes.some((node) => node.id === selectedNodeId)) {
+      selectedNodeId = activeWorkflow?.pipeline.nodes[0]?.id ?? null;
     }
   }
 
@@ -388,11 +394,17 @@
   function updateCurrentWorkflow(mutator: (item: EditableWorkflow) => EditableWorkflow) {
     if (!workflow) return;
     const dirtySlug = workflow.slug;
-    editorWorkflows = editorWorkflows.map((item) => (item.slug === dirtySlug ? mutator(item) : item));
-    if (!dirtyWorkflowSlugs.includes(dirtySlug)) {
-      dirtyWorkflowSlugs = [...dirtyWorkflowSlugs, dirtySlug];
-    }
-    saveNotice = "Edited locally. Save/export wiring can use this workflow shape.";
+    let updatedSlug = dirtySlug;
+    editorWorkflows = editorWorkflows.map((item) => {
+      if (item.slug !== dirtySlug) return item;
+      const updated = mutator(item);
+      updatedSlug = updated.slug;
+      return updated;
+    });
+    dirtyWorkflowSlugs = Array.from(
+      new Set([...dirtyWorkflowSlugs.filter((slug) => slug !== dirtySlug), updatedSlug])
+    );
+    saveNotice = "Edited locally. Save to persist this workflow.";
   }
 
   function updateWorkflowField(field: "slug" | "enabled" | "name" | "working_dir" | "concurrency", value: string | boolean | number | null) {
@@ -406,6 +418,51 @@
       return { ...item, pipeline: { ...item.pipeline, concurrency: Number(value) || 1 } };
     });
     if (field === "slug") workflowSlug = String(value || oldSlug);
+  }
+
+  function workflowForSave(item: EditableWorkflow): WorkflowDefinition {
+    return {
+      schema: item.schema || "puffer.workflow.v1",
+      slug: item.slug,
+      enabled: item.enabled,
+      trigger: item.trigger,
+      pipeline: {
+        name: item.pipeline.name,
+        working_dir: item.pipeline.working_dir,
+        concurrency: item.pipeline.concurrency,
+        nodes: item.pipeline.nodes.map((node) => ({
+          id: node.id,
+          type: node.type,
+          agent: node.agent,
+          prompt: node.prompt,
+          model: node.model,
+          tools: [...(node.tools ?? [])],
+          env: node.env,
+          depends_on: [...(node.depends_on ?? [])]
+        }))
+      }
+    };
+  }
+
+  async function saveCurrentWorkflow() {
+    if (!workflow || !workflowDirty || savingWorkflowSlug) return;
+    const savedSlug = workflow.slug;
+    savingWorkflowSlug = savedSlug;
+    error = null;
+    saveNotice = `Saving ${savedSlug}...`;
+    try {
+      const next = await saveWorkflow(workflowForSave(workflow));
+      dirtyWorkflowSlugs = dirtyWorkflowSlugs.filter((slug) => slug !== savedSlug);
+      applyWorkflowSnapshot(next);
+      workflowSlug = savedSlug;
+      saveNotice = `Saved ${savedSlug}.`;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      error = message;
+      saveNotice = `Could not save ${savedSlug}: ${message}`;
+    } finally {
+      savingWorkflowSlug = null;
+    }
   }
 
   function updateTriggerField(field: "source_topic" | "connection_slug" | "pattern" | "cron", value: string) {
@@ -1155,6 +1212,18 @@
           <Icon name="plus" size={12} />{provider.short}
         </button>
       {/each}
+      <button
+        type="button"
+        class="sc-btn"
+        data-variant="ghost"
+        data-size="sm"
+        aria-label="Save workflow"
+        aria-busy={savingWorkflowSlug === workflow?.slug}
+        disabled={!workflow || !workflowDirty || savingWorkflowSlug !== null}
+        onclick={saveCurrentWorkflow}
+      >
+        <Icon name="check" size={12} />{savingWorkflowSlug === workflow?.slug ? "Saving" : workflowDirty ? "Save" : "Saved"}
+      </button>
       <button
         type="button"
         class="sc-btn"

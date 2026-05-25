@@ -18,6 +18,7 @@ import type {
   SettingsSnapshot,
   MessageActor,
   TimelineItem,
+  WorkflowDefinition,
   WorkflowRun,
   WorkflowSnapshot
 } from "../types";
@@ -1086,6 +1087,12 @@ export async function renameSession(sessionId: string, title: string): Promise<S
 export async function loadWorkflowSnapshot(): Promise<WorkflowSnapshot> {
   const client = await ensureLocalDaemonClient();
   return client.request<WorkflowSnapshot>("workflow_list");
+}
+
+/** Persist one workflow definition through the daemon and return the refreshed snapshot. */
+export async function saveWorkflow(workflow: WorkflowDefinition): Promise<WorkflowSnapshot> {
+  const client = await ensureLocalDaemonClient();
+  return client.request<WorkflowSnapshot>("workflow_save", { workflow });
 }
 
 /** Load runs for one workflow slug from the daemon. */

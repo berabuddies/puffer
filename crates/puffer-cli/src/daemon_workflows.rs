@@ -8,7 +8,7 @@ use puffer_subscriptions::{
     connector_workflow_trigger_supported, suggested_connection_slug, ConnectionRecord,
     SubscriberManifestRoots,
 };
-use puffer_workflow::WorkflowStore;
+use puffer_workflow::{RegisterOptions, WorkflowStore};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::fs;
@@ -16,6 +16,21 @@ use std::fs;
 /// Returns the workflow editor snapshot with connector catalog context.
 pub(crate) fn handle_workflow_list(paths: &ConfigPaths) -> Result<Value> {
     let store = WorkflowStore::new(&paths.workspace_config_dir);
+    let mut snapshot = serde_json::to_value(store.snapshot()?)?;
+    add_connector_context(paths, &mut snapshot);
+    add_monitor_task_context(paths, &mut snapshot);
+    Ok(snapshot)
+}
+
+/// Saves one workflow definition and returns the refreshed editor snapshot.
+pub(crate) fn handle_workflow_save(paths: &ConfigPaths, params: &Value) -> Result<Value> {
+    let workflow = params
+        .get("workflow")
+        .or_else(|| params.get("definition"))
+        .cloned()
+        .context("missing workflow")?;
+    let store = WorkflowStore::new(&paths.workspace_config_dir);
+    store.register_json(workflow, RegisterOptions::default())?;
     let mut snapshot = serde_json::to_value(store.snapshot()?)?;
     add_connector_context(paths, &mut snapshot);
     add_monitor_task_context(paths, &mut snapshot);
@@ -408,5 +423,40 @@ mod tests {
 
         assert_eq!(snapshot["monitor_tasks"].as_array().unwrap().len(), 0);
         assert_eq!(snapshot["monitor_task_error"], Value::Null);
+    }
+
+    #[test]
+    fn workflow_save_upserts_definition_and_returns_snapshot() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths::discover(tempdir.path());
+
+        let snapshot = handle_workflow_save(
+            &paths,
+            &json!({
+                "workflow": {
+                    "schema": "puffer.workflow.v1",
+                    "slug": "saved-pipeline",
+                    "enabled": true,
+                    "trigger": {"type": "connection", "connection_slug": "telegram-user", "pattern": "hi"},
+                    "pipeline": {
+                        "name": "Saved pipeline",
+                        "nodes": [
+                            {"id": "reply", "type": "puffer", "prompt": "Draft a reply."}
+                        ]
+                    }
+                }
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(snapshot["workflows"].as_array().unwrap().len(), 1);
+        assert_eq!(snapshot["workflows"][0]["slug"], "saved-pipeline");
+        assert_eq!(
+            snapshot["workflows"][0]["pipeline"]["name"],
+            "Saved pipeline"
+        );
+
+        let listed = handle_workflow_list(&paths).unwrap();
+        assert_eq!(listed["workflows"][0]["slug"], "saved-pipeline");
     }
 }

@@ -71,6 +71,33 @@ test("pipeline connector search selects a connection trigger", async ({ page }) 
   await expect(page.locator(".pf-pipe-graph").getByRole("button", { name: /telegram-user/ })).toBeVisible();
 });
 
+test("pipeline editor saves workflow changes through daemon", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const saveButton = page.getByRole("button", { name: "Save workflow" });
+  await expect(saveButton).toBeDisabled();
+
+  await page.locator(".pf-editor-config").getByLabel("Name").fill("Saved monitor pipeline");
+  await expect(saveButton).toBeEnabled();
+  await expect(page.locator(".pf-pipe-save-note")).toContainText("Save to persist");
+
+  await saveButton.click();
+  const request = await daemon.waitForRequest("workflow_save");
+  const workflow = request.params.workflow as {
+    slug?: string;
+    pipeline?: { name?: string; nodes?: Array<{ type?: string }> };
+  };
+  expect(workflow.slug).toBe("agent-review-pipeline");
+  expect(workflow.pipeline?.name).toBe("Saved monitor pipeline");
+  expect(workflow.pipeline?.nodes?.[0]?.type).toBe("codex");
+  await expect(page.locator(".pf-pipe-save-note")).toContainText("Saved agent-review-pipeline.");
+  await expect(saveButton).toBeDisabled();
+});
+
 test("pipeline connector search matches multiple metadata terms", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);

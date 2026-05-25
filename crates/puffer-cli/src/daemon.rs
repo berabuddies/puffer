@@ -819,6 +819,10 @@ async fn dispatch_request(
             crate::daemon_browser::handle_browser_agent(&s, &p)
         })),
         "workflow_list" => respond!(crate::daemon_workflows::handle_workflow_list(&state.paths)),
+        "workflow_save" => respond!(crate::daemon_workflows::handle_workflow_save(
+            &state.paths,
+            &params
+        )),
         "workflow_runs_list" => respond!(crate::daemon_workflows::handle_workflow_runs_list(
             &state.paths,
             &params

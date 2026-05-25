@@ -994,15 +994,9 @@ export class FakeDaemon {
       case "browser_recording":
         return { frames: this.browserRecordings.get(String(request.params.sessionId ?? "")) ?? [] };
       case "workflow_list":
-        return {
-          workflows: this.workflowSnapshot.workflows.map((workflow) => ({ ...workflow })),
-          runs: this.workflowSnapshot.runs.map((run) => ({ ...run })),
-          connectors: this.workflowSnapshot.connectors?.map((connector) => ({ ...connector })) ?? [],
-          connections: this.workflowSnapshot.connections?.map((connection) => ({ ...connection })) ?? [],
-          connector_error: this.workflowSnapshot.connector_error ?? null,
-          monitor_tasks: this.workflowSnapshot.monitor_tasks?.map((task) => ({ ...task })) ?? [],
-          monitor_task_error: this.workflowSnapshot.monitor_task_error ?? null
-        };
+        return this.workflowListResponse();
+      case "workflow_save":
+        return this.saveWorkflow(request.params);
       case "list_dir":
         return this.listDir(request.params);
       case "load_file_tabs":
@@ -1022,6 +1016,32 @@ export class FakeDaemon {
       default:
         throw new Error(`Unhandled fake daemon method: ${request.method}`);
     }
+  }
+
+  private workflowListResponse(): JsonRecord {
+    return {
+      workflows: this.workflowSnapshot.workflows.map((workflow) => ({ ...workflow })),
+      runs: this.workflowSnapshot.runs.map((run) => ({ ...run })),
+      connectors: this.workflowSnapshot.connectors?.map((connector) => ({ ...connector })) ?? [],
+      connections: this.workflowSnapshot.connections?.map((connection) => ({ ...connection })) ?? [],
+      connector_error: this.workflowSnapshot.connector_error ?? null,
+      monitor_tasks: this.workflowSnapshot.monitor_tasks?.map((task) => ({ ...task })) ?? [],
+      monitor_task_error: this.workflowSnapshot.monitor_task_error ?? null
+    };
+  }
+
+  private saveWorkflow(params: JsonRecord): JsonRecord {
+    const workflow = params.workflow as JsonRecord | undefined;
+    const slug = String(workflow?.slug ?? "");
+    if (!workflow || !slug) throw new Error("missing workflow");
+    this.workflowSnapshot = {
+      ...this.workflowSnapshot,
+      workflows: [
+        ...this.workflowSnapshot.workflows.filter((candidate) => candidate.slug !== slug),
+        { ...workflow }
+      ].sort((a, b) => String(a.slug ?? "").localeCompare(String(b.slug ?? "")))
+    };
+    return this.workflowListResponse();
   }
 
   private throwQueuedFailure(method: string): void {
