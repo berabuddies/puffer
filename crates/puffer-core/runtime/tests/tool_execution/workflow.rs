@@ -1,6 +1,9 @@
 use super::*;
 use puffer_config::ConfigPaths;
 use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::thread;
 use std::time::Duration;
 
 #[test]
@@ -215,6 +218,88 @@ fn task_flow_bindings_and_buffers_do_not_spawn_or_call_network() {
     assert!(error
         .to_string()
         .contains("namespace must be a simple identifier"));
+}
+
+#[test]
+fn http_request_sends_declared_json_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/v1/search", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let read = stream.read(&mut buffer).unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if String::from_utf8_lossy(&request).contains("\"query\":\"alpha\"") {
+                break;
+            }
+        }
+        let request_text = String::from_utf8_lossy(&request).to_string();
+        let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"ok\":true}";
+        stream.write_all(response.as_bytes()).unwrap();
+        request_text
+    });
+
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let output = crate::runtime::claude_tools::workflow::http_request::execute_http_request(
+        &mut state,
+        &cwd,
+        json!({
+            "method": "POST",
+            "url": url,
+            "headers": {
+                "Authorization": "Bearer token",
+                "Notion-Version": "2022-06-28"
+            },
+            "json": {"query": "alpha"},
+            "timeoutMs": 5000
+        }),
+    )
+    .unwrap();
+    let request_text = server.join().unwrap();
+    assert!(request_text.starts_with("POST /v1/search HTTP/1.1"));
+    assert!(request_text.contains("authorization: Bearer token"));
+    assert!(request_text.contains("notion-version: 2022-06-28"));
+    assert!(request_text.contains("\"query\":\"alpha\""));
+
+    let parsed: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["status"], 200);
+    assert_eq!(parsed["body"], "{\"ok\":true}");
+}
+
+#[test]
+fn http_request_fails_closed_on_http_errors_by_default() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/denied", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buffer = [0_u8; 256];
+        let _ = stream.read(&mut buffer).unwrap();
+        let response = "HTTP/1.1 403 Forbidden\r\nContent-Length: 6\r\n\r\ndenied";
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+
+    let mut state = temp_state();
+    let cwd = state.cwd.clone();
+    let error = crate::runtime::claude_tools::workflow::http_request::execute_http_request(
+        &mut state,
+        &cwd,
+        json!({
+            "method": "GET",
+            "url": url
+        }),
+    )
+    .unwrap_err();
+    server.join().unwrap();
+    assert!(error
+        .to_string()
+        .contains("HTTP request failed with status 403"));
 }
 
 #[test]

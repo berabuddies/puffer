@@ -750,6 +750,7 @@ pub fn execute_workflow_tool(
         "get_goal" => workflow::goal::execute_get_goal(state, cwd, input),
         "create_goal" => workflow::goal::execute_create_goal(state, cwd, input),
         "update_goal" => workflow::goal::execute_update_goal(state, cwd, input),
+        "HttpRequest" => workflow::http_request::execute_http_request(state, cwd, input),
         "Lark" => workflow::lark::execute_lark(state, cwd, input),
         "LSP" => workflow::lsp::execute_lsp(state, resources, cwd, input),
         "ProcessControl" => workflow::process_control::execute_process_control(state, cwd, input),
