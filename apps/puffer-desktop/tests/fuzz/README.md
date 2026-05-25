@@ -68,6 +68,10 @@ node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs bug-list \
   --actual "two resolve_permission requests are sent" \
   --impact "duplicate tool execution or confusing approval state"
 node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs bug-list \
+  --append-from-verdict \
+  --verdict apps/puffer-desktop/tests/fuzz/.runs/<run>/verdict.json \
+  --gate apps/puffer-desktop/tests/fuzz/.runs/<run>/verdict-gate.json
+node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs bug-list \
   --set-status \
   --id PUF-FUZZ-0001 \
   --status fixed \

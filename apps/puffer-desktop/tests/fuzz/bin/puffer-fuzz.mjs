@@ -127,6 +127,7 @@ Commands:
   replay --input run.json --case-id chat-turn-race-0001 --out /tmp/replay.spec.ts
   shrink --input run.json --case-id chat-turn-race-0001 --out /tmp/shrunk-run.json --report-out /tmp/shrink.md
   bug-list --append --title "..." --severity P1 --area chat --shard chat-composer-send --evidence apps/.../final.md
+  bug-list --append-from-verdict --verdict apps/.../verdict.json --gate apps/.../verdict-gate.json
   bug-list --set-status --id PUF-FUZZ-0001 --status fixed --note "fixed by abc123"
   candidate-list --append --verdict apps/.../verdict.json --gate apps/.../verdict-gate.json --evidence apps/.../bounded-replay-report.json
   candidate-list --set-status --id PUF-CAND-0001 --status soft-bug --note "reviewer admitted"
@@ -554,6 +555,11 @@ async function main() {
 
   if (command === "bug-list") {
     const bugListPath = args["bug-list"] ?? defaultBugListPath;
+    if (args["append-from-verdict"]) {
+      const text = await appendBugListEntryFromVerdict(bugListPath, args);
+      process.stdout.write(text);
+      return;
+    }
     if (args.append) {
       const text = await appendBugListEntry(bugListPath, args);
       process.stdout.write(text);
@@ -682,6 +688,36 @@ async function appendBugListEntry(filePath, args) {
     const next = insertBugListRow(current, row).trimEnd() + `\n\n${detail}`;
     await writeBugList(filePath, next);
     return `Appended ${id} to ${filePath}\n`;
+  });
+}
+
+async function appendBugListEntryFromVerdict(filePath, args) {
+  const verdictPath = requiredArg(args, "verdict");
+  const gatePath = requiredArg(args, "gate");
+  const verdict = await readJson(verdictPath);
+  const gate = await readJson(gatePath);
+  if (gate.disposition !== "admitted") {
+    throw new Error(`Refusing to append BUGS entry with gate disposition ${gate.disposition}`);
+  }
+  return appendBugListEntry(filePath, {
+    ...args,
+    title: verdict.title,
+    status: args.status ?? "pending",
+    severity: verdict.severity,
+    area: verdict.area,
+    shard: verdict.shard,
+    evidence: verdictPath,
+    "source-run": verdict.source_run,
+    stability: "citation-gated",
+    expected: verdict.expected,
+    actual: verdict.actual,
+    impact: verdict.impact,
+    repro: (verdict.repro ?? []).join(" / "),
+    notes: [
+      verdict.notes,
+      `gate=${gatePath}`,
+      `clauses=${(gate.clauses ?? []).map((clause) => `${clause.id}:${clause.passed ? "pass" : "fail"}`).join(",")}`
+    ].filter(Boolean).join("; ")
   });
 }
 
