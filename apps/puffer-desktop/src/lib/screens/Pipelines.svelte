@@ -129,6 +129,7 @@
   const connectorFilterPresets: ConnectorFilterPreset[] = [
     { label: "All", query: "" },
     { label: "Trigger", query: "trigger-ready" },
+    { label: "Draft", query: "draft" },
     { label: "Monitor", query: "monitor" },
     { label: "Tasks", query: "monitor task" },
     { label: "Repair", query: "repair" },
@@ -217,6 +218,11 @@
   let selectedConnectorCommand = $derived(
     selectedConnector && !selectedConnectorConnectionInvalid
       ? connectorConnectCommand(selectedConnector, selectedConnectorConnectionName.trim())
+      : ""
+  );
+  let selectedConnectorDraftCommand = $derived(
+    selectedConnector && connectorTriggerSupported(selectedConnector) && !selectedConnectorConnectionInvalid
+      ? workflowDraftCommand(selectedConnectorConnectionName.trim())
       : ""
   );
   let workflowDirty = $derived(workflow ? dirtyWorkflowSlugs.includes(workflow.slug) : false);
@@ -693,6 +699,22 @@
     createWorkflowDraftForConnector(selectedConnector, selectedConnectorConnectionName);
   }
 
+  function workflowDraftCommand(connectionSlug: string): string {
+    const slug = connectionSlug.trim();
+    return slug ? `/workflows new ${slug}-workflow ${slug}` : "";
+  }
+
+  function connectionDraftCommand(connection: WorkflowConnection): string {
+    return workflowDraftCommand(connection.slug);
+  }
+
+  function connectorDraftCommand(connector: WorkflowConnector, plannedConnectionName?: string): string {
+    const existingConnection = plannedConnectionName
+      ? connectionsForConnector(connector.connector_slug).find((connection) => connection.slug === plannedConnectionName)
+      : connectionsForConnector(connector.connector_slug)[0];
+    return workflowDraftCommand(plannedConnectionName || existingConnection?.slug || connectorConnectionHint(connector));
+  }
+
   function connectorConnectionHint(connector: WorkflowConnector): string {
     return connector.suggested_connection_slug || connector.connector_slug;
   }
@@ -721,19 +743,32 @@
     }));
   }
 
+  async function copyWorkflowCommand(command: string) {
+    if (!command.trim()) return;
+    try {
+      await navigator.clipboard.writeText(command.trim());
+      saveNotice = `Copied ${command}.`;
+    } catch (err) {
+      saveNotice = "Clipboard unavailable. Select and copy the command manually.";
+    }
+  }
+
   async function copySelectedConnectorCommand() {
     const command = selectedConnectorCommand.trim();
     if (selectedConnectorConnectionInvalid) {
       saveNotice = "Connection names must use lowercase letters, digits, and hyphens.";
       return;
     }
-    if (!command) return;
-    try {
-      await navigator.clipboard.writeText(command);
-      saveNotice = `Copied ${command}.`;
-    } catch (err) {
-      saveNotice = "Clipboard unavailable. Select and copy the command manually.";
+    await copyWorkflowCommand(command);
+  }
+
+  async function copySelectedConnectorDraftCommand() {
+    const command = selectedConnectorDraftCommand.trim();
+    if (selectedConnectorConnectionInvalid) {
+      saveNotice = "Connection names must use lowercase letters, digits, and hyphens.";
+      return;
     }
+    await copyWorkflowCommand(command);
   }
 
   async function runSelectedConnectorCommand() {
@@ -1002,6 +1037,7 @@
           connector.connect_command,
           connector.suggested_connection_slug,
           connectorCapabilitySearchText(connector),
+          connectorTriggerSupported(connector) ? `${connectorDraftCommand(connector)} draft workflow new` : undefined,
           connectorConnections.map((connection) => `${connection.slug} ${connection.description}`).join(" "),
           "connect setup",
           connector.action_slugs.join(" ")
@@ -1045,6 +1081,7 @@
           connection.state,
           connection.connect_command,
           connection.monitor_command,
+          connectionTriggerSupported(connection) ? `${connectionDraftCommand(connection)} draft workflow new` : undefined,
           "connect repair reconnect",
           connection.has_consumer ? "consumer active active" : "consumer idle idle",
           connectionMonitorSupported(connection) ? "monitor monitorable" : undefined,
@@ -1701,6 +1738,7 @@
                     {@const canMonitor = connectionMonitorSupported(connection)}
                     {@const connectCommand = connectionConnectCommand(connection)}
                     {@const monitorCommand = connectionMonitorCommand(connection)}
+                    {@const draftCommand = connectionDraftCommand(connection)}
                     {@const runtimeHints = connectorRuntimeHints(connector)}
                     {@const actionSlugs = connectorActionSlugs(connector, connectorQuery)}
                     {@const hiddenActions = connectorHiddenActionCount(connector, actionSlugs)}
@@ -1747,7 +1785,7 @@
                         type="button"
                         class="pf-icon-btn pf-draft-btn"
                         aria-label={`Create workflow draft for ${connection.slug}`}
-                        title={`Create workflow draft for ${connection.slug}`}
+                        title={draftCommand}
                         disabled={!canTrigger}
                         onclick={() => createWorkflowDraftForConnection(connection)}
                       >
@@ -1885,6 +1923,7 @@
                     {@const connectorConnections = connectionsForConnector(connector.connector_slug)}
                     {@const canTrigger = connectorTriggerSupported(connector)}
                     {@const connectCommand = connectorConnectCommand(connector)}
+                    {@const draftCommand = connectorDraftCommand(connector)}
                     {@const runtimeHints = connectorRuntimeHints(connector)}
                     {@const actionSlugs = connectorActionSlugs(connector, connectorQuery)}
                     {@const hiddenActions = connectorHiddenActionCount(connector, actionSlugs)}
@@ -1936,7 +1975,7 @@
                         type="button"
                         class="pf-icon-btn pf-draft-btn"
                         aria-label={`Create workflow draft for ${connector.connector_slug}`}
-                        title={`Create workflow draft for ${connector.connector_slug}`}
+                        title={draftCommand}
                         disabled={!canTrigger}
                         onclick={() => createWorkflowDraftForConnector(connector)}
                       >
@@ -2001,6 +2040,24 @@
                         {/if}
                       </div>
                     </div>
+                    {#if connectorTriggerSupported(selectedConnector)}
+                      <div class="pf-connector-command pf-connector-draft-command" aria-label="Selected workflow draft command">
+                        <Icon name="terminal" size={12} />
+                        <code>{selectedConnectorDraftCommand || "Enter a valid connection name."}</code>
+                        <div class="pf-connector-command-actions">
+                          <button
+                            type="button"
+                            class="pf-icon-btn"
+                            aria-label="Copy workflow draft command"
+                            title="Copy workflow draft command"
+                            disabled={!selectedConnectorDraftCommand}
+                            onclick={copySelectedConnectorDraftCommand}
+                          >
+                            <Icon name="copy" size={12} />
+                          </button>
+                        </div>
+                      </div>
+                    {/if}
                   </div>
                 {/if}
               {/if}

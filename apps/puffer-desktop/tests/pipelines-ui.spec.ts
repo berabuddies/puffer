@@ -190,7 +190,9 @@ test("pipeline connector catalog can create a workflow draft for a connector", a
   await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
 
   await page.getByLabel("Search connectors").fill("telegram personal");
-  await page.getByRole("button", { name: "Create workflow draft for telegram-login" }).click();
+  const draftButton = page.getByRole("button", { name: "Create workflow draft for telegram-login" });
+  await expect(draftButton).toHaveAttribute("title", "/workflows new telegram-user-workflow telegram-user");
+  await draftButton.click();
 
   await expect(page.locator(".pf-pipe-save-note")).toContainText("Created telegram-user-backed workflow locally");
   await expect(page.locator(".pf-editor-config").getByLabel("Name", { exact: true })).toHaveValue("Telegram User workflow");
@@ -213,6 +215,62 @@ test("pipeline connector catalog can create a workflow draft for a connector", a
     connection_slug: "telegram-user",
     pattern: ".*"
   });
+});
+
+test("pipeline connector search matches workflow draft commands", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const catalog = page.locator('[aria-label="Connector catalog"]');
+  const connections = page.locator('[aria-label="Connections"]');
+  const resultSummary = page.getByLabel("Connector search results");
+
+  await page.getByLabel("Search connectors").fill("draft /workflows new telegram-user");
+  await expect(resultSummary).toHaveText("1/11 connectors; 1/2 connections");
+  await expect(catalog.getByRole("button", { name: "Plan telegram-login workflow trigger" })).toBeVisible();
+  await expect(connections.getByRole("button", { name: "Use telegram-user as workflow trigger" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Create workflow draft for telegram-user" })).toHaveAttribute(
+    "title",
+    "/workflows new telegram-user-workflow telegram-user"
+  );
+
+  await page.getByLabel("Search connectors").fill("draft /workflows new email-workflow email");
+  await expect(resultSummary).toHaveText("1/11 connectors; 0/2 connections");
+  await expect(catalog.getByRole("button", { name: "Plan email workflow trigger" })).toBeVisible();
+});
+
+test("pipeline selected connector exposes a copyable workflow draft command", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: async (text: string) => {
+          (window as Window & { __copiedWorkflowCommand?: string }).__copiedWorkflowCommand = text;
+        }
+      }
+    });
+  });
+
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  await page.getByLabel("Search connectors").fill("email events");
+  await page.locator('[aria-label="Connector catalog"]').getByRole("button", { name: "Plan email workflow trigger" }).click();
+  await page.getByLabel("Connector connection name").fill("email-personal");
+
+  const draftCommand = page.getByLabel("Selected workflow draft command");
+  await expect(draftCommand).toContainText("/workflows new email-personal-workflow email-personal");
+  await draftCommand.getByRole("button", { name: "Copy workflow draft command" }).click();
+  await expect(page.locator(".pf-pipe-save-note")).toContainText("Copied /workflows new email-personal-workflow email-personal.");
+
+  const copied = await page.evaluate(() => (window as Window & { __copiedWorkflowCommand?: string }).__copiedWorkflowCommand);
+  expect(copied).toBe("/workflows new email-personal-workflow email-personal");
 });
 
 test("pipeline selected connector can create a planned workflow draft", async ({ page }) => {
@@ -350,6 +408,11 @@ test("pipeline connector filter presets apply stable search terms", async ({ pag
   await expect(page.getByLabel("Search connectors")).toHaveValue("trigger-ready");
   await expect(resultSummary).toHaveText("2/11 connectors; 1/2 connections");
   await expect(filters.getByRole("button", { name: "Trigger", exact: true })).toHaveAttribute("aria-pressed", "true");
+
+  await filters.getByRole("button", { name: "Draft" }).click();
+  await expect(page.getByLabel("Search connectors")).toHaveValue("draft");
+  await expect(resultSummary).toHaveText("2/11 connectors; 1/2 connections");
+  await expect(filters.getByRole("button", { name: "Draft" })).toHaveAttribute("aria-pressed", "true");
 
   await filters.getByRole("button", { name: "Monitor" }).click();
   await expect(page.getByLabel("Search connectors")).toHaveValue("monitor");
