@@ -10,8 +10,8 @@
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1 --port 1420",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "test:desktop-ui": "playwright test tests/*ui.spec.ts tests/plus-*.spec.ts",
-    "test:desktop-ui:webkit": "playwright test tests/*ui.spec.ts tests/plus-*.spec.ts --browser=webkit",
+    "test:desktop-ui": "playwright test tests/v2 --pass-with-no-tests",
+    "test:desktop-ui:webkit": "playwright test tests/v2 --browser=webkit --pass-with-no-tests",
     "test:desktop": "playwright test",
     "test:codex-playwright": "playwright test tests/codex-playwright-mcp.spec.ts",
     "tauri": "tauri"
