@@ -37,6 +37,8 @@ import { buildReplayTemplate, defaultReplaySpecPath, formatReplayMarkdown, selec
 import {
   applyReplayFeedback,
   buildShardSchedule,
+  evolveShardTree,
+  formatEvolutionMarkdown,
   formatScheduleMarkdown,
   loadFeedbackLedger,
   loadShards,
@@ -115,6 +117,7 @@ Commands:
   gate --gate-profile bootstrap --out /tmp/puffer_uiux_ready.md
   schedule --limit 4 --out apps/puffer-desktop/tests/fuzz/.runs/manual/schedule.md
   record-feedback --shard chat-composer-send --input apps/puffer-desktop/tests/fuzz/.runs/<run>/bounded-replay-report.json
+  evolve-tree --out apps/puffer-desktop/tests/fuzz/.runs/manual/evolved-schedule.md --json-out apps/puffer-desktop/tests/fuzz/.runs/manual/evolved-schedule.json
   evolve-prompt --out apps/puffer-desktop/tests/fuzz/.runs/manual/prompt-evolution.md
   corpus --from-replay apps/puffer-desktop/tests/fuzz/.runs/<run>/bounded-replay-report.json --out apps/puffer-desktop/tests/fuzz/.runs/<run>/corpus.json
   corpus --input apps/puffer-desktop/tests/fuzz/.runs/<run>/corpus.json --run-out apps/puffer-desktop/tests/fuzz/.runs/<run>/corpus-run.json
@@ -142,6 +145,7 @@ Options:
   --ledger <path>     Default: apps/puffer-desktop/tests/fuzz/coverage-ledger.json
   --no-coverage-ledger Do not update runtime coverage when recording feedback
   --feedback-ledger <path> Default: apps/puffer-desktop/tests/fuzz/feedback-ledger.json
+  --evolution <path> Evolution plan JSON for schedule score adjustments
   --corpus <path>    Default: apps/puffer-desktop/tests/fuzz/corpus/puffer-corpus.json
   --bug-list <path> Default: apps/puffer-desktop/tests/fuzz/BUGS.md
   --candidate-list <path> Default: apps/puffer-desktop/tests/fuzz/BUGS_CAND.md
@@ -256,6 +260,7 @@ async function main() {
     const uiTree = await readJson(args["ui-tree"] ?? defaultUiTreePath);
     const shards = await loadShards(args["shard-dir"] ?? defaultShardDir);
     const feedbackLedger = await loadFeedbackLedger(args["feedback-ledger"] ?? defaultFeedbackLedgerPath);
+    const evolutionPlan = args.evolution ? await readJson(args.evolution) : null;
     let fakeDaemonSource = "";
     try {
       fakeDaemonSource = await readFileText(args["fake-daemon"] ?? defaultFakeDaemonPath);
@@ -354,6 +359,7 @@ async function main() {
     const shards = await loadShards(args["shard-dir"] ?? defaultShardDir);
     const coverageLedger = await loadLedger(args.ledger ?? defaultLedgerPath);
     const feedbackLedger = await loadFeedbackLedger(args["feedback-ledger"] ?? defaultFeedbackLedgerPath);
+    const evolutionPlan = args.evolution ? await readJson(args.evolution) : null;
     const validation = validateSchedulerModel(manifest, allSeeds, uiTree, shards, feedbackLedger);
     if (!validation.ok) {
       for (const item of validation.errors) process.stderr.write(`- ${item}\n`);
@@ -366,6 +372,7 @@ async function main() {
       shards: args.shards,
       exclude: args.exclude,
       intentManifest,
+      evolutionPlan,
       "min-iterations": args["min-iterations"],
       "max-iterations": args["max-iterations"]
     });
@@ -374,6 +381,26 @@ async function main() {
     if (args["json-out"]) await writeJson(args["json-out"], schedule);
     if (args.format === "json") {
       process.stdout.write(`${JSON.stringify(schedule, null, 2)}\n`);
+    } else {
+      process.stdout.write(markdown);
+    }
+    return;
+  }
+
+  if (command === "evolve-tree") {
+    const uiTree = await readJson(args["ui-tree"] ?? defaultUiTreePath);
+    const shards = await loadShards(args["shard-dir"] ?? defaultShardDir);
+    const feedbackLedger = await loadFeedbackLedger(args["feedback-ledger"] ?? defaultFeedbackLedgerPath);
+    const plan = evolveShardTree(uiTree, shards, feedbackLedger, {
+      starvationFloor: args["starvation-floor"],
+      demoteGamma: args["demote-gamma"],
+      maxDemotions: args["max-demotions"]
+    });
+    const markdown = formatEvolutionMarkdown(plan);
+    if (args.out) await writeText(args.out, markdown);
+    if (args["json-out"]) await writeJson(args["json-out"], plan);
+    if (args.format === "json") {
+      process.stdout.write(`${JSON.stringify(plan, null, 2)}\n`);
     } else {
       process.stdout.write(markdown);
     }

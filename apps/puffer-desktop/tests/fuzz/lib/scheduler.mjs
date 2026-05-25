@@ -118,6 +118,7 @@ export function buildShardSchedule(manifest, seeds, uiTree, shards, coverageLedg
       runtimeCoverage: coverageLedger.runtimeCoverage?.shards?.[shard.id] ?? {},
       layeredFrontier: layeredFrontierForShard(shard, options.intentManifest),
       treeNode: treeNodeById.get(shard.startNode),
+      evolution: options.evolutionPlan?.shards?.[shard.id] ?? {},
       namespace,
       minIterations: options["min-iterations"],
       maxIterations: options["max-iterations"]
@@ -175,6 +176,119 @@ export function formatScheduleMarkdown(schedule) {
     lines.push("");
     lines.push("Commands:");
     for (const command of item.commands) lines.push(`- \`${command}\``);
+    lines.push("");
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+export function evolveShardTree(uiTree, shards, feedbackLedger = {}, options = {}) {
+  const floor = Number(options.starvationFloor ?? 5);
+  const demoteGamma = Number(options.demoteGamma ?? 0.5);
+  const maxDemotions = Number(options.maxDemotions ?? 3);
+  const runs = [...(feedbackLedger.runs ?? [])].sort((left, right) =>
+    String(left.recordedAt ?? "").localeCompare(String(right.recordedAt ?? ""))
+  );
+  const nodeById = new Map((uiTree.nodes ?? []).map((node) => [node.id, node]));
+  const runScores = runs.map((run, index) => ({
+    ...run,
+    index,
+    hotness: runHotness(run)
+  }));
+  const sortedScores = runScores.map((run) => run.hotness).sort((left, right) => left - right);
+  const p20 = percentile(sortedScores, 0.2);
+  const p80 = percentile(sortedScores, 0.8);
+  const lastRunIndexByShard = new Map();
+  for (const run of runScores) lastRunIndexByShard.set(run.shardId, run.index);
+
+  const previousEvolution = feedbackLedger.evolution?.shards ?? {};
+  const evolved = {};
+  const decisions = [];
+  for (const shard of shards) {
+    const shardRuns = runScores.filter((run) => run.shardId === shard.id);
+    const lastTwo = shardRuns.slice(-2);
+    const previous = previousEvolution[shard.id] ?? {};
+    const previousDemotions = Number(previous.demotions ?? 0);
+    const hotTwo = lastTwo.length >= 2 && lastTwo.every((run) => run.hotness >= p80);
+    const coldTwo = lastTwo.length >= 2 && lastTwo.every((run) => run.hotness <= p20);
+    const lastRunIndex = lastRunIndexByShard.get(shard.id);
+    const roundsSinceLast = lastRunIndex === undefined ? Infinity : Math.max(0, runScores.length - 1 - lastRunIndex);
+    const starved = roundsSinceLast >= floor || (lastRunIndex === undefined && runs.length >= floor);
+    const node = nodeById.get(shard.startNode);
+    const children = node?.children ?? [];
+    let schedulabilityWeight = Number(previous.schedulabilityWeight ?? 1);
+    let demotions = previousDemotions;
+    const actions = [];
+
+    if (hotTwo && children.length > 0) {
+      actions.push("split");
+    }
+    if (coldTwo && demotions < maxDemotions) {
+      schedulabilityWeight = Number((schedulabilityWeight * demoteGamma).toFixed(3));
+      demotions += 1;
+      actions.push("demote");
+    }
+    if (starved) {
+      actions.push("force-starvation-floor");
+    }
+    if (actions.length === 0) actions.push("keep");
+
+    evolved[shard.id] = {
+      shardId: shard.id,
+      startNode: shard.startNode,
+      actions,
+      schedulabilityWeight,
+      demotions,
+      forceSchedule: actions.includes("force-starvation-floor"),
+      splitChildren: actions.includes("split") ? children : [],
+      recentHotness: lastTwo.map((run) => run.hotness),
+      lastRunIndex: lastRunIndex ?? null,
+      roundsSinceLast: Number.isFinite(roundsSinceLast) ? roundsSinceLast : null
+    };
+    decisions.push(evolved[shard.id]);
+  }
+
+  return {
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    policy: {
+      topPercentile: 0.8,
+      bottomPercentile: 0.2,
+      p20,
+      p80,
+      starvationFloor: floor,
+      demoteGamma,
+      maxDemotions
+    },
+    runCount: runScores.length,
+    shards: evolved,
+    decisions
+  };
+}
+
+export function formatEvolutionMarkdown(plan) {
+  const lines = [
+    "# Puffer UI Tree Evolution Plan",
+    "",
+    `Generated: ${plan.generatedAt}`,
+    `Runs considered: ${plan.runCount}`,
+    `Hot threshold p80: ${plan.policy.p80}`,
+    `Cold threshold p20: ${plan.policy.p20}`,
+    `Starvation floor: ${plan.policy.starvationFloor}`,
+    "",
+    "## Decisions",
+    ""
+  ];
+  for (const item of plan.decisions ?? []) {
+    lines.push(`### ${item.shardId}`);
+    lines.push("");
+    lines.push(`- Actions: ${item.actions.join(", ")}`);
+    lines.push(`- Start node: ${item.startNode}`);
+    lines.push(`- Weight: ${item.schedulabilityWeight}`);
+    lines.push(`- Demotions: ${item.demotions}`);
+    lines.push(`- Force schedule: ${item.forceSchedule ? "yes" : "no"}`);
+    lines.push(`- Split children: ${item.splitChildren.join(", ") || "none"}`);
+    lines.push(`- Recent hotness: ${item.recentHotness.join(", ") || "none"}`);
+    lines.push(`- Rounds since last run: ${item.roundsSinceLast ?? "never"}`);
     lines.push("");
   }
   return `${lines.join("\n")}\n`;
@@ -283,6 +397,8 @@ function scoreShard(shard, context) {
   score -= Math.round(duplicateRate * 20);
   score -= outOfScopeCount * 6;
   score -= Math.min(runtimeEdgeCount, 20);
+  score = Math.round(score * Number(context.evolution.schedulabilityWeight ?? 1));
+  if (context.evolution.forceSchedule) score += 10_000;
 
   const baseIterations = Number(shard.iterations ?? 8);
   const minIterations = Number(context.minIterations ?? 4);
@@ -331,7 +447,8 @@ function scoreShard(shard, context) {
       runtimeEdgeCount,
       intentIds,
       raceIds,
-      layeredPriority
+      layeredPriority,
+      evolution: context.evolution
     },
     artifacts: {
       runPath,
@@ -367,6 +484,23 @@ function layeredFrontierForShard(shard, intentManifest = {}) {
       ...races.map((race) => Number(race.priority ?? 0))
     )
   };
+}
+
+function runHotness(run) {
+  const total = Number(run.total ?? 0);
+  const covered = Array.isArray(run.coveredTags) ? run.coveredTags.length : 0;
+  return Number(run.actionableFailures ?? 0) * 12 +
+    Number(run.newCandidateFindings ?? 0) * 10 +
+    Number(run.stableFailed ?? 0) * 4 +
+    Number(run.timeout ?? 0) * 2 +
+    covered +
+    Math.min(total, 5);
+}
+
+function percentile(values, fraction) {
+  if (values.length === 0) return 0;
+  const index = Math.min(values.length - 1, Math.max(0, Math.ceil(values.length * fraction) - 1));
+  return Number(values[index] ?? 0);
 }
 
 function emptyShardFeedback() {
