@@ -84,8 +84,8 @@ test("pipeline connector search matches multiple metadata terms", async ({ page 
   await expect(catalog.getByText("slack-app")).not.toBeVisible();
 
   await page.getByLabel("Search connectors").fill("web actions");
-  await expect(catalog.getByText("slack-app")).toBeVisible();
-  await expect(catalog.getByText("telegram-login")).not.toBeVisible();
+  await expect(catalog.getByRole("button", { name: "Select slack-app connector setup" })).toBeVisible();
+  await expect(catalog.getByRole("button", { name: "Plan telegram-login workflow trigger" })).not.toBeVisible();
 });
 
 test("pipeline connector catalog shows built-in coverage and result counts", async ({ page }) => {
@@ -125,6 +125,29 @@ test("pipeline connector catalog shows built-in coverage and result counts", asy
   await expect(resultSummary).toHaveText("1/11 connectors; 0/2 connections");
   await expect(catalog.getByRole("button", { name: "Select webhook connector setup" })).toBeVisible();
   await expect(catalog.getByRole("button", { name: "Select matrix-bot connector setup" })).not.toBeVisible();
+});
+
+test("pipeline connector catalog shows and searches existing connection names", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const catalog = page.locator('[aria-label="Connector catalog"]');
+  const resultSummary = page.getByLabel("Connector search results");
+
+  await page.getByLabel("Search connectors").fill("telegram-user");
+  await expect(resultSummary).toHaveText("1/11 connectors; 1/2 connections");
+  const telegram = catalog.getByRole("button", { name: "Plan telegram-login workflow trigger" });
+  await expect(telegram).toContainText("conn:telegram-user");
+  await expect(catalog.getByRole("button", { name: "Select slack-app connector setup" })).not.toBeVisible();
+
+  await page.getByLabel("Search connectors").fill("workspace slack-app");
+  await expect(resultSummary).toHaveText("1/11 connectors; 1/2 connections");
+  const slack = catalog.getByRole("button", { name: "Select slack-app connector setup" });
+  await expect(slack).toContainText("conn:slack-app");
+  await expect(catalog.getByRole("button", { name: "Plan telegram-login workflow trigger" })).not.toBeVisible();
 });
 
 test("pipeline connector search matches setup-only capability terms", async ({ page }) => {

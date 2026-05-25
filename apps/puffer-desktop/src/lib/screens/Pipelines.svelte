@@ -129,7 +129,7 @@
   let connectors = $derived(snapshot.connectors ?? []);
   let connections = $derived(snapshot.connections ?? []);
   let triggerReadyConnections = $derived(connections.filter((connection) => connectionTriggerSupported(connection)));
-  let connectorSearchRows = $derived(indexConnectors(connectors));
+  let connectorSearchRows = $derived(indexConnectors(connectors, connections));
   let connectionSearchRows = $derived(indexConnections(connections, connectorSearchRows));
   let filteredConnections = $derived(filterConnections(connectionSearchRows, connectorQuery));
   let filteredConnectors = $derived(filterConnectors(connectorSearchRows, connectorQuery));
@@ -658,20 +658,26 @@
     return terms.length === 0 || terms.every((term) => searchText.includes(term));
   }
 
-  function indexConnectors(items: WorkflowConnector[]): ConnectorSearchRow[] {
-    return items.map((connector) => ({
-      connector,
-      searchText: buildSearchText([
-        connector.connector_slug,
-        connector.description,
-        connector.skill,
-        connector.connect_command,
-        connector.suggested_connection_slug,
-        connectorCapabilitySearchText(connector),
-        "connect setup",
-        connector.action_slugs.join(" ")
-      ])
-    }));
+  function indexConnectors(items: WorkflowConnector[], existingConnections: WorkflowConnection[]): ConnectorSearchRow[] {
+    return items.map((connector) => {
+      const connectorConnections = existingConnections.filter(
+        (connection) => connection.connector_slug === connector.connector_slug
+      );
+      return {
+        connector,
+        searchText: buildSearchText([
+          connector.connector_slug,
+          connector.description,
+          connector.skill,
+          connector.connect_command,
+          connector.suggested_connection_slug,
+          connectorCapabilitySearchText(connector),
+          connectorConnections.map((connection) => `${connection.slug} ${connection.description}`).join(" "),
+          "connect setup",
+          connector.action_slugs.join(" ")
+        ])
+      };
+    });
   }
 
   function connectorCapabilitySearchText(connector: WorkflowConnector): string {
@@ -1314,6 +1320,8 @@
                     {@const connectCommand = connectorConnectCommand(connector)}
                     {@const actionSlugs = connectorActionSlugs(connector, connectorQuery)}
                     {@const hiddenActions = connectorHiddenActionCount(connector, actionSlugs)}
+                    {@const visibleConnections = connectorConnections.slice(0, 2)}
+                    {@const hiddenConnections = Math.max(0, connectorConnections.length - visibleConnections.length)}
                     <div class="pf-connector-row-group">
                       <button
                         type="button"
@@ -1336,7 +1344,10 @@
                             <span class="pf-connector-action">{action}</span>
                           {/each}
                           {#if hiddenActions > 0}<span>+{hiddenActions} actions</span>{/if}
-                          {#if connectorConnections.length > 0}<span>{connectorConnections.length} conn</span>{/if}
+                          {#each visibleConnections as connection}
+                            <span class="pf-connector-connection">conn:{connection.slug}</span>
+                          {/each}
+                          {#if hiddenConnections > 0}<span>+{hiddenConnections} conn</span>{/if}
                         </span>
                       </button>
                       <button
