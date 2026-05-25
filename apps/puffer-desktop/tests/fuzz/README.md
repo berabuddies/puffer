@@ -151,6 +151,20 @@ schema, and ledger invariants:
 node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-selftest.mjs
 ```
 
+Run the full local plan verifier. It checks syntax, metadata, selftests,
+bounded replay evidence, no-key deterministic triage, tree evolution, GUIFlow
+smoke, and a Codex-planned AgentFlow offline campaign. It writes temporary
+feedback and coverage ledgers under `.runs/` instead of touching the tracked
+ledgers:
+
+```sh
+node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-verify-plan.mjs \
+  --out apps/puffer-desktop/tests/fuzz/.runs/plan-verify
+```
+
+To require a real OpenRouter small-model campaign, pass
+`--require-real-openrouter` with `OPENROUTER_API_KEY` already exported.
+
 Run a one-command smoke check that validates metadata and writes a small run
 plus report:
 

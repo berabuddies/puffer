@@ -20,6 +20,8 @@ Optional controls:
   export PUFFER_OPENROUTER_CONCURRENCY=2
   export PUFFER_OPENROUTER_SHARD_LIMIT=2
   export PUFFER_OPENROUTER_AREAS="chat-composer-send,settings-mcp"
+  export PUFFER_OPENROUTER_FEEDBACK_LEDGER="apps/puffer-desktop/tests/fuzz/.runs/<run>/feedback-ledger.json"
+  export PUFFER_OPENROUTER_COVERAGE_LEDGER="apps/puffer-desktop/tests/fuzz/.runs/<run>/coverage-ledger.json"
 
 Run:
 
@@ -282,7 +284,17 @@ replay_status=$?
 set -e
 echo OPENROUTER_REPLAY_STATUS "$replay_status"
 if [[ -s "$out_dir/bounded-replay-report.json" ]]; then
-  node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs record-feedback --shard {{ item.name }} --input "$out_dir/bounded-replay-report.json" --namespace {{ item.namespace }}
+  feedback_args=()
+  if [[ -n "${PUFFER_OPENROUTER_FEEDBACK_LEDGER:-}" ]]; then
+    feedback_args+=(--feedback-ledger "$PUFFER_OPENROUTER_FEEDBACK_LEDGER" --out "$PUFFER_OPENROUTER_FEEDBACK_LEDGER")
+  fi
+  if [[ -n "${PUFFER_OPENROUTER_COVERAGE_LEDGER:-}" ]]; then
+    feedback_args+=(--ledger "$PUFFER_OPENROUTER_COVERAGE_LEDGER" --coverage-ledger-out "$PUFFER_OPENROUTER_COVERAGE_LEDGER")
+  fi
+  if [[ "${PUFFER_OPENROUTER_NO_COVERAGE_LEDGER:-0}" == "1" ]]; then
+    feedback_args+=(--no-coverage-ledger)
+  fi
+  node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs record-feedback "${feedback_args[@]}" --shard {{ item.name }} --input "$out_dir/bounded-replay-report.json" --namespace {{ item.namespace }}
   node apps/puffer-desktop/tests/fuzz/bin/puffer-openrouter-triage.mjs --namespace {{ item.namespace }} --shard {{ item.name }} --seed {{ item.seed }} --model ${PUFFER_OPENROUTER_MODEL:-inclusionai/ling-2.6-flash} --out "$out_dir/findings.md"
   if [[ -s "$out_dir/verdict-gate.json" ]] && jq -e '.disposition == "candidate"' "$out_dir/verdict-gate.json" >/dev/null; then
     node apps/puffer-desktop/tests/fuzz/bin/puffer-openrouter-reviewer.mjs --verdict "$out_dir/verdict.json" --gate "$out_dir/verdict-gate.json" --replay "$out_dir/bounded-replay-report.json" --out "$out_dir/reviewer.json" || true
