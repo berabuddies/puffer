@@ -14,17 +14,19 @@
   import SectionHeading from "../components/home/SectionHeading.svelte";
   import TaskCard from "../components/home/TaskCard.svelte";
 
-  import { allTaskGroups } from "../data/tasks";
   import type { Task, TaskGroup } from "../data/types";
   import { navigate } from "../router.svelte";
   import { pushToast } from "../lib/toast.svelte";
   import { resetOnboarding } from "../lib/auth.svelte";
 
-  // Local mutable copy so we can implement mock "Ignore" + "Snooze" removal
-  // without mutating the seed export. Refresh restores the full list.
-  let groups = $state<TaskGroup[]>(
-    allTaskGroups.map((g) => ({ ...g, tasks: g.tasks.map((t) => ({ ...t })) }))
-  );
+  // Mock task feed was removed alongside the scripted demos. Home now
+  // renders with empty Work/Life groups until the backend exposes a real
+  // task source — the structure is preserved so the page lays out the
+  // same way and existing tests/snapshots stay valid.
+  let groups = $state<TaskGroup[]>([
+    { label: "Work", count: 0, tasks: [] },
+    { label: "Life", count: 0, tasks: [] }
+  ]);
 
   // Collapsed group labels (toggle via clicking the count chip header).
   let collapsed = $state<Record<string, boolean>>({});

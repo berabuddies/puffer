@@ -913,6 +913,10 @@ export class FakeDaemon {
     const title = String(params.title ?? "").trim();
     const metadata = this.sessions.get(sessionId) ?? sessionMeta({ sessionId });
     metadata.displayName = title || null;
+    // Mirror the real backend: a rename updates both displayName and the
+    // derived `title` field so subsequent reads (incl. the rename response,
+    // which echoes the latest detail snapshot) reflect the new name.
+    if (title) metadata.title = title;
     metadata.updatedAtMs = Date.now();
     this.sessions.set(sessionId, metadata);
     if (title) {

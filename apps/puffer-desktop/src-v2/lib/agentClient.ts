@@ -74,6 +74,96 @@ export async function cancelTurn(turnId: string): Promise<void> {
   await ws.request<unknown>("cancel_turn", { turnId });
 }
 
+/* ── Session list / rename ───────────────────────────────────────
+ * Wraps `list_grouped_sessions` and `rename_session` for the V2
+ * sidebar. Shapes mirror `SessionListItemDto` / `FolderGroupDto`
+ * in `src-tauri/src/dtos.rs` (camelCase via serde rename_all).
+ */
+
+export interface SessionListItem {
+  sessionId: string;
+  displayName: string | null;
+  generatedTitle: string | null;
+  title: string;
+  cwd: string;
+  folderPath: string;
+  updatedAtMs: number;
+  createdAtMs: number;
+  eventCount: number;
+  activityStatus: string;
+  slug: string | null;
+  tags: string[];
+  note: string | null;
+  parentSessionId: string | null;
+  providerId: string;
+  modelId: string | null;
+}
+
+export interface FolderGroup {
+  folderId: string;
+  folderLabel: string;
+  folderPath: string;
+  sessionCount: number;
+  sessions: SessionListItem[];
+}
+
+export async function listGroupedSessions(): Promise<FolderGroup[]> {
+  const result = await ws.request<FolderGroup[]>("list_grouped_sessions", {});
+  return Array.isArray(result) ? result : [];
+}
+
+/**
+ * Server returns a full `SessionDetailDto` from `rename_session`, but for
+ * the sidebar we only care about the fields that overlap with
+ * `SessionListItem` (displayName / title / updatedAtMs). Caller patches
+ * the row in place rather than swapping it wholesale.
+ */
+export interface RenameSessionResult {
+  sessionId: string;
+  displayName: string | null;
+  title: string;
+  updatedAtMs: number;
+}
+
+export async function renameSession(
+  sessionId: string,
+  title: string,
+): Promise<RenameSessionResult> {
+  return ws.request<RenameSessionResult>("rename_session", { sessionId, title });
+}
+
+/* ── Session hydration ────────────────────────────────────────────
+ * Wraps `load_session_detail` so the V2 chat surface can replay the
+ * persisted timeline when a user opens an existing session after a
+ * webview reload. Shape mirrors `SessionDetailDto` in
+ * `src-tauri/src/dtos.rs:156-182` — only the fields chat hydration
+ * reads are typed; the rest are passed through as opaque so future
+ * consumers (diff panel, repo status, etc.) can pick them up without
+ * a type churn here.
+ */
+
+export interface SessionTimelineItem {
+  kind: string; // "user_message" | "assistant_message" | (others we ignore)
+  id: string;
+  text?: string;
+  // Other fields exist on tool_call / permission_dialog / etc. — leave
+  // them un-typed since chat hydration ignores them.
+  [key: string]: unknown;
+}
+
+export interface SessionDetail {
+  sessionId: string;
+  title: string;
+  timeline: SessionTimelineItem[];
+  // Other DTO fields (cwd, providerId, repoStatus, agentDiff, …) are
+  // returned by the server but the chat hydration path doesn't need them.
+  [key: string]: unknown;
+}
+
+export async function loadSessionDetail(sessionId: string): Promise<SessionDetail> {
+  return ws.request<SessionDetail>("load_session_detail", { sessionId });
+}
+
 /**
  * Subscribe to `session:<sessionId>:event` and forward unwrapped payloads.
  * Returns an unsubscribe handle. Safe to call multiple times — each
