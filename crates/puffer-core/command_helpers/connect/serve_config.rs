@@ -156,6 +156,54 @@ pub(super) fn connect_webhook(
     Ok(serve_summary("webhook", connection, &auth_mode, &path))
 }
 
+/// Configures the GitHub webhook preset through the serve-mode webhook connector.
+pub(super) fn connect_github_webhook(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    connection: &str,
+) -> Result<ConnectResult> {
+    let bind_address = ask_input(
+        state,
+        resources,
+        "Bind",
+        "What bind address should the GitHub webhook listen on?",
+    )?;
+    let path_value = ask_input(
+        state,
+        resources,
+        "Path",
+        "What URL path should GitHub post webhook events to?",
+    )?;
+    let path_value = normalize_webhook_path(&path_value);
+    let fields = vec![
+        ("bind_address", toml::Value::String(bind_address)),
+        ("path", toml::Value::String(path_value)),
+        (
+            "welcome_message",
+            toml::Value::String("GitHub webhook ready.".to_string()),
+        ),
+    ];
+    let path = write_workspace_connector_config(state, "webhook", connection, &fields)?;
+    Ok(serve_summary(
+        "github-webhook",
+        connection,
+        "GitHub event webhook",
+        &path,
+    ))
+}
+
+fn normalize_webhook_path(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return "/github".to_string();
+    }
+    if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{trimmed}")
+    }
+}
+
 fn write_workspace_connector_config(
     state: &AppState,
     platform: &str,
@@ -297,6 +345,8 @@ mod tests {
             "What Matrix homeserver URL should Puffer use?" => "https://matrix.example.org",
             "What Matrix username should Puffer use?" => "puffer-bot",
             "What Matrix password should Puffer use?" => "matrix-password",
+            "What bind address should the GitHub webhook listen on?" => "127.0.0.1:9292",
+            "What URL path should GitHub post webhook events to?" => "/github",
             "What bind address should the webhook listen on?" => "127.0.0.1:9191",
             "Should this webhook require bearer-token auth?" => "No bearer token",
             other => panic!("unexpected question: {other}"),
@@ -403,6 +453,28 @@ mod tests {
         assert!(raw.contains("bind_address = \"127.0.0.1:9191\""));
         assert!(raw.contains("path = \"/puffer\""));
         assert!(!raw.contains("auth_token"));
+    }
+
+    #[test]
+    fn github_webhook_connect_writes_webhook_preset_config() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let result = with_user_question_prompt_handler(
+            |request| answer_request(&request),
+            || connect_github_webhook(&mut state, &resources, "github-webhook"),
+        )
+        .expect("connect result");
+
+        assert!(result.summary.contains("connector: github-webhook"));
+        assert!(result.summary.contains("run `puffer serve`"));
+        let path = state.cwd.join(".puffer/connectors.toml");
+        let raw = fs::read_to_string(path).expect("connector config");
+        assert!(raw.contains("[connectors.webhook]"));
+        assert!(raw.contains("display_name = \"github-webhook\""));
+        assert!(raw.contains("bind_address = \"127.0.0.1:9292\""));
+        assert!(raw.contains("path = \"/github\""));
+        assert!(raw.contains("welcome_message = \"GitHub webhook ready.\""));
     }
 
     #[test]

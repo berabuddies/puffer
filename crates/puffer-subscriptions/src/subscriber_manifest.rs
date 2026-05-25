@@ -121,7 +121,7 @@ fn connector_subscriber_manifest_supported(
 fn serve_configured_connector(slug: &str) -> bool {
     matches!(
         slug,
-        "telegram-bot" | "discord-bot" | "matrix-bot" | "webhook"
+        "telegram-bot" | "discord-bot" | "matrix-bot" | "github-webhook" | "webhook"
     )
 }
 

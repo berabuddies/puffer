@@ -229,7 +229,7 @@ fn connector_template_runtime_hints(template: &ConnectorTemplate) -> Vec<String>
     }
     if matches!(
         template.slug.as_str(),
-        "telegram-bot" | "discord-bot" | "matrix-bot" | "webhook"
+        "telegram-bot" | "discord-bot" | "matrix-bot" | "github-webhook" | "webhook"
     ) {
         hints.push("serve");
     }
@@ -386,9 +386,20 @@ mod tests {
         let mut state = temp_state();
         let resources = LoadedResources::default();
 
-        let slug = resolve_connector_slug(&mut state, &resources, "serve webhook").expect("slug");
+        let slug =
+            resolve_connector_slug(&mut state, &resources, "serve http webhook").expect("slug");
 
         assert_eq!(slug, "webhook");
+    }
+
+    #[test]
+    fn resolve_connector_slug_accepts_github_webhook_terms() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let slug = resolve_connector_slug(&mut state, &resources, "github event").expect("slug");
+
+        assert_eq!(slug, "github-webhook");
     }
 
     #[test]

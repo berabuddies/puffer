@@ -7,6 +7,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use puffer_connector_core::{CommandOutcome, ConnectorRuntime, InboundMessage, MessageSplitter};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::sync::Arc;
 
 /// Shared axum state: the runtime plus a snapshot of the config.
@@ -16,7 +17,7 @@ pub struct AppState {
     pub config: Arc<WebhookConfig>,
 }
 
-/// JSON payload accepted by the webhook endpoint.
+/// Native Puffer JSON payload accepted by the webhook endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebhookRequest {
     pub conversation_id: String,
@@ -69,7 +70,7 @@ async fn health() -> Response {
 async fn webhook(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(payload): Json<WebhookRequest>,
+    Json(payload): Json<Value>,
 ) -> Response {
     let origin = headers
         .get(axum::http::header::ORIGIN)
@@ -90,17 +91,12 @@ async fn webhook(
         return (StatusCode::UNAUTHORIZED, "request rejected").into_response();
     }
 
+    let inbound = match inbound_from_payload(&headers, &payload) {
+        Some(inbound) => inbound,
+        None => return (StatusCode::BAD_REQUEST, "unsupported webhook payload").into_response(),
+    };
     let runtime = state.runtime.clone();
     let config = state.config.clone();
-    let inbound = InboundMessage {
-        conversation_id: payload.conversation_id.clone(),
-        user_id: payload.user_id.clone(),
-        text: payload.message.clone(),
-        thread_id: None,
-        is_group: false,
-        bot_mentioned: true,
-        from_bot: false,
-    };
 
     // Dispatch is blocking (it acquires the runtime mutex and may run a
     // whole agent turn); run it on a blocking worker so the reactor
@@ -144,6 +140,229 @@ async fn webhook(
             session_id, text, ..
         } => build_reply_response(&state.config, Some(session_id.to_string()), text),
     }
+}
+
+fn inbound_from_payload(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
+    puffer_inbound(payload).or_else(|| github_inbound(headers, payload))
+}
+
+fn puffer_inbound(payload: &Value) -> Option<InboundMessage> {
+    let conversation_id = string_field(payload, "conversation_id")?;
+    let message = string_field(payload, "message")?;
+    Some(InboundMessage {
+        conversation_id: conversation_id.to_string(),
+        user_id: string_field(payload, "user_id").map(str::to_string),
+        text: message.to_string(),
+        thread_id: None,
+        is_group: false,
+        bot_mentioned: true,
+        from_bot: false,
+    })
+}
+
+fn github_inbound(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
+    let repository = pointer_string(payload, "/repository/full_name")
+        .or_else(|| pointer_string(payload, "/repository/name"))?;
+    let event = header_value(headers, "x-github-event").unwrap_or("github");
+    let action = string_field(payload, "action").unwrap_or("received");
+    let delivery = header_value(headers, "x-github-delivery");
+    let sender = pointer_string(payload, "/sender/login")
+        .or_else(|| pointer_string(payload, "/pusher/name"))
+        .unwrap_or("github");
+    let subject = github_subject(payload);
+    let conversation_id =
+        github_conversation_id(repository, event, delivery, payload, subject.as_ref());
+    let text = github_message(repository, event, action, sender, payload, subject.as_ref());
+
+    Some(InboundMessage {
+        conversation_id,
+        user_id: Some(sender.to_string()),
+        text,
+        thread_id: None,
+        is_group: false,
+        bot_mentioned: true,
+        from_bot: false,
+    })
+}
+
+struct GithubSubject {
+    kind: &'static str,
+    conversation_kind: &'static str,
+    number: Option<String>,
+    title: Option<String>,
+    body: Option<String>,
+    url: Option<String>,
+}
+
+fn github_subject(payload: &Value) -> Option<GithubSubject> {
+    if let Some(comment) = payload.get("comment") {
+        let parent = github_parent_subject(payload);
+        return Some(GithubSubject {
+            kind: "comment",
+            conversation_kind: parent
+                .as_ref()
+                .map(|subject| subject.conversation_kind)
+                .unwrap_or("comment"),
+            number: parent.as_ref().and_then(|subject| subject.number.clone()),
+            title: parent.as_ref().and_then(|subject| subject.title.clone()),
+            body: string_field(comment, "body").map(snippet),
+            url: string_field(comment, "html_url")
+                .map(str::to_string)
+                .or_else(|| parent.and_then(|subject| subject.url)),
+        });
+    }
+    github_parent_subject(payload)
+}
+
+fn github_parent_subject(payload: &Value) -> Option<GithubSubject> {
+    [
+        ("issue", github_issue_kind(payload)),
+        ("pull_request", "pull request"),
+        ("discussion", "discussion"),
+    ]
+    .into_iter()
+    .find_map(|(field, kind)| {
+        let value = payload.get(field)?;
+        Some(GithubSubject {
+            kind,
+            conversation_kind: kind,
+            number: value
+                .get("number")
+                .and_then(number_or_string)
+                .or_else(|| payload.get("number").and_then(number_or_string)),
+            title: string_field(value, "title").map(str::to_string),
+            body: string_field(value, "body").map(snippet),
+            url: string_field(value, "html_url").map(str::to_string),
+        })
+    })
+}
+
+fn github_conversation_id(
+    repository: &str,
+    event: &str,
+    delivery: Option<&str>,
+    payload: &Value,
+    subject: Option<&GithubSubject>,
+) -> String {
+    if let Some(subject) = subject {
+        if let Some(number) = &subject.number {
+            return format!(
+                "github:{repository}:{}:{number}",
+                subject.conversation_kind.replace(' ', "-")
+            );
+        }
+    }
+    if let Some(reference) = string_field(payload, "ref") {
+        return format!("github:{repository}:{event}:{reference}");
+    }
+    format!(
+        "github:{repository}:{event}:{}",
+        delivery.unwrap_or("event")
+    )
+}
+
+fn github_message(
+    repository: &str,
+    event: &str,
+    action: &str,
+    sender: &str,
+    payload: &Value,
+    subject: Option<&GithubSubject>,
+) -> String {
+    let mut lines = vec![
+        format!("GitHub {event} {action} in {repository}"),
+        format!("Sender: {sender}"),
+    ];
+    if let Some(subject) = subject {
+        let number = subject
+            .number
+            .as_ref()
+            .map(|value| format!("#{value} "))
+            .unwrap_or_default();
+        if let Some(title) = &subject.title {
+            if subject.kind == "comment" && subject.conversation_kind != "comment" {
+                lines.push(format!(
+                    "Subject: comment on {} {number}{title}",
+                    subject.conversation_kind
+                ));
+            } else {
+                lines.push(format!("Subject: {} {number}{title}", subject.kind));
+            }
+        }
+        if let Some(url) = &subject.url {
+            lines.push(format!("URL: {url}"));
+        }
+        if let Some(body) = &subject.body {
+            lines.push(String::new());
+            lines.push(body.clone());
+        }
+    } else if event == "push" {
+        append_push_summary(&mut lines, payload);
+    }
+    lines.join("\n")
+}
+
+fn github_issue_kind(payload: &Value) -> &'static str {
+    payload
+        .get("issue")
+        .and_then(|issue| issue.get("pull_request"))
+        .map(|_| "pull request")
+        .unwrap_or("issue")
+}
+
+fn append_push_summary(lines: &mut Vec<String>, payload: &Value) {
+    if let Some(reference) = string_field(payload, "ref") {
+        lines.push(format!("Ref: {reference}"));
+    }
+    let commits = payload
+        .get("commits")
+        .and_then(Value::as_array)
+        .map(|commits| commits.iter().take(3).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if commits.is_empty() {
+        return;
+    }
+    lines.push(String::new());
+    lines.push("Commits:".to_string());
+    for commit in commits {
+        let id = string_field(commit, "id")
+            .map(|value| value.chars().take(7).collect::<String>())
+            .unwrap_or_else(|| "commit".to_string());
+        let message = string_field(commit, "message")
+            .map(snippet)
+            .unwrap_or_default();
+        lines.push(format!("- {id}: {message}"));
+    }
+}
+
+fn string_field<'a>(payload: &'a Value, field: &str) -> Option<&'a str> {
+    payload.get(field).and_then(Value::as_str)
+}
+
+fn pointer_string<'a>(payload: &'a Value, pointer: &str) -> Option<&'a str> {
+    payload.pointer(pointer).and_then(Value::as_str)
+}
+
+fn number_or_string(value: &Value) -> Option<String> {
+    value
+        .as_u64()
+        .map(|number| number.to_string())
+        .or_else(|| value.as_str().map(str::to_string))
+}
+
+fn header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name).and_then(|value| value.to_str().ok())
+}
+
+fn snippet(value: &str) -> String {
+    let collapsed = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX_CHARS: usize = 500;
+    if collapsed.chars().count() <= MAX_CHARS {
+        return collapsed;
+    }
+    let mut out = collapsed.chars().take(MAX_CHARS).collect::<String>();
+    out.push_str("...");
+    out
 }
 
 /// Packs the reply into the webhook response JSON, attaching the
@@ -309,6 +528,100 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn github_issue_payload_maps_to_inbound_message() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-github-event", "issues".parse().unwrap());
+        headers.insert("x-github-delivery", "delivery-1".parse().unwrap());
+        let payload = serde_json::json!({
+            "action": "opened",
+            "repository": {"full_name": "berabuddies/puffer"},
+            "sender": {"login": "tonykebot"},
+            "issue": {
+                "number": 42,
+                "title": "Workflow drafts should be visible",
+                "body": "Please expose this in connector UX.",
+                "html_url": "https://github.com/berabuddies/puffer/issues/42"
+            }
+        });
+
+        let inbound = inbound_from_payload(&headers, &payload).expect("github inbound");
+
+        assert_eq!(
+            inbound.conversation_id,
+            "github:berabuddies/puffer:issue:42"
+        );
+        assert_eq!(inbound.user_id.as_deref(), Some("tonykebot"));
+        assert!(inbound
+            .text
+            .contains("GitHub issues opened in berabuddies/puffer"));
+        assert!(inbound
+            .text
+            .contains("Subject: issue #42 Workflow drafts should be visible"));
+        assert!(inbound
+            .text
+            .contains("https://github.com/berabuddies/puffer/issues/42"));
+    }
+
+    #[test]
+    fn github_comment_payload_keeps_parent_thread_and_comment_body() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-github-event", "issue_comment".parse().unwrap());
+        let payload = serde_json::json!({
+            "action": "created",
+            "repository": {"full_name": "berabuddies/puffer"},
+            "sender": {"login": "tonykebot"},
+            "issue": {
+                "number": 42,
+                "title": "Workflow drafts should be visible",
+                "html_url": "https://github.com/berabuddies/puffer/issues/42"
+            },
+            "comment": {
+                "body": "This should appear in Puffer.",
+                "html_url": "https://github.com/berabuddies/puffer/issues/42#issuecomment-1"
+            }
+        });
+
+        let inbound = inbound_from_payload(&headers, &payload).expect("github inbound");
+
+        assert_eq!(
+            inbound.conversation_id,
+            "github:berabuddies/puffer:issue:42"
+        );
+        assert!(inbound
+            .text
+            .contains("Subject: comment on issue #42 Workflow drafts should be visible"));
+        assert!(inbound.text.contains("This should appear in Puffer."));
+        assert!(inbound
+            .text
+            .contains("https://github.com/berabuddies/puffer/issues/42#issuecomment-1"));
+    }
+
+    #[test]
+    fn github_push_payload_maps_commit_summary() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-github-event", "push".parse().unwrap());
+        let payload = serde_json::json!({
+            "repository": {"full_name": "berabuddies/puffer"},
+            "pusher": {"name": "tonykebot"},
+            "ref": "refs/heads/master",
+            "commits": [
+                {"id": "abcdef1234567890", "message": "Ship workflow UX"}
+            ]
+        });
+
+        let inbound = inbound_from_payload(&headers, &payload).expect("github inbound");
+
+        assert_eq!(
+            inbound.conversation_id,
+            "github:berabuddies/puffer:push:refs/heads/master"
+        );
+        assert!(inbound
+            .text
+            .contains("GitHub push received in berabuddies/puffer"));
+        assert!(inbound.text.contains("- abcdef1: Ship workflow UX"));
     }
 
     #[tokio::test]
