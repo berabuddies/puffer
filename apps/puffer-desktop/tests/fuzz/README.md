@@ -48,6 +48,18 @@ first, then appends bridge shards up to the bridge quota. The default quota is
 `floor(limit / 4)` for batches of four or more. Use `--bridge-quota` when a
 campaign needs a fixed cross-feature budget.
 
+Bridge shards execute through a combined left/right replay instead of two
+independent shard replays. The bridge runner selects a top case for each side,
+concatenates them into one Playwright replay case, and writes a single evidence
+index with `bridge.executionMode = "combined-left-right"`:
+
+```sh
+node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-bridge-replay.mjs \
+  --shard bridge-chat-permission-session-reload \
+  --namespace manual-bridge-chat \
+  --attempts 1
+```
+
 After running a shard replay, record its feedback so later schedules can reduce
 duplicates, flaky shards, and out-of-shard work:
 
@@ -169,10 +181,10 @@ python3 apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-validate-artifacts.py \
 
 Run the full local plan verifier. It checks syntax, metadata, selftests,
 bounded replay evidence, no-key deterministic triage, reviewer aggregation,
-tree evolution, synthetic split/demote/starvation policy, GUIFlow smoke, two
-bridge-shard replays, and a Codex-planned AgentFlow offline campaign. It writes
-temporary feedback and coverage ledgers under `.runs/` instead of touching the
-tracked ledgers:
+tree evolution, synthetic split/demote/starvation policy, GUIFlow smoke,
+combined left/right bridge replays, and a Codex-planned AgentFlow offline
+campaign. It writes temporary feedback and coverage ledgers under `.runs/`
+instead of touching the tracked ledgers:
 
 ```sh
 node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-verify-plan.mjs \

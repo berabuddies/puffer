@@ -120,6 +120,10 @@ def scheduled_areas():
             "allowed_setup_nodes": ", ".join(item["allowedSetupNodes"]),
             "allowed_async_events": ", ".join(item["allowedAsyncEvents"]),
             "invariants": ", ".join(item["invariants"]),
+            "is_bridge": "1" if item.get("bridge") else "0",
+            "bridge_left": (item.get("bridge") or {}).get("leftShard", ""),
+            "bridge_right": (item.get("bridge") or {}).get("rightShard", ""),
+            "bridge_witness": (item.get("bridge") or {}).get("sharedWitness", ""),
             "namespace": f"{NAMESPACE}-{item['shardId']}",
         }
         for item in schedule["items"]
@@ -368,6 +372,34 @@ SYNTHETIC_SHARD_EOF
   fi
   node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs record-feedback "${feedback_args[@]}" --shard {{ item.name }} --input "$out_dir/bounded-replay-report.json" --namespace {{ item.namespace }}
   node apps/puffer-desktop/tests/fuzz/bin/puffer-openrouter-triage.mjs --namespace {{ item.namespace }} --shard {{ item.name }} --seed {{ item.seed }} --model ${PUFFER_OPENROUTER_MODEL:-inclusionai/ling-2.6-flash} --out "$out_dir/findings.md"
+  echo OPENROUTER_SHARD_OK {{ item.namespace }}
+  exit 0
+fi
+if [[ "{{ item.is_bridge }}" == "1" ]]; then
+  set +e
+  node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-bridge-replay.mjs --shard {{ item.name }} --seed {{ item.seed }} --iterations {{ item.iterations }} --steps {{ item.steps }} --limit {{ item.replay_limit }} --attempts 2 --timeout 120 --rng-seed {{ item.namespace }} --namespace {{ item.namespace }} --fail-on-new-finding
+  replay_status=$?
+  set -e
+  echo OPENROUTER_BRIDGE_REPLAY_STATUS "$replay_status"
+  if [[ -s "$out_dir/bounded-replay-report.json" ]]; then
+    feedback_args=()
+    if [[ -n "${PUFFER_OPENROUTER_FEEDBACK_LEDGER:-}" ]]; then
+      feedback_args+=(--feedback-ledger "$PUFFER_OPENROUTER_FEEDBACK_LEDGER" --out "$PUFFER_OPENROUTER_FEEDBACK_LEDGER")
+    fi
+    if [[ -n "${PUFFER_OPENROUTER_COVERAGE_LEDGER:-}" ]]; then
+      feedback_args+=(--ledger "$PUFFER_OPENROUTER_COVERAGE_LEDGER" --coverage-ledger-out "$PUFFER_OPENROUTER_COVERAGE_LEDGER")
+    fi
+    if [[ "${PUFFER_OPENROUTER_NO_COVERAGE_LEDGER:-0}" == "1" ]]; then
+      feedback_args+=(--no-coverage-ledger)
+    fi
+    node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs record-feedback "${feedback_args[@]}" --shard {{ item.name }} --input "$out_dir/bounded-replay-report.json" --namespace {{ item.namespace }}
+    node apps/puffer-desktop/tests/fuzz/bin/puffer-openrouter-triage.mjs --namespace {{ item.namespace }} --shard {{ item.name }} --seed {{ item.seed }} --model ${PUFFER_OPENROUTER_MODEL:-inclusionai/ling-2.6-flash} --out "$out_dir/findings.md"
+    if [[ -s "$out_dir/verdict-gate.json" ]] && jq -e '.disposition == "candidate"' "$out_dir/verdict-gate.json" >/dev/null; then
+      node apps/puffer-desktop/tests/fuzz/bin/puffer-openrouter-reviewer.mjs --verdict "$out_dir/verdict.json" --gate "$out_dir/verdict-gate.json" --replay "$out_dir/bounded-replay-report.json" --out "$out_dir/reviewer.json" || true
+    fi
+  else
+    echo OPENROUTER_BRIDGE_REPLAY_REPORT_MISSING {{ item.namespace }}
+  fi
   echo OPENROUTER_SHARD_OK {{ item.namespace }}
   exit 0
 fi

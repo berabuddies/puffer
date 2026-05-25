@@ -509,14 +509,25 @@ function scoreShard(shard, context) {
       topReportPath,
       replayJsonPath
     },
-    commands: [
-      `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs run --seed ${shard.seed} --iterations ${iterations} --steps ${Number(shard.steps ?? 12)} --rng-seed ${namespace} --out ${runPath}`,
-      `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs report --input ${runPath} --out ${reportPath}`,
-      `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs top-cases --input ${runPath} --shard ${shard.id} --limit ${replayLimit} --out ${topPath} --report-out ${topReportPath}`,
-      `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-replay-loop.mjs --seeds ${shard.seed} --shard ${shard.id} --limit ${replayLimit} --attempts 3 --timeout 120 --rng-seed ${namespace} --namespace ${namespace} --fail-on-new-finding`,
-      `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs record-feedback --shard ${shard.id} --input ${replayJsonPath}`
-    ]
+    commands: buildShardCommands({ shard, iterations, replayLimit, namespace, runPath, reportPath, topPath, topReportPath, replayJsonPath })
   };
+}
+
+function buildShardCommands(context) {
+  const { shard, iterations, replayLimit, namespace, runPath, reportPath, topPath, topReportPath, replayJsonPath } = context;
+  if (shard.bridge) {
+    return [
+      `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-bridge-replay.mjs --shard ${shard.id} --seed ${shard.seed} --iterations ${iterations} --steps ${Number(shard.steps ?? 12)} --limit ${replayLimit} --attempts 3 --timeout 120 --rng-seed ${namespace} --namespace ${namespace} --fail-on-new-finding`,
+      `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs record-feedback --shard ${shard.id} --input ${replayJsonPath}`
+    ];
+  }
+  return [
+    `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs run --seed ${shard.seed} --iterations ${iterations} --steps ${Number(shard.steps ?? 12)} --rng-seed ${namespace} --out ${runPath}`,
+    `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs report --input ${runPath} --out ${reportPath}`,
+    `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs top-cases --input ${runPath} --shard ${shard.id} --limit ${replayLimit} --out ${topPath} --report-out ${topReportPath}`,
+    `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-replay-loop.mjs --seeds ${shard.seed} --shard ${shard.id} --limit ${replayLimit} --attempts 3 --timeout 120 --rng-seed ${namespace} --namespace ${namespace} --fail-on-new-finding`,
+    `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs record-feedback --shard ${shard.id} --input ${replayJsonPath}`
+  ];
 }
 
 function layeredFrontierForShard(shard, intentManifest = {}) {

@@ -33,10 +33,12 @@ const envSummary = {
 run("syntax", "Static syntax checks", [
   "node --check apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs",
   "node --check apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-replay-loop.mjs",
+  "node --check apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-bridge-replay.mjs",
   "node --check apps/puffer-desktop/tests/fuzz/bin/puffer-openrouter-explorer.mjs",
   "node --check apps/puffer-desktop/tests/fuzz/bin/puffer-openrouter-triage.mjs",
   "node --check apps/puffer-desktop/tests/fuzz/bin/puffer-openrouter-aggregate.mjs",
   "node --check apps/puffer-desktop/tests/fuzz/bin/puffer-openrouter-reviewer.mjs",
+  "node --check apps/puffer-desktop/tests/fuzz/bin/puffer-juice-shop-bridge-runner.mjs",
   "node --check apps/puffer-desktop/tests/fuzz/bin/puffer-guiflow-smoke.mjs",
   "node --check apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-selftest.mjs",
   "node --check apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-verify-plan.mjs",
@@ -115,10 +117,13 @@ run("evolution-policy", "Synthetic split/demote/starvation evolution policy", [
   `jq -e '.shards["synthetic-starved-leaf"].actions | index("force-starvation-floor")' ${sh(path.join(outDir, "evolution-policy.json"))} >/dev/null`
 ].join(" && "));
 
-run("bridge-replay", "Two bridge shards replay through evidence path", [
+run("bridge-replay", "Bridge shards replay as combined left/right witnesses", [
   `rm -rf ${sh(path.join(fuzzRoot, ".runs", `${namespace}-bridge-chat`))} ${sh(path.join(fuzzRoot, ".runs", `${namespace}-bridge-model`))}`,
-  `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-replay-loop.mjs --seeds chat-turn-race --shard bridge-chat-permission-session-reload --limit 1 --attempts 1 --timeout 90 --rng-seed ${sh(`${namespace}-bridge-chat`)} --namespace ${sh(`${namespace}-bridge-chat`)}`,
-  `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-replay-loop.mjs --seeds provider-auth-model-race --shard bridge-new-agent-settings-model --limit 1 --attempts 1 --timeout 90 --rng-seed ${sh(`${namespace}-bridge-model`)} --namespace ${sh(`${namespace}-bridge-model`)}`,
+  `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-bridge-replay.mjs --shard bridge-chat-permission-session-reload --iterations 18 --steps 22 --limit 1 --attempts 1 --timeout 90 --rng-seed ${sh(`${namespace}-bridge-chat`)} --namespace ${sh(`${namespace}-bridge-chat`)}`,
+  `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-bridge-replay.mjs --shard bridge-new-agent-settings-model --iterations 12 --steps 20 --limit 1 --attempts 1 --timeout 90 --rng-seed ${sh(`${namespace}-bridge-model`)} --namespace ${sh(`${namespace}-bridge-model`)}`,
+  `test "$(jq -r '.bridge.executionMode' ${sh(path.join(fuzzRoot, ".runs", `${namespace}-bridge-chat`, "bounded-replay-report.json"))})" = "combined-left-right"`,
+  `test "$(jq -r '.bridge.leftShard' ${sh(path.join(fuzzRoot, ".runs", `${namespace}-bridge-chat`, "bounded-replay-report.json"))})" = "chat-permission-question"`,
+  `test "$(jq -r '.bridge.rightShard' ${sh(path.join(fuzzRoot, ".runs", `${namespace}-bridge-chat`, "bounded-replay-report.json"))})" = "chat-session-switch-stale"`,
   `test "$(jq '.evidence_index | length' ${sh(path.join(fuzzRoot, ".runs", `${namespace}-bridge-chat`, "bounded-replay-report.json"))})" -gt 0`,
   `test "$(jq '.evidence_index | length' ${sh(path.join(fuzzRoot, ".runs", `${namespace}-bridge-model`, "bounded-replay-report.json"))})" -gt 0`
 ].join(" && "), { timeout: 240_000 });
@@ -413,6 +418,8 @@ function buildDeliverables() {
       path.join(outDir, "reviewer-aggregate.json")
     ]),
     deliverable("bridge-shards", "Bridge shard manifests and replay evidence", [
+      "apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-bridge-replay.mjs",
+      "apps/puffer-desktop/tests/fuzz/bin/puffer-juice-shop-bridge-runner.mjs",
       "apps/puffer-desktop/tests/fuzz/shards/bridge-chat-permission-session-reload.json",
       "apps/puffer-desktop/tests/fuzz/shards/bridge-new-agent-settings-model.json",
       path.join(fuzzRoot, ".runs", `${namespace}-bridge-chat`, "bounded-replay-report.json"),
