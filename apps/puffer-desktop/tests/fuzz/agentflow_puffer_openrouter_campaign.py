@@ -7,6 +7,8 @@ only execute bounded UI-tree shards and report trigger evidence.
 Required environment:
 
   export OPENROUTER_API_KEY="<key>"
+  # or:
+  export PUFFER_OPENROUTER_API_KEY_FILE="/path/to/openrouter-key"
 
 For local no-network orchestration smoke only:
 
@@ -419,7 +421,7 @@ with Graph(
         task_id="preflight",
         script=(
             "set -euo pipefail\n"
-            "test -n \"${OPENROUTER_API_KEY:-}\" || test \"${PUFFER_OPENROUTER_OFFLINE_SMOKE:-0}\" = \"1\"\n"
+            "test -n \"${OPENROUTER_API_KEY:-}\" || test -s \"${PUFFER_OPENROUTER_API_KEY_FILE:-/dev/null}\" || test \"${PUFFER_OPENROUTER_OFFLINE_SMOKE:-0}\" = \"1\"\n"
             f"rm -rf {PREFLIGHT_DIR} apps/puffer-desktop/tests/fuzz/.runs/openrouter-campaign\n"
             + CLEAN_SELECTED_ARTIFACTS
             + f"mkdir -p {PREFLIGHT_DIR}\n"

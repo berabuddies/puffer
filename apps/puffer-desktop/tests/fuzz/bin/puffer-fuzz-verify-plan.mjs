@@ -4,6 +4,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { hasOpenRouterCredential } from "../lib/openrouter-auth.mjs";
+
 const fuzzRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = path.resolve(fuzzRoot, "..", "..", "..", "..");
 const args = parseArgs(process.argv.slice(2));
@@ -23,7 +25,9 @@ const envSummary = {
   codex: commandExists("codex"),
   agentflow: commandExists("agentflow"),
   guiflowRoot: fs.existsSync(guiflowRoot),
-  openRouterKeyPresent: Boolean(process.env.OPENROUTER_API_KEY)
+  openRouterKeyPresent: Boolean(process.env.OPENROUTER_API_KEY),
+  openRouterKeyFilePresent: hasReadableKeyFile(process.env.PUFFER_OPENROUTER_API_KEY_FILE),
+  openRouterCredentialPresent: hasOpenRouterCredential()
 };
 
 run("syntax", "Static syntax checks", [
@@ -40,6 +44,7 @@ run("syntax", "Static syntax checks", [
   "node --check apps/puffer-desktop/tests/fuzz/lib/evidence-index.mjs",
   "node --check apps/puffer-desktop/tests/fuzz/lib/scheduler.mjs",
   "node --check apps/puffer-desktop/tests/fuzz/lib/prompt-evolution.mjs",
+  "node --check apps/puffer-desktop/tests/fuzz/lib/openrouter-auth.mjs",
   "python3 -m py_compile apps/puffer-desktop/tests/fuzz/agentflow_puffer_openrouter_campaign.py",
   "bash -n apps/puffer-desktop/tests/fuzz/run_openrouter_campaign_loop.sh"
 ].join(" && "));
@@ -56,7 +61,7 @@ run("evidence-replay", "Bounded replay emits evidence index", [
 ].join(" && "), { timeout: 180_000 });
 
 run("no-key-triage", "No-signal triage works without OpenRouter key", [
-  `OPENROUTER_API_KEY= node apps/puffer-desktop/tests/fuzz/bin/puffer-openrouter-triage.mjs --namespace ${sh(`${namespace}-evidence`)} --shard chat-composer-send --seed chat-turn-race --out ${sh(path.join(fuzzRoot, ".runs", `${namespace}-evidence`, "findings.md"))}`,
+  `OPENROUTER_API_KEY= PUFFER_OPENROUTER_API_KEY_FILE= node apps/puffer-desktop/tests/fuzz/bin/puffer-openrouter-triage.mjs --namespace ${sh(`${namespace}-evidence`)} --shard chat-composer-send --seed chat-turn-race --out ${sh(path.join(fuzzRoot, ".runs", `${namespace}-evidence`, "findings.md"))}`,
   `test "$(jq -r '.disposition' ${sh(path.join(fuzzRoot, ".runs", `${namespace}-evidence`, "verdict-gate.json"))})" = "dismissed"`
 ].join(" && "));
 
@@ -178,8 +183,8 @@ if (skipAgentflow) {
 
 if (!runRealOpenRouter) {
   skip("openrouter-real", "Real OpenRouter campaign not requested", { external: true });
-} else if (!envSummary.openRouterKeyPresent) {
-  skip("openrouter-real", "OPENROUTER_API_KEY missing", { required: requireRealOpenRouter, external: true });
+} else if (!envSummary.openRouterCredentialPresent) {
+  skip("openrouter-real", "OPENROUTER_API_KEY or PUFFER_OPENROUTER_API_KEY_FILE missing", { required: requireRealOpenRouter, external: true });
 } else {
   run("openrouter-real", "Real OpenRouter small-model campaign", [
     `export PUFFER_OPENROUTER_NAMESPACE=${sh(`${namespace}-real-openrouter`)}`,
@@ -396,11 +401,11 @@ function summarizeExternalPhaseStatus(stepStatuses) {
 }
 
 function realOpenRouterCaveat() {
-  if (runRealOpenRouter && envSummary.openRouterKeyPresent) {
+  if (runRealOpenRouter && envSummary.openRouterCredentialPresent) {
     return "Real OpenRouter campaign was requested and key-backed execution was available.";
   }
   if (runRealOpenRouter) {
-    return "Real OpenRouter campaign was requested but OPENROUTER_API_KEY was missing.";
+    return "Real OpenRouter campaign was requested but OPENROUTER_API_KEY or PUFFER_OPENROUTER_API_KEY_FILE was missing.";
   }
   return "Real OpenRouter small-model campaign was not requested in this local verifier run.";
 }
@@ -428,6 +433,8 @@ function formatMarkdown(report) {
     `- AgentFlow: ${report.environment.agentflow ? "present" : "missing"}`,
     `- GUIFlow root: ${report.environment.guiflowRoot ? "present" : "missing"}`,
     `- OpenRouter key: ${report.environment.openRouterKeyPresent ? "present" : "missing"}`,
+    `- OpenRouter key file: ${report.environment.openRouterKeyFilePresent ? "present" : "missing"}`,
+    `- OpenRouter credential: ${report.environment.openRouterCredentialPresent ? "present" : "missing"}`,
     "",
     "## Phase Coverage",
     ""
@@ -464,6 +471,11 @@ function commandExists(name) {
     cwd: repoRoot,
     encoding: "utf8"
   }).status === 0;
+}
+
+function hasReadableKeyFile(filePath) {
+  if (!filePath) return false;
+  return fs.existsSync(filePath) && fs.statSync(filePath).size > 0;
 }
 
 function syntheticReviewerShardScript(namespace, fuzzRootPath) {

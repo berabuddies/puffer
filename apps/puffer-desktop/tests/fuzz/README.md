@@ -249,6 +249,8 @@ worker models before scaling out:
 
 ```sh
 export OPENROUTER_API_KEY="<key>"
+# Or avoid shell history/log exposure:
+export PUFFER_OPENROUTER_API_KEY_FILE="$HOME/.config/openrouter/puffer.key"
 PUFFER_OPENROUTER_SHARD_LIMIT=2 \
 PUFFER_OPENROUTER_CONCURRENCY=2 \
 PUFFER_OPENROUTER_PLANNER_MODEL=gpt-5.4 \

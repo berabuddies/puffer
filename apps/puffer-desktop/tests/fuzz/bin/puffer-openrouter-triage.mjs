@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { buildNoFindingVerdict, evaluateFindingAdmission, normalizeVerdict, parseStrictVerdictJson } from "../lib/admission-gate.mjs";
+import { readOpenRouterApiKey } from "../lib/openrouter-auth.mjs";
 import { promptEvolutionExcerpt } from "../lib/prompt-evolution.mjs";
 
 const fuzzRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -17,7 +18,7 @@ const outPath = path.resolve(repoRoot, args.out ?? path.join("apps/puffer-deskto
 const verdictPath = path.resolve(repoRoot, args["verdict-out"] ?? path.join("apps/puffer-desktop/tests/fuzz/.runs", namespace, "verdict.json"));
 const gatePath = path.resolve(repoRoot, args["gate-out"] ?? path.join("apps/puffer-desktop/tests/fuzz/.runs", namespace, "verdict-gate.json"));
 const runDir = path.resolve(fuzzRoot, ".runs", namespace);
-const apiKey = process.env.OPENROUTER_API_KEY;
+const apiKey = readOpenRouterApiKey();
 const baseUrl = (process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1").replace(/\/+$/, "");
 
 const artifacts = {
@@ -52,7 +53,7 @@ if (!hasActionableReplaySignal(replaySummary, replayFindings)) {
 }
 
 if (!apiKey) {
-  throw new Error("OPENROUTER_API_KEY is required when replay contains actionable triage signal");
+  throw new Error("OPENROUTER_API_KEY or PUFFER_OPENROUTER_API_KEY_FILE is required when replay contains actionable triage signal");
 }
 
 const payload = await openRouterChat({

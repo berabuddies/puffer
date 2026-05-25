@@ -10,6 +10,7 @@ import {
   summarizeRun,
   writeJson
 } from "../lib/fuzz-core.mjs";
+import { readOpenRouterApiKey } from "../lib/openrouter-auth.mjs";
 import { promptEvolutionExcerpt } from "../lib/prompt-evolution.mjs";
 import { createRng } from "../lib/seeded-rng.mjs";
 
@@ -22,7 +23,7 @@ const seedId = requireArg(args, "seed");
 const outPath = path.resolve(repoRoot, requireArg(args, "out"));
 const model = args.model ?? process.env.PUFFER_OPENROUTER_MODEL ?? "inclusionai/ling-2.6-flash";
 const baseUrl = (process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1").replace(/\/+$/, "");
-const apiKey = process.env.OPENROUTER_API_KEY;
+const apiKey = readOpenRouterApiKey();
 const offlineSmoke = args.offline === "true" || process.env.PUFFER_OPENROUTER_OFFLINE_SMOKE === "1";
 const maxSteps = Number(args.steps ?? 8);
 const caseCount = Math.max(1, Number(args.cases ?? process.env.PUFFER_OPENROUTER_CASES ?? 1));
@@ -41,7 +42,7 @@ const shard = await readJson(path.join(fuzzRoot, "shards", `${shardId}.json`));
 const rng = createRng(`${namespace}:openrouter-explorer`);
 const selectedActions = [];
 
-if (!apiKey && !offlineSmoke) throw new Error("OPENROUTER_API_KEY is required");
+if (!apiKey && !offlineSmoke) throw new Error("OPENROUTER_API_KEY or PUFFER_OPENROUTER_API_KEY_FILE is required");
 
 const allowedActions = buildAllowedActions(seed, shard);
 if (allowedActions.length === 0) {

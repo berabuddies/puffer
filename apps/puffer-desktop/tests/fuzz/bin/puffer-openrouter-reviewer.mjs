@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { REVIEWER_DECISIONS, parseStrictJsonObject } from "../lib/admission-gate.mjs";
+import { readOpenRouterApiKey } from "../lib/openrouter-auth.mjs";
 
 const fuzzRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = path.resolve(fuzzRoot, "..", "..", "..", "..");
@@ -14,7 +15,7 @@ const replayPath = path.resolve(repoRoot, requireArg(args, "replay"));
 const outPath = path.resolve(repoRoot, args.out ?? path.join(path.dirname(verdictPath), "reviewer.json"));
 const model = args.model ?? process.env.PUFFER_OPENROUTER_REVIEWER_MODEL ??
   process.env.PUFFER_OPENROUTER_MODEL ?? "inclusionai/ling-2.6-flash";
-const apiKey = process.env.OPENROUTER_API_KEY;
+const apiKey = readOpenRouterApiKey();
 const offlineReview = args.offline === "true" || process.env.PUFFER_OPENROUTER_REVIEWER_OFFLINE === "1";
 const baseUrl = (process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1").replace(/\/+$/, "");
 
@@ -51,7 +52,7 @@ if (offlineReview) {
   process.exit(0);
 }
 
-if (!apiKey) throw new Error("OPENROUTER_API_KEY is required");
+if (!apiKey) throw new Error("OPENROUTER_API_KEY or PUFFER_OPENROUTER_API_KEY_FILE is required");
 const payload = await openRouterChat({
   model,
   temperature: 0.1,

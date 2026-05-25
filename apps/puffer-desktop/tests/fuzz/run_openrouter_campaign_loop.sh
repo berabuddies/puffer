@@ -14,15 +14,21 @@ summary_tsv="${loop_dir}/summary.tsv"
 summary_md="${loop_dir}/summary.md"
 namespace_prefix="${PUFFER_OPENROUTER_NAMESPACE_PREFIX:-openrouter-4h}"
 
-require_env() {
-  local name="$1"
-  if [[ -z "${!name:-}" ]]; then
-    echo "${name} is required" >&2
-    exit 2
+require_openrouter_credential() {
+  if [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
+    return
   fi
+  if [[ -n "${PUFFER_OPENROUTER_API_KEY_FILE:-}" && -s "${PUFFER_OPENROUTER_API_KEY_FILE}" ]]; then
+    return
+  fi
+  {
+    echo "OPENROUTER_API_KEY or PUFFER_OPENROUTER_API_KEY_FILE is required"
+    echo "Use PUFFER_OPENROUTER_API_KEY_FILE to avoid putting secrets in shell history."
+  } >&2
+    exit 2
 }
 
-require_env OPENROUTER_API_KEY
+require_openrouter_credential
 
 export PUFFER_OPENROUTER_SHARD_LIMIT="${PUFFER_OPENROUTER_SHARD_LIMIT:-50}"
 export PUFFER_OPENROUTER_CONCURRENCY="${PUFFER_OPENROUTER_CONCURRENCY:-10}"
