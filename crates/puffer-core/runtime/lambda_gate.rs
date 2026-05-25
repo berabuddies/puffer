@@ -10,8 +10,12 @@ use std::path::{Path, PathBuf};
 
 mod fact_extraction;
 mod input_contract;
+mod pending_call;
+mod result_check;
 mod semantic_predicate;
 mod type_check;
+
+pub(crate) use pending_call::PendingLambdaHostCall;
 
 /// One structured host fact tracked by the Lambda Skill call gate.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -131,6 +135,21 @@ impl LambdaToolSig {
             }
         }
         None
+    }
+
+    fn validate_result(
+        &self,
+        args: &Map<String, Value>,
+        result: &Value,
+        facts: &BTreeSet<LambdaFact>,
+    ) -> Option<String> {
+        if result_check::lambda_result_matches_type_with_facts(result, args, &self.result, facts) {
+            return None;
+        }
+        Some(format!(
+            "result for {} does not match {}",
+            self.name, self.result
+        ))
     }
 
     fn required_context_satisfied(
@@ -253,7 +272,11 @@ impl LambdaToolSig {
                     "Lambda Skill host tool {} concrete input contract for {} must bind exactly the non-proof formal parameters [{}]",
                     self.name,
                     concrete_tool,
-                    concrete_bound_params.iter().cloned().collect::<Vec<_>>().join(", ")
+                    concrete_bound_params
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ));
             }
         }
@@ -615,6 +638,9 @@ impl LambdaGateState {
         if verdict.is_accept() {
             if let Some(sig) = self.host.lookup_tool(tool) {
                 let object = args.as_object().cloned().unwrap_or_default();
+                if let Some(reason) = sig.validate_result(&object, result, &self.facts) {
+                    return LambdaGateVerdict::Reject(reason);
+                }
                 for fact in sig.instantiated_facts(&object, result) {
                     self.facts.insert(fact);
                 }
@@ -746,52 +772,6 @@ fn lambda_fact_metadata(fact: &LambdaFact) -> Value {
         Value::Array(fact.args().iter().cloned().map(Value::String).collect()),
     );
     Value::Object(object)
-}
-
-/// One admitted formal host call awaiting its concrete Puffer tool invocation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PendingLambdaHostCall {
-    host_tool: String,
-    host_args: Value,
-    concrete_tool: String,
-    concrete_input: Value,
-}
-
-impl PendingLambdaHostCall {
-    /// Creates a pending bridge from one formal host tool to one concrete tool call.
-    pub(crate) fn new(
-        host_tool: impl Into<String>,
-        host_args: Value,
-        concrete_tool: impl Into<String>,
-        concrete_input: Value,
-    ) -> Self {
-        Self {
-            host_tool: host_tool.into(),
-            host_args,
-            concrete_tool: concrete_tool.into(),
-            concrete_input,
-        }
-    }
-
-    /// Returns the formal host tool name admitted by the Lambda gate.
-    pub(crate) fn host_tool(&self) -> &str {
-        &self.host_tool
-    }
-
-    /// Returns the formal host arguments admitted by the Lambda gate.
-    pub(crate) fn host_args(&self) -> &Value {
-        &self.host_args
-    }
-
-    /// Returns the concrete Puffer tool name this bridge permits next.
-    pub(crate) fn concrete_tool(&self) -> &str {
-        &self.concrete_tool
-    }
-
-    /// Returns true when the pending bridge permits this concrete call.
-    pub(crate) fn permits_concrete_call(&self, tool_id: &str, input: &Value) -> bool {
-        self.concrete_tool == tool_id && self.concrete_input == *input
-    }
 }
 
 /// Builds a runtime gate for a verified Lambda Skill when catalogue data is available.

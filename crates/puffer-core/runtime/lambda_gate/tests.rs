@@ -202,6 +202,75 @@ fn gate_custom_refinements_bind_to_result_values() {
 }
 
 #[test]
+fn gate_rejects_result_refinement_failures_before_committing_facts() {
+    let host = LambdaHostEnv::from_json_str(
+        r#"{"effects":["fs_w"],"domains":[],"tools":[
+          {"name":"save_report","effects":["fs_w"],"concreteTools":["Bash"],"concreteInputContracts":{"Bash":{"command":"save"}},"result":"str{ends_with_pdf(p) && report_saved(p)}"},
+          {"name":"publish_report","effects":["fs_w"],"concreteTools":["Bash"],"concreteInputContracts":{"Bash":{"command":{"$template":"publish ${shell:path}"}}},"params":[{"name":"path","ty":"ReportPath{report_saved(p)}"}],"result":"unit"}
+        ]}"#,
+    )
+    .unwrap();
+    let mut gate = LambdaGateState::with_host_caps(host);
+
+    assert_eq!(
+        gate.step_call_with_args_and_result(
+            "save_report",
+            &serde_json::json!({}),
+            &serde_json::json!("report.txt")
+        )
+        .reason(),
+        Some("result for save_report does not match str{ends_with_pdf(p) && report_saved(p)}")
+    );
+    assert!(gate.facts().is_empty());
+    assert_eq!(
+        gate.admit_call_with_args("publish_report", &serde_json::json!({"path": "report.txt"}))
+            .reason(),
+        Some("formal arg path for publish_report does not match ReportPath{report_saved(p)}")
+    );
+
+    assert!(gate
+        .step_call_with_args_and_result(
+            "save_report",
+            &serde_json::json!({}),
+            &serde_json::json!("report.pdf")
+        )
+        .is_accept());
+    assert!(gate
+        .admit_call_with_args("publish_report", &serde_json::json!({"path": "report.pdf"}))
+        .is_accept());
+}
+
+#[test]
+fn gate_enforces_record_result_refinements() {
+    let host = LambdaHostEnv::from_json_str(
+        r#"{"effects":["proc"],"domains":[],"tools":[
+          {"name":"resolve_server","effects":["proc"],"concreteTools":["Bash"],"concreteInputContracts":{"Bash":{"command":"server"}},"result":"{host: BindHost{loopback_only(h)}, port: BindPort{ephemeral_port(p)}}"}
+        ]}"#,
+    )
+    .unwrap();
+    let mut gate = LambdaGateState::with_host_caps(host);
+
+    assert!(gate
+        .step_call_with_args_and_result(
+            "resolve_server",
+            &serde_json::json!({}),
+            &serde_json::json!({"host": "127.0.0.1", "port": 3000})
+        )
+        .is_accept());
+    assert_eq!(
+        gate.step_call_with_args_and_result(
+            "resolve_server",
+            &serde_json::json!({}),
+            &serde_json::json!({"host": "example.com", "port": 3000})
+        )
+        .reason(),
+        Some(
+            "result for resolve_server does not match {host: BindHost{loopback_only(h)}, port: BindPort{ephemeral_port(p)}}"
+        )
+    );
+}
+
+#[test]
 fn gate_registers_can_bind_to_result_values() {
     let host = LambdaHostEnv::from_json_str(
         r#"{"effects":["net_r"],"domains":[],"tools":[
@@ -357,7 +426,9 @@ fn int_arg_contract_coerces_numeric_string_arguments() {
             &serde_json::json!({"process_id": "1000", "input": "yes\n"})
         )
         .reason(),
-        Some("concrete input for process_submit does not match the precompiled WriteStdin contract")
+        Some(
+            "concrete input for process_submit does not match the precompiled WriteStdin contract"
+        )
     );
 }
 
