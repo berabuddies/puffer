@@ -177,6 +177,27 @@ fn shell_join_template_contract_quotes_array_arguments() {
 }
 
 #[test]
+fn url_template_contract_percent_encodes_arguments() {
+    let host = LambdaHostEnv::from_json_str(
+        r#"{"effects":[],"domains":[],"tools":[{"name":"public_lookup","effects":["net_r"],"params":[{"name":"query","ty":"str"}],"concreteTools":["WebFetch"],"concreteInputContracts":{"WebFetch":{"url":{"$template":"https://example.test/search?q=${url:query}"},"prompt":"Return the response."}}}]}"#,
+    )
+    .unwrap();
+    let gate = LambdaGateState::with_host_caps(host);
+
+    assert!(gate
+        .admit_concrete_input_binding(
+            "public_lookup",
+            &serde_json::json!({"query": "EGFR inhibitor"}),
+            "WebFetch",
+            &serde_json::json!({
+                "url": "https://example.test/search?q=EGFR%20inhibitor",
+                "prompt": "Return the response."
+            })
+        )
+        .is_accept());
+}
+
+#[test]
 fn skill_path_contract_matches_loaded_skill_root() {
     let root = tempfile::tempdir().unwrap();
     let skill_source = root.path().join("skill.lskill");

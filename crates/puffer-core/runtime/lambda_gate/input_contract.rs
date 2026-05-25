@@ -164,6 +164,7 @@ fn render_template(template: &str, args: &Map<String, Value>) -> Option<String> 
             TemplateFormat::Json => output.push_str(&serde_json::to_string(value).ok()?),
             TemplateFormat::Shell => output.push_str(&shell_quote_value(value)?),
             TemplateFormat::ShellJoin => output.push_str(&shell_quote_array(value)?),
+            TemplateFormat::Url => output.push_str(&url_encode_value(value)?),
             TemplateFormat::Raw => {
                 if let Some(text) = value.as_str() {
                     output.push_str(text);
@@ -184,6 +185,7 @@ enum TemplateFormat {
     Json,
     Shell,
     ShellJoin,
+    Url,
 }
 
 fn template_placeholder(placeholder: &str) -> Option<(TemplateFormat, &str)> {
@@ -194,6 +196,8 @@ fn template_placeholder(placeholder: &str) -> Option<(TemplateFormat, &str)> {
         (TemplateFormat::Shell, name.trim())
     } else if let Some(name) = trimmed.strip_prefix("shell_join:") {
         (TemplateFormat::ShellJoin, name.trim())
+    } else if let Some(name) = trimmed.strip_prefix("url:") {
+        (TemplateFormat::Url, name.trim())
     } else {
         (TemplateFormat::Raw, trimmed)
     };
@@ -220,4 +224,25 @@ fn shell_quote_array(value: &Value) -> Option<String> {
         .map(shell_quote_value)
         .collect::<Option<Vec<_>>>()
         .map(|quoted| quoted.join(" "))
+}
+
+fn url_encode_value(value: &Value) -> Option<String> {
+    let text = if let Some(text) = value.as_str() {
+        text.to_string()
+    } else {
+        serde_json::to_string(value).ok()?
+    };
+    Some(percent_encode(&text))
+}
+
+fn percent_encode(text: &str) -> String {
+    let mut encoded = String::new();
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
 }
