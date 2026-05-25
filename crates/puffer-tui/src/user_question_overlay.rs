@@ -29,6 +29,7 @@ pub(crate) struct UserQuestionOption {
     label: String,
     description: String,
     preview: Option<String>,
+    search_text: String,
 }
 
 /// Modal list state for answering `AskUserQuestion` prompts.
@@ -65,6 +66,7 @@ impl UserQuestionOverlay {
                     .options
                     .into_iter()
                     .map(|option| UserQuestionOption {
+                        search_text: searchable_option_text(&option.label, &option.description),
                         label: option.label,
                         description: option.description,
                         preview: option.preview,
@@ -544,14 +546,13 @@ impl UserQuestionOverlay {
 
     fn filtered_option_indices(&self, question: &UserQuestion, query: &str) -> Vec<usize> {
         let query = normalize_search_query(query);
+        let terms = query.split_whitespace().collect::<Vec<_>>();
         question
             .options
             .iter()
             .enumerate()
             .filter(|(_, option)| {
-                query.is_empty()
-                    || normalize_search_query(&option.label).contains(&query)
-                    || normalize_search_query(&option.description).contains(&query)
+                terms.is_empty() || terms.iter().all(|term| option.search_text.contains(term))
             })
             .map(|(index, _)| index)
             .collect()
@@ -655,4 +656,8 @@ fn number_shortcut(index: usize) -> Option<char> {
 
 fn normalize_search_query(value: &str) -> String {
     value.trim().to_ascii_lowercase()
+}
+
+fn searchable_option_text(label: &str, description: &str) -> String {
+    format!("{} {}", label.trim(), description.trim()).to_ascii_lowercase()
 }

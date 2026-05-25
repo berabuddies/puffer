@@ -204,6 +204,19 @@ fn user_question_searchable_choice_filters_and_selects() {
 }
 
 #[test]
+fn user_question_searchable_choice_matches_multiple_terms() {
+    let mut overlay = UserQuestionOverlay::from_value(sample_searchable_payload()).unwrap();
+
+    for ch in "slack account".chars() {
+        overlay.insert_custom_char(ch);
+    }
+
+    let rows = overlay.rows();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].1.contains("slack-login"));
+}
+
+#[test]
 fn user_question_response_preserves_composer_draft() {
     let (response_tx, response_rx) = mpsc::channel();
     let draft = "keep this draft [Pasted text #1 +2 lines]".to_string();

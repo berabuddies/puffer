@@ -4,6 +4,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use puffer_resources::LoadedResources;
 use serde_json::{json, Value};
 
+mod catalog;
 mod serve_config;
 
 /// Runs the deterministic `/connect` connector-auth flow without a provider turn.
@@ -55,10 +56,15 @@ fn parse_or_ask_target(
     let mut connection_name = parts.next().unwrap_or_default().to_string();
     let extra = parts.collect::<Vec<_>>().join(" ");
 
-    if connector_slug.is_empty() {
-        connector_slug = ask_connector_slug(state, resources)?;
-    }
+    connector_slug = if connector_slug.is_empty() {
+        catalog::ask_connector_slug(state, resources)?
+    } else {
+        catalog::resolve_connector_slug(state, resources, &connector_slug)?
+    };
     if connection_name.is_empty() || !extra.is_empty() {
+        if !extra.is_empty() {
+            connection_name.clear();
+        }
         connection_name = ask_input(
             state,
             resources,
@@ -576,113 +582,6 @@ fn ask_port(
         .with_context(|| format!("`{value}` is not a valid TCP port"))
 }
 
-fn ask_connector_slug(state: &mut AppState, resources: &LoadedResources) -> Result<String> {
-    let options = connector_catalog_options(state, resources)?;
-    ask_searchable_choice(
-        state,
-        resources,
-        "Connector",
-        "Which connector should Puffer connect?",
-        &options,
-    )
-}
-
-fn connector_catalog_options(
-    state: &mut AppState,
-    resources: &LoadedResources,
-) -> Result<Vec<(String, String)>> {
-    match call_tool(state, resources, "ConnectorList", json!({})) {
-        Ok(output) => connector_options(&output),
-        Err(error)
-            if error
-                .to_string()
-                .contains("subscription runtime is not running") =>
-        {
-            Ok(builtin_connector_options())
-        }
-        Err(error) => Err(error),
-    }
-}
-
-fn builtin_connector_options() -> Vec<(String, String)> {
-    puffer_subscriptions::builtin_connector_templates()
-        .into_iter()
-        .map(|template| {
-            let mut traits = Vec::new();
-            if template.requires_auth {
-                traits.push("auth");
-            } else {
-                traits.push("no auth");
-            }
-            if template.can_subscribe {
-                traits.push("subscribe");
-            }
-            if template.can_proxy_agent {
-                traits.push("agent proxy");
-            }
-            (
-                template.slug,
-                format!("{} ({})", template.description, traits.join(", ")),
-            )
-        })
-        .collect()
-}
-
-fn connector_options(output: &Value) -> Result<Vec<(String, String)>> {
-    let connectors = output
-        .get("connectors")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("ConnectorList did not return a connectors array"))?;
-    if connectors.is_empty() {
-        bail!("no connector templates are available");
-    }
-    let options = connectors
-        .iter()
-        .filter_map(|connector| {
-            let slug = connector.get("connector_slug").and_then(Value::as_str)?;
-            Some((slug.to_string(), connector_option_description(connector)))
-        })
-        .collect::<Vec<_>>();
-    if options.is_empty() {
-        bail!("ConnectorList did not return any connector slugs");
-    }
-    Ok(options)
-}
-
-fn connector_option_description(connector: &Value) -> String {
-    let description = connector
-        .get("description")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("Connector template");
-    let mut traits = Vec::new();
-    if connector
-        .get("requires_auth")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        traits.push("auth");
-    } else {
-        traits.push("no auth");
-    }
-    if connector
-        .get("can_subscribe")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        traits.push("subscribe");
-    }
-    if connector
-        .get("can_proxy_agent")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        traits.push("agent proxy");
-    }
-    format!("{description} ({})", traits.join(", "))
-}
-
 fn ask_input(
     state: &mut AppState,
     resources: &LoadedResources,
@@ -883,6 +782,18 @@ mod tests {
 
         assert_eq!(target.connector_slug, "telegram-login");
         assert_eq!(target.connection_name, "telegram-user");
+    }
+
+    #[test]
+    fn parse_target_resolves_unique_connector_search_term() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let target =
+            parse_or_ask_target(&mut state, &resources, "matrix matrix-main").expect("target");
+
+        assert_eq!(target.connector_slug, "matrix-bot");
+        assert_eq!(target.connection_name, "matrix-main");
     }
 
     #[test]
