@@ -1,4 +1,4 @@
-use super::{canonical_fact_arg, LambdaFact};
+use super::{canonical_fact_arg, semantic_predicate, LambdaFact};
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 
@@ -193,17 +193,7 @@ fn compare_expr_shape(expr: &str) -> bool {
 }
 
 fn runtime_predicate_shape(expr: &str) -> bool {
-    expr.split_once('(').is_some_and(|(name, _)| {
-        matches!(
-            name.trim(),
-            "valid_arxiv_id"
-                | "valid_address"
-                | "valid_uri"
-                | "valid_url"
-                | "emergency_number"
-                | "parsed_ok"
-        )
-    })
+    semantic_predicate::is_supported_expr(expr)
 }
 
 fn string_predicate_shape(expr: &str) -> bool {
@@ -255,7 +245,7 @@ mod tests {
     fn extracts_positive_result_facts() {
         let args = json!({"repo": "puffer"}).as_object().unwrap().clone();
         let facts = facts_from_result_refinements(
-            "Result{is_issue(r) && linked_to(repo) && valid_url(r)}",
+            "Result{is_issue(r) && linked_to(repo) && valid_url(r) && is_folder(r)}",
             &json!("ISSUE-1"),
             &args,
         );
