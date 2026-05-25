@@ -300,6 +300,42 @@ pub(super) fn connect_linear_webhook(
     ))
 }
 
+/// Configures the Stripe webhook preset through the serve-mode webhook connector.
+pub(super) fn connect_stripe_webhook(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    connection: &str,
+) -> Result<ConnectResult> {
+    let bind_address = ask_input(
+        state,
+        resources,
+        "Bind",
+        "What bind address should the Stripe webhook listen on?",
+    )?;
+    let path_value = ask_input(
+        state,
+        resources,
+        "Path",
+        "What URL path should Stripe post webhook events to?",
+    )?;
+    let path_value = normalize_webhook_path_with_default(&path_value, "/stripe");
+    let fields = vec![
+        ("bind_address", toml::Value::String(bind_address)),
+        ("path", toml::Value::String(path_value)),
+        (
+            "welcome_message",
+            toml::Value::String("Stripe webhook ready.".to_string()),
+        ),
+    ];
+    let path = write_workspace_connector_config(state, "webhook", connection, &fields)?;
+    Ok(serve_summary(
+        "stripe-webhook",
+        connection,
+        "Stripe event webhook",
+        &path,
+    ))
+}
+
 fn normalize_webhook_path(value: &str) -> String {
     normalize_webhook_path_with_default(value, "/github")
 }
@@ -465,6 +501,8 @@ mod tests {
             "What URL path should Jira post webhook events to?" => "jira",
             "What bind address should the Linear webhook listen on?" => "127.0.0.1:9393",
             "What URL path should Linear post webhook events to?" => "linear",
+            "What bind address should the Stripe webhook listen on?" => "127.0.0.1:9696",
+            "What URL path should Stripe post webhook events to?" => "stripe",
             "What bind address should the webhook listen on?" => "127.0.0.1:9191",
             "Should this webhook require bearer-token auth?" => "No bearer token",
             other => panic!("unexpected question: {other}"),
@@ -659,6 +697,28 @@ mod tests {
         assert!(raw.contains("bind_address = \"127.0.0.1:9393\""));
         assert!(raw.contains("path = \"/linear\""));
         assert!(raw.contains("welcome_message = \"Linear webhook ready.\""));
+    }
+
+    #[test]
+    fn stripe_webhook_connect_writes_webhook_preset_config() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let result = with_user_question_prompt_handler(
+            |request| answer_request(&request),
+            || connect_stripe_webhook(&mut state, &resources, "stripe-webhook"),
+        )
+        .expect("connect result");
+
+        assert!(result.summary.contains("connector: stripe-webhook"));
+        assert!(result.summary.contains("run `puffer serve`"));
+        let path = state.cwd.join(".puffer/connectors.toml");
+        let raw = fs::read_to_string(path).expect("connector config");
+        assert!(raw.contains("[connectors.webhook]"));
+        assert!(raw.contains("display_name = \"stripe-webhook\""));
+        assert!(raw.contains("bind_address = \"127.0.0.1:9696\""));
+        assert!(raw.contains("path = \"/stripe\""));
+        assert!(raw.contains("welcome_message = \"Stripe webhook ready.\""));
     }
 
     #[test]

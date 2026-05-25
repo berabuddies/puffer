@@ -527,6 +527,19 @@ export class FakeDaemon {
         action_slugs: []
       },
       {
+        connector_slug: "stripe-webhook",
+        description: "Stripe invoice, payment, and billing webhook preset backed by puffer serve",
+        skill: "stripe-webhook",
+        runtime_hints: ["serve"],
+        requires_auth: false,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "stripe-webhook",
+        connect_command: "/connect stripe-webhook stripe-webhook",
+        action_slugs: []
+      },
+      {
         connector_slug: "webhook",
         description: "HTTP webhook connector configured through puffer serve",
         skill: "webhook",

@@ -283,3 +283,21 @@ pub(super) fn linear_event_output_schema() -> Value {
         "additionalProperties": true
     })
 }
+
+/// Returns the Stripe webhook event output schema.
+pub(super) fn stripe_event_output_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "const": "stripe_event"},
+            "type": {"type": "string"},
+            "object_type": {"type": "string"},
+            "object_id": {"type": "string"},
+            "account": {"type": "string"},
+            "message": {"type": "string"},
+            "url": {"type": "string"}
+        },
+        "required": ["type", "message"],
+        "additionalProperties": true
+    })
+}

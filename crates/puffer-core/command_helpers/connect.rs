@@ -42,6 +42,9 @@ pub fn execute_connect_flow(
         "linear-webhook" => {
             serve_config::connect_linear_webhook(state, resources, &target.connection_name)?
         }
+        "stripe-webhook" => {
+            serve_config::connect_stripe_webhook(state, resources, &target.connection_name)?
+        }
         "webhook" => serve_config::connect_webhook(state, resources, &target.connection_name)?,
         _ => connect_generic(state, resources, &target)?,
     };
@@ -805,6 +808,8 @@ mod tests {
             "What URL path should GitHub post webhook events to?" => "/github",
             "What bind address should the Linear webhook listen on?" => "127.0.0.1:9393",
             "What URL path should Linear post webhook events to?" => "linear",
+            "What bind address should the Stripe webhook listen on?" => "127.0.0.1:9696",
+            "What URL path should Stripe post webhook events to?" => "stripe",
             "What Telegram bot token should Puffer use?" => "telegram-token",
             other => panic!("unexpected question: {other}"),
         };
@@ -947,6 +952,26 @@ mod tests {
         assert!(raw.contains("[connectors.webhook]"));
         assert!(raw.contains("display_name = \"linear-events\""));
         assert!(raw.contains("path = \"/linear\""));
+    }
+
+    #[test]
+    fn execute_connect_flow_dispatches_stripe_webhook_setup() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let turn = with_user_question_prompt_handler(
+            |request| answer_connect_question(&request),
+            || execute_connect_flow(&mut state, &resources, "stripe-webhook stripe-events"),
+        )
+        .expect("connect turn");
+
+        assert!(turn.assistant_text.contains("connector: stripe-webhook"));
+        assert!(turn.assistant_text.contains("connection: stripe-events"));
+        assert!(turn.assistant_text.contains("run `puffer serve`"));
+        let raw = connector_config(&state);
+        assert!(raw.contains("[connectors.webhook]"));
+        assert!(raw.contains("display_name = \"stripe-events\""));
+        assert!(raw.contains("path = \"/stripe\""));
     }
 
     #[test]

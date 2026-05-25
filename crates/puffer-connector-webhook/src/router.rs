@@ -149,6 +149,7 @@ fn inbound_from_payload(headers: &HeaderMap, payload: &Value) -> Option<InboundM
         .or_else(|| github_inbound(headers, payload))
         .or_else(|| linear_inbound(headers, payload))
         .or_else(|| payloads::jira_inbound(headers, payload))
+        .or_else(|| payloads::stripe_inbound(headers, payload))
         .or_else(|| payloads::gitlab_inbound(headers, payload))
 }
 

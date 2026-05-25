@@ -114,6 +114,7 @@ pub fn builtin_connector_templates() -> Vec<ConnectorTemplate> {
         gitlab_webhook_template(),
         jira_webhook_template(),
         linear_webhook_template(),
+        stripe_webhook_template(),
         webhook_template(),
     ]
 }
@@ -142,6 +143,7 @@ pub fn suggested_connection_slug(connector_slug: &str) -> String {
         "gitlab-webhook" => "gitlab-webhook".to_string(),
         "jira-webhook" => "jira-webhook".to_string(),
         "linear-webhook" => "linear-webhook".to_string(),
+        "stripe-webhook" => "stripe-webhook".to_string(),
         "webhook" => "webhook".to_string(),
         _ => connector_slug.to_string(),
     }
@@ -390,6 +392,23 @@ fn linear_webhook_template() -> ConnectorTemplate {
         can_proxy_agent: false,
         subscriber: None,
         output_schema: linear_event_output_schema(),
+        actions: BTreeMap::new(),
+    }
+}
+
+fn stripe_webhook_template() -> ConnectorTemplate {
+    ConnectorTemplate {
+        slug: "stripe-webhook".to_string(),
+        description: "Stripe invoice, payment, and billing webhook preset backed by puffer serve"
+            .to_string(),
+        skill: "stripe-webhook".to_string(),
+        binary: "puffer connector webhook".to_string(),
+        command: Vec::new(),
+        requires_auth: false,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        subscriber: None,
+        output_schema: stripe_event_output_schema(),
         actions: BTreeMap::new(),
     }
 }

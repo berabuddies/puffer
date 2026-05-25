@@ -243,6 +243,169 @@ fn normalize_jira_event(value: &str) -> String {
         .replace('-', "_")
 }
 
+/// Converts a Stripe webhook payload into an inbound Puffer message.
+pub(super) fn stripe_inbound(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
+    if !stripe_payload_shape(headers, payload) {
+        return None;
+    }
+    let event_id = string_field(payload, "id")?;
+    let event_type = string_field(payload, "type")?;
+    let object = payload.pointer("/data/object")?;
+    let object_type = string_field(object, "object").unwrap_or("object");
+    let object_id = stripe_ref(object, "id").unwrap_or_else(|| event_id.to_string());
+    let account =
+        string_field(payload, "account").or_else(|| header_value(headers, "stripe-account"));
+    let conversation_id = stripe_conversation_id(account, object_type, &object_id);
+    let text = stripe_message(
+        event_type,
+        event_id,
+        account,
+        object_type,
+        &object_id,
+        payload,
+        object,
+    );
+
+    Some(InboundMessage {
+        conversation_id,
+        user_id: Some(account.unwrap_or("stripe").to_string()),
+        text,
+        thread_id: None,
+        is_group: false,
+        bot_mentioned: true,
+        from_bot: false,
+    })
+}
+
+fn stripe_payload_shape(headers: &HeaderMap, payload: &Value) -> bool {
+    header_value(headers, "stripe-signature").is_some()
+        || (string_field(payload, "object") == Some("event")
+            && payload.pointer("/data/object").is_some())
+}
+
+fn stripe_conversation_id(account: Option<&str>, object_type: &str, object_id: &str) -> String {
+    let scope = account
+        .map(|value| format!("stripe:{value}"))
+        .unwrap_or_else(|| "stripe".to_string());
+    format!("{scope}:{}:{object_id}", normalize_stripe_part(object_type))
+}
+
+fn stripe_message(
+    event_type: &str,
+    event_id: &str,
+    account: Option<&str>,
+    object_type: &str,
+    object_id: &str,
+    payload: &Value,
+    object: &Value,
+) -> String {
+    let mut lines = vec![format!("Stripe {event_type}")];
+    if let Some(account) = account {
+        lines.push(format!("Account: {account}"));
+    }
+    lines.push(stripe_mode_line(object));
+    lines.push(stripe_subject_line(object_type, object_id, object));
+    for (label, field) in [
+        ("Customer", "customer"),
+        ("Subscription", "subscription"),
+        ("Invoice", "invoice"),
+        ("Payment intent", "payment_intent"),
+    ] {
+        if let Some(value) = stripe_ref(object, field) {
+            lines.push(format!("{label}: {value}"));
+        }
+    }
+    if let Some(amount) = stripe_amount(object) {
+        lines.push(format!("Amount: {amount}"));
+    }
+    if let Some(url) = stripe_url(object) {
+        lines.push(format!("URL: {url}"));
+    }
+    if let Some(request) =
+        pointer_string(payload, "/request/id").or_else(|| pointer_string(payload, "/request"))
+    {
+        lines.push(format!("Request: {request}"));
+    }
+    lines.push(format!("Event: {event_id}"));
+    lines.join("\n")
+}
+
+fn stripe_mode_line(object: &Value) -> String {
+    if object
+        .get("livemode")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        "Mode: live".to_string()
+    } else {
+        "Mode: test".to_string()
+    }
+}
+
+fn stripe_subject_line(object_type: &str, object_id: &str, object: &Value) -> String {
+    let mut suffixes = Vec::new();
+    if let Some(number) = string_field(object, "number") {
+        suffixes.push(number.to_string());
+    }
+    if let Some(status) =
+        string_field(object, "status").or_else(|| string_field(object, "payment_status"))
+    {
+        suffixes.push(status.to_string());
+    }
+    if let Some(description) = string_field(object, "description") {
+        suffixes.push(snippet(description));
+    }
+    if suffixes.is_empty() {
+        format!("Subject: {object_type} {object_id}")
+    } else {
+        format!("Subject: {object_type} {object_id} {}", suffixes.join(" "))
+    }
+}
+
+fn stripe_amount(object: &Value) -> Option<String> {
+    let amount = [
+        "amount_total",
+        "amount_paid",
+        "amount_due",
+        "amount_received",
+        "amount_captured",
+        "amount",
+    ]
+    .iter()
+    .find_map(|field| object.get(*field).and_then(number_or_string))?;
+    let currency = string_field(object, "currency")
+        .map(str::to_ascii_uppercase)
+        .unwrap_or_else(|| "minor units".to_string());
+    Some(format!("{amount} {currency}"))
+}
+
+fn stripe_url(object: &Value) -> Option<&str> {
+    string_field(object, "hosted_invoice_url")
+        .or_else(|| string_field(object, "receipt_url"))
+        .or_else(|| string_field(object, "url"))
+        .or_else(|| string_field(object, "invoice_pdf"))
+}
+
+fn stripe_ref(object: &Value, field: &str) -> Option<String> {
+    match object.get(field)? {
+        Value::String(value) => Some(value.clone()),
+        Value::Object(_) => object
+            .get(field)
+            .and_then(|value| string_field(value, "id"))
+            .map(str::to_string),
+        _ => object.get(field).and_then(number_or_string),
+    }
+}
+
+fn normalize_stripe_part(value: &str) -> String {
+    value
+        .trim()
+        .to_ascii_lowercase()
+        .replace(':', "_")
+        .replace(' ', "_")
+        .replace('-', "_")
+}
+
 /// Converts a GitLab webhook payload into an inbound Puffer message.
 pub(super) fn gitlab_inbound(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
     let has_header = header_value(headers, "x-gitlab-event").is_some()
@@ -567,6 +730,80 @@ mod tests {
             .text
             .contains("Subject: comment on issue PUF-42 Bring connectors into Corbina"));
         assert!(inbound.text.contains("Please add Jira."));
+    }
+
+    #[test]
+    fn stripe_invoice_payload_maps_to_inbound_message() {
+        let mut headers = HeaderMap::new();
+        headers.insert("stripe-signature", "t=1,v1=test".parse().unwrap());
+        let payload = serde_json::json!({
+            "id": "evt_invoice_paid",
+            "object": "event",
+            "type": "invoice.payment_succeeded",
+            "account": "acct_123",
+            "request": {"id": "req_123"},
+            "data": {
+                "object": {
+                    "id": "in_123",
+                    "object": "invoice",
+                    "number": "PUF-0001",
+                    "status": "paid",
+                    "customer": "cus_123",
+                    "subscription": "sub_123",
+                    "amount_paid": 2000,
+                    "currency": "usd",
+                    "hosted_invoice_url": "https://invoice.stripe.com/i/acct_123/test",
+                    "livemode": false
+                }
+            }
+        });
+
+        let inbound = stripe_inbound(&headers, &payload).expect("stripe inbound");
+
+        assert_eq!(inbound.conversation_id, "stripe:acct_123:invoice:in_123");
+        assert_eq!(inbound.user_id.as_deref(), Some("acct_123"));
+        assert!(inbound.text.contains("Stripe invoice.payment_succeeded"));
+        assert!(inbound
+            .text
+            .contains("Subject: invoice in_123 PUF-0001 paid"));
+        assert!(inbound.text.contains("Customer: cus_123"));
+        assert!(inbound.text.contains("Amount: 2000 USD"));
+        assert!(inbound.text.contains("Request: req_123"));
+    }
+
+    #[test]
+    fn stripe_checkout_payload_uses_object_thread_without_account() {
+        let headers = HeaderMap::new();
+        let payload = serde_json::json!({
+            "id": "evt_checkout_completed",
+            "object": "event",
+            "type": "checkout.session.completed",
+            "data": {
+                "object": {
+                    "id": "cs_test_123",
+                    "object": "checkout.session",
+                    "payment_status": "paid",
+                    "customer": {"id": "cus_nested"},
+                    "amount_total": 5000,
+                    "currency": "usd",
+                    "url": "https://checkout.stripe.com/c/pay/cs_test_123",
+                    "livemode": true
+                }
+            }
+        });
+
+        let inbound = stripe_inbound(&headers, &payload).expect("stripe inbound");
+
+        assert_eq!(
+            inbound.conversation_id,
+            "stripe:checkout.session:cs_test_123"
+        );
+        assert_eq!(inbound.user_id.as_deref(), Some("stripe"));
+        assert!(inbound.text.contains("Mode: live"));
+        assert!(inbound
+            .text
+            .contains("Subject: checkout.session cs_test_123 paid"));
+        assert!(inbound.text.contains("Customer: cus_nested"));
     }
 
     #[test]
