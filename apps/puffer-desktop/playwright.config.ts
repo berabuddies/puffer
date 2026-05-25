@@ -5,6 +5,8 @@ const shouldReuseExistingServer = !process.env.CI && !process.env.CODEX_CI;
 
 export default defineConfig({
   testDir: "tests",
+  // v1 specs target the legacy Puffer UI; the current entry is src-v2 (Momo).
+  testIgnore: ["v1/**"],
   timeout: 120_000,
   expect: {
     timeout: 10_000
