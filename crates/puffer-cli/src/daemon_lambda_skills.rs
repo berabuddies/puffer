@@ -131,6 +131,7 @@ const SUPPORTED_LAMBDA_CONCRETE_TOOLS: &[&str] = &[
     "CronCreate",
     "CronDelete",
     "CronList",
+    "DiscordAction",
     "Edit",
     "EnterPlanMode",
     "EnterWorktree",

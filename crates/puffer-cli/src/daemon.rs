@@ -5178,7 +5178,8 @@ mod tests {
               "effects": ["net_r"],
               "domains": [],
               "tools": [
-                {"name": "fetch_page", "params": [{"name": "url", "ty": "str"}], "result": "str", "effects": ["net_r"], "concreteTools": ["ToolSearch"], "registers": [], "contextReq": null}
+                {"name": "fetch_page", "params": [{"name": "url", "ty": "str"}], "result": "str", "effects": ["net_r"], "concreteTools": ["ToolSearch"], "registers": [], "contextReq": null},
+                {"name": "send_embed", "params": [{"name": "to", "ty": "str"}, {"name": "body", "ty": "str"}, {"name": "embeds", "ty": "str"}], "result": "str", "effects": ["net_w"], "concreteTools": ["DiscordAction"], "concreteInputContracts": {"DiscordAction": {"action": "sendEmbeds", "service": "discord", "channelId": {"$arg": "to"}, "body": {"$arg": "body"}, "embeds": {"$arg": "embeds"}}}, "registers": [], "contextReq": null}
               ]
             }"#,
         )
@@ -5204,6 +5205,7 @@ mod tests {
 
         assert_eq!(saved["skills"][0]["ready"], false);
         assert_eq!(saved["skills"][0]["modelInvocable"], false);
+        assert_eq!(saved["libraries"][0]["allowedTools"][0], "DiscordAction");
         assert!(saved["skills"][0]["failureReason"]
             .as_str()
             .unwrap()

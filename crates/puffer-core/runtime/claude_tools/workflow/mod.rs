@@ -6,6 +6,7 @@ pub mod connector_tools;
 pub mod cron_create;
 pub mod cron_delete;
 pub mod cron_list;
+pub mod discord_action;
 pub mod email_configure;
 pub mod enter_plan_mode;
 pub mod enter_worktree;

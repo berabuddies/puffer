@@ -751,6 +751,7 @@ pub fn execute_workflow_tool(
         "create_goal" => workflow::goal::execute_create_goal(state, cwd, input),
         "update_goal" => workflow::goal::execute_update_goal(state, cwd, input),
         "HttpRequest" => workflow::http_request::execute_http_request(state, cwd, input),
+        "DiscordAction" => workflow::discord_action::execute_discord_action(state, cwd, input),
         "Lark" => workflow::lark::execute_lark(state, cwd, input),
         "LSP" => workflow::lsp::execute_lsp(state, resources, cwd, input),
         "McpToolCall" => workflow::mcp_tool_call::execute_mcp_tool_call(state, cwd, input),
