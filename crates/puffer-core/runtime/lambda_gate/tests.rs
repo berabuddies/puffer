@@ -828,6 +828,48 @@ fn host_catalogue_runtime_validation_accepts_result_refinement_fact_producer() {
 }
 
 #[test]
+fn native_mcp_tool_name_refinement_is_checked_semantically() {
+    let host = LambdaHostEnv::from_json_str(
+        r#"{"effects":["proc","net_r","net_w"],"domains":[],"tools":[
+          {"name":"discover_tools","effects":["proc","net_r"],"concreteTools":["WebSearch"],"concreteInputContracts":{"WebSearch":{"query":"discover mcp tools"}},"result":"ToolRegistry{tools_discovered(r)}"},
+          {"name":"call_mcp_tool","effects":["proc","net_w"],"concreteTools":["McpToolCall"],"concreteInputContracts":{"McpToolCall":{"qualifiedToolName":{"$arg":"tool_name"},"argsJson":{"$arg":"args_json"},"registry":{"$arg":"registry"}}},"params":[{"name":"registry","ty":"ToolRegistry{tools_discovered(r)}"},{"name":"tool_name","ty":"str{tool_names_normalized(n)}"},{"name":"args_json","ty":"str"}]}
+        ]}"#,
+    )
+    .unwrap();
+    let mut gate = LambdaGateState::with_host_caps(host);
+    let registry = serde_json::json!({"tools": ["mcp__agentmail__send_message"]});
+    assert!(gate
+        .step_call_with_args_and_result(
+            "discover_tools",
+            &serde_json::json!({}),
+            &registry
+        )
+        .is_accept());
+
+    assert!(gate
+        .admit_call_with_args(
+            "call_mcp_tool",
+            &serde_json::json!({
+                "registry": registry,
+                "tool_name": "mcp__agentmail__send_message",
+                "args_json": "{}"
+            })
+        )
+        .is_accept());
+    assert!(gate
+        .admit_call_with_args(
+            "call_mcp_tool",
+            &serde_json::json!({
+                "registry": {"tools": []},
+                "tool_name": "agentmail.send_message",
+                "args_json": "{}"
+            })
+        )
+        .reason()
+        .is_some());
+}
+
+#[test]
 fn gate_for_verified_skill_reads_catalogue_file() {
     let root = tempfile::tempdir().unwrap();
     let catalogue = root.path().join("host.json");

@@ -23,6 +23,7 @@ enum PredicateKind {
     LocalOrigin,
     LoopbackHost,
     MeetUrl,
+    McpToolName,
     ParsedPaper,
     Path,
     PlanPath,
@@ -81,6 +82,7 @@ pub(super) fn matches(value: &Value, expr: &str) -> Option<bool> {
         PredicateKind::LocalOrigin => value.as_str().is_some_and(local_origin_url),
         PredicateKind::LoopbackHost => value.as_str().is_some_and(loopback_host),
         PredicateKind::MeetUrl => value.as_str().is_some_and(meet_url),
+        PredicateKind::McpToolName => value.as_str().is_some_and(normalized_mcp_tool_name),
         PredicateKind::ParsedPaper => parsed_paper_value(value),
         PredicateKind::Path => value.as_str().is_some_and(path_like),
         PredicateKind::PlanPath => value.as_str().is_some_and(plan_path),
@@ -181,6 +183,7 @@ fn predicate_kind(name: &str) -> Option<PredicateKind> {
         "json_format" | "pretty_format" | "valid_format" => PredicateKind::Format,
         "loopback_only" => PredicateKind::LoopbackHost,
         "meet_url_valid" => PredicateKind::MeetUrl,
+        "tool_names_normalized" => PredicateKind::McpToolName,
         "origin_local" => PredicateKind::LocalOrigin,
         "plan_path" => PredicateKind::PlanPath,
         "is_pyscript" | "is_script" => PredicateKind::ScriptPath,
@@ -394,6 +397,28 @@ fn meet_url(text: &str) -> bool {
     parsed_host(text).is_some_and(|host| host == "meet.google.com")
 }
 
+fn normalized_mcp_tool_name(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty()
+        || text.len() > 128
+        || text.chars().any(char::is_control)
+        || !text
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+    {
+        return false;
+    }
+    if let Some(stripped) = text.strip_prefix("mcp__") {
+        let Some((server, tool)) = stripped.split_once("__") else {
+            return false;
+        };
+        return !server.is_empty() && !tool.is_empty();
+    }
+    text.strip_prefix("mcp_")
+        .and_then(|rest| rest.split_once('_'))
+        .is_some_and(|(server, tool)| !server.is_empty() && !tool.is_empty())
+}
+
 fn local_origin_url(text: &str) -> bool {
     url::Url::parse(text)
         .ok()
@@ -564,6 +589,7 @@ mod tests {
     fn recognizes_declared_semantic_predicates() {
         assert!(is_supported_expr("is_repo(r)"));
         assert!(is_supported_expr("iso8601_with_tz(t)"));
+        assert!(is_supported_expr("tool_names_normalized(n)"));
         assert!(!is_supported_expr("plan_approved(p)"));
     }
 
@@ -610,5 +636,23 @@ mod tests {
         );
         assert_eq!(matches(&json!(91.0), "valid_lat(lat)"), Some(false));
         assert_eq!(matches(&json!(1500), "ephemeral_port(p)"), Some(true));
+        assert_eq!(
+            matches(
+                &json!("mcp__agentmail__send_message"),
+                "tool_names_normalized(n)"
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            matches(
+                &json!("mcp_agentmail_send_message"),
+                "tool_names_normalized(n)"
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            matches(&json!("agentmail.send_message"), "tool_names_normalized(n)"),
+            Some(false)
+        );
     }
 }
