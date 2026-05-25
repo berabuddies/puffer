@@ -145,7 +145,7 @@ node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs validate
 ```
 
 Run the local no-network selftest for evidence citation, admission, candidate,
-and ledger invariants:
+schema, and ledger invariants:
 
 ```sh
 node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-selftest.mjs

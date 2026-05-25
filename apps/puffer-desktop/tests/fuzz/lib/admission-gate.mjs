@@ -23,6 +23,7 @@ export function buildNoFindingVerdict({ namespace, shard, seed, replaySummary = 
 }
 
 export function evaluateFindingAdmission(verdict, evidenceIndex = [], options = {}) {
+  const schema = validateVerdictSchema(verdict);
   const normalized = normalizeVerdict(verdict);
   const byId = new Map((evidenceIndex ?? []).map((entry) => [entry.id, entry]));
   const clauses = [];
@@ -32,6 +33,11 @@ export function evaluateFindingAdmission(verdict, evidenceIndex = [], options = 
   const primaryCitation = primary ? [primary] : [];
   const allCitations = [...primaryCitation, ...cited];
 
+  clauses.push(check(
+    "schema-valid",
+    schema.passed,
+    schema.passed ? "verdict matches required schema" : schema.errors.join("; ")
+  ));
   clauses.push(check(
     "citation-exists",
     allCitations.every((citation) => byId.has(citation.id)),
@@ -108,6 +114,46 @@ export function normalizeVerdict(input) {
   };
 }
 
+export function validateVerdictSchema(input) {
+  const errors = [];
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return { passed: false, errors: ["verdict must be an object"] };
+  }
+  requireEqual(input.version, 1, "version", errors);
+  requireEnum(input.decision, VERDICT_DECISIONS, "decision", errors);
+  requireEnum(input.severity, new Set(["P0", "P1", "P2", "P3"]), "severity", errors);
+  for (const field of ["title", "area", "shard", "source_run", "expected", "actual", "impact", "notes"]) {
+    requireString(input[field], field, errors);
+  }
+  if (!Array.isArray(input.repro) || !input.repro.every((item) => typeof item === "string")) {
+    errors.push("repro must be an array of strings");
+  }
+  if (!Array.isArray(input.citations)) {
+    errors.push("citations must be an array");
+  } else {
+    input.citations.forEach((citation, index) => requireCitation(citation, `citations[${index}]`, errors));
+  }
+  if (input.primary_cause !== null) {
+    requireCitation(input.primary_cause, "primary_cause", errors);
+  }
+
+  if (["admit", "candidate"].includes(input.decision)) {
+    for (const field of ["title", "area", "shard", "source_run", "expected", "actual", "impact"]) {
+      if (typeof input[field] !== "string" || input[field].trim() === "") {
+        errors.push(`${field} is required for ${input.decision}`);
+      }
+    }
+    if (input.primary_cause === null || input.primary_cause === undefined) {
+      errors.push(`primary_cause is required for ${input.decision}`);
+    }
+    if (!Array.isArray(input.repro) || input.repro.length === 0) {
+      errors.push(`repro requires at least one step for ${input.decision}`);
+    }
+  }
+
+  return { passed: errors.length === 0, errors };
+}
+
 function normalizeCitation(value) {
   if (!value || typeof value !== "object") return null;
   const type = String(value.type ?? "");
@@ -116,6 +162,30 @@ function normalizeCitation(value) {
     type,
     quote_hash: String(value.quote_hash ?? "")
   };
+}
+
+function requireEqual(actual, expected, field, errors) {
+  if (actual !== expected) errors.push(`${field} must be ${JSON.stringify(expected)}`);
+}
+
+function requireEnum(actual, values, field, errors) {
+  if (!values.has(actual)) errors.push(`${field} must be one of: ${[...values].join(", ")}`);
+}
+
+function requireString(value, field, errors) {
+  if (typeof value !== "string") errors.push(`${field} must be a string`);
+}
+
+function requireCitation(value, field, errors) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    errors.push(`${field} must be a citation object or null`);
+    return;
+  }
+  if (typeof value.id !== "string" || value.id.trim() === "") errors.push(`${field}.id must be a non-empty string`);
+  if (!EVIDENCE_TYPES.has(value.type)) errors.push(`${field}.type must be a supported evidence type`);
+  if (typeof value.quote_hash !== "string" || value.quote_hash.trim() === "") {
+    errors.push(`${field}.quote_hash must be a non-empty string`);
+  }
 }
 
 function stringField(value, fallback) {

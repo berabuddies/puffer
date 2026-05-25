@@ -42,14 +42,20 @@ const hallucinatedVerdict = {
   ...admittedVerdict,
   primary_cause: { id: "ev-predicate-9999", type: "predicate", quote_hash: predicate.sha256 }
 };
+const malformedVerdict = {
+  ...admittedVerdict
+};
+delete malformedVerdict.impact;
 
 const admittedGate = evaluateFindingAdmission(admittedVerdict, evidence.evidence_index);
 const candidateGate = evaluateFindingAdmission(candidateVerdict, evidence.evidence_index);
 const hallucinatedGate = evaluateFindingAdmission(hallucinatedVerdict, evidence.evidence_index);
+const malformedGate = evaluateFindingAdmission(malformedVerdict, evidence.evidence_index);
 
 assert(admittedGate.disposition === "admitted" && admittedGate.passed, "valid predicate verdict must be admitted");
 assert(candidateGate.disposition === "candidate", "non-predicate primary cause must become candidate");
 assert(hallucinatedGate.disposition === "gate_failed", "hallucinated evidence id must fail gate");
+assert(malformedGate.disposition === "gate_failed", "schema-invalid admitted verdict must fail gate");
 
 const admittedVerdictPath = writeJson("admitted-verdict.json", admittedVerdict);
 const admittedGatePath = writeJson("admitted-gate.json", admittedGate);
@@ -57,6 +63,8 @@ const candidateVerdictPath = writeJson("candidate-verdict.json", candidateVerdic
 const candidateGatePath = writeJson("candidate-gate.json", candidateGate);
 const hallucinatedVerdictPath = writeJson("hallucinated-verdict.json", hallucinatedVerdict);
 const hallucinatedGatePath = writeJson("hallucinated-gate.json", hallucinatedGate);
+const malformedVerdictPath = writeJson("malformed-verdict.json", malformedVerdict);
+const malformedGatePath = writeJson("malformed-gate.json", malformedGate);
 const bugListPath = path.join(runDir, "BUGS.md");
 const candidateListPath = path.join(runDir, "BUGS_CAND.md");
 
@@ -84,6 +92,18 @@ runExpect(1, [
   "--gate",
   relative(hallucinatedGatePath)
 ]);
+runExpect(1, [
+  "node",
+  "apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs",
+  "bug-list",
+  "--bug-list",
+  relative(path.join(runDir, "BUGS_SCHEMA_REFUSE.md")),
+  "--append-from-verdict",
+  "--verdict",
+  relative(malformedVerdictPath),
+  "--gate",
+  relative(malformedGatePath)
+]);
 runExpect(0, [
   "node",
   "apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs",
@@ -106,6 +126,7 @@ const result = {
   admittedDisposition: admittedGate.disposition,
   candidateDisposition: candidateGate.disposition,
   hallucinatedDisposition: hallucinatedGate.disposition,
+  malformedDisposition: malformedGate.disposition,
   bugListPath: relative(bugListPath),
   candidateListPath: relative(candidateListPath)
 };
