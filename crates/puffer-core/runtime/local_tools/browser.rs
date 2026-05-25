@@ -327,7 +327,12 @@ fn browser_action_uses_explicit_url(payload: &Map<String, Value>) -> bool {
         .get("action")
         .and_then(Value::as_str)
         .map(normalize_browser_action)
-        .is_some_and(|action| matches!(action.as_str(), "open" | "new" | "navigate"))
+        .is_some_and(|action| {
+            matches!(
+                action.as_str(),
+                "open" | "new" | "navigate" | "openconsolelogs" | "openscreenshot"
+            )
+        })
 }
 
 fn browser_action_has_url(payload: &Map<String, Value>) -> bool {
@@ -559,6 +564,19 @@ mod tests {
             roundtrip.get("timeoutMs").and_then(Value::as_u64),
             Some(30000)
         );
+    }
+
+    #[test]
+    fn composite_browser_actions_keep_explicit_url() {
+        for action in ["openConsoleLogs", "openScreenshot"] {
+            let payload = serde_json::json!({
+                "action": action,
+                "url": "https://example.com"
+            });
+            assert!(browser_action_uses_explicit_url(
+                payload.as_object().unwrap()
+            ));
+        }
     }
 
     #[test]

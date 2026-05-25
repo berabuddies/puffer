@@ -154,6 +154,11 @@ impl BrowserRegistry {
         self.get(session_id)?.navigate(normalize_url(&url)?)
     }
 
+    /// Waits for a live page worker to report that navigation has completed.
+    pub(crate) fn wait_for_load(&self, session_id: &str, timeout: Duration) -> Result<()> {
+        self.get(session_id)?.wait_for_load(timeout)
+    }
+
     /// Reloads a live page worker.
     pub(crate) fn reload(&self, session_id: &str) -> Result<()> {
         self.get(session_id)?.reload()

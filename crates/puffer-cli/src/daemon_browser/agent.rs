@@ -151,6 +151,38 @@ pub(crate) fn handle_browser_agent(state: &Arc<DaemonState>, params: &Value) -> 
                 .browsers
                 .agent_screenshot(&backend_id, &tab_id, options)
         }
+        "openScreenshot" => {
+            let url = required_string(params, "url")?;
+            let (tab_id, backend_id) =
+                ensure_target_tab(state, &root_session_id, params, width, height)?;
+            state.browsers.arm_agent_recording(&backend_id);
+            state.browsers.navigate(&backend_id, url)?;
+            state.browsers.focus_tab(&root_session_id, &tab_id)?;
+            publish_tabs(state, &root_session_id);
+            state
+                .browsers
+                .wait_for_load(&backend_id, navigation_timeout(params))?;
+            let options = parse_agent_screenshot_options(params)?;
+            state
+                .browsers
+                .agent_screenshot(&backend_id, &tab_id, options)
+        }
+        "openConsoleLogs" => {
+            let url = required_string(params, "url")?;
+            let (_, backend_id) =
+                ensure_target_tab(state, &root_session_id, params, width, height)?;
+            let _ = state.browsers.console_logs(&backend_id, true);
+            state.browsers.arm_agent_recording(&backend_id);
+            state.browsers.navigate(&backend_id, url)?;
+            state
+                .browsers
+                .wait_for_load(&backend_id, navigation_timeout(params))?;
+            let clear = params
+                .get("clear")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            state.browsers.console_logs(&backend_id, clear)
+        }
         "click" => {
             let (_, backend_id) =
                 ensure_target_tab(state, &root_session_id, params, width, height)?;
@@ -663,6 +695,14 @@ fn optional_string(params: &Value, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
+}
+
+fn navigation_timeout(params: &Value) -> Duration {
+    Duration::from_millis(u64::from(
+        optional_u32(params, "timeoutMs")
+            .unwrap_or(30_000)
+            .clamp(1, 120_000),
+    ))
 }
 
 /// Returns the text payload for one synthesized key event when applicable.

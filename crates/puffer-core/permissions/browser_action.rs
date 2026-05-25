@@ -18,6 +18,8 @@ enum BrowserIntentAction {
     WaitNetworkIdle,
     ConsoleLogs,
     Screenshot,
+    OpenConsoleLogs,
+    OpenScreenshot,
     Open,
     New,
     Focus,
@@ -56,6 +58,8 @@ impl BrowserIntentAction {
             | Self::ConsoleLogs
             | Self::Screenshot => BrowserActionSet::Inspect,
             Self::Open
+            | Self::OpenConsoleLogs
+            | Self::OpenScreenshot
             | Self::New
             | Self::Focus
             | Self::Close
@@ -115,6 +119,8 @@ fn browser_intent_action(action: &str) -> Option<BrowserIntentAction> {
         "waitnetworkidle" | "networkidle" => Some(BrowserIntentAction::WaitNetworkIdle),
         "consolelogs" | "console" => Some(BrowserIntentAction::ConsoleLogs),
         "screenshot" => Some(BrowserIntentAction::Screenshot),
+        "openconsolelogs" | "openconsole" => Some(BrowserIntentAction::OpenConsoleLogs),
+        "openscreenshot" => Some(BrowserIntentAction::OpenScreenshot),
         "open" => Some(BrowserIntentAction::Open),
         "new" => Some(BrowserIntentAction::New),
         "focus" => Some(BrowserIntentAction::Focus),
@@ -174,6 +180,14 @@ mod tests {
         assert_eq!(
             browser_action_set_for_action("consoleLogs"),
             Some(BrowserActionSet::Inspect)
+        );
+        assert_eq!(
+            browser_action_set_for_action("openConsoleLogs"),
+            Some(BrowserActionSet::Navigate)
+        );
+        assert_eq!(
+            browser_action_set_for_action("openScreenshot"),
+            Some(BrowserActionSet::Navigate)
         );
         assert_eq!(
             browser_action_set_for_action("focus_ref"),

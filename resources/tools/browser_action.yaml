@@ -31,6 +31,8 @@ input_schema:
         - domInspect
         - consoleLogs
         - screenshot
+        - openConsoleLogs
+        - openScreenshot
         - click
         - dblclick
         - hover
@@ -60,7 +62,7 @@ input_schema:
       description: Optional stable label for a newly opened tab.
     url:
       type: string
-      description: URL for open or navigate actions.
+      description: URL for open, navigate, openConsoleLogs, or openScreenshot actions.
     page:
       description: Browser page handle or tab id for actions that read an existing page.
     query:

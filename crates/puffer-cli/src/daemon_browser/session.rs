@@ -9,6 +9,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tungstenite::stream::MaybeTlsStream;
@@ -255,6 +256,20 @@ impl BrowserSession {
         state.url = url;
         state.loading = true;
         Ok(())
+    }
+
+    /// Waits until the page worker reports that the current document finished loading.
+    pub(super) fn wait_for_load(&self, timeout: Duration) -> Result<()> {
+        let start = Instant::now();
+        loop {
+            if !self.state.lock().unwrap().loading {
+                return Ok(());
+            }
+            if start.elapsed() >= timeout {
+                bail!("timed out waiting for browser page load");
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
     }
 
     pub(super) fn reload(&self) -> Result<()> {
