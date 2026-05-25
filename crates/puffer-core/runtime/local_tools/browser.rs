@@ -117,6 +117,14 @@ struct BrowserToolInput {
     height: Option<u32>,
     #[serde(default)]
     activate: Option<bool>,
+    #[serde(default)]
+    files: Option<Vec<String>>,
+    #[serde(default)]
+    annotate: Option<bool>,
+    #[serde(default, rename = "screenshotFormat")]
+    screenshot_format: Option<String>,
+    #[serde(default, rename = "screenshotQuality")]
+    screenshot_quality: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -415,6 +423,10 @@ mod tests {
                 width: None,
                 height: None,
                 activate: None,
+                files: None,
+                annotate: None,
+                screenshot_format: None,
+                screenshot_quality: None,
             };
             normalize_session_id(&mut params, &current);
             assert_eq!(params.session_id.as_deref(), Some(current_string.as_str()));
@@ -441,6 +453,10 @@ mod tests {
             width: None,
             height: None,
             activate: None,
+            files: None,
+            annotate: None,
+            screenshot_format: None,
+            screenshot_quality: None,
         };
         normalize_session_id(&mut params, &current);
         assert_eq!(params.session_id.as_deref(), Some(explicit));
@@ -454,7 +470,11 @@ mod tests {
             "ref": "@e5",
             "value": "New York",
             "direction": "down",
-            "px": 480
+            "px": 480,
+            "files": ["/tmp/upload.txt"],
+            "annotate": true,
+            "screenshotFormat": "jpeg",
+            "screenshotQuality": 70
         }))
         .unwrap();
 
@@ -468,6 +488,23 @@ mod tests {
             Some("down")
         );
         assert_eq!(roundtrip.get("px").and_then(Value::as_u64), Some(480));
+        assert_eq!(
+            roundtrip
+                .get("files")
+                .and_then(Value::as_array)
+                .and_then(|files| files.first())
+                .and_then(Value::as_str),
+            Some("/tmp/upload.txt")
+        );
+        assert_eq!(roundtrip.get("annotate").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            roundtrip.get("screenshotFormat").and_then(Value::as_str),
+            Some("jpeg")
+        );
+        assert_eq!(
+            roundtrip.get("screenshotQuality").and_then(Value::as_u64),
+            Some(70)
+        );
     }
 
     #[test]
