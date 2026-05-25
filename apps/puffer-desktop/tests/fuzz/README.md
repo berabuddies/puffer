@@ -157,6 +157,16 @@ schema, and ledger invariants:
 node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-selftest.mjs
 ```
 
+Validate generated replay, verdict, gate, and reviewer artifacts against the
+local JSON schemas:
+
+```sh
+python3 apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-validate-artifacts.py \
+  --evidence apps/puffer-desktop/tests/fuzz/.runs/<run>/bounded-replay-report.json \
+  --verdict apps/puffer-desktop/tests/fuzz/.runs/<run>/verdict.json \
+  --gate apps/puffer-desktop/tests/fuzz/.runs/<run>/verdict-gate.json
+```
+
 Run the full local plan verifier. It checks syntax, metadata, selftests,
 bounded replay evidence, no-key deterministic triage, reviewer aggregation,
 tree evolution, synthetic split/demote/starvation policy, GUIFlow smoke, two

@@ -46,6 +46,7 @@ run("syntax", "Static syntax checks", [
   "node --check apps/puffer-desktop/tests/fuzz/lib/prompt-evolution.mjs",
   "node --check apps/puffer-desktop/tests/fuzz/lib/openrouter-auth.mjs",
   "for schema in apps/puffer-desktop/tests/fuzz/schemas/*.json; do python3 -m json.tool \"$schema\" >/dev/null; done",
+  "python3 -m py_compile apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-validate-artifacts.py",
   "python3 -m py_compile apps/puffer-desktop/tests/fuzz/agentflow_puffer_openrouter_campaign.py",
   "bash -n apps/puffer-desktop/tests/fuzz/run_openrouter_campaign_loop.sh"
 ].join(" && "));
@@ -79,6 +80,18 @@ run("reviewer-aggregate", "Candidate reviewer artifacts appear in aggregate", [
   `test "$(jq '.summary.gateFailureReasons | length' ${sh(path.join(outDir, "reviewer-aggregate.json"))})" -ge 1`,
   `test "$(jq '.blockerSummary.topBlockers | length' ${sh(path.join(outDir, "reviewer-aggregate.json"))})" -ge 1`,
   `jq -e '.blockerSummary.topBlockers[] | select(.type == "candidate-review")' ${sh(path.join(outDir, "reviewer-aggregate.json"))} >/dev/null`
+].join(" && "));
+
+run("artifact-schemas", "Generated artifacts validate against JSON schemas", [
+  `python3 apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz-validate-artifacts.py ` +
+    `--evidence ${sh(path.join(fuzzRoot, ".runs", `${namespace}-evidence`, "bounded-replay-report.json"))} ` +
+    `--verdict ${sh(path.join(fuzzRoot, ".runs", `${namespace}-evidence`, "verdict.json"))} ` +
+    `--gate ${sh(path.join(fuzzRoot, ".runs", `${namespace}-evidence`, "verdict-gate.json"))} ` +
+    `--evidence ${sh(path.join(fuzzRoot, ".runs", `${namespace}-reviewer-candidate`, "bounded-replay-report.json"))} ` +
+    `--verdict ${sh(path.join(fuzzRoot, ".runs", `${namespace}-reviewer-candidate`, "verdict.json"))} ` +
+    `--gate ${sh(path.join(fuzzRoot, ".runs", `${namespace}-reviewer-candidate`, "verdict-gate.json"))} ` +
+    `--reviewer ${sh(path.join(fuzzRoot, ".runs", `${namespace}-reviewer-candidate`, "reviewer.json"))} > ${sh(path.join(outDir, "artifact-schema-validation.json"))}`,
+  `test "$(jq '.validated | length' ${sh(path.join(outDir, "artifact-schema-validation.json"))})" -eq 7`
 ].join(" && "));
 
 run("evolution", "Tree evolution and bridge-aware scheduling", [
@@ -247,6 +260,7 @@ function run(id, title, command, options = {}) {
     stdout: relative(stdoutPath),
     stderr: relative(stderrPath)
   });
+  process.stdout.write(`PUFFER_UIUX_PLAN_STEP ${id} ${passed ? "passed" : "failed"}\n`);
 }
 
 function skip(id, title, options = {}) {
@@ -259,6 +273,7 @@ function skip(id, title, options = {}) {
     startedAt: new Date().toISOString(),
     finishedAt: new Date().toISOString()
   });
+  process.stdout.write(`PUFFER_UIUX_PLAN_STEP ${id} skipped\n`);
 }
 
 function summarize() {
@@ -296,19 +311,19 @@ function buildPhaseCoverage() {
     {
       id: "phase-1",
       title: "Evidence Index and Structured Verdict",
-      localSteps: ["metadata", "evidence-replay", "no-key-triage"],
+      localSteps: ["metadata", "evidence-replay", "no-key-triage", "artifact-schemas"],
       evidence: "Checks evidence_index emission and strict JSON no-signal verdict generation."
     },
     {
       id: "phase-2",
       title: "5-Clause Citation Gate",
-      localSteps: ["metadata", "no-key-triage"],
+      localSteps: ["metadata", "no-key-triage", "artifact-schemas"],
       evidence: "Selftest covers admitted verdicts, malformed verdicts, hallucinated evidence ids, and missing predicate rejection."
     },
     {
       id: "phase-3",
       title: "Candidate Ledger and Reviewer Agent",
-      localSteps: ["metadata", "reviewer-aggregate"],
+      localSteps: ["metadata", "reviewer-aggregate", "artifact-schemas"],
       evidence: "Aggregates a synthetic predicate-missing candidate plus reviewer human_queue decision."
     },
     {
@@ -334,7 +349,7 @@ function buildPhaseCoverage() {
     {
       id: "phase-7",
       title: "Puffer Internal Validation",
-      localSteps: ["syntax", "metadata", "evidence-replay", "no-key-triage", "bridge-replay"],
+      localSteps: ["syntax", "metadata", "evidence-replay", "no-key-triage", "artifact-schemas", "bridge-replay"],
       evidence: "Combines syntax, metadata, replay evidence, no-finding triage, and bridge replay checks against Puffer."
     },
     {
@@ -389,7 +404,8 @@ function buildDeliverables() {
       "apps/puffer-desktop/tests/fuzz/schemas/evidence-index.schema.json",
       "apps/puffer-desktop/tests/fuzz/schemas/verdict.schema.json",
       "apps/puffer-desktop/tests/fuzz/schemas/verdict-gate.schema.json",
-      "apps/puffer-desktop/tests/fuzz/schemas/reviewer.schema.json"
+      "apps/puffer-desktop/tests/fuzz/schemas/reviewer.schema.json",
+      path.join(outDir, "artifact-schema-validation.json")
     ]),
     deliverable("candidate-reviewer", "Candidate ledger and reviewer support", [
       "apps/puffer-desktop/tests/fuzz/BUGS_CAND.md",
@@ -587,7 +603,26 @@ function syntheticReviewerShardScript(namespace, fuzzRootPath) {
   const dir = path.join(fuzzRootPath, ".runs", `${namespace}-reviewer-candidate`);
   return `
 const fs = require("node:fs");
+const crypto = require("node:crypto");
 const dir = ${JSON.stringify(dir)};
+const evidenceValue = "click";
+const evidenceHash = crypto.createHash("sha256").update(evidenceValue).digest("hex");
+const verdict = {
+  version: 1,
+  decision: "candidate",
+  title: "Synthetic predicate-missing candidate",
+  severity: "P2",
+  area: "selftest",
+  shard: "selftest-shard",
+  source_run: ${JSON.stringify(`${namespace}-reviewer-candidate`)},
+  primary_cause: { id: "ev-action-0001", type: "action", quote_hash: evidenceHash },
+  citations: [{ id: "ev-action-0001", type: "action", quote_hash: evidenceHash }],
+  expected: "candidate appears in aggregate",
+  actual: "candidate appears with reviewer decision",
+  impact: "aggregate reviewer counters are visible",
+  repro: ["synthetic"],
+  notes: "synthetic"
+};
 fs.writeFileSync(dir + "/bounded-replay-report.json", JSON.stringify({
   version: 1,
   namespace: ${JSON.stringify(`${namespace}-reviewer-candidate`)},
@@ -602,33 +637,29 @@ fs.writeFileSync(dir + "/bounded-replay-report.json", JSON.stringify({
   },
   findings: [],
   evidence_index: [
-    { id: "ev-action-0001", type: "action", byte_span: [0, 10], sha256: "abc", value: "click", metadata: {} }
-  ]
+    { id: "ev-action-0001", type: "action", byte_span: [0, 10], sha256: evidenceHash, value: evidenceValue, metadata: {} }
+  ],
+  evidence_source: JSON.stringify({ type: "action", value: evidenceValue, metadata: {} }) + "\\n"
 }, null, 2) + "\\n");
 fs.writeFileSync(dir + "/bounded-replay-report.md", "# synthetic reviewer candidate\\n");
 fs.writeFileSync(dir + "/findings.md", "# synthetic reviewer candidate\\n");
-fs.writeFileSync(dir + "/verdict.json", JSON.stringify({
-  version: 1,
-  decision: "candidate",
-  title: "Synthetic predicate-missing candidate",
-  severity: "P2",
-  area: "selftest",
-  shard: "selftest-shard",
-  source_run: ${JSON.stringify(`${namespace}-reviewer-candidate`)},
-  primary_cause: { id: "ev-action-0001", type: "action", quote_hash: "abc" },
-  citations: [{ id: "ev-action-0001", type: "action", quote_hash: "abc" }],
-  expected: "candidate appears in aggregate",
-  actual: "candidate appears with reviewer decision",
-  impact: "aggregate reviewer counters are visible",
-  repro: ["synthetic"],
-  notes: "synthetic"
-}, null, 2) + "\\n");
+fs.writeFileSync(dir + "/verdict.json", JSON.stringify(verdict, null, 2) + "\\n");
 fs.writeFileSync(dir + "/verdict-gate.json", JSON.stringify({
   version: 1,
+  generatedAt: new Date().toISOString(),
   disposition: "candidate",
   passed: false,
   candidateEligible: true,
-  failureReasons: ["primary-cause-is-predicate: primary cause ev-action-0001 resolves to action"]
+  clauses: [
+    { id: "schema-valid", passed: true, detail: "verdict matches required schema" },
+    { id: "citation-exists", passed: true, detail: "all cited ids exist" },
+    { id: "citation-type-match", passed: true, detail: "each cited type matches recorded evidence type" },
+    { id: "citation-value-match", passed: true, detail: "each quote_hash matches recorded evidence hash" },
+    { id: "primary-cause-is-predicate", passed: false, detail: "primary cause ev-action-0001 resolves to action" },
+    { id: "prose-not-page-copy", passed: true, detail: "verdict prose is not a page/string copy" }
+  ],
+  failureReasons: ["primary-cause-is-predicate: primary cause ev-action-0001 resolves to action"],
+  verdict
 }, null, 2) + "\\n");
 fs.writeFileSync(dir + "/reviewer.json", JSON.stringify({
   version: 1,
