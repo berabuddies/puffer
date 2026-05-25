@@ -203,10 +203,11 @@ pub(super) fn execute_tool_call(
         )?
     };
     if result.success {
-        let lambda_metadata = match commit_successful_lambda_skill_gate_call(state, tool_id) {
-            Ok(metadata) => metadata,
-            Err(denied) => return Ok(denied),
-        };
+        let lambda_metadata =
+            match commit_successful_lambda_skill_gate_call(state, tool_id, &result.output) {
+                Ok(metadata) => metadata,
+                Err(denied) => return Ok(denied),
+            };
         if let Some(metadata) = lambda_metadata {
             merge_tool_metadata(&mut result.output.metadata, metadata);
         }

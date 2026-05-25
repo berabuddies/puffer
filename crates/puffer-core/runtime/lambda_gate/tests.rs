@@ -169,6 +169,62 @@ fn gate_custom_refinements_bind_to_registered_argument_values() {
 }
 
 #[test]
+fn gate_custom_refinements_bind_to_result_values() {
+    let host = LambdaHostEnv::from_json_str(
+        r#"{"effects":["net_r"],"domains":[],"tools":[
+          {"name":"resolve_pr","effects":["net_r"],"concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":"resolve pr"}},"result":"PRRef{pr_resolved(p)}"},
+          {"name":"read_pr","effects":["net_r"],"concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":{"$template":"read ${pr}"}}},"params":[{"name":"pr","ty":"PRRef{pr_resolved(p)}"}],"result":"str"}
+        ]}"#,
+    )
+    .unwrap();
+    let mut gate = LambdaGateState::with_host_caps(host);
+
+    assert!(!gate
+        .admit_call_with_args("read_pr", &serde_json::json!({"pr": "91"}))
+        .is_accept());
+    assert!(gate
+        .step_call_with_args_and_result(
+            "resolve_pr",
+            &serde_json::json!({}),
+            &serde_json::json!("91")
+        )
+        .is_accept());
+    assert!(gate.facts().contains(&LambdaFact::new(
+        "pr_resolved",
+        vec![serde_json::to_string(&serde_json::json!("91")).unwrap()]
+    )));
+    assert!(gate
+        .admit_call_with_args("read_pr", &serde_json::json!({"pr": "91"}))
+        .is_accept());
+    assert!(!gate
+        .admit_call_with_args("read_pr", &serde_json::json!({"pr": "92"}))
+        .is_accept());
+}
+
+#[test]
+fn gate_registers_can_bind_to_result_values() {
+    let host = LambdaHostEnv::from_json_str(
+        r#"{"effects":["net_r"],"domains":[],"tools":[
+          {"name":"resolve_pr","effects":["net_r"],"concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":"resolve pr"}},"result":"PRRef","registers":[{"pred":"pr_resolved","args":["pr"]}]},
+          {"name":"read_pr","effects":["net_r"],"concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":{"$template":"read ${pr}"}}},"params":[{"name":"pr","ty":"PRRef{pr_resolved(p)}"}],"result":"str"}
+        ]}"#,
+    )
+    .unwrap();
+    let mut gate = LambdaGateState::with_host_caps(host);
+
+    assert!(gate
+        .step_call_with_args_and_result(
+            "resolve_pr",
+            &serde_json::json!({}),
+            &serde_json::json!("91")
+        )
+        .is_accept());
+    assert!(gate
+        .admit_call_with_args("read_pr", &serde_json::json!({"pr": "91"}))
+        .is_accept());
+}
+
+#[test]
 fn gate_validates_precompiled_concrete_input_contract() {
     let host = LambdaHostEnv::from_json_str(SWAP_HOST_JSON).unwrap();
     let gate = LambdaGateState::with_host_caps(host);
@@ -396,16 +452,25 @@ fn host_catalogue_runtime_validation_accepts_produced_fact_refinement() {
 }
 
 #[test]
-fn host_catalogue_runtime_validation_rejects_result_bound_fact_producer() {
-    let error = validate_host_catalogue_runtime(
+fn host_catalogue_runtime_validation_accepts_result_bound_fact_producer() {
+    validate_host_catalogue_runtime(
             r#"{"effects":[],"domains":[],"tools":[
               {"name":"resolve_pr","effects":[],"concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":"resolve pr"}},"registers":[{"pred":"pr_resolved","args":["pr"]}]},
               {"name":"read_pr","effects":[],"concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":{"$template":"read ${pr}"}}},"params":[{"name":"pr","ty":"PRRef{pr_resolved(p)}"}]}
             ]}"#,
         )
-        .expect_err("result-bound fact producer must not make param refinement ready");
+        .unwrap();
+}
 
-    assert!(format!("{error:#}").contains("without a matching registered fact"));
+#[test]
+fn host_catalogue_runtime_validation_accepts_result_refinement_fact_producer() {
+    validate_host_catalogue_runtime(
+            r#"{"effects":[],"domains":[],"tools":[
+              {"name":"resolve_pr","effects":[],"concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":"resolve pr"}},"result":"PRRef{pr_resolved(p)}"},
+              {"name":"read_pr","effects":[],"concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":{"$template":"read ${pr}"}}},"params":[{"name":"pr","ty":"PRRef{pr_resolved(p)}"}]}
+            ]}"#,
+        )
+        .unwrap();
 }
 
 #[test]

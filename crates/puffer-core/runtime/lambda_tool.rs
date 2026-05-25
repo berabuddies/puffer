@@ -47,6 +47,7 @@ pub(super) fn reject_lambda_skill_gate_preflight(
 pub(super) fn commit_successful_lambda_skill_gate_call(
     state: &mut AppState,
     tool_id: &str,
+    output: &ToolOutput,
 ) -> std::result::Result<Option<Value>, ToolExecutionResult> {
     if let Some(pending) = state.pending_lambda_host_call.as_ref().cloned() {
         let Some(gate) = state.lambda_gate.as_mut() else {
@@ -55,12 +56,18 @@ pub(super) fn commit_successful_lambda_skill_gate_call(
                 "pending formal host call has no active Lambda Skill gate".to_string(),
             ));
         };
+        let result = lambda_result_value(output);
         let metadata = gate.committed_host_call_metadata(
             pending.host_tool(),
             Some(pending.host_args()),
             Some(pending.concrete_tool()),
+            Some(&result),
         );
-        return match gate.step_call_with_args(pending.host_tool(), pending.host_args()) {
+        return match gate.step_call_with_args_and_result(
+            pending.host_tool(),
+            pending.host_args(),
+            &result,
+        ) {
             LambdaGateVerdict::Accept => {
                 state.pending_lambda_host_call = None;
                 Ok(Some(metadata))
@@ -69,6 +76,11 @@ pub(super) fn commit_successful_lambda_skill_gate_call(
         };
     }
     Ok(None)
+}
+
+fn lambda_result_value(output: &ToolOutput) -> Value {
+    let stdout = output.stdout.trim_end_matches(['\r', '\n']).to_string();
+    serde_json::from_str(&stdout).unwrap_or(Value::String(stdout))
 }
 
 /// Prepares a verified formal host-call bridge for the next concrete tool call.

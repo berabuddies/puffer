@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod fact_extraction;
 mod input_contract;
 mod type_check;
 
@@ -38,12 +39,17 @@ impl LambdaFact {
     }
 
     fn instantiate(&self, args: &Map<String, Value>) -> Self {
+        self.instantiate_with_result(args, None)
+    }
+
+    fn instantiate_with_result(&self, args: &Map<String, Value>, result: Option<&Value>) -> Self {
         let resolved: Vec<String> = self
             .args
             .iter()
             .map(|arg| {
                 args.get(arg)
                     .map(canonical_fact_arg)
+                    .or_else(|| result.map(canonical_fact_arg))
                     .unwrap_or_else(|| arg.clone())
             })
             .collect();
@@ -222,11 +228,32 @@ impl LambdaToolSig {
         Ok(())
     }
 
+    fn dynamic_fact_shapes(&self) -> impl Iterator<Item = (String, usize)> + '_ {
+        self.registers
+            .iter()
+            .map(|fact| (fact.pred().to_string(), fact.args().len()))
+            .chain(type_check::fact_refinement_shapes_in_type(&self.result))
+    }
+
     fn instantiated_registers<'a>(
         &'a self,
         args: &'a Map<String, Value>,
     ) -> impl Iterator<Item = LambdaFact> + 'a {
         self.registers.iter().map(|fact| fact.instantiate(args))
+    }
+
+    fn instantiated_facts<'a>(
+        &'a self,
+        args: &'a Map<String, Value>,
+        result: &'a Value,
+    ) -> impl Iterator<Item = LambdaFact> + 'a {
+        let registered = self
+            .registers
+            .iter()
+            .map(|fact| fact.instantiate_with_result(args, Some(result)));
+        let result_refinements =
+            fact_extraction::facts_from_result_refinements(&self.result, result, args).into_iter();
+        registered.chain(result_refinements)
     }
 
     fn validate_concrete_input(
@@ -345,31 +372,9 @@ impl LambdaHostEnv {
         let dynamic_facts = self
             .tools
             .values()
-            .flat_map(|sig| {
-                let param_names = sig
-                    .params
-                    .iter()
-                    .map(|param| param.name.as_str())
-                    .collect::<BTreeSet<_>>();
-                sig.registers
-                    .iter()
-                    .filter(move |fact| {
-                        fact.args()
-                            .iter()
-                            .all(|arg| param_names.contains(arg.as_str()))
-                    })
-                    .map(|fact| (fact.pred().to_string(), fact.args().len()))
-            })
+            .flat_map(LambdaToolSig::dynamic_fact_shapes)
             .collect::<BTreeSet<_>>();
-        let available_facts = self
-            .tools
-            .values()
-            .flat_map(|sig| {
-                sig.registers
-                    .iter()
-                    .map(|fact| (fact.pred().to_string(), fact.args().len()))
-            })
-            .collect::<BTreeSet<_>>();
+        let available_facts = dynamic_facts.clone();
         for sig in self.tools.values() {
             sig.validate_runtime_contract(&dynamic_facts, &available_facts)?;
         }
@@ -534,11 +539,21 @@ impl LambdaGateState {
 
     /// Gates one call and commits instantiated registered facts when accepted.
     pub(crate) fn step_call_with_args(&mut self, tool: &str, args: &Value) -> LambdaGateVerdict {
+        self.step_call_with_args_and_result(tool, args, &Value::Null)
+    }
+
+    /// Gates one call and commits facts instantiated from formal args and result.
+    pub(crate) fn step_call_with_args_and_result(
+        &mut self,
+        tool: &str,
+        args: &Value,
+        result: &Value,
+    ) -> LambdaGateVerdict {
         let verdict = self.admit_call_with_args(tool, args);
         if verdict.is_accept() {
             if let Some(sig) = self.host.lookup_tool(tool) {
                 let object = args.as_object().cloned().unwrap_or_default();
-                for fact in sig.instantiated_registers(&object) {
+                for fact in sig.instantiated_facts(&object, result) {
                     self.facts.insert(fact);
                 }
             }
@@ -552,19 +567,22 @@ impl LambdaGateState {
         host_tool: &str,
         host_args: Option<&Value>,
         concrete_tool: Option<&str>,
+        result: Option<&Value>,
     ) -> Value {
         let host_arg_object = host_args.and_then(Value::as_object);
         let registered_facts = self
             .host
             .lookup_tool(host_tool)
-            .map(|sig| {
-                host_arg_object
-                    .map(|args| {
-                        sig.instantiated_registers(args)
-                            .map(|fact| lambda_fact_metadata(&fact))
-                            .collect()
-                    })
-                    .unwrap_or_else(|| sig.registers.iter().map(lambda_fact_metadata).collect())
+            .map(|sig| match (host_arg_object, result) {
+                (Some(args), Some(result)) => sig
+                    .instantiated_facts(args, result)
+                    .map(|fact| lambda_fact_metadata(&fact))
+                    .collect(),
+                (Some(args), None) => sig
+                    .instantiated_registers(args)
+                    .map(|fact| lambda_fact_metadata(&fact))
+                    .collect(),
+                (None, _) => sig.registers.iter().map(lambda_fact_metadata).collect(),
             })
             .unwrap_or_default();
         lambda_skill_metadata(
