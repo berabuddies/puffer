@@ -1,0 +1,26 @@
+id: McpStatus
+name: McpStatus
+description: |-
+  Return the MCP servers and tool counts currently visible to Puffer's runner.
+
+  Use this for verified Lambda Skill contracts that only need MCP status
+  reporting. This tool does not add servers, edit config, or call MCP tools.
+handler: runtime:workflow:mcp_status
+approval_policy: auto
+sandbox_policy: read-only
+input_schema:
+  type: object
+  properties:
+    includeTools:
+      type: boolean
+      description: Include per-server tool names and descriptions.
+  additionalProperties: false
+metadata:
+  may_spawn_processes: false
+  may_read_files: false
+  may_write_files: false
+  may_access_network: false
+display:
+  group: mcp
+  title: McpStatus
+  show_in_status: true

@@ -22,6 +22,7 @@ pub mod lambda_internal;
 pub mod lsp;
 mod lsp_live;
 mod lsp_live_diagnostics;
+pub mod mcp_status;
 pub mod mcp_tool_call;
 pub mod powershell;
 pub mod process_control;
