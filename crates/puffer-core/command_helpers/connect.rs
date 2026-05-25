@@ -33,6 +33,9 @@ pub fn execute_connect_flow(
         "github-webhook" => {
             serve_config::connect_github_webhook(state, resources, &target.connection_name)?
         }
+        "linear-webhook" => {
+            serve_config::connect_linear_webhook(state, resources, &target.connection_name)?
+        }
         "webhook" => serve_config::connect_webhook(state, resources, &target.connection_name)?,
         _ => connect_generic(state, resources, &target)?,
     };
@@ -921,6 +924,41 @@ mod tests {
         assert!(raw.contains("[connectors.webhook]"));
         assert!(raw.contains("display_name = \"github-events\""));
         assert!(raw.contains("path = \"/github\""));
+    }
+
+    #[test]
+    fn execute_connect_flow_dispatches_linear_webhook_setup() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let turn = with_user_question_prompt_handler(
+            |request| {
+                let question = request.questions[0]["question"]
+                    .as_str()
+                    .expect("question text")
+                    .to_string();
+                let answer = match question.as_str() {
+                    "What bind address should the Linear webhook listen on?" => "127.0.0.1:9393",
+                    "What URL path should Linear post webhook events to?" => "linear",
+                    other => panic!("unexpected question: {other}"),
+                };
+                UserQuestionPromptResponse {
+                    answers: Map::from_iter([(question, json!(answer))]),
+                    annotations: Map::new(),
+                }
+            },
+            || execute_connect_flow(&mut state, &resources, "linear-webhook linear-events"),
+        )
+        .expect("connect turn");
+
+        assert!(turn.assistant_text.contains("connector: linear-webhook"));
+        assert!(turn.assistant_text.contains("connection: linear-events"));
+        assert!(turn.assistant_text.contains("run `puffer serve`"));
+        let raw =
+            std::fs::read_to_string(state.cwd.join(".puffer/connectors.toml")).expect("config");
+        assert!(raw.contains("[connectors.webhook]"));
+        assert!(raw.contains("display_name = \"linear-events\""));
+        assert!(raw.contains("path = \"/linear\""));
     }
 
     #[test]

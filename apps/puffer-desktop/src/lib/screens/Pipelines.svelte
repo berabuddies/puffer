@@ -2008,7 +2008,26 @@
                 </div>
 
                 {#if selectedConnector}
+                  {@const selectedRuntimeHints = connectorRuntimeHints(selectedConnector)}
+                  {@const selectedActionSlugs = connectorActionSlugs(selectedConnector, connectorQuery)}
                   <div class="pf-connector-setup">
+                    <div class="pf-connector-detail" aria-label="Selected connector details">
+                      <span class="pf-connector-main">
+                        <strong>{selectedConnector.connector_slug}</strong>
+                        <small>{selectedConnector.description}</small>
+                      </span>
+                      <span class="pf-connector-tags">
+                        <span>{selectedConnector.requires_auth ? "auth" : "no auth"}</span>
+                        {#if connectorTriggerSupported(selectedConnector)}<span>trigger</span>{:else}<span>no trigger</span>{/if}
+                        <span>skill:{selectedConnector.skill}</span>
+                        {#each selectedRuntimeHints as hint}
+                          <span class="pf-connector-runtime">{hint}</span>
+                        {/each}
+                        {#each selectedActionSlugs as action}
+                          <span class="pf-connector-action">{action}</span>
+                        {/each}
+                      </span>
+                    </div>
                     <label class="pf-connector-name">
                       <span>Connection name</span>
                       <input
@@ -3000,6 +3019,18 @@
   .pf-connector-setup {
     display: grid;
     gap: 6px;
+  }
+
+  .pf-connector-detail {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: color-mix(in oklab, var(--card) 82%, transparent);
+    padding: 7px 8px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: start;
+    min-width: 0;
   }
 
   .pf-connector-name {

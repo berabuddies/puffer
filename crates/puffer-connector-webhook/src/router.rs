@@ -143,7 +143,9 @@ async fn webhook(
 }
 
 fn inbound_from_payload(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
-    puffer_inbound(payload).or_else(|| github_inbound(headers, payload))
+    puffer_inbound(payload)
+        .or_else(|| github_inbound(headers, payload))
+        .or_else(|| linear_inbound(headers, payload))
 }
 
 fn puffer_inbound(payload: &Value) -> Option<InboundMessage> {
@@ -333,6 +335,146 @@ fn append_push_summary(lines: &mut Vec<String>, payload: &Value) {
             .unwrap_or_default();
         lines.push(format!("- {id}: {message}"));
     }
+}
+
+fn linear_inbound(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
+    let has_header = header_value(headers, "linear-event").is_some()
+        || header_value(headers, "linear-delivery").is_some();
+    let has_body_marker = payload.get("webhookId").is_some()
+        || payload.get("webhookTimestamp").is_some()
+        || payload.get("organizationId").is_some();
+    if !has_header && !has_body_marker {
+        return None;
+    }
+    let event_type =
+        header_value(headers, "linear-event").or_else(|| string_field(payload, "type"))?;
+    let entity_type = string_field(payload, "type").unwrap_or(event_type);
+    let action = string_field(payload, "action").unwrap_or("received");
+    let delivery =
+        header_value(headers, "linear-delivery").or_else(|| string_field(payload, "webhookId"));
+    let actor = pointer_string(payload, "/actor/name")
+        .or_else(|| pointer_string(payload, "/actor/email"))
+        .or_else(|| pointer_string(payload, "/actor/id"))
+        .unwrap_or("linear");
+    let subject = linear_subject(entity_type, payload);
+    let conversation_id = linear_conversation_id(entity_type, delivery, payload, subject.as_ref());
+    let text = linear_message(entity_type, action, actor, payload, subject.as_ref());
+
+    Some(InboundMessage {
+        conversation_id,
+        user_id: Some(actor.to_string()),
+        text,
+        thread_id: None,
+        is_group: false,
+        bot_mentioned: true,
+        from_bot: false,
+    })
+}
+
+struct LinearSubject {
+    kind: String,
+    conversation_kind: String,
+    key: Option<String>,
+    title: Option<String>,
+    body: Option<String>,
+    url: Option<String>,
+}
+
+fn linear_subject(entity_type: &str, payload: &Value) -> Option<LinearSubject> {
+    let data = payload.get("data").or_else(|| payload.get("issueData"))?;
+    let kind = entity_type.to_ascii_lowercase();
+    let conversation_kind = if entity_type.eq_ignore_ascii_case("Comment") {
+        "issue".to_string()
+    } else {
+        kind.clone()
+    };
+    let key = if entity_type.eq_ignore_ascii_case("Comment") {
+        string_field(data, "issueId").map(str::to_string)
+    } else {
+        string_field(data, "identifier")
+            .map(str::to_string)
+            .or_else(|| string_field(data, "id").map(str::to_string))
+    };
+    Some(LinearSubject {
+        kind,
+        conversation_kind,
+        key,
+        title: string_field(data, "title")
+            .or_else(|| string_field(data, "name"))
+            .map(str::to_string),
+        body: string_field(data, "body")
+            .or_else(|| string_field(data, "description"))
+            .map(snippet),
+        url: string_field(payload, "url")
+            .or_else(|| string_field(data, "url"))
+            .map(str::to_string),
+    })
+}
+
+fn linear_conversation_id(
+    entity_type: &str,
+    delivery: Option<&str>,
+    payload: &Value,
+    subject: Option<&LinearSubject>,
+) -> String {
+    if let Some(subject) = subject {
+        if let Some(key) = &subject.key {
+            return format!("linear:{}:{key}", subject.conversation_kind);
+        }
+    }
+    format!(
+        "linear:{}:{}",
+        entity_type.to_ascii_lowercase(),
+        delivery
+            .or_else(|| string_field(payload, "webhookId"))
+            .unwrap_or("event")
+    )
+}
+
+fn linear_message(
+    entity_type: &str,
+    action: &str,
+    actor: &str,
+    payload: &Value,
+    subject: Option<&LinearSubject>,
+) -> String {
+    let mut lines = vec![
+        format!("Linear {entity_type} {action}"),
+        format!("Actor: {actor}"),
+    ];
+    if let Some(subject) = subject {
+        let key = subject
+            .key
+            .as_ref()
+            .map(|value| format!("{value} "))
+            .unwrap_or_default();
+        if subject.kind == "comment" && subject.conversation_kind != "comment" {
+            lines.push(format!(
+                "Subject: comment on {} {key}{}",
+                subject.conversation_kind,
+                subject.title.as_deref().unwrap_or_default()
+            ));
+        } else if let Some(title) = &subject.title {
+            lines.push(format!("Subject: {} {key}{title}", subject.kind));
+        } else if !key.is_empty() {
+            lines.push(format!("Subject: {} {}", subject.kind, key.trim()));
+        }
+        if let Some(url) = &subject.url {
+            lines.push(format!("URL: {url}"));
+        }
+        if let Some(body) = &subject.body {
+            lines.push(String::new());
+            lines.push(body.clone());
+        }
+    }
+    if let Some(updated) = payload.get("updatedFrom").and_then(Value::as_object) {
+        if !updated.is_empty() {
+            let mut fields = updated.keys().cloned().collect::<Vec<_>>();
+            fields.sort();
+            lines.push(format!("Updated fields: {}", fields.join(", ")));
+        }
+    }
+    lines.join("\n")
 }
 
 fn string_field<'a>(payload: &'a Value, field: &str) -> Option<&'a str> {
@@ -622,6 +764,69 @@ mod tests {
             .text
             .contains("GitHub push received in berabuddies/puffer"));
         assert!(inbound.text.contains("- abcdef1: Ship workflow UX"));
+    }
+
+    #[test]
+    fn linear_issue_payload_maps_to_inbound_message() {
+        let mut headers = HeaderMap::new();
+        headers.insert("linear-event", "Issue".parse().unwrap());
+        headers.insert("linear-delivery", "delivery-1".parse().unwrap());
+        let payload = serde_json::json!({
+            "action": "create",
+            "type": "Issue",
+            "actor": {"name": "Tony"},
+            "data": {
+                "id": "issue-uuid",
+                "identifier": "PUF-42",
+                "title": "Make workflow connectors searchable",
+                "description": "Expose connector presets in both UI surfaces."
+            },
+            "url": "https://linear.app/puffer/issue/PUF-42/make-workflow-connectors-searchable",
+            "organizationId": "org-uuid",
+            "webhookId": "webhook-uuid",
+            "webhookTimestamp": 1743191178476_i64
+        });
+
+        let inbound = inbound_from_payload(&headers, &payload).expect("linear inbound");
+
+        assert_eq!(inbound.conversation_id, "linear:issue:PUF-42");
+        assert_eq!(inbound.user_id.as_deref(), Some("Tony"));
+        assert!(inbound.text.contains("Linear Issue create"));
+        assert!(inbound
+            .text
+            .contains("Subject: issue PUF-42 Make workflow connectors searchable"));
+        assert!(inbound
+            .text
+            .contains("https://linear.app/puffer/issue/PUF-42"));
+    }
+
+    #[test]
+    fn linear_comment_payload_uses_issue_thread() {
+        let mut headers = HeaderMap::new();
+        headers.insert("linear-event", "Comment".parse().unwrap());
+        let payload = serde_json::json!({
+            "action": "create",
+            "type": "Comment",
+            "actor": {"email": "tony@example.com"},
+            "data": {
+                "id": "comment-uuid",
+                "body": "This should reach Puffer.",
+                "issueId": "issue-uuid"
+            },
+            "url": "https://linear.app/puffer/issue/PUF-42#comment-comment-uuid",
+            "webhookId": "webhook-uuid",
+            "webhookTimestamp": 1743191178476_i64
+        });
+
+        let inbound = inbound_from_payload(&headers, &payload).expect("linear inbound");
+
+        assert_eq!(inbound.conversation_id, "linear:issue:issue-uuid");
+        assert_eq!(inbound.user_id.as_deref(), Some("tony@example.com"));
+        assert!(inbound.text.contains("Linear Comment create"));
+        assert!(inbound
+            .text
+            .contains("Subject: comment on issue issue-uuid"));
+        assert!(inbound.text.contains("This should reach Puffer."));
     }
 
     #[tokio::test]

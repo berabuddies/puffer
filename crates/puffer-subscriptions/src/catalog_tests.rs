@@ -18,6 +18,7 @@ fn builtins_cover_required_initial_connectors() {
     assert!(slugs.contains(&"slack-bot".to_string()));
     assert!(slugs.contains(&"email".to_string()));
     assert!(slugs.contains(&"github-webhook".to_string()));
+    assert!(slugs.contains(&"linear-webhook".to_string()));
     assert!(slugs.contains(&"webhook".to_string()));
 }
 
@@ -32,6 +33,10 @@ fn suggested_connection_slugs_match_connect_defaults() {
     assert_eq!(
         suggested_connection_slug("github-webhook"),
         "github-webhook"
+    );
+    assert_eq!(
+        suggested_connection_slug("linear-webhook"),
+        "linear-webhook"
     );
     assert_eq!(suggested_connection_slug("webhook"), "webhook");
     assert_eq!(suggested_connection_slug("custom-feed"), "custom-feed");
@@ -96,7 +101,13 @@ fn builtins_define_host_enforced_action_permissions() {
 
 #[test]
 fn serve_mode_connectors_do_not_claim_workflow_runtime_capabilities() {
-    for slug in ["discord-bot", "matrix-bot", "github-webhook", "webhook"] {
+    for slug in [
+        "discord-bot",
+        "matrix-bot",
+        "github-webhook",
+        "linear-webhook",
+        "webhook",
+    ] {
         let template = builtin_connector_template(slug).unwrap();
         assert!(!template.can_subscribe, "{slug} should not claim triggers");
         assert!(

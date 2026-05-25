@@ -488,6 +488,19 @@ export class FakeDaemon {
         action_slugs: []
       },
       {
+        connector_slug: "linear-webhook",
+        description: "Linear issue and project webhook preset backed by puffer serve",
+        skill: "linear-webhook",
+        runtime_hints: ["serve"],
+        requires_auth: false,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "linear-webhook",
+        connect_command: "/connect linear-webhook linear-webhook",
+        action_slugs: []
+      },
+      {
         connector_slug: "webhook",
         description: "HTTP webhook connector configured through puffer serve",
         skill: "webhook",
