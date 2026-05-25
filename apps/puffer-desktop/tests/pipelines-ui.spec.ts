@@ -182,6 +182,75 @@ test("pipeline connector search matches multiple metadata terms", async ({ page 
   await expect(catalog.getByRole("button", { name: "Plan telegram-login workflow trigger" })).not.toBeVisible();
 });
 
+test("pipeline connector catalog can create a workflow draft for a connector", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  await page.getByLabel("Search connectors").fill("telegram personal");
+  await page.getByRole("button", { name: "Create workflow draft for telegram-login" }).click();
+
+  await expect(page.locator(".pf-pipe-save-note")).toContainText("Created telegram-user-backed workflow locally");
+  await expect(page.locator(".pf-editor-config").getByLabel("Name", { exact: true })).toHaveValue("Telegram User workflow");
+  await expect(page.locator(".pf-editor-config").getByLabel("Slug")).toHaveValue("telegram-user-workflow");
+  await expect(page.getByLabel("Trigger type")).toHaveValue("connection");
+  await expect(page.getByLabel("Workflow connection")).toHaveValue("telegram-user");
+
+  await page.getByRole("button", { name: "Save workflow" }).click();
+  const request = await daemon.waitForRequest("workflow_save", (candidate) => {
+    const workflow = candidate.params.workflow as { slug?: string };
+    return workflow.slug === "telegram-user-workflow";
+  });
+  const workflow = request.params.workflow as {
+    enabled?: boolean;
+    trigger?: { type?: string; connection_slug?: string; pattern?: string };
+  };
+  expect(workflow.enabled).toBe(false);
+  expect(workflow.trigger).toMatchObject({
+    type: "connection",
+    connection_slug: "telegram-user",
+    pattern: ".*"
+  });
+});
+
+test("pipeline selected connector can create a planned workflow draft", async ({ page }) => {
+  const daemon = new FakeDaemon();
+  await daemon.install(page);
+  await daemon.open(page);
+
+  await page.locator(".pf-sidebar").getByRole("button", { name: "Pipelines" }).click();
+
+  const catalog = page.locator('[aria-label="Connector catalog"]');
+  await page.getByLabel("Search connectors").fill("email events");
+  await catalog.getByRole("button", { name: "Plan email workflow trigger" }).click();
+  await page.getByLabel("Connector connection name").fill("email-personal");
+  await page.getByRole("button", { name: "Create workflow draft for selected connector" }).click();
+
+  await expect(page.locator(".pf-pipe-save-note")).toContainText("Run /connect email email-personal before enabling it");
+  await expect(page.locator(".pf-editor-config").getByLabel("Name", { exact: true })).toHaveValue("Email Personal workflow");
+  await expect(page.locator(".pf-editor-config").getByLabel("Slug")).toHaveValue("email-personal-workflow");
+  await expect(page.getByLabel("Trigger type")).toHaveValue("connection");
+  await expect(page.getByLabel("Workflow connection")).toHaveValue("email-personal");
+
+  await page.getByRole("button", { name: "Save workflow" }).click();
+  const request = await daemon.waitForRequest("workflow_save", (candidate) => {
+    const workflow = candidate.params.workflow as { slug?: string };
+    return workflow.slug === "email-personal-workflow";
+  });
+  const workflow = request.params.workflow as {
+    enabled?: boolean;
+    trigger?: { type?: string; connection_slug?: string; pattern?: string };
+  };
+  expect(workflow.enabled).toBe(false);
+  expect(workflow.trigger).toMatchObject({
+    type: "connection",
+    connection_slug: "email-personal",
+    pattern: ".*"
+  });
+});
+
 test("pipeline connector catalog shows built-in coverage and result counts", async ({ page }) => {
   const daemon = new FakeDaemon();
   await daemon.install(page);
