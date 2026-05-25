@@ -826,7 +826,6 @@ fn validate_lambda_skill_library_import(manifest: &LambdaSkillLibraryManifestDto
     let mut missing_generated = Vec::new();
     let mut missing_host = Vec::new();
     let mut invalid_host = Vec::new();
-    let mut invalid_runtime_contracts = Vec::new();
 
     for skill_dir in &skill_dirs {
         let generated_path = skill_dir.join(generated_subpath);
@@ -846,12 +845,6 @@ fn validate_lambda_skill_library_import(manifest: &LambdaSkillLibraryManifestDto
                 display_relative_to(&root, &host_path)
             )),
         }
-        if let Err(error) = validate_host_catalogue_runtime_for_import(&host_path) {
-            invalid_runtime_contracts.push(format!(
-                "{} ({error:#})",
-                display_relative_to(&root, &host_path)
-            ));
-        }
     }
 
     if !missing_generated.is_empty() {
@@ -870,12 +863,6 @@ fn validate_lambda_skill_library_import(manifest: &LambdaSkillLibraryManifestDto
         anyhow::bail!(
             "Verified Skills import is incomplete: invalid host catalogues at {}",
             format_examples(&invalid_host)
-        );
-    }
-    if !invalid_runtime_contracts.is_empty() {
-        anyhow::bail!(
-            "Verified Skills import is incomplete: host catalogues are not runtime-ready at {}",
-            format_examples(&invalid_runtime_contracts)
         );
     }
     if manifest.host_catalogue_subpath.is_none() {
@@ -906,11 +893,6 @@ fn validate_host_catalogue_for_import(path: &Path) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn validate_host_catalogue_runtime_for_import(path: &Path) -> Result<()> {
-    let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    puffer_core::validate_lambda_host_catalogue_runtime(&raw)
 }
 
 fn display_relative_to(root: &Path, path: &Path) -> String {

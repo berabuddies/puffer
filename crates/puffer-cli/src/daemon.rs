@@ -5104,7 +5104,7 @@ mod tests {
     }
 
     #[test]
-    fn desktop_lambda_skill_library_save_rejects_host_without_input_contracts() {
+    fn desktop_lambda_skill_library_save_accepts_not_ready_runtime_contracts() {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace_root = temp.path().join("workspace");
         let lambda_root = temp.path().join("lambda-skills");
@@ -5141,19 +5141,26 @@ mod tests {
         let state = DaemonState::load(workspace_root, paths, "token".into(), true, false, false)
             .expect("daemon state");
 
-        let error = handle_save_lambda_skill_library(
+        let saved = handle_save_lambda_skill_library(
             &state,
             &json!({
                 "id": "verified",
                 "root": lambda_root.display().to_string()
             }),
         )
-        .expect_err("host without concrete input contracts should reject import");
+        .expect("runtime-not-ready host should still import");
 
-        assert!(error.to_string().contains("not runtime-ready"));
-        assert!(error
-            .to_string()
+        assert_eq!(saved["skills"][0]["ready"], false);
+        assert_eq!(saved["skills"][0]["modelInvocable"], false);
+        assert!(saved["skills"][0]["failureReason"]
+            .as_str()
+            .unwrap()
             .contains("lacks a concrete input contract"));
+        assert!(state
+            .paths
+            .workspace_config_dir
+            .join("resources/lambda_skill_libraries/verified.yaml")
+            .exists());
     }
 
     #[test]
