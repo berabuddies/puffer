@@ -110,7 +110,8 @@ if (skipGuiflow) {
   run("guiflow-smoke", "GUIFlow buggy/fixed smoke benchmark", [
     `node apps/puffer-desktop/tests/fuzz/bin/puffer-guiflow-smoke.mjs --root ${sh(guiflowRoot)} --suite ${sh(path.join(guiflowRoot, "benchmarks", "smoke_suite.json"))} --out ${sh(path.join(outDir, "guiflow-smoke"))}`,
     `test "$(jq '.summary.buggyAdmitted' ${sh(path.join(outDir, "guiflow-smoke", "guiflow-smoke-report.json"))})" -ge 1`,
-    `test "$(jq '.summary.fixedAdmitted' ${sh(path.join(outDir, "guiflow-smoke", "guiflow-smoke-report.json"))})" -eq 0`
+    `test "$(jq '.summary.fixedAdmitted' ${sh(path.join(outDir, "guiflow-smoke", "guiflow-smoke-report.json"))})" -eq 0`,
+    `test "$(jq '[.results[].artifacts.screenshot | select(length > 0)] | length' ${sh(path.join(outDir, "guiflow-smoke", "guiflow-smoke-report.json"))})" -eq "$(jq '.summary.total' ${sh(path.join(outDir, "guiflow-smoke", "guiflow-smoke-report.json"))})"`
   ].join(" && "), { timeout: 120_000 });
 }
 
@@ -326,7 +327,7 @@ function buildPhaseCoverage() {
       id: "phase-8",
       title: "GUIFlow Benchmark Adapter",
       localSteps: ["guiflow-smoke"],
-      evidence: "Requires buggy GUIFlow smoke app to admit a predicate-backed finding and fixed app to admit none."
+      evidence: "Requires buggy GUIFlow smoke app to admit a predicate-backed finding, fixed app to admit none, and every case to export screenshot/verdict/gate artifacts."
     },
     {
       id: "phase-9",

@@ -42,6 +42,7 @@ if (summary.buggyAdmitted < 1 || summary.fixedAdmitted !== 0) process.exitCode =
 async function runCase(testCase) {
   const caseDir = path.join(outDir, testCase.id);
   fs.mkdirSync(caseDir, { recursive: true });
+  const screenshotPath = path.join(caseDir, "final-page.png");
   const server = startServer(resolveServer(testCase.server));
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
@@ -106,6 +107,7 @@ async function runCase(testCase) {
       metadata: { caseId: testCase.id }
     });
   } finally {
+    await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => undefined);
     await browser.close().catch(() => undefined);
     if (server) await stopServer(server);
   }
@@ -122,7 +124,13 @@ async function runCase(testCase) {
     expectationResults,
     ...evidence,
     verdict,
-    gate
+    gate,
+    artifacts: {
+      resultJson: relative(path.join(caseDir, "result.json")),
+      verdictJson: relative(path.join(caseDir, "verdict.json")),
+      gateJson: relative(path.join(caseDir, "verdict-gate.json")),
+      screenshot: fs.existsSync(screenshotPath) ? relative(screenshotPath) : ""
+    }
   };
   fs.writeFileSync(path.join(caseDir, "result.json"), `${JSON.stringify(result, null, 2)}\n`);
   fs.writeFileSync(path.join(caseDir, "verdict.json"), `${JSON.stringify(verdict, null, 2)}\n`);
@@ -282,6 +290,9 @@ function formatMarkdown(report) {
     lines.push(`- Status: ${result.status}`);
     lines.push(`- Gate disposition: ${result.gate.disposition}`);
     lines.push(`- Evidence entries: ${result.evidence_index.length}`);
+    lines.push(`- Screenshot: ${result.artifacts?.screenshot || "missing"}`);
+    lines.push(`- Verdict: ${result.artifacts?.verdictJson || "missing"}`);
+    lines.push(`- Citation gate: ${result.artifacts?.gateJson || "missing"}`);
     lines.push("");
   }
   return `${lines.join("\n")}\n`;

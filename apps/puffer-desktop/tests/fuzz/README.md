@@ -318,7 +318,9 @@ node apps/puffer-desktop/tests/fuzz/bin/puffer-guiflow-smoke.mjs \
 
 The smoke runner is a wiring and validation probe, not a paper result. It
 expects the buggy checkout app to produce one admitted predicate-backed finding
-and the fixed checkout app to produce zero admitted findings.
+and the fixed checkout app to produce zero admitted findings. Each case writes
+`result.json`, `verdict.json`, `verdict-gate.json`, and a final-page screenshot
+for manual replay and diagnosis.
 
 ## Recommended Workflow
 
