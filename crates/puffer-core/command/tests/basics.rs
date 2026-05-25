@@ -283,7 +283,7 @@ fn workflows_connectors_filter_shows_connect_commands() {
     .unwrap();
 
     let text = &state.transcript.last().unwrap().text;
-    assert!(text.contains("showing 2/13 connectors for query=\"telegram\""));
+    assert!(text.contains("showing 2/14 connectors for query=\"telegram\""));
     assert!(text.contains("telegram-login"));
     assert!(text.contains("actions=send_message"));
     assert!(text.contains("connect=/connect telegram-login telegram-user"));
@@ -350,7 +350,7 @@ fn workflows_connectors_filter_presets_use_stable_capability_terms() {
 
     let text = &state.transcript.last().unwrap().text;
     assert!(text.contains("filters: trigger-ready | no-trigger | draft | has-actions"));
-    assert!(text.contains("showing 7/13 connectors for query=\"has-actions\""));
+    assert!(text.contains("showing 7/14 connectors for query=\"has-actions\""));
     assert!(text.contains("- telegram-login [auth,events,no-trigger,actions]"));
     assert!(text.contains("actions=send_message,"));
     assert!(!text.contains("- slack-bot ["));
@@ -383,7 +383,7 @@ fn workflows_connectors_catalog_includes_serve_connectors_as_non_triggers() {
     .unwrap();
 
     let text = &state.transcript.last().unwrap().text;
-    assert!(text.contains("showing 1/13 connectors for query=\"discord\""));
+    assert!(text.contains("showing 1/14 connectors for query=\"discord\""));
     assert!(text.contains("discord-bot"));
     assert!(text.contains("connect=/connect discord-bot discord-bot"));
     assert!(text.contains("[auth,no-trigger]"));
@@ -416,11 +416,43 @@ fn workflows_connectors_catalog_includes_github_webhook_preset() {
     .unwrap();
 
     let text = &state.transcript.last().unwrap().text;
-    assert!(text.contains("showing 1/13 connectors for query=\"github\""));
+    assert!(text.contains("showing 1/14 connectors for query=\"github\""));
     assert!(text.contains("github-webhook"));
     assert!(text.contains("connect=/connect github-webhook github-webhook"));
     assert!(text.contains("runtime=serve"));
     assert!(text.contains("[no-trigger]"));
+}
+
+#[test]
+fn workflows_connectors_catalog_includes_gitlab_webhook_preset() {
+    let tempdir = tempdir().unwrap();
+    let paths = ConfigPaths::discover(tempdir.path());
+    ensure_workspace_dirs(&paths).unwrap();
+    let session_store = SessionStore::from_paths(&paths).unwrap();
+    let session = session_store
+        .create_session(tempdir.path().to_path_buf())
+        .unwrap();
+    let mut state = AppState::new(
+        PufferConfig::default(),
+        tempdir.path().to_path_buf(),
+        session,
+    );
+
+    dispatch_command(
+        &mut state,
+        &supported_commands(),
+        &LoadedResources::default(),
+        &mut ProviderRegistry::new(),
+        &mut AuthStore::default(),
+        &session_store,
+        "/workflows connectors gitlab merge request",
+    )
+    .unwrap();
+
+    let text = &state.transcript.last().unwrap().text;
+    assert!(text.contains("showing 1/14 connectors for query=\"gitlab merge request\""));
+    assert!(text.contains("gitlab-webhook") && text.contains("/connect gitlab-webhook"));
+    assert!(text.contains("runtime=serve") && text.contains("[no-trigger]"));
 }
 
 #[test]
@@ -450,7 +482,7 @@ fn workflows_connectors_catalog_includes_linear_webhook_preset() {
     .unwrap();
 
     let text = &state.transcript.last().unwrap().text;
-    assert!(text.contains("showing 1/13 connectors for query=\"linear issue\""));
+    assert!(text.contains("showing 1/14 connectors for query=\"linear issue\""));
     assert!(text.contains("linear-webhook"));
     assert!(text.contains("connect=/connect linear-webhook linear-webhook"));
     assert!(text.contains("runtime=serve"));

@@ -233,6 +233,7 @@ fn connector_template_runtime_hints(template: &ConnectorTemplate) -> Vec<String>
             | "discord-bot"
             | "matrix-bot"
             | "github-webhook"
+            | "gitlab-webhook"
             | "linear-webhook"
             | "webhook"
     ) {
@@ -405,6 +406,17 @@ mod tests {
         let slug = resolve_connector_slug(&mut state, &resources, "github event").expect("slug");
 
         assert_eq!(slug, "github-webhook");
+    }
+
+    #[test]
+    fn resolve_connector_slug_accepts_gitlab_webhook_terms() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let slug =
+            resolve_connector_slug(&mut state, &resources, "gitlab merge request").expect("slug");
+
+        assert_eq!(slug, "gitlab-webhook");
     }
 
     #[test]

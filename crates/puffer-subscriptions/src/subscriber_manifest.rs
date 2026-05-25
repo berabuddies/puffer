@@ -125,6 +125,7 @@ fn serve_configured_connector(slug: &str) -> bool {
             | "discord-bot"
             | "matrix-bot"
             | "github-webhook"
+            | "gitlab-webhook"
             | "linear-webhook"
             | "webhook"
     )

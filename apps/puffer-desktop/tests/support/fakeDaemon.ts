@@ -488,6 +488,19 @@ export class FakeDaemon {
         action_slugs: []
       },
       {
+        connector_slug: "gitlab-webhook",
+        description: "GitLab issue, merge request, comment, and push webhook preset backed by puffer serve",
+        skill: "gitlab-webhook",
+        runtime_hints: ["serve"],
+        requires_auth: false,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "gitlab-webhook",
+        connect_command: "/connect gitlab-webhook gitlab-webhook",
+        action_slugs: []
+      },
+      {
         connector_slug: "linear-webhook",
         description: "Linear issue and project webhook preset backed by puffer serve",
         skill: "linear-webhook",

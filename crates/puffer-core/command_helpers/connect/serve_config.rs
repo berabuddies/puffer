@@ -192,6 +192,42 @@ pub(super) fn connect_github_webhook(
     ))
 }
 
+/// Configures the GitLab webhook preset through the serve-mode webhook connector.
+pub(super) fn connect_gitlab_webhook(
+    state: &mut AppState,
+    resources: &LoadedResources,
+    connection: &str,
+) -> Result<ConnectResult> {
+    let bind_address = ask_input(
+        state,
+        resources,
+        "Bind",
+        "What bind address should the GitLab webhook listen on?",
+    )?;
+    let path_value = ask_input(
+        state,
+        resources,
+        "Path",
+        "What URL path should GitLab post webhook events to?",
+    )?;
+    let path_value = normalize_webhook_path_with_default(&path_value, "/gitlab");
+    let fields = vec![
+        ("bind_address", toml::Value::String(bind_address)),
+        ("path", toml::Value::String(path_value)),
+        (
+            "welcome_message",
+            toml::Value::String("GitLab webhook ready.".to_string()),
+        ),
+    ];
+    let path = write_workspace_connector_config(state, "webhook", connection, &fields)?;
+    Ok(serve_summary(
+        "gitlab-webhook",
+        connection,
+        "GitLab event webhook",
+        &path,
+    ))
+}
+
 /// Configures the Linear webhook preset through the serve-mode webhook connector.
 pub(super) fn connect_linear_webhook(
     state: &mut AppState,
@@ -387,6 +423,8 @@ mod tests {
             "What Matrix password should Puffer use?" => "matrix-password",
             "What bind address should the GitHub webhook listen on?" => "127.0.0.1:9292",
             "What URL path should GitHub post webhook events to?" => "/github",
+            "What bind address should the GitLab webhook listen on?" => "127.0.0.1:9494",
+            "What URL path should GitLab post webhook events to?" => "gitlab",
             "What bind address should the Linear webhook listen on?" => "127.0.0.1:9393",
             "What URL path should Linear post webhook events to?" => "linear",
             "What bind address should the webhook listen on?" => "127.0.0.1:9191",
@@ -517,6 +555,28 @@ mod tests {
         assert!(raw.contains("bind_address = \"127.0.0.1:9292\""));
         assert!(raw.contains("path = \"/github\""));
         assert!(raw.contains("welcome_message = \"GitHub webhook ready.\""));
+    }
+
+    #[test]
+    fn gitlab_webhook_connect_writes_webhook_preset_config() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let result = with_user_question_prompt_handler(
+            |request| answer_request(&request),
+            || connect_gitlab_webhook(&mut state, &resources, "gitlab-webhook"),
+        )
+        .expect("connect result");
+
+        assert!(result.summary.contains("connector: gitlab-webhook"));
+        assert!(result.summary.contains("run `puffer serve`"));
+        let path = state.cwd.join(".puffer/connectors.toml");
+        let raw = fs::read_to_string(path).expect("connector config");
+        assert!(raw.contains("[connectors.webhook]"));
+        assert!(raw.contains("display_name = \"gitlab-webhook\""));
+        assert!(raw.contains("bind_address = \"127.0.0.1:9494\""));
+        assert!(raw.contains("path = \"/gitlab\""));
+        assert!(raw.contains("welcome_message = \"GitLab webhook ready.\""));
     }
 
     #[test]

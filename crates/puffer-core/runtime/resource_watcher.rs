@@ -125,12 +125,10 @@ impl ResourceWatcher {
                     Ok(guard) => guard,
                     Err(poisoned) => poisoned.into_inner(),
                 };
-                if let Some(prev) = *guard {
-                    if now.duration_since(prev) < DEBOUNCE {
-                        // Already raised inside the debounce window; the
-                        // existing flag covers this burst.
-                        return;
-                    }
+                if !should_raise_signal(*guard, signal_clone.load(Ordering::Acquire), now) {
+                    // Already raised inside the debounce window; the
+                    // existing flag covers this burst.
+                    return;
                 }
                 *guard = Some(now);
                 signal_clone.store(true, Ordering::Release);
@@ -250,6 +248,17 @@ fn is_resource_path(path: &Path) -> bool {
         }
     }
     true
+}
+
+fn should_raise_signal(
+    last_fired: Option<Instant>,
+    signal_already_set: bool,
+    now: Instant,
+) -> bool {
+    let Some(prev) = last_fired else {
+        return true;
+    };
+    now.duration_since(prev) >= DEBOUNCE || !signal_already_set
 }
 
 #[cfg(test)]
@@ -387,6 +396,21 @@ mod tests {
         assert!(
             wait_for_signal(&signal, Duration::from_secs(2)),
             "watcher should re-raise the signal after the debounce window elapses"
+        );
+    }
+
+    #[test]
+    fn debounce_allows_reraising_after_consumer_clears_signal() {
+        let now = Instant::now();
+        let first_fire = now - Duration::from_millis(10);
+
+        assert!(
+            !should_raise_signal(Some(first_fire), true, now),
+            "a still-latched signal covers duplicate events inside the debounce window"
+        );
+        assert!(
+            should_raise_signal(Some(first_fire), false, now),
+            "a consumed signal can be raised again for a follow-up file write inside the debounce window"
         );
     }
 

@@ -33,6 +33,9 @@ pub fn execute_connect_flow(
         "github-webhook" => {
             serve_config::connect_github_webhook(state, resources, &target.connection_name)?
         }
+        "gitlab-webhook" => {
+            serve_config::connect_gitlab_webhook(state, resources, &target.connection_name)?
+        }
         "linear-webhook" => {
             serve_config::connect_linear_webhook(state, resources, &target.connection_name)?
         }

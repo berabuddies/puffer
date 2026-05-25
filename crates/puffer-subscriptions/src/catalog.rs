@@ -111,6 +111,7 @@ pub fn builtin_connector_templates() -> Vec<ConnectorTemplate> {
         slack_bot_template(),
         email_template(),
         github_webhook_template(),
+        gitlab_webhook_template(),
         linear_webhook_template(),
         webhook_template(),
     ]
@@ -137,6 +138,7 @@ pub fn suggested_connection_slug(connector_slug: &str) -> String {
         "telegram-bot" => "telegram-bot".to_string(),
         "slack-bot" => "slack-bot".to_string(),
         "github-webhook" => "github-webhook".to_string(),
+        "gitlab-webhook" => "gitlab-webhook".to_string(),
         "linear-webhook" => "linear-webhook".to_string(),
         "webhook" => "webhook".to_string(),
         _ => connector_slug.to_string(),
@@ -336,6 +338,24 @@ fn github_webhook_template() -> ConnectorTemplate {
         can_proxy_agent: false,
         subscriber: None,
         output_schema: github_event_output_schema(),
+        actions: BTreeMap::new(),
+    }
+}
+
+fn gitlab_webhook_template() -> ConnectorTemplate {
+    ConnectorTemplate {
+        slug: "gitlab-webhook".to_string(),
+        description:
+            "GitLab issue, merge request, comment, and push webhook preset backed by puffer serve"
+                .to_string(),
+        skill: "gitlab-webhook".to_string(),
+        binary: "puffer connector webhook".to_string(),
+        command: Vec::new(),
+        requires_auth: false,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        subscriber: None,
+        output_schema: gitlab_event_output_schema(),
         actions: BTreeMap::new(),
     }
 }

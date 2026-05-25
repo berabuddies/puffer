@@ -229,6 +229,25 @@ pub(super) fn github_event_output_schema() -> Value {
     })
 }
 
+/// Returns the GitLab webhook event output schema.
+pub(super) fn gitlab_event_output_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "const": "gitlab_event"},
+            "event": {"type": "string"},
+            "object_kind": {"type": "string"},
+            "action": {"type": "string"},
+            "project": {"type": "string"},
+            "sender": {"type": "string"},
+            "message": {"type": "string"},
+            "url": {"type": "string"}
+        },
+        "required": ["event", "project", "message"],
+        "additionalProperties": true
+    })
+}
+
 /// Returns the Linear webhook event output schema.
 pub(super) fn linear_event_output_schema() -> Value {
     serde_json::json!({

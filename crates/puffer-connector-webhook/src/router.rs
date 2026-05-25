@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
+mod payloads;
+
 /// Shared axum state: the runtime plus a snapshot of the config.
 #[derive(Clone)]
 pub struct AppState {
@@ -146,6 +148,7 @@ fn inbound_from_payload(headers: &HeaderMap, payload: &Value) -> Option<InboundM
     puffer_inbound(payload)
         .or_else(|| github_inbound(headers, payload))
         .or_else(|| linear_inbound(headers, payload))
+        .or_else(|| payloads::gitlab_inbound(headers, payload))
 }
 
 fn puffer_inbound(payload: &Value) -> Option<InboundMessage> {
