@@ -44,15 +44,13 @@ impl Drop for ServerHandle {
 }
 
 fn pick_free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
+    let (addr, _listener) = bind_loopback_listener();
+    addr.port()
 }
 
 fn spawn_server(runner: Arc<dyn ToolRunner>) -> ServerHandle {
-    let port = pick_free_port();
-    spawn_server_on_port(runner, port)
+    let (addr, listener) = bind_loopback_listener();
+    spawn_server_with_listener(runner, addr, listener, None)
 }
 
 /// Like [`spawn_server`] but installs a custom `BidiElicitationRouter` on
@@ -62,20 +60,39 @@ fn spawn_server_with_router(
     runner: Arc<dyn ToolRunner>,
     router: Arc<BidiElicitationRouter>,
 ) -> ServerHandle {
-    let port = pick_free_port();
-    spawn_server_on_port_with_router(runner, port, Some(router))
+    let (addr, listener) = bind_loopback_listener();
+    spawn_server_with_listener(runner, addr, listener, Some(router))
 }
 
 fn spawn_server_on_port(runner: Arc<dyn ToolRunner>, port: u16) -> ServerHandle {
-    spawn_server_on_port_with_router(runner, port, None)
+    let (addr, listener) = bind_listener_on_port(port);
+    spawn_server_with_listener(runner, addr, listener, None)
 }
 
-fn spawn_server_on_port_with_router(
+fn bind_loopback_listener() -> (SocketAddr, TcpListener) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    prepare_listener(listener)
+}
+
+fn bind_listener_on_port(port: u16) -> (SocketAddr, TcpListener) {
+    let listener = TcpListener::bind(("127.0.0.1", port)).expect("bind grpc test port");
+    prepare_listener(listener)
+}
+
+fn prepare_listener(listener: TcpListener) -> (SocketAddr, TcpListener) {
+    listener
+        .set_nonblocking(true)
+        .expect("set grpc test listener nonblocking");
+    let addr = listener.local_addr().expect("read grpc test listener addr");
+    (addr, listener)
+}
+
+fn spawn_server_with_listener(
     runner: Arc<dyn ToolRunner>,
-    port: u16,
+    addr: SocketAddr,
+    listener: TcpListener,
     router: Option<Arc<BidiElicitationRouter>>,
 ) -> ServerHandle {
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let endpoint = format!("http://{addr}");
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -98,9 +115,8 @@ fn spawn_server_on_port_with_router(
         .name("puffer-runner-grpc-test-server-thread".into())
         .spawn(move || {
             handle.block_on(async move {
-                let listener = tokio::net::TcpListener::bind(addr)
-                    .await
-                    .expect("bind tonic listener");
+                let listener =
+                    tokio::net::TcpListener::from_std(listener).expect("wrap tonic listener");
                 let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
                 let _ = ready_tx.send(());
                 tonic::transport::Server::builder()
