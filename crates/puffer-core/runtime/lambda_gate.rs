@@ -6,6 +6,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
+use std::path::{Path, PathBuf};
 
 mod input_contract;
 mod type_check;
@@ -178,6 +179,7 @@ impl LambdaToolSig {
         concrete_tool: &str,
         args: &Value,
         input: &Value,
+        skill_root: Option<&Path>,
     ) -> Option<String> {
         let Some(object) = args.as_object() else {
             return Some(format!(
@@ -191,7 +193,7 @@ impl LambdaToolSig {
                 self.name, concrete_tool
             ));
         };
-        if contract.matches(object, input) {
+        if contract.matches(object, skill_root, input) {
             return None;
         }
         Some(format!(
@@ -213,6 +215,7 @@ pub(crate) struct LambdaHostEnv {
     effects: BTreeSet<String>,
     domains: Vec<String>,
     tools: HashMap<String, LambdaToolSig>,
+    skill_root: Option<PathBuf>,
 }
 
 impl LambdaHostEnv {
@@ -231,6 +234,7 @@ impl LambdaHostEnv {
             effects: parsed.effects.into_iter().collect(),
             domains: parsed.domains,
             tools,
+            skill_root: None,
         })
     }
 
@@ -409,7 +413,12 @@ impl LambdaGateState {
         let Some(sig) = self.host.lookup_tool(host_tool) else {
             return LambdaGateVerdict::reject(format!("unknown tool: {host_tool}"));
         };
-        if let Some(reason) = sig.validate_concrete_input(concrete_tool, args, concrete_input) {
+        if let Some(reason) = sig.validate_concrete_input(
+            concrete_tool,
+            args,
+            concrete_input,
+            self.host.skill_root.as_deref(),
+        ) {
             return LambdaGateVerdict::reject(reason);
         }
         LambdaGateVerdict::Accept
@@ -605,15 +614,24 @@ pub(crate) fn gate_for_verified_skill(skill: &SkillSpec) -> Result<Option<Lambda
     let Some(raw) = host_catalogue_json_for_verification(verification)? else {
         return Ok(None);
     };
-    let host = LambdaHostEnv::from_json_str(&raw)
+    let mut host = LambdaHostEnv::from_json_str(&raw)
         .context("failed to parse host catalogue")?
         .apply_concrete_tool_bindings(&verification.host_tool_bindings)
         .context("failed to apply host tool bindings")?;
+    host.skill_root = skill_root_for_verification(verification);
     host.validate_concrete_tool_bindings()
         .context("failed to validate host tool bindings")?;
     host.validate_runtime_contracts()
         .context("failed to validate Lambda Skill runtime contracts")?;
     Ok(Some(LambdaGateState::with_host_caps(host)))
+}
+
+fn skill_root_for_verification(verification: &SkillVerificationSpec) -> Option<PathBuf> {
+    verification
+        .source_path
+        .as_deref()
+        .and_then(|path| Path::new(path).parent())
+        .map(Path::to_path_buf)
 }
 
 /// Validates a host catalogue against the runtime harness requirements.
@@ -782,217 +800,4 @@ impl FactJson {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const SWAP_HOST_JSON: &str = r#"{
-      "effects": ["net_r", "net_w", "sign"], "domains": ["TokenAddr"],
-      "tools": [
-        {"name": "get_quote", "params": [{"name": "from", "ty": "TokenAddr"}, {"name": "to", "ty": "TokenAddr"}], "result": "real{p > 0}", "effects": ["net_r"], "concreteTools": ["ToolSearch"], "concreteInputContracts": {"ToolSearch": {"query": {"$template": "quote ${from} ${to}"}}}, "registers": [], "contextReq": null},
-        {"name": "authenticate", "params": [], "result": "unit", "effects": [], "concreteTools": ["ToolSearch"], "concreteInputContracts": {"ToolSearch": {"query": "authenticate"}}, "registers": [{"pred": "authed", "args": []}], "contextReq": null},
-        {"name": "execute_swap", "params": [{"name": "from", "ty": "TokenAddr"}, {"name": "to", "ty": "TokenAddr"}, {"name": "amount", "ty": "real{a > 0}"}], "result": "Result<Receipt, SwapErr>", "effects": ["net_w", "sign"], "concreteTools": ["Bash"], "concreteInputContracts": {"Bash": {"command": {"$template": "swap ${from} ${to} ${amount}"}}}, "registers": [], "contextReq": {"pred": "authed", "args": []}}
-      ]
-    }"#;
-
-    #[test]
-    fn parses_precompiled_host_catalogue_shape() {
-        let host = LambdaHostEnv::from_json_str(SWAP_HOST_JSON).unwrap();
-        assert!(host.effects().contains("net_w"));
-        assert_eq!(host.domains(), &["TokenAddr".to_string()]);
-        let execute = host.lookup_tool("execute_swap").unwrap();
-        assert_eq!(execute.name(), "execute_swap");
-        assert!(execute.effects().contains("sign"));
-        assert_eq!(execute.context_req().unwrap().pred(), "authed");
-    }
-
-    #[test]
-    fn gate_rejects_unknown_tools() {
-        let host = LambdaHostEnv::from_json_str(SWAP_HOST_JSON).unwrap();
-        let gate = LambdaGateState::with_host_caps(host);
-        let verdict = gate.admit_call("missing_tool");
-        assert_eq!(verdict.reason(), Some("unknown tool: missing_tool"));
-    }
-
-    #[test]
-    fn gate_rejects_missing_capabilities() {
-        let host = LambdaHostEnv::from_json_str(SWAP_HOST_JSON).unwrap();
-        let gate = LambdaGateState::with_caps(host, ["net_r".to_string()]);
-        let verdict = gate.admit_call("execute_swap");
-        assert_eq!(
-            verdict.reason(),
-            Some("tool effects exceed gate capabilities: execute_swap")
-        );
-    }
-
-    #[test]
-    fn gate_tracks_registered_facts_for_context_requirements() {
-        let host = LambdaHostEnv::from_json_str(SWAP_HOST_JSON).unwrap();
-        let mut gate = LambdaGateState::with_host_caps(host);
-        let rejected = gate.admit_call("execute_swap");
-        assert_eq!(
-            rejected.reason(),
-            Some("contextReq not satisfied for execute_swap: (authed)")
-        );
-
-        assert!(gate.step_call("authenticate").is_accept());
-        assert!(gate
-            .facts()
-            .contains(&LambdaFact::new("authed", Vec::new())));
-        assert!(gate.step_call("execute_swap").is_accept());
-    }
-
-    #[test]
-    fn gate_can_start_with_initial_facts() {
-        let host = LambdaHostEnv::from_json_str(SWAP_HOST_JSON).unwrap();
-        let mut gate = LambdaGateState::with_host_caps(host);
-        gate.add_fact(LambdaFact::new("authed", Vec::new()));
-        assert!(gate.admit_call("execute_swap").is_accept());
-    }
-
-    #[test]
-    fn gate_validates_formal_host_arguments() {
-        let host = LambdaHostEnv::from_json_str(SWAP_HOST_JSON).unwrap();
-        let mut gate = LambdaGateState::with_host_caps(host);
-        gate.add_fact(LambdaFact::new("authed", Vec::new()));
-
-        assert!(gate
-            .admit_call_with_args(
-                "execute_swap",
-                &serde_json::json!({
-                    "from": "ETH",
-                    "to": "USDC",
-                    "amount": 10.5
-                })
-            )
-            .is_accept());
-        assert_eq!(
-            gate.admit_call_with_args(
-                "execute_swap",
-                &serde_json::json!({
-                    "from": "ETH",
-                    "to": "USDC",
-                    "amount": "ten"
-                })
-            )
-            .reason(),
-            Some("formal arg amount for execute_swap does not match real{a > 0}")
-        );
-        assert_eq!(
-            gate.admit_call_with_args(
-                "execute_swap",
-                &serde_json::json!({
-                    "from": "ETH",
-                    "amount": 10.5
-                })
-            )
-            .reason(),
-            Some("formal args for execute_swap missing parameter to")
-        );
-    }
-
-    #[test]
-    fn gate_validates_precompiled_concrete_input_contract() {
-        let host = LambdaHostEnv::from_json_str(SWAP_HOST_JSON).unwrap();
-        let gate = LambdaGateState::with_host_caps(host);
-
-        assert!(gate
-            .admit_concrete_input_binding(
-                "get_quote",
-                &serde_json::json!({"from": "ETH", "to": "USDC"}),
-                "ToolSearch",
-                &serde_json::json!({"query": "quote ETH USDC"})
-            )
-            .is_accept());
-        assert_eq!(
-            gate.admit_concrete_input_binding(
-                "get_quote",
-                &serde_json::json!({"from": "ETH", "to": "USDC"}),
-                "ToolSearch",
-                &serde_json::json!({"query": "quote BTC USDC"})
-            )
-            .reason(),
-            Some("concrete input for get_quote does not match the precompiled ToolSearch contract")
-        );
-    }
-
-    #[test]
-    fn host_catalogue_runtime_validation_rejects_missing_input_contract() {
-        let error = validate_host_catalogue_runtime(
-            r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","effects":[],"concreteTools":["ToolSearch"],"params":[{"name":"query","ty":"str"}]}]}"#,
-        )
-        .expect_err("missing concrete input contract must fail");
-
-        assert!(format!("{error:#}").contains("lacks a concrete input contract"));
-    }
-
-    #[test]
-    fn host_catalogue_runtime_validation_rejects_malformed_refinement() {
-        let error = validate_host_catalogue_runtime(
-            r#"{"effects":[],"domains":[],"tools":[{"name":"custom_fetch","effects":[],"concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":{"$arg":"id"}}},"params":[{"name":"id","ty":"str{host_custom_rule id}"}]}]}"#,
-        )
-        .expect_err("malformed runtime refinement must fail");
-
-        assert!(format!("{error:#}").contains("unsupported runtime refinement host_custom_rule id"));
-    }
-
-    #[test]
-    fn host_catalogue_runtime_validation_rejects_malformed_result_refinement() {
-        let error = validate_host_catalogue_runtime(
-            r#"{"effects":[],"domains":[],"tools":[{"name":"custom_parse","effects":[],"concreteTools":["Bash"],"concreteInputContracts":{"Bash":{"command":"parse"}},"result":"Paper{host_custom_rule p}"}]}"#,
-        )
-        .expect_err("malformed result refinement must fail");
-
-        assert!(format!("{error:#}").contains("unsupported runtime refinement host_custom_rule p"));
-    }
-
-    #[test]
-    fn gate_for_verified_skill_reads_catalogue_file() {
-        let root = tempfile::tempdir().unwrap();
-        let catalogue = root.path().join("host.json");
-        fs::write(
-            &catalogue,
-            r#"{"effects":[],"domains":[],"tools":[{"name":"formal_search","effects":[],"concreteTools":["ToolSearch"],"concreteInputContracts":{"ToolSearch":{"query":"formal"}}}]}"#,
-        )
-        .unwrap();
-        let mut skill = SkillSpec::default();
-        skill.verification = Some(SkillVerificationSpec {
-            system: "lambda-skill".to_string(),
-            source_path: None,
-            generated_path: None,
-            host_catalogue_path: Some(catalogue.display().to_string()),
-            compiler_path: None,
-            host_tool_bindings: Default::default(),
-            tools: None,
-            actions: None,
-        });
-
-        let gate = gate_for_verified_skill(&skill)
-            .unwrap()
-            .expect("catalogue should create a gate");
-
-        assert!(gate.admit_call("formal_search").is_accept());
-        assert!(gate
-            .admit_concrete_tool_binding("formal_search", "ToolSearch")
-            .is_accept());
-    }
-
-    #[test]
-    fn gate_for_verified_skill_ignores_compiler_path_without_host_catalogue() {
-        let root = tempfile::tempdir().unwrap();
-        let compiler = root.path().join("lskillc");
-        fs::write(&compiler, "").unwrap();
-        let mut skill = SkillSpec::default();
-        skill.verification = Some(SkillVerificationSpec {
-            system: "lambda-skill".to_string(),
-            source_path: Some(root.path().join("skill.lskill").display().to_string()),
-            generated_path: None,
-            host_catalogue_path: None,
-            compiler_path: Some(compiler.display().to_string()),
-            host_tool_bindings: Default::default(),
-            tools: None,
-            actions: None,
-        });
-
-        assert!(gate_for_verified_skill(&skill).unwrap().is_none());
-    }
-}
+mod tests;

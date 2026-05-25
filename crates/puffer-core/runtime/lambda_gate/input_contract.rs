@@ -1,12 +1,14 @@
 use anyhow::{anyhow, Result};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Component, Path};
 
 /// Concrete input pattern compiled from a Lambda Skill host catalogue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum LambdaInputPattern {
     Exact(Value),
     Arg(String),
+    SkillPath(String),
     Template(String),
     Object(BTreeMap<String, LambdaInputPattern>),
     Array(Vec<LambdaInputPattern>),
@@ -22,6 +24,13 @@ impl LambdaInputPattern {
                             return Err(anyhow!("$arg contract must be a string"));
                         };
                         return Ok(Self::Arg(arg.to_string()));
+                    }
+                    if let Some(path) = object.remove("$skill_path") {
+                        let Some(path) = path.as_str() else {
+                            return Err(anyhow!("$skill_path contract must be a string"));
+                        };
+                        validate_skill_path(path)?;
+                        return Ok(Self::SkillPath(path.to_string()));
                     }
                     if let Some(template) = object.remove("$template") {
                         let Some(template) = template.as_str() else {
@@ -63,14 +72,22 @@ impl LambdaInputPattern {
                     item.collect_arg_refs(out);
                 }
             }
-            Self::Exact(_) => {}
+            Self::Exact(_) | Self::SkillPath(_) => {}
         }
     }
 
-    pub(super) fn matches(&self, args: &Map<String, Value>, input: &Value) -> bool {
+    pub(super) fn matches(
+        &self,
+        args: &Map<String, Value>,
+        skill_root: Option<&Path>,
+        input: &Value,
+    ) -> bool {
         match self {
             Self::Exact(expected) => expected == input,
             Self::Arg(name) => args.get(name) == Some(input),
+            Self::SkillPath(relative) => input.as_str().is_some_and(|actual| {
+                skill_root.is_some_and(|root| root.join(relative).display().to_string() == actual)
+            }),
             Self::Template(template) => input.as_str().is_some_and(|text| {
                 render_template(template, args).is_some_and(|expected| expected == text)
             }),
@@ -82,7 +99,7 @@ impl LambdaInputPattern {
                     && pattern.iter().all(|(key, pattern)| {
                         object
                             .get(key)
-                            .is_some_and(|value| pattern.matches(args, value))
+                            .is_some_and(|value| pattern.matches(args, skill_root, value))
                     })
             }
             Self::Array(pattern) => {
@@ -93,10 +110,30 @@ impl LambdaInputPattern {
                     && pattern
                         .iter()
                         .zip(items)
-                        .all(|(pattern, value)| pattern.matches(args, value))
+                        .all(|(pattern, value)| pattern.matches(args, skill_root, value))
             }
         }
     }
+}
+
+fn validate_skill_path(path: &str) -> Result<()> {
+    let relative = Path::new(path);
+    if path.trim().is_empty() || relative.is_absolute() {
+        return Err(anyhow!(
+            "$skill_path contract must be a non-empty relative path"
+        ));
+    }
+    if relative.components().any(|part| {
+        matches!(
+            part,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(anyhow!(
+            "$skill_path contract cannot escape the skill directory"
+        ));
+    }
+    Ok(())
 }
 
 fn collect_template_arg_refs(template: &str, out: &mut BTreeSet<String>) {
