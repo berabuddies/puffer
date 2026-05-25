@@ -68,13 +68,20 @@ run("reviewer-aggregate", "Candidate reviewer artifacts appear in aggregate", [
   `cp apps/puffer-desktop/tests/fuzz/.runs/openrouter-campaign/puffer_openrouter_fuzz_report.json ${sh(path.join(outDir, "reviewer-aggregate.json"))}`,
   `test "$(jq '.summary.candidateVerdicts' ${sh(path.join(outDir, "reviewer-aggregate.json"))})" -ge 1`,
   `test "$(jq '.summary.reviewerReportsPresent' ${sh(path.join(outDir, "reviewer-aggregate.json"))})" -ge 1`,
-  `test "$(jq '.summary.reviewerHumanQueueDecisions' ${sh(path.join(outDir, "reviewer-aggregate.json"))})" -ge 1`
+  `test "$(jq '.summary.reviewerHumanQueueDecisions' ${sh(path.join(outDir, "reviewer-aggregate.json"))})" -ge 1`,
+  `test "$(jq '.blockerSummary.topBlockers | length' ${sh(path.join(outDir, "reviewer-aggregate.json"))})" -ge 1`,
+  `jq -e '.blockerSummary.topBlockers[] | select(.type == "candidate-review")' ${sh(path.join(outDir, "reviewer-aggregate.json"))} >/dev/null`
 ].join(" && "));
 
 run("evolution", "Tree evolution and bridge-aware scheduling", [
   `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs evolve-tree --out ${sh(path.join(outDir, "evolved.md"))} --json-out ${sh(path.join(outDir, "evolved.json"))} --starvation-floor 1`,
-  `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs schedule --limit 2 --namespace ${sh(`${namespace}-evolved`)} --evolution ${sh(path.join(outDir, "evolved.json"))} --format json > ${sh(path.join(outDir, "schedule.json"))}`,
-  `test "$(jq '.selectedShardIds | length' ${sh(path.join(outDir, "schedule.json"))})" -eq 2`
+  `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs schedule --limit 8 --bridge-quota 2 --namespace ${sh(`${namespace}-evolved`)} --evolution ${sh(path.join(outDir, "evolved.json"))} --format json > ${sh(path.join(outDir, "schedule.json"))}`,
+  `test "$(jq '.selectedShardIds | length' ${sh(path.join(outDir, "schedule.json"))})" -eq 8`,
+  `test "$(jq '.normalSelectedCount' ${sh(path.join(outDir, "schedule.json"))})" -eq 6`,
+  `test "$(jq '.bridgeSelectedCount' ${sh(path.join(outDir, "schedule.json"))})" -eq 2`,
+  `test "$(jq -r '.selectionPolicy.mode' ${sh(path.join(outDir, "schedule.json"))})" = "normal-first-bridge-quota"`,
+  `test "$(jq '.selectionPolicy.bridgeQuota' ${sh(path.join(outDir, "schedule.json"))})" -eq 2`,
+  `test "$(jq -r '.items[0].bridge // false' ${sh(path.join(outDir, "schedule.json"))})" = "false"`
 ].join(" && "));
 
 run("evolution-policy", "Synthetic split/demote/starvation evolution policy", [
@@ -155,6 +162,8 @@ if (skipAgentflow) {
     `test "$(jq '.summary.shards' ${sh(path.join(outDir, "scale-aggregate.json"))})" -eq 50`,
     `test "$(jq '.summary.missingReplayReports' ${sh(path.join(outDir, "scale-aggregate.json"))})" -eq 0`,
     `test "$(jq '.summary.verdictReportsPresent' ${sh(path.join(outDir, "scale-aggregate.json"))})" -eq 50`,
+    `test "$(jq '.blockerSummary.ready' ${sh(path.join(outDir, "scale-aggregate.json"))})" = "true"`,
+    `test "$(jq '.blockerSummary.topBlockers | length' ${sh(path.join(outDir, "scale-aggregate.json"))})" -eq 0`,
     `test "$(jq '.runs | length' ${sh(path.join(outDir, "scale-feedback-ledger.json"))})" -eq 50`,
     `test "$(jq '.runtimeCoverage.shards | length' ${sh(path.join(outDir, "scale-coverage-ledger.json"))})" -ge 1`
   ].join(" && "), { timeout: 420_000 });
@@ -291,7 +300,7 @@ function buildPhaseCoverage() {
       id: "phase-4",
       title: "Bridge Shards",
       localSteps: ["evolution", "bridge-replay"],
-      evidence: "Schedules evolved shards and replays two bridge shards through the same evidence path."
+      evidence: "Schedules bridge shards after normal shards with explicit bridge counts, then replays two bridge shards through the same evidence path."
     },
     {
       id: "phase-5",

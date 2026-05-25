@@ -155,6 +155,7 @@ Options:
   --pics-dir <path>   Default: bugs/pics
   --seed <id>         Select one seed; omit to run all seeds
   --shards <ids>      Comma-separated shard ids for scheduler filtering
+  --bridge-quota <n>  Bridge shards selected after normal shards; default floor(limit/4) for limit >= 4
   --shard <id>        Single shard id for top-cases or feedback
   --profile <name>    all, core, secondary, low-priority
   --gate-profile <name> bootstrap, ready, release
@@ -375,7 +376,8 @@ async function main() {
       intentManifest,
       evolutionPlan,
       "min-iterations": args["min-iterations"],
-      "max-iterations": args["max-iterations"]
+      "max-iterations": args["max-iterations"],
+      "bridge-quota": args["bridge-quota"]
     });
     const markdown = formatScheduleMarkdown(schedule);
     if (args.out) await writeText(args.out, markdown);

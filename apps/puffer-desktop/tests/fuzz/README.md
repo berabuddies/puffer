@@ -37,10 +37,16 @@ ledger, and feedback from previous replay runs:
 ```sh
 node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs schedule \
   --limit 4 \
+  --bridge-quota 1 \
   --namespace manual-shards \
   --out apps/puffer-desktop/tests/fuzz/.runs/manual-shards/schedule.md \
   --json-out apps/puffer-desktop/tests/fuzz/.runs/manual-shards/schedule.json
 ```
+
+The scheduler is normal-first by default: it selects normal UI-tree shards
+first, then appends bridge shards up to the bridge quota. The default quota is
+`floor(limit / 4)` for batches of four or more. Use `--bridge-quota` when a
+campaign needs a fixed cross-feature budget.
 
 After running a shard replay, record its feedback so later schedules can reduce
 duplicates, flaky shards, and out-of-shard work:

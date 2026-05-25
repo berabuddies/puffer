@@ -129,15 +129,32 @@ export function buildShardSchedule(manifest, seeds, uiTree, shards, coverageLedg
       return left.shardId.localeCompare(right.shardId);
     });
 
-  const items = candidates.slice(0, limit);
+  const items = selectScheduleItems(candidates, {
+    limit,
+    requestedShardIds,
+    bridgeQuota: options["bridge-quota"]
+  });
+  const bridgeCandidates = candidates.filter((item) => item.bridge);
+  const normalCandidates = candidates.filter((item) => !item.bridge);
+  const bridgeItems = items.filter((item) => item.bridge);
+  const normalItems = items.filter((item) => !item.bridge);
   return {
     version: 1,
     generatedAt: new Date().toISOString(),
     namespace,
     limit,
     totalCandidates: candidates.length,
+    normalCandidateCount: normalCandidates.length,
+    bridgeCandidateCount: bridgeCandidates.length,
     selectedCount: items.length,
+    normalSelectedCount: normalItems.length,
+    bridgeSelectedCount: bridgeItems.length,
     selectedShardIds: items.map((item) => item.shardId),
+    bridgeSelectedShardIds: bridgeItems.map((item) => item.shardId),
+    selectionPolicy: {
+      mode: requestedShardIds.length > 0 ? "explicit-request" : "normal-first-bridge-quota",
+      bridgeQuota: requestedShardIds.length > 0 ? null : bridgeItems.length
+    },
     items
   };
 }
@@ -149,6 +166,9 @@ export function formatScheduleMarkdown(schedule) {
     `Generated: ${schedule.generatedAt}`,
     `Namespace: ${schedule.namespace}`,
     `Selected shards: ${schedule.selectedCount}/${schedule.totalCandidates}`,
+    `Normal selected: ${schedule.normalSelectedCount ?? 0}/${schedule.normalCandidateCount ?? 0}`,
+    `Bridge selected: ${schedule.bridgeSelectedCount ?? 0}/${schedule.bridgeCandidateCount ?? 0}`,
+    `Selection policy: ${schedule.selectionPolicy?.mode ?? "score-only"}`,
     "",
     "## Shards",
     ""
@@ -179,6 +199,38 @@ export function formatScheduleMarkdown(schedule) {
     lines.push("");
   }
   return `${lines.join("\n")}\n`;
+}
+
+function selectScheduleItems(candidates, options) {
+  const limit = Number(options.limit ?? 4);
+  const requestedShardIds = options.requestedShardIds ?? [];
+  if (requestedShardIds.length > 0) return candidates.slice(0, limit);
+  const bridgeCandidates = candidates.filter((item) => item.bridge);
+  const normalCandidates = candidates.filter((item) => !item.bridge);
+  const bridgeQuota = parseBridgeQuota(options.bridgeQuota, limit, bridgeCandidates.length);
+  const normalQuota = Math.max(0, limit - bridgeQuota);
+  const selected = [
+    ...normalCandidates.slice(0, normalQuota),
+    ...bridgeCandidates.slice(0, bridgeQuota)
+  ];
+  if (selected.length >= limit) return selected.slice(0, limit);
+  const selectedIds = new Set(selected.map((item) => item.shardId));
+  const fillers = candidates.filter((item) => !selectedIds.has(item.shardId));
+  return [...selected, ...fillers.slice(0, limit - selected.length)];
+}
+
+function parseBridgeQuota(value, limit, availableBridgeCount) {
+  if (value !== undefined && value !== null && value !== true) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return defaultBridgeQuota(limit, availableBridgeCount);
+    return clamp(numeric, 0, Math.min(limit, availableBridgeCount));
+  }
+  return defaultBridgeQuota(limit, availableBridgeCount);
+}
+
+function defaultBridgeQuota(limit, availableBridgeCount) {
+  if (limit < 4 || availableBridgeCount === 0) return 0;
+  return Math.min(availableBridgeCount, Math.max(1, Math.floor(limit / 4)));
 }
 
 export function evolveShardTree(uiTree, shards, feedbackLedger = {}, options = {}) {

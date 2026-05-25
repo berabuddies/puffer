@@ -25,12 +25,14 @@ const shardDirs = fs.existsSync(runsRoot)
 
 const shards = shardDirs.map(readShard);
 const summary = summarize(shards);
+const blockerSummary = summarizeBlockers(shards);
 const payload = {
   version: 1,
   generatedAt: new Date().toISOString(),
   namespace,
   reportPath: relative(reportPath),
   summary,
+  blockerSummary,
   shards
 };
 
@@ -180,6 +182,85 @@ function extractBugListAppendBlocks(text) {
   return blocks;
 }
 
+function summarizeBlockers(shards) {
+  const topBlockers = [];
+  const counts = {};
+  for (const shard of shards) {
+    for (const blocker of blockersForShard(shard)) {
+      topBlockers.push(blocker);
+      counts[blocker.type] = (counts[blocker.type] ?? 0) + 1;
+    }
+  }
+  topBlockers.sort((left, right) => {
+    if (severityRank(left.severity) !== severityRank(right.severity)) {
+      return severityRank(left.severity) - severityRank(right.severity);
+    }
+    return left.shard.localeCompare(right.shard) || left.type.localeCompare(right.type);
+  });
+  return {
+    ready: topBlockers.length === 0,
+    total: topBlockers.length,
+    counts,
+    topBlockers: topBlockers.slice(0, 20)
+  };
+}
+
+function blockersForShard(shard) {
+  const blockers = [];
+  if (shard.missingReplay) {
+    blockers.push(blocker(shard, "missing-replay", "P0", "Bounded replay report is missing", shard.reportJson));
+    return blockers;
+  }
+  if (!shard.finalReportPresent) {
+    blockers.push(blocker(shard, "missing-findings-report", "P2", "Findings report is missing", shard.findingsMd));
+  }
+  if (!shard.verdict) {
+    blockers.push(blocker(shard, "missing-verdict", "P1", "Structured verdict is missing", shard.verdictJson));
+  }
+  if (!shard.gate) {
+    blockers.push(blocker(shard, "missing-citation-gate", "P1", "Citation gate result is missing", shard.gateJson));
+  }
+  if (shard.gate?.disposition === "gate_failed") {
+    blockers.push(blocker(
+      shard,
+      "gate-failed",
+      "P1",
+      `Citation gate failed: ${(shard.gate.failureReasons ?? []).join("; ") || "unknown reason"}`,
+      shard.gateJson
+    ));
+  }
+  if (shard.gate?.disposition === "candidate") {
+    blockers.push(blocker(shard, "candidate-review", "P2", "Candidate verdict needs reviewer or human triage", shard.gateJson));
+  }
+  if (shard.reviewer?.decision === "human_queue") {
+    blockers.push(blocker(shard, "reviewer-human-queue", "P2", "Reviewer deferred candidate to human queue", shard.reviewerJson));
+  }
+  if (Number(shard.summary.actionableFailures ?? 0) > 0 && shard.gate?.disposition !== "admitted") {
+    blockers.push(blocker(shard, "unadmitted-actionable-failure", "P1", "Replay reports actionable failures without an admitted verdict", shard.reportJson));
+  }
+  if (Number(shard.summary.nonPassingFailures ?? 0) > 0 && shard.gate?.disposition === "dismissed") {
+    blockers.push(blocker(shard, "dismissed-nonpassing-failure", "P2", "Non-passing replay was dismissed by triage", shard.reportJson));
+  }
+  if (shard.bugListAppendBlocks.length > 0) {
+    blockers.push(blocker(shard, "legacy-bug-list-append", "P2", "Legacy BUG_LIST_APPEND output is still present", shard.findingsMd));
+  }
+  return blockers;
+}
+
+function blocker(shard, type, severity, detail, artifact) {
+  return {
+    type,
+    severity,
+    shard: shard.name,
+    detail,
+    artifact
+  };
+}
+
+function severityRank(severity) {
+  return { P0: 0, P1: 1, P2: 2, P3: 3 }[severity] ?? 9;
+}
+
 function formatMarkdown(payload) {
   const lines = [
     "# Puffer OpenRouter Small-Model UI/UX Fuzz Report",
@@ -207,9 +288,26 @@ function formatMarkdown(payload) {
     `- Non-passing failures: ${payload.summary.nonPassingFailures}`,
     `- Actionable product failures: ${payload.summary.actionableFailures}`,
     "",
-    "## Classification",
+    "## Top Blockers",
+    "",
+    `- Ready: ${payload.blockerSummary.ready ? "yes" : "no"}`,
+    `- Total blockers: ${payload.blockerSummary.total}`,
     ""
   ];
+  appendCountLines(lines, payload.blockerSummary.counts);
+  if (payload.blockerSummary.topBlockers.length === 0) {
+    lines.push("", "- None");
+  } else {
+    lines.push("");
+    for (const item of payload.blockerSummary.topBlockers) {
+      lines.push(`- ${item.severity} ${item.type} in ${item.shard}: ${item.detail} (${item.artifact})`);
+    }
+  }
+  lines.push(
+    "",
+    "## Classification",
+    ""
+  );
   appendCountLines(lines, payload.summary.byClassification);
   lines.push("", "## Shards", "");
   if (payload.shards.length === 0) {
