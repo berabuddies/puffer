@@ -8,6 +8,7 @@ use std::path::{Component, Path};
 pub(super) enum LambdaInputPattern {
     Exact(Value),
     Arg(String),
+    IntArg(String),
     SkillPath(String),
     Template(String),
     ShellJson(Box<LambdaInputPattern>),
@@ -26,6 +27,12 @@ impl LambdaInputPattern {
                             return Err(anyhow!("$arg contract must be a string"));
                         };
                         return Ok(Self::Arg(arg.to_string()));
+                    }
+                    if let Some(arg) = object.remove("$int_arg") {
+                        let Some(arg) = arg.as_str() else {
+                            return Err(anyhow!("$int_arg contract must be a string"));
+                        };
+                        return Ok(Self::IntArg(arg.to_string()));
                     }
                     if let Some(path) = object.remove("$skill_path") {
                         let Some(path) = path.as_str() else {
@@ -72,7 +79,7 @@ impl LambdaInputPattern {
 
     pub(super) fn collect_arg_refs(&self, out: &mut BTreeSet<String>) {
         match self {
-            Self::Arg(name) => {
+            Self::Arg(name) | Self::IntArg(name) => {
                 out.insert(name.clone());
             }
             Self::Template(template) => {
@@ -111,6 +118,7 @@ impl LambdaInputPattern {
         match self {
             Self::Exact(expected) => Some(expected.clone()),
             Self::Arg(name) => args.get(name).cloned(),
+            Self::IntArg(name) => render_int_arg(args.get(name)?),
             Self::SkillPath(relative) => {
                 let root = skill_root?;
                 Some(Value::String(root.join(relative).display().to_string()))
@@ -150,6 +158,20 @@ impl LambdaInputPattern {
             Value::String(text) => Some(text),
             value => serde_json::to_string(&value).ok(),
         }
+    }
+}
+
+fn render_int_arg(value: &Value) -> Option<Value> {
+    match value {
+        Value::Number(number) if number.is_i64() || number.is_u64() => {
+            Some(Value::Number(number.clone()))
+        }
+        Value::String(text) => text
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .map(|number| Value::Number(number.into())),
+        _ => None,
     }
 }
 

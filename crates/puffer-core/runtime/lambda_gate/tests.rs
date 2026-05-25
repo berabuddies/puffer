@@ -334,6 +334,34 @@ fn shell_json_concat_contract_quotes_structured_payload() {
 }
 
 #[test]
+fn int_arg_contract_coerces_numeric_string_arguments() {
+    let host = LambdaHostEnv::from_json_str(
+        r#"{"effects":[],"domains":[],"tools":[{"name":"process_submit","effects":["proc"],"params":[{"name":"session_id","ty":"SessionId"},{"name":"data","ty":"str"}],"concreteTools":["WriteStdin"],"concreteInputContracts":{"WriteStdin":{"process_id":{"$int_arg":"session_id"},"input":{"$template":"${data}\n"}}}}]}"#,
+    )
+    .unwrap();
+    let gate = LambdaGateState::with_host_caps(host);
+
+    assert!(gate
+        .admit_concrete_input_binding(
+            "process_submit",
+            &serde_json::json!({"session_id": "1000", "data": "yes"}),
+            "WriteStdin",
+            &serde_json::json!({"process_id": 1000, "input": "yes\n"})
+        )
+        .is_accept());
+    assert_eq!(
+        gate.admit_concrete_input_binding(
+            "process_submit",
+            &serde_json::json!({"session_id": "1000", "data": "yes"}),
+            "WriteStdin",
+            &serde_json::json!({"process_id": "1000", "input": "yes\n"})
+        )
+        .reason(),
+        Some("concrete input for process_submit does not match the precompiled WriteStdin contract")
+    );
+}
+
+#[test]
 fn url_template_contract_percent_encodes_arguments() {
     let host = LambdaHostEnv::from_json_str(
         r#"{"effects":[],"domains":[],"tools":[{"name":"public_lookup","effects":["net_r"],"params":[{"name":"query","ty":"str"}],"concreteTools":["WebFetch"],"concreteInputContracts":{"WebFetch":{"url":{"$template":"https://example.test/search?q=${url:query}"},"prompt":"Return the response."}}}]}"#,
