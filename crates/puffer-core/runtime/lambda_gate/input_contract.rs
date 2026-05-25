@@ -10,6 +10,8 @@ pub(super) enum LambdaInputPattern {
     Arg(String),
     SkillPath(String),
     Template(String),
+    ShellJson(Box<LambdaInputPattern>),
+    Concat(Vec<LambdaInputPattern>),
     Object(BTreeMap<String, LambdaInputPattern>),
     Array(Vec<LambdaInputPattern>),
 }
@@ -38,6 +40,19 @@ impl LambdaInputPattern {
                         };
                         return Ok(Self::Template(template.to_string()));
                     }
+                    if let Some(shell_json) = object.remove("$shell_json") {
+                        return Ok(Self::ShellJson(Box::new(Self::from_json(shell_json)?)));
+                    }
+                    if let Some(concat) = object.remove("$concat") {
+                        let Value::Array(items) = concat else {
+                            return Err(anyhow!("$concat contract must be an array"));
+                        };
+                        return items
+                            .into_iter()
+                            .map(Self::from_json)
+                            .collect::<Result<Vec<_>>>()
+                            .map(Self::Concat);
+                    }
                 }
                 object
                     .into_iter()
@@ -62,6 +77,12 @@ impl LambdaInputPattern {
             Self::Template(template) => {
                 collect_template_arg_refs(template, out);
             }
+            Self::ShellJson(pattern) => pattern.collect_arg_refs(out),
+            Self::Concat(parts) => {
+                for part in parts {
+                    part.collect_arg_refs(out);
+                }
+            }
             Self::Object(object) => {
                 for value in object.values() {
                     value.collect_arg_refs(out);
@@ -82,36 +103,45 @@ impl LambdaInputPattern {
         skill_root: Option<&Path>,
         input: &Value,
     ) -> bool {
+        self.render_value(args, skill_root).as_ref() == Some(input)
+    }
+
+    fn render_value(&self, args: &Map<String, Value>, skill_root: Option<&Path>) -> Option<Value> {
         match self {
-            Self::Exact(expected) => expected == input,
-            Self::Arg(name) => args.get(name) == Some(input),
-            Self::SkillPath(relative) => input.as_str().is_some_and(|actual| {
-                skill_root.is_some_and(|root| root.join(relative).display().to_string() == actual)
-            }),
-            Self::Template(template) => input.as_str().is_some_and(|text| {
-                render_template(template, args).is_some_and(|expected| expected == text)
-            }),
-            Self::Object(pattern) => {
-                let Some(object) = input.as_object() else {
-                    return false;
-                };
-                object.len() == pattern.len()
-                    && pattern.iter().all(|(key, pattern)| {
-                        object
-                            .get(key)
-                            .is_some_and(|value| pattern.matches(args, skill_root, value))
-                    })
+            Self::Exact(expected) => Some(expected.clone()),
+            Self::Arg(name) => args.get(name).cloned(),
+            Self::SkillPath(relative) => {
+                let root = skill_root?;
+                Some(Value::String(root.join(relative).display().to_string()))
             }
-            Self::Array(pattern) => {
-                let Some(items) = input.as_array() else {
-                    return false;
-                };
-                items.len() == pattern.len()
-                    && pattern
-                        .iter()
-                        .zip(items)
-                        .all(|(pattern, value)| pattern.matches(args, skill_root, value))
+            Self::Template(template) => render_template(template, args).map(Value::String),
+            Self::ShellJson(pattern) => {
+                let value = pattern.render_value(args, skill_root)?;
+                let json = serde_json::to_string(&value).ok()?;
+                Some(Value::String(shell_quote_string(&json)))
             }
+            Self::Concat(parts) => parts
+                .iter()
+                .map(|part| part.render_string(args, skill_root))
+                .collect::<Option<Vec<_>>>()
+                .map(|items| Value::String(items.concat())),
+            Self::Object(pattern) => pattern
+                .iter()
+                .map(|(key, pattern)| Some((key.clone(), pattern.render_value(args, skill_root)?)))
+                .collect::<Option<Map<String, Value>>>()
+                .map(Value::Object),
+            Self::Array(pattern) => pattern
+                .iter()
+                .map(|pattern| pattern.render_value(args, skill_root))
+                .collect::<Option<Vec<_>>>()
+                .map(Value::Array),
+        }
+    }
+
+    fn render_string(&self, args: &Map<String, Value>, skill_root: Option<&Path>) -> Option<String> {
+        match self.render_value(args, skill_root)? {
+            Value::String(text) => Some(text),
+            value => serde_json::to_string(&value).ok(),
         }
     }
 }
@@ -214,7 +244,11 @@ fn shell_quote_value(value: &Value) -> Option<String> {
     } else {
         serde_json::to_string(value).ok()?
     };
-    Some(format!("'{}'", text.replace('\'', r#"'"'"'"#)))
+    Some(shell_quote_string(&text))
+}
+
+fn shell_quote_string(text: &str) -> String {
+    format!("'{}'", text.replace('\'', r#"'"'"'"#))
 }
 
 fn shell_quote_array(value: &Value) -> Option<String> {

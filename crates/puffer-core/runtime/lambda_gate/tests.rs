@@ -177,6 +177,44 @@ fn shell_join_template_contract_quotes_array_arguments() {
 }
 
 #[test]
+fn shell_json_concat_contract_quotes_structured_payload() {
+    let host = LambdaHostEnv::from_json_str(
+        r#"{"effects":[],"domains":[],"tools":[{"name":"notion_search","effects":["proc","net_r"],"params":[{"name":"query","ty":"str"}],"concreteTools":["Bash"],"concreteInputContracts":{"Bash":{"command":{"$concat":["composio execute NOTION_SEARCH -d ",{"$shell_json":{"query":{"$arg":"query"}}}]},"run_in_background":false,"timeout":300000,"tty":false}}}]}"#,
+    )
+    .unwrap();
+    let gate = LambdaGateState::with_host_caps(host);
+
+    assert!(gate
+        .admit_concrete_input_binding(
+            "notion_search",
+            &serde_json::json!({"query": "alpha' $(rm -rf /)"}),
+            "Bash",
+            &serde_json::json!({
+                "command": "composio execute NOTION_SEARCH -d '{\"query\":\"alpha'\"'\"' $(rm -rf /)\"}'",
+                "run_in_background": false,
+                "timeout": 300000,
+                "tty": false
+            })
+        )
+        .is_accept());
+    assert_eq!(
+        gate.admit_concrete_input_binding(
+            "notion_search",
+            &serde_json::json!({"query": "alpha' $(rm -rf /)"}),
+            "Bash",
+            &serde_json::json!({
+                "command": "composio execute NOTION_SEARCH -d '{\"query\":\"alpha' $(rm -rf /)\"}'",
+                "run_in_background": false,
+                "timeout": 300000,
+                "tty": false
+            })
+        )
+        .reason(),
+        Some("concrete input for notion_search does not match the precompiled Bash contract")
+    );
+}
+
+#[test]
 fn url_template_contract_percent_encodes_arguments() {
     let host = LambdaHostEnv::from_json_str(
         r#"{"effects":[],"domains":[],"tools":[{"name":"public_lookup","effects":["net_r"],"params":[{"name":"query","ty":"str"}],"concreteTools":["WebFetch"],"concreteInputContracts":{"WebFetch":{"url":{"$template":"https://example.test/search?q=${url:query}"},"prompt":"Return the response."}}}]}"#,
