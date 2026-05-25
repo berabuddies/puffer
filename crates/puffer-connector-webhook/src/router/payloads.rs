@@ -6,6 +6,7 @@ use super::{header_value, number_or_string, pointer_string, snippet, string_fiel
 
 mod alertmanager;
 mod asana;
+mod azuredevops;
 mod bitbucket;
 mod datadog;
 mod grafana;
@@ -29,6 +30,7 @@ pub(super) fn asana_inbound(headers: &HeaderMap, payload: &Value) -> Option<Inbo
 /// Converts a known provider webhook payload into an inbound Puffer message.
 pub(super) fn provider_inbound(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
     asana_inbound(headers, payload)
+        .or_else(|| azuredevops::azuredevops_inbound(headers, payload))
         .or_else(|| bitbucket_inbound(headers, payload))
         .or_else(|| jira_inbound(headers, payload))
         .or_else(|| grafana_inbound(headers, payload))

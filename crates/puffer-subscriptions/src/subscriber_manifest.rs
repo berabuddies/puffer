@@ -129,6 +129,7 @@ fn serve_configured_connector(slug: &str) -> bool {
             | "datadog-webhook"
             | "newrelic-webhook"
             | "opsgenie-webhook"
+            | "azure-devops-webhook"
             | "bitbucket-webhook"
             | "github-webhook"
             | "grafana-webhook"

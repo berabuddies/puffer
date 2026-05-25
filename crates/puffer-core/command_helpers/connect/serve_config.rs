@@ -233,6 +233,11 @@ fn webhook_preset(connector_slug: &str) -> Result<WebhookPreset> {
             default_path: "/opsgenie",
             method: "Opsgenie alert action webhook",
         },
+        "azure-devops-webhook" => WebhookPreset {
+            product: "Azure DevOps",
+            default_path: "/azure-devops",
+            method: "Azure DevOps service hook",
+        },
         "bitbucket-webhook" => WebhookPreset {
             product: "Bitbucket",
             default_path: "/bitbucket",

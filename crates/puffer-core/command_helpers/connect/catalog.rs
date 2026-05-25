@@ -237,6 +237,7 @@ fn connector_template_runtime_hints(template: &ConnectorTemplate) -> Vec<String>
             | "datadog-webhook"
             | "newrelic-webhook"
             | "opsgenie-webhook"
+            | "azure-devops-webhook"
             | "bitbucket-webhook"
             | "github-webhook"
             | "grafana-webhook"
@@ -430,6 +431,17 @@ mod tests {
             resolve_connector_slug(&mut state, &resources, "bitbucket pull request").expect("slug");
 
         assert_eq!(slug, "bitbucket-webhook");
+    }
+
+    #[test]
+    fn resolve_connector_slug_accepts_azure_devops_webhook_terms() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let slug =
+            resolve_connector_slug(&mut state, &resources, "azure devops work item").expect("slug");
+
+        assert_eq!(slug, "azure-devops-webhook");
     }
 
     #[test]
