@@ -2677,16 +2677,18 @@ test("verified skill gate events render inside agent activity with check details
     concreteInput: { command: "python3 arxiv_search.py" },
     registeredFacts: [{ pred: "searched", args: ["au:\"Hanzhi Liu\""] }]
   });
-  daemon.emit("session:session-gate-activity:event", {
-    type: "turn-complete",
-    turnId: "turn-session-gate-activity",
-    assistantText: "Found the arXiv paper."
-  });
 
   await expect(page.locator(".gate-toast")).toHaveCount(0);
+  await expect(page.locator(".gate-detail-panel")).toHaveCount(0);
   const activity = page.getByRole("button", { name: /Agent activity/ });
   await expect(activity).toContainText("Checked 2 gates");
   await activity.click();
+
+  const actions = page.locator(".activity-action");
+  await expect(actions).toHaveCount(3);
+  await expect(actions.nth(0)).toContainText("Gate admitted");
+  await expect(actions.nth(1)).toContainText("Shell");
+  await expect(actions.nth(2)).toContainText("Gate committed");
 
   const admitted = page.locator(".activity-action").filter({ hasText: "Gate admitted" });
   await expect(admitted).toContainText("arxiv_search -> Bash");
@@ -2696,6 +2698,13 @@ test("verified skill gate events render inside agent activity with check details
   await expect(panel).toContainText('"query":"au:\\"Hanzhi Liu\\""');
   await expect(panel).toContainText("Concrete input");
   await expect(panel).toContainText("Compare concrete_tool with the next activity row's tool name");
+
+  daemon.emit("session:session-gate-activity:event", {
+    type: "turn-complete",
+    turnId: "turn-session-gate-activity",
+    assistantText: "Found the arXiv paper."
+  });
+  await expect(page.getByText("Found the arXiv paper.")).toBeVisible();
 });
 
 test("daemon-running background sessions receive approval events", async ({ page }) => {

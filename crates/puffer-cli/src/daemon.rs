@@ -526,6 +526,19 @@ fn lambda_gate_stream_payload(turn_id: &str, invocation: &ToolInvocation) -> Opt
     }))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LambdaGateStreamPhase {
+    BeforeToolInvocations,
+    AfterToolInvocations,
+}
+
+fn lambda_gate_stream_phase(payload: &Value) -> LambdaGateStreamPhase {
+    match payload.get("gateEvent").and_then(Value::as_str) {
+        Some("host_call_admitted") => LambdaGateStreamPhase::BeforeToolInvocations,
+        _ => LambdaGateStreamPhase::AfterToolInvocations,
+    }
+}
+
 async fn handle_socket(socket: WebSocket, state: Arc<DaemonState>) {
     let (ws_tx, mut ws_rx) = socket.split();
     let tx = Arc::new(AsyncMutex::new(ws_tx));
@@ -2774,18 +2787,30 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                     })).collect::<Vec<_>>(),
                 }),
                 TurnStreamEvent::ToolInvocations(invs) => {
+                    let mut before_gates = Vec::new();
+                    let mut after_gates = Vec::new();
                     for gate_payload in invs
                         .iter()
                         .filter_map(|inv| lambda_gate_stream_payload(&ev_turn, inv))
                     {
+                        match lambda_gate_stream_phase(&gate_payload) {
+                            LambdaGateStreamPhase::BeforeToolInvocations => {
+                                before_gates.push(gate_payload);
+                            }
+                            LambdaGateStreamPhase::AfterToolInvocations => {
+                                after_gates.push(gate_payload);
+                            }
+                        }
+                    }
+                    for gate_payload in before_gates {
                         ev_state.publish_event(ServerEnvelope::Event {
                             event: ev_channel.clone(),
                             payload: event_payload_with_actor(gate_payload, &ev_actor),
                         });
                     }
-                    json!({
+                    let tool_payload = json!({
                         "type": "tool-invocations",
-                        "turnId": ev_turn,
+                        "turnId": ev_turn.clone(),
                         "invocations": invs.iter().map(|i| json!({
                             "callId": i.call_id,
                             "toolId": i.tool_id,
@@ -2794,7 +2819,18 @@ async fn start_turn(state: Arc<DaemonState>, params: Value) -> Result<Value> {
                             "success": i.success,
                             "metadata": if i.metadata.is_null() { Value::Null } else { i.metadata.clone() },
                         })).collect::<Vec<_>>(),
-                    })
+                    });
+                    ev_state.publish_event(ServerEnvelope::Event {
+                        event: ev_channel.clone(),
+                        payload: event_payload_with_actor(tool_payload, &ev_actor),
+                    });
+                    for gate_payload in after_gates {
+                        ev_state.publish_event(ServerEnvelope::Event {
+                            event: ev_channel.clone(),
+                            payload: event_payload_with_actor(gate_payload, &ev_actor),
+                        });
+                    }
+                    return;
                 }
                 TurnStreamEvent::PlanUpdated { file_path, content } => json!({
                     "type": "plan-updated",
@@ -3440,6 +3476,35 @@ mod tests {
         assert_eq!(payload["gateEvent"], "host_call_admitted");
         assert_eq!(payload["hostTool"], "gh_pr_view");
         assert_eq!(payload["concreteTool"], "Bash");
+    }
+
+    #[test]
+    fn lambda_gate_stream_phase_places_admit_before_commit_after_batch() {
+        let admitted = json!({
+            "type": "lambda-gate",
+            "gateEvent": "host_call_admitted"
+        });
+        let committed = json!({
+            "type": "lambda-gate",
+            "gateEvent": "host_call_committed"
+        });
+        let rejected = json!({
+            "type": "lambda-gate",
+            "gateEvent": "gate_rejected"
+        });
+
+        assert_eq!(
+            super::lambda_gate_stream_phase(&admitted),
+            super::LambdaGateStreamPhase::BeforeToolInvocations
+        );
+        assert_eq!(
+            super::lambda_gate_stream_phase(&committed),
+            super::LambdaGateStreamPhase::AfterToolInvocations
+        );
+        assert_eq!(
+            super::lambda_gate_stream_phase(&rejected),
+            super::LambdaGateStreamPhase::AfterToolInvocations
+        );
     }
 
     impl Drop for DiscoveryCacheEnvGuard {

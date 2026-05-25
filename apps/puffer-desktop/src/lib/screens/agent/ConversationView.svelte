@@ -1091,10 +1091,8 @@
 
   function shouldCollapseActivity(row: Extract<RowKind, { kind: "agent" }>, idx: number): boolean {
     const isActiveTurn = idx === activeTurnAgentRowIndex;
-    return !isActiveTurn && row.children.length > 0 && (
-      Boolean(row.item?.body.trim()) ||
-      row.children.some(isGateActivity)
-    );
+    if (row.children.some(isGateActivity)) return true;
+    return !isActiveTurn && row.children.length > 0 && Boolean(row.item?.body.trim());
   }
 
   function activityGroupId(row: Extract<RowKind, { kind: "agent" }>, idx: number): string {
