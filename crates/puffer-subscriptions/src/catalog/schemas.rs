@@ -320,6 +320,25 @@ pub(super) fn stripe_event_output_schema() -> Value {
     })
 }
 
+/// Returns the Sentry webhook event output schema.
+pub(super) fn sentry_event_output_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "const": "sentry_event"},
+            "resource": {"type": "string"},
+            "action": {"type": "string"},
+            "project": {"type": "string"},
+            "issue_id": {"type": "string"},
+            "event_id": {"type": "string"},
+            "message": {"type": "string"},
+            "url": {"type": "string"}
+        },
+        "required": ["resource", "message"],
+        "additionalProperties": true
+    })
+}
+
 /// Returns the Shopify webhook event output schema.
 pub(super) fn shopify_event_output_schema() -> Value {
     serde_json::json!({

@@ -5,6 +5,7 @@ use serde_json::Value;
 use super::{header_value, number_or_string, pointer_string, snippet, string_field};
 
 mod asana;
+mod sentry;
 mod shopify;
 mod trello;
 
@@ -21,6 +22,11 @@ pub(super) fn asana_inbound(headers: &HeaderMap, payload: &Value) -> Option<Inbo
 /// Converts a Trello webhook payload into an inbound Puffer message.
 pub(super) fn trello_inbound(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
     trello::trello_inbound(headers, payload)
+}
+
+/// Converts a Sentry webhook payload into an inbound Puffer message.
+pub(super) fn sentry_inbound(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
+    sentry::sentry_inbound(headers, payload)
 }
 
 /// Converts a Shopify webhook payload into an inbound Puffer message.

@@ -115,6 +115,7 @@ pub fn builtin_connector_templates() -> Vec<ConnectorTemplate> {
         gitlab_webhook_template(),
         jira_webhook_template(),
         linear_webhook_template(),
+        sentry_webhook_template(),
         shopify_webhook_template(),
         stripe_webhook_template(),
         trello_webhook_template(),
@@ -147,6 +148,7 @@ pub fn suggested_connection_slug(connector_slug: &str) -> String {
         "gitlab-webhook" => "gitlab-webhook".to_string(),
         "jira-webhook" => "jira-webhook".to_string(),
         "linear-webhook" => "linear-webhook".to_string(),
+        "sentry-webhook" => "sentry-webhook".to_string(),
         "shopify-webhook" => "shopify-webhook".to_string(),
         "stripe-webhook" => "stripe-webhook".to_string(),
         "trello-webhook" => "trello-webhook".to_string(),
@@ -432,6 +434,23 @@ fn stripe_webhook_template() -> ConnectorTemplate {
         can_proxy_agent: false,
         subscriber: None,
         output_schema: stripe_event_output_schema(),
+        actions: BTreeMap::new(),
+    }
+}
+
+fn sentry_webhook_template() -> ConnectorTemplate {
+    ConnectorTemplate {
+        slug: "sentry-webhook".to_string(),
+        description: "Sentry issue, event, and alert webhook preset backed by puffer serve"
+            .to_string(),
+        skill: "sentry-webhook".to_string(),
+        binary: "puffer connector webhook".to_string(),
+        command: Vec::new(),
+        requires_auth: false,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        subscriber: None,
+        output_schema: sentry_event_output_schema(),
         actions: BTreeMap::new(),
     }
 }

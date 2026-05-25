@@ -237,6 +237,7 @@ fn connector_template_runtime_hints(template: &ConnectorTemplate) -> Vec<String>
             | "gitlab-webhook"
             | "jira-webhook"
             | "linear-webhook"
+            | "sentry-webhook"
             | "shopify-webhook"
             | "stripe-webhook"
             | "trello-webhook"
@@ -465,6 +466,17 @@ mod tests {
             resolve_connector_slug(&mut state, &resources, "stripe invoice payment").expect("slug");
 
         assert_eq!(slug, "stripe-webhook");
+    }
+
+    #[test]
+    fn resolve_connector_slug_accepts_sentry_webhook_terms() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let slug =
+            resolve_connector_slug(&mut state, &resources, "sentry issue alert").expect("slug");
+
+        assert_eq!(slug, "sentry-webhook");
     }
 
     #[test]

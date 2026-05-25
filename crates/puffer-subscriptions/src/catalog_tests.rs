@@ -22,6 +22,7 @@ fn builtins_cover_required_initial_connectors() {
     assert!(slugs.contains(&"gitlab-webhook".to_string()));
     assert!(slugs.contains(&"jira-webhook".to_string()));
     assert!(slugs.contains(&"linear-webhook".to_string()));
+    assert!(slugs.contains(&"sentry-webhook".to_string()));
     assert!(slugs.contains(&"shopify-webhook".to_string()));
     assert!(slugs.contains(&"stripe-webhook".to_string()));
     assert!(slugs.contains(&"trello-webhook".to_string()));
@@ -49,6 +50,10 @@ fn suggested_connection_slugs_match_connect_defaults() {
     assert_eq!(
         suggested_connection_slug("linear-webhook"),
         "linear-webhook"
+    );
+    assert_eq!(
+        suggested_connection_slug("sentry-webhook"),
+        "sentry-webhook"
     );
     assert_eq!(
         suggested_connection_slug("shopify-webhook"),
@@ -133,6 +138,7 @@ fn serve_mode_connectors_do_not_claim_workflow_runtime_capabilities() {
         "gitlab-webhook",
         "jira-webhook",
         "linear-webhook",
+        "sentry-webhook",
         "shopify-webhook",
         "stripe-webhook",
         "trello-webhook",

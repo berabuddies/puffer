@@ -540,6 +540,19 @@ export class FakeDaemon {
         action_slugs: []
       },
       {
+        connector_slug: "sentry-webhook",
+        description: "Sentry issue, event, and alert webhook preset backed by puffer serve",
+        skill: "sentry-webhook",
+        runtime_hints: ["serve"],
+        requires_auth: false,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "sentry-webhook",
+        connect_command: "/connect sentry-webhook sentry-webhook",
+        action_slugs: []
+      },
+      {
         connector_slug: "stripe-webhook",
         description: "Stripe invoice, payment, and billing webhook preset backed by puffer serve",
         skill: "stripe-webhook",

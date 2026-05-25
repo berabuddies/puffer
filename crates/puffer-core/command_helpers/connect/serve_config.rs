@@ -233,6 +233,11 @@ fn webhook_preset(connector_slug: &str) -> Result<WebhookPreset> {
             default_path: "/linear",
             method: "Linear event webhook",
         },
+        "sentry-webhook" => WebhookPreset {
+            product: "Sentry",
+            default_path: "/sentry",
+            method: "Sentry event webhook",
+        },
         "shopify-webhook" => WebhookPreset {
             product: "Shopify",
             default_path: "/shopify",
@@ -416,6 +421,8 @@ mod tests {
             "What URL path should Jira post webhook events to?" => "jira",
             "What bind address should the Linear webhook listen on?" => "127.0.0.1:9393",
             "What URL path should Linear post webhook events to?" => "linear",
+            "What bind address should the Sentry webhook listen on?" => "127.0.0.1:9798",
+            "What URL path should Sentry post webhook events to?" => "sentry",
             "What bind address should the Shopify webhook listen on?" => "127.0.0.1:9999",
             "What URL path should Shopify post webhook events to?" => "shopify",
             "What bind address should the Stripe webhook listen on?" => "127.0.0.1:9696",
@@ -682,6 +689,28 @@ mod tests {
         assert!(raw.contains("bind_address = \"127.0.0.1:9999\""));
         assert!(raw.contains("path = \"/shopify\""));
         assert!(raw.contains("welcome_message = \"Shopify webhook ready.\""));
+    }
+
+    #[test]
+    fn sentry_webhook_connect_writes_webhook_preset_config() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let result = with_user_question_prompt_handler(
+            |request| answer_request(&request),
+            || connect_webhook_preset(&mut state, &resources, "sentry-webhook", "sentry-webhook"),
+        )
+        .expect("connect result");
+
+        assert!(result.summary.contains("connector: sentry-webhook"));
+        assert!(result.summary.contains("run `puffer serve`"));
+        let path = state.cwd.join(".puffer/connectors.toml");
+        let raw = fs::read_to_string(path).expect("connector config");
+        assert!(raw.contains("[connectors.webhook]"));
+        assert!(raw.contains("display_name = \"sentry-webhook\""));
+        assert!(raw.contains("bind_address = \"127.0.0.1:9798\""));
+        assert!(raw.contains("path = \"/sentry\""));
+        assert!(raw.contains("welcome_message = \"Sentry webhook ready.\""));
     }
 
     #[test]

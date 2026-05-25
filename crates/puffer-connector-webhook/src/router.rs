@@ -172,6 +172,7 @@ fn inbound_from_payload(headers: &HeaderMap, payload: &Value) -> Option<InboundM
         .or_else(|| linear_inbound(headers, payload))
         .or_else(|| payloads::asana_inbound(headers, payload))
         .or_else(|| payloads::jira_inbound(headers, payload))
+        .or_else(|| payloads::sentry_inbound(headers, payload))
         .or_else(|| payloads::shopify_inbound(headers, payload))
         .or_else(|| payloads::stripe_inbound(headers, payload))
         .or_else(|| payloads::trello_inbound(headers, payload))
