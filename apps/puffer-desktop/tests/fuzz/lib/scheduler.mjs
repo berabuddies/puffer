@@ -168,6 +168,10 @@ export function formatScheduleMarkdown(schedule) {
     lines.push(`- Allowed setup nodes: ${item.allowedSetupNodes.join(", ")}`);
     lines.push(`- Allowed async events: ${item.allowedAsyncEvents.join(", ") || "none"}`);
     lines.push(`- Invariants: ${item.invariants.join(", ") || "none"}`);
+    if (item.bridge) {
+      lines.push(`- Bridge: ${item.bridge.leftShard} + ${item.bridge.rightShard}`);
+      lines.push(`- Bridge witness: ${item.bridge.sharedWitness}`);
+    }
     lines.push("");
     lines.push("Commands:");
     for (const command of item.commands) lines.push(`- \`${command}\``);
@@ -311,6 +315,7 @@ function scoreShard(shard, context) {
     ownedCoverage,
     allowedAsyncEvents: shard.allowedAsyncEvents ?? [],
     invariants: shard.invariants ?? [],
+    bridge: shard.bridge ?? null,
     reason: {
       seedTier,
       missingOwnedCoverage,

@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "id": "bridge-workspace-reconnect-agent-card",
+  "title": "Bridge: workspace refresh and active agent reconnect",
+  "priority": 8,
+  "seed": "workspace-session-race",
+  "startNode": "workspace/agent-card-selection",
+  "entrypoint": "workspace.agent-card",
+  "iterations": 14,
+  "steps": 18,
+  "replayLimit": 3,
+  "bridge": {
+    "leftShard": "workspace-agent-card-selection",
+    "rightShard": "chat-session-switch-stale",
+    "sharedWitness": "active agent selection survives grouped refresh and reconnect events"
+  },
+  "ownedNodes": ["workspace/agent-card-selection", "chat/session-switch-stale"],
+  "allowedSetupNodes": ["app", "workspace", "agent-detail", "chat"],
+  "ownedCoverage": [
+    "control:workspace.agent-card",
+    "control:workspace.search",
+    "state:session.loading",
+    "state:daemon.reconnecting",
+    "async:delayed-list-refresh",
+    "async:stale-session-event",
+    "async:reconnect",
+    "invariant:active-session-stable"
+  ],
+  "allowedAsyncEvents": ["delayed-list-refresh", "stale-session-event", "late-success", "late-failure", "reconnect"],
+  "invariants": ["app-no-crash", "active-session-stable", "stale-error-scoped", "draft-preserved-on-failure", "no-permanent-loading"]
+}

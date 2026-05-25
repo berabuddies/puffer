@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "id": "bridge-browser-session-stale",
+  "title": "Bridge: browser tab state across session switch",
+  "priority": 9,
+  "seed": "browser-tab-race",
+  "startNode": "browser/tab-lifecycle",
+  "entrypoint": "open-browser-pane",
+  "iterations": 14,
+  "steps": 18,
+  "replayLimit": 3,
+  "bridge": {
+    "leftShard": "browser-tab-lifecycle",
+    "rightShard": "chat-session-switch-stale",
+    "sharedWitness": "active browser tab state remains scoped after session switch and stale daemon events"
+  },
+  "ownedNodes": ["browser/tab-lifecycle", "chat/session-switch-stale"],
+  "allowedSetupNodes": ["app", "workspace", "agent-detail", "chat", "browser"],
+  "ownedCoverage": [
+    "control:browser.tab",
+    "control:browser.address",
+    "control:workspace.agent-card",
+    "state:browser.multi-tab",
+    "state:session.loading",
+    "async:stale-tab-event",
+    "async:stale-session-event",
+    "invariant:active-tab-stable",
+    "invariant:active-session-stable"
+  ],
+  "allowedAsyncEvents": ["stale-tab-event", "stale-session-event", "late-success", "late-failure", "reconnect"],
+  "invariants": ["app-no-crash", "active-tab-stable", "active-session-stable", "stale-error-scoped", "no-permanent-loading"]
+}

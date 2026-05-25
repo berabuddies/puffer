@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "id": "bridge-chat-permission-session-reload",
+  "title": "Bridge: permission/question response across session reload",
+  "priority": 10,
+  "seed": "chat-turn-race",
+  "startNode": "chat/permission-question",
+  "entrypoint": "chat.permission-response",
+  "iterations": 18,
+  "steps": 22,
+  "replayLimit": 3,
+  "bridge": {
+    "leftShard": "chat-permission-question",
+    "rightShard": "chat-session-switch-stale",
+    "sharedWitness": "pending permission or question resolves only for the originating session"
+  },
+  "ownedNodes": ["chat/permission-question", "chat/session-switch-stale"],
+  "allowedSetupNodes": ["app", "workspace", "agent-detail", "chat", "chat/composer-send"],
+  "ownedCoverage": [
+    "control:chat.permission-response",
+    "control:chat.question-response",
+    "control:workspace.agent-card",
+    "state:session.awaiting-permission",
+    "state:session.awaiting-question",
+    "state:session.loading",
+    "async:duplicate-submit",
+    "async:stale-session-event",
+    "async:delayed-list-refresh",
+    "invariant:active-session-stable",
+    "invariant:one-request-per-intent"
+  ],
+  "allowedAsyncEvents": ["duplicate-submit", "stale-session-event", "delayed-list-refresh", "late-success", "late-failure", "reconnect"],
+  "invariants": ["app-no-crash", "active-session-stable", "stale-error-scoped", "one-request-per-intent", "draft-preserved-on-failure"]
+}

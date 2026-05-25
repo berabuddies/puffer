@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "id": "bridge-new-agent-settings-model",
+  "title": "Bridge: new-agent provider with settings default model",
+  "priority": 9,
+  "seed": "provider-auth-model-race",
+  "startNode": "new-agent/provider-model",
+  "entrypoint": "new-agent.provider",
+  "iterations": 16,
+  "steps": 20,
+  "replayLimit": 3,
+  "bridge": {
+    "leftShard": "new-agent-provider-model",
+    "rightShard": "settings-default-model",
+    "sharedWitness": "new-agent provider/model choice remains independent of delayed settings default model updates"
+  },
+  "ownedNodes": ["new-agent/provider-model", "settings/default-model", "settings/provider-auth"],
+  "allowedSetupNodes": ["app", "workspace", "agent-detail", "new-agent", "settings"],
+  "ownedCoverage": [
+    "control:new-agent.provider",
+    "control:new-agent.submit",
+    "control:settings.default-model-save",
+    "control:settings.provider-refresh",
+    "state:auth.refreshing",
+    "state:settings.saving",
+    "state:session.loading",
+    "async:duplicate-submit",
+    "async:late-success",
+    "async:delayed-list-refresh",
+    "invariant:no-cross-provider-model"
+  ],
+  "allowedAsyncEvents": ["duplicate-submit", "late-success", "late-failure", "delayed-list-refresh", "server-push-update", "reconnect"],
+  "invariants": ["app-no-crash", "no-cross-provider-model", "one-request-per-intent", "controls-disabled-while-pending", "no-permanent-loading"]
+}

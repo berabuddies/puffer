@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "id": "bridge-files-terminal-session",
+  "title": "Bridge: file draft and terminal output across session scope",
+  "priority": 7,
+  "seed": "files-terminal-race",
+  "startNode": "files/editor-save",
+  "entrypoint": "files.editor",
+  "iterations": 12,
+  "steps": 18,
+  "replayLimit": 3,
+  "bridge": {
+    "leftShard": "files-editor-save",
+    "rightShard": "terminal-pty-lifecycle",
+    "sharedWitness": "file draft and terminal output stay scoped to the active session after stale events"
+  },
+  "ownedNodes": ["files/editor-save", "terminal/pty-lifecycle", "chat/session-switch-stale"],
+  "allowedSetupNodes": ["app", "workspace", "agent-detail", "files", "terminal"],
+  "ownedCoverage": [
+    "control:files.editor",
+    "control:files.save",
+    "control:terminal.input",
+    "control:workspace.agent-card",
+    "state:session.loading",
+    "async:stale-session-event",
+    "async:late-success",
+    "async:late-failure",
+    "invariant:draft-preserved-on-failure",
+    "invariant:active-session-stable"
+  ],
+  "allowedAsyncEvents": ["stale-session-event", "late-success", "late-failure", "reconnect"],
+  "invariants": ["app-no-crash", "draft-preserved-on-failure", "active-session-stable", "stale-error-scoped", "no-permanent-loading"]
+}
