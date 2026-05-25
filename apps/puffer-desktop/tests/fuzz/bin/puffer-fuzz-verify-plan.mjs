@@ -60,6 +60,17 @@ run("no-key-triage", "No-signal triage works without OpenRouter key", [
   `test "$(jq -r '.disposition' ${sh(path.join(fuzzRoot, ".runs", `${namespace}-evidence`, "verdict-gate.json"))})" = "dismissed"`
 ].join(" && "));
 
+run("reviewer-aggregate", "Candidate reviewer artifacts appear in aggregate", [
+  `rm -rf ${sh(path.join(fuzzRoot, ".runs", `${namespace}-reviewer-candidate`))}`,
+  `mkdir -p ${sh(path.join(fuzzRoot, ".runs", `${namespace}-reviewer-candidate`))}`,
+  `node -e ${sh(syntheticReviewerShardScript(namespace, fuzzRoot))}`,
+  `PUFFER_OPENROUTER_NAMESPACE=${sh(namespace)} node apps/puffer-desktop/tests/fuzz/bin/puffer-openrouter-aggregate.mjs`,
+  `cp apps/puffer-desktop/tests/fuzz/.runs/openrouter-campaign/puffer_openrouter_fuzz_report.json ${sh(path.join(outDir, "reviewer-aggregate.json"))}`,
+  `test "$(jq '.summary.candidateVerdicts' ${sh(path.join(outDir, "reviewer-aggregate.json"))})" -ge 1`,
+  `test "$(jq '.summary.reviewerReportsPresent' ${sh(path.join(outDir, "reviewer-aggregate.json"))})" -ge 1`,
+  `test "$(jq '.summary.reviewerHumanQueueDecisions' ${sh(path.join(outDir, "reviewer-aggregate.json"))})" -ge 1`
+].join(" && "));
+
 run("evolution", "Tree evolution and bridge-aware scheduling", [
   `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs evolve-tree --out ${sh(path.join(outDir, "evolved.md"))} --json-out ${sh(path.join(outDir, "evolved.json"))} --starvation-floor 1`,
   `node apps/puffer-desktop/tests/fuzz/bin/puffer-fuzz.mjs schedule --limit 2 --namespace ${sh(`${namespace}-evolved`)} --evolution ${sh(path.join(outDir, "evolved.json"))} --format json > ${sh(path.join(outDir, "schedule.json"))}`,
@@ -247,6 +258,64 @@ function commandExists(name) {
     cwd: repoRoot,
     encoding: "utf8"
   }).status === 0;
+}
+
+function syntheticReviewerShardScript(namespace, fuzzRootPath) {
+  const dir = path.join(fuzzRootPath, ".runs", `${namespace}-reviewer-candidate`);
+  return `
+const fs = require("node:fs");
+const dir = ${JSON.stringify(dir)};
+fs.writeFileSync(dir + "/bounded-replay-report.json", JSON.stringify({
+  version: 1,
+  namespace: ${JSON.stringify(`${namespace}-reviewer-candidate`)},
+  summary: {
+    total: 1,
+    passed: 0,
+    stableFailed: 1,
+    newCandidateFindings: 1,
+    nonPassingFailures: 1,
+    actionableFailures: 1,
+    byClassification: { "needs-manual-triage": 1 }
+  },
+  findings: [],
+  evidence_index: [
+    { id: "ev-action-0001", type: "action", byte_span: [0, 10], sha256: "abc", value: "click", metadata: {} }
+  ]
+}, null, 2) + "\\n");
+fs.writeFileSync(dir + "/bounded-replay-report.md", "# synthetic reviewer candidate\\n");
+fs.writeFileSync(dir + "/findings.md", "# synthetic reviewer candidate\\n");
+fs.writeFileSync(dir + "/verdict.json", JSON.stringify({
+  version: 1,
+  decision: "candidate",
+  title: "Synthetic predicate-missing candidate",
+  severity: "P2",
+  area: "selftest",
+  shard: "selftest-shard",
+  source_run: ${JSON.stringify(`${namespace}-reviewer-candidate`)},
+  primary_cause: { id: "ev-action-0001", type: "action", quote_hash: "abc" },
+  citations: [{ id: "ev-action-0001", type: "action", quote_hash: "abc" }],
+  expected: "candidate appears in aggregate",
+  actual: "candidate appears with reviewer decision",
+  impact: "aggregate reviewer counters are visible",
+  repro: ["synthetic"],
+  notes: "synthetic"
+}, null, 2) + "\\n");
+fs.writeFileSync(dir + "/verdict-gate.json", JSON.stringify({
+  version: 1,
+  disposition: "candidate",
+  passed: false,
+  candidateEligible: true,
+  failureReasons: ["primary-cause-is-predicate: primary cause ev-action-0001 resolves to action"]
+}, null, 2) + "\\n");
+fs.writeFileSync(dir + "/reviewer.json", JSON.stringify({
+  version: 1,
+  decision: "human_queue",
+  confidence: 0.5,
+  reason: "synthetic aggregate reviewer smoke",
+  cited_evidence: ["ev-action-0001"],
+  notes: "synthetic"
+}, null, 2) + "\\n");
+`;
 }
 
 function parseArgs(argv) {

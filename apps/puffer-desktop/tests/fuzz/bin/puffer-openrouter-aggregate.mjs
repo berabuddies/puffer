@@ -45,6 +45,7 @@ function readShard(dir) {
   const findingsMd = path.join(dir, "findings.md");
   const verdictJson = path.join(dir, "verdict.json");
   const gateJson = path.join(dir, "verdict-gate.json");
+  const reviewerJson = path.join(dir, "reviewer.json");
   const data = fs.existsSync(reportJson)
     ? JSON.parse(fs.readFileSync(reportJson, "utf8"))
     : null;
@@ -53,6 +54,9 @@ function readShard(dir) {
     : null;
   const gate = fs.existsSync(gateJson)
     ? JSON.parse(fs.readFileSync(gateJson, "utf8"))
+    : null;
+  const reviewer = fs.existsSync(reviewerJson)
+    ? JSON.parse(fs.readFileSync(reviewerJson, "utf8"))
     : null;
   const findingsText = fs.existsSync(findingsMd)
     ? fs.readFileSync(findingsMd, "utf8")
@@ -66,11 +70,13 @@ function readShard(dir) {
     findingsMd: relative(findingsMd),
     verdictJson: relative(verdictJson),
     gateJson: relative(gateJson),
+    reviewerJson: relative(reviewerJson),
     missingReplay: data === null,
     summary,
     findings: data?.findings ?? [],
     verdict,
     gate,
+    reviewer,
     bugListAppendBlocks: extractBugListAppendBlocks(findingsText),
     finalReportPresent: findingsText.trim().length > 0
   };
@@ -117,6 +123,10 @@ function summarize(shards) {
     candidateVerdicts: 0,
     dismissedVerdicts: 0,
     gateFailedVerdicts: 0,
+    reviewerReportsPresent: 0,
+    reviewerAdmitDecisions: 0,
+    reviewerDismissDecisions: 0,
+    reviewerHumanQueueDecisions: 0,
     totalReplayCases: 0,
     newCandidateFindings: 0,
     knownDuplicateFindings: 0,
@@ -136,6 +146,10 @@ function summarize(shards) {
     if (shard.gate?.disposition === "candidate") summary.candidateVerdicts += 1;
     if (shard.gate?.disposition === "dismissed") summary.dismissedVerdicts += 1;
     if (shard.gate?.disposition === "gate_failed") summary.gateFailedVerdicts += 1;
+    if (shard.reviewer) summary.reviewerReportsPresent += 1;
+    if (shard.reviewer?.decision === "admit") summary.reviewerAdmitDecisions += 1;
+    if (shard.reviewer?.decision === "dismiss") summary.reviewerDismissDecisions += 1;
+    if (shard.reviewer?.decision === "human_queue") summary.reviewerHumanQueueDecisions += 1;
     summary.legacyBugListAppendBlocks += shard.bugListAppendBlocks.length;
     summary.totalReplayCases += Number(shard.summary.total ?? 0);
     summary.newCandidateFindings += Number(shard.summary.newCandidateFindings ?? 0);
@@ -185,6 +199,8 @@ function formatMarkdown(payload) {
     `- Candidate verdicts: ${payload.summary.candidateVerdicts}`,
     `- Dismissed verdicts: ${payload.summary.dismissedVerdicts}`,
     `- Gate-failed verdicts: ${payload.summary.gateFailedVerdicts}`,
+    `- Reviewer reports present: ${payload.summary.reviewerReportsPresent}`,
+    `- Reviewer decisions admit/dismiss/human_queue: ${payload.summary.reviewerAdmitDecisions}/${payload.summary.reviewerDismissDecisions}/${payload.summary.reviewerHumanQueueDecisions}`,
     `- Replay cases: ${payload.summary.totalReplayCases}`,
     `- New candidate findings: ${payload.summary.newCandidateFindings}`,
     `- Known duplicate findings: ${payload.summary.knownDuplicateFindings}`,
@@ -206,6 +222,7 @@ function formatMarkdown(payload) {
     lines.push(`- Findings report: ${shard.finalReportPresent ? shard.findingsMd : "missing"}`);
     lines.push(`- Verdict: ${shard.verdict ? shard.verdictJson : "missing"}`);
     lines.push(`- Citation gate: ${shard.gate ? `${shard.gateJson} (${shard.gate.disposition})` : "missing"}`);
+    lines.push(`- Reviewer: ${shard.reviewer ? `${shard.reviewerJson} (${shard.reviewer.decision})` : "missing"}`);
     lines.push(`- Replay cases: ${shard.summary.total ?? 0}`);
     lines.push(`- New candidates: ${shard.summary.newCandidateFindings ?? 0}`);
     lines.push(`- Known duplicates: ${shard.summary.knownDuplicateFindings ?? 0}`);
