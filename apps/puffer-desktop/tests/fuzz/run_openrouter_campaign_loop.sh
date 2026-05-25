@@ -33,7 +33,7 @@ export PUFFER_OPENROUTER_MAX_STEPS="${PUFFER_OPENROUTER_MAX_STEPS:-20}"
 export PUFFER_OPENROUTER_TIMEOUT_SECONDS="${PUFFER_OPENROUTER_TIMEOUT_SECONDS:-1500}"
 
 mkdir -p "$loop_dir"
-printf "round\tnamespace\tstatus\tstarted_at\tfinished_at\tshards\tcompleted_replay\tmissing_replay\treplay_cases\tactionable\tcandidates\tadmitted_verdicts\tcandidate_verdicts\tdismissed_verdicts\tgate_failed_verdicts\taggregate_json\tlog\n" > "$summary_tsv"
+printf "round\tnamespace\tstatus\tstarted_at\tfinished_at\tshards\tcompleted_replay\tmissing_replay\treplay_cases\tactionable\tcandidates\tadmitted_verdicts\tcandidate_verdicts\tdismissed_verdicts\tgate_failed_verdicts\treviewer_reports\treviewer_admit\treviewer_dismiss\treviewer_human_queue\taggregate_json\tlog\n" > "$summary_tsv"
 
 round=1
 while true; do
@@ -88,15 +88,20 @@ while true; do
   candidate_verdicts="$(jq -r '.summary.candidateVerdicts // 0' "$round_json")"
   dismissed_verdicts="$(jq -r '.summary.dismissedVerdicts // 0' "$round_json")"
   gate_failed_verdicts="$(jq -r '.summary.gateFailedVerdicts // 0' "$round_json")"
+  reviewer_reports="$(jq -r '.summary.reviewerReportsPresent // 0' "$round_json")"
+  reviewer_admit="$(jq -r '.summary.reviewerAdmitDecisions // 0' "$round_json")"
+  reviewer_dismiss="$(jq -r '.summary.reviewerDismissDecisions // 0' "$round_json")"
+  reviewer_human_queue="$(jq -r '.summary.reviewerHumanQueueDecisions // 0' "$round_json")"
   combined_status="$status"
   if [[ "$aggregate_status" -ne 0 ]]; then
     combined_status="${status}+aggregate-${aggregate_status}"
   fi
 
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
     "$round" "$namespace" "$combined_status" "$round_started_at" "$round_finished_at" \
     "$shards" "$completed" "$missing" "$cases" "$actionable" "$candidates" \
     "$admitted_verdicts" "$candidate_verdicts" "$dismissed_verdicts" "$gate_failed_verdicts" \
+    "$reviewer_reports" "$reviewer_admit" "$reviewer_dismiss" "$reviewer_human_queue" \
     "$round_json" "$log_path" \
     >> "$summary_tsv"
 
@@ -114,7 +119,7 @@ while true; do
     echo
     echo "## Rounds"
     echo
-    tail -n +2 "$summary_tsv" | awk -F '\t' '{ printf "- Round %s `%s`: status=%s, replay=%s/%s, cases=%s, actionable=%s, candidates=%s, verdicts(admit/cand/dismiss/fail)=%s/%s/%s/%s\n", $1, $2, $3, $7, $6, $9, $10, $11, $12, $13, $14, $15 }'
+    tail -n +2 "$summary_tsv" | awk -F '\t' '{ printf "- Round %s `%s`: status=%s, replay=%s/%s, cases=%s, actionable=%s, candidates=%s, verdicts(admit/cand/dismiss/fail)=%s/%s/%s/%s, reviewers(reports/admit/dismiss/human_queue)=%s/%s/%s/%s\n", $1, $2, $3, $7, $6, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19 }'
   } > "$summary_md"
 
   if [[ "$status" -ne 0 ]]; then
