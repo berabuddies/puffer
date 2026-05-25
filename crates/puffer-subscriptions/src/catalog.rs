@@ -110,6 +110,7 @@ pub fn builtin_connector_templates() -> Vec<ConnectorTemplate> {
         slack_login_template(),
         slack_bot_template(),
         email_template(),
+        asana_webhook_template(),
         github_webhook_template(),
         gitlab_webhook_template(),
         jira_webhook_template(),
@@ -139,6 +140,7 @@ pub fn suggested_connection_slug(connector_slug: &str) -> String {
         "slack-login" => "slack-login".to_string(),
         "telegram-bot" => "telegram-bot".to_string(),
         "slack-bot" => "slack-bot".to_string(),
+        "asana-webhook" => "asana-webhook".to_string(),
         "github-webhook" => "github-webhook".to_string(),
         "gitlab-webhook" => "gitlab-webhook".to_string(),
         "jira-webhook" => "jira-webhook".to_string(),
@@ -326,6 +328,23 @@ fn webhook_template() -> ConnectorTemplate {
         can_proxy_agent: false,
         subscriber: None,
         output_schema: message_output_schema(),
+        actions: BTreeMap::new(),
+    }
+}
+
+fn asana_webhook_template() -> ConnectorTemplate {
+    ConnectorTemplate {
+        slug: "asana-webhook".to_string(),
+        description: "Asana task, project, and story webhook preset backed by puffer serve"
+            .to_string(),
+        skill: "asana-webhook".to_string(),
+        binary: "puffer connector webhook".to_string(),
+        command: Vec::new(),
+        requires_auth: false,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        subscriber: None,
+        output_schema: asana_event_output_schema(),
         actions: BTreeMap::new(),
     }
 }

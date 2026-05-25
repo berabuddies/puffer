@@ -156,188 +156,91 @@ pub(super) fn connect_webhook(
     Ok(serve_summary("webhook", connection, &auth_mode, &path))
 }
 
-/// Configures the GitHub webhook preset through the serve-mode webhook connector.
-pub(super) fn connect_github_webhook(
+/// Configures a named webhook preset through the serve-mode webhook connector.
+pub(super) fn connect_webhook_preset(
     state: &mut AppState,
     resources: &LoadedResources,
+    connector_slug: &str,
     connection: &str,
 ) -> Result<ConnectResult> {
+    let preset = webhook_preset(connector_slug)?;
     let bind_address = ask_input(
         state,
         resources,
         "Bind",
-        "What bind address should the GitHub webhook listen on?",
+        &format!(
+            "What bind address should the {} webhook listen on?",
+            preset.product
+        ),
     )?;
     let path_value = ask_input(
         state,
         resources,
         "Path",
-        "What URL path should GitHub post webhook events to?",
+        &format!(
+            "What URL path should {} post webhook events to?",
+            preset.product
+        ),
     )?;
-    let path_value = normalize_webhook_path(&path_value);
+    let path_value = normalize_webhook_path_with_default(&path_value, preset.default_path);
     let fields = vec![
         ("bind_address", toml::Value::String(bind_address)),
         ("path", toml::Value::String(path_value)),
         (
             "welcome_message",
-            toml::Value::String("GitHub webhook ready.".to_string()),
+            toml::Value::String(format!("{} webhook ready.", preset.product)),
         ),
     ];
     let path = write_workspace_connector_config(state, "webhook", connection, &fields)?;
     Ok(serve_summary(
-        "github-webhook",
+        connector_slug,
         connection,
-        "GitHub event webhook",
+        preset.method,
         &path,
     ))
 }
 
-/// Configures the GitLab webhook preset through the serve-mode webhook connector.
-pub(super) fn connect_gitlab_webhook(
-    state: &mut AppState,
-    resources: &LoadedResources,
-    connection: &str,
-) -> Result<ConnectResult> {
-    let bind_address = ask_input(
-        state,
-        resources,
-        "Bind",
-        "What bind address should the GitLab webhook listen on?",
-    )?;
-    let path_value = ask_input(
-        state,
-        resources,
-        "Path",
-        "What URL path should GitLab post webhook events to?",
-    )?;
-    let path_value = normalize_webhook_path_with_default(&path_value, "/gitlab");
-    let fields = vec![
-        ("bind_address", toml::Value::String(bind_address)),
-        ("path", toml::Value::String(path_value)),
-        (
-            "welcome_message",
-            toml::Value::String("GitLab webhook ready.".to_string()),
-        ),
-    ];
-    let path = write_workspace_connector_config(state, "webhook", connection, &fields)?;
-    Ok(serve_summary(
-        "gitlab-webhook",
-        connection,
-        "GitLab event webhook",
-        &path,
-    ))
+struct WebhookPreset {
+    product: &'static str,
+    default_path: &'static str,
+    method: &'static str,
 }
 
-/// Configures the Jira webhook preset through the serve-mode webhook connector.
-pub(super) fn connect_jira_webhook(
-    state: &mut AppState,
-    resources: &LoadedResources,
-    connection: &str,
-) -> Result<ConnectResult> {
-    let bind_address = ask_input(
-        state,
-        resources,
-        "Bind",
-        "What bind address should the Jira webhook listen on?",
-    )?;
-    let path_value = ask_input(
-        state,
-        resources,
-        "Path",
-        "What URL path should Jira post webhook events to?",
-    )?;
-    let path_value = normalize_webhook_path_with_default(&path_value, "/jira");
-    let fields = vec![
-        ("bind_address", toml::Value::String(bind_address)),
-        ("path", toml::Value::String(path_value)),
-        (
-            "welcome_message",
-            toml::Value::String("Jira webhook ready.".to_string()),
-        ),
-    ];
-    let path = write_workspace_connector_config(state, "webhook", connection, &fields)?;
-    Ok(serve_summary(
-        "jira-webhook",
-        connection,
-        "Jira event webhook",
-        &path,
-    ))
-}
-
-/// Configures the Linear webhook preset through the serve-mode webhook connector.
-pub(super) fn connect_linear_webhook(
-    state: &mut AppState,
-    resources: &LoadedResources,
-    connection: &str,
-) -> Result<ConnectResult> {
-    let bind_address = ask_input(
-        state,
-        resources,
-        "Bind",
-        "What bind address should the Linear webhook listen on?",
-    )?;
-    let path_value = ask_input(
-        state,
-        resources,
-        "Path",
-        "What URL path should Linear post webhook events to?",
-    )?;
-    let path_value = normalize_webhook_path_with_default(&path_value, "/linear");
-    let fields = vec![
-        ("bind_address", toml::Value::String(bind_address)),
-        ("path", toml::Value::String(path_value)),
-        (
-            "welcome_message",
-            toml::Value::String("Linear webhook ready.".to_string()),
-        ),
-    ];
-    let path = write_workspace_connector_config(state, "webhook", connection, &fields)?;
-    Ok(serve_summary(
-        "linear-webhook",
-        connection,
-        "Linear event webhook",
-        &path,
-    ))
-}
-
-/// Configures the Stripe webhook preset through the serve-mode webhook connector.
-pub(super) fn connect_stripe_webhook(
-    state: &mut AppState,
-    resources: &LoadedResources,
-    connection: &str,
-) -> Result<ConnectResult> {
-    let bind_address = ask_input(
-        state,
-        resources,
-        "Bind",
-        "What bind address should the Stripe webhook listen on?",
-    )?;
-    let path_value = ask_input(
-        state,
-        resources,
-        "Path",
-        "What URL path should Stripe post webhook events to?",
-    )?;
-    let path_value = normalize_webhook_path_with_default(&path_value, "/stripe");
-    let fields = vec![
-        ("bind_address", toml::Value::String(bind_address)),
-        ("path", toml::Value::String(path_value)),
-        (
-            "welcome_message",
-            toml::Value::String("Stripe webhook ready.".to_string()),
-        ),
-    ];
-    let path = write_workspace_connector_config(state, "webhook", connection, &fields)?;
-    Ok(serve_summary(
-        "stripe-webhook",
-        connection,
-        "Stripe event webhook",
-        &path,
-    ))
-}
-
-fn normalize_webhook_path(value: &str) -> String {
-    normalize_webhook_path_with_default(value, "/github")
+fn webhook_preset(connector_slug: &str) -> Result<WebhookPreset> {
+    let preset = match connector_slug {
+        "asana-webhook" => WebhookPreset {
+            product: "Asana",
+            default_path: "/asana",
+            method: "Asana event webhook",
+        },
+        "github-webhook" => WebhookPreset {
+            product: "GitHub",
+            default_path: "/github",
+            method: "GitHub event webhook",
+        },
+        "gitlab-webhook" => WebhookPreset {
+            product: "GitLab",
+            default_path: "/gitlab",
+            method: "GitLab event webhook",
+        },
+        "jira-webhook" => WebhookPreset {
+            product: "Jira",
+            default_path: "/jira",
+            method: "Jira event webhook",
+        },
+        "linear-webhook" => WebhookPreset {
+            product: "Linear",
+            default_path: "/linear",
+            method: "Linear event webhook",
+        },
+        "stripe-webhook" => WebhookPreset {
+            product: "Stripe",
+            default_path: "/stripe",
+            method: "Stripe event webhook",
+        },
+        _ => bail!("unsupported webhook preset `{connector_slug}`"),
+    };
+    Ok(preset)
 }
 
 fn normalize_webhook_path_with_default(value: &str, default: &str) -> String {
@@ -493,6 +396,8 @@ mod tests {
             "What Matrix homeserver URL should Puffer use?" => "https://matrix.example.org",
             "What Matrix username should Puffer use?" => "puffer-bot",
             "What Matrix password should Puffer use?" => "matrix-password",
+            "What bind address should the Asana webhook listen on?" => "127.0.0.1:9797",
+            "What URL path should Asana post webhook events to?" => "asana",
             "What bind address should the GitHub webhook listen on?" => "127.0.0.1:9292",
             "What URL path should GitHub post webhook events to?" => "/github",
             "What bind address should the GitLab webhook listen on?" => "127.0.0.1:9494",
@@ -618,7 +523,7 @@ mod tests {
 
         let result = with_user_question_prompt_handler(
             |request| answer_request(&request),
-            || connect_github_webhook(&mut state, &resources, "github-webhook"),
+            || connect_webhook_preset(&mut state, &resources, "github-webhook", "github-webhook"),
         )
         .expect("connect result");
 
@@ -634,13 +539,35 @@ mod tests {
     }
 
     #[test]
+    fn asana_webhook_connect_writes_webhook_preset_config() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let result = with_user_question_prompt_handler(
+            |request| answer_request(&request),
+            || connect_webhook_preset(&mut state, &resources, "asana-webhook", "asana-webhook"),
+        )
+        .expect("connect result");
+
+        assert!(result.summary.contains("connector: asana-webhook"));
+        assert!(result.summary.contains("run `puffer serve`"));
+        let path = state.cwd.join(".puffer/connectors.toml");
+        let raw = fs::read_to_string(path).expect("connector config");
+        assert!(raw.contains("[connectors.webhook]"));
+        assert!(raw.contains("display_name = \"asana-webhook\""));
+        assert!(raw.contains("bind_address = \"127.0.0.1:9797\""));
+        assert!(raw.contains("path = \"/asana\""));
+        assert!(raw.contains("welcome_message = \"Asana webhook ready.\""));
+    }
+
+    #[test]
     fn gitlab_webhook_connect_writes_webhook_preset_config() {
         let mut state = temp_state();
         let resources = LoadedResources::default();
 
         let result = with_user_question_prompt_handler(
             |request| answer_request(&request),
-            || connect_gitlab_webhook(&mut state, &resources, "gitlab-webhook"),
+            || connect_webhook_preset(&mut state, &resources, "gitlab-webhook", "gitlab-webhook"),
         )
         .expect("connect result");
 
@@ -662,7 +589,7 @@ mod tests {
 
         let result = with_user_question_prompt_handler(
             |request| answer_request(&request),
-            || connect_jira_webhook(&mut state, &resources, "jira-webhook"),
+            || connect_webhook_preset(&mut state, &resources, "jira-webhook", "jira-webhook"),
         )
         .expect("connect result");
 
@@ -684,7 +611,7 @@ mod tests {
 
         let result = with_user_question_prompt_handler(
             |request| answer_request(&request),
-            || connect_linear_webhook(&mut state, &resources, "linear-webhook"),
+            || connect_webhook_preset(&mut state, &resources, "linear-webhook", "linear-webhook"),
         )
         .expect("connect result");
 
@@ -706,7 +633,7 @@ mod tests {
 
         let result = with_user_question_prompt_handler(
             |request| answer_request(&request),
-            || connect_stripe_webhook(&mut state, &resources, "stripe-webhook"),
+            || connect_webhook_preset(&mut state, &resources, "stripe-webhook", "stripe-webhook"),
         )
         .expect("connect result");
 

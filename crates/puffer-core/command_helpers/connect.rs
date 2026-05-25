@@ -30,21 +30,13 @@ pub fn execute_connect_flow(
         "matrix-bot" => {
             serve_config::connect_matrix_bot(state, resources, &target.connection_name)?
         }
-        "github-webhook" => {
-            serve_config::connect_github_webhook(state, resources, &target.connection_name)?
-        }
-        "gitlab-webhook" => {
-            serve_config::connect_gitlab_webhook(state, resources, &target.connection_name)?
-        }
-        "jira-webhook" => {
-            serve_config::connect_jira_webhook(state, resources, &target.connection_name)?
-        }
-        "linear-webhook" => {
-            serve_config::connect_linear_webhook(state, resources, &target.connection_name)?
-        }
-        "stripe-webhook" => {
-            serve_config::connect_stripe_webhook(state, resources, &target.connection_name)?
-        }
+        "asana-webhook" | "github-webhook" | "gitlab-webhook" | "jira-webhook"
+        | "linear-webhook" | "stripe-webhook" => serve_config::connect_webhook_preset(
+            state,
+            resources,
+            &target.connector_slug,
+            &target.connection_name,
+        )?,
         "webhook" => serve_config::connect_webhook(state, resources, &target.connection_name)?,
         _ => connect_generic(state, resources, &target)?,
     };

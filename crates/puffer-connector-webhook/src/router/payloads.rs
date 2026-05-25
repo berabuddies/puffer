@@ -4,6 +4,18 @@ use serde_json::Value;
 
 use super::{header_value, number_or_string, pointer_string, snippet, string_field};
 
+mod asana;
+
+/// Returns whether an Asana webhook payload is a heartbeat with no events.
+pub(super) fn asana_payload_is_heartbeat(headers: &HeaderMap, payload: &Value) -> bool {
+    asana::asana_payload_is_heartbeat(headers, payload)
+}
+
+/// Converts an Asana webhook payload into an inbound Puffer message.
+pub(super) fn asana_inbound(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
+    asana::asana_inbound(headers, payload)
+}
+
 /// Converts a Jira webhook payload into an inbound Puffer message.
 pub(super) fn jira_inbound(headers: &HeaderMap, payload: &Value) -> Option<InboundMessage> {
     let event = string_field(payload, "webhookEvent")

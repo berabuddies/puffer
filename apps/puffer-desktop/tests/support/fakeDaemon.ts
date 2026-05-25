@@ -475,6 +475,19 @@ export class FakeDaemon {
         action_slugs: ["send_message"]
       },
       {
+        connector_slug: "asana-webhook",
+        description: "Asana task, project, and story webhook preset backed by puffer serve",
+        skill: "asana-webhook",
+        runtime_hints: ["serve"],
+        requires_auth: false,
+        can_subscribe: false,
+        can_proxy_agent: false,
+        can_trigger_workflow: false,
+        suggested_connection_slug: "asana-webhook",
+        connect_command: "/connect asana-webhook asana-webhook",
+        action_slugs: []
+      },
+      {
         connector_slug: "github-webhook",
         description: "GitHub event webhook preset backed by puffer serve",
         skill: "github-webhook",

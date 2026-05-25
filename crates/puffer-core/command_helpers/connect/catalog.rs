@@ -232,6 +232,7 @@ fn connector_template_runtime_hints(template: &ConnectorTemplate) -> Vec<String>
         "telegram-bot"
             | "discord-bot"
             | "matrix-bot"
+            | "asana-webhook"
             | "github-webhook"
             | "gitlab-webhook"
             | "jira-webhook"
@@ -408,6 +409,17 @@ mod tests {
         let slug = resolve_connector_slug(&mut state, &resources, "github event").expect("slug");
 
         assert_eq!(slug, "github-webhook");
+    }
+
+    #[test]
+    fn resolve_connector_slug_accepts_asana_webhook_terms() {
+        let mut state = temp_state();
+        let resources = LoadedResources::default();
+
+        let slug =
+            resolve_connector_slug(&mut state, &resources, "asana task project").expect("slug");
+
+        assert_eq!(slug, "asana-webhook");
     }
 
     #[test]

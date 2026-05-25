@@ -124,6 +124,7 @@ fn serve_configured_connector(slug: &str) -> bool {
         "telegram-bot"
             | "discord-bot"
             | "matrix-bot"
+            | "asana-webhook"
             | "github-webhook"
             | "gitlab-webhook"
             | "jira-webhook"

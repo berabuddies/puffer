@@ -1,5 +1,6 @@
 use crate::handler::{extract_bearer, handle_command};
 use crate::WebhookConfig;
+use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -69,11 +70,7 @@ async fn health() -> Response {
     (StatusCode::OK, "puffer").into_response()
 }
 
-async fn webhook(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(payload): Json<Value>,
-) -> Response {
+async fn webhook(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     let origin = headers
         .get(axum::http::header::ORIGIN)
         .and_then(|v| v.to_str().ok());
@@ -91,6 +88,17 @@ async fn webhook(
     let presented_token = auth_header.and_then(extract_bearer);
     if !state.config.is_token_allowed(presented_token.as_deref()) {
         return (StatusCode::UNAUTHORIZED, "request rejected").into_response();
+    }
+
+    if let Some(response) = asana_handshake_response(&headers) {
+        return response;
+    }
+    let payload: Value = match serde_json::from_slice(&body) {
+        Ok(payload) => payload,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid webhook JSON").into_response(),
+    };
+    if payloads::asana_payload_is_heartbeat(&headers, &payload) {
+        return (StatusCode::OK, "asana heartbeat accepted").into_response();
     }
 
     let inbound = match inbound_from_payload(&headers, &payload) {
@@ -148,9 +156,17 @@ fn inbound_from_payload(headers: &HeaderMap, payload: &Value) -> Option<InboundM
     puffer_inbound(payload)
         .or_else(|| github_inbound(headers, payload))
         .or_else(|| linear_inbound(headers, payload))
+        .or_else(|| payloads::asana_inbound(headers, payload))
         .or_else(|| payloads::jira_inbound(headers, payload))
         .or_else(|| payloads::stripe_inbound(headers, payload))
         .or_else(|| payloads::gitlab_inbound(headers, payload))
+}
+
+fn asana_handshake_response(headers: &HeaderMap) -> Option<Response> {
+    let secret = headers.get("x-hook-secret")?.clone();
+    let mut response = StatusCode::OK.into_response();
+    response.headers_mut().insert("x-hook-secret", secret);
+    Some(response)
 }
 
 fn puffer_inbound(payload: &Value) -> Option<InboundMessage> {
@@ -648,6 +664,32 @@ mod tests {
         assert!(parsed.reply.contains("/help"));
         assert!(parsed.session_id.is_none());
         assert!(!parsed.oversized);
+    }
+
+    #[tokio::test]
+    async fn webhook_echoes_asana_handshake_secret() {
+        let runtime = test_runtime(tempdir().unwrap().path().to_path_buf());
+        let router = build_router(AppState {
+            runtime,
+            config: Arc::new(base_config()),
+        });
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/puffer")
+                    .header("x-hook-secret", "shared-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("x-hook-secret").unwrap(),
+            "shared-secret"
+        );
     }
 
     #[tokio::test]

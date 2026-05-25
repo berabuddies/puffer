@@ -211,6 +211,24 @@ pub(super) fn message_output_schema() -> Value {
     })
 }
 
+/// Returns the Asana webhook event output schema.
+pub(super) fn asana_event_output_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "const": "asana_event"},
+            "action": {"type": "string"},
+            "resource_type": {"type": "string"},
+            "resource_gid": {"type": "string"},
+            "parent_gid": {"type": "string"},
+            "actor": {"type": "string"},
+            "message": {"type": "string"}
+        },
+        "required": ["action", "message"],
+        "additionalProperties": true
+    })
+}
+
 /// Returns the GitHub webhook event output schema.
 pub(super) fn github_event_output_schema() -> Value {
     serde_json::json!({
