@@ -779,6 +779,7 @@ pub fn execute_workflow_tool(
             input,
             structured_output,
         ),
+        "VisionAnalyze" => workflow::vision_analyze::execute_vision_analyze(state, cwd, input),
         "SubscriberInstall" => {
             workflow::subscriber_install::execute_subscriber_install(state, cwd, input)
         }
